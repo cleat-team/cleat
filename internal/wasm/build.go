@@ -111,18 +111,23 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 	}
 
 	// Write a main package stub. The stub differs by target:
-	//   - tinygo: empty main — exports are callable without _start.
+	//   - tinygo: blocks on channel to keep main() alive (asyncify scheduler
+	//     handles exports while main is blocked). The deadlock message on stdout
+	//     is harmless — the module stays alive.
 	//   - go: time.Sleep loop keeps the runtime alive for export calls.
 	var mainStub string
 	if cfg.Target == "tinygo" {
-		mainStub = "package main\n\nfunc main() {}\n"
+		mainStub = `package main
+
+func main() {
+	<-make(chan struct{})
+}
+`
 	} else {
 		mainStub = `package main
 
 import "time"
 
-// main blocks to keep the Go runtime alive so the host can call WASM exports.
-// time.Sleep yields via WASI poll_oneoff, preventing deadlock detection.
 func main() {
 	for {
 		time.Sleep(100 * time.Millisecond)

@@ -131,7 +131,7 @@ func TestEngineExecute(t *testing.T) {
 		t.Error("expected non-empty history")
 	}
 
-	expectedServices := []string{"catalog", "catalog", "inventory", "payments", "payments", "shipping", "notifications"}
+	expectedServices := []string{"catalog", "inventory", "payments", "payments", "shipping", "notifications"}
 	for i, svc := range expectedServices {
 		if i >= len(history) {
 			t.Errorf("step %d: missing (expected %s)", i, svc)
