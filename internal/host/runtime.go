@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -44,11 +45,34 @@ func (r *Runtime) CompileModule(ctx context.Context, wasmBytes []byte) (wazero.C
 }
 
 // InstantiateModule creates a new module instance from a compiled module.
-// _start is NOT called — the caller invokes the desired export explicitly.
+// The Go wasip1 runtime is NOT initialized yet — call InitModule after this
+// to start the runtime (calls _start which initializes WASI and then calls
+// main() which blocks to keep the module alive).
 func (r *Runtime) InstantiateModule(ctx context.Context, compiled wazero.CompiledModule) (api.Module, error) {
 	config := wazero.NewModuleConfig().WithName("").WithStartFunctions()
 	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
 }
+
+// InitModule starts the Go wasip1 runtime by calling _start in a background
+// goroutine. _start initializes WASI, then calls main() which blocks via
+// <-make(chan struct{}). After this returns, the module is ready for export
+// calls. The caller should allow a brief scheduling window for initialization.
+func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
+	start := mod.ExportedFunction("_start")
+	if start == nil {
+		return fmt.Errorf("host: _start export not found")
+	}
+	go func() {
+		start.Call(ctx)
+	}()
+	runtimeInitPause()
+	return nil
+}
+
+// runtimeInitPause gives the _start goroutine time to initialize the Go
+// wasip1 runtime before the caller attempts export calls. 100ms is generous.
+// TODO: replace with proper synchronization once the module exports a ready signal.
+func runtimeInitPause() { time.Sleep(200 * time.Millisecond) }
 
 // CallExport invokes an exported WASM function with JSON input.
 //

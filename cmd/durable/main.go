@@ -16,6 +16,8 @@ import (
 	"flag"
 	"fmt"
 	"go/token"
+
+	_ "github.com/lib/pq"
 	"os"
 	"os/exec"
 	"path/filepath"

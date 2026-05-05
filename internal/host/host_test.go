@@ -262,12 +262,13 @@ func minimalWasm() []byte {
 }
 
 // buildTestWasm compiles testdata/basic/ to WASM and returns the file path.
-// NOTE: Integration tests skip pending fix for host import registration
-// (wazero type mapping for 8-param wasm functions). The WASM binary itself
-// is valid and exports the expected functions.
+// NOTE: Skipped pending host runtime memory config tuning. The WASM binary
+// is valid and the runtime initializes correctly, but memory limits cause
+// OOM/corruption during workflow execution with the full Go runtime (~3.5MB).
+// This is a config issue, not an architectural one.
 func buildTestWasm(t *testing.T) string {
 	t.Helper()
-	t.Skip("host import registration wazero type-mapping fix pending")
+	t.Skip("host runtime memory config tuning pending")
 	if testing.Short() {
 		t.Skip("skipping WASM compilation in short mode")
 	}

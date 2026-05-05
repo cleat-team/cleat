@@ -187,9 +187,10 @@ func (e *CallError) Retryable() bool {
 
 // ---- Call options ----
 
-// CallOptions provides per-call configuration such as retry policy.
+// CallOptions provides per-call configuration.
 type CallOptions struct {
-	Retry *RetryPolicy
+	Retry           *RetryPolicy
+	MaxResponseSize int // 0 = use default (64KB), capped at outBufSize
 }
 
 // RetryPolicy configures automatic retry behavior for durable calls.
@@ -351,12 +352,15 @@ func (h *hostCallsImpl) DurableCallTyped(service, operation string, request, res
 	return nil
 }
 
+// DurableCallWithOptions default behavior: retry at SDK level.
+// NOTE: SDK-level retry records one event per attempt, bloating history.
+// Once the host runtime supports it, retry should move to the host side
+// (one history event per logical call, host handles the retry loop).
 func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operation, requestJSON string) (string, error) {
 	if h.durableCallWithOptions != nil {
 		return h.durableCallWithOptions(opts, service, operation, requestJSON)
 	}
 
-	// Default: no retry, just delegate.
 	if opts.Retry == nil {
 		return h.DurableCall(service, operation, requestJSON)
 	}

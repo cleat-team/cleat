@@ -37,7 +37,8 @@ func writeJSONOut(outPtr unsafe.Pointer, maxLen uint32, v interface{}) int64 {
 	}
 	outLen := uint32(len(data))
 	if outLen > maxLen {
-		outLen = maxLen
+		return writeErrorOut(outPtr, maxLen,
+			fmt.Errorf("response size %d exceeds buffer capacity %d", outLen, maxLen))
 	}
 	if outLen > 0 {
 		dst := unsafe.Slice((*byte)(outPtr), int(outLen))
@@ -52,7 +53,7 @@ func writeErrorOut(outPtr unsafe.Pointer, maxLen uint32, err error) int64 {
 	msg := err.Error()
 	msgLen := uint32(len(msg))
 	if msgLen > maxLen {
-		msgLen = maxLen
+		msgLen = maxLen // errors are truncated but the error code is still set
 	}
 	if msgLen > 0 {
 		dst := unsafe.Slice((*byte)(outPtr), int(msgLen))

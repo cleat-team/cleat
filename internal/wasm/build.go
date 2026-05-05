@@ -107,9 +107,20 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
-	// Write a main package stub so go build produces a bare WASM binary
-	// rather than an ar archive. The WASM exports are the real entry points.
-	mainStub := "package main\n\nfunc main() {}\n"
+	// Write a main package stub so go build produces a bare WASM binary.
+	// main() blocks in time.Sleep to keep the Go runtime alive. Unlike a
+	// channel receive, time.Sleep calls WASI poll_oneoff, which the Go
+	// scheduler treats as a legitimate blocking wait (not a deadlock).
+	mainStub := `package main
+
+import "time"
+
+func main() {
+	for {
+		time.Sleep(time.Second)
+	}
+}
+`
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
 	}

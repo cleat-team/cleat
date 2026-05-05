@@ -62,6 +62,12 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 	}
 	defer mod.Close(ctx)
 
+	// Initialize the Go wasip1 runtime (calls _start in a goroutine, which
+	// initializes WASI and then blocks in main() to keep the module alive).
+	if err := e.rt.InitModule(ctx, mod); err != nil {
+		return "", nil, fmt.Errorf("host: init module: %w", err)
+	}
+
 	session := &execSession{
 		engine:   e,
 		history:  history,
