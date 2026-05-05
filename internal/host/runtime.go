@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -13,7 +14,15 @@ import (
 // Runtime wraps a wazero runtime with pre-registered host function imports.
 type Runtime struct {
 	wazeroRuntime wazero.Runtime
+	stdout        bytes.Buffer
+	stderr        bytes.Buffer
 }
+
+// Stdout returns captured stdout output from the most recent module.
+func (r *Runtime) Stdout() string { return r.stdout.String() }
+
+// Stderr returns captured stderr output from the most recent module.
+func (r *Runtime) Stderr() string { return r.stderr.String() }
 
 // NewRuntime creates a Runtime with all 14 durable_* host functions registered
 // on the "env" module. WASI preview1 is also instantiated for Go wasip1 support.
@@ -47,7 +56,13 @@ func (r *Runtime) CompileModule(ctx context.Context, wasmBytes []byte) (wazero.C
 // InstantiateModule creates a new module instance without running _start.
 // Use InitModule to start the Go runtime afterwards.
 func (r *Runtime) InstantiateModule(ctx context.Context, compiled wazero.CompiledModule) (api.Module, error) {
-	config := wazero.NewModuleConfig().WithName("").WithStartFunctions()
+	r.stdout.Reset()
+	r.stderr.Reset()
+	config := wazero.NewModuleConfig().
+		WithName("").
+		WithStdout(&r.stdout).
+		WithStderr(&r.stderr).
+		WithStartFunctions()
 	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
 }
 

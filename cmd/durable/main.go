@@ -54,13 +54,16 @@ func main() {
 	case "build":
 		var outDir string
 		fs := flag.NewFlagSet("build", flag.ExitOnError)
+		var target string
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
+		
+		fs.StringVar(&target, "target", "go", "compilation target: go or tinygo")
 		fs.Parse(os.Args[2:])
 		remainder := fs.Args()
 		if len(remainder) > 0 {
 			pattern = remainder[0]
 		}
-		runBuild(pattern, outDir)
+		runBuild(pattern, outDir, target)
 	case "vet":
 		runVet(pattern)
 	case "deploy":
@@ -72,7 +75,7 @@ func main() {
 	}
 }
 
-func runBuild(pattern, outDir string) {
+func runBuild(pattern, outDir, target string) {
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = cg
 
@@ -163,6 +166,7 @@ func runBuild(pattern, outDir string) {
 		GoVersion:   goVersion,
 		Outputs:     outputs,
 		WASMOutput:  wasmFile,
+			Target:      target,
 		XfrmSource:  tr.Files,
 	}
 
@@ -173,17 +177,35 @@ func runBuild(pattern, outDir string) {
 
 	fmt.Printf("  Build directory: %s\n", outDir)
 
-	fmt.Printf("  Compiling WASM module (GOOS=wasip1 GOARCH=wasm)...\n")
 	wasmPath := filepath.Join(outDir, wasmFile)
-	cmd := exec.Command("go", "build",
-		"-o", wasmPath,
-		".",
-	)
+	var cmd *exec.Cmd
+	if target == "tinygo" {
+		fmt.Printf("  Compiling WASM module (tinygo)...\n")
+		cmd = exec.Command("tinygo", "build",
+			"-target=wasip1",
+			"-o", wasmPath,
+			".",
+		)
+		// tinygo needs GOROOT and TINYGOROOT in its environment.
+		cmd.Env = os.Environ()
+		if goroot := os.Getenv("GOROOT"); goroot != "" {
+			cmd.Env = append(cmd.Env, "GOROOT="+goroot)
+		}
+		if tinygoroot := os.Getenv("TINYGOROOT"); tinygoroot != "" {
+			cmd.Env = append(cmd.Env, "TINYGOROOT="+tinygoroot)
+		}
+	} else {
+		fmt.Printf("  Compiling WASM module (GOOS=wasip1 GOARCH=wasm)...\n")
+		cmd = exec.Command("go", "build",
+			"-o", wasmPath,
+			".",
+		)
+		cmd.Env = append(os.Environ(),
+			"GOOS=wasip1",
+			"GOARCH=wasm",
+		)
+	}
 	cmd.Dir = outDir
-	cmd.Env = append(os.Environ(),
-		"GOOS=wasip1",
-		"GOARCH=wasm",
-	)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {

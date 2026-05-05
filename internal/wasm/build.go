@@ -36,6 +36,9 @@ type BuildConfig struct {
 	// (e.g., "place_order.wasm").
 	WASMOutput string
 
+	// Target is the compilation target: "go" (default) or "tinygo".
+	Target string
+
 	// XfrmSource, if non-nil, provides transformed source files to write
 	// instead of copying original source files. Keyed by filename.
 	XfrmSource map[string][]byte
@@ -107,23 +110,26 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
-	// Write a main package stub so go build produces a bare WASM binary.
-	// main() must keep the goroutine runnable to prevent Go's deadlock
-	// detector from killing the module. time.Sleep is unreliable in WASM
-	// because WASI poll_oneoff support varies across runtimes.
-	//
-	// In production, replace this busy-wait with proper synchronization
-	// (e.g., the host signals readiness via shared memory or a channel).
-	mainStub := `package main
+	// Write a main package stub. The stub differs by target:
+	//   - tinygo: empty main — exports are callable without _start.
+	//   - go: time.Sleep loop keeps the runtime alive for export calls.
+	var mainStub string
+	if cfg.Target == "tinygo" {
+		mainStub = "package main\n\nfunc main() {}\n"
+	} else {
+		mainStub = `package main
 
 import "time"
 
+// main blocks to keep the Go runtime alive so the host can call WASM exports.
+// time.Sleep yields via WASI poll_oneoff, preventing deadlock detection.
 func main() {
 	for {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 `
+	}
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
 	}

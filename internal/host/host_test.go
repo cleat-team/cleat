@@ -263,11 +263,13 @@ func minimalWasm() []byte {
 
 func buildTestWasm(t *testing.T) string {
 	t.Helper()
-	t.Skip("WASM integration tests need tinygo (Phase 10) — standard Go wasip1 binary is 3.5MB and exceeds default WASM memory limits. tinygo produces ~200KB binaries.")
 	if testing.Short() {
 		t.Skip("skipping WASM compilation in short mode")
 	}
-	// The test runs from the module root. Find the durable CLI and testdata.
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not installed — skipping WASM integration test")
+	}
+
 	cwd, _ := os.Getwd()
 	projectRoot := cwd
 	if strings.HasSuffix(cwd, "internal/host") {
@@ -276,8 +278,18 @@ func buildTestWasm(t *testing.T) string {
 
 	tmpDir := t.TempDir()
 	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "durable"),
-		"build", "-o", tmpDir, filepath.Join(projectRoot, "testdata", "basic"))
+		"build", "--target", "tinygo", "-o", tmpDir, filepath.Join(projectRoot, "testdata", "basic"))
 	cmd.Dir = projectRoot
+
+	// tinygo needs GOROOT and TINYGOROOT.
+	cmd.Env = os.Environ()
+	if goroot := os.Getenv("GOROOT"); goroot != "" {
+		cmd.Env = append(cmd.Env, "GOROOT="+goroot)
+	}
+	if tinygoroot := os.Getenv("TINYGOROOT"); tinygoroot != "" {
+		cmd.Env = append(cmd.Env, "TINYGOROOT="+tinygoroot)
+	}
+
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("durable build failed:\n%s\n%v", string(out), err)
