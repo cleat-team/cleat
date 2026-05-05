@@ -45,16 +45,16 @@ Because every external interaction is recorded for durability, that same data pr
 - `cluster/resilience/main.go` — PostgreSQL resilience analysis.
 - `ast_transform_demo.go`, `ast_transform_demo_v2.go` — Early AST transformation experiments (superseded by the WASM approach).
 
-All demos are standalone Go programs with simulated DB/APIs — no external dependencies beyond the Go standard library. Available at `/home/rcownie/dev/goof/wasm-demo/`.
+All demos are standalone Go programs with simulated DB/APIs — no external dependencies beyond the Go standard library. Available at `/localssd/rcownie/cleat/wasm-demo/`.
 
 ### Design document
-`/home/rcownie/dev/goof/durable-execution-design.md` — 9 sections covering the full design with comparisons to Temporal, Azure Durable Functions, AWS Step Functions, Restate, and Inngest.
+`/localssd/rcownie/cleat/durable-execution-design.md` — 9 sections covering the full design with comparisons to Temporal, Azure Durable Functions, AWS Step Functions, Restate, and Inngest.
 
 ## Environment constraints
-- Limited disk space (~145MB free). Go toolchain at `/home/rcownie/go/bin/go` (Go 1.23.4).
-- Build with: `GOTOOLCHAIN=local /home/rcownie/go/bin/go build -o /tmp/binary ./path/`
+- Limited disk space (~145MB free). Go toolchain at `/tmp/go1.26.2/go/bin/go` (Go 1.26.2).
+- Build with: `/tmp/go1.26.2/go/bin/go build -o /tmp/binary ./path/`
 - No external Go dependencies can be installed (disk full). All demos use stdlib only.
-- Working directory: `/home/rcownie/dev/goof/`
+- Working directory: `/localssd/rcownie/cleat/`
 
 ## User preferences observed
 - Values operational simplicity over feature completeness. Prefers "one database instead of four services."
@@ -65,5 +65,5 @@ All demos are standalone Go programs with simulated DB/APIs — no external depe
 - Multi-language support is valuable but not urgent — Go first, Rust second.
 
 ## Key files
-- `/home/rcownie/dev/goof/durable-execution-design.md` — The full design document.
-- `/home/rcownie/dev/goof/wasm-demo/` — Runnable demo code.
+- `/localssd/rcownie/cleat/durable-execution-design.md` — The full design document.
+- `/localssd/rcownie/cleat/wasm-demo/` — Runnable demo code.

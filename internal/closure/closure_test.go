@@ -233,14 +233,28 @@ func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 	cr := Compute(result, cg)
 
 	expectedLeaves := map[string]bool{
-		"github.com/rcownie/durable/testdata/errors.leafFunc":          true,
-		"github.com/rcownie/durable/testdata/errors.BadWithGoroutine":  true,
+		"github.com/rcownie/durable/testdata/errors.leafFunc":                   true,
+		"github.com/rcownie/durable/testdata/errors.BadWithGoroutine":           true,
+		"github.com/rcownie/durable/testdata/errors.BadWithInterfaceDispatch":   true,
+		"github.com/rcownie/durable/testdata/errors.BadWithFuncValue":           true,
+		"github.com/rcownie/durable/testdata/errors.BadWithFloatCondition":      true,
 	}
 
 	for name := range expectedLeaves {
 		if !cr.DurableLeaves[name] {
 			t.Errorf("expected %s to be a durable leaf", name)
 		}
+	}
+
+	// No unexpected leaves.
+	for name := range cr.DurableLeaves {
+		if !expectedLeaves[name] {
+			t.Errorf("unexpected durable leaf: %s", name)
+		}
+	}
+
+	if len(cr.DurableLeaves) != len(expectedLeaves) {
+		t.Errorf("expected %d durable leaves, got %d", len(expectedLeaves), len(cr.DurableLeaves))
 	}
 }
 
@@ -287,5 +301,113 @@ func TestComputeErrorsCorrectlyTagsPure(t *testing.T) {
 	pureName := "github.com/rcownie/durable/testdata/errors.pureHelper"
 	if !cr.Pure[pureName] {
 		t.Errorf("expected %s to be pure", pureName)
+	}
+}
+
+func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph failed: %v", err)
+	}
+
+	cr := Compute(result, cg)
+
+	badName := "github.com/rcownie/durable/testdata/errors.BadWithInterfaceDispatch"
+
+	warns := cr.Warnings[badName]
+	if len(warns) == 0 {
+		t.Fatalf("expected W003 warning for %s, got none", badName)
+	}
+
+	foundW003 := false
+	for _, w := range warns {
+		if w.Code == "W003" {
+			foundW003 = true
+			break
+		}
+	}
+	if !foundW003 {
+		t.Errorf("expected W003 (interface dispatch) warning for %s, got codes: ", badName)
+		for _, w := range warns {
+			t.Logf("  %s: %s", w.Code, w.Message)
+		}
+	}
+}
+
+func TestComputeErrorsDetectsFuncValueCall(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph failed: %v", err)
+	}
+
+	cr := Compute(result, cg)
+
+	badName := "github.com/rcownie/durable/testdata/errors.BadWithFuncValue"
+
+	warns := cr.Warnings[badName]
+	if len(warns) == 0 {
+		t.Fatalf("expected W004 warning for %s, got none", badName)
+	}
+
+	foundW004 := false
+	for _, w := range warns {
+		if w.Code == "W004" {
+			foundW004 = true
+			break
+		}
+	}
+	if !foundW004 {
+		t.Errorf("expected W004 (func value call) warning for %s, got codes: ", badName)
+		for _, w := range warns {
+			t.Logf("  %s: %s", w.Code, w.Message)
+		}
+	}
+}
+
+func TestComputeErrorsDetectsFloatInCondition(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph failed: %v", err)
+	}
+
+	cr := Compute(result, cg)
+
+	badName := "github.com/rcownie/durable/testdata/errors.BadWithFloatCondition"
+
+	warns := cr.Warnings[badName]
+	if len(warns) == 0 {
+		t.Fatalf("expected W002 warning for %s, got none", badName)
+	}
+
+	foundW002 := false
+	for _, w := range warns {
+		if w.Code == "W002" {
+			foundW002 = true
+			break
+		}
+	}
+	if !foundW002 {
+		t.Errorf("expected W002 (float in condition) warning for %s, got codes: ", badName)
+		for _, w := range warns {
+			t.Logf("  %s: %s", w.Code, w.Message)
+		}
 	}
 }

@@ -12,6 +12,7 @@
 package main
 
 import (
+	"database/sql"
 	"flag"
 	"fmt"
 	"go/token"
@@ -30,9 +31,10 @@ import (
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet> [flags] <package>\n")
+		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy> [flags] <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable build [-o <dir>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable vet <package>\n")
+		fmt.Fprintf(os.Stderr, "  durable deploy [--db <connstr>] [--name <name>] [--namespace <ns>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "Example: durable build -o ./out ./testdata/basic/\n")
 	}
 	flag.Parse()
@@ -59,6 +61,8 @@ func main() {
 		runBuild(pattern, outDir)
 	case "vet":
 		runVet(pattern)
+	case "deploy":
+		runDeploy(os.Args[3:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		flag.Usage()
@@ -120,7 +124,7 @@ func runBuild(pattern, outDir string) {
 
 	fmt.Println()
 
-	outputs := wasm.BuildOutputs(result.TargetPkg.Name, usage, result)
+	outputs := wasm.BuildOutputs("main", usage, result)
 	hostCount := usage.Count()
 	fmt.Printf("  Generating WASM imports (%d host functions used)... ", hostCount)
 	fmt.Println("OK")
@@ -151,7 +155,7 @@ func runBuild(pattern, outDir string) {
 	buildCfg := &wasm.BuildConfig{
 		SrcDir:      result.TargetPkg.Dir,
 		OutDir:      outDir,
-		PkgName:     result.TargetPkg.Name,
+		PkgName:     "main",
 		ModulePath:  result.ModulePath,
 		ProjectRoot: result.ModuleDir,
 		GoVersion:   goVersion,
@@ -235,6 +239,76 @@ func runVet(pattern string) {
 	os.Exit(exitCode)
 }
 
+// runDeploy deploys a compiled WASM workflow to the database.
+// Usage: durable deploy [--db <connstr>] [--name <name>] [--namespace <ns>] <wasm-file>
+func runDeploy(args []string) {
+	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
+	dbFlag := fs.String("db", "", "PostgreSQL connection string")
+	nameFlag := fs.String("name", "", "workflow name (derived from filename if not set)")
+	nsFlag := fs.String("namespace", "", "workflow namespace (reserved for future use)")
+	fs.Parse(args)
+
+	remainder := fs.Args()
+	if len(remainder) < 1 {
+		fmt.Fprintf(os.Stderr, "Usage: durable deploy [--db <connstr>] [--name <name>] [--namespace <ns>] <wasm-file>\n")
+		os.Exit(1)
+	}
+	wasmPath := remainder[0]
+	_ = nsFlag
+
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading WASM file %s: %v\n", wasmPath, err)
+		os.Exit(1)
+	}
+
+	name := *nameFlag
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(wasmPath), ".wasm")
+	}
+
+	connStr := *dbFlag
+	if connStr == "" {
+		connStr = os.Getenv("DURABLE_DATABASE_URL")
+	}
+
+	if connStr == "" {
+		fmt.Printf("Would deploy workflow %q (version 1) from %s (%d bytes)\n", name, wasmPath, len(wasmBytes))
+		fmt.Println("Dry run; set DURABLE_DATABASE_URL or --db to deploy.")
+		return
+	}
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\n", err)
+		os.Exit(1)
+	}
+
+	var version int
+	err = db.QueryRow("SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_defs WHERE name = $1", name).Scan(&version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
+		os.Exit(1)
+	}
+
+	_, err = db.Exec(
+		"INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points) VALUES ($1, $2, $3, $4)",
+		name, version, wasmBytes, []string{},
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error inserting workflow definition: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Deployed workflow %q version %d (%d bytes)\n", name, version, len(wasmBytes))
+}
+
 func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {
 	fset := token.NewFileSet()
 
@@ -300,22 +374,7 @@ func wasmOutputName(result *analyzer.AnalysisResult) string {
 	if len(result.EntryPoints) == 0 {
 		return "output.wasm"
 	}
-	return toSnakeCaseMain(analyzer.ShortName(result.EntryPoints[0])) + ".wasm"
-}
-
-func toSnakeCaseMain(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteByte(byte(r + 32))
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
+	return wasm.ToSnakeCase(analyzer.ShortName(result.EntryPoints[0])) + ".wasm"
 }
 
 func formatSize(n int64) string {

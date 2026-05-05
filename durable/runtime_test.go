@@ -547,3 +547,185 @@ func TestPollUntilErrorsOnDeadlineExceeded(t *testing.T) {
 		t.Errorf("expected 'deadline exceeded' error, got %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Retry Policy (DurableCallWithOptions default implementation)
+// ---------------------------------------------------------------------------
+
+func TestRetryBackoffCalculation(t *testing.T) {
+	var attemptCount int
+	var sleepDurations []time.Duration
+
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			attemptCount++
+			return "", errors.New("transient error")
+		},
+		DurableSleep: func(ms int64) {
+			sleepDurations = append(sleepDurations, time.Duration(ms)*time.Millisecond)
+		},
+	})
+
+	rp := RetryPolicy{
+		MaxAttempts:        3,
+		InitialInterval:    1 * time.Second,
+		BackoffCoefficient: 2.0,
+		MaxInterval:        30 * time.Second,
+	}
+
+	_, err := h.DurableCallWithOptions(CallOptions{Retry: &rp}, "svc", "op", "{}")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if attemptCount != 3 {
+		t.Errorf("expected 3 attempts, got %d", attemptCount)
+	}
+
+	expectedSleeps := []time.Duration{1 * time.Second, 2 * time.Second}
+	if len(sleepDurations) != len(expectedSleeps) {
+		t.Fatalf("expected %d sleeps, got %d: %v", len(expectedSleeps), len(sleepDurations), sleepDurations)
+	}
+	for i, expected := range expectedSleeps {
+		if sleepDurations[i] != expected {
+			t.Errorf("sleep %d: expected %v, got %v", i, expected, sleepDurations[i])
+		}
+	}
+}
+
+func TestRetryMaxIntervalCapsBackoff(t *testing.T) {
+	var attemptCount int
+	var sleepDurations []time.Duration
+
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			attemptCount++
+			return "", errors.New("transient error")
+		},
+		DurableSleep: func(ms int64) {
+			sleepDurations = append(sleepDurations, time.Duration(ms)*time.Millisecond)
+		},
+	})
+
+	rp := RetryPolicy{
+		MaxAttempts:        4,
+		InitialInterval:    1 * time.Second,
+		BackoffCoefficient: 100.0,
+		MaxInterval:        5 * time.Second,
+	}
+
+	_, err := h.DurableCallWithOptions(CallOptions{Retry: &rp}, "svc", "op", "{}")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if attemptCount != 4 {
+		t.Errorf("expected 4 attempts, got %d", attemptCount)
+	}
+	if len(sleepDurations) != 3 {
+		t.Fatalf("expected 3 sleeps, got %d: %v", len(sleepDurations), sleepDurations)
+	}
+	// attempt=1: 1s * 100.0^0 = 1s (below MaxInterval=5s, no cap)
+	// attempt=2: 1s * 100.0^1 = 100s (capped to 5s)
+	// attempt=3: 1s * 100.0^2 = 10000s (capped to 5s)
+	expected := []time.Duration{1 * time.Second, 5 * time.Second, 5 * time.Second}
+	for i, exp := range expected {
+		if sleepDurations[i] != exp {
+			t.Errorf("sleep %d: expected %v, got %v", i, exp, sleepDurations[i])
+		}
+	}
+}
+
+func TestRetryNonRetryableError(t *testing.T) {
+	var attemptCount int
+	var sleepDurations []time.Duration
+
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			attemptCount++
+			return "", errors.New("InvalidRequest: bad input")
+		},
+		DurableSleep: func(ms int64) {
+			sleepDurations = append(sleepDurations, time.Duration(ms)*time.Millisecond)
+		},
+	})
+
+	rp := RetryPolicy{
+		MaxAttempts:        3,
+		InitialInterval:    1 * time.Second,
+		BackoffCoefficient: 2.0,
+		MaxInterval:        30 * time.Second,
+		NonRetryableErrors: []string{"InvalidRequest"},
+	}
+
+	_, err := h.DurableCallWithOptions(CallOptions{Retry: &rp}, "svc", "op", "{}")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "InvalidRequest") {
+		t.Errorf("expected error containing 'InvalidRequest', got %v", err)
+	}
+	if attemptCount != 1 {
+		t.Errorf("expected 1 attempt, got %d", attemptCount)
+	}
+	if len(sleepDurations) != 0 {
+		t.Errorf("expected 0 sleeps, got %d", len(sleepDurations))
+	}
+}
+
+func TestRetryExhaustionReturnsLastError(t *testing.T) {
+	var attemptCount int
+	originalErr := errors.New("service unavailable")
+
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			attemptCount++
+			return "", originalErr
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	rp := RetryPolicy{
+		MaxAttempts:        3,
+		InitialInterval:    1 * time.Second,
+		BackoffCoefficient: 2.0,
+		MaxInterval:        30 * time.Second,
+	}
+
+	_, err := h.DurableCallWithOptions(CallOptions{Retry: &rp}, "svc", "op", "{}")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "retry exhausted") {
+		t.Errorf("expected error containing 'retry exhausted', got %v", err)
+	}
+	if !errors.Is(err, originalErr) {
+		t.Errorf("expected error to wrap original error, got %v", err)
+	}
+	if attemptCount != 3 {
+		t.Errorf("expected 3 attempts, got %d", attemptCount)
+	}
+}
+
+func TestRetryNilPolicyDelegatesToDurableCall(t *testing.T) {
+	var callCount int
+
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			callCount++
+			return "ok", nil
+		},
+		DurableSleep: func(ms int64) {
+			t.Error("DurableSleep should not be called")
+		},
+	})
+
+	resp, err := h.DurableCallWithOptions(CallOptions{}, "svc", "op", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != "ok" {
+		t.Errorf("expected 'ok', got %q", resp)
+	}
+	if callCount != 1 {
+		t.Errorf("expected 1 call, got %d", callCount)
+	}
+}

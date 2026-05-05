@@ -266,7 +266,17 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 }
 
 // HostCallsOptions holds the function implementations for NewHostCalls.
-// All fields are optional; nil fields will panic if called.
+// All fields are optional. Nil fields produce one of four behaviors depending
+// on the method's role:
+//
+//   - Panic: core primitives (DurableSleep, Now, Random) — nil indicates
+//     programmer error.
+//   - Error: callable operations (DurableCall, DurableAwaitSignals, etc.) —
+//     nil prevents the caller from proceeding safely.
+//   - No-op: diagnostic/logging (DurableLog, SetQueryState, PollCancellation).
+//   - Default: Version/MinVersion return 1 when nil.
+//
+// See individual method docs on hostCallsImpl for details.
 type HostCallsOptions struct {
 	DurableCall               func(service, operation, requestJSON string) (string, error)
 	DurableCallTyped          func(service, operation string, request, result interface{}) error
@@ -290,6 +300,15 @@ type HostCallsOptions struct {
 }
 
 // ---- Interface method implementations ----
+//
+// Nil-guard contract for hostCallsImpl methods:
+//   Panic:   DurableSleepMs, NowMs, Random — core primitives, nil = programmer error
+//   Error:   DurableCall, DurableCallJSON, DurableCallTyped, DurableCallWithOptions,
+//            DurableCallJSONWithOptions, DurableCallWithHeartbeat, DurableAwaitSignals,
+//            DurableDefer, PollSignal, ContinueAsNew, ChildWorkflow, AwaitChild
+//   No-op:   DurableLog, LogKV, PollCancellation, SetQueryState — diagnostic/optional
+//   Default: Version, MinVersion — return 1 when nil
+// ----
 
 func (h *hostCallsImpl) DurableCall(service, operation, requestJSON string) (string, error) {
 	if h.durableCall == nil {

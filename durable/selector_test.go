@@ -1,6 +1,7 @@
 package durable
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -195,5 +196,26 @@ func TestSelectorAddChildWorkflow(t *testing.T) {
 	}
 	if sel.children[0].runID != "run_123" {
 		t.Errorf("expected runID 'run_123', got %q", sel.children[0].runID)
+	}
+}
+
+func TestSelectorAddChildWorkflowReturnsError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		Now: func() int64 { return 1000 },
+	})
+
+	sel := NewSelector(h)
+	var result string
+	sel.AddChildWorkflow("run_123", &result)
+
+	winner := sel.Select()
+	if winner != SelectorError {
+		t.Errorf("expected SelectorError, got %q", winner)
+	}
+	if sel.Err() == nil {
+		t.Fatal("expected non-nil error")
+	}
+	if !strings.Contains(sel.Err().Error(), "not yet supported") {
+		t.Errorf("expected error containing 'not yet supported', got %v", sel.Err())
 	}
 }

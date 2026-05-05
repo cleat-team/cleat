@@ -194,6 +194,21 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 
 		case *ast.CallExpr:
 			checkForbiddenCall(stmt, fd, name, cr, fset)
+			checkInterfaceDispatch(stmt, fd, name, cr, fset)
+			checkFuncValueCall(stmt, fd, name, cr, fset)
+
+		case *ast.IfStmt:
+			checkFloatInExpr(stmt.Cond, fd, name, cr, fset)
+
+		case *ast.ForStmt:
+			if stmt.Cond != nil {
+				checkFloatInExpr(stmt.Cond, fd, name, cr, fset)
+			}
+
+		case *ast.SwitchStmt:
+			if stmt.Tag != nil {
+				checkFloatInExpr(stmt.Tag, fd, name, cr, fset)
+			}
 
 		case *ast.RangeStmt:
 			if stmt.Key != nil && stmt.X != nil && fd.Pkg.Info != nil {
@@ -272,6 +287,121 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 			Message:    msg,
 			Suggestion: suggestion,
 			Line:       line,
+		})
+	}
+}
+
+// checkInterfaceDispatch detects calls through interface dispatch (other
+// than HostCalls), which cannot be statically resolved.
+func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName string, cr *Result, fset *token.FileSet) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return
+	}
+	xIdent, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return
+	}
+	if fd.Pkg == nil || fd.Pkg.Info == nil {
+		return
+	}
+	tv, ok := fd.Pkg.Info.Types[xIdent]
+	if !ok {
+		return
+	}
+	// Only flag interface types that are NOT durable.HostCalls.
+	_, isInterface := tv.Type.Underlying().(*types.Interface)
+	if !isInterface {
+		return
+	}
+	if analyzer.IsHostCallsType(tv.Type) {
+		return
+	}
+	line := 0
+	if fset != nil {
+		line = fset.Position(call.Pos()).Line
+	}
+	cr.Warnings[funcName] = append(cr.Warnings[funcName], ValidationWarning{
+		Code:     "W003",
+		FuncName: funcName,
+		Message:  "unresolvable function call through interface dispatch (E008 in future release)",
+		Line:     line,
+	})
+}
+
+// checkFuncValueCall detects calls where the function is a variable
+// holding a function value, which cannot be statically resolved.
+func checkFuncValueCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName string, cr *Result, fset *token.FileSet) {
+	ident, ok := call.Fun.(*ast.Ident)
+	if !ok {
+		return
+	}
+	if fd.Pkg == nil || fd.Pkg.Info == nil {
+		return
+	}
+	obj, ok := fd.Pkg.Info.Uses[ident]
+	if !ok {
+		return
+	}
+	// If it's a *types.Func, it's a direct function call — that's fine.
+	if _, isFunc := obj.(*types.Func); isFunc {
+		return
+	}
+	// If it's a *types.Var, it's a function value call — not statically resolvable.
+	if _, isVar := obj.(*types.Var); !isVar {
+		return
+	}
+	line := 0
+	if fset != nil {
+		line = fset.Position(call.Pos()).Line
+	}
+	cr.Warnings[funcName] = append(cr.Warnings[funcName], ValidationWarning{
+		Code:     "W004",
+		FuncName: funcName,
+		Message:  "function value call cannot be statically resolved (E009 in future release)",
+		Line:     line,
+	})
+}
+
+// checkFloatInExpr walks an expression looking for identifiers whose type
+// is float32 or float64 and issues a W002 warning if any are found.
+func checkFloatInExpr(expr ast.Expr, fd *analyzer.FuncDecl, funcName string, cr *Result, fset *token.FileSet) {
+	if fd.Pkg == nil || fd.Pkg.Info == nil {
+		return
+	}
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		ident, ok := n.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		tv, ok := fd.Pkg.Info.Types[ident]
+		if !ok {
+			return true
+		}
+		basic, ok := tv.Type.Underlying().(*types.Basic)
+		if !ok {
+			return true
+		}
+		if basic.Kind() == types.Float32 || basic.Kind() == types.Float64 {
+			found = true
+			return false
+		}
+		return true
+	})
+	if found {
+		line := 0
+		if fset != nil {
+			line = fset.Position(expr.Pos()).Line
+		}
+		cr.Warnings[funcName] = append(cr.Warnings[funcName], ValidationWarning{
+			Code:     "W002",
+			FuncName: funcName,
+			Message:  "floating-point value in control flow condition may cause non-deterministic replay",
+			Line:     line,
 		})
 	}
 }

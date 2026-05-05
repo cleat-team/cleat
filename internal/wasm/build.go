@@ -2,7 +2,6 @@ package wasm
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,21 +50,20 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return fmt.Errorf("creating build directory: %w", err)
 	}
 
-	// Copy or write user source files.
+	// Copy or write user source files, rewriting package declarations to "main".
 	if len(cfg.XfrmSource) > 0 {
-		// Write transformed source files.
 		for filename, content := range cfg.XfrmSource {
 			base := filepath.Base(filename)
 			if strings.HasPrefix(base, "gen_") {
 				continue
 			}
 			dst := filepath.Join(cfg.OutDir, base)
-			if err := os.WriteFile(dst, content, 0644); err != nil {
+			rewritten := rewritePackageToMain(content)
+			if err := os.WriteFile(dst, rewritten, 0644); err != nil {
 				return fmt.Errorf("writing transformed %s: %w", base, err)
 			}
 		}
 	} else {
-		// Copy original source files.
 		goFiles, err := filepath.Glob(filepath.Join(cfg.SrcDir, "*.go"))
 		if err != nil {
 			return fmt.Errorf("globbing source files: %w", err)
@@ -76,8 +74,13 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 				continue
 			}
 			dst := filepath.Join(cfg.OutDir, base)
-			if err := copyFile(src, dst); err != nil {
-				return fmt.Errorf("copying %s: %w", base, err)
+			content, err := os.ReadFile(src)
+			if err != nil {
+				return fmt.Errorf("reading %s: %w", base, err)
+			}
+			rewritten := rewritePackageToMain(content)
+			if err := os.WriteFile(dst, rewritten, 0644); err != nil {
+				return fmt.Errorf("writing %s: %w", base, err)
 			}
 		}
 	}
@@ -104,6 +107,13 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
+	// Write a main package stub so go build produces a bare WASM binary
+	// rather than an ar archive. The WASM exports are the real entry points.
+	mainStub := "package main\n\nfunc main() {}\n"
+	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
+		return err
+	}
+
 	// Create go.mod with replace directive pointing to the project root.
 	modContent := fmt.Sprintf(`module durable-build
 
@@ -122,20 +132,35 @@ replace %s => %s
 	return nil
 }
 
-// copyFile copies a file from src to dst.
-func copyFile(src, dst string) error {
-	s, err := os.Open(src)
-	if err != nil {
-		return err
+// packageDeclPattern matches "package <name>" at the start of a Go source file.
+func rewritePackageToMain(content []byte) []byte {
+	// packageDecl matches "package <identifier>" with optional leading whitespace and comments.
+	// We replace only the package name, preserving any //go:build constraints or comments above.
+	var result []byte
+	done := false
+	for i := 0; i < len(content); i++ {
+		if !done && content[i] == '\n' {
+			// Check if the previous line was "package X"
+			lineStart := 0
+			if i > 0 {
+				for j := i - 1; j >= 0 && content[j] != '\n'; j-- {
+					lineStart = j
+				}
+			}
+			line := string(content[lineStart:i])
+			if strings.HasPrefix(strings.TrimSpace(line), "package ") {
+				// Found the package declaration — rewrite it.
+				result = append(result, content[:lineStart]...)
+				result = append(result, []byte("package main")...)
+				result = append(result, content[i:]...)
+				done = true
+				break
+			}
+		}
 	}
-	defer s.Close()
-
-	d, err := os.Create(dst)
-	if err != nil {
-		return err
+	if !done {
+		return content // no package declaration found, return as-is
 	}
-	defer d.Close()
-
-	_, err = io.Copy(d, s)
-	return err
+	return result
 }
+

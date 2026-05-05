@@ -30,7 +30,7 @@ var adapterDefs = map[string]adapterDef{
 			{"requestJSON", "string"},
 		},
 		ResultStmts: []string{
-			"responseLen := uint32(result >> 40)",
+			"responseLen := uint32(uint64(result) >> 40)",
 			"callErrorCode := durable.CallErrorCode((result >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
@@ -58,7 +58,7 @@ var adapterDefs = map[string]adapterDef{
 			{"timeoutMs", "int64"},
 		},
 		ResultStmts: []string{
-			"signalNameLen := uint32(result >> 48)",
+			"signalNameLen := uint32(uint64(result) >> 48)",
 			"payloadLen := uint32((result >> 32) & 0xFFFF)",
 			"timedOut := uint32((result >> 16) & 0xFFFF) != 0",
 			"errCode := uint32(result & 0xFFFF)",
@@ -75,7 +75,7 @@ var adapterDefs = map[string]adapterDef{
 			{"description", "string"},
 		},
 		ResultStmts: []string{
-			"deferIDLen := uint32(result >> 32)",
+			"deferIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("durable_defer: error code %d", errCode)`,
@@ -96,7 +96,7 @@ var adapterDefs = map[string]adapterDef{
 		FieldName:  "PollCancellation",
 		ReturnType: "(bool, string)",
 		ResultStmts: []string{
-			"reasonLen := uint32(result >> 32)",
+			"reasonLen := uint32(uint64(result) >> 32)",
 			"cancelled := uint32(result) != 0",
 			"return cancelled, unsafe.String(&reasonBuf[0], int(reasonLen))",
 		},
@@ -108,7 +108,7 @@ var adapterDefs = map[string]adapterDef{
 			{"signalName", "string"},
 		},
 		ResultStmts: []string{
-			"payloadLen := uint32(result >> 32)",
+			"payloadLen := uint32(uint64(result) >> 32)",
 			"flags := uint32(result)",
 			"errCode := flags & 0xFF",
 			"found := (flags >> 8) != 0",
@@ -140,7 +140,7 @@ var adapterDefs = map[string]adapterDef{
 			{"inputJSON", "string"},
 		},
 		ResultStmts: []string{
-			"runIDLen := uint32(result >> 32)",
+			"runIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("durable_child_workflow: error code %d", errCode)`,
@@ -155,7 +155,7 @@ var adapterDefs = map[string]adapterDef{
 			{"runID", "string"},
 		},
 		ResultStmts: []string{
-			"resultLen := uint32(result >> 32)",
+			"resultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
 			`	return "", fmt.Errorf("durable_await_child: error code %d", errCode)`,

@@ -12,9 +12,13 @@
 // Build:
 //
 //	durable build -o /tmp/out ./testdata/autothread/
+//
+// NOTE: This fixture uses raw json.Marshal to exercise the low-level
+// DurableCall API. Production code should prefer DurableCallTyped.
 package autothread
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/rcownie/durable/durable"
@@ -96,9 +100,11 @@ func processPayment(userID string, amountCents int) (Charge, error) {
 }
 
 func fulfillOrder(r Reservation, c Charge) (string, error) {
-	request := fmt.Sprintf(`{"reservation_id":"%s","charge_id":"%s"}`,
-		r.ReservationID, c.ChargeID)
-	response, err := h.DurableCall("shipping", "CreateShipment", request)
+	req, _ := json.Marshal(map[string]string{
+		"reservation_id": r.ReservationID,
+		"charge_id":      c.ChargeID,
+	})
+	response, err := h.DurableCall("shipping", "CreateShipment", string(req))
 	if err != nil {
 		return "", err
 	}
@@ -109,8 +115,8 @@ func fulfillOrder(r Reservation, c Charge) (string, error) {
 // ---- Leaf functions that call HostCalls methods ----
 
 func checkItemAvailability(sku string) error {
-	request := fmt.Sprintf(`{"sku":"%s"}`, sku)
-	response, err := h.DurableCall("catalog", "LookupItem", request)
+	req, _ := json.Marshal(map[string]string{"sku": sku})
+	response, err := h.DurableCall("catalog", "LookupItem", string(req))
 	if err != nil {
 		return err
 	}
@@ -126,8 +132,8 @@ type PaymentMethod struct {
 }
 
 func getDefaultPaymentMethod(userID string) (PaymentMethod, error) {
-	request := fmt.Sprintf(`{"user_id":"%s"}`, userID)
-	response, err := h.DurableCall("payments", "GetDefaultMethod", request)
+	req, _ := json.Marshal(map[string]string{"user_id": userID})
+	response, err := h.DurableCall("payments", "GetDefaultMethod", string(req))
 	if err != nil {
 		return PaymentMethod{}, err
 	}
@@ -136,8 +142,11 @@ func getDefaultPaymentMethod(userID string) (PaymentMethod, error) {
 }
 
 func reserveInventory(userID string, items []CartItem) (Reservation, error) {
-	request := fmt.Sprintf(`{"user_id":"%s","item_count":%d}`, userID, len(items))
-	response, err := h.DurableCall("inventory", "Reserve", request)
+	req, _ := json.Marshal(map[string]interface{}{
+		"user_id":    userID,
+		"item_count": len(items),
+	})
+	response, err := h.DurableCall("inventory", "Reserve", string(req))
 	if err != nil {
 		return Reservation{}, err
 	}
@@ -146,8 +155,11 @@ func reserveInventory(userID string, items []CartItem) (Reservation, error) {
 }
 
 func chargeCustomer(token string, amountCents int) (Charge, error) {
-	request := fmt.Sprintf(`{"token":"%s","amount_cents":%d}`, token, amountCents)
-	response, err := h.DurableCall("payments", "Charge", request)
+	req, _ := json.Marshal(map[string]interface{}{
+		"token":        token,
+		"amount_cents": amountCents,
+	})
+	response, err := h.DurableCall("payments", "Charge", string(req))
 	if err != nil {
 		return Charge{}, err
 	}
@@ -156,19 +168,22 @@ func chargeCustomer(token string, amountCents int) (Charge, error) {
 }
 
 func releaseReservation(reservationID string) error {
-	request := fmt.Sprintf(`{"reservation_id":"%s"}`, reservationID)
-	_, err := h.DurableCall("inventory", "Release", request)
+	req, _ := json.Marshal(map[string]string{"reservation_id": reservationID})
+	_, err := h.DurableCall("inventory", "Release", string(req))
 	return err
 }
 
 func refundPayment(chargeID string) error {
-	request := fmt.Sprintf(`{"charge_id":"%s"}`, chargeID)
-	_, err := h.DurableCall("payments", "Refund", request)
+	req, _ := json.Marshal(map[string]string{"charge_id": chargeID})
+	_, err := h.DurableCall("payments", "Refund", string(req))
 	return err
 }
 
 func notifyCustomer(userID, trackingID string) error {
-	request := fmt.Sprintf(`{"user_id":"%s","tracking_id":"%s"}`, userID, trackingID)
-	_, err := h.DurableCall("notifications", "SendEmail", request)
+	req, _ := json.Marshal(map[string]string{
+		"user_id":     userID,
+		"tracking_id": trackingID,
+	})
+	_, err := h.DurableCall("notifications", "SendEmail", string(req))
 	return err
 }

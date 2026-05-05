@@ -3,6 +3,8 @@
 package errors
 
 import (
+	"io"
+
 	"github.com/rcownie/durable/durable"
 )
 
@@ -37,4 +39,28 @@ func BadWithGoroutine(h durable.HostCalls) {
 // pureHelper does not use HostCalls and is not in the durable closure.
 func pureHelper(input string) string {
 	return "pure: " + input
+}
+
+// BadWithInterfaceDispatch calls a method on an interface, which cannot be statically resolved.
+func BadWithInterfaceDispatch(h durable.HostCalls, reader io.Reader) error {
+	buf := make([]byte, 1024)
+	_, err := reader.Read(buf) // interface dispatch - unresolvable
+	h.DurableLog("read some data")
+	return err
+}
+
+// BadWithFuncValue stores a function in a variable and calls it.
+func BadWithFuncValue(h durable.HostCalls) {
+	fn := func() {
+		h.DurableLog("inside func value")
+	}
+	fn() // function value call - unresolvable
+}
+
+// BadWithFloatCondition uses a float in an if condition (non-deterministic).
+func BadWithFloatCondition(h durable.HostCalls) {
+	ratio := 0.95
+	if ratio > 0.5 {
+		h.DurableLog("above threshold")
+	}
 }

@@ -3,9 +3,14 @@
 //
 // It defines a PlaceOrder workflow with nested helper functions,
 // compensation logic, and multiple HostCalls method usages.
+//
+// NOTE: This test fixture exercises the low-level DurableCall API.
+// Production code should prefer DurableCallTyped which handles JSON
+// marshaling/unmarshaling automatically and eliminates injection risks.
 package basic
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/rcownie/durable/durable"
@@ -76,8 +81,8 @@ func validateAndReserve(h durable.HostCalls, userID string, cart []CartItem) (Re
 }
 
 func checkItemAvailability(h durable.HostCalls, sku string) error {
-	request := fmt.Sprintf(`{"sku":"%s"}`, sku)
-	response, err := h.DurableCall("catalog", "LookupItem", request)
+	req, _ := json.Marshal(map[string]string{"sku": sku})
+	response, err := h.DurableCall("catalog", "LookupItem", string(req))
 	if err != nil {
 		return err
 	}
@@ -101,8 +106,8 @@ type PaymentMethod struct {
 }
 
 func getDefaultPaymentMethod(h durable.HostCalls, userID string) (PaymentMethod, error) {
-	request := fmt.Sprintf(`{"user_id":"%s"}`, userID)
-	response, err := h.DurableCall("payments", "GetDefaultMethod", request)
+	req, _ := json.Marshal(map[string]string{"user_id": userID})
+	response, err := h.DurableCall("payments", "GetDefaultMethod", string(req))
 	if err != nil {
 		return PaymentMethod{}, err
 	}
@@ -111,9 +116,11 @@ func getDefaultPaymentMethod(h durable.HostCalls, userID string) (PaymentMethod,
 }
 
 func fulfillOrder(h durable.HostCalls, r Reservation, c Charge) (string, error) {
-	request := fmt.Sprintf(`{"reservation_id":"%s","charge_id":"%s"}`,
-		r.ReservationID, c.ChargeID)
-	response, err := h.DurableCall("shipping", "CreateShipment", request)
+	req, _ := json.Marshal(map[string]string{
+		"reservation_id": r.ReservationID,
+		"charge_id":      c.ChargeID,
+	})
+	response, err := h.DurableCall("shipping", "CreateShipment", string(req))
 	if err != nil {
 		return "", err
 	}
@@ -124,8 +131,11 @@ func fulfillOrder(h durable.HostCalls, r Reservation, c Charge) (string, error) 
 // ---- Leaf API calls ----
 
 func reserveInventory(h durable.HostCalls, userID string, items []CartItem) (Reservation, error) {
-	request := fmt.Sprintf(`{"user_id":"%s","item_count":%d}`, userID, len(items))
-	response, err := h.DurableCall("inventory", "Reserve", request)
+	req, _ := json.Marshal(map[string]interface{}{
+		"user_id":    userID,
+		"item_count": len(items),
+	})
+	response, err := h.DurableCall("inventory", "Reserve", string(req))
 	if err != nil {
 		return Reservation{}, err
 	}
@@ -134,8 +144,11 @@ func reserveInventory(h durable.HostCalls, userID string, items []CartItem) (Res
 }
 
 func chargeCustomer(h durable.HostCalls, token string, amountCents int) (Charge, error) {
-	request := fmt.Sprintf(`{"token":"%s","amount_cents":%d}`, token, amountCents)
-	response, err := h.DurableCall("payments", "Charge", request)
+	req, _ := json.Marshal(map[string]interface{}{
+		"token":        token,
+		"amount_cents": amountCents,
+	})
+	response, err := h.DurableCall("payments", "Charge", string(req))
 	if err != nil {
 		return Charge{}, err
 	}
@@ -144,19 +157,22 @@ func chargeCustomer(h durable.HostCalls, token string, amountCents int) (Charge,
 }
 
 func releaseReservation(h durable.HostCalls, reservationID string) error {
-	request := fmt.Sprintf(`{"reservation_id":"%s"}`, reservationID)
-	_, err := h.DurableCall("inventory", "Release", request)
+	req, _ := json.Marshal(map[string]string{"reservation_id": reservationID})
+	_, err := h.DurableCall("inventory", "Release", string(req))
 	return err
 }
 
 func refundPayment(h durable.HostCalls, chargeID string) error {
-	request := fmt.Sprintf(`{"charge_id":"%s"}`, chargeID)
-	_, err := h.DurableCall("payments", "Refund", request)
+	req, _ := json.Marshal(map[string]string{"charge_id": chargeID})
+	_, err := h.DurableCall("payments", "Refund", string(req))
 	return err
 }
 
 func notifyCustomer(h durable.HostCalls, userID, trackingID string) error {
-	request := fmt.Sprintf(`{"user_id":"%s","tracking_id":"%s"}`, userID, trackingID)
-	_, err := h.DurableCall("notifications", "SendEmail", request)
+	req, _ := json.Marshal(map[string]string{
+		"user_id":     userID,
+		"tracking_id": trackingID,
+	})
+	_, err := h.DurableCall("notifications", "SendEmail", string(req))
 	return err
 }

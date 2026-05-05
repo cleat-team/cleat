@@ -78,7 +78,7 @@ func writeErrorOut(outPtr unsafe.Pointer, maxLen uint32, err error) int64 {
 
 // generateExport writes a single //go:wasmexport function.
 func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifier) {
-	exportName := toSnakeCase(fd.Name)
+	exportName := ToSnakeCase(fd.Name)
 	sig := fd.Type
 
 	// Collect parameters after durable.HostCalls.
@@ -170,8 +170,8 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 	buf.WriteString("}\n\n")
 }
 
-// toSnakeCase converts a CamelCase string to snake_case.
-func toSnakeCase(s string) string {
+// ToSnakeCase converts a CamelCase string to snake_case.
+func ToSnakeCase(s string) string {
 	var b strings.Builder
 	for i, r := range s {
 		if r >= 'A' && r <= 'Z' {

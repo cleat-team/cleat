@@ -1,11 +1,15 @@
 package durable
 
 import (
+	"errors"
 	"time"
 )
 
 // SelectorTimer is returned by Selector.Select when the timer fires.
 const SelectorTimer = "__selector_timer__"
+
+// SelectorError is returned by Selector.Select when an error occurs.
+const SelectorError = "__selector_error__"
 
 // Selector waits for one of multiple futures to resolve. It provides
 // a durable equivalent of Go's select statement for workflow code.
@@ -36,6 +40,7 @@ type Selector struct {
 	children     []childFuture
 	timer        *timerFuture
 	pollInterval time.Duration
+	err          error
 }
 
 type signalFuture struct {
@@ -88,10 +93,19 @@ func (s *Selector) AddTimer(timeout time.Duration, fired *bool) {
 	}
 }
 
+// Err returns the error from the last Select call, if any.
+func (s *Selector) Err() error {
+	return s.err
+}
+
 // Select blocks until one future resolves. It returns the signal name,
-// the child workflow runID, or SelectorTimer. The corresponding destination
-// pointer is populated before Select returns.
+// the child workflow runID, SelectorTimer, or SelectorError. The
+// corresponding destination pointer is populated before Select returns.
 func (s *Selector) Select() string {
+	if len(s.children) > 0 {
+		s.err = errors.New("durable: child workflow futures not yet supported; use signals and timers instead")
+		return SelectorError
+	}
 	for {
 		// Check signals non-blocking.
 		for i := range s.signals {
