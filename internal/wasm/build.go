@@ -108,16 +108,19 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 	}
 
 	// Write a main package stub so go build produces a bare WASM binary.
-	// main() blocks in time.Sleep to keep the Go runtime alive. Unlike a
-	// channel receive, time.Sleep calls WASI poll_oneoff, which the Go
-	// scheduler treats as a legitimate blocking wait (not a deadlock).
+	// main() must keep the goroutine runnable to prevent Go's deadlock
+	// detector from killing the module. time.Sleep is unreliable in WASM
+	// because WASI poll_oneoff support varies across runtimes.
+	//
+	// In production, replace this busy-wait with proper synchronization
+	// (e.g., the host signals readiness via shared memory or a channel).
 	mainStub := `package main
 
 import "time"
 
 func main() {
 	for {
-		time.Sleep(time.Second)
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 `

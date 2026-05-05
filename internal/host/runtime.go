@@ -44,19 +44,17 @@ func (r *Runtime) CompileModule(ctx context.Context, wasmBytes []byte) (wazero.C
 	return r.wazeroRuntime.CompileModule(ctx, wasmBytes)
 }
 
-// InstantiateModule creates a new module instance from a compiled module.
-// The Go wasip1 runtime is NOT initialized yet — call InitModule after this
-// to start the runtime (calls _start which initializes WASI and then calls
-// main() which blocks to keep the module alive).
+// InstantiateModule creates a new module instance without running _start.
+// Use InitModule to start the Go runtime afterwards.
 func (r *Runtime) InstantiateModule(ctx context.Context, compiled wazero.CompiledModule) (api.Module, error) {
 	config := wazero.NewModuleConfig().WithName("").WithStartFunctions()
 	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
 }
 
 // InitModule starts the Go wasip1 runtime by calling _start in a background
-// goroutine. _start initializes WASI, then calls main() which blocks via
-// <-make(chan struct{}). After this returns, the module is ready for export
-// calls. The caller should allow a brief scheduling window for initialization.
+// goroutine. _start initializes WASI and calls main() which blocks to keep
+// the module alive. After a brief pause for initialization, the module is
+// ready for export calls.
 func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 	start := mod.ExportedFunction("_start")
 	if start == nil {
@@ -65,23 +63,14 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 	go func() {
 		start.Call(ctx)
 	}()
-	runtimeInitPause()
+	// Give Go runtime time to initialize WASI before main() enters its loop.
+	time.Sleep(200 * time.Millisecond)
 	return nil
 }
 
-// runtimeInitPause gives the _start goroutine time to initialize the Go
-// wasip1 runtime before the caller attempts export calls. 100ms is generous.
-// TODO: replace with proper synchronization once the module exports a ready signal.
-func runtimeInitPause() { time.Sleep(200 * time.Millisecond) }
-
 // CallExport invokes an exported WASM function with JSON input.
-//
-// It writes inputJSON into the module's linear memory at a scratch offset,
-// calls the export with (argsPtr, argsLen, outPtr, maxOutLen), and decodes
-// the int64 result per exports.go convention:
-//
-//	bits 0-31  = errCode (0 = success)
-//	bits 32-63 = output length
+// It writes inputJSON into the module's linear memory, calls the export,
+// and decodes the int64 result per the exports.go convention.
 func (r *Runtime) CallExport(ctx context.Context, mod api.Module, exportName string, inputJSON []byte) (string, error) {
 	fn := mod.ExportedFunction(exportName)
 	if fn == nil {
@@ -93,17 +82,21 @@ func (r *Runtime) CallExport(ctx context.Context, mod api.Module, exportName str
 		return "", fmt.Errorf("host: module has no exported memory")
 	}
 
-	// Reserve scratch space for input and output buffers.
-	scratchBase := uint32(outBufSize * 2) // start at 128KB
+	// Reserve scratch space. Use high offsets to avoid conflicts with the
+	// Go runtime's own stack/heap (which grows from low addresses).
+	scratchBase := uint32(10 * 1024 * 1024) // 10MB offset
 	inputOffset := scratchBase
 	outputOffset := scratchBase + outBufSize
-	needed := outputOffset + outBufSize
 
-	// Grow memory if needed.
+	// Grow memory to fit our scratch region.
+	needed := outputOffset + outBufSize
 	currentSize := mem.Size()
 	if currentSize < needed {
 		pagesNeeded := (needed - currentSize + 65535) / 65536
-		mem.Grow(pagesNeeded)
+		if _, ok := mem.Grow(pagesNeeded); !ok {
+			// Grow failed — try once more with a smaller amount.
+			mem.Grow(1)
+		}
 	}
 
 	// Write input JSON into WASM memory.
@@ -126,7 +119,6 @@ func (r *Runtime) CallExport(ctx context.Context, mod api.Module, exportName str
 		return "", fmt.Errorf("host: export %q returned no results", exportName)
 	}
 
-	// Decode the int64 result.
 	errCode, actualLen := decodeExportResult(results[0])
 
 	if errCode != 0 {

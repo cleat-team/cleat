@@ -261,14 +261,9 @@ func minimalWasm() []byte {
 	}
 }
 
-// buildTestWasm compiles testdata/basic/ to WASM and returns the file path.
-// NOTE: Skipped pending host runtime memory config tuning. The WASM binary
-// is valid and the runtime initializes correctly, but memory limits cause
-// OOM/corruption during workflow execution with the full Go runtime (~3.5MB).
-// This is a config issue, not an architectural one.
 func buildTestWasm(t *testing.T) string {
 	t.Helper()
-	t.Skip("host runtime memory config tuning pending")
+	t.Skip("WASM integration tests need tinygo (Phase 10) — standard Go wasip1 binary is 3.5MB and exceeds default WASM memory limits. tinygo produces ~200KB binaries.")
 	if testing.Short() {
 		t.Skip("skipping WASM compilation in short mode")
 	}

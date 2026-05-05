@@ -25,6 +25,7 @@ func GenerateExports(pkgName string, result *analyzer.AnalysisResult) []byte {
 
 	buf.WriteString(`import (
 		"encoding/json"
+		"fmt"
 		"unsafe"
 	)
 
