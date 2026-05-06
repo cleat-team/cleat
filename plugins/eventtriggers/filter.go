@@ -107,19 +107,19 @@ func matchOperators(path string, val interface{}, found bool, ops map[string]int
 				return false, nil
 			}
 		case "$gt":
-			if !found || !compareNumeric(val, operand) > 0 {
+			if !found || !(compareNumeric(val, operand) > 0) {
 				return false, nil
 			}
 		case "$lt":
-			if !found || !compareNumeric(val, operand) < 0 {
+			if !found || !(compareNumeric(val, operand) < 0) {
 				return false, nil
 			}
 		case "$gte":
-			if !found || !compareNumeric(val, operand) >= 0 {
+			if !found || !(compareNumeric(val, operand) >= 0) {
 				return false, nil
 			}
 		case "$lte":
-			if !found || !compareNumeric(val, operand) <= 0 {
+			if !found || !(compareNumeric(val, operand) <= 0) {
 				return false, nil
 			}
 		case "$in":

@@ -677,3 +677,34 @@ func (s *ShardedStore) ClearStickyWorker(ctx context.Context, workflowID string)
 	}
 	return shard.Store.ClearStickyWorker(ctx, workflowID)
 }
+
+// ---------------------------------------------------------------------------
+// Update Request methods (Feature 3: Update Handler)
+// ---------------------------------------------------------------------------
+
+// CreateUpdateRequest routes by workflow ID.
+func (s *ShardedStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.CreateUpdateRequest(ctx, workflowID, updateName, payload, promiseID)
+}
+
+// GetPendingUpdateRequests routes by workflow ID.
+func (s *ShardedStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return nil, fmt.Errorf("no shard available")
+	}
+	return shard.Store.GetPendingUpdateRequests(ctx, workflowID)
+}
+
+// CompleteUpdateRequest routes by workflow ID.
+func (s *ShardedStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.CompleteUpdateRequest(ctx, workflowID, updateName, result, errMsg)
+}

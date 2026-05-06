@@ -506,16 +506,6 @@ func (e *TestEnv) randomImpl() int64 {
 }
 
 func (e *TestEnv) createPromiseImpl(name string) (string, error) {
-
-func (e *TestEnv) registerUpdateHandlerImpl(name string) {
-	// No-op for testing. The SDK layer stores the handler+validator in a map.
-}
-
-func (e *TestEnv) runDetachedImpl(fn func(h durable.HostCalls) error) error {
-	// Run the function directly. In test mode there is no cancellation anyway.
-	return fn(e.h)
-}
-
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.deferCounter++
@@ -525,6 +515,15 @@ func (e *TestEnv) runDetachedImpl(fn func(h durable.HostCalls) error) error {
 		status: "pending",
 	}
 	return promiseID, nil
+}
+
+func (e *TestEnv) registerUpdateHandlerImpl(name string) {
+	// No-op for testing. The SDK layer stores the handler+validator in a map.
+}
+
+func (e *TestEnv) runDetachedImpl(fn func(h durable.HostCalls) error) error {
+	// Run the function directly. In test mode there is no cancellation anyway.
+	return fn(e.h)
 }
 
 func (e *TestEnv) awaitPromiseImpl(promiseID string, timeout time.Duration) (string, bool, error) {

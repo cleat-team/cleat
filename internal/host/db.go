@@ -1185,6 +1185,55 @@ func (s *PostgresStore) ClearStickyWorker(ctx context.Context, workflowID string
 	return nil
 }
 
+// ---------------------------------------------------------------------------
+// Update Request methods (Feature 3: Update Handler)
+// ---------------------------------------------------------------------------
+
+// CreateUpdateRequest registers an incoming update request for a workflow.
+func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status)
+		VALUES ($1, $2, $3, $4, 'pending')
+	`, workflowID, updateName, payload, promiseID)
+	return err
+}
+
+// GetPendingUpdateRequests returns all pending (not yet dispatched) update requests.
+func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT workflow_id, update_name, payload::text, COALESCE(promise_id, ''), status,
+		       COALESCE(result::text, ''), COALESCE(error_msg, ''), created_at
+		FROM workflow_update_requests
+		WHERE workflow_id = $1 AND status = 'pending'
+		ORDER BY created_at
+	`, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var requests []UpdateRequestInfo
+	for rows.Next() {
+		var r UpdateRequestInfo
+		if err := rows.Scan(&r.WorkflowID, &r.UpdateName, &r.Payload, &r.PromiseID,
+			&r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		requests = append(requests, r)
+	}
+	return requests, rows.Err()
+}
+
+// CompleteUpdateRequest marks an update request as completed with a result or error.
+func (s *PostgresStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_update_requests
+		SET status = 'completed', result = $3, error_msg = $4, completed_at = now()
+		WHERE workflow_id = $1 AND update_name = $2 AND status = 'pending'
+	`, workflowID, updateName, result, errMsg)
+	return err
+}
+
 // NextCronTime computes the next firing time for a 5-field cron expression
 // (minute hour day-of-month month day-of-week) from the given time.
 func NextCronTime(cronExpr string, from time.Time) time.Time {

@@ -518,28 +518,6 @@ func (r *LocalRunner) random() int64 {
 }
 
 func (r *LocalRunner) createPromiseImpl(name string) (string, error) {
-
-func (r *LocalRunner) registerUpdateHandler(name string) {
-	r.mu.Lock()
-	r.events = append(r.events, Event{
-		Type:    "register_update_handler",
-		Message: name,
-	})
-	r.mu.Unlock()
-	r.logEvent("[%.3fs] register_update_handler %s", r.elapsed().Seconds(), name)
-}
-
-func (r *LocalRunner) runDetached(fn func(h durable.HostCalls) error) error {
-	r.mu.Lock()
-	r.events = append(r.events, Event{
-		Type:    "run_detached",
-		Message: "starting detached execution",
-	})
-	r.mu.Unlock()
-	r.logEvent("[%.3fs] run_detached", r.elapsed().Seconds())
-	return fn(r.h)
-}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// Generate a UUID-based promise ID.
@@ -561,6 +539,27 @@ func (r *LocalRunner) runDetached(fn func(h durable.HostCalls) error) error {
 	})
 	r.logEvent("[%.3fs] create_promise %s -> %s", r.elapsed().Seconds(), name, promiseID)
 	return promiseID, nil
+}
+
+func (r *LocalRunner) registerUpdateHandler(name string) {
+	r.mu.Lock()
+	r.events = append(r.events, Event{
+		Type:    "register_update_handler",
+		Message: name,
+	})
+	r.mu.Unlock()
+	r.logEvent("[%.3fs] register_update_handler %s", r.elapsed().Seconds(), name)
+}
+
+func (r *LocalRunner) runDetached(fn func(h durable.HostCalls) error) error {
+	r.mu.Lock()
+	r.events = append(r.events, Event{
+		Type:    "run_detached",
+		Message: "starting detached execution",
+	})
+	r.mu.Unlock()
+	r.logEvent("[%.3fs] run_detached", r.elapsed().Seconds())
+	return fn(r.h)
 }
 
 func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) (string, bool, error) {
