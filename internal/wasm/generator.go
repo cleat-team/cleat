@@ -115,6 +115,13 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
+	"durable_await_all_children": {
+		ImportName: "durable_await_all_children",
+		Params: []paramSpec{
+			{"runIDsJSON", kindInString},
+			{"results", kindOutString},
+		},
+	},
 	"durable_call_heartbeat": {
 		ImportName: "durable_call_heartbeat",
 		Params: []paramSpec{

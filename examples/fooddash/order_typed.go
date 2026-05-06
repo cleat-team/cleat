@@ -58,23 +58,23 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 
 	// Step 3: Charge the customer. Compensate with refund.
 	s.AddStep("charge_customer",
-		func() error {
+		func(h durable.HostCalls) (string, error) {
 			resp, err := paymentsClient.Charge(payments.ChargeRequest{
 				UserID:      userID,
 				AmountCents: total,
 				Currency:    "usd",
 			})
 			if err != nil {
-				return err
+				return "", err
 			}
 			chargeResult = struct {
 				ChargeID string
 				Amount   int
 			}{ChargeID: resp.ChargeID, Amount: total}
-			return nil
+			return "", nil
 		},
-		func() error {
-			return paymentsClient.Refund(payments.RefundRequest{
+		func(h durable.HostCalls) {
+			paymentsClient.Refund(payments.RefundRequest{
 				ChargeID: chargeResult.ChargeID,
 			})
 		},
@@ -82,12 +82,12 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 
 	// Step 4: Assign a driver. Compensate with release.
 	s.AddStep("assign_driver",
-		func() error {
+		func(h durable.HostCalls) (string, error) {
 			resp, err := dispatchClient.FindDriver(dispatch.FindDriverRequest{
 				Address: fmt.Sprintf("%s, %s %s", address.Street, address.City, address.ZipCode),
 			})
 			if err != nil {
-				return err
+				return "", err
 			}
 
 			// Wait for the driver to accept.
@@ -96,13 +96,13 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 				2*time.Minute,
 			)
 			if sr.Err != nil {
-				return fmt.Errorf("signal error: %w", sr.Err)
+				return "", fmt.Errorf("signal error: %w", sr.Err)
 			}
 			if sr.TimedOut {
-				return fmt.Errorf("no driver accepted within timeout")
+				return "", fmt.Errorf("no driver accepted within timeout")
 			}
 			if sr.Name == "driver_declined" {
-				return fmt.Errorf("driver declined the delivery")
+				return "", fmt.Errorf("driver declined the delivery")
 			}
 
 			driverInfo = struct {
@@ -114,10 +114,10 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 				DriverName: "Alex",
 				ETAMinutes: 15,
 			}
-			return nil
+			return "", nil
 		},
-		func() error {
-			return dispatchClient.ReleaseDriver(dispatch.ReleaseDriverRequest{
+		func(h durable.HostCalls) {
+			dispatchClient.ReleaseDriver(dispatch.ReleaseDriverRequest{
 				DriverID: driverInfo.DriverID,
 			})
 		},
@@ -125,7 +125,7 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 
 	// Step 5: Notify the restaurant. Compensate with cancel.
 	s.AddStep("notify_restaurant",
-		func() error {
+		func(h durable.HostCalls) (string, error) {
 			var itemNames string
 			for i, item := range validated {
 				if i > 0 {
@@ -133,14 +133,14 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 				}
 				itemNames += fmt.Sprintf("%dx %s", item.Quantity, item.Name)
 			}
-			return restaurantClient.NotifyOrder(restaurant.NotifyOrderRequest{
+			return "", restaurantClient.NotifyOrder(restaurant.NotifyOrderRequest{
 				RestaurantID: restaurantID,
 				Items:        itemNames,
 				ETAMinutes:   driverInfo.ETAMinutes,
 			})
 		},
-		func() error {
-			return restaurantClient.CancelOrder(restaurant.CancelOrderRequest{
+		func(h durable.HostCalls) {
+			restaurantClient.CancelOrder(restaurant.CancelOrderRequest{
 				OrderID: chargeResult.ChargeID,
 			})
 		},

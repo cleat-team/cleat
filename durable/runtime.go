@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -63,6 +64,10 @@ type HostCalls interface {
 	// does not support heartbeats.
 	DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(progressJSON string)) (string, error)
 
+	// DurableCallTypedWithHeartbeat is like DurableCallWithHeartbeat but marshals
+	// request to JSON and unmarshals the response into result.
+	DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(progressJSON string)) error
+
 	// DurableSleep suspends the workflow for the given duration.
 	DurableSleep(d time.Duration)
 
@@ -106,6 +111,19 @@ type HostCalls interface {
 	// AwaitChild waits for a child workflow to complete.
 	AwaitChild(runID string) (resultJSON string, err error)
 
+	// AwaitAllChildren waits for all child workflows identified by runIDs to
+	// complete. Results are returned in the same order as runIDs. Unlike
+	// calling AwaitChild in a loop, all children are awaited concurrently.
+	AwaitAllChildren(runIDs []string) ([]ChildResult, error)
+
+	// ChildWorkflowTyped starts a child workflow with typed input.
+	// Marshals request to JSON internally. Use AwaitChildTyped to
+	// get the typed result.
+	ChildWorkflowTyped(name string, request interface{}) (runID string, err error)
+
+	// AwaitChildTyped waits for a child workflow and unmarshals its result.
+	AwaitChildTyped(runID string, result interface{}) error
+
 	// Version returns the current workflow version number for schema evolution.
 	Version() int
 
@@ -138,6 +156,13 @@ type SignalResult struct {
 	Payload  string
 	TimedOut bool
 	Err      error
+}
+
+// ChildResult holds the outcome of a child workflow.
+type ChildResult struct {
+	RunID  string `json:"run_id"`
+	Result string `json:"result,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // CallResult is the serialized result of a durable API call.
@@ -244,6 +269,10 @@ type hostCallsImpl struct {
 	continueAsNew             func(newInputJSON string) error
 	childWorkflow             func(name, inputJSON string) (string, error)
 	awaitChild                func(runID string) (string, error)
+	awaitAllChildren           func(runIDs []string) ([]ChildResult, error)
+	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
+	childWorkflowTyped        func(name string, request interface{}) (string, error)
+	awaitChildTyped           func(runID string, result interface{}) error
 	durableCallWithRetry       func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
 	version                   func() int
 	minVersion                func() int
@@ -270,6 +299,10 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		continueAsNew:             opts.ContinueAsNew,
 		childWorkflow:             opts.ChildWorkflow,
 		awaitChild:                opts.AwaitChild,
+		awaitAllChildren:           opts.AwaitAllChildren,
+		durableCallTypedWithHeartbeat: opts.DurableCallTypedWithHeartbeat,
+		childWorkflowTyped:        opts.ChildWorkflowTyped,
+		awaitChildTyped:           opts.AwaitChildTyped,
 		durableCallWithRetry:       opts.DurableCallWithRetry,
 		version:                   opts.Version,
 		minVersion:                opts.MinVersion,
@@ -316,10 +349,14 @@ type HostCallsOptions struct {
 	DurableLog                func(message string)
 	PollCancellation          func() (bool, string)
 	PollSignal                func(signalName string) (string, bool, error)
-	ContinueAsNew             func(newInputJSON string) error
-	ChildWorkflow             func(name, inputJSON string) (string, error)
-	AwaitChild                func(runID string) (string, error)
-	DurableCallWithRetry       func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
+	ContinueAsNew                func(newInputJSON string) error
+	ChildWorkflow                func(name, inputJSON string) (string, error)
+	AwaitChild                   func(runID string) (string, error)
+	AwaitAllChildren              func(runIDs []string) ([]ChildResult, error)
+	DurableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
+	DurableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
+	ChildWorkflowTyped           func(name string, request interface{}) (string, error)
+	AwaitChildTyped              func(runID string, result interface{}) error
 	Version                   func() int
 	MinVersion                func() int
 	SetQueryState             func(key, value string)
@@ -333,7 +370,7 @@ type HostCallsOptions struct {
 //   Panic:   DurableSleepMs, NowMs, Random — core primitives, nil = programmer error
 //   Error:   DurableCall, DurableCallJSON, DurableCallTyped, DurableCallWithOptions,
 //            DurableCallJSONWithOptions, DurableCallWithHeartbeat, DurableAwaitSignals,
-//            DurableDefer, PollSignal, ContinueAsNew, ChildWorkflow, AwaitChild
+//            DurableDefer, PollSignal, ContinueAsNew, ChildWorkflow, AwaitChild, AwaitAllChildren
 //   No-op:   DurableLog, LogKV, PollCancellation, SetQueryState — diagnostic/optional
 //   Default: Version, MinVersion — return 1 when nil
 // ----
@@ -455,6 +492,21 @@ func (h *hostCallsImpl) DurableCallWithHeartbeat(service, operation, requestJSON
 	return h.DurableCall(service, operation, requestJSON)
 }
 
+func (h *hostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
+	reqJSON, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("durable: marshaling request for %s.%s: %w", service, operation, err)
+	}
+	resp, err := h.DurableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval, onProgress)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal([]byte(resp), result); err != nil {
+		return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
+	}
+	return nil
+}
+
 func (h *hostCallsImpl) DurableSleep(d time.Duration) {
 	h.DurableSleepMs(d.Milliseconds())
 }
@@ -553,6 +605,38 @@ func (h *hostCallsImpl) AwaitChild(runID string) (string, error) {
 	return h.awaitChild(runID)
 }
 
+func (h *hostCallsImpl) AwaitAllChildren(runIDs []string) ([]ChildResult, error) {
+	if h.awaitAllChildren == nil {
+		return nil, errors.New("durable: AwaitAllChildren not initialized")
+	}
+	return h.awaitAllChildren(runIDs)
+}
+
+func (h *hostCallsImpl) ChildWorkflowTyped(name string, request interface{}) (string, error) {
+	if h.childWorkflowTyped != nil {
+		return h.childWorkflowTyped(name, request)
+	}
+	reqJSON, err := json.Marshal(request)
+	if err != nil {
+		return "", fmt.Errorf("durable: marshaling child workflow input for %s: %w", name, err)
+	}
+	return h.ChildWorkflow(name, string(reqJSON))
+}
+
+func (h *hostCallsImpl) AwaitChildTyped(runID string, result interface{}) error {
+	if h.awaitChildTyped != nil {
+		return h.awaitChildTyped(runID, result)
+	}
+	resp, err := h.AwaitChild(runID)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal([]byte(resp), result); err != nil {
+		return fmt.Errorf("durable: unmarshaling child result for %s: %w", runID, err)
+	}
+	return nil
+}
+
 func (h *hostCallsImpl) Version() int {
 	if h.version == nil {
 		return 1
@@ -594,11 +678,13 @@ func (h *hostCallsImpl) Random() int64 {
 
 // ---- Saga: structured compensation ----
 
-// sagaStep represents a single step in a Saga with its compensation function.
-type sagaStep struct {
-	description string
-	forward     func() error
-	compensate  func() error
+// SagaStep defines a single step in a Saga with its forward action and
+// compensation function. Create instances via NewSaga().AddStep() or
+// by constructing a SagaStep literal for use with AddParallel().
+type SagaStep struct {
+	Description string
+	Forward     func(HostCalls) (string, error)
+	Compensate  func(HostCalls)
 }
 
 // Saga provides structured compensation for multi-step operations.
@@ -613,8 +699,22 @@ type sagaStep struct {
 //	if err := s.Run(h); err != nil {
 //	    return err
 //	}
+//
+// Typed usage (recommended):
+//
+//	s := durable.NewSaga()
+//	s.AddStep("book_flight",
+//	    func(h HostCalls) (string, error) {
+//	        var result FlightResult
+//	        err := h.DurableCallTyped("flights", "Book", req, &result)
+//	        return "", err
+//	    },
+//	    func(h HostCalls) {
+//	        h.DurableCall("flights", "Cancel", cancelJSON)
+//	    },
+//	)
 type Saga struct {
-	steps []sagaStep
+	steps []SagaStep
 }
 
 // NewSaga creates a new Saga helper.
@@ -626,12 +726,26 @@ func NewSaga() *Saga {
 // is the cleanup if a later step fails. description is used for logging.
 // compensate may be nil for best-effort steps that have no meaningful
 // compensation (e.g., sending a notification).
-func (s *Saga) AddStep(description string, forward, compensate func() error) {
-	s.steps = append(s.steps, sagaStep{
-		description: description,
-		forward:     forward,
-		compensate:  compensate,
+//
+// Typed usage example:
+//
+//	s.AddStep("book_flight",
+//	    func(h HostCalls) (string, error) {
+//	        var result FlightResult
+//	        err := h.DurableCallTyped("flights", "Book", req, &result)
+//	        return "", err
+//	    },
+//	    func(h HostCalls) {
+//	        h.DurableCall("flights", "Cancel", cancelJSON)
+//	    },
+//	)
+func (s *Saga) AddStep(description string, forward func(HostCalls) (string, error), compensate func(HostCalls)) *Saga {
+	s.steps = append(s.steps, SagaStep{
+		Description: description,
+		Forward:     forward,
+		Compensate:  compensate,
 	})
+	return s
 }
 
 // Run executes all forward steps in order. If any step fails, previously
@@ -640,28 +754,89 @@ func (s *Saga) AddStep(description string, forward, compensate func() error) {
 func (s *Saga) Run(h HostCalls) error {
 	var completed int
 	for i, step := range s.steps {
-		h.LogKV("saga: executing step", "step", i, "description", step.description)
-		if err := step.forward(); err != nil {
+		h.LogKV("saga: executing step", "step", i, "description", step.Description)
+		_, err := step.Forward(h)
+		if err != nil {
 			h.LogKV("saga: step failed, compensating",
 				"step", i,
-				"description", step.description,
+				"description", step.Description,
 				"error", err.Error(),
 				"completed_count", completed)
 			for j := completed - 1; j >= 0; j-- {
 				cs := s.steps[j]
-				if cs.compensate == nil {
+				if cs.Compensate == nil {
 					continue
 				}
-				h.LogKV("saga: compensating", "step", j, "description", cs.description)
-				if cerr := cs.compensate(); cerr != nil {
-					h.LogKV("saga: compensation error", "step", j, "description", cs.description, "error", cerr.Error())
-				}
+				h.LogKV("saga: compensating", "step", j, "description", cs.Description)
+				cs.Compensate(h)
 			}
-			return fmt.Errorf("saga step %q failed: %w", step.description, err)
+			return fmt.Errorf("saga step %q failed: %w", step.Description, err)
 		}
 		completed++
 	}
 	return nil
+}
+
+// AddParallel adds multiple steps that execute concurrently. If any step
+// fails, all successfully completed parallel steps are compensated in
+// LIFO order. The returned values are collected into a slice in the same
+// order as the steps were added.
+func (s *Saga) AddParallel(steps ...SagaStep) *Saga {
+	s.steps = append(s.steps, SagaStep{
+		Description: "parallel",
+		Forward: func(h HostCalls) (string, error) {
+			type stepResult struct {
+				index  int
+				result string
+				err    error
+			}
+
+			results := make([]stepResult, len(steps))
+			var wg sync.WaitGroup
+
+			for i, step := range steps {
+				wg.Add(1)
+				go func(idx int, st SagaStep) {
+					defer wg.Done()
+					// Each step runs in its own goroutine.
+					// All durable calls within each step are recorded
+					// deterministically through the same HostCalls.
+					res, err := st.Forward(h)
+					results[idx] = stepResult{index: idx, result: res, err: err}
+				}(i, step)
+			}
+			wg.Wait()
+
+			// Check for failures in order.
+			var firstErr error
+			for _, r := range results {
+				if r.err != nil && firstErr == nil {
+					firstErr = r.err
+				}
+			}
+
+			if firstErr != nil {
+				// Compensate successful steps in LIFO order.
+				for i := len(results) - 1; i >= 0; i-- {
+					if results[i].err == nil && steps[i].Compensate != nil {
+						steps[i].Compensate(h)
+					}
+				}
+				return "", firstErr
+			}
+
+			// All succeeded — collect results.
+			var out []string
+			for _, r := range results {
+				out = append(out, r.result)
+			}
+			b, _ := json.Marshal(out)
+			return string(b), nil
+		},
+		// No single description for parallel steps — the forward closure
+		// handles everything internally.
+	})
+	return s
 }
 
 // ---- PollUntil: sleep-based polling ----

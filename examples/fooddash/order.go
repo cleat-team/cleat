@@ -120,35 +120,35 @@ func PlaceOrder(h durable.HostCalls, userID string, restaurantID string,
 
 	// Step 3: Charge the customer. Compensate with refund.
 	s.AddStep("charge_customer",
-		func() error {
+		func(h durable.HostCalls) (string, error) {
 			var err error
 			charge, err = chargeCustomer(userID, total)
-			return err
+			return "", err
 		},
-		func() error {
-			return refundCharge(charge.ChargeID)
+		func(h durable.HostCalls) {
+			refundCharge(charge.ChargeID)
 		},
 	)
 
 	// Step 4: Assign a driver. Compensate with release.
 	s.AddStep("assign_driver",
-		func() error {
+		func(h durable.HostCalls) (string, error) {
 			var err error
 			driver, err = assignDriver(address)
-			return err
+			return "", err
 		},
-		func() error {
-			return releaseDriver(driver.DriverID)
+		func(h durable.HostCalls) {
+			releaseDriver(driver.DriverID)
 		},
 	)
 
 	// Step 5: Notify the restaurant. Compensate with cancel.
 	s.AddStep("notify_restaurant",
-		func() error {
-			return notifyRestaurant(restaurantID, validated, driver.ETAMinutes)
+		func(h durable.HostCalls) (string, error) {
+			return "", notifyRestaurant(restaurantID, validated, driver.ETAMinutes)
 		},
-		func() error {
-			return cancelRestaurantOrder(charge.ChargeID)
+		func(h durable.HostCalls) {
+			cancelRestaurantOrder(charge.ChargeID)
 		},
 	)
 
@@ -189,17 +189,17 @@ func CancelOrder(h durable.HostCalls, orderID string) error {
 	s := durable.NewSaga()
 
 	s.AddStep("release_driver",
-		func() error { return releaseDriver(orderID) },
+		func(h durable.HostCalls) (string, error) { return "", releaseDriver(orderID) },
 		nil, // best-effort, no compensation needed
 	)
 
 	s.AddStep("refund_payment",
-		func() error { return refundCharge(orderID) },
+		func(h durable.HostCalls) (string, error) { return "", refundCharge(orderID) },
 		nil,
 	)
 
 	s.AddStep("cancel_restaurant",
-		func() error { return cancelRestaurantOrder(orderID) },
+		func(h durable.HostCalls) (string, error) { return "", cancelRestaurantOrder(orderID) },
 		nil,
 	)
 

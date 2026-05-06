@@ -351,16 +351,16 @@ func TestSagaExecutesAllStepsInOrder(t *testing.T) {
 	})
 	s := NewSaga()
 	s.AddStep("step1",
-		func() error { order = append(order, "step1"); return nil },
-		func() error { order = append(order, "comp1"); return nil },
+		func(h HostCalls) (string, error) { order = append(order, "step1"); return "", nil },
+		func(h HostCalls) { order = append(order, "comp1") },
 	)
 	s.AddStep("step2",
-		func() error { order = append(order, "step2"); return nil },
-		func() error { order = append(order, "comp2"); return nil },
+		func(h HostCalls) (string, error) { order = append(order, "step2"); return "", nil },
+		func(h HostCalls) { order = append(order, "comp2") },
 	)
 	s.AddStep("step3",
-		func() error { order = append(order, "step3"); return nil },
-		func() error { order = append(order, "comp3"); return nil },
+		func(h HostCalls) (string, error) { order = append(order, "step3"); return "", nil },
+		func(h HostCalls) { order = append(order, "comp3") },
 	)
 
 	err := s.Run(h)
@@ -386,16 +386,16 @@ func TestSagaCompensatesInReverseOrderOnFailure(t *testing.T) {
 	})
 	s := NewSaga()
 	s.AddStep("step1",
-		func() error { order = append(order, "step1"); return nil },
-		func() error { order = append(order, "comp1"); return nil },
+		func(h HostCalls) (string, error) { order = append(order, "step1"); return "", nil },
+		func(h HostCalls) { order = append(order, "comp1") },
 	)
 	s.AddStep("step2",
-		func() error { order = append(order, "step2"); return nil },
-		func() error { order = append(order, "comp2"); return nil },
+		func(h HostCalls) (string, error) { order = append(order, "step2"); return "", nil },
+		func(h HostCalls) { order = append(order, "comp2") },
 	)
 	s.AddStep("step3",
-		func() error { order = append(order, "step3"); return errors.New("step3 failed") },
-		func() error { order = append(order, "comp3"); return nil },
+		func(h HostCalls) (string, error) { order = append(order, "step3"); return "", errors.New("step3 failed") },
+		func(h HostCalls) { order = append(order, "comp3") },
 	)
 
 	err := s.Run(h)
@@ -424,16 +424,16 @@ func TestSagaRunsCompensationEvenIfSomeCompensationsFail(t *testing.T) {
 	})
 	s := NewSaga()
 	s.AddStep("step1",
-		func() error { order = append(order, "step1"); return nil },
-		func() error { order = append(order, "comp1"); return errors.New("comp1 failed") },
+		func(h HostCalls) (string, error) { order = append(order, "step1"); return "", nil },
+		func(h HostCalls) { order = append(order, "comp1") },
 	)
 	s.AddStep("step2",
-		func() error { order = append(order, "step2"); return nil },
-		func() error { order = append(order, "comp2"); return nil },
+		func(h HostCalls) (string, error) { order = append(order, "step2"); return "", nil },
+		func(h HostCalls) { order = append(order, "comp2") },
 	)
 	s.AddStep("step3",
-		func() error { order = append(order, "step3"); return errors.New("step3 failed") },
-		func() error { order = append(order, "comp3"); return nil },
+		func(h HostCalls) (string, error) { order = append(order, "step3"); return "", errors.New("step3 failed") },
+		func(h HostCalls) { order = append(order, "comp3") },
 	)
 
 	err := s.Run(h)
@@ -462,12 +462,12 @@ func TestSagaReturnsForwardError(t *testing.T) {
 	})
 	s := NewSaga()
 	s.AddStep("goodStep",
-		func() error { return nil },
-		func() error { return nil },
+		func(h HostCalls) (string, error) { return "", nil },
+		func(h HostCalls) {},
 	)
 	s.AddStep("badStep",
-		func() error { return errors.New("boom") },
-		func() error { return nil },
+		func(h HostCalls) (string, error) { return "", errors.New("boom") },
+		func(h HostCalls) {},
 	)
 
 	err := s.Run(h)

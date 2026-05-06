@@ -173,6 +173,25 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&resultBuf[0], int(resultLen)), nil",
 		},
 	},
+	"AwaitAllChildren": {
+		FieldName:  "AwaitAllChildren",
+		ReturnType: "([]ChildResult, error)",
+		Params: []adapterParam{
+			{"runIDs", "[]string"},
+		},
+		ResultStmts: []string{
+			"resultLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result & 0xFF)",
+			"if errCode != 0 {",
+			`    return nil, fmt.Errorf("durable_await_all_children: error code %d", errCode)`,
+			"}",
+			"var outcomes []ChildResult",
+			`if err := json.Unmarshal(resultsBuf[:resultLen], &outcomes); err != nil {`,
+			`    return nil, fmt.Errorf("durable_await_all_children: bad result: %w", err)`,
+			"}",
+			"return outcomes, nil",
+		},
+	},
 	"DurableCallWithRetry": {
 		FieldName:  "DurableCallWithRetry",
 		ReturnType: "(string, error)",

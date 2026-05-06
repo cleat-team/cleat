@@ -1,11 +1,10 @@
-// Data pipeline — fan-out/fan-in with child workflows and heartbeat.
+// Data pipeline — fan-out/fan-in with child workflows and AwaitAllChildren.
 //
 // Demonstrates:
-//   - ChildWorkflow for fan-out (one child per data item)
-//   - AwaitChild for fan-in (wait for all children, collect results)
-//   - DurableCallWithHeartbeat for long-running transform steps
+//   - ChildWorkflowTyped for type-safe child workflow fan-out
+//   - AwaitAllChildren for concurrent fan-in (all children awaited concurrently)
+//   - DurableCallTypedWithHeartbeat for long-running steps with progress
 //   - SetQueryState for tracking pipeline progress
-//   - PollCancellation for mid-pipeline abort
 //
 // Build:
 //
@@ -26,25 +25,19 @@ var h durable.HostCalls
 
 type PipelineInput struct {
 	JobID   string   `json:"job_id"`
-	Items   []string `json:"items"`    // URLs or resource IDs to process
+	Items   []string `json:"items"`
 	BatchID string   `json:"batch_id"`
 }
 
-type ItemResult struct {
-	Item   string `json:"item"`
-	Output string `json:"output"`
-	Bytes  int    `json:"bytes"`
-}
-
 type PipelineResult struct {
-	JobID      string       `json:"job_id"`
-	TotalItems int          `json:"total_items"`
-	Succeeded  int          `json:"succeeded"`
-	Failed     int          `json:"failed"`
-	Results    []ItemResult `json:"results,omitempty"`
+	JobID      string              `json:"job_id"`
+	TotalItems int                 `json:"total_items"`
+	Succeeded  int                 `json:"succeeded"`
+	Failed     int                 `json:"failed"`
+	Results    []durable.ChildResult `json:"results,omitempty"`
 }
 
-// ---- Parent workflow: fan-out ----
+// ---- Parent workflow: fan-out/fan-in ----
 
 func RunPipeline(h durable.HostCalls, input PipelineInput) (*PipelineResult, error) {
 	if len(input.Items) == 0 {
@@ -56,63 +49,42 @@ func RunPipeline(h durable.HostCalls, input PipelineInput) (*PipelineResult, err
 	h.SetQueryState("total", fmt.Sprintf("%d", len(input.Items)))
 	h.DurableLog(fmt.Sprintf("Pipeline starting: job=%s items=%d", input.JobID, len(input.Items)))
 
-	// Fan-out: start a child workflow for each item.
+	// Fan-out: start a typed child workflow for each item.
 	var runIDs []string
-	itemInputs := make(map[string]string) // runID -> item
-
 	for i, item := range input.Items {
-		childInput := toJSON(ChildInput{
-			Item:    item,
-			JobID:   input.JobID,
-			Index:   i,
-			BatchID: input.BatchID,
-		})
-
-		runID, err := h.ChildWorkflow("process_item", childInput)
+		childInput := ChildInput{Item: item, JobID: input.JobID, Index: i, BatchID: input.BatchID}
+		runID, err := h.ChildWorkflowTyped("process_item", childInput)
 		if err != nil {
-			// If a child fails to start, record failure and continue.
 			h.DurableLog(fmt.Sprintf("Failed to start child for %s: %v", item, err))
 			continue
 		}
 		runIDs = append(runIDs, runID)
-		itemInputs[runID] = item
 	}
 
 	h.SetQueryState("children", fmt.Sprintf("%d", len(runIDs)))
 	h.DurableLog(fmt.Sprintf("Started %d child workflows", len(runIDs)))
 
-	// Fan-in: await all children, collect results.
-	var results []ItemResult
-	var succeeded, failed int
-
-	for _, runID := range runIDs {
-		item := itemInputs[runID]
-
-		resultJSON, err := h.AwaitChild(runID)
-		if err != nil {
-			h.DurableLog(fmt.Sprintf("Child failed for %s: %v", item, err))
-			failed++
-			continue
-		}
-
-		var cr ChildResult
-		if err := json.Unmarshal([]byte(resultJSON), &cr); err != nil {
-			h.DurableLog(fmt.Sprintf("Bad child result for %s: %v", item, err))
-			failed++
-			continue
-		}
-
-		results = append(results, ItemResult{
-			Item:   item,
-			Output: cr.Output,
-			Bytes:  cr.Bytes,
-		})
-		succeeded++
-		h.SetQueryState("completed", fmt.Sprintf("%d/%d", succeeded, len(runIDs)))
+	// Fan-in: await all children concurrently.
+	results, err := h.AwaitAllChildren(runIDs)
+	if err != nil {
+		return nil, fmt.Errorf("await children failed: %w", err)
 	}
 
-	// Send completion notification.
-	notifyResult(h, input.JobID, succeeded, failed)
+	// Count outcomes.
+	var succeeded, failed int
+	for _, r := range results {
+		if r.Error == "" {
+			succeeded++
+		} else {
+			failed++
+		}
+	}
+
+	h.DurableCall("notifications", "PipelineComplete", toJSON(map[string]interface{}{
+		"job_id":    input.JobID,
+		"succeeded": succeeded,
+		"failed":    failed,
+	}))
 
 	h.SetQueryState("status", "complete")
 	h.SetQueryState("succeeded", fmt.Sprintf("%d", succeeded))
@@ -129,15 +101,7 @@ func RunPipeline(h durable.HostCalls, input PipelineInput) (*PipelineResult, err
 	}, nil
 }
 
-func notifyResult(h durable.HostCalls, jobID string, succeeded, failed int) {
-	h.DurableCall("notifications", "PipelineComplete", toJSON(map[string]interface{}{
-		"job_id":    jobID,
-		"succeeded": succeeded,
-		"failed":    failed,
-	}))
-}
-
-// ---- Child workflow: process single item ----
+// ---- Child workflow types ----
 
 type ChildInput struct {
 	Item    string `json:"item"`
@@ -147,6 +111,7 @@ type ChildInput struct {
 }
 
 type ChildResult struct {
+	Item   string `json:"item"`
 	Output string `json:"output"`
 	Bytes  int    `json:"bytes"`
 }
@@ -155,25 +120,27 @@ type ChildResult struct {
 func ProcessItem(h durable.HostCalls, input ChildInput) (*ChildResult, error) {
 	h.DurableLog(fmt.Sprintf("Processing item %d/%s: %s", input.Index, input.BatchID, input.Item))
 
-	// Step 1: Fetch data from source (with heartbeat for long downloads).
+	// Step 1: Fetch data (with heartbeat for long downloads).
 	h.SetQueryState("stage", "fetching")
-	fetchResult, err := h.DurableCallWithHeartbeat(
-		"data", "Fetch", toJSON(map[string]string{"item": input.Item}),
+
+	var fetchData struct {
+		Raw  string `json:"raw"`
+		Size int    `json:"size"`
+	}
+	if err := h.DurableCallTypedWithHeartbeat(
+		"data", "Fetch",
+		map[string]string{"item": input.Item},
+		&fetchData,
 		5*time.Second,
 		func(progressJSON string) {
-			// Progress callback — typically updates query state.
 			var p struct{ Percent int `json:"percent"` }
 			if json.Unmarshal([]byte(progressJSON), &p) == nil {
 				h.SetQueryState("fetch_progress", fmt.Sprintf("%d%%", p.Percent))
 			}
 		},
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("fetch failed for %s: %w", input.Item, err)
 	}
-
-	var fetchData struct{ Raw string `json:"raw"`; Size int `json:"size"` }
-	json.Unmarshal([]byte(fetchResult), &fetchData)
 
 	// Step 2: Transform data.
 	h.SetQueryState("stage", "transforming")
@@ -185,7 +152,10 @@ func ProcessItem(h durable.HostCalls, input ChildInput) (*ChildResult, error) {
 		return nil, fmt.Errorf("transform failed for %s: %w", input.Item, err)
 	}
 
-	var transformData struct{ Output string `json:"output"`; Bytes int `json:"bytes"` }
+	var transformData struct {
+		Output string `json:"output"`
+		Bytes  int    `json:"bytes"`
+	}
 	json.Unmarshal([]byte(transformResult), &transformData)
 
 	// Step 3: Store result.
@@ -200,6 +170,7 @@ func ProcessItem(h durable.HostCalls, input ChildInput) (*ChildResult, error) {
 
 	h.SetQueryState("stage", "done")
 	return &ChildResult{
+		Item:   input.Item,
 		Output: transformData.Output,
 		Bytes:  transformData.Bytes,
 	}, nil

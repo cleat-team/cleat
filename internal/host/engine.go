@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tetratelabs/wazero/api"
@@ -25,6 +26,7 @@ const (
 	EventTypeAwaitChild     EventType = "await_child"
 	EventTypeContinueAsNew  EventType = "continue_as_new"
 	EventTypeHeartbeat    EventType = "heartbeat"
+	EventTypeAwaitAllChildren EventType = "await_all_children"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -306,7 +308,17 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	mem := m.Memory()
 
-	resp, err := s.engine.caller.Call(ctx, service, operation, requestJSON)
+	// Check cancellation before making the call.
+	callCtx := ctx
+	if s.engine.signalStore != nil {
+		cancelled, _, err := s.engine.signalStore.PollCancellation(ctx, "")
+		if err == nil && cancelled {
+			written := writeWasmString(mem, responsePtr, "workflow cancelled", responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+	}
+
+	resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
 
 	var callErr string
 	if err != nil {
@@ -384,8 +396,13 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 	}
 	resultCh := make(chan callResult, 1)
 
+	// Create a cancellable context for the call so we can cancel it if
+	// the workflow is cancelled during a long-running heartbeat call.
+	callCtx, cancelCall := context.WithCancel(ctx)
+	defer cancelCall()
+
 	go func() {
-		resp, err := s.engine.caller.Call(ctx, service, operation, requestJSON)
+		resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
 		resultCh <- callResult{resp: resp, err: err}
 	}()
 
@@ -403,6 +420,14 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 			}
 			s.history = append(s.history, rec)
 			s.stepCount++
+
+			// Check for cancellation on each heartbeat tick.
+			if s.engine.signalStore != nil {
+				cancelled, _, pollErr := s.engine.signalStore.PollCancellation(ctx, "")
+				if pollErr == nil && cancelled {
+					cancelCall() // Cancel the in-flight call.
+				}
+			}
 
 		case res := <-resultCh:
 			var callErr string
@@ -798,6 +823,88 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 	}
 
 	return packAwaitChildResultSuspend()
+}
+
+func (s *execSession) AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
+	if s.isReplay {
+		return s.replayAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
+	}
+	return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
+}
+
+func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	var runIDs []string
+	if err := json.Unmarshal([]byte(runIDsJSON), &runIDs); err != nil {
+		written := writeWasmString(mem, resultsPtr, fmt.Sprintf(`[{"error":"invalid runIDs: %v"}]`, err), resultsMaxLen)
+		return packAwaitChildResult(uint32(written), 1)
+	}
+
+	// Concurrently await all children.
+	type childOutcome struct {
+		RunID  string `json:"run_id"`
+		Result string `json:"result,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}
+
+	outcomes := make([]childOutcome, len(runIDs))
+	var wg sync.WaitGroup
+
+	for i, runID := range runIDs {
+		wg.Add(1)
+		go func(idx int, rid string) {
+			defer wg.Done()
+			if s.engine.childWfStore != nil {
+				result, completed, err := s.engine.childWfStore.GetChildResult(ctx, rid)
+				if err != nil {
+					outcomes[idx] = childOutcome{RunID: rid, Error: err.Error()}
+				} else if completed {
+					outcomes[idx] = childOutcome{RunID: rid, Result: result}
+				} else {
+					outcomes[idx] = childOutcome{RunID: rid, Error: "child not completed"}
+				}
+			} else {
+				outcomes[idx] = childOutcome{RunID: rid, Error: "no child workflow store"}
+			}
+		}(i, runID)
+	}
+	wg.Wait()
+
+	// Record event.
+	outcomesJSON, _ := json.Marshal(outcomes)
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeAwaitAllChildren,
+		Request:   runIDsJSON,
+		Response:  string(outcomesJSON),
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	written := writeWasmString(mem, resultsPtr, string(outcomesJSON), resultsMaxLen)
+	return packAwaitChildResult(uint32(written), 0)
+}
+
+func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	if s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		s.stepCount++
+
+		if rec.EventType != EventTypeAwaitAllChildren {
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s", rec.Step, rec.EventType)
+			written := writeWasmString(mem, resultsPtr, errMsg, resultsMaxLen)
+			return packAwaitChildResult(uint32(written), 1)
+		}
+
+		written := writeWasmString(mem, resultsPtr, rec.Response, resultsMaxLen)
+		return packAwaitChildResult(uint32(written), 0)
+	}
+
+	s.isReplay = false
+	return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
 }
 
 func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,

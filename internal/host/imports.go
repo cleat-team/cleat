@@ -32,6 +32,7 @@ type HostHandler interface {
 	ContinueAsNew(ctx context.Context, m api.Module, newInputJSON string) int64
 	ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
 	AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
+	AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64
 	DurableCallWithRetry(ctx context.Context, m api.Module, service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string, responsePtr, responseMaxLen uint32) int64
 	DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64
 	Version(ctx context.Context) int64
@@ -41,7 +42,7 @@ type HostHandler interface {
 	Random(ctx context.Context) int64
 }
 
-// registerHostFunctions registers all 14 durable_* imports on the "env" host module.
+// registerHostFunctions registers all 15 durable_* imports on the "env" host module.
 func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	// durable_call: (ptr,len x3, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -181,6 +182,16 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		req := readWasmString(mem, reqPtr, reqLen)
 		return uint64(h.DurableCallWithHeartbeat(ctx, m, service, op, req, heartbeatIntervalMs, respPtr, respMaxLen))
 	}).Export("durable_call_heartbeat")
+
+	// durable_await_all_children: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		idsPtr, idsLen uint32,
+		resultsPtr, resultsMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		runIDsJSON := readWasmString(mem, idsPtr, idsLen)
+		return uint64(h.AwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen))
+	}).Export("durable_await_all_children")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

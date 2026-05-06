@@ -1,0 +1,238 @@
+# Language Support Analysis for Cleat
+
+Extending cleat's WASM-based workflow model to additional languages.
+Baseline: the Rust SDK is 537 lines (host_calls 290 + memory 126 + proc-macro 121).
+
+## The WASM Boundary
+
+Any language must:
+1. **Compile to `wasm32-wasip1` (or `wasm32-unknown-unknown`)** — produce a `.wasm` shared library
+2. **Export functions** with the cleat ABI: `(args_ptr, args_len, out_ptr, max_out_len) -> i64`
+3. **Import 15 host functions** from the `"env"` module with `(ptr, len)` string protocol
+4. **Read/write linear memory** at a 10 MiB scratch offset for string I/O
+5. **Return the suspend sentinel** `(1 << 62)` for sleep/await-signals
+
+The host runtime doesn't know or care what language produced the WASM bytes.
+
+---
+
+## Language-by-Language Assessment
+
+### C — Cost: ~1 week, Value: Medium
+
+**How:** `clang --target=wasm32-wasip1` produces standalone WASM. No runtime needed.
+
+**SDK:** A `durable.h` header declaring the 15 `extern` imports plus inline memory
+helpers (`read_string`, `write_string`, `encode_export_result`). ~200 lines.
+
+**Transformer:** None needed. The user `#include`s the header and writes `extern "C"`
+export functions. The "build" is `clang --target=wasm32-wasip1 -o workflow.wasm workflow.c`.
+
+**DX:** Manual FFI, no macros. The user writes the export wrapper by hand, similar to
+the Rust proof-of-concept before `#[durable_entry]`. A `DUREBLE_EXPORT(name, input_type)`
+C macro could reduce boilerplate to ~5 lines per export.
+
+**Showstoppers:** None. C has been compiling to WASM since the MVP of wasmtime in 2019.
+
+**Binary size:** ~10-50 KB (no runtime, no GC).
+
+**Verdict:** Lowest cost. Do this first. The `durable.h` header proves the ABI works
+for all compiled languages.
+
+### Zig — Cost: ~1 week, Value: Medium
+
+**How:** `zig build-exe -target wasm32-wasi` (Zig ships its own WASM linker). Even
+simpler toolchain setup than C — no clang/WASI sysroot needed.
+
+**SDK:** A `durable.zig` module with comptime-generated import wrappers and memory
+helpers. Zig's `comptime` could auto-generate the 15 import declarations. ~150 lines.
+
+**Transformer:** None needed, but Zig's comptime reflection could generate export
+wrappers at compile time without needing a separate proc-macro. Zero build-step
+overhead beyond `zig build`.
+
+**DX:** Potentially better than Go — comptime type-safe import generation without an
+external transformer pipeline. The user writes a regular Zig function, and a
+comptime-generated export wrapper handles the ABI.
+
+**Showstoppers:** None. Zig's WASM support is production-quality (used by Bun, TigerBeetle).
+
+**Binary size:** ~5-30 KB (Zig's compiler is aggressive about dead code elimination).
+
+**Verdict:** Same low cost as C, but better DX. Zig is the dark-horse winner for
+WASM-based durable execution — comptime reflection eliminates the need for a separate
+transformer entirely.
+
+### Java / Kotlin — Cost: ~4-8 weeks, Value: High
+
+**How:** [TeaVM](https://github.com/konsoletyper/teavm) compiles JVM bytecode to
+WASM (no embedded JVM — it's an AOT compiler). Compiles `.class` files to `.wasm`.
+Also works for Kotlin, Scala, and any JVM language.
+
+**SDK:** A `durable-java` JAR with:
+- `HostCalls` class declaring the 15 native imports via TeaVM's `@Import` annotations
+- `Memory` helper class for string I/O
+- `@DurableEntry` annotation for marking workflow methods
+
+**Transformer:**
+- Annotation processor (javac plugin) that reads `@DurableEntry` annotations at
+  compile time and generates export wrapper methods
+- The export wrapper handles JSON deserialization (using a bundled JSON library or
+  TeaVM's built-in JavaScript interop), HostCalls construction, and result packing
+
+**DX:** Familiar to Temporal Java users. `@DurableEntry` on a method, `HostCalls`
+injected. Gradle/Maven plugin runs `durable build --target java`.
+
+**Showstoppers:**
+- TeaVM's class library is a subset of the JDK. No `java.lang.reflect`, limited
+  `java.util.concurrent`. Most workflow code doesn't need these, but it's a constraint.
+- JSON libraries: need one that works under TeaVM (TeaVM has its own JSON support, or
+  a minimal `org.json`-compatible library).
+- Debugging: stack traces from WASM are opaque. Need source maps or a dev-mode
+  that runs on the JVM directly (like `durable dev` for Go).
+
+**Binary size:** ~200-500 KB (TeaVM includes a minimal class library + GC).
+
+**Verdict:** Feasible and high-value. Java has the largest enterprise workflow
+ecosystem (Camunda, Temporal Java SDK). 4-8 weeks for a solid v0.1.
+
+### TypeScript — Cost: ~6-12 weeks, Value: Very High
+
+**How:** Two approaches:
+
+**A) AssemblyScript** (a TypeScript-like language that compiles directly to WASM):
+- Mature compiler, produces small WASM binaries (~10-50 KB)
+- Subset of TypeScript (no closures, no `any`, manual memory management)
+- SDK: `durable-as` package with `HostCalls` class and `@durableEntry` decorator
+- Transformer: AssemblyScript transformer plugin that generates exports
+- **Showstopper:** AssemblyScript is NOT TypeScript. It's a different language that
+  looks like TypeScript. Existing TS code won't compile. This is a significant
+  limitation for adoption.
+
+**B) Javy / QuickJS-in-WASM** (Shopify's approach):
+- Embeds the QuickJS JavaScript engine compiled to WASM
+- Runs actual JavaScript/TypeScript code inside the WASM module
+- SDK: `durable-js` npm package with `HostCalls` class and `durableEntry()` decorator
+- Transformer: Babel plugin or `tsc` plugin that wraps entry functions with ABI glue
+- **Binary size:** 1-5 MB (embedded JS engine)
+- **Debugging:** Very difficult — JS running inside QuickJS inside WASM inside wazero.
+  Three layers of abstraction.
+- **Showstoppers:**
+  - QuickJS-in-WASM adds significant overhead and debugging complexity
+  - TypeScript type information is erased at compile time — can't generate typed
+    adapters from TS interfaces the way cleat does for Go
+  - The WASM binary is impractically large for database storage (1-5 MB per version)
+  - No mature `tsc --target wasm32-wasip1` compiler exists
+
+**C) Static Hermes** (Meta's experimental TypeScript→native compiler):
+- Compiles TypeScript to native code via Hermes engine
+- WASM target is experimental (not production-ready as of 2026)
+- Could produce smaller binaries than QuickJS-in-WASM
+- **Showstopper:** Not production-ready. Would be betting on an experimental compiler.
+
+**Verdict:** TypeScript is the highest-value language (largest developer community),
+but the technical path is the roughest. AssemblyScript is the most practical near-term
+option but is only "TypeScript-flavored." Real TypeScript via Javy is possible but
+carries significant binary size and debugging overhead. Recommend AssemblyScript
+as a stepping stone.
+
+### Python — Cost: ~8-16 weeks, Value: Medium-High
+
+**How:** No production-quality Python→WASM AOT compiler exists. Three approaches:
+
+**A) CPython compiled to WASM** (Pyodide approach):
+- Embeds the CPython interpreter as a WASM module
+- SDK: `durable-py` package with `HostCalls` class and `@durable_entry` decorator
+- Transformer: AST transform (via Python's `ast` module or a decorator that
+  dynamically generates the export wrapper at import time)
+- **Binary size:** 5-20 MB (full CPython interpreter + standard library subset)
+- **Showstopper:** Binary size. Storing 20 MB blobs in `workflow_defs` per version
+  is impractical. A single deploy with 5 versions = 100 MB of WASM in Postgres.
+
+**B) RustPython** (Python interpreter written in Rust, compiles to WASM):
+- Smaller than CPython (~2-5 MB)
+- Slower, less compatible with CPython libraries
+- **Showstopper:** Same binary size concerns, plus compatibility gaps.
+
+**C) MicroPython** (embedded Python, compiles to WASM):
+- Very small (~200-500 KB)
+- Highly restricted standard library (no `asyncio`, limited `json`, no type hints)
+- **Showstopper:** Too restricted for real workflow code. Can't use most Python
+  libraries.
+
+**D) Mojo** (Modular's Python-superset, compiles to native/WASM):
+- Python-compatible syntax, AOT-compiled
+- WASM target exists but is early-stage
+- **Showstopper:** Not mature enough to bet on.
+
+**Verdict:** Python has no clean WASM story. The binary size problem is a genuine
+showstopper for the database-stored-workflow model. If Python is essential,
+MicroPython is the least-bad option, but it's a heavily restricted subset.
+Recommend deferring until the WASM ecosystem matures (or relaxing the "store
+WASM in Postgres" constraint for Python — e.g., store a reference to a container
+image instead).
+
+### Go — Already Done
+
+Full automated transformer pipeline: analyzer → callgraph → closure → transform →
+WASM compile. Supports both `go` and `tinygo` targets. ~3,000 lines of transformer
+code across 5 packages.
+
+### Rust — Already Done
+
+`durable-sdk` crate (290 lines) + `durable-macro` proc-macro (121 lines) +
+`durable build --target rust`. ~537 lines total for the SDK.
+
+---
+
+## Summary Table
+
+| Language | WASM compiler | SDK effort | Transformer effort | Binary size | Showstoppers? | Rank |
+|----------|--------------|------------|-------------------|-------------|---------------|------|
+| **C** | clang (mature) | ~1 week | None (header macro) | 10-50 KB | None | 1st |
+| **Zig** | zig build-exe (mature) | ~1 week | None (comptime) | 5-30 KB | None | 1st |
+| **Java/Kotlin** | TeaVM (mature) | ~2-3 weeks | ~2-5 weeks | 200-500 KB | TeaVM classlib subset | 2nd |
+| **AssemblyScript** | asc (mature) | ~1-2 weeks | ~1-3 weeks | 10-50 KB | Not actually TypeScript | 3rd |
+| **TypeScript** | Javy/QuickJS (mature) | ~2-3 weeks | ~3-6 weeks | 1-5 MB | Binary size, debugging | 4th |
+| **Python** | CPython-wasm (mature) | ~2-3 weeks | ~3-6 weeks | 5-20 MB | Binary size, compat | 5th |
+| **C#/.NET** | NativeAOT-LLVM (exp.) | ~3-5 weeks | ~4-8 weeks | 1-5 MB | Immature toolchain | 6th |
+| **Go** | go build (built-in) | ✅ Done | ✅ Done | ~1-5 MB (go) / ~100-500 KB (tinygo) | None | Done |
+| **Rust** | cargo build (built-in) | ✅ Done | ✅ Done | ~50-200 KB | None | Done |
+
+---
+
+## The Binary Size Constraint
+
+Cleat stores WASM blobs in `workflow_defs.wasm_bytes` (PostgreSQL `BYTEA`). Each
+deploy creates a new row. With 10 versions of a workflow, you're storing 10× the
+binary size. This drives the ranking:
+
+- **Good** (< 500 KB): C, Zig, Rust, AssemblyScript, Java/TeaVM, Go/tinygo
+- **OK** (500 KB - 2 MB): Go (standard), TypeScript/Javy (worst-case)
+- **Problematic** (> 2 MB): Python/CPython — makes the "deploy is an INSERT" model
+  expensive. 20 MB × 10 versions × 50 workflows = 10 GB of WASM in Postgres.
+
+If Python/TypeScript via embedded interpreters is essential, consider:
+- Store WASM in object storage (S3) instead of Postgres, with a `wasm_url` column
+- Or use a WASM deduplication layer (the embedded runtime is identical across
+  workflow versions — only the user code differs)
+
+---
+
+## Recommended Order
+
+1. **C + Zig** (week 1-2): Prove the ABI works for compiled languages. The `durable.h`
+   header is < 200 lines and validates that no host changes are needed.
+2. **Java** (weeks 3-8): Highest value for enterprise adoption. TeaVM is mature.
+   The annotation processor pattern is well-understood from Lombok/Dagger.
+3. **AssemblyScript** (weeks 6-10): Gives a "TypeScript-like" option without the
+   embedded-interpreter overhead. Real TypeScript can follow once Javy or Static
+   Hermes stabilizes.
+4. **TypeScript via Javy** (months 3-4): After AssemblyScript proves demand. Focus
+   on reducing binary size (tree-shaking the JS runtime) and improving debugging.
+5. **Python** (months 6+): Wait for the WASM ecosystem to produce a Python AOT
+   compiler. Mojo is the most promising candidate. MicroPython is a fallback for
+   simple workflows.
+
+No language has a hard showstopper — even Python via CPython-wasm works, just with
+impractical binary sizes. The WASM boundary design holds up.
