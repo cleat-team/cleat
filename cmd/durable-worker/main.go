@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"log/slog"
 	"math"
 	"net/http"
 	"os"
@@ -37,6 +38,8 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/rcownie/durable/internal/host"
+	"github.com/rcownie/durable/internal/plugin"
+	"github.com/tetratelabs/wazero"
 )
 
 //go:embed web/dist
@@ -66,6 +69,7 @@ func main() {
 	compactionThreshold := flag.Int("compaction-threshold", host.DefaultCompactionThreshold, "Number of events before history compaction triggers")
 	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
 	shardsFile := flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
+	pluginConfigFile := flag.String("plugin-config", "", "path to plugin config JSON file")
 	flag.Parse()
 
 	workerID := generateWorkerID()
@@ -75,6 +79,14 @@ func main() {
 	defer cancel()
 
 	taskQueues := strings.Split(*taskQueuesStr, ",")
+
+	// Plugin state (populated in the non-sharded path).
+	var (
+		plugRegistrars []host.HostFuncRegistrar
+		plugList       []*plugin.LoadedPlugin
+		plugHandler    http.Handler
+		plugMux        *http.ServeMux
+	)
 
 	var store host.WorkflowStore
 	if *shardsFile != "" {
@@ -115,6 +127,95 @@ func main() {
 
 		// Start periodic cleanup of expired idempotency keys.
 		go idempotencyCleanupLoop(ctx, db, 1*time.Hour)
+
+		// ---- Plugin loading ----
+		if *apiAddr != "" {
+			plugMux = http.NewServeMux()
+		}
+
+		var rawPluginConfig json.RawMessage
+		if *pluginConfigFile != "" {
+			data, ferr := os.ReadFile(*pluginConfigFile)
+			if ferr != nil {
+				log.Fatalf("[worker %s] plugin config: %v", workerID, ferr)
+			}
+			if json.Valid(data) {
+				rawPluginConfig = json.RawMessage(data)
+			} else {
+				log.Fatalf("[worker %s] plugin config: must be valid JSON", workerID)
+			}
+		}
+
+		pluginEnv := &plugin.Environment{
+			DB:     db,
+			Mux:    plugMux,
+			Config: rawPluginConfig,
+			Logger: slog.Default(),
+			Done:   ctx.Done(),
+		}
+
+		plugList, err = plugin.LoadAll(ctx, pluginEnv)
+		if err != nil {
+			log.Fatalf("[worker %s] plugin: %v", workerID, err)
+		}
+
+		if err := plugin.RunMigrations(ctx, db, nil, plugList); err != nil {
+			log.Fatalf("[worker %s] plugin migrations: %v", workerID, err)
+		}
+
+		for _, lp := range plugList {
+			if !lp.Healthy {
+				continue
+			}
+			if p, ok := lp.Plugin.(plugin.HasRoutes); ok && plugMux != nil {
+				if rerr := p.RegisterRoutes(plugMux); rerr != nil {
+					log.Printf("[worker %s] plugin %s: route registration failed: %v",
+						workerID, lp.Plugin.Info().Name, rerr)
+				}
+			}
+		}
+
+		if plugMux != nil {
+			plugHandler = plugMux
+			for _, lp := range plugList {
+				if !lp.Healthy {
+					continue
+				}
+				if p, ok := lp.Plugin.(plugin.HasMiddleware); ok {
+					plugHandler = p.Middleware(plugHandler)
+				}
+			}
+		}
+
+		for _, lp := range plugList {
+			if !lp.Healthy {
+				continue
+			}
+			if p, ok := lp.Plugin.(plugin.HasHostFunctions); ok {
+				pCopy := p
+				plugRegistrars = append(plugRegistrars, func(builder wazero.HostModuleBuilder) {
+					pb := plugin.NewHostModuleBuilder(builder)
+					if rerr := pCopy.RegisterHostFunctions(pb); rerr != nil {
+						log.Printf("[worker %s] plugin %s: host functions failed: %v",
+							workerID, pCopy.Info().Name, rerr)
+					}
+				})
+			}
+		}
+
+		for _, lp := range plugList {
+			if !lp.Healthy {
+				continue
+			}
+			if p, ok := lp.Plugin.(plugin.HasBackground); ok {
+				go func(bg plugin.HasBackground) {
+					if berr := bg.Run(ctx); berr != nil {
+						log.Printf("[worker %s] plugin %s: background worker exited: %v",
+							workerID, bg.Info().Name, berr)
+					}
+				}(p)
+			}
+		}
 	}
 
 	w := &Worker{
@@ -130,12 +231,19 @@ func main() {
 		scheduleInterval:    15 * time.Second,
 		compactionThreshold: *compactionThreshold,
 		compactionInterval:  *compactionInterval,
+		pluginRegistrars:    plugRegistrars,
 	}
 
 	// Start HTTP API server if configured.
 	if *apiAddr != "" {
 		api := &apiServer{store: store, worker: w}
-		mux := http.NewServeMux()
+
+		// Use plugin mux if available, otherwise create a fresh one.
+		mux := plugMux
+		if mux == nil {
+			mux = http.NewServeMux()
+		}
+
 		mux.HandleFunc("/healthz", api.handleHealthz)
 		mux.HandleFunc("/metrics", handleMetrics)
 		// Schedule API routes (registered before workflows so /api/schedules is not caught by /api/workflows/).
@@ -143,6 +251,29 @@ func main() {
 		mux.HandleFunc("/api/schedules", api.handleSchedulesList)
 		mux.HandleFunc("/api/workflows/", api.handleWorkflows)
 		mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
+
+		// Plugin discovery endpoint.
+		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			type pluginStatus struct {
+				plugin.PluginInfo
+				Healthy bool   `json:"healthy"`
+				Error   string `json:"error,omitempty"`
+			}
+			var statuses []pluginStatus
+			for _, lp := range plugList {
+				ps := pluginStatus{
+					PluginInfo: lp.Plugin.Info(),
+					Healthy:    lp.Healthy,
+				}
+				if lp.Error != nil {
+					ps.Error = lp.Error.Error()
+				}
+				statuses = append(statuses, ps)
+			}
+			json.NewEncoder(w).Encode(statuses)
+		})
+
 		// Serve embedded SPA for non-API paths.
 		webFS, fsErr := fs.Sub(webDist, "web/dist")
 		if fsErr != nil {
@@ -160,7 +291,13 @@ func main() {
 				fileServer.ServeHTTP(w, r)
 			})
 		}
-		srv := &http.Server{Addr: *apiAddr, Handler: mux}
+		// Use plugin middleware chain if available.
+		handler := plugHandler
+		if handler == nil {
+			handler = mux
+		}
+
+		srv := &http.Server{Addr: *apiAddr, Handler: handler}
 		go func() {
 			log.Printf("[worker %s] HTTP API listening on %s", workerID, *apiAddr)
 			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
@@ -193,6 +330,7 @@ type Worker struct {
 	heartbeatInterval time.Duration
 	pollInterval      time.Duration
 	namespace         string
+	pluginRegistrars  []host.HostFuncRegistrar
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -353,7 +491,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 
 	// ---- Create engine ----
-	rt, err := host.NewRuntime(w.ctx)
+	rt, err := host.NewRuntime(w.ctx, w.pluginRegistrars...)
 	if err != nil {
 		w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("create runtime: %v", err), nil)
 		return
@@ -675,7 +813,7 @@ func determineEntryPoint(input json.RawMessage) string {
 // Errors during defer execution are logged but do not prevent other defers
 // from running.
 func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
-	rt, err := host.NewRuntime(w.ctx)
+	rt, err := host.NewRuntime(w.ctx, w.pluginRegistrars...)
 	if err != nil {
 		log.Printf("[worker %s] runDefers: create runtime: %v", w.id, err)
 		return

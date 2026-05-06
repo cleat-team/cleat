@@ -11,6 +11,11 @@ import (
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
 
+// HostFuncRegistrar is a callback that registers additional host functions
+// on the "env" module during runtime construction. Use it to integrate
+// plugin host functions into the wazero runtime.
+type HostFuncRegistrar func(wazero.HostModuleBuilder)
+
 // Runtime wraps a wazero runtime with pre-registered host function imports.
 type Runtime struct {
 	wazeroRuntime wazero.Runtime
@@ -24,9 +29,13 @@ func (r *Runtime) Stdout() string { return r.stdout.String() }
 // Stderr returns captured stderr output from the most recent module.
 func (r *Runtime) Stderr() string { return r.stderr.String() }
 
-// NewRuntime creates a Runtime with all 14 durable_* host functions registered
-// on the "env" module. WASI preview1 is also instantiated for Go wasip1 support.
-func NewRuntime(ctx context.Context) (*Runtime, error) {
+// NewRuntime creates a Runtime with all durable_* host functions registered
+// on the "env" module, plus any additional registrars. WASI preview1 is also
+// instantiated for Go wasip1 support.
+//
+// Pass plugin host function registrars to add custom imports that are
+// callable from workflow WASM modules.
+func NewRuntime(ctx context.Context, registrars ...HostFuncRegistrar) (*Runtime, error) {
 	rt := wazero.NewRuntime(ctx)
 
 	// WASI is required by Go wasip1 modules for goroutine/stack management.
@@ -35,6 +44,12 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	// Build the "env" host module that provides durable_* imports.
 	envBuilder := rt.NewHostModuleBuilder("env")
 	registerHostFunctions(envBuilder)
+
+	// Apply any extra host function registrars (e.g., from plugins).
+	for _, r := range registrars {
+		r(envBuilder)
+	}
+
 	if _, err := envBuilder.Instantiate(ctx); err != nil {
 		rt.Close(ctx)
 		return nil, fmt.Errorf("host: instantiating env module: %w", err)

@@ -1,0 +1,168 @@
+package plugin
+
+import (
+	"context"
+	"testing"
+)
+
+// Test plugin that does nothing.
+type noopPlugin struct{}
+
+func (p *noopPlugin) Info() PluginInfo {
+	return PluginInfo{Name: "noop", Version: "0.1.0", Description: "does nothing"}
+}
+
+func (p *noopPlugin) Init(ctx context.Context, env *Environment) error {
+	return nil
+}
+
+func init() {
+	Register(func() Plugin { return &noopPlugin{} })
+}
+
+func TestRegistration(t *testing.T) {
+	infos := List()
+	found := false
+	for _, info := range infos {
+		if info.Name == "noop" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("noop plugin not found in registry")
+	}
+}
+
+func TestTopologicalSort(t *testing.T) {
+	ctors := map[string]func() Plugin{
+		"a": func() Plugin { return &testPlugin{info: PluginInfo{Name: "a", Requires: []string{"b"}}} },
+		"b": func() Plugin { return &testPlugin{info: PluginInfo{Name: "b"}} },
+	}
+	sorted, err := topologicalSort(ctors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sorted[0] != "b" || sorted[1] != "a" {
+		t.Errorf("expected [b a], got %v", sorted)
+	}
+}
+
+func TestCircularDependency(t *testing.T) {
+	ctors := map[string]func() Plugin{
+		"a": func() Plugin { return &testPlugin{info: PluginInfo{Name: "a", Requires: []string{"b"}}} },
+		"b": func() Plugin { return &testPlugin{info: PluginInfo{Name: "b", Requires: []string{"a"}}} },
+	}
+	_, err := topologicalSort(ctors)
+	if err == nil {
+		t.Error("expected error for circular dependency")
+	}
+}
+
+func TestMissingDependency(t *testing.T) {
+	ctors := map[string]func() Plugin{
+		"a": func() Plugin { return &testPlugin{info: PluginInfo{Name: "a", Requires: []string{"nonexistent"}}} },
+	}
+	_, err := topologicalSort(ctors)
+	if err == nil {
+		t.Error("expected error for missing dependency")
+	}
+}
+
+func TestLoadAll(t *testing.T) {
+	// Load all registered plugins (including the noop test plugin).
+	env := &Environment{Logger: nil}
+	plugins, err := LoadAll(context.Background(), env)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+	if len(plugins) == 0 {
+		t.Fatal("expected at least the noop plugin to be loaded")
+	}
+	// All loaded plugins must be healthy (no init failures).
+	for _, lp := range plugins {
+		if !lp.Healthy {
+			t.Errorf("plugin %s not healthy: %v", lp.Plugin.Info().Name, lp.Error)
+		}
+	}
+}
+
+func TestPanickingPlugin(t *testing.T) {
+	// Register a plugin that panics during Init.
+	Register(func() Plugin {
+		return &testPlugin{
+			info: PluginInfo{Name: "panic-plugin", Version: "0.1.0"},
+			init: func(ctx context.Context, env *Environment) error {
+				panic("omg")
+			},
+		}
+	})
+
+	env := &Environment{Logger: nil}
+	plugins, err := LoadAll(context.Background(), env)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "panic-plugin" {
+			found = true
+			if lp.Healthy {
+				t.Error("expected panic-plugin to be unhealthy")
+			}
+			if lp.Error == nil {
+				t.Error("expected panic-plugin to have an error")
+			}
+		}
+	}
+	if !found {
+		t.Error("panic-plugin not found in loaded plugins")
+	}
+}
+
+func TestFailingInitPlugin(t *testing.T) {
+	Register(func() Plugin {
+		return &testPlugin{
+			info: PluginInfo{Name: "fail-plugin", Version: "0.1.0"},
+			init: func(ctx context.Context, env *Environment) error {
+				return context.Canceled
+			},
+		}
+	})
+
+	env := &Environment{Logger: nil}
+	plugins, err := LoadAll(context.Background(), env)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "fail-plugin" {
+			found = true
+			if lp.Healthy {
+				t.Error("expected fail-plugin to be unhealthy")
+			}
+			if lp.Error == nil {
+				t.Error("expected fail-plugin to have an error")
+			}
+		}
+	}
+	if !found {
+		t.Error("fail-plugin not found in loaded plugins")
+	}
+}
+
+type testPlugin struct {
+	info PluginInfo
+	init func(ctx context.Context, env *Environment) error
+}
+
+func (p *testPlugin) Info() PluginInfo { return p.info }
+func (p *testPlugin) Init(ctx context.Context, env *Environment) error {
+	if p.init != nil {
+		return p.init(ctx, env)
+	}
+	return nil
+}
