@@ -14,6 +14,17 @@ import (
 	"time"
 )
 
+// SuspendSentinel is a sentinel panic value used to suspend workflow execution.
+// When the host returns a suspend signal (e.g., from DurableSleep), the
+// WASM adapter panics with this value. The export wrapper catches it and
+// returns a suspend status code to the host.
+type SuspendSentinel struct{}
+
+func (SuspendSentinel) Error() string { return "durable: workflow suspended" }
+
+// ErrSuspend is the sentinel value panicked to suspend a workflow.
+var ErrSuspend error = SuspendSentinel{}
+
 // HostCalls is the interface workflow code programs against. It provides
 // durable, deterministic access to external services, time, and randomness.
 //

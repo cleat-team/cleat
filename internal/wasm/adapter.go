@@ -49,6 +49,12 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"durationMs", "int64"},
 		},
+		ResultStmts: []string{
+			"sleepStatus := byte(uint64(result) >> 56)",
+			"if sleepStatus == 1 {",
+			"	panic(durable.ErrSuspend)",
+			"}",
+		},
 	},
 	"DurableAwaitSignals": {
 		FieldName:  "DurableAwaitSignals",

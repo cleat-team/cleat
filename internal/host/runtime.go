@@ -83,18 +83,34 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 	return nil
 }
 
+// ErrSuspended is returned by CallExport when the workflow suspends.
+var ErrSuspended = fmt.Errorf("workflow suspended")
+
 // CallExport invokes an exported WASM function with JSON input.
 // It writes inputJSON into the module's linear memory, calls the export,
 // and decodes the int64 result per the exports.go convention.
+// If the export returns the suspend sentinel, it returns ("", nil, ErrSuspended).
 func (r *Runtime) CallExport(ctx context.Context, mod api.Module, exportName string, inputJSON []byte) (string, error) {
+	result, suspended, err := r.CallExportWithSuspend(ctx, mod, exportName, inputJSON)
+	if err != nil {
+		return "", err
+	}
+	if suspended {
+		return "", ErrSuspended
+	}
+	return result, nil
+}
+
+// CallExportWithSuspend invokes an exported WASM function and detects suspension.
+func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exportName string, inputJSON []byte) (result string, suspended bool, err error) {
 	fn := mod.ExportedFunction(exportName)
 	if fn == nil {
-		return "", fmt.Errorf("host: export %q not found", exportName)
+		return "", false, fmt.Errorf("host: export %q not found", exportName)
 	}
 
 	mem := mod.Memory()
 	if mem == nil {
-		return "", fmt.Errorf("host: module has no exported memory")
+		return "", false, fmt.Errorf("host: module has no exported memory")
 	}
 
 	// Reserve scratch space. Use high offsets to avoid conflicts with the
@@ -109,7 +125,6 @@ func (r *Runtime) CallExport(ctx context.Context, mod api.Module, exportName str
 	if currentSize < needed {
 		pagesNeeded := (needed - currentSize + 65535) / 65536
 		if _, ok := mem.Grow(pagesNeeded); !ok {
-			// Grow failed — try once more with a smaller amount.
 			mem.Grow(1)
 		}
 	}
@@ -127,20 +142,25 @@ func (r *Runtime) CallExport(ctx context.Context, mod api.Module, exportName str
 		uint64(outBufSize),
 	)
 	if err != nil {
-		return "", fmt.Errorf("host: export %q call failed: %w", exportName, err)
+		return "", false, fmt.Errorf("host: export %q call failed: %w", exportName, err)
 	}
 
 	if len(results) == 0 {
-		return "", fmt.Errorf("host: export %q returned no results", exportName)
+		return "", false, fmt.Errorf("host: export %q returned no results", exportName)
+	}
+
+	// Check for suspend sentinel: (1 << 62).
+	if results[0] == (1 << 62) {
+		return "", true, nil
 	}
 
 	errCode, actualLen := decodeExportResult(results[0])
 
 	if errCode != 0 {
 		errMsg := readWasmString(mem, outputOffset, minU32(actualLen, outBufSize))
-		return "", fmt.Errorf("host: %s: %s", exportName, errMsg)
+		return "", false, fmt.Errorf("host: %s: %s", exportName, errMsg)
 	}
 
 	response := readWasmString(mem, outputOffset, minU32(actualLen, outBufSize))
-	return response, nil
+	return response, false, nil
 }

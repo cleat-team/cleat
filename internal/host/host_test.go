@@ -17,7 +17,8 @@ type mockCaller struct {
 func (m *mockCaller) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
 	resp := mockResponse(service, operation)
 	m.calls = append(m.calls, CallRecord{
-		Service: service, Op: operation, Request: requestJSON, Response: resp,
+		EventType: EventTypeCall,
+		Service:   service, Op: operation, Request: requestJSON, Response: resp,
 	})
 	return resp, nil
 }
@@ -120,10 +121,11 @@ func TestEngineExecute(t *testing.T) {
 	engine := NewEngine(rt, caller)
 
 	input := []byte(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
-	result, history, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+	result, history, suspended, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
+	_ = suspended
 	if result == "" {
 		t.Error("expected non-empty result")
 	}
@@ -163,7 +165,7 @@ func TestEngineReplay(t *testing.T) {
 	caller1 := &mockCaller{}
 	engine1 := NewEngine(rt, caller1)
 	input := []byte(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
-	result1, history, err := engine1.Execute(ctx, wasmBytes, "place_order", input)
+	result1, history, _, _, err := engine1.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -171,7 +173,7 @@ func TestEngineReplay(t *testing.T) {
 	// Second: replay with captured history.
 	caller2 := &mockCaller{}
 	engine2 := NewEngine(rt, caller2)
-	result2, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, history)
+	result2, _, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, history)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -201,7 +203,7 @@ func TestEngineReplayDivergence(t *testing.T) {
 	caller1 := &mockCaller{}
 	engine1 := NewEngine(rt, caller1)
 	input := []byte(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
-	_, history, err := engine1.Execute(ctx, wasmBytes, "place_order", input)
+	_, history, _, _, err := engine1.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -213,7 +215,7 @@ func TestEngineReplayDivergence(t *testing.T) {
 
 	caller2 := &mockCaller{}
 	engine2 := NewEngine(rt, caller2)
-	_, _, err = engine2.Replay(ctx, wasmBytes, "place_order", input, history)
+	_, _, _, _, err = engine2.Replay(ctx, wasmBytes, "place_order", input, history)
 	if err == nil {
 		t.Error("expected divergence error")
 	} else {
@@ -239,7 +241,7 @@ func TestEngineExecuteCancelOrder(t *testing.T) {
 	engine := NewEngine(rt, caller)
 
 	input := []byte(`{"OrderID":"ord-123"}`)
-	result, history, err := engine.Execute(ctx, wasmBytes, "cancel_order", input)
+	result, history, _, _, err := engine.Execute(ctx, wasmBytes, "cancel_order", input)
 	if err != nil {
 		t.Fatalf("Execute cancel_order: %v", err)
 	}

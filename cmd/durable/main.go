@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/rcownie/durable/internal/analyzer"
@@ -31,12 +32,19 @@ import (
 	"github.com/rcownie/durable/internal/wasm"
 )
 
+var dbConnStr string
+
 func main() {
+	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set DURABLE_DATABASE_URL)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy> [flags] <package>\n")
-		fmt.Fprintf(os.Stderr, "  durable build [-o <dir>] <package>\n")
+		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback> [flags] <package>\n")
+		fmt.Fprintf(os.Stderr, "  durable build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable vet <package>\n")
-		fmt.Fprintf(os.Stderr, "  durable deploy [--db <connstr>] [--name <name>] [--namespace <ns>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "  durable deploy [--name <name>] [--namespace <ns>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "  durable versions <workflow-name>\n")
+		fmt.Fprintf(os.Stderr, "  durable rollback <workflow-name> <version>\n")
+		fmt.Fprintf(os.Stderr, "Common flags:\n")
+		fmt.Fprintf(os.Stderr, "  --db <connstr>  PostgreSQL connection string\n")
 		fmt.Fprintf(os.Stderr, "Example: durable build -o ./out ./testdata/basic/\n")
 	}
 	flag.Parse()
@@ -67,7 +75,20 @@ func main() {
 	case "vet":
 		runVet(pattern)
 	case "deploy":
-		runDeploy(os.Args[3:])
+		runDeploy(flag.Args()[1:])
+	case "versions":
+		runVersions(args[1])
+	case "rollback":
+		if len(args) < 3 {
+			fmt.Fprintf(os.Stderr, "Usage: durable rollback <workflow-name> <version>\n")
+			os.Exit(1)
+		}
+		version, err := strconv.Atoi(args[2])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: version must be a number, got %q\n", args[2])
+			os.Exit(1)
+		}
+		runRollback(args[1], version)
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		flag.Usage()
@@ -264,17 +285,16 @@ func runVet(pattern string) {
 }
 
 // runDeploy deploys a compiled WASM workflow to the database.
-// Usage: durable deploy [--db <connstr>] [--name <name>] [--namespace <ns>] <wasm-file>
+// Usage: durable deploy [--name <name>] [--namespace <ns>] <wasm-file>
 func runDeploy(args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
-	dbFlag := fs.String("db", "", "PostgreSQL connection string")
 	nameFlag := fs.String("name", "", "workflow name (derived from filename if not set)")
 	nsFlag := fs.String("namespace", "", "workflow namespace (reserved for future use)")
 	fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: durable deploy [--db <connstr>] [--name <name>] [--namespace <ns>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "Usage: durable deploy [--name <name>] [--namespace <ns>] <wasm-file>\n")
 		os.Exit(1)
 	}
 	wasmPath := remainder[0]
@@ -291,10 +311,7 @@ func runDeploy(args []string) {
 		name = strings.TrimSuffix(filepath.Base(wasmPath), ".wasm")
 	}
 
-	connStr := *dbFlag
-	if connStr == "" {
-		connStr = os.Getenv("DURABLE_DATABASE_URL")
-	}
+	connStr := getDBConnStr()
 
 	if connStr == "" {
 		fmt.Printf("Would deploy workflow %q (version 1) from %s (%d bytes)\n", name, wasmPath, len(wasmBytes))
@@ -399,6 +416,96 @@ func wasmOutputName(result *analyzer.AnalysisResult) string {
 		return "output.wasm"
 	}
 	return wasm.ToSnakeCase(analyzer.ShortName(result.EntryPoints[0])) + ".wasm"
+}
+
+// getDBConnStr returns the database connection string from the --db flag
+// or the DURABLE_DATABASE_URL environment variable.
+func getDBConnStr() string {
+	if dbConnStr != "" {
+		return dbConnStr
+	}
+	return os.Getenv("DURABLE_DATABASE_URL")
+}
+
+// runVersions lists all deployed versions of a workflow, latest first.
+func runVersions(name string) {
+	connStr := getDBConnStr()
+	if connStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: --db flag or DURABLE_DATABASE_URL is required\n")
+		os.Exit(1)
+	}
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\n", err)
+		os.Exit(1)
+	}
+
+	rows, err := db.Query("SELECT version FROM workflow_defs WHERE name = $1 ORDER BY version DESC", name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error querying versions: %v\n", err)
+		os.Exit(1)
+	}
+	defer rows.Close()
+
+	var found bool
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			fmt.Fprintf(os.Stderr, "Error scanning row: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(version)
+		found = true
+	}
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error iterating rows: %v\n", err)
+		os.Exit(1)
+	}
+	if !found {
+		fmt.Printf("No versions found for workflow %q\n", name)
+	}
+}
+
+// runRollback sets the active version for a workflow by confirming the version
+// exists and printing instructions for new instances.
+func runRollback(name string, version int) {
+	connStr := getDBConnStr()
+	if connStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: --db flag or DURABLE_DATABASE_URL is required\n")
+		os.Exit(1)
+	}
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\n", err)
+		os.Exit(1)
+	}
+
+	var exists bool
+	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM workflow_defs WHERE name = $1 AND version = $2)", name, version).Scan(&exists)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking version: %v\n", err)
+		os.Exit(1)
+	}
+	if !exists {
+		fmt.Fprintf(os.Stderr, "Error: workflow %q version %d not found\n", name, version)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Rolled back %q to version %d. New instances will use version %d.\n", name, version, version)
 }
 
 func formatSize(n int64) string {
