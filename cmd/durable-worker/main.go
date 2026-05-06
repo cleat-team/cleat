@@ -151,6 +151,17 @@ func main() {
 			Config: rawPluginConfig,
 			Logger: slog.Default(),
 			Done:   ctx.Done(),
+			StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+				versions, err := store.ListVersions(ctx, defName)
+				if err != nil {
+					return "", fmt.Errorf("start workflow %s: %w", defName, err)
+				}
+				if len(versions) == 0 {
+					return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
+				}
+				runID, _, err := store.StartNewRun(ctx, defName, versions[0], input, "")
+				return runID, err
+			},
 		}
 
 		plugList, err = plugin.LoadAll(ctx, pluginEnv)

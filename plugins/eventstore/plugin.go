@@ -38,7 +38,8 @@ type Plugin struct {
 
 // Config controls eventstore parameters.
 type Config struct {
-	MaxEventSize int `json:"max_event_size"` // max event body bytes; default 1 MB
+	MaxEventSize  int `json:"max_event_size"`  // max event body bytes; default 1 MB
+	RetentionDays int `json:"retention_days"`  // days to keep events; <=0 disables cleanup, default 30
 }
 
 // Info returns plugin metadata for discovery and documentation.

@@ -28,5 +28,14 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS task_queue;
 			`,
 		},
+		{
+			Version: 2,
+			Up: `ALTER TABLE task_queue ADD COLUMN IF NOT EXISTS def_name TEXT;
+			     ALTER TABLE task_queue ADD COLUMN IF NOT EXISTS input JSONB;
+			     ALTER TABLE task_queue ADD COLUMN IF NOT EXISTS run_id TEXT;`,
+			Down: `ALTER TABLE task_queue DROP COLUMN IF EXISTS run_id;
+			       ALTER TABLE task_queue DROP COLUMN IF EXISTS input;
+			       ALTER TABLE task_queue DROP COLUMN IF EXISTS def_name;`,
+		},
 	}
 }

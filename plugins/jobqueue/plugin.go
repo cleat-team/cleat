@@ -29,6 +29,7 @@ type Plugin struct {
 	db     *sql.DB
 	mux    *http.ServeMux
 	logger *slog.Logger
+	env    *plugin.Environment
 }
 
 // Info returns plugin metadata for discovery and documentation.
@@ -43,6 +44,8 @@ func (p *Plugin) Info() plugin.PluginInfo {
 
 // Init initializes the plugin with the given environment.
 func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
+	p.env = env
+
 	if env.Logger != nil {
 		p.logger = env.Logger
 	} else {

@@ -37,6 +37,13 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// enqueueRequest is the JSON body shape accepted by the enqueue endpoint.
+type enqueueRequest struct {
+	DefName string          `json:"def_name,omitempty"`
+	Input   json.RawMessage `json:"input,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
 // tenantID extracts the tenant UUID from the request context. Returns the
 // zero UUID if no tenant is set.
 func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
@@ -78,20 +85,25 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 
-	// Validate that the body is valid JSON.
+	var req enqueueRequest
 	if len(body) > 0 {
-		var validate json.RawMessage
-		if err := json.Unmarshal(body, &validate); err != nil {
+		if err := json.Unmarshal(body, &req); err != nil {
 			p.writeError(w, 400, "invalid JSON payload")
 			return
 		}
 	}
 
 	jobID := uuid.New()
+
+	var defName *string
+	if req.DefName != "" {
+		defName = &req.DefName
+	}
+
 	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO task_queue (tenant_id, queue_name, job_id, payload)
-		VALUES ($1, $2, $3, $4)
-	`, tid, queueName, jobID, body)
+		INSERT INTO task_queue (tenant_id, queue_name, job_id, payload, def_name, input)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, tid, queueName, jobID, req.Payload, defName, req.Input)
 	if err != nil {
 		p.logger.Error("jobqueue: enqueue", "error", err)
 		p.writeError(w, 500, "failed to enqueue job")
@@ -102,6 +114,7 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		"job_id", jobID,
 		"queue", queueName,
 		"tenant", tid,
+		"def_name", req.DefName,
 	)
 
 	p.writeJSON(w, 201, map[string]interface{}{

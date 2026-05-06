@@ -3,7 +3,10 @@ package oauthprovider
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -112,6 +115,11 @@ func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider str
 	return &cfg, nil
 }
 
+func sha256Hex(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
 func generateSessionToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -137,11 +145,13 @@ func (p *Plugin) extractSession(r *http.Request) *SessionInfo {
 	var userEmail sql.NullString
 	var expiresAt sql.NullTime
 
+	tokenHash := sha256Hex(token)
+
 	err := p.db.QueryRowContext(r.Context(), `
 		SELECT id, tenant_id, user_email, expires_at
 		FROM oauth_sessions
-		WHERE session_token = $1 AND (expires_at IS NULL OR expires_at > now())
-	`, token).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
+		WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
+	`, tokenHash).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
 	if err != nil {
 		return nil
 	}
@@ -196,15 +206,48 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generate CSRF state nonce.
+	stateBytes := make([]byte, 32)
+	if _, err := rand.Read(stateBytes); err != nil {
+		p.writeError(w, http.StatusInternalServerError, "failed to generate state")
+		return
+	}
+	state := hex.EncodeToString(stateBytes)
+
+	// Generate PKCE code_verifier and code_challenge (RFC 7636).
+	verifierBytes := make([]byte, 32)
+	if _, err := rand.Read(verifierBytes); err != nil {
+		p.writeError(w, http.StatusInternalServerError, "failed to generate code verifier")
+		return
+	}
+	codeVerifier := base64.RawURLEncoding.EncodeToString(verifierBytes)
+	h := sha256.Sum256([]byte(codeVerifier))
+	codeChallenge := base64.RawURLEncoding.EncodeToString(h[:])
+
+	// Store state + code_verifier in oauth_sessions with 5-minute expiry.
+	sessionID := uuid.New()
+	sessionExpiresAt := time.Now().Add(5 * time.Minute)
+	_, err = p.db.ExecContext(r.Context(), `
+		INSERT INTO oauth_sessions (id, tenant_id, provider, state, code_verifier, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, sessionID, tid, provider, state, codeVerifier, sessionExpiresAt)
+	if err != nil {
+		p.logger.Error("oauth: store state", "error", err)
+		p.writeError(w, http.StatusInternalServerError, "failed to initialize login")
+		return
+	}
+
 	ep := endpoints[provider]
 	authURL := formatProviderURL(ep.authURL, cfg.Domain)
 
 	v := url.Values{}
 	v.Set("client_id", cfg.ClientID)
 	v.Set("redirect_uri", cfg.RedirectURL)
-	v.Set("state", tid.String())
+	v.Set("state", state)
 	v.Set("response_type", "code")
 	v.Set("scope", ep.scope)
+	v.Set("code_challenge", codeChallenge)
+	v.Set("code_challenge_method", "S256")
 
 	http.Redirect(w, r, authURL+"?"+v.Encode(), http.StatusFound)
 }
@@ -229,9 +272,31 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tid, err := uuid.Parse(state)
+	// Look up state in oauth_sessions — verify it exists and hasn't expired.
+	var tid uuid.UUID
+	var storedProvider string
+	var codeVerifier sql.NullString
+	var sessionID uuid.UUID
+
+	err := p.db.QueryRowContext(r.Context(), `
+		SELECT id, tenant_id, provider, code_verifier
+		FROM oauth_sessions
+		WHERE state = $1 AND expires_at > now()
+	`, state).Scan(&sessionID, &tid, &storedProvider, &codeVerifier)
 	if err != nil {
-		p.writeError(w, http.StatusBadRequest, "invalid state")
+		p.logger.Error("oauth: state lookup", "error", err)
+		p.writeError(w, http.StatusBadRequest, "invalid or expired state")
+		return
+	}
+
+	if !codeVerifier.Valid || codeVerifier.String == "" {
+		p.writeError(w, http.StatusBadRequest, "missing code verifier")
+		return
+	}
+
+	// Verify the provider in the stored row matches the URL path.
+	if storedProvider != provider {
+		p.writeError(w, http.StatusBadRequest, "provider mismatch")
 		return
 	}
 
@@ -245,13 +310,14 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	ep := endpoints[provider]
 	tokenURL := formatProviderURL(ep.tokenURL, cfg.Domain)
 
-	// Exchange authorization code for tokens.
+	// Exchange authorization code for tokens with PKCE code_verifier.
 	data := url.Values{}
 	data.Set("code", code)
 	data.Set("client_id", cfg.ClientID)
 	data.Set("client_secret", cfg.ClientSecret)
 	data.Set("redirect_uri", cfg.RedirectURL)
 	data.Set("grant_type", "authorization_code")
+	data.Set("code_verifier", codeVerifier.String)
 
 	tokenReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
@@ -328,17 +394,25 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionID := uuid.New()
+	// Hash the session token for at-rest storage.
+	tokenHash := sha256Hex(sessionToken)
+
 	var expiresAt *time.Time
 	if tokenResult.ExpiresIn > 0 {
 		t := time.Now().Add(time.Duration(tokenResult.ExpiresIn) * time.Second)
 		expiresAt = &t
 	}
 
+	// Update the pre-inserted state row with the actual session data and clear
+	// the PKCE fields.
 	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO oauth_sessions (id, tenant_id, provider, session_token, user_email, access_token, refresh_token, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, sessionID, tid, provider, sessionToken, email, tokenResult.AccessToken, tokenResult.RefreshToken, expiresAt)
+		UPDATE oauth_sessions
+		SET session_token = $1, token_hash = $2, user_email = $3,
+		    access_token = $4, refresh_token = $5, expires_at = $6,
+		    state = NULL, code_verifier = NULL
+		WHERE id = $7
+	`, sessionToken, tokenHash, email, tokenResult.AccessToken,
+		tokenResult.RefreshToken, expiresAt, sessionID)
 	if err != nil {
 		p.logger.Error("oauth: create session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to create session")

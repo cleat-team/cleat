@@ -19,10 +19,10 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 	if mux == nil {
 		return fmt.Errorf("blobstore: nil mux")
 	}
-	mux.HandleFunc("PUT /blobs/{key}", p.handlePut)
-	mux.HandleFunc("GET /blobs/{key}", p.handleGet)
-	mux.HandleFunc("HEAD /blobs/{key}", p.handleHead)
-	mux.HandleFunc("DELETE /blobs/{key}", p.handleDelete)
+	mux.HandleFunc("PUT /blobs/{key...}", p.handlePut)
+	mux.HandleFunc("GET /blobs/{key...}", p.handleGet)
+	mux.HandleFunc("HEAD /blobs/{key...}", p.handleHead)
+	mux.HandleFunc("DELETE /blobs/{key...}", p.handleDelete)
 	mux.HandleFunc("GET /blobs", p.handleList)
 	return nil
 }

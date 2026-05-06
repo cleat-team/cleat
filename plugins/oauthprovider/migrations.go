@@ -42,5 +42,24 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS oauth_config;
 			`,
 		},
+		{
+			Version: 2,
+			Up: `
+				ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS state TEXT;
+				ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS code_verifier TEXT;
+				ALTER TABLE oauth_sessions ADD COLUMN IF NOT EXISTS token_hash TEXT;
+				ALTER TABLE oauth_sessions ALTER COLUMN session_token DROP NOT NULL;
+				DROP INDEX IF EXISTS idx_oauth_sessions_token;
+				CREATE INDEX IF NOT EXISTS idx_oauth_sessions_state ON oauth_sessions(state);
+				CREATE INDEX IF NOT EXISTS idx_oauth_sessions_token_hash ON oauth_sessions(token_hash);
+			`,
+			Down: `
+				DROP INDEX IF EXISTS idx_oauth_sessions_token_hash;
+				DROP INDEX IF EXISTS idx_oauth_sessions_state;
+				ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS token_hash;
+				ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS code_verifier;
+				ALTER TABLE oauth_sessions DROP COLUMN IF EXISTS state;
+			`,
+		},
 	}
 }

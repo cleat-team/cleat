@@ -106,14 +106,14 @@ func TestAllowWithRateLimit(t *testing.T) {
 	p.mu.Unlock()
 
 	// First two should be allowed.
-	if !p.allow(tid) {
+	if !p.allow(tid).allowed {
 		t.Error("request 1: expected allow")
 	}
-	if !p.allow(tid) {
+	if !p.allow(tid).allowed {
 		t.Error("request 2: expected allow")
 	}
 	// Third should be denied (bucket empty).
-	if p.allow(tid) {
+	if p.allow(tid).allowed {
 		t.Error("request 3: expected deny")
 	}
 }
@@ -125,7 +125,7 @@ func TestAllowNoLimit(t *testing.T) {
 	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001")
 
 	// No rate limits configured — all requests allowed.
-	if !p.allow(tid) {
+	if !p.allow(tid).allowed {
 		t.Error("expected allow when no rate limit configured")
 	}
 }
@@ -143,11 +143,11 @@ func TestAllowMultipleBuckets(t *testing.T) {
 	p.mu.Unlock()
 
 	// First request: both have tokens, should pass.
-	if !p.allow(tid) {
+	if !p.allow(tid).allowed {
 		t.Error("request 1: expected allow (both buckets have tokens)")
 	}
 	// Second request: generous has 9 left, strict is empty — should be denied.
-	if p.allow(tid) {
+	if p.allow(tid).allowed {
 		t.Error("request 2: expected deny (strict bucket empty)")
 	}
 }

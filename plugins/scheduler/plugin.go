@@ -28,6 +28,7 @@ func init() {
 // Plugin implements user-managed cron schedules with tenant isolation.
 type Plugin struct {
 	db     *sql.DB
+	env    *plugin.Environment
 	mux    *http.ServeMux
 	logger *slog.Logger
 }
@@ -50,6 +51,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		p.logger = slog.Default()
 	}
 
+	p.env = env
 	p.db = env.DB
 	p.mux = env.Mux
 

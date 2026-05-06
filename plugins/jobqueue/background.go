@@ -2,6 +2,7 @@ package jobqueue
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,11 +38,11 @@ func (p *Plugin) Run(ctx context.Context) error {
 }
 
 // pollPending scans for pending jobs and dispatches them. For each pending job,
-// it atomically claims the job (status -> 'running') and logs a dispatch event.
-// Actual workflow dispatch integration comes in a later phase.
+// it atomically claims the job (status -> 'running') and dispatches the
+// referenced workflow. Jobs without a def_name are marked completed immediately.
 func (p *Plugin) pollPending(ctx context.Context) error {
 	rows, err := p.db.QueryContext(ctx, `
-		SELECT tenant_id, queue_name, job_id, payload
+		SELECT tenant_id, queue_name, job_id, payload, def_name, input
 		FROM task_queue
 		WHERE status = 'pending'
 		ORDER BY created_at ASC
@@ -58,8 +59,10 @@ func (p *Plugin) pollPending(ctx context.Context) error {
 			queueName string
 			jobID     uuid.UUID
 			payload   []byte
+			defName   *string
+			input     json.RawMessage
 		)
-		if err := rows.Scan(&tenantID, &queueName, &jobID, &payload); err != nil {
+		if err := rows.Scan(&tenantID, &queueName, &jobID, &payload, &defName, &input); err != nil {
 			p.logger.Error("jobqueue: scan job", "error", err)
 			continue
 		}
@@ -81,11 +84,56 @@ func (p *Plugin) pollPending(ctx context.Context) error {
 			continue
 		}
 
-		p.logger.Info("jobqueue: would dispatch job",
-			"job_id", jobID,
-			"queue", queueName,
-			"tenant", tenantID,
-		)
+		if defName != nil && *defName != "" {
+			// Dispatch as a workflow.
+			if input == nil {
+				input = json.RawMessage("{}")
+			}
+
+			runID, err := p.env.StartWorkflow(ctx, *defName, input)
+			if err != nil {
+				p.logger.Error("jobqueue: dispatch workflow",
+					"job_id", jobID,
+					"def_name", *defName,
+					"error", err,
+				)
+				if _, updateErr := p.db.ExecContext(ctx, `
+					UPDATE task_queue
+					SET status = 'failed', completed_at = now()
+					WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
+				`, jobID, tenantID, queueName); updateErr != nil {
+					p.logger.Error("jobqueue: mark failed", "job_id", jobID, "error", updateErr)
+				}
+				continue
+			}
+
+			p.logger.Info("jobqueue: dispatched workflow",
+				"job_id", jobID,
+				"def_name", *defName,
+				"run_id", runID,
+			)
+
+			if _, updateErr := p.db.ExecContext(ctx, `
+				UPDATE task_queue
+				SET status = 'completed', completed_at = now(), run_id = $4
+				WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
+			`, jobID, tenantID, queueName, runID); updateErr != nil {
+				p.logger.Error("jobqueue: mark completed", "job_id", jobID, "error", updateErr)
+			}
+		} else {
+			p.logger.Info("jobqueue: job has no workflow target, marking completed",
+				"job_id", jobID,
+				"queue", queueName,
+				"tenant", tenantID,
+			)
+			if _, updateErr := p.db.ExecContext(ctx, `
+				UPDATE task_queue
+				SET status = 'completed', completed_at = now()
+				WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
+			`, jobID, tenantID, queueName); updateErr != nil {
+				p.logger.Error("jobqueue: mark completed", "job_id", jobID, "error", updateErr)
+			}
+		}
 	}
 
 	return rows.Err()

@@ -14,6 +14,7 @@ package plugin
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -44,6 +45,11 @@ type Environment struct {
 	Logger   *slog.Logger
 	TenantID uuid.UUID
 	Done     <-chan struct{}
+
+	// StartWorkflow starts a new workflow instance using the latest deployed version.
+	// Plugins use this to trigger workflow executions (e.g., from cron schedules
+	// or job queues). Returns the run ID of the new workflow instance.
+	StartWorkflow func(ctx context.Context, defName string, input json.RawMessage) (runID string, err error)
 }
 
 // --- Optional interfaces (discovered by loader via type assertion) ---

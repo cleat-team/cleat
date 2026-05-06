@@ -2,7 +2,9 @@ package oauthprovider
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"net/http"
 	"strings"
 
@@ -47,6 +49,10 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Hash the incoming token and look up by token_hash.
+		tokenHashBytes := sha256.Sum256([]byte(token))
+		tokenHash := hex.EncodeToString(tokenHashBytes[:])
+
 		var sessionID uuid.UUID
 		var tenantID uuid.UUID
 		var userEmail sql.NullString
@@ -55,8 +61,8 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		err := p.db.QueryRowContext(r.Context(), `
 			SELECT id, tenant_id, user_email, expires_at
 			FROM oauth_sessions
-			WHERE session_token = $1 AND (expires_at IS NULL OR expires_at > now())
-		`, token).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
+			WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
+		`, tokenHash).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
 		if err != nil {
 			p.logger.Warn("oauth: invalid session token", "error", err)
 			http.Error(w, `{"error":"invalid session"}`, http.StatusUnauthorized)

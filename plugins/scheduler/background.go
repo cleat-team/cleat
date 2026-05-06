@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,6 +77,26 @@ func (p *Plugin) runDueSchedules(ctx context.Context) {
 			"workflow", workflowName,
 			"input", string(input),
 		)
+
+		// Actually start the workflow run.
+		runID, startErr := p.env.StartWorkflow(ctx, workflowName, json.RawMessage(input))
+		if startErr != nil {
+			p.logger.Error("scheduler: start workflow failed",
+				"id", id,
+				"name", name,
+				"workflow", workflowName,
+				"error", startErr,
+			)
+			// Continue to update next_run_at so a single bad schedule
+			// does not block the background worker.
+		} else {
+			p.logger.Info("scheduler: workflow started",
+				"id", id,
+				"name", name,
+				"workflow", workflowName,
+				"run_id", runID,
+			)
+		}
 
 		// Calculate the next run from the cron expression.
 		// Use the current time as the baseline. If the cron expression cannot
