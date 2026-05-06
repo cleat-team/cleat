@@ -55,8 +55,16 @@ func runBuildJava(pattern, outDir string) {
 
 	matches, _ := filepath.Glob(filepath.Join(wasmDir, "*.wasm"))
 	if len(matches) == 0 {
-		// Try broader search.
-		matches, _ = filepath.Glob(filepath.Join(javaDir, "build", "**", "*.wasm"))
+		// Try broader search — WalkDir, because filepath.Glob doesn't support **.
+		_ = filepath.WalkDir(filepath.Join(javaDir, "build"), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil // skip inaccessible files/dirs
+			}
+			if !d.IsDir() && strings.HasSuffix(path, ".wasm") {
+				matches = append(matches, path)
+			}
+			return nil
+		})
 	}
 	if len(matches) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: no .wasm file found in build output\n")

@@ -309,8 +309,8 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
-		       payload
-		       promise_name, promise_id, promise_result, promise_error,
+		       payload,
+		       promise_name, promise_id, promise_result, promise_error
 		FROM event_history
 		WHERE workflow_id = $1
 		ORDER BY step
@@ -337,7 +337,8 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 			&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
-			&payload); err != nil {
+			&payload,
+			&promiseName, &promiseID, &promiseResult, &promiseError); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
@@ -362,10 +363,10 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PluginInput = pluginInput.String
 		rec.PluginOutput = pluginOutput.String
 		rec.PluginError = pluginErr.String
-				rec.PromiseName = promiseName.String
-				rec.PromiseID = promiseID.String
-				rec.PromiseResult = promiseResult.String
-				rec.PromiseError = promiseError.String
+			rec.PromiseName = promiseName.String
+			rec.PromiseID = promiseID.String
+			rec.PromiseResult = promiseResult.String
+			rec.PromiseError = promiseError.String
 
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
@@ -1336,6 +1337,13 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		payload["promise_name"] = rec.PromiseName
 		payload["promise_id"] = rec.PromiseID
 	case "await_promise", "promise_resolved", "promise_rejected":
+		payload["promise_id"] = rec.PromiseID
+		if rec.PromiseResult != "" {
+			payload["promise_result"] = rec.PromiseResult
+		}
+		if rec.PromiseError != "" {
+			payload["promise_error"] = rec.PromiseError
+		}
 	case "update_handler":
 		if rec.UpdateHandlerName != "" {
 			payload["update_handler_name"] = rec.UpdateHandlerName
@@ -1355,13 +1363,6 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 	case "run_detached":
 		// No extra fields to store.
-		payload["promise_id"] = rec.PromiseID
-		if rec.PromiseResult != "" {
-			payload["promise_result"] = rec.PromiseResult
-		}
-		if rec.PromiseError != "" {
-			payload["promise_error"] = rec.PromiseError
-		}
 	}
 	return json.Marshal(payload)
 }
@@ -1404,6 +1405,10 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["plugin_output"].(string); ok { rec.PluginOutput = v }
 		if v, ok := m["plugin_error"].(string); ok { rec.PluginError = v }
 	case "create_promise", "await_promise", "promise_resolved", "promise_rejected":
+		if v, ok := m["promise_name"].(string); ok { rec.PromiseName = v }
+		if v, ok := m["promise_id"].(string); ok { rec.PromiseID = v }
+		if v, ok := m["promise_result"].(string); ok { rec.PromiseResult = v }
+		if v, ok := m["promise_error"].(string); ok { rec.PromiseError = v }
 	case "update_handler":
 		if v, ok := m["update_handler_name"].(string); ok { rec.UpdateHandlerName = v }
 	case "state_mutation":
@@ -1413,9 +1418,5 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["state_op"].(string); ok { rec.StateOp = v }
 	case "run_detached":
 		// No extra fields to restore.
-		if v, ok := m["promise_name"].(string); ok { rec.PromiseName = v }
-		if v, ok := m["promise_id"].(string); ok { rec.PromiseID = v }
-		if v, ok := m["promise_result"].(string); ok { rec.PromiseResult = v }
-		if v, ok := m["promise_error"].(string); ok { rec.PromiseError = v }
 	}
 }

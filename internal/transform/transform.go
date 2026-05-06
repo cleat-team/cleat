@@ -273,6 +273,7 @@ func hasHostCallsParam(fd *analyzer.FuncDecl) bool {
 
 // addHostCallsParam inserts h durable.HostCalls as the first parameter.
 func addHostCallsParam(fn *ast.FuncDecl) {
+	paramName := "h"
 	if fn.Type.Params != nil {
 		for _, field := range fn.Type.Params.List {
 			for _, name := range field.Names {
@@ -280,13 +281,15 @@ func addHostCallsParam(fn *ast.FuncDecl) {
 					if isHostCallsField(field) {
 						return // already has it
 					}
+					// A non-HostCalls param named "h" exists; use a unique name.
+					paramName = "h2"
 				}
 			}
 		}
 	}
 
 	newParam := &ast.Field{
-		Names: []*ast.Ident{ast.NewIdent("h")},
+		Names: []*ast.Ident{ast.NewIdent(paramName)},
 		Type: &ast.SelectorExpr{
 			X:   ast.NewIdent("durable"),
 			Sel: ast.NewIdent("HostCalls"),

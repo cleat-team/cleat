@@ -78,6 +78,10 @@ func main() {
 
 		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, rust, java, or assemblyscript")
 		fs.Parse(os.Args[2:])
+		if !isValidTarget(target) {
+			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript\n", target)
+			os.Exit(1)
+		}
 		remainder := fs.Args()
 		if len(remainder) > 0 {
 			pattern = remainder[0]
@@ -201,6 +205,7 @@ func runBuild(pattern, outDir, target string) {
 		fmt.Printf("  Auto-threading: no changes needed\n")
 	}
 
+	keepTempDir := false
 	if outDir == "" {
 		var err error
 		outDir, err = os.MkdirTemp("", "durable-build-*")
@@ -208,6 +213,11 @@ func runBuild(pattern, outDir, target string) {
 			fmt.Fprintf(os.Stderr, "Error creating temp directory: %v\n", err)
 			os.Exit(1)
 		}
+		defer func() {
+			if !keepTempDir {
+				os.RemoveAll(outDir)
+			}
+		}()
 	}
 
 	goVersion := result.GoVersion
@@ -283,6 +293,7 @@ func runBuild(pattern, outDir, target string) {
 		os.Exit(1)
 	}
 	fmt.Printf("  Wrote %s (%s)\n", wasmPath, formatSize(fi.Size()))
+	keepTempDir = true
 }
 
 func runVet(pattern string) {
@@ -684,6 +695,14 @@ func runSchedule(args []string) {
 		fmt.Fprintf(os.Stderr, "Unknown schedule subcommand: %s\n", subCmd)
 		os.Exit(1)
 	}
+}
+
+func isValidTarget(t string) bool {
+	valid := map[string]bool{
+		"go": true, "tinygo": true, "rust": true,
+		"java": true, "assemblyscript": true,
+	}
+	return valid[t]
 }
 
 func formatSize(n int64) string {

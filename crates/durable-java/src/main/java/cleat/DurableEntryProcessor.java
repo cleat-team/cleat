@@ -9,6 +9,9 @@ import javax.lang.model.element.Element;
 import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.VariableElement;
+import javax.lang.model.type.TypeKind;
+import javax.lang.model.type.TypeMirror;
 import javax.tools.Diagnostic;
 import javax.tools.JavaFileObject;
 import java.io.IOException;
@@ -101,10 +104,28 @@ public class DurableEntryProcessor extends AbstractProcessor {
         String returnType = method.getReturnType().toString();
         boolean returnsVoid = "void".equals(returnType);
 
-        // For the input, we work with JSON strings.  Complex types would need
-        // full JSON parsing; for the initial implementation we pass raw JSON.
+        // Determine the input type from the actual parameter type rather than
+        // hardcoding "String".  This supports non-String workflow parameters.
         String inputType = "String";
         String paramName = "input";
+        if (userParamCount >= 1) {
+            VariableElement userParam = params.get(1); // index 0 is HostCalls
+            TypeMirror paramTypeMirror = userParam.asType();
+            inputType = paramTypeMirror.toString();
+            paramName = userParam.getSimpleName().toString();
+
+            // Validate that the parameter type is supported for JSON deserialization.
+            if (!isSupportedParameterType(paramTypeMirror)) {
+                processingEnv.getMessager().printMessage(
+                    Diagnostic.Kind.ERROR,
+                    "Unsupported parameter type '" + inputType + "' for parameter '"
+                        + paramName + "' in method '" + method.getSimpleName()
+                        + "'.  Supported types are: String, int, Integer, long, Long, "
+                        + "double, Double, boolean, Boolean, and custom reference types "
+                        + "that are JSON-serializable.",
+                    userParam);
+            }
+        }
 
         // If there are no user parameters, we don't need deserialization.
         boolean hasInput = userParamCount >= 1;
@@ -191,7 +212,7 @@ public class DurableEntryProcessor extends AbstractProcessor {
             out.println("            String inputJSON = Memory.readString(argsPtr, argsLen);");
             out.println();
             out.println("            // Deserialize the workflow input.");
-            out.println("            String " + paramName + " = JsonHelper.parse(inputJSON, String.class);");
+            out.println("            " + inputType + " " + paramName + " = JsonHelper.parse(inputJSON, " + inputType + ".class);");
             out.println();
         }
 
@@ -239,6 +260,29 @@ public class DurableEntryProcessor extends AbstractProcessor {
         // Utility method for escapeJavaString isn't needed as a helper
         // in the generated class — we use JsonHelper.escapeJson instead.
         out.println("}");
+    }
+
+    /**
+     * Returns true if the given type is supported as a workflow input parameter.
+     * <p>
+     * Supported types include {@link String}, the common primitives and their
+     * boxed equivalents ({@code int}/{@link Integer}, {@code long}/{@link Long},
+     * {@code double}/{@link Double}, {@code boolean}/{@link Boolean}), and any
+     * custom reference type (which {@link JsonHelper} will attempt to deserialize).
+     * </p>
+     */
+    private static boolean isSupportedParameterType(TypeMirror type) {
+        TypeKind kind = type.getKind();
+        if (kind == TypeKind.VOID || kind == TypeKind.ARRAY) {
+            return false;
+        }
+        if (kind.isPrimitive()) {
+            String name = type.toString();
+            return "int".equals(name) || "long".equals(name)
+                || "double".equals(name) || "boolean".equals(name);
+        }
+        // All other reference types (String, custom types, etc.) are allowed.
+        return true;
     }
 
     /**

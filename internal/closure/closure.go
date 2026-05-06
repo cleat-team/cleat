@@ -237,6 +237,22 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 
 // checkForbiddenCall checks if a call expression uses a forbidden function.
 func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName string, cr *Result, fset *token.FileSet) {
+	// Check builtins.
+	if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "close" {
+		line := 0
+		if fset != nil {
+			line = fset.Position(call.Pos()).Line
+		}
+		cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
+			Code:       "E012",
+			FuncName:   funcName,
+			Message:    "close() is not allowed in durable functions",
+			Suggestion: "Channel operations are non-deterministic; use signals instead.",
+			Line:       line,
+		})
+		return
+	}
+
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return
@@ -247,7 +263,7 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 		return
 	}
 
-	pkgPath := resolveImportPath(fd, pkgIdent.Name)
+	pkgPath := resolveImportPath(fd, pkgIdent)
 	selName := sel.Sel.Name
 
 	var code, msg, suggestion string
@@ -376,7 +392,7 @@ func checkForbiddenPackageRef(sel *ast.SelectorExpr, fd *analyzer.FuncDecl, func
 		return
 	}
 
-	pkgPath := resolveImportPath(fd, pkgIdent.Name)
+	pkgPath := resolveImportPath(fd, pkgIdent)
 	if pkgPath == "" {
 		return
 	}
@@ -453,7 +469,20 @@ func checkFloatInExpr(expr ast.Expr, fd *analyzer.FuncDecl, funcName string, cr 
 }
 
 // resolveImportPath resolves a package identifier to its full import path.
-func resolveImportPath(fd *analyzer.FuncDecl, name string) string {
+// It first tries type-checked resolution (exact), then falls back to
+// matching by explicit import name or last path component.
+func resolveImportPath(fd *analyzer.FuncDecl, pkgIdent *ast.Ident) string {
+	// Prefer type-checked info for exact resolution.
+	if fd.Pkg != nil && fd.Pkg.Info != nil {
+		if obj, ok := fd.Pkg.Info.Uses[pkgIdent]; ok {
+			if pkgName, ok := obj.(*types.PkgName); ok {
+				return pkgName.Imported().Path()
+			}
+		}
+	}
+
+	name := pkgIdent.Name
+	// Fallback: match by explicit import name or last path component.
 	for _, file := range fd.Pkg.Files {
 		for _, imp := range file.Imports {
 			importPath := strings.Trim(imp.Path.Value, `"`)

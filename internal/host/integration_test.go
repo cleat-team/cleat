@@ -88,6 +88,11 @@ func setupFullTestSchema(t *testing.T, db *sql.DB) {
 			plugin_input JSONB,
 			plugin_output JSONB,
 			plugin_error TEXT,
+			promise_name TEXT,
+			promise_id TEXT,
+			promise_result TEXT,
+			promise_error TEXT,
+			payload JSONB,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 			PRIMARY KEY (workflow_id, step)
 		)`,
@@ -585,4 +590,141 @@ func TestIntegrationReplayDivergence(t *testing.T) {
 	}
 
 	t.Log("Replay divergence integration test passed")
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Persistence round-trip for the 7 new event types.
+//
+// Creates EventRecords for create_promise, await_promise, promise_resolved,
+// promise_rejected, update_handler, state_mutation, and run_detached, persists
+// them via AppendEventHistoryBatch, loads them back via LoadEventHistory, and
+// verifies all fields (including the promise fields from fix #26) survive the
+// round-trip.
+// ---------------------------------------------------------------------------
+
+// TestIntegrationNewEventTypesPersistenceRoundTrip verifies that all 7 new
+// event types can be persisted to and loaded from PostgreSQL with complete
+// field fidelity, with special focus on the promise fields (promise_id,
+// promise_result, promise_error, promise_name) that were the subject of the
+// #26 copy-paste bug fix.
+func TestIntegrationNewEventTypesPersistenceRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	db := testDB(t)
+	defer db.Close()
+	setupFullTestSchema(t, db)
+
+	ctx := context.Background()
+	runID := fmt.Sprintf("int-new-events-%d", time.Now().UnixNano())
+
+	defer func() {
+		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
+	}()
+
+	store := NewPostgresStore(db)
+
+	// Create one EventRecord for each of the 7 new event types.
+	events := []EventRecord{
+		{
+			Step: 0, EventType: EventTypeCreatePromise,
+			PromiseName: "test-promise",
+			PromiseID:   "prom-001",
+		},
+		{
+			Step: 1, EventType: EventTypeAwaitPromise,
+			PromiseID:     "prom-001",
+			PromiseResult: `{"ok":true}`,
+		},
+		{
+			Step: 2, EventType: EventTypePromiseResolved,
+			PromiseID:     "prom-001",
+			PromiseResult: `{"ok":true,"value":42}`,
+		},
+		{
+			Step: 3, EventType: EventTypePromiseRejected,
+			PromiseID:    "prom-002",
+			PromiseError: "rejected: timeout",
+		},
+		{
+			Step: 4, EventType: EventTypeUpdateHandler,
+			UpdateHandlerName: "update-status",
+		},
+		{
+			Step: 5, EventType: EventTypeStateMutation,
+			StateKey:   "counter",
+			StateValue: "42",
+			StateDelta: 1,
+			StateOp:    "increment",
+		},
+		{
+			Step: 6, EventType: EventTypeRunDetached,
+		},
+	}
+
+	// ---- Step 1: Persist events to the database ----
+	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
+		t.Fatalf("AppendEventHistoryBatch: %v", err)
+	}
+
+	// ---- Step 2: Load events back from the database ----
+	loaded, err := store.LoadEventHistory(ctx, runID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory: %v", err)
+	}
+
+	// ---- Step 3: Verify loaded events match original ----
+	if len(loaded) != len(events) {
+		t.Fatalf("history length mismatch: inserted=%d, loaded=%d", len(events), len(loaded))
+	}
+
+	for i, expected := range events {
+		got := loaded[i]
+
+		// Core fields.
+		if got.Step != expected.Step {
+			t.Errorf("step %d Step: expected %d, got %d", i, expected.Step, got.Step)
+		}
+		if got.EventType != expected.EventType {
+			t.Errorf("step %d EventType: expected %q, got %q", i, expected.EventType, got.EventType)
+		}
+
+		// Promise fields (the focus of the #26 copy-paste bug fix).
+		if got.PromiseName != expected.PromiseName {
+			t.Errorf("step %d PromiseName: expected %q, got %q", i, expected.PromiseName, got.PromiseName)
+		}
+		if got.PromiseID != expected.PromiseID {
+			t.Errorf("step %d PromiseID: expected %q, got %q", i, expected.PromiseID, got.PromiseID)
+		}
+		if got.PromiseResult != expected.PromiseResult {
+			t.Errorf("step %d PromiseResult: expected %q, got %q", i, expected.PromiseResult, got.PromiseResult)
+		}
+		if got.PromiseError != expected.PromiseError {
+			t.Errorf("step %d PromiseError: expected %q, got %q", i, expected.PromiseError, got.PromiseError)
+		}
+
+		// Update handler fields.
+		if got.UpdateHandlerName != expected.UpdateHandlerName {
+			t.Errorf("step %d UpdateHandlerName: expected %q, got %q", i, expected.UpdateHandlerName, got.UpdateHandlerName)
+		}
+
+		// State mutation fields.
+		if got.StateKey != expected.StateKey {
+			t.Errorf("step %d StateKey: expected %q, got %q", i, expected.StateKey, got.StateKey)
+		}
+		if got.StateValue != expected.StateValue {
+			t.Errorf("step %d StateValue: expected %q, got %q", i, expected.StateValue, got.StateValue)
+		}
+		if got.StateDelta != expected.StateDelta {
+			t.Errorf("step %d StateDelta: expected %d, got %d", i, expected.StateDelta, got.StateDelta)
+		}
+		if got.StateOp != expected.StateOp {
+			t.Errorf("step %d StateOp: expected %q, got %q", i, expected.StateOp, got.StateOp)
+		}
+
+		t.Logf("Step %d (%s): all fields match", i, expected.EventType)
+	}
+
+	t.Log("New event types persistence round-trip integration test passed")
 }

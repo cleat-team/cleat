@@ -130,11 +130,23 @@ impl HostCalls {
     }
 
     /// Suspend execution for a duration. Mirrors Go's DurableSleep.
-    /// Returns true if this should suspend the workflow.
+    ///
+    /// On a fresh execution the host returns status = 1 (bits 56-63) or the
+    /// direct `SUSPEND_SENTINEL` value. In either case we panic with
+    /// [`SuspendSentinel`] so the export wrapper can propagate the sentinel
+    /// back to the engine. On replay the call returns status = 0 and we return
+    /// `false` (no suspend needed).
     pub fn durable_sleep(&self, duration_ms: i64) -> bool {
         let result = unsafe { imports::durable_sleep(duration_ms) };
+        // Some host runtimes return SUSPEND_SENTINEL directly.
+        if result == memory::SUSPEND_SENTINEL {
+            std::panic::panic_any(crate::SuspendSentinel);
+        }
         let (status, _) = memory::decode_sleep_result(result);
-        status == memory::SLEEP_STATUS_SUSPEND
+        if status == memory::SLEEP_STATUS_SUSPEND {
+            std::panic::panic_any(crate::SuspendSentinel);
+        }
+        false
     }
 
     /// Get current time in milliseconds since epoch. Mirrors Go's Now().
@@ -260,6 +272,11 @@ impl HostCalls {
                 result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host returns SUSPEND_SENTINEL when the child has not completed
+        // yet — the workflow must suspend.
+        if r == memory::SUSPEND_SENTINEL {
+            std::panic::panic_any(crate::SuspendSentinel);
+        }
         let (result_len, err_code) = memory::decode_simple_result(r);
         if err_code != 0 {
             return (String::new(), Some(format!("await_child error code: {}", err_code)));
@@ -283,6 +300,11 @@ impl HostCalls {
                 payload_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
+        // The host returns SUSPEND_SENTINEL when no signal is available and a
+        // non-zero timeout has been specified — the workflow must suspend.
+        if result == memory::SUSPEND_SENTINEL {
+            std::panic::panic_any(crate::SuspendSentinel);
+        }
         let (sig_name_len, payload_len, timed_out, err_code) = memory::decode_await_signals_result(result);
         if err_code != 0 {
             return (String::new(), String::new(), false, Some(format!("await_signals error code: {}", err_code)));

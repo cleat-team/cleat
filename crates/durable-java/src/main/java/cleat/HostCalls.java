@@ -244,24 +244,22 @@ public class HostCalls {
      * Returns the time in milliseconds since the Unix epoch.  The same value
      * is returned on replay as during the original execution.
      *
-     * @return milliseconds since Unix epoch (32-bit value, zero-extended)
+     * @return milliseconds since Unix epoch (full 64-bit value)
      */
     public long now() {
-        long result = durableNowRaw();
-        return Memory.decodeSimpleExtra(result) & 0xFFFFFFFFL;
+        return durableNowRaw();
     }
 
     /**
      * Get a deterministic random value.
      * <p>
      * The same value is returned on replay as during the original execution.
-     * The value is a 32-bit unsigned integer, zero-extended to {@code long}.
+     * The value is a full 64-bit integer.
      *
-     * @return a deterministic 32-bit random value
+     * @return a deterministic 64-bit random value
      */
     public long random() {
-        long result = durableRandomRaw();
-        return Memory.decodeSimpleExtra(result) & 0xFFFFFFFFL;
+        return durableRandomRaw();
     }
 
     /**
@@ -288,7 +286,7 @@ public class HostCalls {
      */
     public int version() {
         long result = durableVersionRaw();
-        return Memory.decodeSimpleExtra(result);
+        return (int) (result & 0xFFFFFFFFL);
     }
 
     /**
@@ -301,7 +299,7 @@ public class HostCalls {
      */
     public int minVersion() {
         long result = durableMinVersionRaw();
-        return Memory.decodeSimpleExtra(result);
+        return (int) (result & 0xFFFFFFFFL);
     }
 
     /**

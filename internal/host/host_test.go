@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -248,6 +249,257 @@ func TestEngineExecuteCancelOrder(t *testing.T) {
 	t.Logf("cancel_order result: %s, history: %d calls", result, len(history))
 	if len(history) < 2 {
 		t.Errorf("expected at least 2 calls for cancel_order, got %d", len(history))
+	}
+}
+
+// ---- New event type tests (7 new event types, no WASM needed) ----
+
+func TestNewEventTypesPayloadRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  EventRecord
+	}{
+		{
+			name: "create_promise",
+			rec: EventRecord{
+				Step: 0, EventType: EventTypeCreatePromise,
+				PromiseName: "order-promise",
+				PromiseID:   "550e8400-e29b-41d4-a716-446655440000",
+			},
+		},
+		{
+			name: "await_promise_resolved",
+			rec: EventRecord{
+				Step: 1, EventType: EventTypeAwaitPromise,
+				PromiseID:     "550e8400-e29b-41d4-a716-446655440000",
+				PromiseResult: `{"status":"completed"}`,
+			},
+		},
+		{
+			name: "await_promise_rejected",
+			rec: EventRecord{
+				Step: 2, EventType: EventTypeAwaitPromise,
+				PromiseID:    "550e8400-e29b-41d4-a716-446655440000",
+				PromiseError: "timed out",
+			},
+		},
+		{
+			name: "promise_resolved",
+			rec: EventRecord{
+				Step: 3, EventType: EventTypePromiseResolved,
+				PromiseID:     "prom-001",
+				PromiseResult: `{"order_id":"ord-123","status":"paid"}`,
+			},
+		},
+		{
+			name: "promise_rejected",
+			rec: EventRecord{
+				Step: 4, EventType: EventTypePromiseRejected,
+				PromiseID:    "prom-002",
+				PromiseError: "payment_failed: card_declined",
+			},
+		},
+		{
+			name: "update_handler",
+			rec: EventRecord{
+				Step: 5, EventType: EventTypeUpdateHandler,
+				UpdateHandlerName: "update_shipping_address",
+			},
+		},
+		{
+			name: "state_mutation",
+			rec: EventRecord{
+				Step: 6, EventType: EventTypeStateMutation,
+				StateKey:   "retry_count",
+				StateValue: "3",
+				StateDelta: 1,
+				StateOp:    "increment",
+			},
+		},
+		{
+			name: "state_mutation_set",
+			rec: EventRecord{
+				Step: 7, EventType: EventTypeStateMutation,
+				StateKey:   "status",
+				StateValue: "processing",
+				StateOp:    "set",
+			},
+		},
+		{
+			name: "run_detached",
+			rec: EventRecord{
+				Step: 8, EventType: EventTypeRunDetached,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Serialize event-type-specific fields to payload JSON.
+			payload, err := eventRecordToPayload(tt.rec)
+			if err != nil {
+				t.Fatalf("eventRecordToPayload: %v", err)
+			}
+
+			// Deserialize back into a fresh record with matching EventType.
+			got := EventRecord{EventType: tt.rec.EventType}
+			populateFromPayload(&got, payload)
+
+			// Verify promise fields round-trip correctly.
+			if got.PromiseName != tt.rec.PromiseName {
+				t.Errorf("PromiseName: expected %q, got %q", tt.rec.PromiseName, got.PromiseName)
+			}
+			if got.PromiseID != tt.rec.PromiseID {
+				t.Errorf("PromiseID: expected %q, got %q", tt.rec.PromiseID, got.PromiseID)
+			}
+			if got.PromiseResult != tt.rec.PromiseResult {
+				t.Errorf("PromiseResult: expected %q, got %q", tt.rec.PromiseResult, got.PromiseResult)
+			}
+			if got.PromiseError != tt.rec.PromiseError {
+				t.Errorf("PromiseError: expected %q, got %q", tt.rec.PromiseError, got.PromiseError)
+			}
+
+			// Verify update handler fields round-trip correctly.
+			if got.UpdateHandlerName != tt.rec.UpdateHandlerName {
+				t.Errorf("UpdateHandlerName: expected %q, got %q", tt.rec.UpdateHandlerName, got.UpdateHandlerName)
+			}
+
+			// Verify state mutation fields round-trip correctly.
+			if got.StateKey != tt.rec.StateKey {
+				t.Errorf("StateKey: expected %q, got %q", tt.rec.StateKey, got.StateKey)
+			}
+			if got.StateValue != tt.rec.StateValue {
+				t.Errorf("StateValue: expected %q, got %q", tt.rec.StateValue, got.StateValue)
+			}
+			if got.StateDelta != tt.rec.StateDelta {
+				t.Errorf("StateDelta: expected %d, got %d", tt.rec.StateDelta, got.StateDelta)
+			}
+			if got.StateOp != tt.rec.StateOp {
+				t.Errorf("StateOp: expected %q, got %q", tt.rec.StateOp, got.StateOp)
+			}
+
+			t.Logf("Payload round-trip OK for %s (payload=%s)", tt.name, string(payload))
+		})
+	}
+}
+
+func TestNewEventTypesJSONRoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  EventRecord
+	}{
+		{
+			name: "create_promise",
+			rec: EventRecord{
+				Step: 0, EventType: EventTypeCreatePromise,
+				PromiseName: "order-promise",
+				PromiseID:   "550e8400-e29b-41d4-a716-446655440000",
+			},
+		},
+		{
+			name: "await_promise",
+			rec: EventRecord{
+				Step: 1, EventType: EventTypeAwaitPromise,
+				PromiseID:     "550e8400-e29b-41d4-a716-446655440000",
+				PromiseResult: `{"status":"completed"}`,
+			},
+		},
+		{
+			name: "promise_resolved",
+			rec: EventRecord{
+				Step: 2, EventType: EventTypePromiseResolved,
+				PromiseID:     "prom-001",
+				PromiseResult: `{"order_id":"ord-123","status":"paid"}`,
+			},
+		},
+		{
+			name: "promise_rejected",
+			rec: EventRecord{
+				Step: 3, EventType: EventTypePromiseRejected,
+				PromiseID:    "prom-002",
+				PromiseError: "card_declined",
+			},
+		},
+		{
+			name: "update_handler",
+			rec: EventRecord{
+				Step: 4, EventType: EventTypeUpdateHandler,
+				UpdateHandlerName: "update_shipping_address",
+			},
+		},
+		{
+			name: "state_mutation",
+			rec: EventRecord{
+				Step: 5, EventType: EventTypeStateMutation,
+				StateKey:   "retry_count",
+				StateValue: "3",
+				StateDelta: 1,
+				StateOp:    "increment",
+			},
+		},
+		{
+			name: "run_detached",
+			rec: EventRecord{
+				Step: 6, EventType: EventTypeRunDetached,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.rec)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+
+			var got EventRecord
+			if err := json.Unmarshal(data, &got); err != nil {
+				t.Fatalf("json.Unmarshal: %v", err)
+			}
+
+			// Core fields.
+			if got.Step != tt.rec.Step {
+				t.Errorf("Step: expected %d, got %d", tt.rec.Step, got.Step)
+			}
+			if got.EventType != tt.rec.EventType {
+				t.Errorf("EventType: expected %q, got %q", tt.rec.EventType, got.EventType)
+			}
+
+			// Promise fields.
+			if got.PromiseName != tt.rec.PromiseName {
+				t.Errorf("PromiseName: expected %q, got %q", tt.rec.PromiseName, got.PromiseName)
+			}
+			if got.PromiseID != tt.rec.PromiseID {
+				t.Errorf("PromiseID: expected %q, got %q", tt.rec.PromiseID, got.PromiseID)
+			}
+			if got.PromiseResult != tt.rec.PromiseResult {
+				t.Errorf("PromiseResult: expected %q, got %q", tt.rec.PromiseResult, got.PromiseResult)
+			}
+			if got.PromiseError != tt.rec.PromiseError {
+				t.Errorf("PromiseError: expected %q, got %q", tt.rec.PromiseError, got.PromiseError)
+			}
+
+			// Update handler fields.
+			if got.UpdateHandlerName != tt.rec.UpdateHandlerName {
+				t.Errorf("UpdateHandlerName: expected %q, got %q", tt.rec.UpdateHandlerName, got.UpdateHandlerName)
+			}
+
+			// State mutation fields.
+			if got.StateKey != tt.rec.StateKey {
+				t.Errorf("StateKey: expected %q, got %q", tt.rec.StateKey, got.StateKey)
+			}
+			if got.StateValue != tt.rec.StateValue {
+				t.Errorf("StateValue: expected %q, got %q", tt.rec.StateValue, got.StateValue)
+			}
+			if got.StateDelta != tt.rec.StateDelta {
+				t.Errorf("StateDelta: expected %d, got %d", tt.rec.StateDelta, got.StateDelta)
+			}
+			if got.StateOp != tt.rec.StateOp {
+				t.Errorf("StateOp: expected %q, got %q", tt.rec.StateOp, got.StateOp)
+			}
+
+			t.Logf("JSON round-trip OK for %s (json=%s)", tt.name, string(data))
+		})
 	}
 }
 

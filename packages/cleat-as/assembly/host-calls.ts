@@ -370,6 +370,39 @@ export class HostCalls {
     this.memory = memory;
   }
 
+  /**
+   * Write a string to the scratch buffer with bounds checking.
+   *
+   * Throws a descriptive error if the string does not fit in the remaining
+   * buffer space, preventing silent memory corruption from buffer overflow.
+   *
+   * @param offset    - Write offset in the scratch buffer.
+   * @param remaining - Remaining bytes available at offset.
+   * @param s         - String to write.
+   * @param label     - Human-readable label for error messages.
+   * @returns The number of bytes written.
+   */
+  private writeScratch(offset: usize, remaining: i32, s: string, label: string): i32 {
+    if (remaining <= 0) {
+      throw new Error(
+        "scratch buffer overflow: no space remaining for '" + label + "'",
+      );
+    }
+    let byteLen: usize = String.UTF8.byteLength(s);
+    if (byteLen > remaining as usize) {
+      throw new Error(
+        "scratch buffer overflow: '" +
+          label +
+          "' requires " +
+          byteLen.toString() +
+          " bytes but only " +
+          remaining.toString() +
+          " remain",
+      );
+    }
+    return this.memory.writeString(offset, remaining, s);
+  }
+
   // ────────────────────────────────────────────
   // 1. durable_call
   // ────────────────────────────────────────────
@@ -389,9 +422,11 @@ export class HostCalls {
     // Encode input strings sequentially into the scratch buffer
     let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
     let opOffset: usize = SCRATCH_BASE + svcLen;
-    let opLen: i32 = this.memory.writeString(opOffset, OUT_BUF_SIZE, operation);
+    let remaining: i32 = OUT_BUF_SIZE - svcLen;
+    let opLen: i32 = this.writeScratch(opOffset, remaining, operation, "operation");
     let reqOffset: usize = opOffset + opLen;
-    let reqLen: i32 = this.memory.writeString(reqOffset, OUT_BUF_SIZE, requestJson);
+    remaining -= opLen;
+    let reqLen: i32 = this.writeScratch(reqOffset, remaining, requestJson, "requestJson");
 
     // Call the host import
     let result: i64 = import_durable_call(
@@ -641,7 +676,8 @@ export class HostCalls {
   childWorkflow(name: string, inputJson: string): DurableResult<string> {
     let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
     let inputOffset: usize = SCRATCH_BASE + nameLen;
-    let inputLen: i32 = this.memory.writeString(inputOffset, OUT_BUF_SIZE, inputJson);
+    let remaining: i32 = OUT_BUF_SIZE - nameLen;
+    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
 
     let result: i64 = import_durable_child_workflow(
       SCRATCH_BASE as i32,
@@ -778,7 +814,8 @@ export class HostCalls {
   setQueryState(key: string, value: string): void {
     let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, key);
     let valOffset: usize = SCRATCH_BASE + keyLen;
-    let valLen: i32 = this.memory.writeString(valOffset, OUT_BUF_SIZE, value);
+    let remaining: i32 = OUT_BUF_SIZE - keyLen;
+    let valLen: i32 = this.writeScratch(valOffset, remaining, value, "value");
 
     import_set_query_state(SCRATCH_BASE as i32, keyLen, valOffset as i32, valLen);
   }

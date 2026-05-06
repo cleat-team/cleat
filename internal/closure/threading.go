@@ -164,9 +164,9 @@ func callerPassesHostCalls(callerName, calleeName string, result *analyzer.Analy
 		if calleeIdent != calleeShortName && !strings.HasSuffix(calleeIdent, "."+calleeShortName) {
 			return true
 		}
-		// Check if the first argument is the caller's HostCalls parameter.
-		if len(call.Args) > 0 {
-			if ident, ok := call.Args[0].(*ast.Ident); ok {
+		// Check if any argument is the caller's HostCalls parameter.
+		for _, arg := range call.Args {
+			if ident, ok := arg.(*ast.Ident); ok {
 				if isCallerHostCallsParam(ident.Name, callerFd) {
 					passes = true
 					return false

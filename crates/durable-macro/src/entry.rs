@@ -25,6 +25,19 @@ pub fn durable_entry_impl(item: TokenStream) -> TokenStream {
     // Pop the first arg (HostCalls). We'll add h: &HostCalls to the inner fn.
     all_args.remove(0);
 
+    // Validate: #[durable_entry] supports exactly one input parameter beyond &HostCalls.
+    if all_args.len() > 1 {
+        return syn::Error::new_spanned(
+            &all_args[1],
+            format!(
+                "`#[durable_entry]` functions must have exactly one input parameter (beyond `&HostCalls`). Found {} extra parameters.",
+                all_args.len()
+            ),
+        )
+        .to_compile_error()
+        .into();
+    }
+
     // Rebuild inner function params (including HostCalls).
     let inner_params = {
         let mut params = vec![quote! { h: &durable_sdk::HostCalls }];
@@ -94,25 +107,30 @@ pub fn durable_entry_impl(item: TokenStream) -> TokenStream {
 
             let h = durable_sdk::HostCalls;
 
-            match format_durable_result(#inner_name(#(#inner_call_args),*)) {
-                Ok(output_json) => {
-                    let n = unsafe { durable_sdk::memory::write_string(out_ptr, max_out_len, &output_json) };
-                    durable_sdk::memory::encode_export_result(0, n)
-                }
-                Err(err_msg) => {
-                    let err_json = serde_json::json!({"error": err_msg}).to_string();
-                    let n = unsafe { durable_sdk::memory::write_string(out_ptr, max_out_len, &err_json) };
-                    durable_sdk::memory::encode_export_result(1, n)
-                }
-            }
-        }
+            let result = std::panic::catch_unwind(|| {
+                #inner_name(#(#inner_call_args),*)
+            });
 
-        fn format_durable_result<T: serde::Serialize, E: std::fmt::Display>(
-            r: std::result::Result<T, E>,
-        ) -> std::result::Result<String, String> {
-            match r {
-                Ok(val) => serde_json::to_string(&val).map_err(|e| format!("serialize: {}", e)),
-                Err(e) => Err(e.to_string()),
+            match result {
+                Ok(inner_result) => {
+                    match durable_sdk::format_durable_result(inner_result) {
+                        Ok(output_json) => {
+                            let n = unsafe { durable_sdk::memory::write_string(out_ptr, max_out_len, &output_json) };
+                            durable_sdk::memory::encode_export_result(0, n)
+                        }
+                        Err(err_msg) => {
+                            let err_json = serde_json::json!({"error": err_msg}).to_string();
+                            let n = unsafe { durable_sdk::memory::write_string(out_ptr, max_out_len, &err_json) };
+                            durable_sdk::memory::encode_export_result(1, n)
+                        }
+                    }
+                }
+                Err(panic_err) => {
+                    if panic_err.downcast_ref::<durable_sdk::SuspendSentinel>().is_some() {
+                        return durable_sdk::memory::SUSPEND_SENTINEL;
+                    }
+                    std::panic::resume_unwind(panic_err);
+                }
             }
         }
     };

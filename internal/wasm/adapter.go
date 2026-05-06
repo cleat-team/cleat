@@ -56,6 +56,18 @@ var adapterDefs = map[string]adapterDef{
 			"}",
 		},
 	},
+	"DurableSleepMs": {
+		FieldName: "DurableSleepMs",
+		Params: []adapterParam{
+			{"durationMs", "int64"},
+		},
+		ResultStmts: []string{
+			"sleepStatus := byte(uint64(result) >> 56)",
+			"if sleepStatus == 1 {",
+			"	panic(durable.ErrSuspend)",
+			"}",
+		},
+	},
 	"DurableAwaitSignals": {
 		FieldName:  "DurableAwaitSignals",
 		ReturnType: "(string, string, bool, error)",
@@ -276,6 +288,13 @@ var adapterDefs = map[string]adapterDef{
 			"return result",
 		},
 	},
+	"NowMs": {
+		FieldName:  "NowMs",
+		ReturnType: "int64",
+		ResultStmts: []string{
+			"return result",
+		},
+	},
 	"Random": {
 		FieldName:  "Random",
 		ReturnType: "int64",
@@ -293,7 +312,7 @@ var adapterDefs = map[string]adapterDef{
 				"promiseIDLen := uint32(uint64(result) >> 32)",
 				"errCode := uint32(result)",
 				"if errCode != 0 {",
-				"return fmt.Errorf(\"durable_create_promise: error code %d\", errCode)",
+				"return \"\", fmt.Errorf(\"durable_create_promise: error code %d\", errCode)",
 				"}",
 				"return unsafe.String(&promiseIDOutBuf[0], int(promiseIDLen)), nil",
 			},
@@ -310,7 +329,7 @@ var adapterDefs = map[string]adapterDef{
 				"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
 				"errCode := uint32(result & 0xFFFF)",
 				"if errCode != 0 {",
-				"return fmt.Errorf(\"durable_await_promise: error code %d\", errCode)",
+				"return \"\", false, fmt.Errorf(\"durable_await_promise: error code %d\", errCode)",
 				"}",
 				"return unsafe.String(&resultOutBuf[0], int(resultLen)), timedOut, nil",
 			},
@@ -374,6 +393,22 @@ func needsUnsafe(usage *UsageInfo) bool {
 	return false
 }
 
+// needsTime returns true if any of the used adapter defs have a time.Duration param.
+func needsTime(usage *UsageInfo) bool {
+	for _, hf := range usage.Funcs {
+		adef, ok := adapterDefs[hf.FieldName]
+		if !ok {
+			continue
+		}
+		for _, p := range adef.Params {
+			if p.Type == "time.Duration" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // numOutBufs returns the number of kindOutString params in the import def.
 func numOutBufs(importName string) int {
 	def, ok := importDefs[importName]
@@ -423,6 +458,9 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo) []byte {
 	}
 	if needsUnsafe(usage) {
 		buf.WriteString("\t\"unsafe\"\n")
+	}
+	if needsTime(usage) {
+		buf.WriteString("\t\"time\"\n")
 	}
 	buf.WriteString("\n")
 	buf.WriteString("\t\"github.com/rcownie/durable/durable\"\n")

@@ -17,9 +17,6 @@ dependencies {
     // JSON processing (minimal)
     implementation("org.teavm:teavm-jso-apis:0.10.2")
 
-    // Annotation processing (for javax.annotation.processing at compile time)
-    annotationProcessor("org.teavm:teavm-classlib:0.10.2")
-
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
 }
 

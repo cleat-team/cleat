@@ -341,7 +341,7 @@ class CleatEntryTransformer {
       for (let i = 0; i < paramNames.length; i++) {
         const pname = paramNames[i];
         const ptype = paramTypes[i];
-        code += `  let ${pname}: ${ptype} = _parsed.getString("${pname}") as ${ptype};\n`;
+        code += this._getDeserializeCode(pname, ptype);
       }
       code += `\n`;
     }
@@ -365,12 +365,10 @@ class CleatEntryTransformer {
     } else if (isString) {
       // String return types are wrapped in JSON string quotes.
       // The output is a valid JSON string value: "the_result".
-      // Note: embedded quotes in the result are not escaped in this
-      // simplified wrapper. For production use, add JSON string encoding.
       code += `    const _result: string = ${callExpr};\n`;
       code += `\n`;
       code += `    // ---- Step 4: Write result to output buffer ----\n`;
-      code += `    const _out = '"' + _result + '"';\n`;
+      code += `    const _out = JSON.stringify(_result);\n`;
       code += `    const _written = Memory.writeString(outPtr, maxOutLen, _out);\n`;
       code += `    return Memory.encodeExportResult(0, _written);\n`;
     } else {
@@ -410,6 +408,30 @@ class CleatEntryTransformer {
       `    const _errWritten = Memory.writeString(outPtr, maxOutLen, _errBody);\n` +
       `    return Memory.encodeExportResult(1, _errWritten);\n`
     );
+  }
+
+  // ---------------------------------------------------------------
+  // Generate deserialization code for a single parameter based on type
+  // Used by the multi-parameter branch to select the correct JSON getter
+  // ---------------------------------------------------------------
+  _getDeserializeCode(pname, ptype) {
+    // Map AS types to the correct JSON getter from the AS JSON library
+    if (ptype === "string" || ptype === "String") {
+      return `  let ${pname}: ${ptype} = _parsed.getString("${pname}") as ${ptype};\n`;
+    } else if (ptype === "i32" || ptype === "u32" || ptype === "i64" || ptype === "u64") {
+      return `  let ${pname}: ${ptype} = _parsed.getInteger("${pname}") as ${ptype};\n`;
+    } else if (ptype === "f64" || ptype === "f32") {
+      return `  let ${pname}: ${ptype} = _parsed.getFloat("${pname}") as ${ptype};\n`;
+    } else if (ptype === "bool" || ptype === "boolean") {
+      return `  let ${pname}: ${ptype} = _parsed.getBool("${pname}");\n`;
+    } else {
+      // Unknown type — throw a compile-time error from the transformer
+      throw new Error(
+        "[@cleat/transform] Unsupported type '" + ptype +
+        "' for multi-parameter entry function parameter '" + pname +
+        "'. Supported types: string, i32, u32, i64, u64, f64, f32, bool"
+      );
+    }
   }
 }
 

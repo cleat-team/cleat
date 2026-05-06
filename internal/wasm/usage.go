@@ -54,11 +54,24 @@ var hostFunctions = []HostFunction{
 	{"durable_min_version", "MinVersion"},
 	// State
 	{"set_query_state", "SetQueryState"},
+	// State mutation methods (all map to set_query_state import)
+	{"set_query_state", "SetState"},
+	{"set_query_state", "DeleteState"},
+	{"set_query_state", "IncrState"},
 	// Promises
 	{"durable_create_promise", "CreatePromise"},
 	{"durable_await_promise", "AwaitPromise"},
 	// Update handlers
 	{"durable_register_update_handler", "RegisterUpdateHandler"},
+	// Fetch / HTTP methods (all map to durable_call import)
+	{"durable_call", "DurableFetch"},
+	{"durable_call", "DurableFetchJSON"},
+	{"durable_call", "FetchGet"},
+	{"durable_call", "FetchGetJSON"},
+	// Detached execution (no WASM import needed, but tracked so it's not silently ignored)
+	{"", "RunDetached"},
+	// Heartbeat variants
+	{"durable_call_heartbeat", "DurableCallTypedWithHeartbeat"},
 	// Time
 	{"durable_now", "Now"},
 	{"durable_now", "NowMs"},
@@ -140,7 +153,7 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 			return true
 		}
 		fieldName := selExpr.Sel.Name
-		if importName, ok := fieldToImport[fieldName]; ok {
+		if importName, ok := fieldToImport[fieldName]; ok && importName != "" {
 			info.Used[importName] = true
 		}
 		return true

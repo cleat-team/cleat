@@ -114,7 +114,7 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 	//   - tinygo: blocks on channel to keep main() alive (asyncify scheduler
 	//     handles exports while main is blocked). The deadlock message on stdout
 	//     is harmless — the module stays alive.
-	//   - go: time.Sleep loop keeps the runtime alive for export calls.
+	//   - go: select{} blocks forever with zero CPU to keep the runtime alive.
 	var mainStub string
 	if cfg.Target == "tinygo" {
 		mainStub = `package main
@@ -126,12 +126,8 @@ func main() {
 	} else {
 		mainStub = `package main
 
-import "time"
-
 func main() {
-	for {
-		time.Sleep(100 * time.Millisecond)
-	}
+	select {}
 }
 `
 	}
@@ -216,10 +212,12 @@ replace %s => %s
 	return nil
 }
 
-// packageDeclPattern matches "package <name>" at the start of a Go source file.
+// rewritePackageToMain replaces the first "package <name>" declaration with
+// "package main", preserving any //go:build constraints or comments above it.
 func rewritePackageToMain(content []byte) []byte {
-	// packageDecl matches "package <identifier>" with optional leading whitespace and comments.
-	// We replace only the package name, preserving any //go:build constraints or comments above.
+	// Find the first "package <name>" line and rewrite it.
+	// We scan each line by looking for newline characters. For files that end
+	// without a trailing newline we also check the last fragment directly.
 	var result []byte
 	done := false
 	for i := 0; i < len(content); i++ {
@@ -243,6 +241,18 @@ func rewritePackageToMain(content []byte) []byte {
 		}
 	}
 	if !done {
+		// Check the last line of the file (handles files without a trailing
+		// newline whose last line is the package declaration).
+		lineStart := 0
+		for j := len(content) - 1; j >= 0 && content[j] != '\n'; j-- {
+			lineStart = j
+		}
+		line := string(content[lineStart:])
+		if strings.HasPrefix(strings.TrimSpace(line), "package ") {
+			result = append(result, content[:lineStart]...)
+			result = append(result, []byte("package main")...)
+			return result
+		}
 		return content // no package declaration found, return as-is
 	}
 	return result
