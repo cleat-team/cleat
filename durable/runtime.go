@@ -288,6 +288,19 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 //   - No-op: diagnostic/logging (DurableLog, SetQueryState, PollCancellation).
 //   - Default: Version/MinVersion return 1 when nil.
 //
+// Composite wrappers (not individually nullable — behavior derives from
+// the underlying field noted below):
+//
+//   DurableCallJSON              -> DurableCall
+//   DurableCallTyped             -> durableCallTyped (falls back to DurableCall)
+//   DurableCallWithOptions       -> durableCallWithOptions (falls back to DurableCall)
+//   DurableCallJSONWithOptions   -> DurableCallWithOptions
+//   DurableCallWithHeartbeat     -> durableCallWithHeartbeat (falls back to DurableCall)
+//   AwaitSignals                 -> DurableAwaitSignals
+//   DurableSleep                 -> DurableSleepMs
+//   LogKV                        -> DurableLog
+//   Now                          -> NowMs
+//
 // See individual method docs on hostCallsImpl for details.
 type HostCallsOptions struct {
 	DurableCall               func(service, operation, requestJSON string) (string, error)

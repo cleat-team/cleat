@@ -3,6 +3,7 @@ package durabletest
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -709,5 +710,194 @@ func TestDurableDefer(t *testing.T) {
 	}
 	if id == "" {
 		t.Fatal("expected non-empty defer ID")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional: Signal delivery during DurableSleep
+// ---------------------------------------------------------------------------
+
+func TestSignalDuringDurableSleep(t *testing.T) {
+	env := NewTestEnv()
+
+	// Goroutine 1: sleep for 5s
+	slept := make(chan struct{})
+	go func() {
+		env.H().DurableSleep(5 * time.Second)
+		close(slept)
+	}()
+
+	// Goroutine 2: deliver a signal after a short real-time delay
+	signalDone := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		env.Signal("wake_up", "payload")
+		close(signalDone)
+	}()
+
+	// Wait for the signal to be delivered.
+	<-signalDone
+
+	// Give the sleep goroutine time to register.
+	time.Sleep(5 * time.Millisecond)
+
+	// Advance time past the sleep deadline.
+	env.AdvanceTime(6 * time.Second)
+
+	// Wait for the sleep to finish.
+	<-slept
+
+	// The signal should now be available via PollSignal.
+	payload, found, err := env.H().PollSignal("wake_up")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !found {
+		t.Fatal("expected PollSignal to find signal after sleep")
+	}
+	if payload != "payload" {
+		t.Fatalf("expected payload %q, got %q", "payload", payload)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional: Concurrent signal delivery
+// ---------------------------------------------------------------------------
+
+func TestConcurrentSignalDelivery(t *testing.T) {
+	env := NewTestEnv()
+
+	var wg sync.WaitGroup
+	signals := []string{"sig1", "sig2", "sig3", "sig4", "sig5"}
+
+	for _, name := range signals {
+		wg.Add(1)
+		go func(sigName string) {
+			defer wg.Done()
+			env.Signal(sigName, "payload-"+sigName)
+		}(name)
+	}
+
+	wg.Wait()
+
+	for _, name := range signals {
+		payload, found, err := env.H().PollSignal(name)
+		if err != nil {
+			t.Fatalf("unexpected error for %s: %v", name, err)
+		}
+		if !found {
+			t.Fatalf("expected signal %s to be found", name)
+		}
+		expectedPayload := "payload-" + name
+		if payload != expectedPayload {
+			t.Fatalf("expected payload %q for %s, got %q", expectedPayload, name, payload)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional: Multiple rapid signals with FIFO ordering
+// ---------------------------------------------------------------------------
+
+func TestMultipleRapidSignals(t *testing.T) {
+	env := NewTestEnv()
+
+	// Send 20 signals with different names and payloads.
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("sig_%d", i)
+		payload := fmt.Sprintf("payload_%d", i)
+		env.Signal(name, payload)
+	}
+
+	// Verify all 20 are retrievable via PollSignal.
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("sig_%d", i)
+		payload, found, err := env.H().PollSignal(name)
+		if err != nil {
+			t.Fatalf("unexpected error for %s: %v", name, err)
+		}
+		if !found {
+			t.Fatalf("expected signal %s to be found", name)
+		}
+		expected := fmt.Sprintf("payload_%d", i)
+		if payload != expected {
+			t.Fatalf("expected payload %q for %s, got %q", expected, name, payload)
+		}
+	}
+
+	// Verify FIFO ordering for signals with the same timestamps.
+	env2 := NewTestEnv()
+	env2.Signal("first", "payload_first")
+	env2.Signal("second", "payload_second")
+	env2.Signal("third", "payload_third")
+
+	// All three signals share the current simulated time.
+	// AwaitSignals should return them in insertion order.
+	names := []string{"first", "second", "third"}
+
+	name, payload, timedOut, err := env2.H().DurableAwaitSignals(names, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if timedOut {
+		t.Fatal("unexpected timeout for first signal")
+	}
+	if name != "first" {
+		t.Fatalf("expected signal %q, got %q", "first", name)
+	}
+	if payload != "payload_first" {
+		t.Fatalf("expected payload %q, got %q", "payload_first", payload)
+	}
+
+	name, payload, timedOut, err = env2.H().DurableAwaitSignals([]string{"second", "third"}, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if timedOut {
+		t.Fatal("unexpected timeout for second signal")
+	}
+	if name != "second" {
+		t.Fatalf("expected signal %q, got %q", "second", name)
+	}
+	if payload != "payload_second" {
+		t.Fatalf("expected payload %q, got %q", "payload_second", payload)
+	}
+
+	name, payload, timedOut, err = env2.H().DurableAwaitSignals([]string{"third"}, 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if timedOut {
+		t.Fatal("unexpected timeout for third signal")
+	}
+	if name != "third" {
+		t.Fatalf("expected signal %q, got %q", "third", name)
+	}
+	if payload != "payload_third" {
+		t.Fatalf("expected payload %q, got %q", "payload_third", payload)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional: Zero duration AwaitSignals
+// ---------------------------------------------------------------------------
+
+func TestZeroDurationAwaitSignals(t *testing.T) {
+	env := NewTestEnv()
+
+	// AwaitSignals with zero timeout should poll and immediately time out.
+	result := env.H().AwaitSignals([]string{"test"}, 0)
+
+	if !result.TimedOut {
+		t.Fatal("expected TimedOut from AwaitSignals with zero timeout")
+	}
+	if result.Err != nil {
+		t.Fatalf("unexpected error: %v", result.Err)
+	}
+	if result.Name != "" {
+		t.Fatalf("expected empty Name, got %q", result.Name)
+	}
+	if result.Payload != "" {
+		t.Fatalf("expected empty Payload, got %q", result.Payload)
 	}
 }
