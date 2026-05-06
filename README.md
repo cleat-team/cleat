@@ -2,17 +2,94 @@
 
 A durable execution framework for Go. Workflows are written in near-standard Go, compiled to WebAssembly, and stored in PostgreSQL. The framework handles replay, checkpointing, failover, and observability with minimal developer overhead.
 
-## Quick start
+## Installation
+
+### From source
 
 ```bash
-# Build and vet a workflow package
-go run ./cmd/durable build -o ./out ./testdata/basic/
-go run ./cmd/durable vet ./testdata/basic/
+git clone https://github.com/rcownie/durable.git
+cd durable
 
-# Deploy a compiled WASM workflow to the database (dry run without --db)
-go run ./cmd/durable deploy --db "postgres://..." --name myworkflow ./out/place_order.wasm
+# CLI tools
+go install ./cmd/durable           # durable build/vet/deploy/versions/rollback
+go install ./cmd/durable-worker/   # production worker daemon
+go install ./cmd/durable-gen/      # typed client code generator
+```
 
-# Run tests
+### go install
+
+```bash
+go install github.com/rcownie/durable/cmd/durable@latest
+go install github.com/rcownie/durable/cmd/durable-worker@latest
+go install github.com/rcownie/durable/cmd/durable-gen@latest
+```
+
+### Dependencies
+
+- **Go 1.26+** with `GOOS=wasip1 GOARCH=wasm` target (bundled with Go 1.22+)
+- **PostgreSQL 14+** for the worker daemon and workflow storage
+- **TinyGo** (optional) for smaller WASM binaries via `--target tinygo`
+
+## Quick start
+
+The following is a complete workflow example from `testdata/basic/order.go`. It models an order-processing pipeline with nested durable calls and compensation logic.
+
+```go
+package basic
+
+import (
+    "encoding/json"
+    "fmt"
+    "github.com/rcownie/durable/durable"
+)
+
+type CartItem struct {
+    SKU      string `json:"sku"`
+    Quantity int    `json:"quantity"`
+}
+
+func PlaceOrder(h durable.HostCalls, userID string, cart []CartItem) (string, error) {
+    if len(cart) == 0 {
+        return "", fmt.Errorf("cart is empty")
+    }
+
+    reservation, err := validateAndReserve(h, userID, cart)
+    if err != nil {
+        return "", fmt.Errorf("inventory step failed: %w", err)
+    }
+
+    charge, err := processPayment(h, userID, reservation.TotalCents)
+    if err != nil {
+        releaseReservation(h, reservation.ReservationID)
+        return "", fmt.Errorf("payment failed: %w", err)
+    }
+
+    trackingID, err := fulfillOrder(h, reservation, charge)
+    if err != nil {
+        refundPayment(h, charge.ChargeID)
+        releaseReservation(h, reservation.ReservationID)
+        return "", fmt.Errorf("fulfillment failed: %w", err)
+    }
+
+    _ = notifyCustomer(h, userID, trackingID)
+    return trackingID, nil
+}
+```
+
+Build and deploy:
+
+```bash
+# 1. Compile the workflow package to WASM
+durable build -o ./out ./testdata/basic/
+
+# 2. Validate without compiling
+durable vet ./testdata/basic/
+
+# 3. Deploy to PostgreSQL (dry run without --db)
+durable deploy --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
+    --name place_order ./out/place_order.wasm
+
+# 4. Run SDK and unit tests
 go test ./...
 ```
 
@@ -46,9 +123,61 @@ go test ./...
                                                              +-----------------+
 ```
 
+### Transformer Pipeline
+
+The CLI's `build` command runs a five-stage pipeline:
+
+1. **analyzer.Load** -- loads Go packages via `go/packages`, parses AST, resolves types, identifies exported functions as entry points.
+2. **callgraph.Build** -- builds a static call graph of the target package using the `callgraph` package.
+3. **closure.Compute** -- computes the durable closure: the set of functions reachable from entry points that make `HostCalls`. Validates that every path through the closure passes `HostCalls` correctly.
+4. **transform** -- rewrites source files: adds `HostCalls` parameters to functions that need them (auto-threading), inserts import statements, generates WASM export wrappers.
+5. **wasm.Compile** -- generates WASM import declarations, host adapter code, and compiles to `wasip1` binary. Supports both `go` (standard toolchain) and `tinygo` targets.
+
+### Host Runtime
+
+The host runtime uses **wazero** (a zero-dependency WebAssembly runtime for Go) to execute compiled WASM modules. Execution follows a checkpoint/replay model:
+
+- WASM modules import 14 host functions from the `env` module (e.g., `durable_call`, `durable_sleep`, `durable_now`).
+- On first execution, the host runs the entry point, records every `DurableCall` request/response in the event history, and persists state to PostgreSQL.
+- On replay (e.g., after a worker crash or suspension), the host replays the event history. Completed calls return cached responses instead of re-executing. The workflow resumes from the last incomplete step.
+
+### Worker Daemon
+
+The worker (`durable-worker`) polls PostgreSQL for runnable workflow instances using `SELECT ... FOR UPDATE SKIP LOCKED`. Each claimed instance loads its WASM module and event history, replays or executes the workflow, then persists new events. Workers are stateless and can be horizontally scaled.
+
+### WASM Boundary
+
+The WASM boundary is defined by 14 host function imports on the `env` module:
+
+`durable_call`, `durable_sleep`, `durable_now`, `durable_random`, `durable_log`, `durable_version`, `durable_min_version`, `durable_defer`, `durable_poll_cancellation`, `durable_poll_signal`, `durable_continue_as_new`, `durable_child_workflow`, `durable_await_child`, `durable_await_signals`, `set_query_state`
+
+Strings cross the boundary through a pointer+length protocol: the caller writes string data into the module's linear memory at a scratch region (10 MB offset) and passes `(ptr, len)` pairs. Responses are written back to the same region. The output buffer is 64 KB by default.
+
 ## SDK API overview
 
 The SDK provides a single import -- `durable.HostCalls` -- which is passed as the first parameter to entry point functions. All external interactions go through this interface, enabling deterministic replay.
+
+### HostCalls interface (key methods)
+
+```go
+type HostCalls interface {
+    DurableCall(service, operation, requestJSON string) (responseJSON string, err error)
+    DurableCallTyped(service, operation string, request, result interface{}) error
+    DurableCallWithOptions(opts CallOptions, service, operation, requestJSON string) (string, error)
+    DurableSleep(d time.Duration)
+    AwaitSignals(signalNames []string, timeout time.Duration) SignalResult
+    DurableDefer(description string) (deferID string, err error)
+    Now() time.Time
+    Random() int64
+    ChildWorkflow(name, inputJSON string) (runID string, err error)
+    AwaitChild(runID string) (resultJSON string, err error)
+    ContinueAsNew(newInputJSON string) error
+    LogKV(message string, kvs ...interface{})
+    // ...
+}
+```
+
+`DurableCallTyped` marshals request structs to JSON and unmarshals responses automatically, eliminating magic strings and manual JSON handling. It is the recommended way to call services.
 
 ### PlaceOrder (basic durable calls)
 
@@ -80,6 +209,19 @@ func CreateOrder(h durable.HostCalls, input string) error {
 
 `DurableDefer` runs the compensation block if the function returns an error. If the function succeeds, the deferred block is skipped. On replay, the compensation is not re-executed if it already ran.
 
+For structured multi-step compensation, use `durable.NewSaga()`:
+
+```go
+s := durable.NewSaga()
+s.AddStep("charge", chargeFn, refundFn)
+s.AddStep("assign_driver", assignFn, releaseFn)
+if err := s.Run(h); err != nil {
+    return err
+}
+```
+
+The Saga runs forward steps in order. If any step fails, previously completed steps are compensated in reverse order.
+
 ### Signals (external events)
 
 ```go
@@ -109,6 +251,312 @@ func processOrder(h durable.HostCalls, input string) error {
     return nil
 }
 ```
+
+### Timer and polling pattern
+
+```go
+// PollUntil repeatedly checks a condition at the given interval until a
+// deadline is exceeded.
+status, err := durable.PollUntil(h, 30*time.Second, 30*time.Minute,
+    func() (string, error) {
+        return checkPickupStatus(driverID)
+    },
+    func(s string) bool { return s == "picked_up" },
+)
+```
+
+## CLI Reference
+
+All commands are available through the `durable` binary.
+
+### durable build
+
+Analyze and compile a workflow package to WASM.
+
+```
+durable build [-o <dir>] [--target <target>] <package>
+
+Flags:
+  -o <dir>        Output directory for generated files (default: temp dir)
+  --target        Compilation target: "go" (default) or "tinygo"
+```
+
+The pipeline loads the package, analyzes call graphs, computes durable closures, verifies HostCalls threading, generates WASM imports/exports and host adapters, and compiles to a `wasip1` binary.
+
+### durable vet
+
+Validate a workflow package without compiling to WASM.
+
+```
+durable vet <package>
+```
+
+Reports entry points, durable leaf functions, threading errors, closure errors, and warnings. Exits with code 1 if any errors are found.
+
+### durable deploy
+
+Upload a compiled WASM workflow to PostgreSQL.
+
+```
+durable deploy [--name <name>] [--namespace <ns>] <wasm-file>
+
+Flags:
+  --name <name>      Workflow name (derived from filename if not set)
+  --namespace <ns>   Namespace (reserved for future use)
+
+Common flags:
+  --db <connstr>     PostgreSQL connection string (or DURABLE_DATABASE_URL env)
+```
+
+Without `--db` or `DURABLE_DATABASE_URL`, performs a dry run that prints what would be deployed.
+
+### durable versions
+
+List all deployed versions of a workflow, latest first.
+
+```
+durable versions <workflow-name>
+
+Requires:
+  --db <connstr>   or DURABLE_DATABASE_URL env
+```
+
+### durable rollback
+
+Set the active version for new workflow instances.
+
+```
+durable rollback <workflow-name> <version>
+
+Requires:
+  --db <connstr>   or DURABLE_DATABASE_URL env
+```
+
+Confirms the version exists and reports that new instances will use the specified version.
+
+### durable-gen
+
+Generate typed client wrappers for durable service calls.
+
+```
+durable-gen client [-o <file>] [-service <name>] [-p <package>] <spec-dir>
+```
+
+The spec directory contains Go files with request/response structs and a `Client` interface. The generator produces a concrete implementation using `DurableCallTyped`.
+
+## Worker deployment
+
+The `durable-worker` daemon polls PostgreSQL for runnable workflow instances and drives execution.
+
+```bash
+# Run with default settings
+durable-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable"
+
+# With explicit concurrency and heartbeat
+durable-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
+    --concurrency 20 \
+    --heartbeat 10s \
+    --poll 250ms
+```
+
+### Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db` | `DATABASE_URL` env | PostgreSQL connection URL |
+| `--concurrency` | 10 | Max concurrent workflow executions |
+| `--heartbeat` | 5s | Heartbeat interval for claimed instances |
+| `--poll` | 500ms | Poll interval when no work is available |
+
+### How it works
+
+1. The dispatch loop calls `ClaimWorkflow`, which runs `SELECT ... FOR UPDATE SKIP LOCKED` on `workflow_instances` rows with `status = 'ready'` and `next_wake_at <= now()`.
+2. Each claimed instance is executed in its own goroutine (up to `--concurrency`).
+3. A background heartbeat goroutine updates `heartbeat_at` for all in-flight instances. If the heartbeat fails (e.g., DB connection loss), the worker reconnects with exponential backoff.
+4. On graceful shutdown (SIGINT/SIGTERM), the worker waits for all in-flight workflows before exiting.
+5. WASM modules are cached in memory (keyed by `def_name:def_version`) to avoid repeated database loads.
+
+### Concurrency and scaling
+
+Workers are stateless and horizontally scalable. Multiple `durable-worker` instances can run concurrently against the same database -- `SKIP LOCKED` ensures each workflow instance is claimed by exactly one worker. Set `--concurrency` based on available CPU and the workload's I/O profile.
+
+### Heartbeat monitoring
+
+The heartbeat interval (`--heartbeat`, default 5s) controls how often the worker updates `heartbeat_at` in `workflow_instances`. If a worker crashes, its claimed instances become reclaimable after the heartbeat stops updating. Monitor `idx_instances_heartbeat` to detect stale assignments.
+
+## Database setup
+
+Run `schema.sql` against a PostgreSQL 14+ database before deploying workflows.
+
+```bash
+psql -U postgres -d cleat -f schema.sql
+```
+
+### Tables
+
+**workflow_defs** -- stores compiled WASM blobs versioned by workflow name.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| name | TEXT | Workflow name (part of composite PK) |
+| version | INTEGER | Monotonically increasing version |
+| wasm_bytes | BYTEA | Compiled WASM module binary |
+| entry_points | TEXT[] | Exported entry point names |
+| created_at | TIMESTAMPTZ | Deployment timestamp |
+
+**workflow_instances** -- tracks individual workflow execution state.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | TEXT | Unique workflow instance ID |
+| def_name | TEXT | Reference to workflow_defs.name |
+| def_version | INTEGER | Reference to workflow_defs.version |
+| status | TEXT | ready, running, completed, failed, suspended |
+| input | JSONB | Workflow input arguments |
+| assigned_to | TEXT | Worker ID currently claiming this instance |
+| heartbeat_at | TIMESTAMPTZ | Last heartbeat from the claiming worker |
+| next_wake_at | TIMESTAMPTZ | When to retry (sleep/suspend deadline) |
+| result | JSONB | Workflow result (if completed) |
+| error_msg | TEXT | Error message (if failed) |
+| cancellation_requested | BOOLEAN | Whether cancellation has been requested |
+
+**event_history** -- ordered list of every durable call, sleep, signal, defer, and child workflow event.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| workflow_id | TEXT | Reference to workflow_instances.id |
+| step | INTEGER | Monotonically increasing event sequence number |
+| event_type | TEXT | call, sleep, await_signals, signal_received, defer, child_workflow, continue_as_new |
+| service | TEXT | Target service name (for call events) |
+| operation | TEXT | Target operation name (for call events) |
+| request | JSONB | Request payload |
+| response | JSONB | Response payload |
+| error | TEXT | Error message (if call failed) |
+| signal_name | TEXT | Signal name (for signal events) |
+| signal_payload | JSONB | Signal payload |
+| duration_ms | BIGINT | Sleep duration in milliseconds |
+
+**workflow_signals** -- external signals delivered to running workflows.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| workflow_id | TEXT | Reference to workflow_instances.id |
+| signal_name | TEXT | Signal name (part of composite PK) |
+| payload | JSONB | Signal payload |
+| delivered_at | TIMESTAMPTZ | Delivery timestamp |
+
+### Indexes
+
+- `idx_instances_ready` on `(status, next_wake_at)` WHERE `status = 'ready'` -- accelerates the worker poll loop.
+- `idx_instances_heartbeat` on `(assigned_to, heartbeat_at)` WHERE `status = 'running'` -- enables monitoring and stale-assignment detection.
+- `idx_defs_active` on `(name, version DESC)` -- speeds up latest-version lookups for deployment.
+
+## Testing workflows
+
+The `durabletest` package provides a `TestEnv` that simulates the host runtime without compiling to WASM. It replaces all host function calls with configurable stubs and a deterministic simulated clock.
+
+### Full test example
+
+```go
+package myworkflow_test
+
+import (
+    "testing"
+    "github.com/rcownie/durable/durable"
+    "github.com/rcownie/durable/durable/durabletest"
+)
+
+func TestPlaceOrder_Success(t *testing.T) {
+    env := durabletest.NewTestEnv()
+    defer env.Reset()
+
+    // Register stubs for all durable calls the workflow will make.
+    env.OnCall("inventory", "Reserve", nil).
+        ReturnJSON(map[string]interface{}{
+            "reservation_id": "resv_abc123",
+            "total_cents":    3299,
+        }, nil)
+    env.OnCall("payments", "Charge", nil).
+        ReturnJSON(map[string]interface{}{
+            "charge_id": "chg_xyz789",
+            "amount":    3299,
+        }, nil)
+    env.OnCall("shipping", "CreateShipment", nil).
+        ReturnJSON(map[string]interface{}{"tracking_id": "TRACK-123"}, nil)
+    env.OnCall("notifications", "SendEmail", nil).Return("", nil)
+
+    // Run the workflow using the mock HostCalls.
+    h := env.H()
+    result, err := PlaceOrder(h, "user_42", []CartItem{
+        {SKU: "SKU-001", Quantity: 2},
+    })
+
+    if err != nil {
+        t.Fatalf("unexpected error: %v", err)
+    }
+    if result != "TRACK-123" {
+        t.Fatalf("expected tracking TRACK-123, got %s", result)
+    }
+
+    // Verify the expected calls were made.
+    env.AssertCalled(t, "inventory", "Reserve")
+    env.AssertCalled(t, "payments", "Charge")
+    env.AssertCalled(t, "shipping", "CreateShipment")
+    env.AssertNotCalled(t, "inventory", "Release")
+}
+
+func TestPlaceOrder_Error_Compensation(t *testing.T) {
+    env := durabletest.NewTestEnv()
+    defer env.Reset()
+
+    // Payment succeeds but fulfillment fails -- compensation should run.
+    env.OnCall("inventory", "Reserve", nil).
+        ReturnJSON(map[string]interface{}{
+            "reservation_id": "resv_abc123",
+            "total_cents":    3299,
+        }, nil)
+    env.OnCall("payments", "Charge", nil).
+        ReturnJSON(map[string]interface{}{
+            "charge_id": "chg_xyz789",
+            "amount":    3299,
+        }, nil)
+    env.OnCall("shipping", "CreateShipment", nil).
+        Return("", fmt.Errorf("shipping service unavailable"))
+    env.OnCall("payments", "Refund", nil).Return("", nil)
+    env.OnCall("inventory", "Release", nil).Return("", nil)
+
+    _, err := PlaceOrder(env.H(), "user_42", []CartItem{{SKU: "SKU-001", Quantity: 1}})
+    if err == nil {
+        t.Fatal("expected error from failed fulfillment")
+    }
+
+    // Compensation calls should have been made.
+    env.AssertCalled(t, "payments", "Refund")
+    env.AssertCalled(t, "inventory", "Release")
+}
+```
+
+### TestEnv API
+
+| Method | Description |
+|--------|-------------|
+| `NewTestEnv()` | Creates a TestEnv with clock starting at 2024-01-01T00:00:00Z |
+| `H()` | Returns the mock `HostCalls` for workflow code |
+| `OnCall(service, op, matcher)` | Registers a stub; matcher can be nil, string, or `func(string) bool` |
+| `Signal(name, payload)` | Delivers a signal immediately |
+| `AfterSignal(delay, name, payload)` | Schedules a signal at a future simulated time |
+| `AdvanceTime(d)` | Advances the simulated clock, wakes sleepers, delivers due signals |
+| `SetTime(t)` | Sets the simulated clock to an absolute time |
+| `Now()` | Returns the current simulated time |
+| `CallHistory()` | Returns all calls made through the mock |
+| `AssertCalled(t, svc, op)` | Fails the test if the call was not made |
+| `AssertNotCalled(t, svc, op)` | Fails the test if the call was made |
+| `SetRandomSeq(seq)` | Configures deterministic random values |
+| `SetVersion(v)` | Sets the workflow version for testing versioned code |
+| `QueryState(key)` | Reads query state set via `H().SetQueryState()` |
+| `Reset()` | Clears all stubs, history, signals, and resets the clock |
+
+Using `TestEnv` avoids the full WASM compilation cycle (seconds, not milliseconds), allows deterministic time control without `time.Sleep`, and lets you assert exact call patterns including compensation paths.
 
 ## Status and roadmap
 

@@ -227,6 +227,9 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 					}
 				}
 			}
+
+		case *ast.SelectorExpr:
+			checkForbiddenPackageRef(stmt, fd, name, cr, fset)
 		}
 		return true
 	})
@@ -321,11 +324,12 @@ func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName 
 	if fset != nil {
 		line = fset.Position(call.Pos()).Line
 	}
-	cr.Warnings[funcName] = append(cr.Warnings[funcName], ValidationWarning{
-		Code:     "W003",
-		FuncName: funcName,
-		Message:  "unresolvable function call through interface dispatch (E008 in future release)",
-		Line:     line,
+	cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
+		Code:       "E008",
+		FuncName:   funcName,
+		Message:    "unresolvable function call through interface dispatch",
+		Suggestion: "Use concrete types or refactor to avoid interface dispatch in durable functions.",
+		Line:       line,
 	})
 }
 
@@ -355,12 +359,54 @@ func checkFuncValueCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 	if fset != nil {
 		line = fset.Position(call.Pos()).Line
 	}
-	cr.Warnings[funcName] = append(cr.Warnings[funcName], ValidationWarning{
-		Code:     "W004",
-		FuncName: funcName,
-		Message:  "function value call cannot be statically resolved (E009 in future release)",
-		Line:     line,
+	cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
+		Code:       "E009",
+		FuncName:   funcName,
+		Message:    "function value call cannot be statically resolved",
+		Suggestion: "Replace with a direct function call or inline the logic.",
+		Line:       line,
 	})
+}
+
+// checkForbiddenPackageRef detects references to packages that are forbidden
+// in durable functions (os, reflect).
+func checkForbiddenPackageRef(sel *ast.SelectorExpr, fd *analyzer.FuncDecl, funcName string, cr *Result, fset *token.FileSet) {
+	pkgIdent, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return
+	}
+
+	pkgPath := resolveImportPath(fd, pkgIdent.Name)
+	if pkgPath == "" {
+		return
+	}
+
+	var code, msg, suggestion string
+
+	switch {
+	case pkgPath == "os":
+		code, msg, suggestion = "E010",
+			"direct os package usage is not allowed in durable functions",
+			"Use h.DurableCall() with a service name instead of direct OS operations."
+	case pkgPath == "reflect":
+		code, msg, suggestion = "E011",
+			"direct reflect package usage is not allowed in durable functions",
+			"Avoid runtime type introspection; use compile-time generics where possible."
+	}
+
+	if code != "" {
+		line := 0
+		if fset != nil {
+			line = fset.Position(sel.Pos()).Line
+		}
+		cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
+			Code:       code,
+			FuncName:   funcName,
+			Message:    msg,
+			Suggestion: suggestion,
+			Line:       line,
+		})
+	}
 }
 
 // checkFloatInExpr walks an expression looking for identifiers whose type

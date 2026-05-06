@@ -320,22 +320,22 @@ func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
 
 	badName := "github.com/rcownie/durable/testdata/errors.BadWithInterfaceDispatch"
 
-	warns := cr.Warnings[badName]
-	if len(warns) == 0 {
-		t.Fatalf("expected W003 warning for %s, got none", badName)
+	errs := cr.Errors[badName]
+	if len(errs) == 0 {
+		t.Fatalf("expected E008 error for %s, got none", badName)
 	}
 
-	foundW003 := false
-	for _, w := range warns {
-		if w.Code == "W003" {
-			foundW003 = true
+	foundE008 := false
+	for _, e := range errs {
+		if e.Code == "E008" {
+			foundE008 = true
 			break
 		}
 	}
-	if !foundW003 {
-		t.Errorf("expected W003 (interface dispatch) warning for %s, got codes: ", badName)
-		for _, w := range warns {
-			t.Logf("  %s: %s", w.Code, w.Message)
+	if !foundE008 {
+		t.Errorf("expected E008 (interface dispatch) error for %s, got codes: ", badName)
+		for _, e := range errs {
+			t.Logf("  %s: %s", e.Code, e.Message)
 		}
 	}
 }
@@ -356,22 +356,22 @@ func TestComputeErrorsDetectsFuncValueCall(t *testing.T) {
 
 	badName := "github.com/rcownie/durable/testdata/errors.BadWithFuncValue"
 
-	warns := cr.Warnings[badName]
-	if len(warns) == 0 {
-		t.Fatalf("expected W004 warning for %s, got none", badName)
+	errs := cr.Errors[badName]
+	if len(errs) == 0 {
+		t.Fatalf("expected E009 error for %s, got none", badName)
 	}
 
-	foundW004 := false
-	for _, w := range warns {
-		if w.Code == "W004" {
-			foundW004 = true
+	foundE009 := false
+	for _, e := range errs {
+		if e.Code == "E009" {
+			foundE009 = true
 			break
 		}
 	}
-	if !foundW004 {
-		t.Errorf("expected W004 (func value call) warning for %s, got codes: ", badName)
-		for _, w := range warns {
-			t.Logf("  %s: %s", w.Code, w.Message)
+	if !foundE009 {
+		t.Errorf("expected E009 (func value call) error for %s, got codes: ", badName)
+		for _, e := range errs {
+			t.Logf("  %s: %s", e.Code, e.Message)
 		}
 	}
 }
