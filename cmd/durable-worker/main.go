@@ -46,15 +46,15 @@ var webDist embed.FS
 
 // -- Prometheus metrics --
 var (
-	metricsWorkflowsActive   int64
+	metricsWorkflowsActive    int64
 	metricsWorkflowsCompleted int64
-	metricsWorkflowsFailed   int64
-	metricsWorkflowsClaimed  int64
-	metricsDurableCallsTotal int64
-	metricsReplayDurationUs int64
-	metricsReplayCount      int64
-	metricsPollWaitCount    int64
-	metricsPollWaitTotalUs  int64
+	metricsWorkflowsFailed    int64
+	metricsWorkflowsClaimed   int64
+	metricsDurableCallsTotal  int64
+	metricsReplayDurationUs   int64
+	metricsReplayCount        int64
+	metricsPollWaitCount      int64
+	metricsPollWaitTotalUs    int64
 )
 
 func main() {
@@ -230,7 +230,7 @@ func main() {
 		scheduleInterval:    15 * time.Second,
 		compactionThreshold: *compactionThreshold,
 		compactionInterval:  *compactionInterval,
-		pluginRegistry:       pluginRegistry,
+		pluginRegistry:      pluginRegistry,
 	}
 
 	// Start HTTP API server if configured.
@@ -503,7 +503,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion}),
 		host.WithWorkflowID(wf.ID),
 		host.WithChildWorkflowStore(w.store),
-			host.WithPluginRegistry(w.pluginRegistry),
+		host.WithPluginRegistry(w.pluginRegistry),
 	}
 	if compactionState != nil {
 		engineOpts = append(engineOpts, host.WithCompactionState(compactionState))
@@ -798,17 +798,20 @@ type hostPluginRegistryAdapter struct {
 	pluginName string
 }
 
-func (a *hostPluginRegistryAdapter) Register(funcName string, fn plugin.PluginFunc) error {
-	if funcName == "" {
+func (a *hostPluginRegistryAdapter) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	if opts.Name == "" {
 		return fmt.Errorf("function name must not be empty")
 	}
-	if strings.Contains(funcName, "/") || strings.Contains(funcName, "\x00") {
-		return fmt.Errorf("function name %q contains invalid characters", funcName)
+	if strings.Contains(opts.Name, "/") || strings.Contains(opts.Name, "\x00") {
+		return fmt.Errorf("function name %q contains invalid characters", opts.Name)
 	}
-	if a.registry.Has(a.pluginName, funcName) {
-		return fmt.Errorf("function %q already registered for plugin %q", funcName, a.pluginName)
+	if a.registry.Has(a.pluginName, opts.Name) {
+		return fmt.Errorf("function %q already registered for plugin %q", opts.Name, a.pluginName)
 	}
-	return a.registry.Register(a.pluginName, funcName, host.PluginFunc(fn))
+	if opts.Idempotent {
+		return a.registry.RegisterIdempotent(a.pluginName, opts.Name, host.PluginFunc(fn))
+	}
+	return a.registry.Register(a.pluginName, opts.Name, host.PluginFunc(fn))
 }
 
 // determineEntryPoint extracts the entry point name from workflow input.

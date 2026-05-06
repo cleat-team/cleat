@@ -17,7 +17,7 @@ func (p *noopPlugin) Init(ctx context.Context, env *Environment) error {
 }
 
 func init() {
-	Register(func() Plugin { return &noopPlugin{} })
+	Register(PluginInfo{Name: "noop", Version: "0.1.0", Description: "does nothing"}, func() Plugin { return &noopPlugin{} })
 }
 
 func TestRegistration(t *testing.T) {
@@ -89,7 +89,7 @@ func TestLoadAll(t *testing.T) {
 
 func TestPanickingPlugin(t *testing.T) {
 	// Register a plugin that panics during Init.
-	Register(func() Plugin {
+	Register(PluginInfo{Name: "panic-plugin", Version: "0.1.0"}, func() Plugin {
 		return &testPlugin{
 			info: PluginInfo{Name: "panic-plugin", Version: "0.1.0"},
 			init: func(ctx context.Context, env *Environment) error {
@@ -122,7 +122,7 @@ func TestPanickingPlugin(t *testing.T) {
 }
 
 func TestFailingInitPlugin(t *testing.T) {
-	Register(func() Plugin {
+	Register(PluginInfo{Name: "fail-plugin", Version: "0.1.0"}, func() Plugin {
 		return &testPlugin{
 			info: PluginInfo{Name: "fail-plugin", Version: "0.1.0"},
 			init: func(ctx context.Context, env *Environment) error {

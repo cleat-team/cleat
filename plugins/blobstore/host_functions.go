@@ -20,8 +20,15 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("blobstore: nil function registry")
 	}
-	scope.Register("put", p.blobPut)
-	scope.Register("get", p.blobGet)
+	if err := scope.Register(plugin.FuncOptions{Name: "put"}, p.blobPut); err != nil {
+		return err
+	}
+	// blob_get is safe to re-invoke during replay -- reads from S3, not from
+	// event history. Registering as idempotent means the engine will re-invoke
+	// the function on replay instead of returning cached output.
+	if err := scope.Register(plugin.FuncOptions{Name: "get", Idempotent: true}, p.blobGet); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -60,8 +67,8 @@ type blobGetOutput struct {
 // ref_count. Re-uploading with the same tenant_id and key overwrites the
 // index entry.
 func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) {
-	tid := plugin.TenantFromContext(ctx)
-	if tid == uuid.Nil {
+	cc := plugin.CallContextFromContext(ctx)
+	if cc == nil || cc.TenantID == uuid.Nil {
 		return "", fmt.Errorf("blobstore: no tenant context")
 	}
 
@@ -81,16 +88,39 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 
 	// Compute SHA-256 hash of the data for content-addressing.
 	hash := sha256.Sum256(input.Data)
+	sha256Hex := hex.EncodeToString(hash[:])
 
-	// Insert or increment ref_count in blob_content.
+	// Store bytes via the selected backend.
+	if err := p.backend.Put(ctx, sha256Hex, input.Data, input.ContentType); err != nil {
+		return "", fmt.Errorf("blobstore: store content: %w", err)
+	}
+
+	// Insert or increment ref_count in blob_content metadata.
+	storageBackend := p.config.Backend
+	var s3Key *string
+	if storageBackend == "s3" {
+		s3Key = &sha256Hex
+	}
 	_, err := p.db.ExecContext(ctx, `
-		INSERT INTO blob_content (sha256, size, data, ref_count)
-		VALUES ($1, $2, $3, 1)
+		INSERT INTO blob_content (sha256, size, ref_count, storage_backend, s3_key)
+		VALUES ($1, $2, 1, $3, $4)
 		ON CONFLICT (sha256) DO UPDATE
 		SET ref_count = blob_content.ref_count + 1
-	`, hash[:], len(input.Data), input.Data)
+	`, hash[:], len(input.Data), storageBackend, s3Key)
 	if err != nil {
 		return "", fmt.Errorf("blobstore: store content: %w", err)
+	}
+
+	// Record workflow blob reference so the blob is not physically deleted
+	// while this workflow is still in-flight.
+	wfID := cc.WorkflowID
+	if wfID != "" {
+		if _, err := p.db.ExecContext(ctx, `
+			INSERT INTO workflow_blob_refs (workflow_id, sha256)
+			VALUES ($1, $2) ON CONFLICT DO NOTHING
+		`, wfID, hash[:]); err != nil {
+			p.logger.Warn("blobstore: record blob ref", "workflow_id", wfID, "sha256", sha256Hex, "error", err)
+		}
 	}
 
 	// Marshal tags for the JSONB column.
@@ -123,7 +153,7 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 			SET sha256 = EXCLUDED.sha256, size = EXCLUDED.size,
 			    content_type = EXCLUDED.content_type, tags = EXCLUDED.tags,
 			    expires_at = EXCLUDED.expires_at
-		`, input.Key, tid, hash[:], len(input.Data), input.ContentType, tagsJSON, *expiresAt)
+		`, input.Key, cc.TenantID, hash[:], len(input.Data), input.ContentType, tagsJSON, *expiresAt)
 	} else {
 		_, err = p.db.ExecContext(ctx, `
 			INSERT INTO blob_index (key, tenant_id, sha256, size, content_type, tags)
@@ -132,7 +162,7 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 			SET sha256 = EXCLUDED.sha256, size = EXCLUDED.size,
 			    content_type = EXCLUDED.content_type, tags = EXCLUDED.tags,
 			    expires_at = NULL
-		`, input.Key, tid, hash[:], len(input.Data), input.ContentType, tagsJSON)
+		`, input.Key, cc.TenantID, hash[:], len(input.Data), input.ContentType, tagsJSON)
 	}
 	if err != nil {
 		return "", fmt.Errorf("blobstore: store index: %w", err)
@@ -140,7 +170,7 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 
 	output := blobPutOutput{
 		Key:    input.Key,
-		SHA256: hex.EncodeToString(hash[:]),
+		SHA256: sha256Hex,
 		Size:   int64(len(input.Data)),
 	}
 	outJSON, _ := json.Marshal(output)
@@ -150,8 +180,8 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 // blobGet retrieves a blob by key. Returns the data (base64-encoded in JSON)
 // along with metadata. Returns an error if the blob is not found or has expired.
 func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) {
-	tid := plugin.TenantFromContext(ctx)
-	if tid == uuid.Nil {
+	cc := plugin.CallContextFromContext(ctx)
+	if cc == nil || cc.TenantID == uuid.Nil {
 		return "", fmt.Errorf("blobstore: no tenant context")
 	}
 
@@ -164,18 +194,17 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 	}
 
 	var (
-		data        []byte
 		sha256Bytes []byte
 		contentType string
 		size        int64
 		expiresAt   sql.NullTime
 	)
 	err := p.db.QueryRowContext(ctx, `
-		SELECT c.data, c.sha256, i.content_type, i.size, i.expires_at
+		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
-		WHERE i.key = $1 AND i.tenant_id = $2
-	`, input.Key, tid).Scan(&data, &sha256Bytes, &contentType, &size, &expiresAt)
+		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
+	`, input.Key, cc.TenantID).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if err == sql.ErrNoRows {
 		return "", fmt.Errorf("blobstore: blob not found: %s", input.Key)
 	}
@@ -188,9 +217,28 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 		return "", fmt.Errorf("blobstore: blob expired: %s", input.Key)
 	}
 
+	// Retrieve blob data from the configured backend.
+	sha256Hex := hex.EncodeToString(sha256Bytes)
+	data, err := p.backend.Get(ctx, sha256Hex)
+	if err != nil {
+		return "", fmt.Errorf("blobstore: get data: %w", err)
+	}
+
+	// Record workflow blob reference so the blob is not physically deleted
+	// while this workflow is still in-flight.
+	wfID := cc.WorkflowID
+	if wfID != "" {
+		if _, err := p.db.ExecContext(ctx, `
+			INSERT INTO workflow_blob_refs (workflow_id, sha256)
+			VALUES ($1, $2) ON CONFLICT DO NOTHING
+		`, wfID, sha256Bytes); err != nil {
+			p.logger.Warn("blobstore: record blob ref", "workflow_id", wfID, "sha256", sha256Hex, "error", err)
+		}
+	}
+
 	output := blobGetOutput{
 		Key:         input.Key,
-		SHA256:      hex.EncodeToString(sha256Bytes),
+		SHA256:      sha256Hex,
 		Size:        size,
 		ContentType: contentType,
 		Data:        data,

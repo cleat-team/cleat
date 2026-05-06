@@ -63,20 +63,23 @@ func EncodeSuspend() uint64 {
 	return 1 << 62
 }
 
-type tenantIDKeyType struct{}
-
-var tenantIDKey = tenantIDKeyType{}
-
-// WithTenant adds a tenant ID to a context.
-func WithTenant(ctx context.Context, tenantID uuid.UUID) context.Context {
-	return context.WithValue(ctx, tenantIDKey, tenantID)
+// CallContext carries per-invocation metadata injected by the engine
+// before calling plugin host functions.
+type CallContext struct {
+	TenantID   uuid.UUID `json:"tenant_id"`
+	WorkflowID string    `json:"workflow_id"`
 }
 
-// TenantFromContext extracts the tenant ID from a context.
-func TenantFromContext(ctx context.Context) uuid.UUID {
-	tid, ok := ctx.Value(tenantIDKey).(uuid.UUID)
-	if !ok {
-		return uuid.Nil
-	}
-	return tid
+type callContextKeyType struct{}
+
+// WithCallContext injects call context into the context.
+func WithCallContext(ctx context.Context, cc *CallContext) context.Context {
+	return context.WithValue(ctx, callContextKeyType{}, cc)
+}
+
+// CallContextFromContext extracts call context from the context.
+// Returns nil if not present.
+func CallContextFromContext(ctx context.Context) *CallContext {
+	cc, _ := ctx.Value(callContextKeyType{}).(*CallContext)
+	return cc
 }

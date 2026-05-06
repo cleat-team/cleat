@@ -19,20 +19,18 @@ type registryEntry struct {
 	ctor func() Plugin
 }
 
-// Register registers a plugin constructor. Call from init().
-func Register(constructor func() Plugin) {
+// Register registers a plugin constructor with its PluginInfo. Call from init().
+func Register(info PluginInfo, ctor func() Plugin) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 
-	p := constructor()
-	info := p.Info()
 	if info.Name == "" {
 		panic("plugin registered with empty name")
 	}
 	if _, exists := registry[info.Name]; exists {
 		panic(fmt.Sprintf("plugin %q registered twice", info.Name))
 	}
-	registry[info.Name] = registryEntry{info: info, ctor: constructor}
+	registry[info.Name] = registryEntry{info: info, ctor: ctor}
 }
 
 // LoadedPlugin wraps a plugin instance with its current state.

@@ -100,18 +100,24 @@ type HasBackground interface {
 
 // HasHostFunctions: plugin adds functions callable from workflows.
 // These functions are automatically recorded in event history and
-// replayed deterministically — plugin authors don't need to handle replay.
+// replayed deterministically -- plugin authors don't need to handle replay.
 type HasHostFunctions interface {
 	Plugin
 	RegisterHostFunctions(scope FuncRegistry) error
 }
 
+// FuncOptions configures a registered host function.
+type FuncOptions struct {
+	Name       string // function name (required)
+	Idempotent bool   // if true, safe to re-invoke during replay
+}
+
 // FuncRegistry lets plugins register workflow-callable functions.
-// The plugin name is implicit — each plugin gets its own scoped registry.
+// The plugin name is implicit -- each plugin gets its own scoped registry.
 type FuncRegistry interface {
 	// Register adds a host function. The engine handles WASM I/O,
 	// event history recording, and deterministic replay.
-	Register(funcName string, fn PluginFunc) error
+	Register(opts FuncOptions, fn PluginFunc) error
 }
 
 // PluginFunc is a plugin host function implementation.

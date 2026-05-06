@@ -38,5 +38,35 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS blob_content;
 			`,
 		},
+		{
+			Version: 2,
+			Up: `
+				ALTER TABLE blob_content ADD COLUMN IF NOT EXISTS storage_backend TEXT NOT NULL DEFAULT 'memory';
+				ALTER TABLE blob_content ADD COLUMN IF NOT EXISTS s3_key TEXT;
+				ALTER TABLE blob_content ALTER COLUMN data DROP NOT NULL;
+			`,
+			Down: `
+				ALTER TABLE blob_content ALTER COLUMN data SET NOT NULL;
+				ALTER TABLE blob_content DROP COLUMN IF EXISTS s3_key;
+				ALTER TABLE blob_content DROP COLUMN IF EXISTS storage_backend;
+			`,
+		},
+		{
+			Version: 3,
+			Up: `
+				CREATE TABLE IF NOT EXISTS workflow_blob_refs (
+					workflow_id TEXT NOT NULL,
+					sha256      BYTEA NOT NULL,
+					created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+					PRIMARY KEY (workflow_id, sha256)
+				);
+
+				ALTER TABLE blob_index ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+			`,
+			Down: `
+				DROP TABLE IF EXISTS workflow_blob_refs;
+				ALTER TABLE blob_index DROP COLUMN IF EXISTS deleted_at;
+			`,
+		},
 	}
 }

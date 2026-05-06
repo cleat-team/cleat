@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/durable/internal/auth"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -42,7 +42,8 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 // tenantID extracts the tenant UUID from the request context. Returns the
 // zero UUID if no tenant is set.
 func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	return plugin.TenantFromContext(r.Context())
+	tid, _ := auth.TenantIDFromContext(r.Context())
+	return tid
 }
 
 // ---- PUT /blobs/{key} ----
@@ -76,6 +77,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	// Compute content hash (SHA-256) for content-addressing.
 	hash := sha256.Sum256(body)
+	sha256Hex := fmt.Sprintf("%x", hash)
 	contentType := r.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "application/octet-stream"
@@ -103,13 +105,25 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Insert or increment blob_content.
+	// Store bytes via the configured backend.
+	if err := p.backend.Put(r.Context(), sha256Hex, body, contentType); err != nil {
+		p.logger.Error("blobstore: backend put", "key", key, "error", err)
+		p.writeError(w, 500, "failed to store content")
+		return
+	}
+
+	// Insert or increment blob_content metadata.
+	storageBackend := p.config.Backend
+	var s3Key *string
+	if storageBackend == "s3" {
+		s3Key = &sha256Hex
+	}
 	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO blob_content (sha256, size, data, ref_count)
-		VALUES ($1, $2, $3, 1)
+		INSERT INTO blob_content (sha256, size, ref_count, storage_backend, s3_key)
+		VALUES ($1, $2, 1, $3, $4)
 		ON CONFLICT (sha256) DO UPDATE
 		SET ref_count = blob_content.ref_count + 1
-	`, hash[:], len(body), body)
+	`, hash[:], len(body), storageBackend, s3Key)
 	if err != nil {
 		p.logger.Error("blobstore: store content", "key", key, "error", err)
 		p.writeError(w, 500, "failed to store content")
@@ -159,7 +173,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	p.writeJSON(w, 201, map[string]interface{}{
 		"key":    key,
-		"sha256": fmt.Sprintf("%x", hash),
+		"sha256": sha256Hex,
 		"size":   len(body),
 	})
 }
@@ -179,18 +193,17 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var data []byte
 	var sha256Bytes []byte
 	var contentType string
 	var size int64
 	var expiresAt sql.NullTime
 
 	err := p.db.QueryRowContext(r.Context(), `
-		SELECT c.data, c.sha256, i.content_type, i.size, i.expires_at
+		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
-		WHERE i.key = $1 AND i.tenant_id = $2
-	`, key, tid).Scan(&data, &sha256Bytes, &contentType, &size, &expiresAt)
+		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
+	`, key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -207,9 +220,18 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Retrieve blob data from the configured backend.
+	sha256Hex := fmt.Sprintf("%x", sha256Bytes)
+	data, err := p.backend.Get(r.Context(), sha256Hex)
+	if err != nil {
+		p.logger.Error("blobstore: get data", "key", key, "error", err)
+		p.writeError(w, 500, "failed to retrieve blob data")
+		return
+	}
+
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-	w.Header().Set("X-Blob-SHA256", fmt.Sprintf("%x", sha256Bytes))
+	w.Header().Set("X-Blob-SHA256", sha256Hex)
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
 }
@@ -238,7 +260,7 @@ func (p *Plugin) handleHead(w http.ResponseWriter, r *http.Request) {
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
-		WHERE i.key = $1 AND i.tenant_id = $2
+		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
 	`, key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "blob not found")
@@ -276,40 +298,25 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete the index entry and get the SHA-256 so we can decrement ref_count.
-	var sha256Bytes []byte
-	err := p.db.QueryRowContext(r.Context(), `
-		DELETE FROM blob_index
-		WHERE key = $1 AND tenant_id = $2
-		RETURNING sha256
-	`, key, tid).Scan(&sha256Bytes)
-	if err == sql.ErrNoRows {
-		p.writeError(w, 404, "blob not found")
-		return
-	}
+	// Soft delete: set deleted_at timestamp. Physical deletion is deferred
+	// to the TTL cleanup loop, which only removes bytes from S3 when no
+	// in-flight workflow references the blob.
+	result, err := p.db.ExecContext(r.Context(), `
+		UPDATE blob_index SET deleted_at = now()
+		WHERE key = $1 AND tenant_id = $2 AND deleted_at IS NULL
+	`, key, tid)
 	if err != nil {
-		p.logger.Error("blobstore: delete index", "key", key, "error", err)
+		p.logger.Error("blobstore: soft delete", "key", key, "error", err)
 		p.writeError(w, 500, "failed to delete blob")
 		return
 	}
-
-	// Decrement ref_count; if it hits zero, delete the content row.
-	_, err = p.db.ExecContext(r.Context(), `
-		WITH updated AS (
-			UPDATE blob_content
-			SET ref_count = ref_count - 1
-			WHERE sha256 = $1
-			RETURNING ref_count, sha256
-		)
-		DELETE FROM blob_content
-		WHERE sha256 IN (SELECT sha256 FROM updated WHERE ref_count <= 0)
-	`, sha256Bytes)
-	if err != nil {
-		p.logger.Error("blobstore: decrement ref_count", "key", key, "error", err)
-		// The index entry is already deleted; log the error but return success.
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		p.writeError(w, 404, "blob not found")
+		return
 	}
 
-	p.logger.Info("blobstore: deleted", "key", key, "tenant", tid)
+	p.logger.Info("blobstore: deleted (soft)", "key", key, "tenant", tid)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -335,7 +342,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	query := `
 		SELECT i.key, i.sha256, i.size, i.content_type, i.tags, i.created_at, i.expires_at
 		FROM blob_index i
-		WHERE i.tenant_id = $1
+		WHERE i.tenant_id = $1 AND i.deleted_at IS NULL
 	`
 	args := []interface{}{tid}
 	argIdx := 2

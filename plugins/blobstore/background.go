@@ -2,6 +2,7 @@ package blobstore
 
 import (
 	"context"
+	"encoding/hex"
 	"time"
 )
 
@@ -34,14 +35,38 @@ func (p *Plugin) Run(ctx context.Context) error {
 	}
 }
 
-// cleanupExpired deletes expired blob_index entries and decrements ref_count
-// on blob_content. Content rows with ref_count <= 0 are removed.
+// cleanupExpired handles expired and soft-deleted blobs while respecting
+// in-flight workflow references. Blobs are never physically deleted from S3
+// while any workflow with status 'ready' or 'running' references them.
+//
+// Phase 1: Clean up stale workflow_blob_refs for workflows that are no longer
+// in-flight (status is 'done', 'failed', or 'cancelled').
+//
+// Phase 2: Delete expired blob_index entries (expires_at < now()) and
+// soft-deleted entries (deleted_at IS NOT NULL) and decrement ref_count
+// on the corresponding blob_content rows.
+//
+// Phase 3: Garbage-collect blob_content rows with ref_count <= 0, but only
+// if no in-flight workflow references the content via workflow_blob_refs.
 func (p *Plugin) cleanupExpired(ctx context.Context) error {
-	// Phase 1: delete expired index entries and decrement ref_count.
+	// Phase 1: clean up stale workflow blob references. A ref is stale when
+	// the referencing workflow is no longer in-flight (done, failed, cancelled).
+	_, err := p.db.ExecContext(ctx, `
+		DELETE FROM workflow_blob_refs
+		WHERE workflow_id NOT IN (
+			SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Phase 2: delete expired and soft-deleted index entries, decrementing
+	// ref_count on blob_content.
 	result, err := p.db.ExecContext(ctx, `
 		WITH deleted AS (
 			DELETE FROM blob_index
-			WHERE expires_at < now()
+			WHERE (expires_at < now() OR deleted_at IS NOT NULL)
 			RETURNING sha256
 		)
 		UPDATE blob_content
@@ -53,17 +78,41 @@ func (p *Plugin) cleanupExpired(ctx context.Context) error {
 	}
 	affected, _ := result.RowsAffected()
 	if affected > 0 {
-		p.logger.Info("blobstore: expired index entries cleaned", "count", affected)
+		p.logger.Info("blobstore: expired/deleted index entries cleaned", "count", affected)
 	}
 
-	// Phase 2: garbage-collect blob_content with no remaining references.
-	result, err = p.db.ExecContext(ctx, `
-		DELETE FROM blob_content WHERE ref_count <= 0
+	// Phase 3: garbage-collect blob_content with no remaining references,
+	// but only if no in-flight workflow references the content.
+	orphanRows, err := p.db.QueryContext(ctx, `
+		DELETE FROM blob_content
+		WHERE ref_count <= 0
+		  AND NOT EXISTS (
+			SELECT 1 FROM workflow_blob_refs r
+			WHERE r.sha256 = blob_content.sha256
+		  )
+		RETURNING sha256, storage_backend
 	`)
 	if err != nil {
 		return err
 	}
-	orphaned, _ := result.RowsAffected()
+	defer orphanRows.Close()
+
+	var orphaned int
+	for orphanRows.Next() {
+		var sha256Bytes []byte
+		var storageBackend string
+		if err := orphanRows.Scan(&sha256Bytes, &storageBackend); err != nil {
+			p.logger.Error("blobstore: scan orphan", "error", err)
+			continue
+		}
+		if storageBackend == "s3" {
+			sha256Hex := hex.EncodeToString(sha256Bytes)
+			if err := p.backend.Delete(ctx, sha256Hex); err != nil {
+				p.logger.Error("blobstore: s3 delete orphan", "sha256", sha256Hex, "error", err)
+			}
+		}
+		orphaned++
+	}
 	if orphaned > 0 {
 		p.logger.Info("blobstore: orphaned content cleaned", "count", orphaned)
 	}

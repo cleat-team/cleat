@@ -30,7 +30,7 @@ const (
 	EventTypeContinueAsNew    EventType = "continue_as_new"
 	EventTypeHeartbeat        EventType = "heartbeat"
 	EventTypeAwaitAllChildren EventType = "await_all_children"
-		EventTypePluginCall       EventType = "plugin_call"
+	EventTypePluginCall       EventType = "plugin_call"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -74,6 +74,7 @@ type EventRecord struct {
 	PluginInput  string `json:"plugin_input,omitempty"`
 	PluginOutput string `json:"plugin_output,omitempty"`
 	PluginError  string `json:"plugin_error,omitempty"`
+	Idempotent   bool   `json:"idempotent,omitempty"`
 }
 
 // CallRecord is kept for backward compatibility in tests.
@@ -121,7 +122,7 @@ type SuspendResult struct {
 	History      []EventRecord
 	SuspendUntil time.Time
 	Reason       string
-	NewInput     string // for continue_as_new: the new input payload
+	NewInput     string            // for continue_as_new: the new input payload
 	Deferrals    map[string]string // registered defers (deferID -> description)
 }
 
@@ -144,13 +145,20 @@ type ChildWorkflowStore interface {
 // Takes JSON input, returns JSON output. The engine handles WASM I/O.
 type PluginFunc func(ctx context.Context, inputJSON string) (outputJSON string, err error)
 
+// pluginFuncEntry stores a registered plugin function along with its
+// idempotent flag. Idempotent functions are safe to re-invoke during replay.
+type pluginFuncEntry struct {
+	fn         PluginFunc
+	idempotent bool
+}
+
 // PluginRegistry maps plugin function names to implementations.
 type PluginRegistry struct {
-	funcs map[string]PluginFunc // key = lookupKey(pluginName, funcName)
+	funcs map[string]pluginFuncEntry // key = lookupKey(pluginName, funcName)
 }
 
 func NewPluginRegistry() *PluginRegistry {
-	return &PluginRegistry{funcs: make(map[string]PluginFunc)}
+	return &PluginRegistry{funcs: make(map[string]pluginFuncEntry)}
 }
 
 // lookupKey returns a unique key for a plugin function. The \x00 separator
@@ -167,7 +175,18 @@ func (pr *PluginRegistry) Register(pluginName, funcName string, fn PluginFunc) e
 	if _, exists := pr.funcs[key]; exists {
 		return fmt.Errorf("plugin function %q already registered", key)
 	}
-	pr.funcs[key] = fn
+	pr.funcs[key] = pluginFuncEntry{fn: fn, idempotent: false}
+	return nil
+}
+
+// RegisterIdempotent registers a plugin function that is safe to re-invoke
+// during replay (e.g., read-only S3 GET operations).
+func (pr *PluginRegistry) RegisterIdempotent(pluginName, funcName string, fn PluginFunc) error {
+	key := lookupKey(pluginName, funcName)
+	if _, exists := pr.funcs[key]; exists {
+		return fmt.Errorf("plugin function %q already registered", key)
+	}
+	pr.funcs[key] = pluginFuncEntry{fn: fn, idempotent: true}
 	return nil
 }
 
@@ -177,9 +196,9 @@ func (pr *PluginRegistry) Has(pluginName, funcName string) bool {
 	return ok
 }
 
-func (pr *PluginRegistry) Lookup(pluginName, funcName string) (PluginFunc, bool) {
-	fn, ok := pr.funcs[lookupKey(pluginName, funcName)]
-	return fn, ok
+func (pr *PluginRegistry) Lookup(pluginName, funcName string) (PluginFunc, bool, bool) {
+	entry, ok := pr.funcs[lookupKey(pluginName, funcName)]
+	return entry.fn, entry.idempotent, ok
 }
 
 // RetryableError is optionally implemented by errors to indicate retryability.
@@ -294,13 +313,13 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 	}
 
 	session := &execSession{
-		engine:      e,
-		history:     replayHistory,
-		isReplay:    len(replayHistory) > 0,
-		nowMs:       nowMs.Load(),
-		deferrals:   make(map[string]string),
-		workflowID:  e.workflowID,
-		tenantID:    e.tenantID,
+		engine:     e,
+		history:    replayHistory,
+		isReplay:   len(replayHistory) > 0,
+		nowMs:      nowMs.Load(),
+		deferrals:  make(map[string]string),
+		workflowID: e.workflowID,
+		tenantID:   e.tenantID,
 	}
 
 	execCtx := withHandler(ctx, session)
@@ -365,17 +384,17 @@ func DeferralsFromHistory(history []EventRecord) map[string]string {
 
 // execSession implements HostHandler for a single execution or replay.
 type execSession struct {
-	engine      *Engine
-	history     []EventRecord
-	stepCount   int
-	isReplay    bool
-	nowMs       int64
-	suspendErr  *SuspendError
-	signals     map[string]string // pending signals delivered during this session
-	deferrals   map[string]string // registered defer callbacks (deferID -> description)
-	workflowID  string            // parent workflow instance ID (for child workflows)
-	queryState  map[string]string // key-value state set via SetQueryState
-	tenantID    string            // tenant ID injected into plugin function context
+	engine     *Engine
+	history    []EventRecord
+	stepCount  int
+	isReplay   bool
+	nowMs      int64
+	suspendErr *SuspendError
+	signals    map[string]string // pending signals delivered during this session
+	deferrals  map[string]string // registered defer callbacks (deferID -> description)
+	workflowID string            // parent workflow instance ID (for child workflows)
+	queryState map[string]string // key-value state set via SetQueryState
+	tenantID   string            // tenant ID injected into plugin function context
 }
 
 var _ HostHandler = (*execSession)(nil)
@@ -495,6 +514,23 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
+		if rec.Idempotent {
+			// Safe to re-invoke during replay -- read-only operation (S3 GET).
+			// Look up the function and call it, returning fresh output.
+			// Do NOT append to newEvents (the event is already in history).
+			return s.freshPluginCallWithHistory(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+		}
+
+		// Idempotent flag may not be persisted in DB (no event_history column).
+		// Fall back to registry lookup: if the function is currently registered
+		// as idempotent, re-invoke instead of returning cached output.
+		if s.engine.pluginRegistry != nil {
+			_, idempotent, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
+			if ok && idempotent {
+				return s.freshPluginCallWithHistory(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+			}
+		}
+
 		if rec.PluginError != "" {
 			written := writeWasmString(mem, responsePtr, rec.PluginError, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
@@ -504,7 +540,7 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 		return packDurableCallResult(int(written), 0, 0)
 	}
 
-	// Past recorded history — switch to fresh execution.
+	// Past recorded history -- switch to fresh execution.
 	s.isReplay = false
 	return s.freshPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 }
@@ -512,6 +548,21 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 func (s *execSession) freshPluginCall(ctx context.Context, m api.Module,
 	pluginName, functionName, inputJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
+	return s.freshPluginCallInternal(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen, true)
+}
+
+// freshPluginCallWithHistory is like freshPluginCall but does not record the
+// event in history or advance the step counter. Used for replay re-invocation
+// of idempotent functions where the event is already in history.
+func (s *execSession) freshPluginCallWithHistory(ctx context.Context, m api.Module,
+	pluginName, functionName, inputJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+	return s.freshPluginCallInternal(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen, false)
+}
+
+func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
+	pluginName, functionName, inputJSON string,
+	responsePtr, responseMaxLen uint32, recordEvent bool) int64 {
 	mem := m.Memory()
 
 	// Look up the plugin function.
@@ -520,42 +571,51 @@ func (s *execSession) freshPluginCall(ctx context.Context, m api.Module,
 		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 1, 1)
 	}
-	fn, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
+	fn, idempotent, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
 	if !ok {
 		errMsg := fmt.Sprintf("plugin function %s/%s not registered", pluginName, functionName)
 		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 1, 1)
 	}
 
-		// Inject tenant ID into context for plugin functions that need it.
-		callCtx := ctx
-		if s.tenantID != "" {
-			tid, err := uuid.Parse(s.tenantID)
-			if err == nil {
-				callCtx = plugin.WithTenant(callCtx, tid)
-			}
+	// Inject call context (tenant ID + workflow ID) for plugin functions.
+	callCtx := ctx
+	cc := &plugin.CallContext{}
+	if s.tenantID != "" {
+		tid, err := uuid.Parse(s.tenantID)
+		if err == nil {
+			cc.TenantID = tid
 		}
+	}
+	if s.workflowID != "" {
+		cc.WorkflowID = s.workflowID
+	}
+	callCtx = plugin.WithCallContext(callCtx, cc)
 
-		// Actually call the plugin.
-		outputJSON, err := fn(callCtx, inputJSON)
+	// Actually call the plugin.
+	outputJSON, err := fn(callCtx, inputJSON)
 
 	var errStr string
 	if err != nil {
 		errStr = err.Error()
 	}
 
-	// Record in event history.
-	rec := EventRecord{
-		Step:         s.stepCount,
-		EventType:    EventTypePluginCall,
-		PluginName:   pluginName,
-		PluginFunc:   functionName,
-		PluginInput:  inputJSON,
-		PluginOutput: outputJSON,
-		PluginError:  errStr,
+	// Record in event history (unless this is an idempotent re-invocation
+	// where the event is already in history).
+	if recordEvent {
+		rec := EventRecord{
+			Step:         s.stepCount,
+			EventType:    EventTypePluginCall,
+			PluginName:   pluginName,
+			PluginFunc:   functionName,
+			PluginInput:  inputJSON,
+			PluginOutput: outputJSON,
+			PluginError:  errStr,
+			Idempotent:   idempotent,
+		}
+		s.history = append(s.history, rec)
+		s.stepCount++
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
 
 	if err != nil {
 		written := writeWasmString(mem, responsePtr, errStr, responseMaxLen)
