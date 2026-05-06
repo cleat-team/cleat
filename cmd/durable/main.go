@@ -208,8 +208,13 @@ func runBuild(pattern, outDir, target string) {
 			".",
 		)
 		// tinygo needs GOROOT and TINYGOROOT in its environment.
+		// tinygo 0.36 requires host Go < 1.25. If DURABLE_TINYGO_GOROOT is set,
+		// use it as GOROOT and add its bin to PATH ahead of the current PATH.
 		cmd.Env = os.Environ()
-		if goroot := os.Getenv("GOROOT"); goroot != "" {
+		if tinygoGoroot := os.Getenv("DURABLE_TINYGO_GOROOT"); tinygoGoroot != "" {
+			cmd.Env = append(cmd.Env, "GOROOT="+tinygoGoroot)
+			cmd.Env = append(cmd.Env, "PATH="+tinygoGoroot+"/bin:"+os.Getenv("PATH"))
+		} else if goroot := os.Getenv("GOROOT"); goroot != "" {
 			cmd.Env = append(cmd.Env, "GOROOT="+goroot)
 		}
 		if tinygoroot := os.Getenv("TINYGOROOT"); tinygoroot != "" {

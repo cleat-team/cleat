@@ -140,6 +140,65 @@ func main() {
 	}
 
 	// Create go.mod with replace directive pointing to the project root.
+	// tinygo has a max supported Go version (1.24 for tinygo 0.36-0.37),
+	// so cap the go version and provide a stub dependency with a compatible
+	// go directive when targeting tinygo.
+	goVersion := cfg.GoVersion
+	replaceRoot := cfg.ProjectRoot
+	if cfg.Target == "tinygo" {
+		goVersion = "1.24"
+		// Create a minimal dependency tree with go 1.24 so tinygo doesn't
+		// reject the project root's go 1.26 requirement.
+		depsDir := filepath.Join(cfg.OutDir, ".deps")
+		if err := os.MkdirAll(filepath.Join(depsDir, "durable"), 0755); err != nil {
+			return fmt.Errorf("creating .deps/durable: %w", err)
+		}
+		// Copy durable SDK into .deps/
+		srcDurable := filepath.Join(cfg.ProjectRoot, "durable")
+		goFiles, err := filepath.Glob(filepath.Join(srcDurable, "*.go"))
+		if err != nil {
+			return fmt.Errorf("globbing durable source: %w", err)
+		}
+		for _, gf := range goFiles {
+			base := filepath.Base(gf)
+			if strings.HasPrefix(base, "gen_") {
+				continue
+			}
+			content, err := os.ReadFile(gf)
+			if err != nil {
+				return fmt.Errorf("reading %s: %w", base, err)
+			}
+			if err := os.WriteFile(filepath.Join(depsDir, "durable", base), content, 0644); err != nil {
+				return fmt.Errorf("writing %s: %w", base, err)
+			}
+		}
+		// Also copy durabletest if present.
+		srcDurabletest := filepath.Join(srcDurable, "durabletest")
+		if st, err := os.Stat(srcDurabletest); err == nil && st.IsDir() {
+			if err := os.MkdirAll(filepath.Join(depsDir, "durabletest"), 0755); err != nil {
+				return fmt.Errorf("creating .deps/durabletest: %w", err)
+			}
+			testGoFiles, _ := filepath.Glob(filepath.Join(srcDurabletest, "*.go"))
+			for _, gf := range testGoFiles {
+				base := filepath.Base(gf)
+				content, err := os.ReadFile(gf)
+				if err != nil {
+					continue
+				}
+				os.WriteFile(filepath.Join(depsDir, "durabletest", base), content, 0644)
+			}
+		}
+		// Write .deps/go.mod with a compatible version.
+		depsMod := fmt.Sprintf(`module %s
+
+go 1.24
+`, cfg.ModulePath)
+		if err := os.WriteFile(filepath.Join(depsDir, "go.mod"), []byte(depsMod), 0644); err != nil {
+			return fmt.Errorf("writing .deps/go.mod: %w", err)
+		}
+		replaceRoot = depsDir
+	}
+
 	modContent := fmt.Sprintf(`module durable-build
 
 go %s
@@ -147,7 +206,7 @@ go %s
 require %s v0.0.0
 
 replace %s => %s
-`, cfg.GoVersion, cfg.ModulePath, cfg.ModulePath, cfg.ProjectRoot)
+`, goVersion, cfg.ModulePath, cfg.ModulePath, replaceRoot)
 
 	modPath := filepath.Join(cfg.OutDir, "go.mod")
 	if err := os.WriteFile(modPath, []byte(modContent), 0644); err != nil {
