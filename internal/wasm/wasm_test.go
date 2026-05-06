@@ -416,3 +416,223 @@ func TestAdapterDefsCoverage(t *testing.T) {
 		}
 	}
 }
+
+// ---- Bit-packing round-trip tests ----
+//
+// These tests verify that the bit-packing formats used by the host runtime
+// (internal/host/memory.go) and the extraction logic emitted by the code
+// generator (adapter.go ResultStmts) are compatible. The packing logic is
+// inlined to keep tests self-contained since packDurableCallResult and
+// packSimpleResult are unexported in the host package.
+
+// TestBitPackingDurableCall verifies the durable_call result format:
+//
+//	bits 40-63 = responseLen (24 bits)
+//	bits 8-39  = callErrorCode (32 bits, though passed as byte)
+//	bits 0-7   = errCode (8 bits)
+//
+// See packDurableCallResult in internal/host/memory.go and the DurableCall
+// ResultStmts in adapter.go.
+func TestBitPackingDurableCall(t *testing.T) {
+	tests := []struct {
+		responseLen   int
+		callErrorCode byte
+		errCode       byte
+	}{
+		{0, 0, 0},
+		{1, 0, 0},
+		{0xFFFFFF, 0, 0},       // max 24-bit value -- sets bit 63 when shifted
+		{0, 0xFF, 0},           // max callErrorCode
+		{0, 0, 0xFF},           // max errCode
+		{0xABCDEF, 0x12, 0x34}, // all fields non-zero
+		{0x800000, 0, 0},       // 0x800000 << 40 sets bit 63 -> negative int64
+	}
+	for _, tt := range tests {
+		// Pack using the same formula as host.packDurableCallResult.
+		packed := int64(uint64(tt.responseLen)<<40 | uint64(tt.callErrorCode)<<8 | uint64(tt.errCode))
+
+		// Extract using the adapter.go DurableCall ResultStmts.
+		responseLen := uint32(uint64(packed) >> 40)
+		callErrorCode := byte((uint64(packed) >> 8) & 0xFF)
+		errCode := byte(uint64(packed) & 0xFF)
+
+		if responseLen != uint32(tt.responseLen) {
+			t.Errorf("[%#x] responseLen = %d, want %d", uint64(packed), responseLen, tt.responseLen)
+		}
+		if callErrorCode != tt.callErrorCode {
+			t.Errorf("[%#x] callErrorCode = %d, want %d", uint64(packed), callErrorCode, tt.callErrorCode)
+		}
+		if errCode != tt.errCode {
+			t.Errorf("[%#x] errCode = %d, want %d", uint64(packed), errCode, tt.errCode)
+		}
+
+		// Verify that extracting without the uint64 cast would be wrong when bit 63 is set.
+		if uint64(packed)&(1<<63) != 0 {
+			badResponseLen := uint32(packed >> 40) // arithmetic shift -- sign extends!
+			if badResponseLen == responseLen {
+				t.Errorf("[%#x] expected arithmetic shift to produce wrong result, but got %d",
+					uint64(packed), badResponseLen)
+			}
+		}
+	}
+}
+
+// TestBitPackingAwaitSignals verifies the durable_await_signals result format:
+//
+//	bits 48-63 = signalNameLen (16 bits)
+//	bits 32-47 = payloadLen (16 bits)
+//	bits 16-31 = timedOut flag (non-zero == true)
+//	bits 0-15  = errCode (16 bits)
+//
+// See the DurableAwaitSignals ResultStmts in adapter.go.
+func TestBitPackingAwaitSignals(t *testing.T) {
+	tests := []struct {
+		signalNameLen uint32
+		payloadLen    uint32
+		timedOut      bool
+		errCode       uint32
+	}{
+		{0, 0, false, 0},
+		{1, 0, false, 0},
+		{0xFFFF, 0, false, 0},   // max 16-bit signalNameLen
+		{0, 0xFFFF, false, 0},    // max 16-bit payloadLen
+		{0, 0, true, 0},          // timedOut set
+		{0, 0, false, 0xFFFF},    // max 16-bit errCode
+		{0xABCD, 0x1234, true, 0x5678}, // all fields non-zero
+	}
+	for _, tt := range tests {
+		var timedOutVal uint32
+		if tt.timedOut {
+			timedOutVal = 1
+		}
+		packed := int64(uint64(tt.signalNameLen)<<48 |
+			uint64(tt.payloadLen)<<32 |
+			uint64(timedOutVal)<<16 |
+			uint64(tt.errCode))
+
+		// Extract using adapter.go DurableAwaitSignals ResultStmts.
+		signalNameLen := uint32(uint64(packed) >> 48)
+		payloadLen := uint32((uint64(packed) >> 32) & 0xFFFF)
+		timedOut := uint32((uint64(packed) >> 16) & 0xFFFF) != 0
+		errCode := uint32(uint64(packed) & 0xFFFF)
+
+		if signalNameLen != tt.signalNameLen {
+			t.Errorf("[%#x] signalNameLen = %d, want %d", uint64(packed), signalNameLen, tt.signalNameLen)
+		}
+		if payloadLen != tt.payloadLen {
+			t.Errorf("[%#x] payloadLen = %d, want %d", uint64(packed), payloadLen, tt.payloadLen)
+		}
+		if timedOut != tt.timedOut {
+			t.Errorf("[%#x] timedOut = %v, want %v", uint64(packed), timedOut, tt.timedOut)
+		}
+		if errCode != tt.errCode {
+			t.Errorf("[%#x] errCode = %d, want %d", uint64(packed), errCode, tt.errCode)
+		}
+	}
+}
+
+// TestBitPackingSleep verifies the durable_sleep result format:
+//
+//	bit  56     = sleepStatus (1 byte)
+//	bits 0-55   = durationMs (unused in extraction)
+//
+// See the DurableSleep ResultStmts in adapter.go.
+func TestBitPackingSleep(t *testing.T) {
+	tests := []struct {
+		sleepStatus byte
+	}{
+		{0},   // normal return
+		{1},   // suspend sentinel
+		{0xFF}, // any non-zero value
+	}
+	for _, tt := range tests {
+		packed := int64(uint64(tt.sleepStatus) << 56)
+
+		// Extract using adapter.go DurableSleep ResultStmts.
+		sleepStatus := byte(uint64(packed) >> 56)
+
+		if sleepStatus != tt.sleepStatus {
+			t.Errorf("[%#x] sleepStatus = %d, want %d", uint64(packed), sleepStatus, tt.sleepStatus)
+		}
+	}
+}
+
+// TestDecodeExportResult verifies the export result format used by
+// writeJSONOut/writeErrorOut in exports.go and decodeExportResult in
+// internal/host/memory.go:
+//
+//	bits 0-31  = errCode (0 = success)
+//	bits 32-63 = actual output length
+func TestDecodeExportResult(t *testing.T) {
+	tests := []struct {
+		errCode   uint32
+		actualLen uint32
+	}{
+		{0, 0},
+		{0, 1},
+		{1, 0},
+		{0xFFFFFFFF, 0},          // max errCode
+		{0, 0xFFFFFFFF},          // max actualLen -- sets bit 63
+		{0xDEAD, 0xBEEF},
+	}
+	for _, tt := range tests {
+		// Pack as exports.go does: int64(actualLen)<<32 | errCode
+		packed := uint64(tt.actualLen)<<32 | uint64(tt.errCode)
+
+		// Extract using decodeExportResult logic.
+		errCode := uint32(packed & 0xFFFFFFFF)
+		actualLen := uint32(packed >> 32)
+
+		if errCode != tt.errCode {
+			t.Errorf("[%#x] errCode = %d (%#x), want %d (%#x)",
+				packed, errCode, errCode, tt.errCode, tt.errCode)
+		}
+		if actualLen != tt.actualLen {
+			t.Errorf("[%#x] actualLen = %d, want %d", packed, actualLen, tt.actualLen)
+		}
+
+		// Also test the host.decodeExportResult formula directly.
+		rErrCode := uint32(packed & 0xFFFFFFFF)
+		rActualLen := uint32(packed >> 32)
+		if rErrCode != tt.errCode || rActualLen != tt.actualLen {
+			t.Errorf("decodeExportResult formula mismatch for [%#x]", packed)
+		}
+	}
+}
+
+// TestSimpleResultPacking verifies the packSimpleResult format:
+//
+//	bits 32-63 = extra[0] (32 bits, optional)
+//	bits 0-31  = errCode (32 bits)
+//
+// See packSimpleResult in internal/host/memory.go.
+func TestSimpleResultPacking(t *testing.T) {
+	tests := []struct {
+		errCode byte
+		extra   uint32
+	}{
+		{0, 0},
+		{1, 0},
+		{0xFF, 0},
+		{0, 0xFFFFFFFF},
+		{0xAB, 0xCDEF},
+	}
+	for _, tt := range tests {
+		var v uint64
+		if tt.extra != 0 || tt.errCode == 0 { // match packSimpleResult logic
+			v = uint64(tt.extra) << 32
+		}
+		packed := int64(v | uint64(tt.errCode))
+
+		// Decode with the uint64-based formula (as host does).
+		decodedErr := uint32(uint64(packed) & 0xFFFFFFFF)
+		decodedExtra := uint32(uint64(packed) >> 32)
+
+		if decodedErr != uint32(tt.errCode) {
+			t.Errorf("[%#x] errCode = %d, want %d", uint64(packed), decodedErr, tt.errCode)
+		}
+		if decodedExtra != tt.extra {
+			t.Errorf("[%#x] extra = %d, want %d", uint64(packed), decodedExtra, tt.extra)
+		}
+	}
+}

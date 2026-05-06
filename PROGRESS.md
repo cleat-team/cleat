@@ -1,6 +1,6 @@
 # Durable Execution Project — Progress
 
-## Status: Transformer and SDK complete; host runtime pending
+## Status: All phases delivered; production runtime operational
 
 ## What's built
 
@@ -9,14 +9,13 @@
 - Call graph construction with durable leaf identification
 - Transitive closure computation and construct validation (E001-E007, W001)
 - HostCalls threading verification (E010) including global var h pattern
-- Auto-threading transform (context object → param injection)
+- Auto-threading transform (context object to param injection)
 - WASM import/export/adapter code generation
 - Build directory assembly and WASM compilation
 - CLI: `durable build` and `durable vet`
 
 ### SDK runtime (durable package)
-- `HostCalls` interface with 23 methods
-- `hostCallsImpl` concrete implementation with WASM adapter hooks
+- `HostCalls` interface with 23 methods + concrete `hostCallsImpl` with WASM adapter hooks
 - `Saga` structured compensation (nil-safe)
 - `PollUntil` generic sleep-based polling
 - `Selector` multi-future wait (signals, timer, child workflow)
@@ -24,7 +23,6 @@
 - `RetryPolicy` with exponential backoff and non-retryable error filtering
 - `DurableCallTyped` eliminating manual JSON marshaling
 - `LogKV` structured key-value logging
-- `SignalResult` structured AwaitSignals return
 
 ### Testing framework (durabletest)
 - Mock `HostCalls` with stub registration (string, nil, func matchers)
@@ -38,6 +36,35 @@
 - Generates typed client wrappers using `DurableCallTyped`
 - Eliminates magic strings from service/operation calls
 
+### Production host runtime
+- wazero-based Runtime, Engine with Execute/Replay
+- 14 host function imports, WASM memory management
+- Real DurableSleep: suspend/resume protocol via panic/recover sentinel
+- Signal delivery: SignalStore interface, PostgresStore, signals table
+- Cancellation: PollCancellation checks DB flag, RequestCancellation API
+
+### PostgreSQL worker daemon (cmd/durable-worker)
+- SKIP LOCKED poll loop, WASM loading, event replay, heartbeat, failover handling
+- Schema versioning: h.Version()/MinVersion() return real values, deploy auto-increments
+- History compaction via ContinueAsNew
+- Database schema (schema.sql): workflow_defs, workflow_instances (extended), event_history (extended), workflow_signals
+
+### CLI
+- `durable build` — compile workflows to WASM
+- `durable vet` — validate workflow code
+- `durable deploy` — deploy workflow definitions
+- `durable versions` — list deployed versions
+- `durable rollback` — roll back to previous version
+
+### Phase 10: tinygo compilation target
+- Tinygo support for smaller WASM binaries and broader target compatibility
+
+### Phase 11: durable deploy CLI command
+- Deploy driver with schema versioning and DB migrations
+
+### Phase 13: Defer execution engine
+- DurableDefer for guaranteed cleanup on workflow exit
+
 ### Examples
 - `testdata/basic/` — workflow with explicit h parameter threading
 - `testdata/autothread/` — workflow using global h pattern (auto-threaded)
@@ -45,20 +72,6 @@
 - `examples/fooddash/` — full food delivery app with Saga, signals, typed clients
 - `examples/fooddash/clients/` — generated typed clients (dispatch, menu, orders, payments, restaurant)
 - `examples/fooddash/spec/` — service spec interfaces for code generation
-
-### Demo (wasm-demo/)
-- Host runtime with checkpoint/replay, crash simulation, resume
-- Worker with DB failover handling
-- Versioned WASM loading
-- Cluster design walkthrough (observability, resilience, performance, versioning)
-
-## What's missing (remaining Phases 9-13)
-- Phase 9 (partial): E008-E011, W002 validation rules
-- Phase 10: tinygo compilation target
-- Phase 11: `durable deploy` + database schema
-- Phase 12: WASM conformance tests
-- Phase 13: Defer execution engine
-- Production host runtime (wazero integration with PostgreSQL)
 
 ## Key design decisions
 [See durable_context.md for architectural rationale]

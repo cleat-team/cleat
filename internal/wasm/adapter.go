@@ -31,7 +31,7 @@ var adapterDefs = map[string]adapterDef{
 		},
 		ResultStmts: []string{
 			"responseLen := uint32(uint64(result) >> 40)",
-			"callErrorCode := durable.CallErrorCode((result >> 8) & 0xFFFFFFFF)",
+			"callErrorCode := durable.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
 			`	return "", &durable.CallError{`,
@@ -65,8 +65,8 @@ var adapterDefs = map[string]adapterDef{
 		},
 		ResultStmts: []string{
 			"signalNameLen := uint32(uint64(result) >> 48)",
-			"payloadLen := uint32((result >> 32) & 0xFFFF)",
-			"timedOut := uint32((result >> 16) & 0xFFFF) != 0",
+			"payloadLen := uint32((uint64(result) >> 32) & 0xFFFF)",
+			"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
 			"errCode := uint32(result & 0xFFFF)",
 			"if errCode != 0 {",
 			`	return "", "", false, fmt.Errorf("durable_await_signals: error code %d", errCode)`,
