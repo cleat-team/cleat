@@ -396,6 +396,9 @@ func TestImportParamDecl(t *testing.T) {
 
 func TestImportDefsCoverage(t *testing.T) {
 	for _, hf := range hostFunctions {
+		if hf.ImportName == "" {
+			continue // no WASM import needed (e.g., RunDetached is only tracked)
+		}
 		if _, ok := importDefs[hf.ImportName]; !ok {
 			t.Errorf("hostFunctions[%s].ImportName=%q has no importDef", hf.FieldName, hf.ImportName)
 		}
