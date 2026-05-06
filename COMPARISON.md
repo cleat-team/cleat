@@ -44,7 +44,7 @@ Every external interaction is recorded in `event_history` for replay. That same 
 
 The WASM boundary (14 host function imports) means any language that compiles to WASM can produce workflow modules. The worker doesn't know or care what language produced the WASM bytes. Temporal maintains separate SDKs in 6 languages, each reimplementing the deterministic runtime — bugs and behavioral differences between SDKs are an ongoing problem. DBOS has 4 separate SDKs (TypeScript, Python, Go, Java). In cleat, a language transformer generates a few hundred lines of adapter code — not a full runtime reimplementation.
 
-**Caveat**: Only Go has an automated transformer pipeline today. Rust WASM workflows have been proven — they compile via `cargo build --target wasm32-wasip1`, load into the Go runtime, and execute correctly with full replay, cancellation, and compensation (all 4 integration tests pass). A second language does not require reimplementing the runtime — just a transformer for each language, estimated 6-12 weeks per language.
+**Caveat**: Go has a fully automated transformer pipeline (`durable build`). Rust has an automated transformer via the `durable-sdk` crate (with `HostCalls` struct and memory helpers) and the `durable-macro` proc-macro crate (`#[durable_entry]` attribute that generates WASM exports). Rust workflows compile with `durable build --target rust` (which wraps `cargo build --target wasm32-wasip1`) and execute correctly with full replay, cancellation, and compensation.
 
 ### 7. Stronger Static Analysis
 
@@ -68,7 +68,7 @@ Temporal catches many of these at runtime (when replay diverges, producing crypt
 
 ## Cleat's Disadvantages
 
-### 1. Build Pipeline Friction — **ADDRESSED**
+### 1. Build Pipeline Friction — **FIXED**
 
 ~~Every change requires: edit Go → `durable build` (5-stage pipeline: analyze → callgraph → closure → transform → wasm compile) → WASM binary → deploy → test. The WASM compilation step adds seconds to the inner dev loop.~~
 
@@ -84,29 +84,29 @@ This is a pre-1.0 project with no production track record. Temporal has been bat
 
 | Feature | Cleat | Temporal | DBOS |
 |---|---|---|---|
-| Queries (read workflow state externally) | Partial (`SetQueryState` API, no external read yet) | Mature | Via Conductor |
-| Cron/scheduling | Gap | Built-in | Built-in |
-| Web UI / dashboard | Gap | Mature UI | Conductor dashboard |
-| Activity heartbeating | Partial (`DurableCallWithHeartbeat`) | Mature | Via steps |
-| Server-side retry | **Done** (`durable_call_retry`, one-event-per-call) | Built-in | Built-in |
+| Queries (read workflow state externally) | Done (`SetQueryState` + `GET /api/workflows/:id/query?key=X`) | Mature | Via Conductor |
+| Cron/scheduling | Done (built-in scheduler + REST API) | Built-in | Built-in |
+| Web UI / dashboard | Done (Svelte SPA embedded in worker) | Mature UI | Conductor dashboard |
+| Activity heartbeating | Done (`durable_call_heartbeat` host import + heartbeat goroutine) | Mature | Via steps |
+| Server-side retry | Done (`durable_call_retry`, one-event-per-call) | Built-in | Built-in |
 | Task queues / routing | Single worker pool | Rich routing model | Durable queues |
 | History compaction | `ContinueAsNew` only | Automatic | Automatic |
-| Multi-tenancy | Gap | Supported | Via namespaces |
+| Multi-tenancy | Namespace isolation (worker `--namespace` flag) | Supported | Via namespaces |
 | Cloud / managed offering | Gap | Temporal Cloud | DBOS Cloud |
 
 ### 4. WASM Boundary Overhead
 
 Strings cross the WASM boundary via a pointer+length protocol through linear memory at a 10 MB scratch offset. For each `DurableCall`, the request is serialized, copied across the boundary, and the response is copied back. Temporal's in-process SDK avoids this cost. For I/O-bound workflows (API calls dominate runtime), this is negligible. For workflows with many small rapid durable calls, it adds up.
 
-### 5. Go-Only Today
+### 5. Rust Support (Second Language)
 
-Temporal: Go, Java, TypeScript, Python, .NET, PHP, Ruby. DBOS: TypeScript, Python, Go, Java. Cleat: Go. The WASM multi-language vision is compelling but unrealized — and each new language requires building a transformer pipeline, which is substantial work (estimated 6-12 weeks per language).
+Temporal: Go, Java, TypeScript, Python, .NET, PHP, Ruby. DBOS: TypeScript, Python, Go, Java. Cleat: Go and Rust. The Rust pipeline uses the `durable-sdk` crate and `#[durable_entry]` proc-macro — no handwritten WASM FFI needed. Additional languages (C, Zig, TypeScript compiled to WASM) are possible since the host ABI is language-agnostic, but each requires a similar transformer and macros/code-generation support (estimated 2-4 weeks per language for languages with WASM support).
 
 ### 6. TinyGo Dependency for Production Builds
 
 Standard Go WASM binaries are large (the Go runtime compiled to WASM). TinyGo produces smaller binaries but is a subset of Go (no `reflect` in many cases, limited standard library coverage) and adds another toolchain dependency. The recent fix for TinyGo compilation with Go 1.26 (commit `2c651db`) suggests this is an ongoing maintenance burden.
 
-### 7. Retry at SDK Level Bloats Event History — **ADDRESSED**
+### 7. Retry at SDK Level Bloats Event History — **FIXED**
 
 ~~Cleat implements retry in the SDK: `RetryPolicy` controls exponential backoff between attempts, using `DurableSleep` between retries. Each attempt becomes a separate event in the history.~~
 
@@ -134,29 +134,29 @@ Both Temporal and DBOS have documented strategies for scaling beyond a single da
 
 2. **Server-side retry** — **Done**: `durable_call_retry` host import performs server-side retry inside the engine. Retries don't add events to workflow history — a single event is written regardless of attempts.
 
-3. **Web UI / dashboard**: Even a simple dashboard showing workflow instances, their status, event history, and allowing cancel/retry operations. This is table stakes for operational adoption. Could be a single-page app served by the worker or a separate lightweight service.
+3. **Web UI / dashboard** — **Done**: Svelte 5 + Vite SPA embedded in the worker binary via `embed.FS`. Dashboard with summary cards and recent workflows, workflow list with status filters, workflow detail with event timeline, signal/cancel actions, and schedule management with CRUD.
 
-4. **Cron/scheduling**: Built-in support for recurring workflow execution. This is the most commonly requested feature in every workflow engine.
+4. **Cron/scheduling** — **Done**: Built-in scheduler runs in the worker via `scheduleLoop()`. Schedules managed via CLI (`durable schedule add|list|delete|enable|disable`) and REST API (`GET/POST/DELETE /api/schedules`). Uses standard 5-field cron expressions.
+
+5. **Implement a second language (Rust)** — **Done**: The `durable-sdk` crate provides `HostCalls` struct with all 15 WASM host imports and memory helpers. The `durable-macro` proc-macro crate provides `#[durable_entry]` for automatic WASM export generation. Rust workflows compile via `durable build --target rust` (delegates to `cargo build --target wasm32-wasip1`).
+
+6. **Queries** — **Done**: Workflows set query state via `h.SetQueryState(key, value)`. External systems read it via `GET /api/workflows/:id/query?key=X`. Query state is persisted as JSONB in the `workflow_instances` table.
 
 ### Medium Impact
 
-5. **Implement a second language (Rust)** — **Partial (proven, no automated transformer)**: Rust WASM workflows compile via `cargo build --target wasm32-wasip1` and execute correctly on the Go runtime with full replay, cancellation, and compensation (all 4 integration tests pass). What's missing is an automated Rust transformer pipeline (estimated 6-12 weeks) to generate host adapter code from Rust source.
-
-6. **Task queues / routing**: Allow routing specific workflow types to specific worker pools. This enables heterogeneous worker fleets (GPU, high-memory, etc.) and workload isolation.
-
-7. **Queries**: Let external systems read workflow state without signals. Critical for operational visibility — "what's the status of order #123?" without needing to deliver a signal.
+7. **Task queues / routing**: Allow routing specific workflow types to specific worker pools. This enables heterogeneous worker fleets (GPU, high-memory, etc.) and workload isolation.
 
 8. **History compaction**: Automatic pruning/compaction of event history for long-running workflows with many steps. `ContinueAsNew` exists but requires manual orchestration.
 
+9. **Multi-tenancy beyond namespace isolation**: The `--namespace` flag on the worker provides basic namespace filtering, but there's no auth layer, per-namespace quotas, or tenant-aware API surface. Important for platform use cases.
+
 ### Lower Impact
 
-9. **Cloud / managed offering**: A managed control plane would reduce adoption friction. Even a simple one that provisions workers and PostgreSQL.
+10. **Cloud / managed offering**: A managed control plane would reduce adoption friction. Even a simple one that provisions workers and PostgreSQL.
 
-10. **Ecosystem integrations**: OpenTelemetry export, Prometheus metrics endpoint, Datadog/Grafana dashboards, Kubernetes operator, Helm chart.
+11. **Ecosystem integrations**: OpenTelemetry export, Datadog/Grafana dashboards, Kubernetes operator, Helm chart. Prometheus metrics endpoint at `/metrics` already exists.
 
-11. **Exactly-once semantics**: Server-level idempotency guarantees beyond the application-level `ON CONFLICT DO NOTHING` on event history.
-
-12. **Multi-tenancy**: Namespace isolation for workflow definitions and instances. Important for platform use cases.
+12. **Exactly-once semantics**: Server-level idempotency guarantees beyond the application-level `ON CONFLICT DO NOTHING` on event history.
 
 ---
 
@@ -166,6 +166,6 @@ Cleat's WASM-based versioning is genuinely clever and architecturally unique. Th
 
 The developer model is cleaner than Temporal's (no workflow/activity split) and the static analysis is stronger than DBOS's (build-time validation rather than runtime behavior). For a Go shop that wants a single-infrastructure durability story, cleat's design is coherent and well-motivated.
 
-But it is a prototype, not a product. Critical production features are still missing (queries, scheduling, UI, task routing, metrics), and the Go-only automated pipeline means manual work is needed for other languages.
+It is approaching MVP readiness. Queries, cron/scheduling, web UI, activity heartbeating, server-side retry, Prometheus metrics, and both Go and Rust transformer pipelines are all implemented. The major remaining gaps for production use are task routing (directing workflow types to specific worker pools), automatic history compaction, and ecosystem integrations (Helm charts, Grafana dashboards).
 
-**Cleat's path to competitiveness**: build a basic web UI, add cron/scheduling, and ship the Rust transformer pipeline. Dev mode and server-side retry are complete. The multi-language thesis is proven — Rust workflows run correctly on the Go runtime.
+**Cleat's path to competitiveness**: build a basic web UI, add cron/scheduling, and ship the Rust transformer pipeline — all three are now complete. The next priorities are task routing, dogfooding on real workloads, and documentation.
