@@ -24,7 +24,15 @@ func (p *Plugin) Run(ctx context.Context) error {
 	p.logger.Info("scheduler: background loop started, interval=60s")
 
 	// Run once immediately on startup.
-	p.runDueSchedules(ctx)
+	start := time.Now()
+	schedulesDue, workflowsStarted, workflowsFailed := p.runDueSchedules(ctx)
+	p.logger.Info("scheduler: work cycle completed",
+		"plugin", p.Info().Name,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"schedules_due", schedulesDue,
+		"workflows_started", workflowsStarted,
+		"workflows_failed", workflowsFailed,
+	)
 
 	for {
 		select {
@@ -33,7 +41,15 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case <-ticker.C:
-			p.runDueSchedules(ctx)
+			start := time.Now()
+			schedulesDue, workflowsStarted, workflowsFailed := p.runDueSchedules(ctx)
+			p.logger.Info("scheduler: work cycle completed",
+				"plugin", p.Info().Name,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"schedules_due", schedulesDue,
+				"workflows_started", workflowsStarted,
+				"workflows_failed", workflowsFailed,
+			)
 		}
 	}
 }
@@ -41,8 +57,8 @@ func (p *Plugin) Run(ctx context.Context) error {
 // runDueSchedules finds schedules where enabled=true AND next_run_at <= now()
 // and triggers the corresponding workflow. After triggering, it calculates
 // the next future run from the cron expression and updates next_run_at and
-// last_run_at.
-func (p *Plugin) runDueSchedules(ctx context.Context) {
+// last_run_at. Returns (schedulesDue, workflowsStarted, workflowsFailed).
+func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT id, tenant_id, name, cron, workflow_name, input, next_run_at
 		FROM schedules
@@ -51,9 +67,11 @@ func (p *Plugin) runDueSchedules(ctx context.Context) {
 	`)
 	if err != nil {
 		p.logger.Error("scheduler: query due schedules", "error", err)
-		return
+		return 0, 0, 0
 	}
 	defer rows.Close()
+
+	var schedulesDue, workflowsStarted, workflowsFailed int
 
 	for rows.Next() {
 		var (
@@ -69,6 +87,8 @@ func (p *Plugin) runDueSchedules(ctx context.Context) {
 			p.logger.Error("scheduler: scan due schedule", "error", err)
 			continue
 		}
+
+		schedulesDue++
 
 		p.logger.Info("scheduler: triggering schedule",
 			"id", id,
@@ -87,9 +107,11 @@ func (p *Plugin) runDueSchedules(ctx context.Context) {
 				"workflow", workflowName,
 				"error", startErr,
 			)
+			workflowsFailed++
 			// Continue to update next_run_at so a single bad schedule
 			// does not block the background worker.
 		} else {
+			workflowsStarted++
 			p.logger.Info("scheduler: workflow started",
 				"id", id,
 				"name", name,
@@ -130,4 +152,6 @@ func (p *Plugin) runDueSchedules(ctx context.Context) {
 	if err := rows.Err(); err != nil {
 		p.logger.Error("scheduler: rows iteration error", "error", err)
 	}
+
+	return schedulesDue, workflowsStarted, workflowsFailed
 }

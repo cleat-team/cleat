@@ -33,6 +33,7 @@ type Plugin struct {
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config
+	env    *plugin.Environment
 }
 
 // Config controls webhook-ingest plugin behaviour.
@@ -61,6 +62,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.mux = env.Mux
+	p.env = env
 
 	// Parse optional config.
 	if len(env.Config) > 0 {

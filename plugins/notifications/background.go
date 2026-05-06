@@ -37,9 +37,22 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case <-ticker.C:
-			if err := p.processDeliveries(ctx); err != nil {
-				p.logger.Error("notifications: delivery processing failed", "error", err)
+			start := time.Now()
+			attempted, succeeded, failed, err := p.processDeliveries(ctx)
+			if err != nil {
+				p.logger.Error("notifications: delivery processing failed",
+					"plugin", p.Info().Name,
+					"error", err,
+				)
+				continue
 			}
+			p.logger.Info("notifications: work cycle completed",
+				"plugin", p.Info().Name,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"deliveries_attempted", attempted,
+				"deliveries_succeeded", succeeded,
+				"deliveries_failed", failed,
+			)
 		}
 	}
 }
@@ -61,7 +74,8 @@ type webhookConfigRow struct {
 
 // processDeliveries queries for pending and retrying deliveries whose retry
 // time has elapsed, and attempts HTTP POST delivery for each.
-func (p *Plugin) processDeliveries(ctx context.Context) error {
+// Returns (attempted, succeeded, failed, error).
+func (p *Plugin) processDeliveries(ctx context.Context) (int, int, int, error) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
 		FROM webhook_delivery d
@@ -71,9 +85,11 @@ func (p *Plugin) processDeliveries(ctx context.Context) error {
 		LIMIT 100
 	`)
 	if err != nil {
-		return fmt.Errorf("query deliveries: %w", err)
+		return 0, 0, 0, fmt.Errorf("query deliveries: %w", err)
 	}
 	defer rows.Close()
+
+	var attempted, succeeded, failed int
 
 	for rows.Next() {
 		var d deliveryRow
@@ -82,25 +98,34 @@ func (p *Plugin) processDeliveries(ctx context.Context) error {
 			continue
 		}
 
-		if err := p.deliver(ctx, d); err != nil {
+		attempted++
+		outcome, err := p.deliver(ctx, d)
+		if err != nil {
 			p.logger.Error("notifications: deliver", "delivery_id", d.ID, "error", err)
+			continue
+		}
+		switch outcome {
+		case "delivered":
+			succeeded++
+		case "failed":
+			failed++
 		}
 	}
 
-	return rows.Err()
+	return attempted, succeeded, failed, rows.Err()
 }
 
 // deliver attempts a single webhook delivery. It reads the webhook config,
 // builds and sends an HTTP POST with HMAC-SHA256 signing, and updates the
-// delivery status accordingly.
-func (p *Plugin) deliver(ctx context.Context, d deliveryRow) error {
+// delivery status accordingly. Returns the outcome ("delivered", "retrying", "failed").
+func (p *Plugin) deliver(ctx context.Context, d deliveryRow) (string, error) {
 	// Look up the webhook config.
 	var cfg webhookConfigRow
 	err := p.db.QueryRowContext(ctx, `
 		SELECT url, secret FROM webhook_config WHERE id = $1
 	`, d.WebhookID).Scan(&cfg.URL, &cfg.Secret)
 	if err != nil {
-		return fmt.Errorf("lookup webhook config: %w", err)
+		return "", fmt.Errorf("lookup webhook config: %w", err)
 	}
 
 	// Build the request body.
@@ -111,7 +136,7 @@ func (p *Plugin) deliver(ctx context.Context, d deliveryRow) error {
 
 	req, err := http.NewRequestWithContext(ctx, "POST", cfg.URL, bytes.NewReader(payloadBytes))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Webhook-Event", d.EventType)
@@ -123,9 +148,9 @@ func (p *Plugin) deliver(ctx context.Context, d deliveryRow) error {
 		// Network or timeout error — record and retry.
 		newCount := d.AttemptCount + 1
 		if newCount >= 10 {
-			return p.markFailed(ctx, d.ID, newCount, fmt.Sprintf("request failed: %v", err))
+			return "failed", p.markFailed(ctx, d.ID, newCount, fmt.Sprintf("request failed: %v", err))
 		}
-		return p.markRetrying(ctx, d.ID, newCount, fmt.Sprintf("request failed: %v", err))
+		return "retrying", p.markRetrying(ctx, d.ID, newCount, fmt.Sprintf("request failed: %v", err))
 	}
 	defer resp.Body.Close()
 
@@ -133,15 +158,15 @@ func (p *Plugin) deliver(ctx context.Context, d deliveryRow) error {
 	respBody := string(respBodyBytes)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return p.markDelivered(ctx, d.ID, d.AttemptCount+1, resp.StatusCode, respBody)
+		return "delivered", p.markDelivered(ctx, d.ID, d.AttemptCount+1, resp.StatusCode, respBody)
 	}
 
 	// Non-2xx response — retry.
 	newCount := d.AttemptCount + 1
 	if newCount >= 10 {
-		return p.markFailed(ctx, d.ID, newCount, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
+		return "failed", p.markFailed(ctx, d.ID, newCount, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
 	}
-	return p.markRetrying(ctx, d.ID, newCount, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
+	return "retrying", p.markRetrying(ctx, d.ID, newCount, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
 }
 
 // markDelivered updates the delivery as successfully delivered.

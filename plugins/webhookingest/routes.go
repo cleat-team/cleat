@@ -61,6 +61,8 @@ type webhookSourceJSON struct {
 	SourceType string    `json:"source_type"`
 	Secret     string    `json:"secret"`
 	Enabled    bool      `json:"enabled"`
+	SignalWorkflowID string    `json:"signal_workflow_id,omitempty"`
+	SignalName       string    `json:"signal_name,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
@@ -68,7 +70,9 @@ type webhookSourceJSON struct {
 type createSourceRequest struct {
 	Name       string `json:"name"`
 	SourceType string `json:"source_type"`
-	Secret     string `json:"secret,omitempty"`
+	Secret           string `json:"secret,omitempty"`
+	SignalWorkflowID string `json:"signal_workflow_id,omitempty"`
+	SignalName       string `json:"signal_name,omitempty"`
 }
 
 type webhookEventJSON struct {
@@ -95,11 +99,12 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// Look up the webhook source.
 	var source webhookSourceJSON
 	err = p.db.QueryRowContext(r.Context(), `
-		SELECT id, tenant_id, name, source_type, secret, enabled, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1
 	`, sourceID).Scan(&source.ID, &source.TenantID, &source.Name, &source.SourceType,
-		&source.Secret, &source.Enabled, &source.CreatedAt, &source.UpdatedAt)
+		&source.Secret, &source.Enabled, &source.SignalWorkflowID, &source.SignalName,
+		&source.CreatedAt, &source.UpdatedAt)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "source not found")
 		return
@@ -189,6 +194,39 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 		"event_type", eventType,
 	)
 
+	// If this source is bound to a workflow, deliver a signal immediately.
+	if source.SignalWorkflowID != "" {
+		signalPayload := map[string]interface{}{
+			"source_id":   sourceID.String(),
+			"event_id":    eventID.String(),
+			"event_type":  eventType,
+			"received_at": now.Format(time.RFC3339),
+		}
+		if json.Valid(body) {
+			signalPayload["payload"] = json.RawMessage(body)
+		} else {
+			signalPayload["payload"] = string(body)
+		}
+		payloadBytes, _ := json.Marshal(signalPayload)
+		signalName := source.SignalName
+		if signalName == "" {
+			signalName = "webhook_received"
+		}
+		if p.env != nil && p.env.SignalWorkflow != nil {
+			if serr := p.env.SignalWorkflow(r.Context(), source.SignalWorkflowID, signalName, string(payloadBytes)); serr != nil {
+				p.logger.Error("webhook-ingest: signal delivery failed",
+					"workflow_id", source.SignalWorkflowID,
+					"error", serr,
+				)
+			} else {
+				p.logger.Info("webhook-ingest: signal delivered",
+					"workflow_id", source.SignalWorkflowID,
+					"event_id", eventID,
+				)
+			}
+		}
+	}
+
 	p.writeJSON(w, 201, map[string]interface{}{
 		"id":         eventID,
 		"event_type": eventType,
@@ -206,7 +244,7 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := p.db.QueryContext(r.Context(), `
-		SELECT id, tenant_id, name, source_type, secret, enabled, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -269,10 +307,19 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
+	var signalWorkflowID interface{}
+	if req.SignalWorkflowID != "" {
+		signalWorkflowID = req.SignalWorkflowID
+	}
+	signalName := req.SignalName
+	if signalName == "" {
+		signalName = "webhook_received"
+	}
+
 	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret, enabled, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, true, $6, $6)
-	`, tid, id, req.Name, req.SourceType, req.Secret, now)
+		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret, enabled, created_at, updated_at, signal_workflow_id, signal_name)
+		VALUES ($1, $2, $3, $4, $5, true, $6, $6, $7, $8)
+	`, tid, id, req.Name, req.SourceType, req.Secret, now, signalWorkflowID, signalName)
 	if err != nil {
 		p.logger.Error("webhook-ingest: create source", "error", err)
 		p.writeError(w, 500, "failed to create source")
@@ -285,15 +332,17 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	p.logger.Info("webhook-ingest: source created", "id", id, "tenant", tid)
 
 	p.writeJSON(w, 201, map[string]interface{}{
-		"id":           id,
-		"tenant_id":    tid,
-		"name":         req.Name,
-		"source_type":  req.SourceType,
-		"secret":       req.Secret,
-		"enabled":      true,
-		"endpoint_url": endpointURL,
-		"created_at":   now,
-		"updated_at":   now,
+		"id":                 id,
+		"tenant_id":          tid,
+		"name":               req.Name,
+		"source_type":        req.SourceType,
+		"secret":             req.Secret,
+		"signal_workflow_id": req.SignalWorkflowID,
+		"signal_name":        signalName,
+		"enabled":            true,
+		"endpoint_url":       endpointURL,
+		"created_at":         now,
+		"updated_at":         now,
 	})
 }
 
@@ -315,11 +364,12 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 
 	var s webhookSourceJSON
 	err = p.db.QueryRowContext(r.Context(), `
-		SELECT id, tenant_id, name, source_type, secret, enabled, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND tenant_id = $2
 	`, id, tid).Scan(&s.ID, &s.TenantID, &s.Name, &s.SourceType,
-		&s.Secret, &s.Enabled, &s.CreatedAt, &s.UpdatedAt)
+		&s.Secret, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
+		&s.CreatedAt, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "source not found")
 		return

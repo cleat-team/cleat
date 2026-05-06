@@ -26,20 +26,27 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case <-ticker.C:
-			p.cleanup(ctx)
+			start := time.Now()
+			n := p.cleanup(ctx)
+			p.logger.Info("eventstore: work cycle completed",
+				"plugin", p.Info().Name,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"deleted_events", n,
+			)
 		}
 	}
 }
 
-// cleanup runs a single round of event stream housekeeping.
-func (p *Plugin) cleanup(ctx context.Context) {
+// cleanup runs a single round of event stream housekeeping and returns the
+// number of deleted events.
+func (p *Plugin) cleanup(ctx context.Context) int64 {
 	retentionDays := p.config.RetentionDays
 	if retentionDays == 0 {
 		retentionDays = 30 // default 30 days
 	}
 	if retentionDays < 0 {
 		p.logger.Info("eventstore: cleanup skipped (retention disabled)")
-		return
+		return 0
 	}
 
 	result, err := p.db.ExecContext(ctx,
@@ -49,7 +56,7 @@ func (p *Plugin) cleanup(ctx context.Context) {
 	)
 	if err != nil {
 		p.logger.Error("eventstore: cleanup failed", "error", err)
-		return
+		return 0
 	}
 	n, _ := result.RowsAffected()
 	if n > 0 {
@@ -58,4 +65,5 @@ func (p *Plugin) cleanup(ctx context.Context) {
 			"retention_days", retentionDays,
 		)
 	}
+	return n
 }

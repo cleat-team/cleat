@@ -23,8 +23,16 @@ func (p *Plugin) Run(ctx context.Context) error {
 	p.logger.Info("rate-limiter: background reload started, interval=30s")
 
 	// Do an initial load so the middleware has data immediately.
-	if err := p.reload(ctx); err != nil {
+	start := time.Now()
+	n, err := p.reload(ctx)
+	if err != nil {
 		p.logger.Error("rate-limiter: initial reload failed", "error", err)
+	} else {
+		p.logger.Info("rate-limiter: work cycle completed",
+			"plugin", p.Info().Name,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"configs_reloaded", n,
+		)
 	}
 
 	for {
@@ -34,22 +42,34 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case <-ticker.C:
-			if err := p.reload(ctx); err != nil {
-				p.logger.Error("rate-limiter: reload failed", "error", err)
+			start := time.Now()
+			n, err := p.reload(ctx)
+			if err != nil {
+				p.logger.Error("rate-limiter: reload failed",
+					"plugin", p.Info().Name,
+					"error", err,
+				)
+				continue
 			}
+			p.logger.Info("rate-limiter: work cycle completed",
+				"plugin", p.Info().Name,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"configs_reloaded", n,
+			)
 		}
 	}
 }
 
 // reload queries all rate limit configs from the database and rebuilds the
 // in-memory token bucket map atomically under the plugin mutex.
-func (p *Plugin) reload(ctx context.Context) error {
+// Returns the number of configs reloaded.
+func (p *Plugin) reload(ctx context.Context) (int, error) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT tenant_id, limit_key, max_requests, window_seconds
 		FROM rate_limits
 	`)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer rows.Close()
 
@@ -66,13 +86,14 @@ func (p *Plugin) reload(ctx context.Context) error {
 		newBuckets[key] = newTokenBucket(maxRequests, windowSeconds)
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
 
 	p.mu.Lock()
 	p.buckets = newBuckets
 	p.mu.Unlock()
 
-	p.logger.Debug("rate-limiter: reloaded rate limits", "count", len(newBuckets))
-	return nil
+	count := len(newBuckets)
+	p.logger.Debug("rate-limiter: reloaded rate limits", "count", count)
+	return count, nil
 }

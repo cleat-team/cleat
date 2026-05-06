@@ -30,9 +30,22 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case <-ticker.C:
-			if err := p.pollPending(ctx); err != nil {
-				p.logger.Error("jobqueue: poll failed", "error", err)
+			start := time.Now()
+			claimed, dispatched, failed, err := p.pollPending(ctx)
+			if err != nil {
+				p.logger.Error("jobqueue: poll failed",
+					"plugin", p.Info().Name,
+					"error", err,
+				)
+				continue
 			}
+			p.logger.Info("jobqueue: work cycle completed",
+				"plugin", p.Info().Name,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"jobs_claimed", claimed,
+				"jobs_dispatched", dispatched,
+				"jobs_failed", failed,
+			)
 		}
 	}
 }
@@ -40,7 +53,8 @@ func (p *Plugin) Run(ctx context.Context) error {
 // pollPending scans for pending jobs and dispatches them. For each pending job,
 // it atomically claims the job (status -> 'running') and dispatches the
 // referenced workflow. Jobs without a def_name are marked completed immediately.
-func (p *Plugin) pollPending(ctx context.Context) error {
+// Returns (claimed, dispatched, failed, error).
+func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 	rows, err := p.db.QueryContext(ctx, `
 		SELECT tenant_id, queue_name, job_id, payload, def_name, input
 		FROM task_queue
@@ -49,9 +63,11 @@ func (p *Plugin) pollPending(ctx context.Context) error {
 		LIMIT 10
 	`)
 	if err != nil {
-		return err
+		return 0, 0, 0, err
 	}
 	defer rows.Close()
+
+	var claimed, dispatched, failed int
 
 	for rows.Next() {
 		var (
@@ -83,6 +99,7 @@ func (p *Plugin) pollPending(ctx context.Context) error {
 			// Another worker claimed it; skip.
 			continue
 		}
+		claimed++
 
 		if defName != nil && *defName != "" {
 			// Dispatch as a workflow.
@@ -97,6 +114,7 @@ func (p *Plugin) pollPending(ctx context.Context) error {
 					"def_name", *defName,
 					"error", err,
 				)
+				failed++
 				if _, updateErr := p.db.ExecContext(ctx, `
 					UPDATE task_queue
 					SET status = 'failed', completed_at = now()
@@ -107,6 +125,7 @@ func (p *Plugin) pollPending(ctx context.Context) error {
 				continue
 			}
 
+			dispatched++
 			p.logger.Info("jobqueue: dispatched workflow",
 				"job_id", jobID,
 				"def_name", *defName,
@@ -136,6 +155,5 @@ func (p *Plugin) pollPending(ctx context.Context) error {
 		}
 	}
 
-	return rows.Err()
+	return claimed, dispatched, failed, rows.Err()
 }
-

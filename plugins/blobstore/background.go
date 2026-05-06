@@ -28,9 +28,22 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case <-ticker.C:
-			if err := p.cleanupExpired(ctx); err != nil {
-				p.logger.Error("blobstore: TTL cleanup failed", "error", err)
+			start := time.Now()
+			staleRefs, expiredEntries, orphanedBlobs, err := p.cleanupExpired(ctx)
+			if err != nil {
+				p.logger.Error("blobstore: TTL cleanup failed",
+					"plugin", p.Info().Name,
+					"error", err,
+				)
+				continue
 			}
+			p.logger.Info("blobstore: work cycle completed",
+				"plugin", p.Info().Name,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"stale_refs", staleRefs,
+				"expired_entries", expiredEntries,
+				"orphaned_blobs", orphanedBlobs,
+			)
 		}
 	}
 }
@@ -48,17 +61,21 @@ func (p *Plugin) Run(ctx context.Context) error {
 //
 // Phase 3: Garbage-collect blob_content rows with ref_count <= 0, but only
 // if no in-flight workflow references the content via workflow_blob_refs.
-func (p *Plugin) cleanupExpired(ctx context.Context) error {
+func (p *Plugin) cleanupExpired(ctx context.Context) (staleRefs, expiredEntries, orphanedBlobs int, err error) {
 	// Phase 1: clean up stale workflow blob references. A ref is stale when
 	// the referencing workflow is no longer in-flight (done, failed, cancelled).
-	_, err := p.db.ExecContext(ctx, `
+	result1, err := p.db.ExecContext(ctx, `
 		DELETE FROM workflow_blob_refs
 		WHERE workflow_id NOT IN (
 			SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
 		)
 	`)
 	if err != nil {
-		return err
+		return staleRefs, expiredEntries, orphanedBlobs, err
+	}
+	if result1 != nil {
+		r, _ := result1.RowsAffected()
+		staleRefs = int(r)
 	}
 
 	// Phase 2: delete expired and soft-deleted index entries, decrementing
@@ -74,9 +91,10 @@ func (p *Plugin) cleanupExpired(ctx context.Context) error {
 		WHERE sha256 IN (SELECT sha256 FROM deleted)
 	`)
 	if err != nil {
-		return err
+		return staleRefs, expiredEntries, orphanedBlobs, err
 	}
 	affected, _ := result.RowsAffected()
+	expiredEntries = int(affected)
 	if affected > 0 {
 		p.logger.Info("blobstore: expired/deleted index entries cleaned", "count", affected)
 	}
@@ -93,7 +111,7 @@ func (p *Plugin) cleanupExpired(ctx context.Context) error {
 		RETURNING sha256, storage_backend
 	`)
 	if err != nil {
-		return err
+		return staleRefs, expiredEntries, orphanedBlobs, err
 	}
 	defer orphanRows.Close()
 
@@ -116,6 +134,7 @@ func (p *Plugin) cleanupExpired(ctx context.Context) error {
 	if orphaned > 0 {
 		p.logger.Info("blobstore: orphaned content cleaned", "count", orphaned)
 	}
+	orphanedBlobs = orphaned
 
-	return nil
+	return staleRefs, expiredEntries, orphanedBlobs, nil
 }

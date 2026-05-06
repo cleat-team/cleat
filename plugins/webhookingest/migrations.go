@@ -42,5 +42,12 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS webhook_sources;
 			`,
 		},
+		{
+			Version: 3,
+			Up: `ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS signal_workflow_id TEXT;
+ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS signal_name TEXT NOT NULL DEFAULT 'webhook_received';`,
+			Down: `ALTER TABLE webhook_sources DROP COLUMN IF EXISTS signal_workflow_id;
+ALTER TABLE webhook_sources DROP COLUMN IF EXISTS signal_name;`,
+		},
 	}
 }

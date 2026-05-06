@@ -28,15 +28,27 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case <-ticker.C:
-			if err := p.cleanupRetention(ctx); err != nil {
-				p.logger.Error("audit-log: retention cleanup failed", "error", err)
+			start := time.Now()
+			affected, err := p.cleanupRetention(ctx)
+			if err != nil {
+				p.logger.Error("audit-log: retention cleanup failed",
+					"plugin", p.Info().Name,
+					"error", err,
+				)
+				continue
 			}
+			p.logger.Info("audit-log: work cycle completed",
+				"plugin", p.Info().Name,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"deleted_events", affected,
+			)
 		}
 	}
 }
 
 // cleanupRetention deletes audit events older than the configured retention period.
-func (p *Plugin) cleanupRetention(ctx context.Context) error {
+// Returns the number of deleted events.
+func (p *Plugin) cleanupRetention(ctx context.Context) (int64, error) {
 	retention := time.Duration(p.config.RetentionDays) * 24 * time.Hour
 	cutoff := time.Now().Add(-retention)
 
@@ -45,7 +57,7 @@ func (p *Plugin) cleanupRetention(ctx context.Context) error {
 		WHERE timestamp < $1
 	`, cutoff)
 	if err != nil {
-		return fmt.Errorf("delete old events: %w", err)
+		return 0, fmt.Errorf("delete old events: %w", err)
 	}
 	affected, _ := result.RowsAffected()
 	if affected > 0 {
@@ -54,5 +66,5 @@ func (p *Plugin) cleanupRetention(ctx context.Context) error {
 			"cutoff", cutoff,
 		)
 	}
-	return nil
+	return affected, nil
 }

@@ -50,6 +50,11 @@ type Environment struct {
 	// Plugins use this to trigger workflow executions (e.g., from cron schedules
 	// or job queues). Returns the run ID of the new workflow instance.
 	StartWorkflow func(ctx context.Context, defName string, input json.RawMessage) (runID string, err error)
+
+	// SignalWorkflow delivers a signal to a running workflow instance.
+	// The signal name and JSON payload are recorded deterministically
+	// in the workflow_signals table.
+	SignalWorkflow func(ctx context.Context, workflowID, signalName, payload string) error
 }
 
 // --- Optional interfaces (discovered by loader via type assertion) ---

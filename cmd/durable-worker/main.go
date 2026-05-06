@@ -85,6 +85,7 @@ func main() {
 		plugList       []*plugin.LoadedPlugin
 		plugHandler    http.Handler
 		plugMux        *http.ServeMux
+		bgWg          sync.WaitGroup
 	)
 
 	var store host.WorkflowStore
@@ -162,6 +163,10 @@ func main() {
 				runID, _, err := store.StartNewRun(ctx, defName, versions[0], input, "")
 				return runID, err
 			},
+
+			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
+				return store.DeliverSignal(ctx, workflowID, signalName, payload)
+			},
 		}
 
 		plugList, err = plugin.LoadAll(ctx, pluginEnv)
@@ -218,7 +223,9 @@ func main() {
 				continue
 			}
 			if p, ok := lp.Plugin.(plugin.HasBackground); ok {
+				bgWg.Add(1)
 				go func(bg plugin.HasBackground) {
+					defer bgWg.Done()
 					if berr := bg.Run(ctx); berr != nil {
 						log.Printf("[worker %s] plugin %s: background worker exited: %v",
 							workerID, bg.Info().Name, berr)
@@ -327,6 +334,18 @@ func main() {
 		<-sigCh
 		log.Printf("[worker %s] Shutting down...", workerID)
 		cancel()
+		log.Printf("[worker %s] waiting for background workers to stop...", workerID)
+		done := make(chan struct{})
+		go func() {
+			bgWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			log.Printf("[worker %s] all background workers stopped", workerID)
+		case <-time.After(30 * time.Second):
+			log.Printf("[worker %s] timed out waiting for background workers after 30s", workerID)
+		}
 	}()
 
 	w.Run()
