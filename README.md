@@ -1,6 +1,6 @@
 # cleat
 
-A durable execution framework for Go. Workflows are written in near-standard Go, compiled to WebAssembly, and stored in PostgreSQL. The framework handles replay, checkpointing, failover, and observability with minimal developer overhead.
+A durable execution framework for Go and Rust. Workflows are written in near-standard Go (or Rust with `#[durable_entry]`), compiled to WebAssembly, and stored in PostgreSQL. The framework handles replay, checkpointing, failover, and observability with minimal developer overhead. Includes an embedded Svelte web UI for workflow monitoring and schedule management.
 
 ## Installation
 
@@ -29,6 +29,8 @@ go install github.com/rcownie/durable/cmd/durable-gen@latest
 - **Go 1.26+** with `GOOS=wasip1 GOARCH=wasm` target (bundled with Go 1.22+)
 - **PostgreSQL 14+** for the worker daemon and workflow storage
 - **TinyGo** (optional) for smaller WASM binaries via `--target tinygo`
+- **Rust toolchain** (optional) for Rust workflows via `--target rust`
+- **Node.js** (optional) to build the web UI for the worker dashboard
 
 ## Quick start
 
@@ -79,17 +81,27 @@ func PlaceOrder(h durable.HostCalls, userID string, cart []CartItem) (string, er
 Build and deploy:
 
 ```bash
-# 1. Compile the workflow package to WASM
+# 1. Compile the workflow package to WASM (Go)
 durable build -o ./out ./testdata/basic/
 
-# 2. Validate without compiling
+# 2. Compile a Rust workflow
+durable build --target rust -o ./out ./examples/rust-workflow/
+
+# 3. Validate without compiling
 durable vet ./testdata/basic/
 
-# 3. Deploy to PostgreSQL (dry run without --db)
+# 4. Deploy to PostgreSQL
 durable deploy --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
     --name place_order ./out/place_order.wasm
 
-# 4. Run SDK and unit tests
+# 5. Run the worker with the web UI
+durable-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
+    --api-addr :8080
+
+# 6. Manage cron schedules
+durable schedule add hourly-report --cron "0 * * * *" --def place_order
+
+# 7. Run SDK and unit tests
 go test ./...
 ```
 
@@ -98,8 +110,8 @@ go test ./...
 ```
 +------------------+         +-------------------+         +-----------------+
 |  Workflow Author  |         |  CLI (durable)    |         |  PostgreSQL     |
-|  (Go source)      | ------> |  build / vet /    | ------> |  workflow_defs  |
-|                   |         |  deploy           |         |  (WASM blobs)   |
+|  (Go / Rust)      | ------> |  build / vet /    | ------> |  workflow_defs  |
+|                   |         |  deploy / schedule|         |  (WASM blobs)   |
 +------------------+         +-------------------+         +-----------------+
         |                            |                              |
         |  writes                    |  1. Load & analyze           |  stores
@@ -115,12 +127,12 @@ go test ./...
 +------------------+         +-------------------+         +-----------------+
                                                              |  Stateless      |
                                                              |  Workers        |
-                                                             |                 |
-                                                             |  SKIP LOCKED    |
-                                                             |  claim instance |
-                                                             |  load WASM      |
-                                                             |  replay / exec  |
-                                                             +-----------------+
++------------------+                                          |                 |
+|  Web UI (Svelte)  | <-- HTTP -->                           |  SKIP LOCKED    |
+|  embedded in      |                                          |  claim instance |
+|  worker binary    |                                          |  load WASM      |
+|  /api/* endpoints |                                          |  replay / exec  |
++------------------+                                          +-----------------+
 ```
 
 ### Transformer Pipeline
@@ -137,7 +149,7 @@ The CLI's `build` command runs a five-stage pipeline:
 
 The host runtime uses **wazero** (a zero-dependency WebAssembly runtime for Go) to execute compiled WASM modules. Execution follows a checkpoint/replay model:
 
-- WASM modules import 14 host functions from the `env` module (e.g., `durable_call`, `durable_sleep`, `durable_now`).
+- WASM modules import 15 host functions from the `env` module (e.g., `durable_call`, `durable_sleep`, `durable_now`, `durable_call_heartbeat`).
 - On first execution, the host runs the entry point, records every `DurableCall` request/response in the event history, and persists state to PostgreSQL.
 - On replay (e.g., after a worker crash or suspension), the host replays the event history. Completed calls return cached responses instead of re-executing. The workflow resumes from the last incomplete step.
 
@@ -147,9 +159,9 @@ The worker (`durable-worker`) polls PostgreSQL for runnable workflow instances u
 
 ### WASM Boundary
 
-The WASM boundary is defined by 14 host function imports on the `env` module:
+The WASM boundary is defined by 15 host function imports on the `env` module:
 
-`durable_call`, `durable_sleep`, `durable_now`, `durable_random`, `durable_log`, `durable_version`, `durable_min_version`, `durable_defer`, `durable_poll_cancellation`, `durable_poll_signal`, `durable_continue_as_new`, `durable_child_workflow`, `durable_await_child`, `durable_await_signals`, `set_query_state`
+`durable_call`, `durable_call_heartbeat`, `durable_sleep`, `durable_now`, `durable_random`, `durable_log`, `durable_version`, `durable_min_version`, `durable_defer`, `durable_poll_cancellation`, `durable_poll_signal`, `durable_continue_as_new`, `durable_child_workflow`, `durable_await_child`, `durable_await_signals`, `set_query_state`
 
 Strings cross the boundary through a pointer+length protocol: the caller writes string data into the module's linear memory at a scratch region (10 MB offset) and passes `(ptr, len)` pairs. Responses are written back to the same region. The output buffer is 64 KB by default.
 
@@ -278,7 +290,7 @@ durable build [-o <dir>] [--target <target>] <package>
 
 Flags:
   -o <dir>        Output directory for generated files (default: temp dir)
-  --target        Compilation target: "go" (default) or "tinygo"
+  --target        Compilation target: "go" (default), "tinygo", or "rust"
 ```
 
 The pipeline loads the package, analyzes call graphs, computes durable closures, verifies HostCalls threading, generates WASM imports/exports and host adapters, and compiles to a `wasip1` binary.
@@ -302,7 +314,7 @@ durable deploy [--name <name>] [--namespace <ns>] <wasm-file>
 
 Flags:
   --name <name>      Workflow name (derived from filename if not set)
-  --namespace <ns>   Namespace (reserved for future use)
+  --namespace <ns>   Namespace (default: "default")
 
 Common flags:
   --db <connstr>     PostgreSQL connection string (or DURABLE_DATABASE_URL env)
@@ -364,6 +376,8 @@ durable-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--db` | `DATABASE_URL` env | PostgreSQL connection URL |
+| `--api-addr` | (disabled) | HTTP API listen address (e.g., `:8080`) — serves REST API, metrics, and web UI |
+| `--namespace` | `default` | Workflow namespace to claim from |
 | `--concurrency` | 10 | Max concurrent workflow executions |
 | `--heartbeat` | 5s | Heartbeat interval for claimed instances |
 | `--poll` | 500ms | Poll interval when no work is available |
@@ -373,8 +387,11 @@ durable-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
 1. The dispatch loop calls `ClaimWorkflow`, which runs `SELECT ... FOR UPDATE SKIP LOCKED` on `workflow_instances` rows with `status = 'ready'` and `next_wake_at <= now()`.
 2. Each claimed instance is executed in its own goroutine (up to `--concurrency`).
 3. A background heartbeat goroutine updates `heartbeat_at` for all in-flight instances. If the heartbeat fails (e.g., DB connection loss), the worker reconnects with exponential backoff.
-4. On graceful shutdown (SIGINT/SIGTERM), the worker waits for all in-flight workflows before exiting.
-5. WASM modules are cached in memory (keyed by `def_name:def_version`) to avoid repeated database loads.
+4. A reaper goroutine reclaims instances with stale heartbeats every 30 seconds.
+5. A schedule loop fires due cron schedules every 15 seconds.
+6. On graceful shutdown (SIGINT/SIGTERM), the worker waits for all in-flight workflows before exiting.
+7. WASM modules are cached in memory (keyed by `def_name:def_version`) to avoid repeated database loads.
+8. When `--api-addr` is set, the worker serves a REST API at `/api/*`, Prometheus metrics at `/metrics`, and the embedded Svelte web UI at `/`.
 
 ### Concurrency and scaling
 
@@ -426,7 +443,7 @@ psql -U postgres -d cleat -f schema.sql
 |--------|------|-------------|
 | workflow_id | TEXT | Reference to workflow_instances.id |
 | step | INTEGER | Monotonically increasing event sequence number |
-| event_type | TEXT | call, sleep, await_signals, signal_received, defer, child_workflow, continue_as_new |
+| event_type | TEXT | call, sleep, await_signals, signal_received, defer, child_workflow, continue_as_new, heartbeat |
 | service | TEXT | Target service name (for call events) |
 | operation | TEXT | Target operation name (for call events) |
 | request | JSONB | Request payload |
@@ -560,10 +577,29 @@ Using `TestEnv` avoids the full WASM compilation cycle (seconds, not millisecond
 
 ## Status and roadmap
 
-**P0 (stable):** Timers/sleep, retry policies, idempotency keys, dead letter queue, secrets/credentials.
+### Done
 
-**P1 (stable):** Signals/external events, workflow cancellation, DurableDefer (cleanup on exit), testing framework, transformer (Go to WASM).
+- Go transformer pipeline (`durable build`) — analysis, call graph, closure, transform, WASM compile
+- Rust transformer pipeline (`durable build --target rust`) — `durable-sdk` crate + `#[durable_entry]` proc-macro
+- Timers/sleep, retry policies, server-side retry (`durable_call_retry`)
+- Signals/external events, workflow cancellation
+- DurableDefer, Saga (compensating transactions)
+- Child workflows, ContinueAsNew
+- Testing framework (`durabletest.TestEnv`) — WASM-free, deterministic clock
+- Dev mode (`durable dev`) — WASM-free local execution
+- Dead letter queue
+- Queries (`SetQueryState` + `GET /api/workflows/:id/query?key=X`)
+- Cron scheduling (`durable schedule` CLI + REST API)
+- Activity heartbeating (`DurableCallWithHeartbeat`)
+- Namespace isolation (`--namespace` flag)
+- Prometheus metrics (`/metrics`)
+- Svelte web UI (dashboard, workflow list/detail, schedule management)
+- Typed client code generator (`durable-gen`)
 
-**P2 (planned):** Queries, schema evolution, scheduling/CRON, child workflows.
+### Next
 
-**P3 (future):** Multi-tenancy, workflow prioritization, history compaction.
+- **Task routing** — route workflow types to specific worker pools
+- **Automatic history compaction** — prune long event histories
+- **Getting-started tutorial** — end-to-end walkthrough
+- **Load testing and performance benchmarks**
+- **Ecosystem integrations** — Helm chart, Grafana dashboards
