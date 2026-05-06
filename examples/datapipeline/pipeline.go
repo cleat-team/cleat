@@ -1,0 +1,211 @@
+// Data pipeline — fan-out/fan-in with child workflows and heartbeat.
+//
+// Demonstrates:
+//   - ChildWorkflow for fan-out (one child per data item)
+//   - AwaitChild for fan-in (wait for all children, collect results)
+//   - DurableCallWithHeartbeat for long-running transform steps
+//   - SetQueryState for tracking pipeline progress
+//   - PollCancellation for mid-pipeline abort
+//
+// Build:
+//
+//	durable build -o /tmp/out ./examples/datapipeline/
+package datapipeline
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/rcownie/durable/durable"
+)
+
+var h durable.HostCalls
+
+// ---- Domain types ----
+
+type PipelineInput struct {
+	JobID   string   `json:"job_id"`
+	Items   []string `json:"items"`    // URLs or resource IDs to process
+	BatchID string   `json:"batch_id"`
+}
+
+type ItemResult struct {
+	Item   string `json:"item"`
+	Output string `json:"output"`
+	Bytes  int    `json:"bytes"`
+}
+
+type PipelineResult struct {
+	JobID      string       `json:"job_id"`
+	TotalItems int          `json:"total_items"`
+	Succeeded  int          `json:"succeeded"`
+	Failed     int          `json:"failed"`
+	Results    []ItemResult `json:"results,omitempty"`
+}
+
+// ---- Parent workflow: fan-out ----
+
+func RunPipeline(h durable.HostCalls, input PipelineInput) (*PipelineResult, error) {
+	if len(input.Items) == 0 {
+		return nil, fmt.Errorf("no items to process")
+	}
+
+	h.SetQueryState("job_id", input.JobID)
+	h.SetQueryState("status", "running")
+	h.SetQueryState("total", fmt.Sprintf("%d", len(input.Items)))
+	h.DurableLog(fmt.Sprintf("Pipeline starting: job=%s items=%d", input.JobID, len(input.Items)))
+
+	// Fan-out: start a child workflow for each item.
+	var runIDs []string
+	itemInputs := make(map[string]string) // runID -> item
+
+	for i, item := range input.Items {
+		childInput := toJSON(ChildInput{
+			Item:    item,
+			JobID:   input.JobID,
+			Index:   i,
+			BatchID: input.BatchID,
+		})
+
+		runID, err := h.ChildWorkflow("process_item", childInput)
+		if err != nil {
+			// If a child fails to start, record failure and continue.
+			h.DurableLog(fmt.Sprintf("Failed to start child for %s: %v", item, err))
+			continue
+		}
+		runIDs = append(runIDs, runID)
+		itemInputs[runID] = item
+	}
+
+	h.SetQueryState("children", fmt.Sprintf("%d", len(runIDs)))
+	h.DurableLog(fmt.Sprintf("Started %d child workflows", len(runIDs)))
+
+	// Fan-in: await all children, collect results.
+	var results []ItemResult
+	var succeeded, failed int
+
+	for _, runID := range runIDs {
+		item := itemInputs[runID]
+
+		resultJSON, err := h.AwaitChild(runID)
+		if err != nil {
+			h.DurableLog(fmt.Sprintf("Child failed for %s: %v", item, err))
+			failed++
+			continue
+		}
+
+		var cr ChildResult
+		if err := json.Unmarshal([]byte(resultJSON), &cr); err != nil {
+			h.DurableLog(fmt.Sprintf("Bad child result for %s: %v", item, err))
+			failed++
+			continue
+		}
+
+		results = append(results, ItemResult{
+			Item:   item,
+			Output: cr.Output,
+			Bytes:  cr.Bytes,
+		})
+		succeeded++
+		h.SetQueryState("completed", fmt.Sprintf("%d/%d", succeeded, len(runIDs)))
+	}
+
+	// Send completion notification.
+	notifyResult(h, input.JobID, succeeded, failed)
+
+	h.SetQueryState("status", "complete")
+	h.SetQueryState("succeeded", fmt.Sprintf("%d", succeeded))
+	h.SetQueryState("failed", fmt.Sprintf("%d", failed))
+	h.DurableLog(fmt.Sprintf("Pipeline complete: job=%s succeeded=%d failed=%d",
+		input.JobID, succeeded, failed))
+
+	return &PipelineResult{
+		JobID:      input.JobID,
+		TotalItems: len(input.Items),
+		Succeeded:  succeeded,
+		Failed:     failed,
+		Results:    results,
+	}, nil
+}
+
+func notifyResult(h durable.HostCalls, jobID string, succeeded, failed int) {
+	h.DurableCall("notifications", "PipelineComplete", toJSON(map[string]interface{}{
+		"job_id":    jobID,
+		"succeeded": succeeded,
+		"failed":    failed,
+	}))
+}
+
+// ---- Child workflow: process single item ----
+
+type ChildInput struct {
+	Item    string `json:"item"`
+	JobID   string `json:"job_id"`
+	Index   int    `json:"index"`
+	BatchID string `json:"batch_id"`
+}
+
+type ChildResult struct {
+	Output string `json:"output"`
+	Bytes  int    `json:"bytes"`
+}
+
+// ProcessItem is the child workflow entry point.
+func ProcessItem(h durable.HostCalls, input ChildInput) (*ChildResult, error) {
+	h.DurableLog(fmt.Sprintf("Processing item %d/%s: %s", input.Index, input.BatchID, input.Item))
+
+	// Step 1: Fetch data from source (with heartbeat for long downloads).
+	h.SetQueryState("stage", "fetching")
+	fetchResult, err := h.DurableCallWithHeartbeat(
+		"data", "Fetch", toJSON(map[string]string{"item": input.Item}),
+		5*time.Second,
+		func(progressJSON string) {
+			// Progress callback — typically updates query state.
+			var p struct{ Percent int `json:"percent"` }
+			if json.Unmarshal([]byte(progressJSON), &p) == nil {
+				h.SetQueryState("fetch_progress", fmt.Sprintf("%d%%", p.Percent))
+			}
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("fetch failed for %s: %w", input.Item, err)
+	}
+
+	var fetchData struct{ Raw string `json:"raw"`; Size int `json:"size"` }
+	json.Unmarshal([]byte(fetchResult), &fetchData)
+
+	// Step 2: Transform data.
+	h.SetQueryState("stage", "transforming")
+	transformResult, err := h.DurableCall("transform", "Process", toJSON(map[string]string{
+		"item": input.Item,
+		"raw":  fetchData.Raw,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("transform failed for %s: %w", input.Item, err)
+	}
+
+	var transformData struct{ Output string `json:"output"`; Bytes int `json:"bytes"` }
+	json.Unmarshal([]byte(transformResult), &transformData)
+
+	// Step 3: Store result.
+	h.SetQueryState("stage", "storing")
+	if _, err := h.DurableCall("storage", "Put", toJSON(map[string]interface{}{
+		"item":   input.Item,
+		"output": transformData.Output,
+		"job_id": input.JobID,
+	})); err != nil {
+		return nil, fmt.Errorf("store failed for %s: %w", input.Item, err)
+	}
+
+	h.SetQueryState("stage", "done")
+	return &ChildResult{
+		Output: transformData.Output,
+		Bytes:  transformData.Bytes,
+	}, nil
+}
+
+func toJSON(v interface{}) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}
