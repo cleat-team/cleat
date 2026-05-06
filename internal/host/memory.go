@@ -7,7 +7,7 @@
 //   HostHandler — per-execution session interface (carried in context)
 //
 // The host reads/writes strings in WASM linear memory using (ptr, len) pairs.
-// All 14 host function imports are registered on the "env" module. Per-execution
+// All host function imports are registered on the "env" module. Per-execution
 // state (replay history, step counter) is carried in context.Context.
 package host
 

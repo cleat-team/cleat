@@ -220,6 +220,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		SELECT step, event_type, service, operation, request, response, error,
 		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 		       defer_description, defer_id, child_name, child_input, run_id, new_input
+		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error
 		FROM event_history
 		WHERE workflow_id = $1
 		ORDER BY step
@@ -237,11 +238,13 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		var signalNames, signalName, signalPayload sql.NullString
 		var deferDesc, deferID sql.NullString
 		var childName, childInput, runID, newInput sql.NullString
+		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
 			&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
-			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput); err != nil {
+			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
+			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
@@ -261,6 +264,11 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.ChildInput = childInput.String
 		rec.RunID = runID.String
 		rec.NewInput = newInput.String
+		rec.PluginName = pluginName.String
+		rec.PluginFunc = pluginFunc.String
+		rec.PluginInput = pluginInput.String
+		rec.PluginOutput = pluginOutput.String
+		rec.PluginError = pluginErr.String
 
 		history = append(history, rec)
 	}
@@ -278,8 +286,9 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
-			defer_description, defer_id, child_name, child_input, run_id, new_input)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+			defer_description, defer_id, child_name, child_input, run_id, new_input,
+			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 		ON CONFLICT (workflow_id, step) DO NOTHING
 	`)
 	if err != nil {
@@ -293,7 +302,8 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
 			nullStr(rec.SignalName), nullStr(rec.SignalPayload),
 			nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-			nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput))
+			nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
+				nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError))
 		if err != nil {
 			return fmt.Errorf("append history batch: exec step %d: %w", rec.Step, err)
 		}

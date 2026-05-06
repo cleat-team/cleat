@@ -27,6 +27,7 @@ const (
 	EventTypeContinueAsNew    EventType = "continue_as_new"
 	EventTypeHeartbeat        EventType = "heartbeat"
 	EventTypeAwaitAllChildren EventType = "await_all_children"
+		EventTypePluginCall       EventType = "plugin_call"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -63,6 +64,13 @@ type EventRecord struct {
 
 	// ContinueAsNew fields.
 	NewInput string `json:"new_input,omitempty"`
+
+	// Plugin call fields.
+	PluginName   string `json:"plugin_name,omitempty"`
+	PluginFunc   string `json:"plugin_func,omitempty"`
+	PluginInput  string `json:"plugin_input,omitempty"`
+	PluginOutput string `json:"plugin_output,omitempty"`
+	PluginError  string `json:"plugin_error,omitempty"`
 }
 
 // CallRecord is kept for backward compatibility in tests.
@@ -129,6 +137,28 @@ type ChildWorkflowStore interface {
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
 }
 
+// PluginFunc is a plugin host function implementation.
+// Takes JSON input, returns JSON output. The engine handles WASM I/O.
+type PluginFunc func(ctx context.Context, inputJSON string) (outputJSON string, err error)
+
+// PluginRegistry maps plugin function names to implementations.
+type PluginRegistry struct {
+	funcs map[string]PluginFunc // fullName = "pluginName/functionName"
+}
+
+func NewPluginRegistry() *PluginRegistry {
+	return &PluginRegistry{funcs: make(map[string]PluginFunc)}
+}
+
+func (pr *PluginRegistry) Register(pluginName, funcName string, fn PluginFunc) {
+	pr.funcs[pluginName+"/"+funcName] = fn
+}
+
+func (pr *PluginRegistry) Lookup(pluginName, funcName string) (PluginFunc, bool) {
+	fn, ok := pr.funcs[pluginName+"/"+funcName]
+	return fn, ok
+}
+
 // RetryableError is optionally implemented by errors to indicate retryability.
 type RetryableError interface {
 	Retryable() bool
@@ -146,6 +176,7 @@ type Engine struct {
 	workflowID      string
 	childWfStore    ChildWorkflowStore
 	compactionState *CompactionState
+		pluginRegistry  *PluginRegistry
 }
 
 // EngineOption configures an Engine.
@@ -174,6 +205,11 @@ func WithChildWorkflowStore(cws ChildWorkflowStore) EngineOption {
 // WithCompactionState sets the compaction state for replaying a compacted workflow.
 func WithCompactionState(cs *CompactionState) EngineOption {
 	return func(e *Engine) { e.compactionState = cs }
+}
+
+// WithPluginRegistry sets the plugin registry for plugin host function dispatch.
+func WithPluginRegistry(pr *PluginRegistry) EngineOption {
+	return func(e *Engine) { e.pluginRegistry = pr }
 }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
@@ -396,6 +432,98 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 }
 
+func (s *execSession) PluginCall(ctx context.Context, m api.Module,
+	pluginName, functionName, inputJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+	if s.isReplay {
+		return s.replayPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+	}
+	return s.freshPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+}
+
+func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
+	pluginName, functionName, inputJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	if s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		s.stepCount++
+
+		if rec.EventType != EventTypePluginCall {
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s", rec.Step, rec.EventType)
+			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		if rec.PluginName != pluginName || rec.PluginFunc != functionName {
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s",
+				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc)
+			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		if rec.PluginError != "" {
+			written := writeWasmString(mem, responsePtr, rec.PluginError, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		written := writeWasmString(mem, responsePtr, rec.PluginOutput, responseMaxLen)
+		return packDurableCallResult(int(written), 0, 0)
+	}
+
+	// Past recorded history — switch to fresh execution.
+	s.isReplay = false
+	return s.freshPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+}
+
+func (s *execSession) freshPluginCall(ctx context.Context, m api.Module,
+	pluginName, functionName, inputJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	// Look up the plugin function.
+	if s.engine.pluginRegistry == nil {
+		errMsg := fmt.Sprintf("plugin function %s/%s not available: no plugin registry configured", pluginName, functionName)
+		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		return packDurableCallResult(int(written), 1, 1)
+	}
+	fn, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
+	if !ok {
+		errMsg := fmt.Sprintf("plugin function %s/%s not registered", pluginName, functionName)
+		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		return packDurableCallResult(int(written), 1, 1)
+	}
+
+	// Actually call the plugin.
+	outputJSON, err := fn(ctx, inputJSON)
+
+	var errStr string
+	if err != nil {
+		errStr = err.Error()
+	}
+
+	// Record in event history.
+	rec := EventRecord{
+		Step:         s.stepCount,
+		EventType:    EventTypePluginCall,
+		PluginName:   pluginName,
+		PluginFunc:   functionName,
+		PluginInput:  inputJSON,
+		PluginOutput: outputJSON,
+		PluginError:  errStr,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	if err != nil {
+		written := writeWasmString(mem, responsePtr, errStr, responseMaxLen)
+		return packDurableCallResult(int(written), 1, 1)
+	}
+
+	written := writeWasmString(mem, responsePtr, outputJSON, responseMaxLen)
+	return packDurableCallResult(int(written), 0, 0)
+}
 func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
 	if s.isReplay {
 		return s.replayCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)

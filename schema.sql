@@ -59,6 +59,11 @@ ALTER TABLE event_history ADD COLUMN IF NOT EXISTS child_name TEXT;
 ALTER TABLE event_history ADD COLUMN IF NOT EXISTS child_input JSONB;
 ALTER TABLE event_history ADD COLUMN IF NOT EXISTS run_id TEXT;
 ALTER TABLE event_history ADD COLUMN IF NOT EXISTS new_input JSONB;
+ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_name TEXT;
+ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_func TEXT;
+ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_input JSONB;
+ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_output JSONB;
+ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_error TEXT;
 
 -- ---------------------------------------------------------------------------
 -- Migrations: extend workflow_instances

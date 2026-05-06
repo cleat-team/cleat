@@ -39,7 +39,6 @@ import (
 
 	"github.com/rcownie/durable/internal/host"
 	"github.com/rcownie/durable/internal/plugin"
-	"github.com/tetratelabs/wazero"
 )
 
 //go:embed web/dist
@@ -82,7 +81,7 @@ func main() {
 
 	// Plugin state (populated in the non-sharded path).
 	var (
-		plugRegistrars []host.HostFuncRegistrar
+		pluginRegistry = host.NewPluginRegistry()
 		plugList       []*plugin.LoadedPlugin
 		plugHandler    http.Handler
 		plugMux        *http.ServeMux
@@ -192,14 +191,14 @@ func main() {
 				continue
 			}
 			if p, ok := lp.Plugin.(plugin.HasHostFunctions); ok {
-				pCopy := p
-				plugRegistrars = append(plugRegistrars, func(builder wazero.HostModuleBuilder) {
-					pb := plugin.NewHostModuleBuilder(builder)
-					if rerr := pCopy.RegisterHostFunctions(pb); rerr != nil {
-						log.Printf("[worker %s] plugin %s: host functions failed: %v",
-							workerID, pCopy.Info().Name, rerr)
-					}
-				})
+				adapter := &hostPluginRegistryAdapter{
+					registry:   pluginRegistry,
+					pluginName: lp.Plugin.Info().Name,
+				}
+				if rerr := p.RegisterHostFunctions(adapter); rerr != nil {
+					log.Printf("[worker %s] plugin %s: host functions failed: %v",
+						workerID, lp.Plugin.Info().Name, rerr)
+				}
 			}
 		}
 
@@ -231,7 +230,7 @@ func main() {
 		scheduleInterval:    15 * time.Second,
 		compactionThreshold: *compactionThreshold,
 		compactionInterval:  *compactionInterval,
-		pluginRegistrars:    plugRegistrars,
+		pluginRegistry:       pluginRegistry,
 	}
 
 	// Start HTTP API server if configured.
@@ -330,7 +329,7 @@ type Worker struct {
 	heartbeatInterval time.Duration
 	pollInterval      time.Duration
 	namespace         string
-	pluginRegistrars  []host.HostFuncRegistrar
+	pluginRegistry    *host.PluginRegistry
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -491,7 +490,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 
 	// ---- Create engine ----
-	rt, err := host.NewRuntime(w.ctx, w.pluginRegistrars...)
+	rt, err := host.NewRuntime(w.ctx)
 	if err != nil {
 		w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("create runtime: %v", err), nil)
 		return
@@ -504,6 +503,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion}),
 		host.WithWorkflowID(wf.ID),
 		host.WithChildWorkflowStore(w.store),
+			host.WithPluginRegistry(w.pluginRegistry),
 	}
 	if compactionState != nil {
 		engineOpts = append(engineOpts, host.WithCompactionState(compactionState))
@@ -792,6 +792,17 @@ type dbWorkflowState struct {
 func (s *dbWorkflowState) Version() int    { return s.version }
 func (s *dbWorkflowState) MinVersion() int { return s.minVersion }
 
+// hostPluginRegistryAdapter bridges plugin.FuncRegistry to host.PluginRegistry.
+type hostPluginRegistryAdapter struct {
+	registry   *host.PluginRegistry
+	pluginName string
+}
+
+func (a *hostPluginRegistryAdapter) Register(funcName string, fn plugin.PluginFunc) error {
+	a.registry.Register(a.pluginName, funcName, host.PluginFunc(fn))
+	return nil
+}
+
 // determineEntryPoint extracts the entry point name from workflow input.
 // The default entry point is "place_order". This can be overridden by
 // including an "__entry_point" field in the input.
@@ -813,7 +824,7 @@ func determineEntryPoint(input json.RawMessage) string {
 // Errors during defer execution are logged but do not prevent other defers
 // from running.
 func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
-	rt, err := host.NewRuntime(w.ctx, w.pluginRegistrars...)
+	rt, err := host.NewRuntime(w.ctx)
 	if err != nil {
 		log.Printf("[worker %s] runDefers: create runtime: %v", w.id, err)
 		return

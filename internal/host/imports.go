@@ -40,6 +40,7 @@ type HostHandler interface {
 	SetQueryState(ctx context.Context, m api.Module, key, value string) int64
 	Now(ctx context.Context) int64
 	Random(ctx context.Context) int64
+	PluginCall(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
 }
 
 // registerHostFunctions registers all 15 durable_* imports on the "env" host module.
@@ -192,6 +193,20 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		runIDsJSON := readWasmString(mem, idsPtr, idsLen)
 		return uint64(h.AwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen))
 	}).Export("durable_await_all_children")
+
+	// plugin_call: (ptr,len x5) -> i64 — routes through PluginRegistry for event history recording.
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		pluginNamePtr, pluginNameLen,
+		funcNamePtr, funcNameLen,
+		inputPtr, inputLen,
+		responsePtr, responseMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		pluginName := readWasmString(mem, pluginNamePtr, pluginNameLen)
+		funcName := readWasmString(mem, funcNamePtr, funcNameLen)
+		inputJSON := readWasmString(mem, inputPtr, inputLen)
+		return uint64(h.PluginCall(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
+	}).Export("plugin_call")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

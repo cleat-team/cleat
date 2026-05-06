@@ -99,20 +99,25 @@ type HasBackground interface {
 	Run(ctx context.Context) error
 }
 
-// HasHostFunctions: plugin adds WASM imports callable from workflows.
+// HasHostFunctions: plugin adds functions callable from workflows.
+// These functions are automatically recorded in event history and
+// replayed deterministically — plugin authors don't need to handle replay.
 type HasHostFunctions interface {
 	Plugin
-	RegisterHostFunctions(builder HostModuleBuilder) error
+	RegisterHostFunctions(scope FuncRegistry) error
 }
 
-// HostModuleBuilder is the interface for registering WASM host functions.
-// This mirrors wazero's HostModuleBuilder pattern so plugins can add
-// custom imports callable from workflow WASM modules.
-type HostModuleBuilder interface {
-	// Register adds a host function. fn must be a function with a signature
-	// compatible with wazero's WithFunc (e.g., func(ctx context.Context, m api.Module, params...) uint64).
-	Register(name string, fn interface{}) error
+// FuncRegistry lets plugins register workflow-callable functions.
+// The plugin name is implicit — each plugin gets its own scoped registry.
+type FuncRegistry interface {
+	// Register adds a host function. The engine handles WASM I/O,
+	// event history recording, and deterministic replay.
+	Register(funcName string, fn PluginFunc) error
 }
+
+// PluginFunc is a plugin host function implementation.
+// Takes JSON input, returns JSON output.
+type PluginFunc func(ctx context.Context, inputJSON string) (outputJSON string, err error)
 
 // HasHealth: plugin reports its health status.
 type HasHealth interface {
