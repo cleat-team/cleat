@@ -40,7 +40,10 @@ type HostHandler interface {
 	SetQueryState(ctx context.Context, m api.Module, key, value string) int64
 	Now(ctx context.Context) int64
 	Random(ctx context.Context) int64
+	CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64
+	AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64
 	PluginCall(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
+	RegisterUpdateHandler(ctx context.Context, m api.Module, name string) int64
 }
 
 // registerHostFunctions registers all 15 durable_* imports on the "env" host module.
@@ -207,6 +210,31 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		inputJSON := readWasmString(mem, inputPtr, inputLen)
 		return uint64(h.PluginCall(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
 	}).Export("plugin_call")
+
+	// durable_register_update_handler: (ptr,len) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		namePtr, nameLen uint32) uint64 {
+		mem := m.Memory()
+		name := readWasmString(mem, namePtr, nameLen)
+		return uint64(handlerFromContext(ctx).RegisterUpdateHandler(ctx, m, name))
+	}).Export("durable_register_update_handler")
+	// durable_create_promise: (ptr,len x2) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen uint32) uint64 {
+		mem := m.Memory()
+		name := readWasmString(mem, namePtr, nameLen)
+		return uint64(handlerFromContext(ctx).CreatePromise(ctx, m, name, promiseIDPtr, promiseIDMaxLen))
+	}).Export("durable_create_promise")
+
+	// durable_await_promise: (ptr,len, i64, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		promiseIDPtr, promiseIDLen uint32, timeoutMs int64,
+		resultPtr, resultMaxLen uint32) uint64 {
+		mem := m.Memory()
+		promiseID := readWasmString(mem, promiseIDPtr, promiseIDLen)
+		return uint64(handlerFromContext(ctx).AwaitPromise(ctx, m, promiseID, timeoutMs, resultPtr, resultMaxLen))
+	}).Export("durable_await_promise")
+
 }
 
 // nowMs is the global time provider, atomically settable for tests.

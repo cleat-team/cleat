@@ -54,6 +54,11 @@ var hostFunctions = []HostFunction{
 	{"durable_min_version", "MinVersion"},
 	// State
 	{"set_query_state", "SetQueryState"},
+	// Promises
+	{"durable_create_promise", "CreatePromise"},
+	{"durable_await_promise", "AwaitPromise"},
+	// Update handlers
+	{"durable_register_update_handler", "RegisterUpdateHandler"},
 	// Time
 	{"durable_now", "Now"},
 	{"durable_now", "NowMs"},

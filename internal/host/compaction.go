@@ -26,6 +26,13 @@ const (
 	EventCodeHeartbeat        = 8
 	EventCodeAwaitAllChildren = 9
 	EventCodePluginCall      = 10
+	EventCodeCreatePromise   = 11
+	EventCodeAwaitPromise    = 12
+	EventCodePromiseResolved = 13
+	EventCodePromiseRejected = 14
+	EventCodeUpdateHandler  = 15
+	EventCodeStateMutation  = 16
+	EventCodeRunDetached    = 17
 )
 
 var eventTypeToCode = map[EventType]int{
@@ -40,6 +47,13 @@ var eventTypeToCode = map[EventType]int{
 	EventTypeHeartbeat:        EventCodeHeartbeat,
 	EventTypeAwaitAllChildren: EventCodeAwaitAllChildren,
 	EventTypePluginCall:       EventCodePluginCall,
+	EventTypeCreatePromise:    EventCodeCreatePromise,
+	EventTypeAwaitPromise:     EventCodeAwaitPromise,
+	EventTypePromiseResolved:  EventCodePromiseResolved,
+	EventTypePromiseRejected:  EventCodePromiseRejected,
+	EventTypeUpdateHandler:    EventCodeUpdateHandler,
+	EventTypeStateMutation:    EventCodeStateMutation,
+	EventTypeRunDetached:      EventCodeRunDetached,
 }
 
 var codeToEventType = map[int]EventType{
@@ -54,6 +68,13 @@ var codeToEventType = map[int]EventType{
 	EventCodeHeartbeat:        EventTypeHeartbeat,
 	EventCodeAwaitAllChildren: EventTypeAwaitAllChildren,
 	EventCodePluginCall:       EventTypePluginCall,
+	EventCodeCreatePromise:    EventTypeCreatePromise,
+	EventCodeAwaitPromise:     EventTypeAwaitPromise,
+	EventCodePromiseResolved:  EventTypePromiseResolved,
+	EventCodePromiseRejected:  EventTypePromiseRejected,
+	EventCodeUpdateHandler:    EventTypeUpdateHandler,
+	EventCodeStateMutation:    EventTypeStateMutation,
+	EventCodeRunDetached:      EventTypeRunDetached,
 }
 
 // CompactionState holds the minimal state needed to reconstruct the compacted
@@ -89,6 +110,10 @@ type CompactedEvent struct {
 	ChildInput    string `json:"ci,omitempty"`
 	RunID         string `json:"rid,omitempty"`
 	NewInput      string `json:"ni,omitempty"`
+	PromiseName   string `json:"prom_name,omitempty"`
+	PromiseID     string `json:"prom_id,omitempty"`
+	PromiseResult string `json:"prom_res,omitempty"`
+	PromiseError  string `json:"prom_err,omitempty"`
 
 	// Plugin call fields.
 	PluginName   string `json:"pn,omitempty"`
@@ -215,6 +240,27 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.PluginInput = ev.PluginInput
 			ce.PluginOutput = ev.PluginOutput
 			ce.PluginError = ev.PluginError
+		case EventTypeCreatePromise:
+			ce.PromiseName = ev.PromiseName
+			ce.PromiseID = ev.PromiseID
+		case EventTypeAwaitPromise:
+			ce.PromiseID = ev.PromiseID
+		case EventTypePromiseResolved:
+			ce.PromiseID = ev.PromiseID
+			ce.PromiseResult = ev.PromiseResult
+		case EventTypePromiseRejected:
+			ce.PromiseID = ev.PromiseID
+			ce.PromiseError = ev.PromiseError
+		case EventTypeUpdateHandler:
+			// Reuse PromiseName/PromiseID fields for storage efficiency.
+			ce.PromiseName = ev.UpdateHandlerName
+		case EventTypeStateMutation:
+			ce.ChildName = ev.StateKey
+			ce.Response = ev.StateValue
+			ce.DurationMs = ev.StateDelta
+			ce.PromiseName = ev.StateOp
+		case EventTypeRunDetached:
+			// No extra fields to store.
 		}
 		cs.Events = append(cs.Events, ce)
 	}
@@ -296,6 +342,26 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.PluginInput = ce.PluginInput
 			rec.PluginOutput = ce.PluginOutput
 			rec.PluginError = ce.PluginError
+		case EventCodeCreatePromise:
+			rec.PromiseName = ce.PromiseName
+			rec.PromiseID = ce.PromiseID
+		case EventCodeAwaitPromise:
+			rec.PromiseID = ce.PromiseID
+		case EventCodePromiseResolved:
+			rec.PromiseID = ce.PromiseID
+			rec.PromiseResult = ce.PromiseResult
+		case EventCodePromiseRejected:
+		case EventCodeUpdateHandler:
+			rec.UpdateHandlerName = ce.PromiseName
+		case EventCodeStateMutation:
+			rec.StateKey = ce.ChildName
+			rec.StateValue = ce.Response
+			rec.StateDelta = ce.DurationMs
+			rec.StateOp = ce.PromiseName
+		case EventCodeRunDetached:
+			// No extra fields to restore.
+			rec.PromiseID = ce.PromiseID
+			rec.PromiseError = ce.PromiseError
 		}
 		full = append(full, rec)
 	}

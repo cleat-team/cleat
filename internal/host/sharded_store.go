@@ -563,3 +563,117 @@ func (s *ShardedStore) PollCancellation(ctx context.Context, workflowID string) 
 	}
 	return shard.Store.PollCancellation(ctx, workflowID)
 }
+
+	// CreatePromise routes by workflow ID.
+func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.CreatePromise(ctx, workflowID, promiseName, promiseID)
+}
+
+	// ResolvePromise routes by workflow ID.
+func (s *ShardedStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.ResolvePromise(ctx, workflowID, promiseID, result)
+}
+
+	// RejectPromise routes by workflow ID.
+func (s *ShardedStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.RejectPromise(ctx, workflowID, promiseID, errMsg)
+}
+
+	// GetPromise routes by workflow ID.
+func (s *ShardedStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return "", "", "", fmt.Errorf("no shard available")
+	}
+	return shard.Store.GetPromise(ctx, workflowID, promiseID)
+}
+
+	// ListPromises routes by workflow ID.
+func (s *ShardedStore) ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return nil, fmt.Errorf("no shard available")
+	}
+	return shard.Store.ListPromises(ctx, workflowID)
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency Key methods (Feature 5)
+// ---------------------------------------------------------------------------
+
+// AcquireConcurrencyKey routes by key text hash for consistent sharding.
+func (s *ShardedStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
+	shard := s.getShard(key)
+	if shard == nil {
+		return false, fmt.Errorf("no shard available")
+	}
+	return shard.Store.AcquireConcurrencyKey(ctx, key, workflowID, ttl)
+}
+
+// ReleaseConcurrencyKey routes by key text hash.
+func (s *ShardedStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+	shard := s.getShard(key)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.ReleaseConcurrencyKey(ctx, key)
+}
+
+// ReleaseWorkflowConcurrencyKeys routes by workflow ID.
+func (s *ShardedStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.ReleaseWorkflowConcurrencyKeys(ctx, workflowID)
+}
+
+// ReapExpiredConcurrencyKeys runs on every shard and returns the total count.
+func (s *ShardedStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
+	var total int64
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		n, err := shard.Store.ReapExpiredConcurrencyKeys(ctx)
+		if err != nil {
+			return total, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// ---------------------------------------------------------------------------
+// Sticky Session methods (Feature 10)
+// ---------------------------------------------------------------------------
+
+// UpdateStickyWorker routes by workflow ID.
+func (s *ShardedStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.UpdateStickyWorker(ctx, workflowID, workerID)
+}
+
+// ClearStickyWorker routes by workflow ID.
+func (s *ShardedStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.ClearStickyWorker(ctx, workflowID)
+}

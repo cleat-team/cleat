@@ -145,11 +145,32 @@ var importDefs = map[string]importDef{
 			{"val", kindInString},
 		},
 	},
+	"durable_create_promise": {
+		ImportName: "durable_create_promise",
+		Params: []paramSpec{
+			{"name", kindInString},
+			{"promise_id_out", kindOutString},
+		},
+	},
+	"durable_await_promise": {
+		ImportName: "durable_await_promise",
+		Params: []paramSpec{
+			{"promise_id", kindInString},
+			{"timeout_ms", kindInt64},
+			{"result_out", kindOutString},
+		},
+	},
 	"durable_now": {
 		ImportName: "durable_now",
 	},
 	"durable_random": {
 		ImportName: "durable_random",
+	},
+	"durable_register_update_handler": {
+		ImportName: "durable_register_update_handler",
+		Params: []paramSpec{
+			{"name", kindInString},
+		},
 	},
 }
 

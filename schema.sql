@@ -64,6 +64,10 @@ ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_func TEXT;
 ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_input JSONB;
 ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_output JSONB;
 ALTER TABLE event_history ADD COLUMN IF NOT EXISTS plugin_error TEXT;
+ALTER TABLE event_history ADD COLUMN IF NOT EXISTS promise_name TEXT;
+ALTER TABLE event_history ADD COLUMN IF NOT EXISTS promise_id TEXT;
+ALTER TABLE event_history ADD COLUMN IF NOT EXISTS promise_result TEXT;
+ALTER TABLE event_history ADD COLUMN IF NOT EXISTS promise_error TEXT;
 
 -- ---------------------------------------------------------------------------
 -- Migrations: extend workflow_instances
@@ -99,6 +103,22 @@ CREATE TABLE IF NOT EXISTS workflow_signals (
 );
 
 -- ---------------------------------------------------------------------------
+-- New: workflow_promises table
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS workflow_promises (
+    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    promise_id TEXT NOT NULL,
+    promise_name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    result JSONB,
+    error_msg TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ,
+    PRIMARY KEY (workflow_id, promise_id)
+);
+CREATE INDEX IF NOT EXISTS idx_promises_status ON workflow_promises(workflow_id, status);
+
+-- ---------------------------------------------------------------------------
 -- Schedules: cron-based recurring workflow execution
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS workflow_schedules (
@@ -112,3 +132,38 @@ CREATE TABLE IF NOT EXISTS workflow_schedules (
     last_run_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------------------
+-- New: concurrency_keys table (Feature 5: Per-Key Concurrency Control)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS concurrency_keys (
+    key_hash BYTEA PRIMARY KEY,
+    key_text TEXT NOT NULL,
+    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id);
+
+-- ---------------------------------------------------------------------------
+-- Migration: add sticky_worker_id for sticky sessions (Feature 10)
+-- ---------------------------------------------------------------------------
+ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS sticky_worker_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- New: workflow_update_requests table (Feature 3: Update Handler)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS workflow_update_requests (
+    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    update_name TEXT NOT NULL,
+    payload JSONB NOT NULL DEFAULT '{}',
+    promise_id TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    result JSONB,
+    error_msg TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    completed_at TIMESTAMPTZ,
+    PRIMARY KEY (workflow_id, update_name)
+);
+CREATE INDEX IF NOT EXISTS idx_update_requests_pending ON workflow_update_requests(workflow_id, status);

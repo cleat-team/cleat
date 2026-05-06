@@ -73,8 +73,8 @@ func chargeWithRetry(h durable.HostCalls, input SubscriptionInput) error {
 		"amount_usd": input.AmountUSD,
 	})
 
-	resp, err := h.DurableCallWithRetry(durable.CallOptions{
-		RetryPolicy: &durable.RetryPolicy{
+	resp, err := h.DurableCallWithOptions(durable.CallOptions{
+		Retry: &durable.RetryPolicy{
 			MaxAttempts:        4,
 			InitialInterval:    1 * time.Second,
 			BackoffCoefficient: 2.0,
@@ -143,7 +143,10 @@ func enterGracePeriod(h durable.HostCalls, input SubscriptionInput) (string, err
 				float64(h.Now().Sub(graceStart).Hours())))
 
 			h.DurableSleep(30*24*time.Hour - h.Now().Sub(graceStart))
-			return h.ContinueAsNew(toJSON(input))
+			if err := h.ContinueAsNew(toJSON(input)); err != nil {
+				return "", fmt.Errorf("continue_as_new failed: %w", err)
+			}
+			return "", nil // unreachable
 		}
 	}
 

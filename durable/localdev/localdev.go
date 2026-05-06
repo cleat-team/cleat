@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rcownie/durable/durable"
 )
 
@@ -99,6 +100,15 @@ func WithChildWorkflowRunner(runner ChildWorkflowRunner) Option {
 	}
 }
 
+// localPromise holds the in-memory state of a durable promise.
+type localPromise struct {
+	name     string
+	status   string
+	result   string
+	errorMsg string
+	ch       chan struct{} // closed when resolved/rejected
+}
+
 // LocalRunner is a pure-Go implementation of durable.HostCalls for local
 // development. It makes real API calls via a ServiceCaller, uses wall-clock
 // time, and records events in memory.
@@ -138,6 +148,7 @@ type LocalRunner struct {
 
 	startTime   time.Time
 	pendingSigs []Signal // signals buffered while no one is listening
+	promises    map[string]*localPromise // durable promises keyed by promiseID
 }
 
 // NewLocalRunner creates a new LocalRunner with the given options.
@@ -150,6 +161,7 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		minVersionVal: 1,
 		queryState:    make(map[string]string),
 		childResults:  make(map[string]childResult),
+		promises:      make(map[string]*localPromise),
 	}
 	for _, o := range opts {
 		o(r)
@@ -171,6 +183,10 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		SetQueryState:          r.setQueryState,
 		Now:                    r.nowMs,
 		Random:                 r.random,
+		CreatePromise:          r.createPromiseImpl,
+		AwaitPromise:           r.awaitPromiseImpl,
+		RegisterUpdateHandler:  r.registerUpdateHandler,
+		RunDetached:            r.runDetached,
 	})
 	return r
 }
@@ -499,6 +515,86 @@ func (r *LocalRunner) random() int64 {
 		return 42 // fallback
 	}
 	return n.Int64()
+}
+
+func (r *LocalRunner) createPromiseImpl(name string) (string, error) {
+
+func (r *LocalRunner) registerUpdateHandler(name string) {
+	r.mu.Lock()
+	r.events = append(r.events, Event{
+		Type:    "register_update_handler",
+		Message: name,
+	})
+	r.mu.Unlock()
+	r.logEvent("[%.3fs] register_update_handler %s", r.elapsed().Seconds(), name)
+}
+
+func (r *LocalRunner) runDetached(fn func(h durable.HostCalls) error) error {
+	r.mu.Lock()
+	r.events = append(r.events, Event{
+		Type:    "run_detached",
+		Message: "starting detached execution",
+	})
+	r.mu.Unlock()
+	r.logEvent("[%.3fs] run_detached", r.elapsed().Seconds())
+	return fn(r.h)
+}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Generate a UUID-based promise ID.
+	id, err := uuid.NewRandom()
+	var promiseID string
+	if err != nil {
+		promiseID = fmt.Sprintf("prom-%s-%d", r.workflowID, len(r.promises))
+	} else {
+		promiseID = id.String()
+	}
+	r.promises[promiseID] = &localPromise{
+		name:   name,
+		status: "pending",
+		ch:     make(chan struct{}),
+	}
+	r.events = append(r.events, Event{
+		Type:    "create_promise",
+		Message: fmt.Sprintf("name=%s id=%s", name, promiseID),
+	})
+	r.logEvent("[%.3fs] create_promise %s -> %s", r.elapsed().Seconds(), name, promiseID)
+	return promiseID, nil
+}
+
+func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) (string, bool, error) {
+	r.mu.RLock()
+	lp, ok := r.promises[promiseID]
+	r.mu.RUnlock()
+
+	if !ok {
+		return "", false, fmt.Errorf("localdev: promise %s not found", promiseID)
+	}
+
+	if lp.status == "resolved" {
+		return lp.result, false, nil
+	}
+	if lp.status == "rejected" {
+		return lp.errorMsg, false, fmt.Errorf("promise rejected: %s", lp.errorMsg)
+	}
+
+	// Pending -- wait for resolution via channel or timeout.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-lp.ch:
+		// Promise was resolved/rejected.
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		if lp.status == "resolved" {
+			return lp.result, false, nil
+		}
+		return lp.errorMsg, false, fmt.Errorf("promise rejected: %s", lp.errorMsg)
+	case <-timer.C:
+		return "", true, nil
+	}
 }
 
 // ---------------------------------------------------------------------------

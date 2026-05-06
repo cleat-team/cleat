@@ -31,6 +31,13 @@ const (
 	EventTypeHeartbeat        EventType = "heartbeat"
 	EventTypeAwaitAllChildren EventType = "await_all_children"
 	EventTypePluginCall       EventType = "plugin_call"
+	EventTypeCreatePromise    EventType = "create_promise"
+	EventTypeAwaitPromise     EventType = "await_promise"
+	EventTypePromiseResolved  EventType = "promise_resolved"
+	EventTypePromiseRejected  EventType = "promise_rejected"
+	EventTypeUpdateHandler    EventType = "update_handler"
+	EventTypeStateMutation    EventType = "state_mutation"
+	EventTypeRunDetached      EventType = "run_detached"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -59,6 +66,12 @@ type EventRecord struct {
 	DeferDescription string `json:"defer_description,omitempty"`
 	DeferID          string `json:"defer_id,omitempty"`
 
+	// Promise fields.
+	PromiseName   string `json:"promise_name,omitempty"`
+	PromiseID     string `json:"promise_id,omitempty"`
+	PromiseResult string `json:"promise_result,omitempty"`
+	PromiseError  string `json:"promise_error,omitempty"`
+
 	// Child workflow fields.
 	ChildName        string `json:"child_name,omitempty"`
 	ChildInput       string `json:"child_input,omitempty"`
@@ -75,6 +88,18 @@ type EventRecord struct {
 	PluginOutput string `json:"plugin_output,omitempty"`
 	PluginError  string `json:"plugin_error,omitempty"`
 	Idempotent   bool   `json:"idempotent,omitempty"`
+
+	// Update handler fields.
+	UpdateHandlerName string `json:"update_handler_name,omitempty"`
+	UpdatePayload     string `json:"update_payload,omitempty"`
+	UpdateResponse    string `json:"update_response,omitempty"`
+	UpdateError       string `json:"update_error,omitempty"`
+
+	// State mutation fields.
+	StateKey   string `json:"state_key,omitempty"`
+	StateValue string `json:"state_value,omitempty"`
+	StateDelta int64  `json:"state_delta,omitempty"`
+	StateOp    string `json:"state_op,omitempty"`
 }
 
 // CallRecord is kept for backward compatibility in tests.
@@ -93,6 +118,14 @@ type SignalStore interface {
 	PollSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
 	// PollCancellation checks whether the workflow has been cancelled.
 	PollCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error)
+}
+
+// PromiseStore provides promise resolution capabilities for running workflows.
+type PromiseStore interface {
+	CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error
+	ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error
+	RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error
+	GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error)
 }
 
 // WorkflowState provides access to workflow instance state.
@@ -214,6 +247,7 @@ type Engine struct {
 	rt              *Runtime
 	caller          ServiceCaller
 	signalStore     SignalStore
+	promiseStore    PromiseStore
 	state           WorkflowState
 	workflowID      string
 	childWfStore    ChildWorkflowStore
@@ -228,6 +262,11 @@ type EngineOption func(*Engine)
 // WithSignalStore sets the signal store for signal delivery and cancellation.
 func WithSignalStore(ss SignalStore) EngineOption {
 	return func(e *Engine) { e.signalStore = ss }
+}
+
+// WithPromiseStore sets the promise store for promise resolution.
+func WithPromiseStore(ps PromiseStore) EngineOption {
+	return func(e *Engine) { e.promiseStore = ps }
 }
 
 // WithWorkflowState sets the workflow state for version info.
@@ -1260,12 +1299,150 @@ func (s *execSession) SetQueryState(ctx context.Context, m api.Module, key, valu
 	return 0
 }
 
+func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, name string) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeUpdateHandler {
+				s.stepCount++
+				return 0
+			}
+		}
+		s.isReplay = false
+	}
+
+	// Fresh execution: record the handler registration event.
+	rec := EventRecord{
+		Step:              s.stepCount,
+		EventType:         EventTypeUpdateHandler,
+		UpdateHandlerName: name,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+	return 0
+}
+
+
 func (s *execSession) Now(ctx context.Context) int64 {
 	return s.nowMs
 }
 
 func (s *execSession) Random(ctx context.Context) int64 {
 	return 42
+}
+
+func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeCreatePromise {
+				s.stepCount++
+				mem := m.Memory()
+				written := writeWasmString(mem, promiseIDPtr, rec.PromiseID, promiseIDMaxLen)
+				return packSimpleResult(0, written)
+			}
+		}
+		s.isReplay = false
+	}
+
+	// Fresh execution: generate promise ID.
+	id, err := uuid.NewRandom()
+	var promiseID string
+	if err != nil {
+		promiseID = fmt.Sprintf("prom-%s-%d", s.workflowID, s.stepCount)
+	} else {
+		promiseID = id.String()
+	}
+
+	rec := EventRecord{
+		Step:        s.stepCount,
+		EventType:   EventTypeCreatePromise,
+		PromiseName: name,
+		PromiseID:   promiseID,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	// Also persist to promise store if available.
+	if s.engine.promiseStore != nil {
+		s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID)
+	}
+
+	mem := m.Memory()
+	written := writeWasmString(mem, promiseIDPtr, promiseID, promiseIDMaxLen)
+	return packSimpleResult(0, written)
+}
+
+func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypePromiseResolved {
+				s.stepCount++
+				written := writeWasmString(mem, resultPtr, rec.PromiseResult, resultMaxLen)
+				return packAwaitPromiseResult(uint32(written), false, 0)
+			}
+			if rec.EventType == EventTypePromiseRejected {
+				s.stepCount++
+				written := writeWasmString(mem, resultPtr, rec.PromiseError, resultMaxLen)
+				return packAwaitPromiseResult(uint32(written), false, 1)
+			}
+			if rec.EventType == EventTypeAwaitPromise {
+				s.stepCount++
+				// Promise was pending in original execution. Check if resolved now.
+				s.isReplay = false
+			}
+		} else {
+			s.isReplay = false
+		}
+	}
+
+	// Fresh execution: check promise store.
+	if s.engine.promiseStore != nil {
+		status, result, errMsg, err := s.engine.promiseStore.GetPromise(ctx, s.workflowID, promiseID)
+		if err == nil && status == "resolved" {
+			rec := EventRecord{
+				Step:          s.stepCount,
+				EventType:     EventTypePromiseResolved,
+				PromiseID:     promiseID,
+				PromiseResult: result,
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+			written := writeWasmString(mem, resultPtr, result, resultMaxLen)
+			return packAwaitPromiseResult(uint32(written), false, 0)
+		}
+		if err == nil && status == "rejected" {
+			rec := EventRecord{
+				Step:         s.stepCount,
+				EventType:    EventTypePromiseRejected,
+				PromiseID:    promiseID,
+				PromiseError: errMsg,
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+			written := writeWasmString(mem, resultPtr, errMsg, resultMaxLen)
+			return packAwaitPromiseResult(uint32(written), false, 1)
+		}
+	}
+
+	// Record await and suspend.
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeAwaitPromise,
+		PromiseID: promiseID,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	s.suspendErr = &SuspendError{
+		Reason: fmt.Sprintf("await_promise(%s)", promiseID),
+		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(timeoutMs) * time.Millisecond),
+	}
+
+	return packAwaitPromiseResult(0, true, 0)
 }
 
 // ---- Result packing helpers ----
@@ -1288,6 +1465,14 @@ func packAwaitChildResult(written uint32, errCode uint32) int64 {
 
 func packAwaitChildResultSuspend() int64 {
 	return 1 << 62
+}
+
+func packAwaitPromiseResult(resultLen uint32, timedOut bool, errCode uint16) int64 {
+	toFlag := uint32(0)
+	if timedOut {
+		toFlag = 1
+	}
+	return int64(uint64(resultLen)<<32 | uint64(toFlag)<<16 | uint64(errCode))
 }
 
 // isDefinitelyNonRetryable checks if an error should not be retried.

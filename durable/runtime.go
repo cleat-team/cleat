@@ -82,6 +82,15 @@ type HostCalls interface {
 	// DurableAwaitSignals is the low-level signal wait. Prefer AwaitSignals.
 	DurableAwaitSignals(signalNames []string, timeoutMs int64) (signalName, payload string, timedOut bool, err error)
 
+	// CreatePromise creates a named durable promise and returns its ID.
+	// The promise can be resolved or rejected by an external caller via the REST API.
+	CreatePromise(name string) (promiseID string, err error)
+
+	// AwaitPromise waits for a promise to be resolved by an external caller.
+	// Returns the result, whether it timed out, and any error.
+	// Blocks the workflow until resolved or timeout expires.
+	AwaitPromise(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
+
 	// DurableDefer registers a function to run when the workflow exits
 	// (LIFO order, always runs even on error). Returns a deferID.
 	// Use NewSaga() for structured compensation patterns.
@@ -135,6 +144,44 @@ type HostCalls interface {
 	// SetQueryState records state that can be read by query handlers.
 	SetQueryState(key, value string)
 
+	// SetState stores a typed value in the workflow's state.
+	// value is marshaled to JSON for persistence.
+	SetState(key string, value interface{})
+
+	// GetState retrieves a typed value from the workflow's state.
+	// result must be a pointer; the stored value is unmarshaled into it.
+	GetState(key string, result interface{}) error
+
+	// DeleteState removes a key from the workflow's state.
+	DeleteState(key string)
+
+	// HasState returns true if the key exists in the workflow's state.
+	HasState(key string) bool
+
+	// IncrState atomically increments a numeric state value by delta.
+	// Returns the new value after increment.
+	IncrState(key string, delta int64) int64
+
+	// ListState returns all state keys matching the given prefix.
+	ListState(prefix string) []string
+
+	// RegisterUpdateHandler registers a handler for the named update.
+	// handler receives payload JSON and returns result JSON.
+	// validator runs first (read-only). Called during workflow init, before durable ops.
+	RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error)
+
+	// RunDetached runs fn with a fresh HostCalls that ignores cancellation.
+	// fn executes immediately, is recorded in history, and survives crash/replay.
+	// On replay, fn IS re-executed (not replayed from cache).
+	RunDetached(fn func(h HostCalls) error) error
+
+	// DurableFetch makes an HTTP request as a durable operation.
+	// Delegates to DurableCall("http", "fetch", requestJSON) internally.
+	DurableFetch(url, method string, headers map[string]string, body string) (responseJSON string, statusCode int, err error)
+
+	// DurableFetchJSON is like DurableFetch but unmarshals the response into result.
+	DurableFetchJSON(url, method string, headers map[string]string, body string, result interface{}) error
+
 	// Now returns the current wall-clock time. Use instead of time.Now()
 	// for deterministic replay.
 	Now() time.Time
@@ -185,6 +232,12 @@ type Checkpoint struct {
 }
 
 // ---- Structured error types ----
+
+// updateHandlerEntry stores a registered update handler and its validator.
+type updateHandlerEntry struct {
+	handler   func(payloadJSON string) (resultJSON string, err error)
+	validator func(payloadJSON string) error
+}
 
 // CallErrorCode classifies durable call failures so callers can distinguish
 // retryable from non-retryable errors without string-matching.
@@ -262,6 +315,8 @@ type hostCallsImpl struct {
 	durableCallWithHeartbeat   func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
 	durableSleep              func(ms int64)
 	durableAwaitSignals       func(signalNames []string, timeoutMs int64) (string, string, bool, error)
+	createPromise    func(name string) (promiseID string, err error)
+	awaitPromise     func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
 	durableDefer              func(description string) (string, error)
 	durableLog                func(message string)
 	pollCancellation          func() (bool, string)
@@ -277,8 +332,14 @@ type hostCallsImpl struct {
 	version                   func() int
 	minVersion                func() int
 	setQueryState             func(key, value string)
+	registerUpdateHandler     func(name string)
+	runDetached               func(fn func(h HostCalls) error) error
 	now                       func() int64
 	random                    func() int64
+
+	// State map for typed K/V operations.
+	stateMap       map[string]interface{}
+	updateHandlers map[string]updateHandlerEntry
 }
 
 // NewHostCalls creates a HostCalls from a set of function implementations.
@@ -292,6 +353,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		durableCallWithHeartbeat:   opts.DurableCallWithHeartbeat,
 		durableSleep:              opts.DurableSleep,
 		durableAwaitSignals:       opts.DurableAwaitSignals,
+		createPromise:              opts.CreatePromise,
+		awaitPromise:               opts.AwaitPromise,
 		durableDefer:              opts.DurableDefer,
 		durableLog:                opts.DurableLog,
 		pollCancellation:          opts.PollCancellation,
@@ -307,6 +370,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		version:                   opts.Version,
 		minVersion:                opts.MinVersion,
 		setQueryState:             opts.SetQueryState,
+		registerUpdateHandler:     opts.RegisterUpdateHandler,
+		runDetached:               opts.RunDetached,
 		now:                       opts.Now,
 		random:                    opts.Random,
 	}
@@ -345,6 +410,8 @@ type HostCallsOptions struct {
 	DurableCallWithHeartbeat   func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
 	DurableSleep              func(ms int64)
 	DurableAwaitSignals       func(signalNames []string, timeoutMs int64) (string, string, bool, error)
+	CreatePromise func(name string) (promiseID string, err error)
+	AwaitPromise  func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
 	DurableDefer              func(description string) (string, error)
 	DurableLog                func(message string)
 	PollCancellation          func() (bool, string)
@@ -360,6 +427,8 @@ type HostCallsOptions struct {
 	Version                   func() int
 	MinVersion                func() int
 	SetQueryState             func(key, value string)
+	RegisterUpdateHandler     func(name string)
+	RunDetached               func(fn func(h HostCalls) error) error
 	Now                       func() int64
 	Random                    func() int64
 }
@@ -535,6 +604,24 @@ func (h *hostCallsImpl) DurableAwaitSignals(signalNames []string, timeoutMs int6
 	return h.durableAwaitSignals(signalNames, timeoutMs)
 }
 
+func (h *hostCallsImpl) CreatePromise(name string) (string, error) {
+	if h.createPromise == nil {
+		return "", errors.New("durable: CreatePromise not initialized")
+	}
+	return h.createPromise(name)
+}
+
+func (h *hostCallsImpl) AwaitPromise(promiseID string, timeout time.Duration) (string, bool, error) {
+	if h.awaitPromise == nil {
+		return "", false, errors.New("durable: AwaitPromise not initialized")
+	}
+	return h.awaitPromise(promiseID, timeout)
+}
+
+func (h *hostCallsImpl) AwaitPromiseMs(promiseID string, timeoutMs int64) (result string, timedOut bool, err error) {
+	return h.AwaitPromise(promiseID, time.Duration(timeoutMs)*time.Millisecond)
+}
+
 func (h *hostCallsImpl) DurableDefer(description string) (string, error) {
 	if h.durableDefer == nil {
 		return "", errors.New("durable: DurableDefer not initialized")
@@ -655,6 +742,149 @@ func (h *hostCallsImpl) SetQueryState(key, value string) {
 	if h.setQueryState != nil {
 		h.setQueryState(key, value)
 	}
+	// Also store in local state map for typed access.
+	if h.stateMap == nil {
+		h.stateMap = make(map[string]interface{})
+	}
+	h.stateMap[key] = value
+}
+
+func (h *hostCallsImpl) SetState(key string, value interface{}) {
+	if h.stateMap == nil {
+		h.stateMap = make(map[string]interface{})
+	}
+	h.stateMap[key] = value
+	// Persist via existing set_query_state mechanism.
+	if h.setQueryState != nil {
+		data, err := json.Marshal(value)
+		if err == nil {
+			h.setQueryState(key, string(data))
+		}
+	}
+}
+
+func (h *hostCallsImpl) GetState(key string, result interface{}) error {
+	if h.stateMap == nil {
+		return errors.New("durable: state not found for key: " + key)
+	}
+	val, ok := h.stateMap[key]
+	if !ok {
+		return errors.New("durable: state key not found: " + key)
+	}
+	data, err := json.Marshal(val)
+	if err != nil {
+		return fmt.Errorf("durable: marshal state value: %w", err)
+	}
+	return json.Unmarshal(data, result)
+}
+
+func (h *hostCallsImpl) DeleteState(key string) {
+	if h.stateMap != nil {
+		delete(h.stateMap, key)
+	}
+	if h.setQueryState != nil {
+		h.setQueryState(key, "")
+	}
+}
+
+func (h *hostCallsImpl) HasState(key string) bool {
+	if h.stateMap == nil {
+		return false
+	}
+	_, ok := h.stateMap[key]
+	return ok
+}
+
+func (h *hostCallsImpl) IncrState(key string, delta int64) int64 {
+	if h.stateMap == nil {
+		h.stateMap = make(map[string]interface{})
+	}
+	var current int64
+	if val, ok := h.stateMap[key]; ok {
+		switch v := val.(type) {
+		case int64:
+			current = v
+		case float64:
+			current = int64(v)
+		case json.Number:
+			current, _ = v.Int64()
+		default:
+			current = 0
+		}
+	}
+	current += delta
+	h.stateMap[key] = current
+	// Persist via existing set_query_state mechanism.
+	if h.setQueryState != nil {
+		data, err := json.Marshal(current)
+		if err == nil {
+			h.setQueryState(key, string(data))
+		}
+	}
+	return current
+}
+
+func (h *hostCallsImpl) ListState(prefix string) []string {
+	if h.stateMap == nil {
+		return nil
+	}
+	var keys []string
+	for k := range h.stateMap {
+		if prefix == "" || strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+func (h *hostCallsImpl) RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error) {
+	if h.updateHandlers == nil {
+		h.updateHandlers = make(map[string]updateHandlerEntry)
+	}
+	h.updateHandlers[name] = updateHandlerEntry{handler: handler, validator: validator}
+	if h.registerUpdateHandler != nil {
+		h.registerUpdateHandler(name)
+	}
+}
+
+func (h *hostCallsImpl) RunDetached(fn func(h HostCalls) error) error {
+	if h.runDetached != nil {
+		return h.runDetached(fn)
+	}
+	return nil
+}
+
+func (h *hostCallsImpl) DurableFetch(url, method string, headers map[string]string, body string) (responseJSON string, statusCode int, err error) {
+	requestMap := map[string]interface{}{
+		"url":     url,
+		"method":  method,
+		"headers": headers,
+		"body":    body,
+	}
+	requestJSON, marshalErr := json.Marshal(requestMap)
+	if marshalErr != nil {
+		return "", 0, fmt.Errorf("durable: marshal fetch request: %w", marshalErr)
+	}
+	resp, callErr := h.DurableCall("http", "fetch", string(requestJSON))
+	if callErr != nil {
+		return "", 0, callErr
+	}
+	var respData struct {
+		Body       string `json:"body"`
+		StatusCode int    `json:"status_code"`
+	}
+	if unmarshalErr := json.Unmarshal([]byte(resp), &respData); unmarshalErr != nil {
+		return "", 0, fmt.Errorf("durable: unmarshal fetch response: %w", unmarshalErr)
+	}
+	return respData.Body, respData.StatusCode, nil
+}
+
+func (h *hostCallsImpl) DurableFetchJSON(url, method string, headers map[string]string, body string, result interface{}) error {
+	resp, _, err := h.DurableFetch(url, method, headers, body)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(resp), result)
 }
 
 func (h *hostCallsImpl) Now() time.Time {

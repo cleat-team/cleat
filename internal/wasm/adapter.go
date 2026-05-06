@@ -283,6 +283,47 @@ var adapterDefs = map[string]adapterDef{
 			"return result",
 		},
 	},
+		"CreatePromise": {
+			FieldName:  "CreatePromise",
+			ReturnType: "(string, error)",
+			Params: []adapterParam{
+				{"name", "string"},
+			},
+			ResultStmts: []string{
+				"promiseIDLen := uint32(uint64(result) >> 32)",
+				"errCode := uint32(result)",
+				"if errCode != 0 {",
+				"return fmt.Errorf(\"durable_create_promise: error code %d\", errCode)",
+				"}",
+				"return unsafe.String(&promiseIDOutBuf[0], int(promiseIDLen)), nil",
+			},
+		},
+		"AwaitPromise": {
+			FieldName:  "AwaitPromise",
+			ReturnType: "(string, bool, error)",
+			Params: []adapterParam{
+				{"promiseID", "string"},
+				{"timeoutMs", "int64"},
+			},
+			ResultStmts: []string{
+				"resultLen := uint32(uint64(result) >> 32)",
+				"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
+				"errCode := uint32(result & 0xFFFF)",
+				"if errCode != 0 {",
+				"return fmt.Errorf(\"durable_await_promise: error code %d\", errCode)",
+				"}",
+				"return unsafe.String(&resultOutBuf[0], int(resultLen)), timedOut, nil",
+			},
+		},
+		"RegisterUpdateHandler": {
+			FieldName: "RegisterUpdateHandler",
+			Params: []adapterParam{
+				{"name", "string"},
+			},
+			ResultStmts: []string{
+				"_ = result",
+			},
+		},
 }
 
 // needsFmt returns true if any of the used adapter defs use fmt.Errorf or fmt.Sprintf.

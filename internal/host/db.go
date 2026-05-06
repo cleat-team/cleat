@@ -39,6 +39,39 @@ type Schedule struct {
 	LastRunAt      *time.Time      `json:"last_run_at,omitempty"`
 }
 
+// PromiseInfo holds the state of a durable promise.
+type PromiseInfo struct {
+	PromiseID   string     `json:"promise_id"`
+	PromiseName string     `json:"promise_name"`
+	Status      string     `json:"status"`
+	Result      string     `json:"result,omitempty"`
+	ErrorMsg    string     `json:"error_msg,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ResolvedAt  *time.Time `json:"resolved_at,omitempty"`
+}
+
+// ConcurrencyKeyInfo holds the state of an acquired concurrency key.
+type ConcurrencyKeyInfo struct {
+	KeyHash    []byte    `json:"key_hash"`
+	KeyText    string    `json:"key_text"`
+	WorkflowID string    `json:"workflow_id"`
+	AcquiredAt time.Time `json:"acquired_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+}
+
+
+// UpdateRequestInfo holds the state of an incoming update request.
+type UpdateRequestInfo struct {
+	WorkflowID string    `json:"workflow_id"`
+	UpdateName string    `json:"update_name"`
+	Payload    string    `json:"payload"`
+	PromiseID  string    `json:"promise_id,omitempty"`
+	Status     string    `json:"status"`
+	Result     string    `json:"result,omitempty"`
+	ErrorMsg   string    `json:"error_msg,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 // WorkflowStore is the database interface for the worker.
 type WorkflowStore interface {
 	// ClaimWorkflow atomically dequeues a runnable workflow instance.
@@ -149,6 +182,60 @@ type WorkflowStore interface {
 	// for a workflow. compactionStep records the step up to which events were
 	// compacted; keepStep controls which events are deleted (step < keepStep).
 	CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
+
+	// CreatePromise creates a new promise for a workflow.
+	CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error
+
+	// ResolvePromise marks a promise as resolved with the given result.
+	ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error
+
+	// RejectPromise marks a promise as rejected with the given error message.
+	RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error
+
+	// GetPromise returns the current status and result of a promise.
+	GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error)
+
+	// ListPromises returns all promises for a workflow ordered by creation time.
+	ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error)
+
+
+	// ---- Update Request methods (Feature 3: Update Handler) ----
+	
+	// CreateUpdateRequest registers an incoming update request for a workflow.
+	// The update will be dispatched to the workflow's registered handler.
+	CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error
+	
+	// GetPendingUpdateRequests returns all pending (not yet dispatched) update
+	// requests for a workflow.
+	GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error)
+	
+	// CompleteUpdateRequest marks an update request as completed with a result or error.
+	CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error
+
+	// ---- Concurrency Key methods (Feature 5) ----
+
+	// AcquireConcurrencyKey tries to acquire a concurrency key for a workflow.
+	// Returns true if acquired, false if already held by another workflow.
+	// Automatically releases expired keys during acquisition.
+	AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error)
+
+	// ReleaseConcurrencyKey releases a specific concurrency key.
+	ReleaseConcurrencyKey(ctx context.Context, key string) error
+
+	// ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.
+	ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error
+
+	// ReapExpiredConcurrencyKeys deletes all expired concurrency keys.
+	// Returns the number of keys deleted.
+	ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error)
+
+	// ---- Sticky Session methods (Feature 10) ----
+
+	// UpdateStickyWorker sets the sticky worker for a workflow.
+	UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error
+
+	// ClearStickyWorker removes the sticky worker assignment.
+	ClearStickyWorker(ctx context.Context, workflowID string) error
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
@@ -194,7 +281,7 @@ func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID, namespa
 			  AND next_wake_at <= now()
 			  AND namespace = $2
 			  AND task_queue = ANY($3)
-			ORDER BY created_at
+			ORDER BY CASE WHEN sticky_worker_id = $1 THEN 0 ELSE 1 END, created_at
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
@@ -223,6 +310,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload
+		       promise_name, promise_id, promise_result, promise_error,
 		FROM event_history
 		WHERE workflow_id = $1
 		ORDER BY step
@@ -242,6 +330,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		var childName, childInput, runID, newInput sql.NullString
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 		var payload sql.NullString
+		var promiseName, promiseID, promiseResult, promiseError sql.NullString
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -273,6 +362,10 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PluginInput = pluginInput.String
 		rec.PluginOutput = pluginOutput.String
 		rec.PluginError = pluginErr.String
+				rec.PromiseName = promiseName.String
+				rec.PromiseID = promiseID.String
+				rec.PromiseResult = promiseResult.String
+				rec.PromiseError = promiseError.String
 
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
@@ -295,8 +388,9 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 			defer_description, defer_id, child_name, child_input, run_id, new_input,
-			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error, payload)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+			promise_name, promise_id, promise_result, promise_error, payload)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
 		ON CONFLICT (workflow_id, step) DO NOTHING
 	`)
 	if err != nil {
@@ -317,6 +411,7 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 			nullStr(rec.DeferDescription), nullStr(rec.DeferID),
 			nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
+			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
 			payloadArg)
 		if err != nil {
 			return fmt.Errorf("append history batch: exec step %d: %w", rec.Step, err)
@@ -422,6 +517,11 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 		`UPDATE idempotency_keys SET result = $3 WHERE workflow_id = $1`,
 		workflowID, result)
 
+	// Best-effort: clear sticky worker assignment (Feature 10).
+	s.ClearStickyWorker(context.Background(), workflowID)
+	// Best-effort: release all concurrency keys (Feature 5).
+	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+
 	return nil
 }
 
@@ -444,6 +544,11 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, 
 	s.db.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $3 WHERE workflow_id = $1`,
 		workflowID, errMsg)
+
+	// Best-effort: clear sticky worker assignment (Feature 10).
+	s.ClearStickyWorker(context.Background(), workflowID)
+	// Best-effort: release all concurrency keys (Feature 5).
+	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
 
 	return nil
 }
@@ -922,6 +1027,163 @@ func (s *PostgresStore) LoadCompactionState(ctx context.Context, workflowID stri
 	return &cs, nil
 }
 
+// ---- PromiseStore interface implementation ----
+
+// CreatePromise creates a new promise for a workflow instance.
+func (s *PostgresStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO workflow_promises (workflow_id, promise_id, promise_name, status)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (workflow_id, promise_id) DO NOTHING
+	`, workflowID, promiseID, promiseName, "pending")
+	return err
+}
+
+// ResolvePromise marks a promise as resolved with the given result.
+func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_promises SET status = $3, result = $4, resolved_at = now()
+		WHERE workflow_id = $1 AND promise_id = $2
+	`, workflowID, promiseID, "resolved", result)
+	return err
+}
+
+// RejectPromise marks a promise as rejected with the given error message.
+func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_promises SET status = $3, error_msg = $4, resolved_at = now()
+		WHERE workflow_id = $1 AND promise_id = $2
+	`, workflowID, promiseID, "rejected", errMsg)
+	return err
+}
+
+// GetPromise returns the current status and result of a promise.
+func (s *PostgresStore) GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error) {
+	var resultStr, errStr sql.NullString
+	err = s.db.QueryRowContext(ctx, `
+		SELECT status, result::text, error_msg FROM workflow_promises
+		WHERE workflow_id = $1 AND promise_id = $2
+	`, workflowID, promiseID).Scan(&status, &resultStr, &errStr)
+	if err == sql.ErrNoRows {
+		return "pending", "", "", nil
+	}
+	if err != nil {
+		return "", "", "", err
+	}
+	return status, resultStr.String, errStr.String, nil
+}
+
+// ListPromises returns all promises for a workflow ordered by creation time.
+func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT promise_id, promise_name, status, COALESCE(result::text, ''), COALESCE(error_msg, ''), created_at, resolved_at
+		FROM workflow_promises
+		WHERE workflow_id = $1
+		ORDER BY created_at
+	`, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var promises []PromiseInfo
+	for rows.Next() {
+		var pi PromiseInfo
+		var resolvedAt sql.NullTime
+		if err := rows.Scan(&pi.PromiseID, &pi.PromiseName, &pi.Status, &pi.Result, &pi.ErrorMsg, &pi.CreatedAt, &resolvedAt); err != nil {
+			return nil, err
+		}
+		if resolvedAt.Valid {
+			pi.ResolvedAt = &resolvedAt.Time
+		}
+		promises = append(promises, pi)
+	}
+	return promises, rows.Err()
+}
+
+// ---- Concurrency Key implementations (Feature 5) ----
+
+// AcquireConcurrencyKey tries to acquire a concurrency key for a workflow.
+// Returns true if acquired, false if already held by another workflow.
+func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
+	// First delete expired keys for this key hash.
+	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256') AND expires_at < now()`, key)
+	if err != nil {
+		return false, fmt.Errorf("acquire concurrency key: delete expired: %w", err)
+	}
+
+	// Try to insert. ON CONFLICT DO NOTHING means if the key_hash already exists,
+	// the RETURNING clause returns no rows.
+	var returnedWorkflowID string
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at)
+		VALUES (digest($1, 'sha256'), $1, $2, now() + $3::interval)
+		ON CONFLICT (key_hash) DO NOTHING
+		RETURNING workflow_id
+	`, key, workflowID, fmt.Sprintf("%d seconds", int(ttl.Seconds()))).Scan(&returnedWorkflowID)
+
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("acquire concurrency key: %w", err)
+	}
+	return true, nil
+}
+
+// ReleaseConcurrencyKey releases a specific concurrency key.
+func (s *PostgresStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256')`, key)
+	if err != nil {
+		return fmt.Errorf("release concurrency key: %w", err)
+	}
+	return nil
+}
+
+// ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.
+func (s *PostgresStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = $1`, workflowID)
+	if err != nil {
+		return fmt.Errorf("release workflow concurrency keys: %w", err)
+	}
+	return nil
+}
+
+// ReapExpiredConcurrencyKeys deletes all expired concurrency keys.
+// Returns the number of keys deleted.
+func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE expires_at < now()`)
+	if err != nil {
+		return 0, fmt.Errorf("reap expired concurrency keys: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n, nil
+}
+
+// ---- Sticky Session implementations (Feature 10) ----
+
+// UpdateStickyWorker sets the sticky worker for a workflow.
+func (s *PostgresStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances SET sticky_worker_id = $2 WHERE id = $1
+	`, workflowID, workerID)
+	if err != nil {
+		return fmt.Errorf("update sticky worker: %w", err)
+	}
+	return nil
+}
+
+// ClearStickyWorker removes the sticky worker assignment.
+func (s *PostgresStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = $1
+	`, workflowID)
+	if err != nil {
+		return fmt.Errorf("clear sticky worker: %w", err)
+	}
+	return nil
+}
+
 // NextCronTime computes the next firing time for a 5-field cron expression
 // (minute hour day-of-month month day-of-week) from the given time.
 func NextCronTime(cronExpr string, from time.Time) time.Time {
@@ -1070,6 +1332,36 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.PluginError != "" {
 			payload["plugin_error"] = rec.PluginError
 		}
+	case "create_promise":
+		payload["promise_name"] = rec.PromiseName
+		payload["promise_id"] = rec.PromiseID
+	case "await_promise", "promise_resolved", "promise_rejected":
+	case "update_handler":
+		if rec.UpdateHandlerName != "" {
+			payload["update_handler_name"] = rec.UpdateHandlerName
+		}
+	case "state_mutation":
+		if rec.StateKey != "" {
+			payload["state_key"] = rec.StateKey
+		}
+		if rec.StateValue != "" {
+			payload["state_value"] = rec.StateValue
+		}
+		if rec.StateDelta != 0 {
+			payload["state_delta"] = rec.StateDelta
+		}
+		if rec.StateOp != "" {
+			payload["state_op"] = rec.StateOp
+		}
+	case "run_detached":
+		// No extra fields to store.
+		payload["promise_id"] = rec.PromiseID
+		if rec.PromiseResult != "" {
+			payload["promise_result"] = rec.PromiseResult
+		}
+		if rec.PromiseError != "" {
+			payload["promise_error"] = rec.PromiseError
+		}
 	}
 	return json.Marshal(payload)
 }
@@ -1111,5 +1403,19 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["plugin_input"].(string); ok { rec.PluginInput = v }
 		if v, ok := m["plugin_output"].(string); ok { rec.PluginOutput = v }
 		if v, ok := m["plugin_error"].(string); ok { rec.PluginError = v }
+	case "create_promise", "await_promise", "promise_resolved", "promise_rejected":
+	case "update_handler":
+		if v, ok := m["update_handler_name"].(string); ok { rec.UpdateHandlerName = v }
+	case "state_mutation":
+		if v, ok := m["state_key"].(string); ok { rec.StateKey = v }
+		if v, ok := m["state_value"].(string); ok { rec.StateValue = v }
+		if v, ok := m["state_delta"].(float64); ok { rec.StateDelta = int64(v) }
+		if v, ok := m["state_op"].(string); ok { rec.StateOp = v }
+	case "run_detached":
+		// No extra fields to restore.
+		if v, ok := m["promise_name"].(string); ok { rec.PromiseName = v }
+		if v, ok := m["promise_id"].(string); ok { rec.PromiseID = v }
+		if v, ok := m["promise_result"].(string); ok { rec.PromiseResult = v }
+		if v, ok := m["promise_error"].(string); ok { rec.PromiseError = v }
 	}
 }

@@ -493,6 +493,77 @@ Host-only extension for plugin function calls. Not included in the Go SDK genera
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
+### 2.20 `durable_create_promise`
+
+Create a named durable promise. Returns a promise ID that external callers use to resolve or reject the promise.
+
+```
+(func (import "env" "durable_create_promise")
+  (param i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `name_ptr` | `i32` | Promise name pointer |
+| `name_len` | `i32` | Promise name length |
+| `promise_id_out_ptr` | `i32` | Output buffer for promise ID |
+| `promise_id_out_max` | `i32` | Output buffer capacity (65536) |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-31 | `errCode` — 0 = success |
+| 32-63 | `promiseIDLen` — bytes written to promise ID buffer |
+
+### 2.21 `durable_await_promise`
+
+Wait for a promise to be resolved by an external caller. Blocks until resolved or timeout expires.
+
+```
+(func (import "env" "durable_await_promise")
+  (param i32 i32 i64 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `promise_id_ptr` | `i32` | Promise ID pointer |
+| `promise_id_len` | `i32` | Promise ID length |
+| `timeout_ms` | `i64` | Timeout in milliseconds |
+| `result_out_ptr` | `i32` | Output buffer for result |
+| `result_out_max` | `i32` | Output buffer capacity (65536) |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-15 | `errCode` — 0 = success, non-zero = error |
+| 16-31 | `timedOut` — non-zero if timeout expired |
+| 32-63 | `resultLen` — bytes written to result buffer |
+
+### 2.22 `durable_register_update_handler`
+
+Register an update handler for workflow updates (bi-directional RPC). Handler registration is one-way; no output buffer is needed.
+
+```
+(func (import "env" "durable_register_update_handler")
+  (param i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `name_ptr` | `i32` | Update handler name pointer |
+| `name_len` | `i32` | Update handler name length |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-31 | `errCode` — 0 = success |
+
 ---
 
 ## 3. Memory Layout

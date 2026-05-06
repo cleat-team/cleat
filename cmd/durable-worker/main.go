@@ -391,6 +391,10 @@ func (w *Worker) Run() {
 	w.wg.Add(1)
 	go w.reaperLoop()
 
+	// Background concurrency key reaper goroutine (Feature 5).
+	w.wg.Add(1)
+	go w.concurrencyKeyReaperLoop()
+
 	// Dispatch loop.
 	w.wg.Add(1)
 	go w.dispatchLoop()
@@ -651,6 +655,33 @@ func (w *Worker) reaperLoop() {
 			}
 			if reaped > 0 {
 				log.Printf("[worker %s] Reaper: reclaimed %d stale instances", w.id, reaped)
+			}
+		}
+	}
+}
+
+func (w *Worker) concurrencyKeyReaperLoop() {
+	defer w.wg.Done()
+	// Reap expired concurrency keys every 60 seconds.
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			reaped, err := w.store.ReapExpiredConcurrencyKeys(w.ctx)
+			if err != nil {
+				if isConnectionError(err) {
+					log.Printf("[worker %s] Concurrency key reaper: DB appears down", w.id)
+				} else {
+					log.Printf("[worker %s] Concurrency key reaper: %v", w.id, err)
+				}
+				continue
+			}
+			if reaped > 0 {
+				log.Printf("[worker %s] Concurrency key reaper: removed %d expired keys", w.id, reaped)
 			}
 		}
 	}
@@ -1072,8 +1103,9 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 
 func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, name string) {
 	var input struct {
-		Input      json.RawMessage `json:"input"`
-		EntryPoint string          `json:"entry_point"`
+		Input          json.RawMessage `json:"input"`
+		EntryPoint     string          `json:"entry_point"`
+		ConcurrencyKey string          `json:"concurrency_key"`
 	}
 	if r.Body != nil {
 		json.NewDecoder(r.Body).Decode(&input)
@@ -1106,6 +1138,12 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		in, _ = json.Marshal(merged)
 	}
 
+	// Support Concurrency-Key header or JSON body field (Feature 5).
+	concurrencyKey := r.Header.Get("Cleat-Concurrency-Key")
+	if concurrencyKey == "" {
+		concurrencyKey = input.ConcurrencyKey
+	}
+
 	// Support Idempotency-Key header for exactly-once semantics.
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), name, versions[0], in, idempotencyKey)
@@ -1115,9 +1153,26 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	}
 	if alreadyExisted {
 		s.writeJSON(w, 200, map[string]string{"workflow_id": runID, "already_started": "true"})
-	} else {
-		s.writeJSON(w, 201, map[string]string{"id": runID})
+		return
 	}
+
+	// If concurrency key is specified, try to acquire it for the new run.
+	if concurrencyKey != "" {
+		ttl := 30 * time.Minute
+		acquired, err := s.store.AcquireConcurrencyKey(r.Context(), concurrencyKey, runID, ttl)
+		if err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		if !acquired {
+			// Key already held by another workflow — fail the new run and return conflict.
+			s.store.FailWorkflow(context.Background(), runID, "", "concurrency key conflict: "+concurrencyKey, nil)
+			s.writeError(w, 409, "workflow already running with key "+concurrencyKey)
+			return
+		}
+	}
+
+	s.writeJSON(w, 201, map[string]string{"id": runID})
 }
 
 func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id string) {
