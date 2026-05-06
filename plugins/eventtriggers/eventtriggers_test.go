@@ -373,3 +373,147 @@ func TestFilterInvalidExpr(t *testing.T) {
 		})
 	}
 }
+
+func TestFilterStructured(t *testing.T) {
+	data := map[string]interface{}{
+		"event": map[string]interface{}{
+			"data": map[string]interface{}{
+				"amount": 150.0,
+				"status": "active",
+				"user": map[string]interface{}{
+					"name": "alice",
+					"age":  30.0,
+				},
+				"items": []interface{}{
+					map[string]interface{}{"sku": "ABC"},
+					map[string]interface{}{"sku": "DEF"},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name   string
+		filter string
+		want   bool
+	}{
+		{
+			name:   "simple eq shorthand",
+			filter: `{"event.data.status": "active"}`,
+			want:   true,
+		},
+		{
+			name:   "simple eq shorthand mismatch",
+			filter: `{"event.data.status": "deleted"}`,
+			want:   false,
+		},
+		{
+			name:   "gt operator",
+			filter: `{"event.data.amount": {"$gt": 100}}`,
+			want:   true,
+		},
+		{
+			name:   "gt operator false",
+			filter: `{"event.data.amount": {"$gt": 200}}`,
+			want:   false,
+		},
+		{
+			name:   "multiple conditions AND",
+			filter: `{"event.data.amount": {"$gt": 100}, "event.data.status": "active"}`,
+			want:   true,
+		},
+		{
+			name:   "multiple conditions one fails",
+			filter: `{"event.data.amount": {"$gt": 100}, "event.data.status": "deleted"}`,
+			want:   false,
+		},
+		{
+			name:   "in operator",
+			filter: `{"event.data.status": {"$in": ["active", "pending"]}}`,
+			want:   true,
+		},
+		{
+			name:   "in operator false",
+			filter: `{"event.data.status": {"$in": ["deleted", "archived"]}}`,
+			want:   false,
+		},
+		{
+			name:   "nin operator",
+			filter: `{"event.data.status": {"$nin": ["deleted", "archived"]}}`,
+			want:   true,
+		},
+		{
+			name:   "ne operator",
+			filter: `{"event.data.status": {"$ne": "deleted"}}`,
+			want:   true,
+		},
+		{
+			name:   "gte operator",
+			filter: `{"event.data.amount": {"$gte": 150}}`,
+			want:   true,
+		},
+		{
+			name:   "lte operator",
+			filter: `{"event.data.amount": {"$lte": 150}}`,
+			want:   true,
+		},
+		{
+			name:   "nested path",
+			filter: `{"event.data.user.name": "alice"}`,
+			want:   true,
+		},
+		{
+			name:   "exists true",
+			filter: `{"event.data.amount": {"$exists": true}}`,
+			want:   true,
+		},
+		{
+			name:   "exists false",
+			filter: `{"event.data.missing": {"$exists": false}}`,
+			want:   true,
+		},
+		{
+			name:   "array index access",
+			filter: `{"event.data.items[0].sku": "ABC"}`,
+			want:   true,
+		},
+		{
+			name:   "empty filter matches all",
+			filter: `{}`,
+			want:   true,
+		},
+		{
+			name:   "ne operator mismatch",
+			filter: `{"event.data.status": {"$ne": "active"}}`,
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := EvaluateFilter(tt.filter, data)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != tt.want {
+				t.Errorf("EvaluateFilter(%q) = %v, want %v", tt.filter, result, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilterStructuredEdgeCases(t *testing.T) {
+	// Invalid JSON
+	_, err := EvaluateFilter("{invalid}", nil)
+	if err == nil {
+		t.Error("expected error for invalid JSON")
+	}
+
+	// Unknown operator
+	_, err = EvaluateFilter(`{"event.data.x": {"$unknown": 1}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{"x": 1}},
+	})
+	if err == nil {
+		t.Error("expected error for unknown operator")
+	}
+}

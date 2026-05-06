@@ -1,18 +1,34 @@
 package eventtriggers
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
-// EvaluateFilter evaluates a filter expression against event data.
-// Returns true if the event matches the filter. If the expression is
-// empty or "true", returns true without evaluation.
+// EvaluateFilter evaluates a filter against event data. It accepts two forms:
+//
+//  1. Structured JSON filter (when expr starts with '{'):
+//     {"event.data.amount": {"$gt": 100}, "event.data.status": {"$in": ["active","pending"]}}
+//  2. Text expression (otherwise): event.data.amount > 100
+//
+// If the expression is empty or "true", returns true without evaluation.
 func EvaluateFilter(expr string, eventData map[string]interface{}) (bool, error) {
 	if expr == "" || expr == "true" {
 		return true, nil
 	}
 
+	// Auto-detect structured JSON filter.
+	if strings.HasPrefix(strings.TrimSpace(expr), "{") {
+		var filter map[string]interface{}
+		if err := json.Unmarshal([]byte(expr), &filter); err != nil {
+			return false, fmt.Errorf("event-triggers: invalid JSON filter: %w", err)
+		}
+		return matchStructured(filter, eventData)
+	}
+
+	// Fall back to text expression grammar.
 	tokens, err := tokenize(expr)
 	if err != nil {
 		return false, fmt.Errorf("event-triggers: tokenize filter: %w", err)
@@ -24,6 +40,205 @@ func EvaluateFilter(expr string, eventData map[string]interface{}) (bool, error)
 	}
 
 	return evaluate(ast, eventData)
+}
+
+// ---- Structured filter (GraphQL/MongoDB-style) ----
+
+// matchStructured evaluates a structured filter object against event data.
+// Each key is a dotted path into the event. Each value is either:
+//
+//	"value"              — shorthand for {"$eq": "value"}
+//	{"$eq": value}       — equals
+//	{"$ne": value}       — not equals
+//	{"$gt": number}      — greater than
+//	{"$lt": number}      — less than
+//	{"$gte": number}     — greater than or equal
+//	{"$lte": number}     — less than or equal
+//	{"$in": [...]}       — value is in list
+//	{"$nin": [...]}      — value is not in list
+//	{"$exists": bool}    — path exists (or not)
+//
+// Multiple keys are ANDed together.
+func matchStructured(filter map[string]interface{}, eventData map[string]interface{}) (bool, error) {
+	for path, cond := range filter {
+		val, found := getPath(eventData, path)
+		matched, err := matchCondition(path, val, found, cond)
+		if err != nil {
+			return false, err
+		}
+		if !matched {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func matchCondition(path string, val interface{}, found bool, cond interface{}) (bool, error) {
+	switch c := cond.(type) {
+	case map[string]interface{}:
+		// Operator form: {"$gt": 100}
+		return matchOperators(path, val, found, c)
+	default:
+		// Shorthand: "value" means {"$eq": "value"}
+		if !found {
+			return false, nil
+		}
+		return valuesEqual(val, c), nil
+	}
+}
+
+func matchOperators(path string, val interface{}, found bool, ops map[string]interface{}) (bool, error) {
+	for op, operand := range ops {
+		switch op {
+		case "$exists":
+			exists, ok := operand.(bool)
+			if !ok {
+				return false, fmt.Errorf("event-triggers: $exists requires bool, got %T", operand)
+			}
+			if found != exists {
+				return false, nil
+			}
+		case "$eq":
+			if !found || !valuesEqual(val, operand) {
+				return false, nil
+			}
+		case "$ne":
+			if found && valuesEqual(val, operand) {
+				return false, nil
+			}
+		case "$gt":
+			if !found || !compareNumeric(val, operand) > 0 {
+				return false, nil
+			}
+		case "$lt":
+			if !found || !compareNumeric(val, operand) < 0 {
+				return false, nil
+			}
+		case "$gte":
+			if !found || !compareNumeric(val, operand) >= 0 {
+				return false, nil
+			}
+		case "$lte":
+			if !found || !compareNumeric(val, operand) <= 0 {
+				return false, nil
+			}
+		case "$in":
+			list, ok := operand.([]interface{})
+			if !ok {
+				return false, fmt.Errorf("event-triggers: $in requires array, got %T", operand)
+			}
+			if !found {
+				return false, nil
+			}
+			matched := false
+			for _, item := range list {
+				if valuesEqual(val, item) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false, nil
+			}
+		case "$nin":
+			list, ok := operand.([]interface{})
+			if !ok {
+				return false, fmt.Errorf("event-triggers: $nin requires array, got %T", operand)
+			}
+			if found {
+				for _, item := range list {
+					if valuesEqual(val, item) {
+						return false, nil
+					}
+				}
+			}
+		default:
+			return false, fmt.Errorf("event-triggers: unknown operator %q", op)
+		}
+	}
+	return true, nil
+}
+
+// getPath resolves a dotted path like "event.data.user.name" or "event.data.items[0]"
+// in a nested map.
+func getPath(data map[string]interface{}, path string) (interface{}, bool) {
+	parts := strings.Split(path, ".")
+	var current interface{} = data
+	for _, part := range parts {
+		// Check for array index: "field[N]"
+		if idx := strings.IndexByte(part, '['); idx >= 0 && strings.HasSuffix(part, "]") {
+			fieldName := part[:idx]
+			indexStr := part[idx+1 : len(part)-1]
+			index, err := strconv.Atoi(indexStr)
+			if err != nil {
+				return nil, false
+			}
+			m, ok := current.(map[string]interface{})
+			if !ok {
+				return nil, false
+			}
+			arr, ok := m[fieldName].([]interface{})
+			if !ok || index < 0 || index >= len(arr) {
+				return nil, false
+			}
+			current = arr[index]
+			continue
+		}
+		m, ok := current.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		val, ok := m[part]
+		if !ok {
+			return nil, false
+		}
+		current = val
+	}
+	return current, true
+}
+
+func valuesEqual(a, b interface{}) bool {
+	// Normalize numeric types for comparison.
+	aNum, aIsNum := toFloat64(a)
+	bNum, bIsNum := toFloat64(b)
+	if aIsNum && bIsNum {
+		return aNum == bNum
+	}
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+}
+
+func compareNumeric(val, operand interface{}) int {
+	a, aOK := toFloat64(val)
+	b, bOK := toFloat64(operand)
+	if !aOK || !bOK {
+		return 0
+	}
+	if a > b {
+		return 1
+	}
+	if a < b {
+		return -1
+	}
+	return 0
+}
+
+func toFloat64(v interface{}) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	}
+	return 0, false
 }
 
 // ---------------------------------------------------------------------------
