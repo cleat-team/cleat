@@ -1,9 +1,9 @@
-// HostCalls: Rust wrapper around the 15 WASM host function imports
+// HostCalls: Rust wrapper around the 18 WASM host function imports
 // matching the cleat host runtime ABI from internal/host/imports.go.
 
 use crate::memory;
 
-/// All 15 host function imports from the "env" WASM module.
+/// All 18 host function imports from the "env" WASM module.
 /// Each returns i64 with a bit-packed result. Strings cross as (ptr, len) pairs.
 mod imports {
     #[link(wasm_import_module = "env")]
@@ -81,6 +81,24 @@ mod imports {
             op_ptr: *const u8, op_len: u32,
             req_ptr: *const u8, req_len: u32,
             resp_ptr: *mut u8, resp_max_len: u32,
+        ) -> i64;
+
+        // durablecreate_promise - one string in, one string out (ABI 2.20)
+        pub fn durable_create_promise(
+            name_ptr: *const u8, name_len: u32,
+            id_out_ptr: *mut u8, id_out_max: u32,
+        ) -> i64;
+
+        // durableawait_promise - one string in, i64 timeout, one string out (ABI 2.21)
+        pub fn durable_await_promise(
+            id_ptr: *const u8, id_len: u32,
+            timeout_ms: i64,
+            result_out_ptr: *mut u8, result_out_max: u32,
+        ) -> i64;
+
+        // durableregister_update_handler - one string in, void return (ABI 2.22)
+        pub fn durable_register_update_handler(
+            name_ptr: *const u8, name_len: u32,
         ) -> i64;
     }
 }
@@ -284,6 +302,56 @@ impl HostCalls {
             imports::set_query_state(
                 key.as_ptr(), key.len() as u32,
                 value.as_ptr(), value.len() as u32,
+            );
+        }
+    }
+
+    /// Create a durable promise. Mirrors Go's CreatePromise (ABI 2.20).
+    /// Returns (promise_id, error).
+    pub fn create_promise(&self, name: &str) -> (String, Option<String>) {
+        let mut id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_create_promise(
+                name.as_ptr(), name.len() as u32,
+                id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (id_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return (String::new(), Some(format!("create_promise error code: {}", err_code)));
+        }
+        let id = unsafe { memory::read_string(id_buf.as_ptr(), id_len) };
+        (id, None)
+    }
+
+    /// Await a durable promise. Mirrors Go's AwaitPromise (ABI 2.21).
+    /// Returns (result, timed_out, error).
+    pub fn await_promise(&self, promise_id: &str, timeout_ms: i64) -> (String, bool, Option<String>) {
+        let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_await_promise(
+                promise_id.as_ptr(), promise_id.len() as u32,
+                timeout_ms,
+                result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (result_len, timed_out, err_code) = memory::decode_await_promise_result(result);
+        if err_code != 0 {
+            return (String::new(), timed_out, Some(format!("await_promise error code: {}", err_code)));
+        }
+        let result = if result_len > 0 {
+            unsafe { memory::read_string(result_buf.as_ptr(), result_len) }
+        } else {
+            String::new()
+        };
+        (result, timed_out, None)
+    }
+
+    /// Register an update handler. Mirrors Go's RegisterUpdateHandler (ABI 2.22).
+    pub fn register_update_handler(&self, name: &str) {
+        unsafe {
+            imports::durable_register_update_handler(
+                name.as_ptr(), name.len() as u32,
             );
         }
     }

@@ -266,6 +266,21 @@ public final class Memory {
         return (int) (result & 0xFFFFL);
     }
 
+    // ---- await_promise result decoding ----
+    // bits 32-63 = resultLen (reuses decodeSimpleExtra)
+    // bits 16-23 = timedOut (8 bits, 0 or 1)
+    // bits  0-15 = errCode (reuses decodeAwaitErrCode)
+
+    /**
+     * Decode the timedOut flag from {@code durable_await_promise}
+     * (bits 16-23).
+     *
+     * @return true if the timeout expired before the promise resolved
+     */
+    public static boolean decodeAwaitPromiseTimedOut(long result) {
+        return ((result >>> 16) & 0xFFL) != 0;
+    }
+
     // ---- poll_signal result decoding ----
     // bits 32-63 = payloadLen
     // bits  8-15 = found flag (0x0100 = 256 if found)

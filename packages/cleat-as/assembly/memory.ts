@@ -293,6 +293,34 @@ export function decodePollCancellationResult(result: i64): PollCancellationResul
   return new PollCancellationResult(cancelled, reasonLen);
 }
 
+/** Decoded durable_await_promise result. */
+export class AwaitPromiseResult {
+  constructor(
+    /** Result length in bytes (bits 32-63). */
+    public readonly resultLen: u32,
+    /** Whether the promise wait timed out (bits 16-23, non-zero = timed out). */
+    public readonly timedOut: bool,
+    /** Error code (bits 0-15, 16 bits). */
+    public readonly errCode: u16,
+  ) {}
+}
+
+/**
+ * Decode a durable_await_promise result.
+ *
+ * Bit layout:
+ *   bits  0-15 = errCode (16 bits)
+ *   bits 16-23 = timedOut flag (non-zero = timed out)
+ *   bits 32-63 = resultLen (32 bits)
+ */
+export function decodeAwaitPromiseResult(result: i64): AwaitPromiseResult {
+  let r: u64 = result as u64;
+  let resultLen: u32 = (r >> 32) as u32;
+  let timedOut: bool = ((r >> 16) & 0xFF) !== 0;
+  let errCode: u16 = (r & 0xFFFF) as u16;
+  return new AwaitPromiseResult(resultLen, timedOut, errCode);
+}
+
 // ──────────────────────────────────────────────
 // Memory helper class
 // ──────────────────────────────────────────────

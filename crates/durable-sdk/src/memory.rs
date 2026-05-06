@@ -99,6 +99,18 @@ pub fn decode_await_signals_result(result: i64) -> (u16, u16, bool, u16) {
     (sig_name_len, payload_len, timed_out, err_code)
 }
 
+/// Decode await_promise result. ABI 2.21.
+/// bits 32-63 = resultLen (32 bits)
+/// bits 16-23 = timedOut flag (1 byte)
+/// bits 0-15  = errCode (16 bits)
+pub fn decode_await_promise_result(result: i64) -> (u32, bool, u16) {
+    let r = result as u64;
+    let result_len = ((r >> 32) & 0xFFFF_FFFF) as u32;
+    let timed_out = ((r >> 16) & 0xFF) != 0;
+    let err_code = (r & 0xFFFF) as u16;
+    (result_len, timed_out, err_code)
+}
+
 /// PollSignal found flag (matches engine.go line 500: 0x0100).
 pub const POLL_SIGNAL_FOUND: u32 = 0x0100;
 

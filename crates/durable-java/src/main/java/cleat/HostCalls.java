@@ -4,7 +4,7 @@ import java.nio.charset.StandardCharsets;
 import org.teavm.interop.Import;
 
 /**
- * High-level wrapper around all 15 cleat WASM host function imports.
+ * High-level wrapper around all 18 cleat WASM host function imports.
  * <p>
  * Each WASM host function is imported from the {@code "env"} module via
  * {@link Import @Import}.  The raw native methods return packed {@code long}
@@ -42,7 +42,7 @@ import org.teavm.interop.Import;
 public class HostCalls {
 
     // ========================================================================
-    // Raw WASM imports (15 host functions from the "env" module)
+    // Raw WASM imports (18 host functions from the "env" module)
     // ========================================================================
 
     @Import(module = "env", name = "durable_call")
@@ -84,6 +84,10 @@ public class HostCalls {
     @Import(module = "env", name = "durable_continue_as_new")
     private static native long durableContinueAsNewRaw(int inPtr, int inLen);
 
+    @Import(module = "env", name = "durable_create_promise")
+    private static native long durableCreatePromiseRaw(
+        int namePtr, int nameLen, int idOutPtr, int idOutMax);
+
     @Import(module = "env", name = "durable_child_workflow")
     private static native long durableChildWorkflowRaw(
         int namePtr, int nameLen,
@@ -95,11 +99,20 @@ public class HostCalls {
         int runIdPtr, int runIdLen,
         int outPtr, int maxLen);
 
+    @Import(module = "env", name = "durable_await_promise")
+    private static native long durableAwaitPromiseRaw(
+        int idPtr, int idLen, long timeoutMs,
+        int resultOutPtr, int resultOutMax);
+
     @Import(module = "env", name = "durable_await_signals")
     private static native long durableAwaitSignalsRaw(
         int namesPtr, int namesLen, long timeoutMs,
         int sigNameOut, int sigNameMax,
         int payloadOut, int payloadMax);
+
+    @Import(module = "env", name = "durable_register_update_handler")
+    private static native long durableRegisterUpdateHandlerRaw(
+        int namePtr, int nameLen);
 
     @Import(module = "env", name = "set_query_state")
     private static native long setQueryStateRaw(
@@ -395,6 +408,35 @@ public class HostCalls {
     }
 
     /**
+     * Create a promise with the given name.
+     * <p>
+     * Promises are durable, first-class entities in cleat. They can be
+     * resolved by this or another workflow, and awaited by one or more
+     * workflows using {@link #awaitPromise(String, long)}.
+     *
+     * @param name the promise name
+     * @return a result containing the promise ID on success, or an error
+     *         description on failure
+     */
+    public DurableResult<String> createPromise(String name) {
+        int[] p = packStrings(name);
+
+        long result = durableCreatePromiseRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int idLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return DurableResult.err("createPromise failed with code " + errCode);
+        }
+
+        String promiseId = readOutput(idLen);
+        return DurableResult.ok(promiseId);
+    }
+
+    /**
      * Start a child workflow execution.
      * <p>
      * The child runs asynchronously.  Use {@link #awaitChild(String)} to
@@ -453,6 +495,38 @@ public class HostCalls {
 
         String childResult = readOutput(resultLen);
         return DurableResult.ok(childResult);
+    }
+
+    /**
+     * Wait for a promise to resolve, with an optional timeout.
+     * <p>
+     * Blocks until the promise with the given ID is resolved or the timeout
+     * expires. On timeout, {@link AwaitPromiseResult#timedOut} is
+     * {@code true}.
+     *
+     * @param promiseId the promise ID to wait for
+     * @param timeoutMs maximum wait time in milliseconds (use
+     *                  {@link Long#MAX_VALUE} for no timeout)
+     * @return a result containing an {@link AwaitPromiseResult} with the
+     *         resolved value and timeout indicator
+     */
+    public DurableResult<AwaitPromiseResult> awaitPromise(String promiseId, long timeoutMs) {
+        int[] p = packStrings(promiseId);
+
+        long result = durableAwaitPromiseRaw(
+            p[0], p[1], timeoutMs,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeAwaitErrCode(result);
+        boolean timedOut = Memory.decodeAwaitPromiseTimedOut(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return DurableResult.err("awaitPromise failed with code " + errCode);
+        }
+
+        String promiseResult = readOutput(resultLen);
+        return DurableResult.ok(new AwaitPromiseResult(promiseResult, timedOut));
     }
 
     /**
@@ -517,6 +591,20 @@ public class HostCalls {
     }
 
     /**
+     * Register a handler for a named update.
+     * <p>
+     * External clients can send updates to this workflow using the cleat
+     * update API. The registered handler is invoked when an update is
+     * received with the matching name.
+     *
+     * @param name the update handler name
+     */
+    public void registerUpdateHandler(String name) {
+        int[] p = packStrings(name);
+        durableRegisterUpdateHandlerRaw(p[0], p[1]);
+    }
+
+    /**
      * Set a key-value pair in the workflow's queryable state.
      * <p>
      * External clients can query this state while the workflow is running or
@@ -572,6 +660,39 @@ public class HostCalls {
             }
             return "AwaitSignalsResult(signalName=" + signalName
                 + ", payload=" + payload + ")";
+        }
+    }
+
+    /**
+     * Result of an {@link #awaitPromise(String, long)} call.
+     * <p>
+     * Contains the promise's resolved value (or empty if timed out), and
+     * whether the timeout expired before the promise was resolved.
+     */
+    public static class AwaitPromiseResult {
+        /** The resolved value of the promise (empty if timed out). */
+        public final String result;
+
+        /** {@code true} if the timeout expired before the promise resolved. */
+        public final boolean timedOut;
+
+        /**
+         * Construct a new await-promise result.
+         *
+         * @param result   the resolved value
+         * @param timedOut whether the wait timed out
+         */
+        public AwaitPromiseResult(String result, boolean timedOut) {
+            this.result = result;
+            this.timedOut = timedOut;
+        }
+
+        @Override
+        public String toString() {
+            if (timedOut) {
+                return "AwaitPromiseResult(timedOut)";
+            }
+            return "AwaitPromiseResult(result=" + result + ")";
         }
     }
 }

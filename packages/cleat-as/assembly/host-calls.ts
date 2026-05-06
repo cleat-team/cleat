@@ -1,5 +1,5 @@
 /**
- * AssemblyScript bindings for the 15 cleat WASM host function imports.
+ * AssemblyScript bindings for the 18 cleat WASM host function imports.
  *
  * Provides raw `@external` import declarations and the `HostCalls` class
  * that wraps each import with idiomatic AssemblyScript methods.
@@ -16,13 +16,14 @@ import {
   decodeAwaitSignalsResult,
   decodePollSignalResult,
   decodePollCancellationResult,
+  decodeAwaitPromiseResult,
   OUT_BUF_SIZE,
   SCRATCH_BASE,
   OUTPUT_OFFSET,
 } from "./memory";
 
 // ═══════════════════════════════════════════════
-// 15 raw host function imports from "env" module
+// 18 raw host function imports from "env" module
 // ═══════════════════════════════════════════════
 
 /**
@@ -180,6 +181,41 @@ export declare function import_durable_call(
   respMaxLen: i32,
 ): i64;
 
+/**
+ * 16. durable_create_promise: Create a new durable promise.
+ * (import "env" "durable_create_promise") (param i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_create_promise")
+export declare function import_durable_create_promise(
+  namePtr: i32,
+  nameLen: i32,
+  idOutPtr: i32,
+  idOutMax: i32,
+): i64;
+
+/**
+ * 17. durable_await_promise: Wait for a durable promise to resolve.
+ * (import "env" "durable_await_promise") (param i32 i32 i64 i32 i32) (result i64)
+ */
+@external("env", "durable_await_promise")
+export declare function import_durable_await_promise(
+  idPtr: i32,
+  idLen: i32,
+  timeoutMs: i64,
+  resultOutPtr: i32,
+  resultOutMax: i32,
+): i64;
+
+/**
+ * 18. durable_register_update_handler: Register a handler for update calls.
+ * (import "env" "durable_register_update_handler") (param i32 i32) (result i64)
+ */
+@external("env", "durable_register_update_handler")
+export declare function import_durable_register_update_handler(
+  namePtr: i32,
+  nameLen: i32,
+): i64;
+
 // ═══════════════════════════════════════════════
 // High-level result types for HostCalls methods
 // ═══════════════════════════════════════════════
@@ -266,12 +302,44 @@ export class AwaitSignalsOutcome {
   }
 }
 
+/** Result of `createPromise`. */
+export class PromiseResult {
+  constructor(
+    /** The promise ID string. Empty on error. */
+    public readonly value: string,
+    /** Error message, or null on success. */
+    public readonly error: string | null,
+  ) {}
+
+  /** Returns true when this result carries an error. */
+  get isError(): bool {
+    return this.error !== null;
+  }
+}
+
+/** Result of `awaitPromise`. */
+export class AwaitPromiseOutcome {
+  constructor(
+    /** The resolved promise value. Empty on timeout or error. */
+    public readonly value: string,
+    /** Whether the wait timed out. */
+    public readonly timedOut: bool,
+    /** Error message, or null on success. */
+    public readonly error: string | null,
+  ) {}
+
+  /** Returns true when this outcome carries an error. */
+  get isError(): bool {
+    return this.error !== null;
+  }
+}
+
 // ═══════════════════════════════════════════════
 // HostCalls wrapper
 // ═══════════════════════════════════════════════
 
 /**
- * High-level AssemblyScript wrapper around the 15 cleat WASM host function
+ * High-level AssemblyScript wrapper around the 18 cleat WASM host function
  * imports.
  *
  * Each method handles string I/O (encode input strings to memory, decode
@@ -713,5 +781,100 @@ export class HostCalls {
     let valLen: i32 = this.memory.writeString(valOffset, OUT_BUF_SIZE, value);
 
     import_set_query_state(SCRATCH_BASE as i32, keyLen, valOffset as i32, valLen);
+  }
+
+  // ────────────────────────────────────────────
+  // 16. createPromise
+  // ────────────────────────────────────────────
+
+  /**
+   * Create a new durable promise with the given name.
+   *
+   * The host allocates a promise ID and writes it to the output buffer.
+   *
+   * @param name - The promise name.
+   * @returns A PromiseResult containing the promise ID on success.
+   */
+  createPromise(name: string): PromiseResult {
+    let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
+
+    let result: i64 = import_durable_create_promise(
+      SCRATCH_BASE as i32,
+      nameLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+
+    if (decoded.errCode !== 0) {
+      return new PromiseResult(
+        "",
+        "create_promise error code: " + decoded.errCode.toString(),
+      );
+    }
+
+    let promiseId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+    return new PromiseResult(promiseId, null);
+  }
+
+  // ────────────────────────────────────────────
+  // 17. awaitPromise
+  // ────────────────────────────────────────────
+
+  /**
+   * Wait for a durable promise to resolve, with a timeout.
+   *
+   * If the promise is not yet resolved when the timeout elapses, the
+   * workflow should suspend by returning the suspension sentinel.
+   *
+   * @param id        - The promise ID to wait for.
+   * @param timeoutMs - Timeout in milliseconds.
+   * @returns The outcome with the resolved value and timeout status.
+   */
+  awaitPromise(id: string, timeoutMs: i64): AwaitPromiseOutcome {
+    let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, id);
+
+    let result: i64 = import_durable_await_promise(
+      SCRATCH_BASE as i32,
+      idLen,
+      timeoutMs,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeAwaitPromiseResult(result);
+
+    if (decoded.errCode !== 0) {
+      return new AwaitPromiseOutcome(
+        "",
+        false,
+        "await_promise error code: " + decoded.errCode.toString(),
+      );
+    }
+
+    let promiseResult: string =
+      decoded.resultLen > 0
+        ? this.memory.readString(OUTPUT_OFFSET, decoded.resultLen as i32)
+        : "";
+
+    return new AwaitPromiseOutcome(promiseResult, decoded.timedOut, null);
+  }
+
+  // ────────────────────────────────────────────
+  // 18. registerUpdateHandler
+  // ────────────────────────────────────────────
+
+  /**
+   * Register a handler for update calls on this workflow.
+   *
+   * Update handlers allow external clients to send update requests to
+   * the workflow while it is executing.
+   *
+   * @param name - The update handler name.
+   */
+  registerUpdateHandler(name: string): void {
+    let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
+    import_durable_register_update_handler(SCRATCH_BASE as i32, nameLen);
   }
 }
