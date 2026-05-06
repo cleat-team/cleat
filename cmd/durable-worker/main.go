@@ -62,45 +62,74 @@ func main() {
 	pollInterval := flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
 	apiAddr := flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
 	namespace := flag.String("namespace", "default", "Workflow namespace to claim from")
+	taskQueuesStr := flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
+	compactionThreshold := flag.Int("compaction-threshold", host.DefaultCompactionThreshold, "Number of events before history compaction triggers")
+	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
+	shardsFile := flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
 	flag.Parse()
-
-	if *dbURL == "" {
-		*dbURL = os.Getenv("DATABASE_URL")
-	}
-	if *dbURL == "" {
-		fmt.Fprintln(os.Stderr, "error: --db or DATABASE_URL is required")
-		os.Exit(1)
-	}
 
 	workerID := generateWorkerID()
 	log.Printf("[worker %s] Starting with concurrency=%d", workerID, *concurrency)
 
-	db, err := sql.Open("postgres", *dbURL)
-	if err != nil {
-		log.Fatalf("[worker %s] Failed to connect to database: %v", workerID, err)
-	}
-	defer db.Close()
-
-	db.SetMaxOpenConns(*concurrency + 5)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	store := host.NewPostgresStore(db)
+	taskQueues := strings.Split(*taskQueuesStr, ",")
+
+	var store host.WorkflowStore
+	if *shardsFile != "" {
+		configs, err := loadShardConfigs(*shardsFile)
+		if err != nil {
+			log.Fatalf("[worker %s] Failed to load shards config: %v", workerID, err)
+		}
+		shardedStore, err := host.NewShardedStore(ctx, configs, taskQueues...)
+		if err != nil {
+			log.Fatalf("[worker %s] Failed to create sharded store: %v", workerID, err)
+		}
+		store = shardedStore
+		defer shardedStore.Close()
+
+		// Start idempotency key cleanup on each shard.
+		for _, shard := range shardedStore.Shards() {
+			go idempotencyCleanupLoop(ctx, shard.DB, 1*time.Hour)
+		}
+	} else {
+		if *dbURL == "" {
+			*dbURL = os.Getenv("DATABASE_URL")
+		}
+		if *dbURL == "" {
+			fmt.Fprintln(os.Stderr, "error: --db or DATABASE_URL is required")
+			os.Exit(1)
+		}
+
+		db, err := sql.Open("postgres", *dbURL)
+		if err != nil {
+			log.Fatalf("[worker %s] Failed to connect to database: %v", workerID, err)
+		}
+		defer db.Close()
+
+		db.SetMaxOpenConns(*concurrency + 5)
+		db.SetMaxIdleConns(5)
+		db.SetConnMaxLifetime(5 * time.Minute)
+		store = host.NewPostgresStore(db, taskQueues...)
+
+		// Start periodic cleanup of expired idempotency keys.
+		go idempotencyCleanupLoop(ctx, db, 1*time.Hour)
+	}
 
 	w := &Worker{
-		id:                workerID,
-		store:             store,
-		concurrency:       *concurrency,
-		heartbeatInterval: *heartbeatInterval,
-		pollInterval:      *pollInterval,
-		ctx:               ctx,
-		cancel:            cancel,
-		namespace:         *namespace,
-		wasmCache:         make(map[string][]byte),
-		scheduleInterval:  15 * time.Second,
+		id:                  workerID,
+		store:               store,
+		concurrency:         *concurrency,
+		heartbeatInterval:   *heartbeatInterval,
+		pollInterval:        *pollInterval,
+		ctx:                 ctx,
+		cancel:              cancel,
+		namespace:           *namespace,
+		wasmCache:           make(map[string][]byte),
+		scheduleInterval:    15 * time.Second,
+		compactionThreshold: *compactionThreshold,
+		compactionInterval:  *compactionInterval,
 	}
 
 	// Start HTTP API server if configured.
@@ -159,7 +188,7 @@ func main() {
 
 type Worker struct {
 	id                string
-	store             *host.PostgresStore
+	store             host.WorkflowStore
 	concurrency       int
 	heartbeatInterval time.Duration
 	pollInterval      time.Duration
@@ -180,6 +209,10 @@ type Worker struct {
 	consecutiveDBErrors int
 	backoffUntil        time.Time
 	circuitOpen         atomic.Bool
+
+	// Compaction settings.
+	compactionThreshold int
+	compactionInterval  time.Duration
 }
 
 func (w *Worker) Run() {
@@ -198,6 +231,10 @@ func (w *Worker) Run() {
 	// Cron schedule loop.
 	w.wg.Add(1)
 	go w.scheduleLoop()
+
+	// Compaction loop.
+	w.wg.Add(1)
+	go w.compactionLoop()
 
 	log.Printf("[worker %s] Running", w.id)
 
@@ -307,6 +344,14 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	// ---- Determine entry point ----
 	entryPoint := determineEntryPoint(wf.Input)
 
+	// ---- Load compaction state if present ----
+	var compactionState *host.CompactionState
+	compactionState, err = w.store.LoadCompactionState(w.ctx, wf.ID)
+	if err != nil {
+		log.Printf("[worker %s] %s: warning: failed to load compaction state: %v", w.id, wf.ID, err)
+		compactionState = nil
+	}
+
 	// ---- Create engine ----
 	rt, err := host.NewRuntime(w.ctx)
 	if err != nil {
@@ -316,12 +361,17 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	defer rt.Close(w.ctx)
 
 	caller := &dbServiceCaller{store: w.store, workerID: w.id}
-	engine := host.NewEngine(rt, caller,
-		host.WithSignalStore(w.store),
+	engineOpts := []host.EngineOption{
+		host.WithSignalStore(w.store.(host.SignalStore)),
 		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion}),
 		host.WithWorkflowID(wf.ID),
 		host.WithChildWorkflowStore(w.store),
-	)
+	}
+	if compactionState != nil {
+		engineOpts = append(engineOpts, host.WithCompactionState(compactionState))
+		log.Printf("[worker %s] %s: loaded compaction state (compacted_step=%d)", w.id, wf.ID, compactionState.CompactedStep)
+	}
+	engine := host.NewEngine(rt, caller, engineOpts...)
 
 	// ---- Execute/Resume ----
 	inputJSON := wf.Input
@@ -352,7 +402,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		if suspended.Reason == "continue_as_new" {
 			// ContinueAsNew: create a new run and complete the current one.
 			log.Printf("[worker %s] %s: continue_as_new → starting new run", w.id, wf.ID)
-			newRunID, err := w.store.StartNewRun(w.ctx, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput))
+			newRunID, _, err := w.store.StartNewRun(w.ctx, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), "")
 			if err != nil {
 				log.Printf("[worker %s] %s: continue_as_new start failed: %v", w.id, wf.ID, err)
 				w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("continue_as_new: %v", err), nil)
@@ -484,7 +534,7 @@ func (w *Worker) scheduleLoop() {
 					continue
 				}
 
-				runID, serr := w.store.StartNewRun(w.ctx, sch.DefName, versions[0], input)
+				runID, _, serr := w.store.StartNewRun(w.ctx, sch.DefName, versions[0], input, "")
 				if serr != nil {
 					log.Printf("[worker %s] Scheduler: failed to start %s for schedule %s: %v",
 						w.id, sch.DefName, sch.Name, serr)
@@ -502,6 +552,30 @@ func (w *Worker) scheduleLoop() {
 					w.id, sch.Name, runID, nextRun.Format(time.RFC3339))
 			}
 			w.scheduleMu.Unlock()
+		}
+	}
+}
+
+func (w *Worker) compactionLoop() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(w.compactionInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			candidates, err := w.store.GetCompactionCandidates(w.ctx, w.compactionThreshold, 10)
+			if err != nil {
+				log.Printf("[worker %s] compaction: error finding candidates: %v", w.id, err)
+				continue
+			}
+			for _, wfID := range candidates {
+				if err := host.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold); err != nil {
+					log.Printf("[worker %s] compaction: error compacting %s: %v", w.id, wfID, err)
+				}
+			}
 		}
 	}
 }
@@ -560,7 +634,7 @@ func (w *Worker) releaseOrFail(wf *host.WorkflowInstance, errMsg string) {
 
 // dbServiceCaller implements host.ServiceCaller for the worker.
 type dbServiceCaller struct {
-	store    *host.PostgresStore
+	store    host.WorkflowStore
 	workerID string
 }
 
@@ -669,10 +743,40 @@ func isConnectionError(err error) bool {
 	return false
 }
 
+// loadShardConfigs reads a JSON file containing an array of ShardConfig.
+// The file format is:
+//
+//	[
+//	  {"name": "shard-0", "conn_str": "postgres://...", "tenants": ["tenant-a"]},
+//	  {"name": "shard-1", "conn_str": "postgres://...", "tenants": ["tenant-b"]}
+//	]
+func loadShardConfigs(path string) ([]host.ShardConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read shards file: %w", err)
+	}
+	var configs []host.ShardConfig
+	if err := json.Unmarshal(data, &configs); err != nil {
+		return nil, fmt.Errorf("parse shards file: %w", err)
+	}
+	if len(configs) == 0 {
+		return nil, fmt.Errorf("shards file %q contains no shard definitions", path)
+	}
+	for i, cfg := range configs {
+		if cfg.Name == "" {
+			return nil, fmt.Errorf("shards file %q: entry %d has empty name", path, i)
+		}
+		if cfg.ConnStr == "" {
+			return nil, fmt.Errorf("shards file %q: shard %q has empty conn_str", path, cfg.Name)
+		}
+	}
+	return configs, nil
+}
+
 // ---- HTTP API server ----
 
 type apiServer struct {
-	store  *host.PostgresStore
+	store  host.WorkflowStore
 	worker *Worker
 }
 
@@ -812,12 +916,18 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		in, _ = json.Marshal(merged)
 	}
 
-	runID, err := s.store.StartNewRun(r.Context(), name, versions[0], in)
+	// Support Idempotency-Key header for exactly-once semantics.
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), name, versions[0], in, idempotencyKey)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
-	s.writeJSON(w, 201, map[string]string{"id": runID})
+	if alreadyExisted {
+		s.writeJSON(w, 200, map[string]string{"workflow_id": runID, "already_started": "true"})
+	} else {
+		s.writeJSON(w, 201, map[string]string{"id": runID})
+	}
 }
 
 func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id string) {
@@ -1029,5 +1139,23 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fmt.Fprintf(w, "durable_poll_wait_seconds_count 0\n")
 		fmt.Fprintf(w, "durable_poll_wait_seconds_sum 0\n")
+	}
+}
+
+// idempotencyCleanupLoop periodically deletes expired idempotency keys
+// from the database. Runs until ctx is cancelled.
+func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, err := db.ExecContext(ctx, `DELETE FROM idempotency_keys WHERE expires_at < now()`)
+			if err != nil {
+				log.Printf("idempotency cleanup: %v", err)
+			}
+		}
 	}
 }

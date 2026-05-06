@@ -1,0 +1,100 @@
+# -- Number of worker replicas to run.
+replicaCount: 3
+
+# -- Image configuration for the durable-worker container.
+image:
+  repository: ghcr.io/rcownie/durable-worker
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# -- Worker runtime configuration.
+# These map to CLI flags on the durable-worker binary.
+worker:
+  # -- Max concurrent workflow executions (--concurrency).
+  concurrency: 10
+  # -- Tenant ID for RLS and isolation (--tenant-id).
+  tenantId: "00000000-0000-0000-0000-000000000000"
+  # -- Namespace / task queue to claim from (--namespace).
+  taskQueues: "default"
+  # -- Heartbeat interval for claimed workflow instances (--heartbeat).
+  heartbeatInterval: "5s"
+  # -- Poll interval when no work is available (--poll).
+  pollInterval: "500ms"
+
+# -- PostgreSQL connection parameters.
+# Either provide a password here (for the chart to create a Secret), or
+# supply an existing Secret containing a "database-url" key.
+postgres:
+  host: ""
+  port: 5432
+  database: cleat
+  username: cleat
+  password: ""
+  # -- Name of an existing Secret with a "database-url" key.
+  # When set, the chart will not create its own Secret.
+  existingSecret: ""
+  sslmode: disable
+
+# -- HTTP API server configuration.
+api:
+  # -- Port for the HTTP API, health checks, and metrics endpoint.
+  port: 8080
+
+# -- Container resource requests and limits.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -- HorizontalPodAutoscaler configuration.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPU: 70
+  targetMemory: 80
+
+# -- Prometheus monitoring configuration.
+monitoring:
+  # -- ServiceMonitor for Prometheus Operator auto-discovery.
+  serviceMonitor:
+    enabled: true
+
+# -- Kubernetes Service configuration.
+service:
+  type: ClusterIP
+
+# -- ServiceAccount configuration.
+serviceAccount:
+  create: true
+  # -- The name of the ServiceAccount to use.
+  # If not set and create is true, a name is generated using the fullname template.
+  name: ""
+
+# -- Security context for the pod (applied to all containers).
+# https://kubernetes.io/docs/tasks/configure-pod-container/security-context/
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# -- Security context for the container (overrides pod-level).
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Node selector for scheduling.
+nodeSelector: {}
+
+# -- Pod tolerations.
+tolerations: []
+
+# -- Pod affinity rules.
+affinity: {}

@@ -17,15 +17,15 @@ import (
 type EventType string
 
 const (
-	EventTypeCall           EventType = "call"
-	EventTypeSleep          EventType = "sleep"
-	EventTypeAwaitSignals   EventType = "await_signals"
-	EventTypeSignalReceived EventType = "signal_received"
-	EventTypeDefer          EventType = "defer"
-	EventTypeChildWorkflow  EventType = "child_workflow"
-	EventTypeAwaitChild     EventType = "await_child"
-	EventTypeContinueAsNew  EventType = "continue_as_new"
-	EventTypeHeartbeat    EventType = "heartbeat"
+	EventTypeCall             EventType = "call"
+	EventTypeSleep            EventType = "sleep"
+	EventTypeAwaitSignals     EventType = "await_signals"
+	EventTypeSignalReceived   EventType = "signal_received"
+	EventTypeDefer            EventType = "defer"
+	EventTypeChildWorkflow    EventType = "child_workflow"
+	EventTypeAwaitChild       EventType = "await_child"
+	EventTypeContinueAsNew    EventType = "continue_as_new"
+	EventTypeHeartbeat        EventType = "heartbeat"
 	EventTypeAwaitAllChildren EventType = "await_all_children"
 )
 
@@ -139,12 +139,13 @@ type RetryableError interface {
 // every DurableCall is recorded in the event history; on replay, cached
 // results are returned and divergence is detected.
 type Engine struct {
-	rt           *Runtime
-	caller       ServiceCaller
-	signalStore  SignalStore
-	state        WorkflowState
-	workflowID   string
-	childWfStore ChildWorkflowStore
+	rt              *Runtime
+	caller          ServiceCaller
+	signalStore     SignalStore
+	state           WorkflowState
+	workflowID      string
+	childWfStore    ChildWorkflowStore
+	compactionState *CompactionState
 }
 
 // EngineOption configures an Engine.
@@ -168,6 +169,11 @@ func WithWorkflowID(id string) EngineOption {
 // WithChildWorkflowStore sets the store used to create and poll child workflows.
 func WithChildWorkflowStore(cws ChildWorkflowStore) EngineOption {
 	return func(e *Engine) { e.childWfStore = cws }
+}
+
+// WithCompactionState sets the compaction state for replaying a compacted workflow.
+func WithCompactionState(cs *CompactionState) EngineOption {
+	return func(e *Engine) { e.compactionState = cs }
 }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
@@ -212,10 +218,19 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 		return "", nil, nil, nil, nil, fmt.Errorf("host: init module: %w", err)
 	}
 
+	// If compaction state is set, merge virtual compacted events with tail history
+	// to produce a complete replay history for deterministic replay.
+	compactedStep := 0
+	replayHistory := history
+	if e.compactionState != nil && len(history) > 0 {
+		replayHistory = buildFullHistoryFromCompaction(history, e.compactionState)
+		compactedStep = e.compactionState.CompactedStep
+	}
+
 	session := &execSession{
 		engine:      e,
-		history:     history,
-		isReplay:    len(history) > 0,
+		history:     replayHistory,
+		isReplay:    len(replayHistory) > 0,
 		nowMs:       nowMs.Load(),
 		deferrals:   make(map[string]string),
 		workflowID:  e.workflowID,
@@ -230,7 +245,8 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 			if se == nil {
 				se = &SuspendError{Reason: "workflow suspended"}
 			}
-			return "", session.history, &SuspendResult{
+			strippedHistory := stripCompactedEvents(session.history, compactedStep)
+			return "", strippedHistory, &SuspendResult{
 				History:      session.history,
 				SuspendUntil: se.Until,
 				Reason:       se.Reason,
@@ -238,10 +254,10 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 				Deferrals:    session.deferrals,
 			}, session.deferrals, session.queryState, nil
 		}
-		return "", session.history, nil, nil, nil, err
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, err
 	}
 
-	return result, session.history, nil, session.deferrals, session.queryState, nil
+	return result, stripCompactedEvents(session.history, compactedStep), nil, session.deferrals, session.queryState, nil
 }
 
 // RunDefer invokes a defer cleanup function in the WASM module.
@@ -1084,4 +1100,16 @@ func splitSignalNames(names string) []string {
 	}
 	parts = append(parts, names[start:])
 	return parts
+}
+
+// stripCompactedEvents removes virtual events that were prepended from compaction
+// state from the result history. This ensures the caller sees only the tail events
+// plus any new events produced during this execution.
+func stripCompactedEvents(history []EventRecord, compactedStep int) []EventRecord {
+	if compactedStep <= 0 || compactedStep >= len(history) {
+		return history
+	}
+	result := make([]EventRecord, len(history)-compactedStep)
+	copy(result, history[compactedStep:])
+	return result
 }

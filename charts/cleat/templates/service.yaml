@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cleat.fullname" . }}
+  labels:
+    {{- include "cleat.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "cleat.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.api.port }}
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: http
+      protocol: TCP

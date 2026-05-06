@@ -44,7 +44,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback|dev|schedule|run> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  durable build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable vet <package>\n")
-		fmt.Fprintf(os.Stderr, "  durable deploy [--name <name>] [--namespace <ns>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "  durable deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  durable versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  durable rollback <workflow-name> <version>\n")
 		fmt.Fprintf(os.Stderr, "  durable dev [--input <json>] [--entry-point <name>] <package>\n")
@@ -328,16 +328,17 @@ func runVet(pattern string) {
 }
 
 // runDeploy deploys a compiled WASM workflow to the database.
-// Usage: durable deploy [--name <name>] [--namespace <ns>] <wasm-file>
+// Usage: durable deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>
 func runDeploy(args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
 	nameFlag := fs.String("name", "", "workflow name (derived from filename if not set)")
 	nsFlag := fs.String("namespace", "", "workflow namespace (default: \"default\")")
+	taskQueueFlag := fs.String("task-queue", "default", "task queue for this workflow (e.g. default, gpu, high-memory)")
 	fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: durable deploy [--name <name>] [--namespace <ns>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "Usage: durable deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>\n")
 		os.Exit(1)
 	}
 	wasmPath := remainder[0]
@@ -357,7 +358,7 @@ func runDeploy(args []string) {
 	connStr := getDBConnStr()
 
 	if connStr == "" {
-		fmt.Printf("Would deploy workflow %q (version 1) from %s (%d bytes)\n", name, wasmPath, len(wasmBytes))
+		fmt.Printf("Would deploy workflow %q (version 1) from %s (%d bytes) to queue %q\n", name, wasmPath, len(wasmBytes), *taskQueueFlag)
 		fmt.Println("Dry run; set DURABLE_DATABASE_URL or --db to deploy.")
 		return
 	}
@@ -387,15 +388,15 @@ func runDeploy(args []string) {
 	}
 
 	_, err = db.Exec(
-		"INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, namespace) VALUES ($1, $2, $3, $4, $5)",
-		name, version, wasmBytes, []string{}, namespace,
+		"INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, namespace, task_queue) VALUES ($1, $2, $3, $4, $5, $6)",
+		name, version, wasmBytes, []string{}, namespace, *taskQueueFlag,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error inserting workflow definition: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Deployed workflow %q version %d (%d bytes)\n", name, version, len(wasmBytes))
+	fmt.Printf("Deployed workflow %q version %d (%d bytes) to queue %q\n", name, version, len(wasmBytes), *taskQueueFlag)
 }
 
 func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {

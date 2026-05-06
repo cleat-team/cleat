@@ -1,0 +1,341 @@
+package host
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+)
+
+// DefaultCompactionThreshold is the default number of events before history
+// compaction triggers. A workflow with more than this many events is eligible.
+const DefaultCompactionThreshold = 1000
+
+// Event type codes for compact JSONB storage. Short int codes minimize
+// storage size when a workflow has thousands of compacted events.
+const (
+	EventCodeCall             = 0
+	EventCodeSleep            = 1
+	EventCodeAwaitSignals     = 2
+	EventCodeSignalReceived   = 3
+	EventCodeDefer            = 4
+	EventCodeChildWorkflow    = 5
+	EventCodeAwaitChild       = 6
+	EventCodeContinueAsNew    = 7
+	EventCodeHeartbeat        = 8
+	EventCodeAwaitAllChildren = 9
+)
+
+var eventTypeToCode = map[EventType]int{
+	EventTypeCall:             EventCodeCall,
+	EventTypeSleep:            EventCodeSleep,
+	EventTypeAwaitSignals:     EventCodeAwaitSignals,
+	EventTypeSignalReceived:   EventCodeSignalReceived,
+	EventTypeDefer:            EventCodeDefer,
+	EventTypeChildWorkflow:    EventCodeChildWorkflow,
+	EventTypeAwaitChild:       EventCodeAwaitChild,
+	EventTypeContinueAsNew:    EventCodeContinueAsNew,
+	EventTypeHeartbeat:        EventCodeHeartbeat,
+	EventTypeAwaitAllChildren: EventCodeAwaitAllChildren,
+}
+
+var codeToEventType = map[int]EventType{
+	EventCodeCall:             EventTypeCall,
+	EventCodeSleep:            EventTypeSleep,
+	EventCodeAwaitSignals:     EventTypeAwaitSignals,
+	EventCodeSignalReceived:   EventTypeSignalReceived,
+	EventCodeDefer:            EventTypeDefer,
+	EventCodeChildWorkflow:    EventTypeChildWorkflow,
+	EventCodeAwaitChild:       EventTypeAwaitChild,
+	EventCodeContinueAsNew:    EventTypeContinueAsNew,
+	EventCodeHeartbeat:        EventTypeHeartbeat,
+	EventCodeAwaitAllChildren: EventTypeAwaitAllChildren,
+}
+
+// CompactionState holds the minimal state needed to reconstruct the compacted
+// portion of a workflow's event history for deterministic replay.
+type CompactionState struct {
+	Version       int              `json:"version"`
+	CompactedStep int              `json:"compacted_step"`
+	Events        []CompactedEvent `json:"events"`
+	PendingDefers []CompactedDefer `json:"pending_defers,omitempty"`
+	OpenChildren  []CompactedChild `json:"open_children,omitempty"`
+	QueryState    map[string]string `json:"query_state,omitempty"`
+}
+
+// CompactedEvent is a sparse representation of a single event in the compacted
+// portion of a workflow's history. Only fields relevant to the event type are
+// populated; omitempty keeps JSONB storage compact. Short JSON tags minimize
+// storage size for workflows with thousands of compacted events.
+type CompactedEvent struct {
+	Type          int    `json:"t"`
+	Service       string `json:"svc,omitempty"`
+	Op            string `json:"op,omitempty"`
+	Request       string `json:"req,omitempty"`
+	Response      string `json:"resp,omitempty"`
+	Error         string `json:"err,omitempty"`
+	DurationMs    int64  `json:"dur,omitempty"`
+	SignalNames   string `json:"sigs,omitempty"`
+	TimeoutMs     int64  `json:"to,omitempty"`
+	SignalName    string `json:"sn,omitempty"`
+	SignalPayload string `json:"sp,omitempty"`
+	DeferID       string `json:"did,omitempty"`
+	DeferDesc     string `json:"dd,omitempty"`
+	ChildName     string `json:"cn,omitempty"`
+	ChildInput    string `json:"ci,omitempty"`
+	RunID         string `json:"rid,omitempty"`
+	NewInput      string `json:"ni,omitempty"`
+}
+
+// CompactedDefer represents a deferred cleanup callback registered in the
+// compacted portion of history that has not yet been executed.
+type CompactedDefer struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+}
+
+// CompactedChild represents a child workflow started in the compacted portion
+// that is still running (not yet completed).
+type CompactedChild struct {
+	RunID string `json:"run_id"`
+	Name  string `json:"name"`
+	Input string `json:"input"`
+}
+
+// CompactWorkflowHistory compacts the event history for a workflow.
+// It loads all events, extracts a compaction checkpoint from events before
+// the compaction point, deletes those events from the database, and stores
+// the compaction state on the workflow_instances row.
+func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID string, threshold int) error {
+	events, err := store.LoadEventHistory(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("compact: load events: %w", err)
+	}
+	if len(events) <= threshold {
+		return nil // Not enough events to compact.
+	}
+
+	// Determine the compaction point: keep the most recent threshold/2 events
+	// as the tail, compact everything before that.
+	keepStep := len(events) - threshold/2
+	if keepStep < 0 {
+		keepStep = 0
+	}
+	compactedStep := keepStep
+
+	// Extract compaction state from the events being compacted.
+	compactedEvents := events[:keepStep]
+	cs := extractCompactionState(compactedEvents)
+
+	csJSON, err := json.Marshal(cs)
+	if err != nil {
+		return fmt.Errorf("compact: marshal state: %w", err)
+	}
+
+	if err := store.CompactHistory(ctx, workflowID, csJSON, compactedStep, keepStep); err != nil {
+		return fmt.Errorf("compact: store: %w", err)
+	}
+
+	log.Printf("compact: workflow=%s events=%d compacted=%d kept=%d state_size=%d",
+		workflowID, len(events), compactedStep, len(events)-keepStep, len(csJSON))
+	return nil
+}
+
+// extractCompactionState builds a CompactionState from the events being
+// compacted away.
+func extractCompactionState(events []EventRecord) *CompactionState {
+	cs := &CompactionState{
+		Version:       1,
+		CompactedStep: len(events),
+		Events:        make([]CompactedEvent, 0, len(events)),
+		PendingDefers: make([]CompactedDefer, 0),
+		OpenChildren:  make([]CompactedChild, 0),
+	}
+
+	defersSeen := make(map[string]string)  // deferID -> description
+	openChildren := make(map[string]bool)   // runID -> still open
+
+	for _, ev := range events {
+		ce := CompactedEvent{Type: eventTypeToCode[ev.EventType]}
+		switch ev.EventType {
+		case EventTypeCall:
+			ce.Service = ev.Service
+			ce.Op = ev.Op
+			ce.Request = ev.Request
+			ce.Response = ev.Response
+			ce.Error = ev.Err
+		case EventTypeSleep:
+			ce.DurationMs = ev.DurationMs
+		case EventTypeAwaitSignals:
+			ce.SignalNames = ev.SignalNames
+			ce.TimeoutMs = ev.TimeoutMs
+		case EventTypeSignalReceived:
+			ce.SignalName = ev.SignalName
+			ce.SignalPayload = ev.SignalPayload
+		case EventTypeDefer:
+			ce.DeferID = ev.DeferID
+			ce.DeferDesc = ev.DeferDescription
+			defersSeen[ev.DeferID] = ev.DeferDescription
+		case EventTypeChildWorkflow:
+			ce.ChildName = ev.ChildName
+			ce.ChildInput = ev.ChildInput
+			ce.RunID = ev.RunID
+			openChildren[ev.RunID] = true
+		case EventTypeAwaitChild:
+			ce.RunID = ev.RunID
+			ce.Response = ev.Response
+			ce.Error = ev.Err
+			if ev.Response != "" || ev.Err != "" {
+				// Child completed — remove from open list.
+				delete(openChildren, ev.RunID)
+			}
+		case EventTypeContinueAsNew:
+			ce.NewInput = ev.NewInput
+		case EventTypeHeartbeat:
+			ce.Service = ev.Service
+			ce.Op = ev.Op
+		case EventTypeAwaitAllChildren:
+			ce.Response = ev.Response
+			// All children resolved.
+			openChildren = make(map[string]bool)
+		}
+		cs.Events = append(cs.Events, ce)
+	}
+
+	// Build list of pending defers (defers that were registered but not yet
+	// executed in the compacted portion).
+	for id, desc := range defersSeen {
+		cs.PendingDefers = append(cs.PendingDefers, CompactedDefer{
+			ID: id, Description: desc,
+		})
+	}
+
+	// Build list of still-open children with their details.
+	for runID := range openChildren {
+		for _, ev := range events {
+			if ev.EventType == EventTypeChildWorkflow && ev.RunID == runID {
+				cs.OpenChildren = append(cs.OpenChildren, CompactedChild{
+					RunID: runID,
+					Name:  ev.ChildName,
+					Input: ev.ChildInput,
+				})
+				break
+			}
+		}
+	}
+
+	return cs
+}
+
+// buildFullHistoryFromCompaction reconstructs the full event history by
+// prepending virtual events reconstructed from the compaction state to the
+// tail events loaded from the database. This gives the engine a complete,
+// contiguous history for deterministic replay.
+func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []EventRecord {
+	totalLen := len(cs.Events) + len(tail)
+	full := make([]EventRecord, 0, totalLen)
+
+	for i, ce := range cs.Events {
+		rec := EventRecord{
+			Step:      i,
+			EventType: codeToEventType[ce.Type],
+		}
+		switch ce.Type {
+		case EventCodeCall:
+			rec.Service = ce.Service
+			rec.Op = ce.Op
+			rec.Request = ce.Request
+			rec.Response = ce.Response
+			rec.Err = ce.Error
+		case EventCodeSleep:
+			rec.DurationMs = ce.DurationMs
+		case EventCodeAwaitSignals:
+			rec.SignalNames = ce.SignalNames
+			rec.TimeoutMs = ce.TimeoutMs
+		case EventCodeSignalReceived:
+			rec.SignalName = ce.SignalName
+			rec.SignalPayload = ce.SignalPayload
+		case EventCodeDefer:
+			rec.DeferID = ce.DeferID
+			rec.DeferDescription = ce.DeferDesc
+		case EventCodeChildWorkflow:
+			rec.ChildName = ce.ChildName
+			rec.ChildInput = ce.ChildInput
+			rec.RunID = ce.RunID
+		case EventCodeAwaitChild:
+			rec.Response = ce.Response
+			rec.Err = ce.Error
+			rec.RunID = ce.RunID
+		case EventCodeContinueAsNew:
+			rec.NewInput = ce.NewInput
+		case EventCodeHeartbeat:
+			rec.Service = ce.Service
+			rec.Op = ce.Op
+		case EventCodeAwaitAllChildren:
+			rec.Response = ce.Response
+		}
+		full = append(full, rec)
+	}
+
+	// Append tail events. Their Step fields already reflect their original
+	// positions, which align with the reconstructed array indices.
+	full = append(full, tail...)
+
+	return full
+}
+
+// loadAllEventsForCompaction loads all event records for a workflow directly
+// from the database. Provided as a low-level utility; callers may also use
+// PostgresStore.LoadEventHistory.
+func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID string) ([]EventRecord, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT step, event_type, service, operation, request, response, error,
+		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+		       defer_description, defer_id, child_name, child_input, run_id, new_input
+		FROM event_history
+		WHERE workflow_id = $1
+		ORDER BY step
+	`, workflowID)
+	if err != nil {
+		return nil, fmt.Errorf("load events for compaction: %w", err)
+	}
+	defer rows.Close()
+
+	var history []EventRecord
+	for rows.Next() {
+		var rec EventRecord
+		var service, op, request, response, errMsg sql.NullString
+		var durationMs, timeoutMs sql.NullInt64
+		var signalNames, signalName, signalPayload sql.NullString
+		var deferDesc, deferID sql.NullString
+		var childName, childInput, runID, newInput sql.NullString
+
+		if err := rows.Scan(&rec.Step, &rec.EventType,
+			&service, &op, &request, &response, &errMsg,
+			&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
+			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput); err != nil {
+			return nil, fmt.Errorf("scan compaction events: %w", err)
+		}
+
+		rec.Service = service.String
+		rec.Op = op.String
+		rec.Request = request.String
+		rec.Response = response.String
+		rec.Err = errMsg.String
+		rec.DurationMs = durationMs.Int64
+		rec.SignalNames = signalNames.String
+		rec.TimeoutMs = timeoutMs.Int64
+		rec.SignalName = signalName.String
+		rec.SignalPayload = signalPayload.String
+		rec.DeferDescription = deferDesc.String
+		rec.DeferID = deferID.String
+		rec.ChildName = childName.String
+		rec.ChildInput = childInput.String
+		rec.RunID = runID.String
+		rec.NewInput = newInput.String
+
+		history = append(history, rec)
+	}
+	return history, rows.Err()
+}

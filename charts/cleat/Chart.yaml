@@ -1,0 +1,17 @@
+apiVersion: v2
+name: cleat
+description: Cleat durable execution worker
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - durable-execution
+  - workflow
+  - wasm
+  - postgres
+home: https://github.com/rcownie/durable
+sources:
+  - https://github.com/rcownie/durable
+maintainers:
+  - name: rcownie
+    email: rcownie@users.noreply.github.com

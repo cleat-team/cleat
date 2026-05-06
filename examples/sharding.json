@@ -1,0 +1,17 @@
+[
+  {
+    "name": "shard-us-east",
+    "conn_str": "postgres://user:pass@us-east.host:5432/cleat_shard0?sslmode=disable",
+    "tenants": ["tenant-alpha", "tenant-beta"]
+  },
+  {
+    "name": "shard-us-west",
+    "conn_str": "postgres://user:pass@us-west.host:5432/cleat_shard1?sslmode=disable",
+    "tenants": ["tenant-gamma", "tenant-delta"]
+  },
+  {
+    "name": "shard-eu",
+    "conn_str": "postgres://user:pass@eu.host:5432/cleat_shard2?sslmode=disable",
+    "tenants": ["tenant-epsilon"]
+  }
+]

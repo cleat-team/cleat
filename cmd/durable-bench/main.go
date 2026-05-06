@@ -17,6 +17,7 @@ import (
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,7 @@ func main() {
 	entryPoint := flag.String("entry-point", "place_order", "Workflow entry point")
 	count := flag.Int("count", 100, "Number of workflow executions")
 	concurrency := flag.Int("concurrency", 10, "Max concurrent executions")
+	taskQueueStr := flag.String("task-queue", "default", "Task queue to poll (e.g. default, gpu, high-memory)")
 	flag.Parse()
 
 	if *dbURL == "" {
@@ -50,7 +52,8 @@ func main() {
 	db.SetMaxOpenConns(*concurrency + 10)
 	db.SetMaxIdleConns(10)
 
-	store := host.NewPostgresStore(db)
+	taskQueues := strings.Split(*taskQueueStr, ",")
+	store := host.NewPostgresStore(db, taskQueues...)
 	ctx := context.Background()
 
 	// Find the latest version of the workflow.
@@ -96,7 +99,7 @@ func runBenchmark(ctx context.Context, store *host.PostgresStore, defName string
 
 			start := time.Now()
 
-			runID, err := store.StartNewRun(ctx, defName, defVersion, input)
+			runID, _, err := store.StartNewRun(ctx, defName, defVersion, input, "")
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return
@@ -161,7 +164,7 @@ func runReplayBenchmark(ctx context.Context, store *host.PostgresStore, defName 
 
 			start := time.Now()
 
-			runID, err := store.StartNewRun(ctx, defName, defVersion, input)
+			runID, _, err := store.StartNewRun(ctx, defName, defVersion, input, "")
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return

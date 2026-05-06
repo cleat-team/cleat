@@ -2,11 +2,14 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // WorkflowInstance is a row from workflow_instances.
@@ -83,8 +86,11 @@ type WorkflowStore interface {
 	// PollAndClaimSignal atomically checks for and claims a pending signal.
 	PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
 
-	// StartNewRun creates a new workflow instance (for ContinueAsNew and child workflows).
-	StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage) (runID string, err error)
+	// StartNewRun creates a new workflow instance.
+	// If idempotencyKey is non-empty, provides exactly-once semantics: a
+	// subsequent call with the same key returns the existing workflow ID
+	// without creating a duplicate.
+	StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (runID string, alreadyExisted bool, err error)
 
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
 	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (runID string, err error)
@@ -129,16 +135,42 @@ type WorkflowStore interface {
 
 	// TraceWorkflow sets the W3C trace_id on a workflow instance.
 	TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error)
+
+	// GetCompactionCandidates returns up to limit workflow IDs whose event
+	// history exceeds the threshold and could benefit from compaction.
+	GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error)
+
+	// LoadCompactionState returns the compaction state for a workflow, or nil
+	// if the workflow has not been compacted.
+	LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error)
+
+	// CompactHistory deletes old events and persists the compaction checkpoint
+	// for a workflow. compactionStep records the step up to which events were
+	// compacted; keepStep controls which events are deleted (step < keepStep).
+	CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
 type PostgresStore struct {
-	db *sql.DB
+	db         *sql.DB
+	taskQueues []string
+	tenantID   string
 }
 
-// NewPostgresStore creates a PostgresStore.
-func NewPostgresStore(db *sql.DB) *PostgresStore {
-	return &PostgresStore{db: db}
+// NewPostgresStore creates a PostgresStore scoped to the given task queues.
+// The taskQueues slice specifies which task queues this worker pool should poll
+// (e.g., "default", "gpu", "high-memory"). Defaults to ["default"].
+// The tenantID defaults to the default tenant UUID from the tenant foundation migration.
+func NewPostgresStore(db *sql.DB, taskQueues ...string) *PostgresStore {
+	tqs := taskQueues
+	if len(tqs) == 0 {
+		tqs = []string{"default"}
+	}
+	return &PostgresStore{
+		db:         db,
+		taskQueues: tqs,
+		tenantID:   "00000000-0000-0000-0000-000000000000",
+	}
 }
 
 // ClaimWorkflow atomically claims a runnable workflow using SKIP LOCKED.
@@ -160,12 +192,13 @@ func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID, namespa
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
 			  AND namespace = $2
+			  AND task_queue = ANY($3)
 			ORDER BY created_at
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at
-	`, workerID, namespace).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+	`, workerID, namespace, pq.Array(s.taskQueues)).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 		&wf.AssignedTo, &nextWakeAt)
 
 	if err == sql.ErrNoRows {
@@ -356,7 +389,16 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2
 	`, workflowID, workerID, result, qsJSON)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Best-effort: record result in idempotency_keys if this workflow was started with a key.
+	s.db.ExecContext(ctx,
+		`UPDATE idempotency_keys SET result = $3 WHERE workflow_id = $1`,
+		workflowID, result)
+
+	return nil
 }
 
 // FailWorkflow marks a workflow as failed.
@@ -370,7 +412,16 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, 
 		SET status = 'failed', error_msg = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2
 	`, workflowID, workerID, errMsg, qsJSON)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Best-effort: record error in idempotency_keys if this workflow was started with a key.
+	s.db.ExecContext(ctx,
+		`UPDATE idempotency_keys SET error_msg = $3 WHERE workflow_id = $1`,
+		workflowID, errMsg)
+
+	return nil
 }
 
 // ReleaseWorkflow returns a workflow to the queue with a next wake time.
@@ -406,6 +457,7 @@ func (s *PostgresStore) CheckCancellation(ctx context.Context, workflowID string
 	}
 	return cancelled, reason.String, nil
 }
+
 // PollAndClaimSignal atomically checks for and claims a pending signal.
 func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -430,18 +482,91 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 }
 
 // StartNewRun creates a new workflow instance.
-func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage) (string, error) {
+// If idempotencyKey is non-empty, provides exactly-once semantics: a subsequent
+// call with the same key returns the existing workflow ID without creating a
+// duplicate. Returns the workflow ID, whether it already existed, and any error.
+func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+	if idempotencyKey != "" {
+		keyHash := sha256.Sum256([]byte(idempotencyKey))
+
+		// Check for existing idempotency key.
+		var existingWfID string
+		err := s.db.QueryRowContext(ctx,
+			`SELECT workflow_id FROM idempotency_keys
+			 WHERE key_hash = $1 AND expires_at > now()`,
+			keyHash[:]).Scan(&existingWfID)
+		if err == nil {
+			return existingWfID, true, nil
+		}
+		if err != sql.ErrNoRows {
+			return "", false, err
+		}
+
+		// Generate workflow ID early so we can insert into both tables atomically.
+		var workflowID string
+		if err := s.db.QueryRowContext(ctx, `SELECT gen_random_uuid()`).Scan(&workflowID); err != nil {
+			return "", false, fmt.Errorf("generate id: %w", err)
+		}
+
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return "", false, err
+		}
+		defer tx.Rollback()
+
+		// Insert idempotency key record. ON CONFLICT DO NOTHING handles the
+		// race where two requests arrive with the same key simultaneously.
+		res, err := tx.ExecContext(ctx,
+			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at)
+			 VALUES ($1, $2, now() + INTERVAL '7 days')
+			 ON CONFLICT (key_hash) DO NOTHING`,
+			keyHash[:], workflowID)
+		if err != nil {
+			return "", false, err
+		}
+
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			// Key was inserted concurrently — rollback and return the existing one.
+			tx.Rollback()
+			err := s.db.QueryRowContext(ctx,
+				`SELECT workflow_id FROM idempotency_keys
+				 WHERE key_hash = $1 AND expires_at > now()`,
+				keyHash[:]).Scan(&existingWfID)
+			if err != nil {
+				return "", false, err
+			}
+			return existingWfID, true, nil
+		}
+
+		// Insert the workflow instance.
+		err = tx.QueryRowContext(ctx, `
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
+			VALUES ($1, $2, $3, 'ready', $4,
+			        COALESCE((SELECT namespace FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
+			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'))
+			RETURNING id
+		`, workflowID, defName, defVersion, input).Scan(&workflowID)
+		if err != nil {
+			return "", false, fmt.Errorf("start new run: %w", err)
+		}
+
+		return workflowID, false, tx.Commit()
+	}
+
+	// No idempotency key — normal flow.
 	var runID string
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
-		        COALESCE((SELECT namespace FROM workflow_defs WHERE name = $1 AND version = $2), 'default'))
+		        COALESCE((SELECT namespace FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'))
 		RETURNING id
 	`, defName, defVersion, input).Scan(&runID)
 	if err != nil {
-		return "", fmt.Errorf("start new run: %w", err)
+		return "", false, fmt.Errorf("start new run: %w", err)
 	}
-	return runID, nil
+	return runID, false, nil
 }
 
 // StartChildWorkflow creates a child workflow instance linked to a parent.
@@ -449,9 +574,10 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (string, error) {
 	var runID string
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, namespace)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, namespace, task_queue)
 		VALUES (gen_random_uuid(), $1, (SELECT MAX(version) FROM workflow_defs WHERE name = $1), 'ready', $2, $3,
-		        COALESCE((SELECT namespace FROM workflow_instances WHERE id = $3), 'default'))
+		        COALESCE((SELECT namespace FROM workflow_instances WHERE id = $3), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'))
 		RETURNING id
 	`, defName, inputJSON, parentID).Scan(&runID)
 	if err != nil {
@@ -688,6 +814,88 @@ func (s *PostgresStore) UpdateScheduleNextRun(ctx context.Context, name string, 
 		UPDATE workflow_schedules SET next_run_at = $2, last_run_at = now() WHERE name = $1
 	`, name, nextRun)
 	return err
+}
+
+// CompactHistory deletes old events and saves compaction state for a workflow.
+func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("compact history: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+		DELETE FROM event_history WHERE workflow_id = $1 AND step < $2 AND tenant_id = $3
+	`, workflowID, keepStep, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("compact history: delete: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET compaction_state = $1, compacted_at = now(), compaction_step = $2
+		WHERE id = $3 AND tenant_id = $4
+	`, compactionState, compactionStep, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("compact history: update: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// GetCompactionCandidates returns workflow IDs that need compaction.
+func (s *PostgresStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT w.id
+		FROM workflow_instances w
+		JOIN (
+			SELECT workflow_id, COUNT(*) AS cnt
+			FROM event_history
+			GROUP BY workflow_id
+		) e ON w.id = e.workflow_id
+		WHERE e.cnt > $1
+		  AND (w.compaction_step IS NULL OR w.compaction_step < e.cnt - $1)
+		  AND w.tenant_id = $2
+		ORDER BY e.cnt DESC
+		LIMIT $3
+	`, threshold, s.tenantID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get compaction candidates: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan compaction candidate: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// LoadCompactionState loads the compaction state JSON for a workflow instance.
+func (s *PostgresStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) {
+	var rawJSON []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT compaction_state FROM workflow_instances
+		WHERE id = $1 AND tenant_id = $2
+	`, workflowID, s.tenantID).Scan(&rawJSON)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load compaction state: %w", err)
+	}
+	if rawJSON == nil {
+		return nil, nil
+	}
+	var cs CompactionState
+	if err := json.Unmarshal(rawJSON, &cs); err != nil {
+		return nil, fmt.Errorf("unmarshal compaction state: %w", err)
+	}
+	return &cs, nil
 }
 
 // NextCronTime computes the next firing time for a 5-field cron expression
