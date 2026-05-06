@@ -46,3 +46,5 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+.claude/scheduled_tasks.lock
+durable-bench
