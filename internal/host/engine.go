@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/durable/durable"
 	"github.com/tetratelabs/wazero/api"
 )
 
