@@ -11,6 +11,10 @@ ast_demo
 ast_demo_v2
 durable-gen
 
+# Rust build artifacts
+**/target/
+**/Cargo.lock
+
 # Test binary, built with `go test -c`
 *.test
 

@@ -101,6 +101,20 @@ var importDefs = map[string]importDef{
 			{"result", kindOutString},
 		},
 	},
+	"durable_call_retry": {
+		ImportName: "durable_call_retry",
+		Params: []paramSpec{
+			{"service", kindInString},
+			{"operation", kindInString},
+			{"requestJSON", kindInString},
+			{"maxAttempts", kindInt64},
+			{"initialIntervalMs", kindInt64},
+			{"backoffCoefficient100x", kindInt64},
+			{"maxIntervalMs", kindInt64},
+			{"nonRetryableErrorsJSON", kindInString},
+			{"response", kindOutString},
+		},
+	},
 	"durable_version": {
 		ImportName: "durable_version",
 	},

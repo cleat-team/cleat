@@ -37,12 +37,13 @@ var dbConnStr string
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set DURABLE_DATABASE_URL)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback> [flags] <package>\n")
+		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback|dev> [flags] <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable vet <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable deploy [--name <name>] [--namespace <ns>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  durable versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  durable rollback <workflow-name> <version>\n")
+		fmt.Fprintf(os.Stderr, "  durable dev [--input <json>] [--entry-point <name>] <package>\n")
 		fmt.Fprintf(os.Stderr, "Common flags:\n")
 		fmt.Fprintf(os.Stderr, "  --db <connstr>  PostgreSQL connection string\n")
 		fmt.Fprintf(os.Stderr, "Example: durable build -o ./out ./testdata/basic/\n")
@@ -64,7 +65,7 @@ func main() {
 		fs := flag.NewFlagSet("build", flag.ExitOnError)
 		var target string
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
-		
+
 		fs.StringVar(&target, "target", "go", "compilation target: go or tinygo")
 		fs.Parse(os.Args[2:])
 		remainder := fs.Args()
@@ -89,6 +90,8 @@ func main() {
 			os.Exit(1)
 		}
 		runRollback(args[1], version)
+	case "dev":
+		runDev(flag.Args()[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		flag.Usage()
@@ -187,7 +190,7 @@ func runBuild(pattern, outDir, target string) {
 		GoVersion:   goVersion,
 		Outputs:     outputs,
 		WASMOutput:  wasmFile,
-			Target:      target,
+		Target:      target,
 		XfrmSource:  tr.Files,
 	}
 

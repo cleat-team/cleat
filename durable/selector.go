@@ -1,7 +1,6 @@
 package durable
 
 import (
-	"errors"
 	"time"
 )
 
@@ -101,11 +100,12 @@ func (s *Selector) Err() error {
 // Select blocks until one future resolves. It returns the signal name,
 // the child workflow runID, SelectorTimer, or SelectorError. The
 // corresponding destination pointer is populated before Select returns.
+//
+// Note: child workflow futures use AwaitChild which suspends the workflow
+// if the child has not yet completed. When mixed with signals, signals
+// are polled non-blocking first; children are checked via AwaitChild
+// which will suspend if no child has completed yet.
 func (s *Selector) Select() string {
-	if len(s.children) > 0 {
-		s.err = errors.New("durable: child workflow futures not yet supported; use signals and timers instead")
-		return SelectorError
-	}
 	for {
 		// Check signals non-blocking.
 		for i := range s.signals {
@@ -116,6 +116,20 @@ func (s *Selector) Select() string {
 					*sf.dest = payload
 				}
 				return sf.name
+			}
+		}
+
+		// Check children. Uses AwaitChild which returns immediately if
+		// the child has completed (cached from replay or fresh from store),
+		// or suspends the workflow if the child is still running.
+		for i := range s.children {
+			cf := &s.children[i]
+			result, err := s.h.AwaitChild(cf.runID)
+			if err == nil {
+				if cf.dest != nil {
+					*cf.dest = result
+				}
+				return cf.runID
 			}
 		}
 

@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS workflow_defs (
     version INTEGER NOT NULL,
     wasm_bytes BYTEA NOT NULL,
     entry_points TEXT[] NOT NULL DEFAULT '{}',
+    min_version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (name, version)
 );
@@ -66,6 +67,13 @@ ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS cancellation_requested B
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS cancellation_reason TEXT;
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS result JSONB;
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS error_msg TEXT;
+ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS parent_workflow_id TEXT;
+
+-- Migration: add min_version column to workflow_defs
+ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS min_version INTEGER NOT NULL DEFAULT 0;
+
+-- Index for zombie instance reaper (reclaim instances with stale heartbeats)
+CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running';
 
 -- ---------------------------------------------------------------------------
 -- New: workflow_signals table

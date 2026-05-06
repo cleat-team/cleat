@@ -70,10 +70,12 @@ func (r *Runtime) InstantiateModule(ctx context.Context, compiled wazero.Compile
 // goroutine. _start initializes WASI and calls main() which blocks to keep
 // the module alive. After a brief pause for initialization, the module is
 // ready for export calls.
+//
+// For non-Go modules (e.g., Rust, C) that don't have _start, this is a no-op.
 func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 	start := mod.ExportedFunction("_start")
 	if start == nil {
-		return fmt.Errorf("host: _start export not found")
+		return nil // Non-Go modules don't need _start.
 	}
 	go func() {
 		start.Call(ctx)
@@ -81,6 +83,26 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 	// Give Go runtime time to initialize WASI before main() enters its loop.
 	time.Sleep(200 * time.Millisecond)
 	return nil
+}
+
+// InstantiateAndInit compiles, instantiates, and initialises a WASM module.
+// Convenience wrapper used by tests and the worker.
+func (r *Runtime) InstantiateAndInit(ctx context.Context, wasmBytes []byte) (api.Module, error) {
+	compiled, err := r.CompileModule(ctx, wasmBytes)
+	if err != nil {
+		return nil, fmt.Errorf("compile: %w", err)
+	}
+	// Note: compiled.Close is deferred to the caller via mod.Close.
+	mod, err := r.InstantiateModule(ctx, compiled)
+	if err != nil {
+		compiled.Close(ctx)
+		return nil, fmt.Errorf("instantiate: %w", err)
+	}
+	if err := r.InitModule(ctx, mod); err != nil {
+		mod.Close(ctx)
+		return nil, fmt.Errorf("init: %w", err)
+	}
+	return mod, nil
 }
 
 // ErrSuspended is returned by CallExport when the workflow suspends.

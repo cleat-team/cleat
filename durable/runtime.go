@@ -244,6 +244,7 @@ type hostCallsImpl struct {
 	continueAsNew             func(newInputJSON string) error
 	childWorkflow             func(name, inputJSON string) (string, error)
 	awaitChild                func(runID string) (string, error)
+	durableCallWithRetry       func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
 	version                   func() int
 	minVersion                func() int
 	setQueryState             func(key, value string)
@@ -269,6 +270,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		continueAsNew:             opts.ContinueAsNew,
 		childWorkflow:             opts.ChildWorkflow,
 		awaitChild:                opts.AwaitChild,
+		durableCallWithRetry:       opts.DurableCallWithRetry,
 		version:                   opts.Version,
 		minVersion:                opts.MinVersion,
 		setQueryState:             opts.SetQueryState,
@@ -317,6 +319,7 @@ type HostCallsOptions struct {
 	ContinueAsNew             func(newInputJSON string) error
 	ChildWorkflow             func(name, inputJSON string) (string, error)
 	AwaitChild                func(runID string) (string, error)
+	DurableCallWithRetry       func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
 	Version                   func() int
 	MinVersion                func() int
 	SetQueryState             func(key, value string)
@@ -376,10 +379,10 @@ func (h *hostCallsImpl) DurableCallTyped(service, operation string, request, res
 	return nil
 }
 
-// DurableCallWithOptions default behavior: retry at SDK level.
-// NOTE: SDK-level retry records one event per attempt, bloating history.
-// Once the host runtime supports it, retry should move to the host side
-// (one history event per logical call, host handles the retry loop).
+// DurableCallWithOptions provides retry at either host or SDK level.
+// When the host-side durableCallWithRetry import is available, the retry
+// loop runs on the host and produces ONE history event per logical call.
+// Otherwise, it falls back to SDK-level retry (one event per attempt).
 func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operation, requestJSON string) (string, error) {
 	if h.durableCallWithOptions != nil {
 		return h.durableCallWithOptions(opts, service, operation, requestJSON)
@@ -389,6 +392,25 @@ func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 		return h.DurableCall(service, operation, requestJSON)
 	}
 
+	// When host-side retry is available, delegate to the host import.
+	// This produces ONE history event per logical call instead of one per attempt.
+	if h.durableCallWithRetry != nil {
+		rp := opts.Retry
+		nonRetryableJSON, _ := json.Marshal(rp.NonRetryableErrors)
+		if nonRetryableJSON == nil {
+			nonRetryableJSON = []byte("[]")
+		}
+		return h.durableCallWithRetry(
+			service, operation, requestJSON,
+			int64(rp.MaxAttempts),
+			rp.InitialInterval.Milliseconds(),
+			int64(rp.BackoffCoefficient*100),
+			rp.MaxInterval.Milliseconds(),
+			string(nonRetryableJSON),
+		)
+	}
+
+	// Fall back to SDK-level retry (one event per attempt).
 	rp := opts.Retry
 	var lastErr error
 	for attempt := 1; attempt <= rp.MaxAttempts; attempt++ {

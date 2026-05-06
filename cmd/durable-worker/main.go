@@ -113,6 +113,10 @@ func (w *Worker) Run() {
 	w.wg.Add(1)
 	go w.heartbeatLoop()
 
+	// Background zombie reaper goroutine.
+	w.wg.Add(1)
+	go w.reaperLoop()
+
 	// Dispatch loop.
 	w.wg.Add(1)
 	go w.dispatchLoop()
@@ -220,6 +224,8 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	engine := host.NewEngine(rt, caller,
 		host.WithSignalStore(w.store),
 		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion}),
+		host.WithWorkflowID(wf.ID),
+		host.WithChildWorkflowStore(w.store),
 	)
 
 	// ---- Execute/Resume ----
@@ -248,6 +254,21 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 
 	if suspended != nil {
+		if suspended.Reason == "continue_as_new" {
+			// ContinueAsNew: create a new run and complete the current one.
+			log.Printf("[worker %s] %s: continue_as_new → starting new run", w.id, wf.ID)
+			newRunID, err := w.store.StartNewRun(w.ctx, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput))
+			if err != nil {
+				log.Printf("[worker %s] %s: continue_as_new start failed: %v", w.id, wf.ID, err)
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("continue_as_new: %v", err))
+				return
+			}
+			log.Printf("[worker %s] %s: continued as new run %s", w.id, wf.ID, newRunID)
+			continueAsNewResult, _ := json.Marshal(map[string]interface{}{"continue_as_new": true, "new_run_id": newRunID})
+			w.store.CompleteWorkflow(context.Background(), wf.ID, w.id, string(continueAsNewResult))
+			return
+		}
+
 		// Persist suspend state.
 		log.Printf("[worker %s] %s: suspended (%s), waking at %s",
 			w.id, wf.ID, suspended.Reason, suspended.SuspendUntil)
@@ -291,6 +312,33 @@ func (w *Worker) heartbeatLoop() {
 				}
 				return true
 			})
+		}
+	}
+}
+
+func (w *Worker) reaperLoop() {
+	defer w.wg.Done()
+	// Reap stale instances every 30 seconds.
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			reaped, err := w.store.ReapStaleInstances(w.ctx, 30*time.Second)
+			if err != nil {
+				if isConnectionError(err) {
+					log.Printf("[worker %s] Reaper: DB appears down", w.id)
+				} else {
+					log.Printf("[worker %s] Reaper: %v", w.id, err)
+				}
+				continue
+			}
+			if reaped > 0 {
+				log.Printf("[worker %s] Reaper: reclaimed %d stale instances", w.id, reaped)
+			}
 		}
 	}
 }

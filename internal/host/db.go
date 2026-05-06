@@ -13,6 +13,7 @@ type WorkflowInstance struct {
 	ID         string
 	DefName    string
 	DefVersion int
+	MinVersion int
 	Status     string
 	Input      json.RawMessage
 	AssignedTo string
@@ -69,6 +70,17 @@ type WorkflowStore interface {
 
 	// StartNewRun creates a new workflow instance (for ContinueAsNew and child workflows).
 	StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage) (runID string, err error)
+
+	// StartChildWorkflow creates a child workflow instance linked to a parent.
+	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (runID string, err error)
+
+	// GetChildResult checks whether a child workflow has completed and returns its result.
+	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
+
+	// ReapStaleInstances reclaims workflow instances that have been running
+	// but whose heartbeat has not been updated within the given timeout.
+	// Returns the number of instances reclaimed.
+	ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error)
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
@@ -378,6 +390,54 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 		return "", fmt.Errorf("start new run: %w", err)
 	}
 	return runID, nil
+}
+
+// StartChildWorkflow creates a child workflow instance linked to a parent.
+func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (string, error) {
+	var runID string
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id)
+		VALUES (gen_random_uuid(), $1, (SELECT MAX(version) FROM workflow_defs WHERE name = $1), 'ready', $2, $3)
+		RETURNING id
+	`, defName, inputJSON, parentID).Scan(&runID)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow: %w", err)
+	}
+	return runID, nil
+}
+
+// GetChildResult checks whether a child workflow has completed (status 'done' or 'failed').
+func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+	var result string
+	var status string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(result, '{}'), status FROM workflow_instances WHERE id = $1
+	`, runID).Scan(&result, &status)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get child result: %w", err)
+	}
+	if status == "done" || status == "failed" {
+		return result, true, nil
+	}
+	return "", false, nil
+}
+
+// ReapStaleInstances reclaims workflow instances with stale heartbeats.
+func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
+		WHERE status = 'running'
+		  AND heartbeat_at < now() - $1::interval
+	`, fmt.Sprintf("%d seconds", int(timeout.Seconds())))
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
 }
 
 // ---- SignalStore interface implementation ----

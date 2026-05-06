@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"time"
 
 	"github.com/tetratelabs/wazero/api"
@@ -20,6 +22,7 @@ const (
 	EventTypeSignalReceived EventType = "signal_received"
 	EventTypeDefer          EventType = "defer"
 	EventTypeChildWorkflow  EventType = "child_workflow"
+	EventTypeAwaitChild     EventType = "await_child"
 	EventTypeContinueAsNew  EventType = "continue_as_new"
 )
 
@@ -50,9 +53,10 @@ type EventRecord struct {
 	DeferID          string `json:"defer_id,omitempty"`
 
 	// Child workflow fields.
-	ChildName  string `json:"child_name,omitempty"`
-	ChildInput string `json:"child_input,omitempty"`
-	RunID      string `json:"run_id,omitempty"`
+	ChildName        string `json:"child_name,omitempty"`
+	ChildInput       string `json:"child_input,omitempty"`
+	RunID            string `json:"run_id,omitempty"`
+	ParentWorkflowID string `json:"parent_workflow_id,omitempty"`
 
 	// ContinueAsNew fields.
 	NewInput string `json:"new_input,omitempty"`
@@ -86,8 +90,9 @@ type WorkflowState interface {
 
 // SuspendError signals that the workflow should be suspended.
 type SuspendError struct {
-	Reason string
-	Until  time.Time // if non-zero, the workflow should wake at this time
+	Reason   string
+	Until    time.Time // if non-zero, the workflow should wake at this time
+	NewInput string    // for continue_as_new: the new input payload
 }
 
 func (e *SuspendError) Error() string {
@@ -102,6 +107,7 @@ type SuspendResult struct {
 	History      []EventRecord
 	SuspendUntil time.Time
 	Reason       string
+	NewInput     string // for continue_as_new: the new input payload
 	Deferrals    map[string]string // registered defers (deferID -> description)
 }
 
@@ -113,15 +119,28 @@ type ExecutionResult struct {
 	Deferrals map[string]string
 }
 
+// ChildWorkflowStore provides child workflow creation and polling for the engine.
+type ChildWorkflowStore interface {
+	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (string, error)
+	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
+}
+
+// RetryableError is optionally implemented by errors to indicate retryability.
+type RetryableError interface {
+	Retryable() bool
+}
+
 // Engine provides durable execution semantics (Execute/Replay) on top of a
 // Runtime. It implements the checkpoint/replay model: on first execution,
 // every DurableCall is recorded in the event history; on replay, cached
 // results are returned and divergence is detected.
 type Engine struct {
-	rt          *Runtime
-	caller      ServiceCaller
-	signalStore SignalStore
-	state       WorkflowState
+	rt           *Runtime
+	caller       ServiceCaller
+	signalStore  SignalStore
+	state        WorkflowState
+	workflowID   string
+	childWfStore ChildWorkflowStore
 }
 
 // EngineOption configures an Engine.
@@ -135,6 +154,16 @@ func WithSignalStore(ss SignalStore) EngineOption {
 // WithWorkflowState sets the workflow state for version info.
 func WithWorkflowState(ws WorkflowState) EngineOption {
 	return func(e *Engine) { e.state = ws }
+}
+
+// WithWorkflowID sets the workflow instance ID for parent-child tracking.
+func WithWorkflowID(id string) EngineOption {
+	return func(e *Engine) { e.workflowID = id }
+}
+
+// WithChildWorkflowStore sets the store used to create and poll child workflows.
+func WithChildWorkflowStore(cws ChildWorkflowStore) EngineOption {
+	return func(e *Engine) { e.childWfStore = cws }
 }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
@@ -183,6 +212,7 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 		isReplay:    len(history) > 0,
 		nowMs:       nowMs.Load(),
 		deferrals:   make(map[string]string),
+		workflowID:  e.workflowID,
 	}
 
 	execCtx := withHandler(ctx, session)
@@ -198,6 +228,7 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 				History:      session.history,
 				SuspendUntil: se.Until,
 				Reason:       se.Reason,
+				NewInput:     se.NewInput,
 				Deferrals:    session.deferrals,
 			}, session.deferrals, nil
 		}
@@ -253,6 +284,8 @@ type execSession struct {
 	suspendErr  *SuspendError
 	signals     map[string]string // pending signals delivered during this session
 	deferrals   map[string]string // registered defer callbacks (deferID -> description)
+	workflowID  string            // parent workflow instance ID (for child workflows)
+	queryState  map[string]string // key-value state set via SetQueryState
 }
 
 var _ HostHandler = (*execSession)(nil)
@@ -510,6 +543,10 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeContinueAsNew {
 				s.stepCount++
+				s.suspendErr = &SuspendError{
+					Reason:   "continue_as_new",
+					NewInput: rec.NewInput,
+				}
 				return 0
 			}
 		}
@@ -525,25 +562,52 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 	s.stepCount++
 
 	s.suspendErr = &SuspendError{
-		Reason: "continue_as_new",
+		Reason:   "continue_as_new",
+		NewInput: newInputJSON,
 	}
 	return 0
 }
 
 func (s *execSession) ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
-	runID := fmt.Sprintf("child-%s-%d", name, s.stepCount)
-
-	if !s.isReplay {
-		rec := EventRecord{
-			Step:       s.stepCount,
-			EventType:  EventTypeChildWorkflow,
-			ChildName:  name,
-			ChildInput: inputJSON,
-			RunID:      runID,
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeChildWorkflow {
+				s.stepCount++
+				mem := m.Memory()
+				written := writeWasmString(mem, runIDPtr, rec.RunID, runIDMaxLen)
+				return int64(uint64(written)<<32 | 0)
+			}
 		}
-		s.history = append(s.history, rec)
-		s.stepCount++
+		s.isReplay = false
 	}
+
+	// Fresh execution: create child workflow via store or generate synthetic ID.
+	var runID string
+	if s.engine.childWfStore != nil {
+		parentID := s.workflowID
+		if parentID == "" {
+			parentID = fmt.Sprintf("unknown-%s-%d", name, s.stepCount)
+		}
+		var err error
+		runID, err = s.engine.childWfStore.StartChildWorkflow(ctx, parentID, name, inputJSON)
+		if err != nil {
+			runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
+		}
+	} else {
+		runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
+	}
+
+	rec := EventRecord{
+		Step:             s.stepCount,
+		EventType:        EventTypeChildWorkflow,
+		ChildName:        name,
+		ChildInput:       inputJSON,
+		RunID:            runID,
+		ParentWorkflowID: s.workflowID,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
 
 	mem := m.Memory()
 	written := writeWasmString(mem, runIDPtr, runID, runIDMaxLen)
@@ -551,10 +615,162 @@ func (s *execSession) ChildWorkflow(ctx context.Context, m api.Module, name, inp
 }
 
 func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
-	result := `{"status":"completed"}`
 	mem := m.Memory()
-	written := writeWasmString(mem, resultPtr, result, resultMaxLen)
-	return int64(uint64(written)<<32 | 0)
+
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeAwaitChild {
+				if rec.Response != "" || rec.Err != "" {
+					// Cached result available — return it.
+					s.stepCount++
+					if rec.Err != "" {
+						written := writeWasmString(mem, resultPtr, rec.Err, resultMaxLen)
+						return packAwaitChildResult(uint32(written), 1)
+					}
+					written := writeWasmString(mem, resultPtr, rec.Response, resultMaxLen)
+					return packAwaitChildResult(uint32(written), 0)
+				}
+				// No cached result yet — fall through to fresh to re-check.
+				s.stepCount++
+				s.isReplay = false
+			}
+		} else {
+			s.isReplay = false
+		}
+	}
+
+	// Fresh execution: check child result via store.
+	if s.engine.childWfStore != nil {
+		result, completed, err := s.engine.childWfStore.GetChildResult(ctx, runID)
+		if completed && err == nil {
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeAwaitChild,
+				RunID:     runID,
+				Response:  result,
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+
+			written := writeWasmString(mem, resultPtr, result, resultMaxLen)
+			return packAwaitChildResult(uint32(written), 0)
+		}
+		if err != nil {
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeAwaitChild,
+				RunID:     runID,
+				Err:       err.Error(),
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+
+			written := writeWasmString(mem, resultPtr, err.Error(), resultMaxLen)
+			return packAwaitChildResult(uint32(written), 1)
+		}
+	}
+
+	// Child not completed — record event and suspend.
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeAwaitChild,
+		RunID:     runID,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	s.suspendErr = &SuspendError{
+		Reason: fmt.Sprintf("await_child(%s)", runID),
+	}
+
+	return packAwaitChildResultSuspend()
+}
+
+func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
+	service, operation, requestJSON string,
+	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
+	nonRetryableErrorsJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+
+	if s.isReplay {
+		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+	}
+	return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
+		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
+		nonRetryableErrorsJSON, responsePtr, responseMaxLen)
+}
+
+func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
+	service, operation, requestJSON string,
+	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
+	nonRetryableErrorsJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+
+	mem := m.Memory()
+
+	// Parse non-retryable error patterns.
+	var nonRetryableErrors []string
+	if nonRetryableErrorsJSON != "" {
+		json.Unmarshal([]byte(nonRetryableErrorsJSON), &nonRetryableErrors)
+	}
+
+	var lastErr error
+
+	for attempt := int64(1); attempt <= maxAttempts; attempt++ {
+		resp, callErr := s.engine.caller.Call(ctx, service, operation, requestJSON)
+
+		if callErr == nil {
+			// Success — record one event and return.
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeCall,
+				Service:   service,
+				Op:        operation,
+				Request:   requestJSON,
+				Response:  resp,
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+
+			written := writeWasmString(mem, responsePtr, resp, responseMaxLen)
+			return packDurableCallResult(int(written), 0, 0)
+		}
+
+		lastErr = callErr
+
+		// Check if error is definitively non-retryable.
+		if isDefinitelyNonRetryable(callErr, nonRetryableErrors) {
+			break
+		}
+
+		if attempt < maxAttempts {
+			// Exponential backoff using host time (not DurableSleep).
+			backoffMs := initialIntervalMs * int64(math.Pow(float64(backoffCoefficient100x)/100.0, float64(attempt-1)))
+			if backoffMs > maxIntervalMs {
+				backoffMs = maxIntervalMs
+			}
+			if backoffMs > 0 {
+				time.Sleep(time.Duration(backoffMs) * time.Millisecond)
+			}
+		}
+	}
+
+	// All retries exhausted or non-retryable error — record failure event.
+	errMsg := lastErr.Error()
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeCall,
+		Service:   service,
+		Op:        operation,
+		Request:   requestJSON,
+		Err:       errMsg,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+	return packDurableCallResult(int(written), 1, 1)
 }
 
 func (s *execSession) Version(ctx context.Context) int64 {
@@ -572,6 +788,10 @@ func (s *execSession) MinVersion(ctx context.Context) int64 {
 }
 
 func (s *execSession) SetQueryState(ctx context.Context, m api.Module, key, value string) int64 {
+	if s.queryState == nil {
+		s.queryState = make(map[string]string)
+	}
+	s.queryState[key] = value
 	return 0
 }
 
@@ -595,6 +815,39 @@ func packAwaitSignalsResult(sigNameLen, payloadLen uint32, timedOut bool, errCod
 		toFlag = 1
 	}
 	return int64(uint64(sigNameLen)<<48 | uint64(payloadLen)<<32 | uint64(toFlag)<<16 | uint64(errCode))
+}
+
+func packAwaitChildResult(written uint32, errCode uint32) int64 {
+	return int64(uint64(written)<<32 | uint64(errCode))
+}
+
+func packAwaitChildResultSuspend() int64 {
+	return 1 << 62
+}
+
+// isDefinitelyNonRetryable checks if an error should not be retried.
+// Returns true if the error's Retryable() method returns false, or if
+// the error message matches any of the non-retryable patterns.
+func isDefinitelyNonRetryable(err error, nonRetryablePatterns []string) bool {
+	// Check if error self-reports as non-retryable via Retryable interface.
+	var re RetryableError
+	if errors.As(err, &re) {
+		if !re.Retryable() {
+			return true
+		}
+	}
+
+	// Check non-retryable error substrings.
+	if len(nonRetryablePatterns) > 0 {
+		errMsg := err.Error()
+		for _, p := range nonRetryablePatterns {
+			if strings.Contains(errMsg, p) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func splitSignalNames(names string) []string {

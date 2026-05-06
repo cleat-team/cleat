@@ -1,7 +1,6 @@
 package durable
 
 import (
-	"strings"
 	"testing"
 	"time"
 )
@@ -199,9 +198,12 @@ func TestSelectorAddChildWorkflow(t *testing.T) {
 	}
 }
 
-func TestSelectorAddChildWorkflowReturnsError(t *testing.T) {
+func TestSelectorAddChildWorkflowCompletes(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		Now: func() int64 { return 1000 },
+		AwaitChild: func(runID string) (string, error) {
+			return `{"status":"done"}`, nil
+		},
 	})
 
 	sel := NewSelector(h)
@@ -209,13 +211,43 @@ func TestSelectorAddChildWorkflowReturnsError(t *testing.T) {
 	sel.AddChildWorkflow("run_123", &result)
 
 	winner := sel.Select()
-	if winner != SelectorError {
-		t.Errorf("expected SelectorError, got %q", winner)
+	if winner != "run_123" {
+		t.Errorf("expected 'run_123', got %q", winner)
 	}
-	if sel.Err() == nil {
-		t.Fatal("expected non-nil error")
+	if result != `{"status":"done"}` {
+		t.Errorf("expected result %q, got %q", `{"status":"done"}`, result)
 	}
-	if !strings.Contains(sel.Err().Error(), "not yet supported") {
-		t.Errorf("expected error containing 'not yet supported', got %v", sel.Err())
+	if sel.Err() != nil {
+		t.Errorf("expected nil error, got %v", sel.Err())
+	}
+}
+
+func TestSelectorChildWithSignals(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		Now: func() int64 { return 1000 },
+		PollSignal: func(signalName string) (string, bool, error) {
+			return "", false, nil
+		},
+		AwaitChild: func(runID string) (string, error) {
+			if runID == "child_done" {
+				return `{"status":"done"}`, nil
+			}
+			return "", nil // child not done — loop continues
+		},
+	})
+
+	sel := NewSelector(h)
+	var childResult string
+	var sigResult string
+	sel.AddChildWorkflow("child_done", &childResult)
+	sel.AddSignal("some_signal", &sigResult)
+
+	winner := sel.Select()
+	// Child should win since it completes immediately.
+	if winner != "child_done" {
+		t.Errorf("expected 'child_done', got %q", winner)
+	}
+	if childResult != `{"status":"done"}` {
+		t.Errorf("expected child result, got %q", childResult)
 	}
 }

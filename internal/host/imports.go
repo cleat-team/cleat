@@ -32,6 +32,7 @@ type HostHandler interface {
 	ContinueAsNew(ctx context.Context, m api.Module, newInputJSON string) int64
 	ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
 	AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
+	DurableCallWithRetry(ctx context.Context, m api.Module, service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string, responsePtr, responseMaxLen uint32) int64
 	Version(ctx context.Context) int64
 	MinVersion(ctx context.Context) int64
 	SetQueryState(ctx context.Context, m api.Module, key, value string) int64
@@ -130,6 +131,23 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		runID := readWasmString(mem, runIDPtr, runIDLen)
 		return uint64(handlerFromContext(ctx).AwaitChild(ctx, m, runID, resultPtr, resultMaxLen))
 	}).Export("durable_await_child")
+
+	// durable_call_retry: (ptr,len x3, i64 x4, ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32,
+		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
+		nonRetryPtr, nonRetryLen uint32,
+		respPtr, respMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		service := readWasmString(mem, svcPtr, svcLen)
+		op := readWasmString(mem, opPtr, opLen)
+		req := readWasmString(mem, reqPtr, reqLen)
+		nonRetryableErrorsJSON := readWasmString(mem, nonRetryPtr, nonRetryLen)
+		return uint64(h.DurableCallWithRetry(ctx, m, service, op, req,
+			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
+			nonRetryableErrorsJSON, respPtr, respMaxLen))
+	}).Export("durable_call_retry")
 
 	// durable_await_signals: (ptr,len, i64, ptr,maxLen x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

@@ -45,6 +45,7 @@ var hostFunctions = []HostFunction{
 	{"durable_continue_as_new", "ContinueAsNew"},
 	{"durable_child_workflow", "ChildWorkflow"},
 	{"durable_await_child", "AwaitChild"},
+	{"durable_call_retry", "DurableCallWithRetry"},
 	// Versioning
 	{"durable_version", "Version"},
 	{"durable_version", "MinVersion"},
