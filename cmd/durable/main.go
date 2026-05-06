@@ -76,7 +76,7 @@ func main() {
 		var target string
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
-		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, or rust")
+		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, rust, java, or assemblyscript")
 		fs.Parse(os.Args[2:])
 		remainder := fs.Args()
 		if len(remainder) > 0 {
@@ -114,6 +114,20 @@ func main() {
 }
 
 func runBuild(pattern, outDir, target string) {
+	if target == "java" {
+		if outDir == "" {
+			outDir = "."
+		}
+		runBuildJava(pattern, outDir)
+		return
+	}
+	if target == "assemblyscript" {
+		if outDir == "" {
+			outDir = "."
+		}
+		runBuildAssemblyScript(pattern, outDir)
+		return
+	}
 	if target == "rust" {
 		if outDir == "" {
 			outDir = "."

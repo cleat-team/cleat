@@ -1,0 +1,13 @@
+{
+  "name": "as-workflow",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "npx asc assembly/index.ts --runtime stub --optimize --initialMemory 170 -o dist/workflow.wasm"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.27.0",
+    "@cleat/sdk": "file:../../packages/cleat-as",
+    "@cleat/transform": "file:../../packages/cleat-as/transform"
+  }
+}

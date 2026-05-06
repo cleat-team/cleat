@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/rcownie/durable/internal/host"
 )
