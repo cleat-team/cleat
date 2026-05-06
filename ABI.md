@@ -72,7 +72,7 @@ The function returns error code 1 in bits 0-31, and the output buffer contains:
 
 ## 2. Host Function Imports
 
-All 15 host functions are imported from the `"env"` WASM module. Every function returns `i64` with a bit-packed result. Strings cross the boundary as `(ptr: i32, len: i32)` pairs — input strings use `(ptr, actual_len)`, output buffers use `(out_ptr, max_len)` where the host writes the result and returns the actual length in the packed result.
+All host functions are imported from the `"env"` WASM module. Every function returns `i64` with a bit-packed result. Strings cross the boundary as `(ptr: i32, len: i32)` pairs — input strings use `(ptr, actual_len)`, output buffers use `(out_ptr, max_len)` where the host writes the result and returns the actual length in the packed result.
 
 ### 2.1 `durable_call`
 
@@ -375,6 +375,124 @@ Set a key-value pair in the workflow's query state.
 
 Return value is ignored.
 
+### 2.16 `durable_call_retry`
+
+Server-side retry variant of `durable_call`. Retries happen inside the host; one event is recorded regardless of attempt count.
+
+```
+(func (import "env" "durable_call_retry")
+  (param i32 i32 i32 i32 i32 i32 i64 i64 i64 i64 i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `service_ptr` | `i32` | Service name pointer |
+| `service_len` | `i32` | Service name length |
+| `operation_ptr` | `i32` | Operation name pointer |
+| `operation_len` | `i32` | Operation name length |
+| `request_ptr` | `i32` | Request JSON pointer |
+| `request_len` | `i32` | Request JSON length |
+| `max_attempts` | `i64` | Maximum number of retry attempts |
+| `initial_interval_ms` | `i64` | Initial retry interval in milliseconds |
+| `backoff_coefficient_100x` | `i64` | Backoff coefficient scaled by 100x (e.g., 200 = 2.0x) |
+| `max_interval_ms` | `i64` | Maximum retry interval in milliseconds |
+| `non_retryable_errors_ptr` | `i32` | Pointer to JSON array of non-retryable error codes |
+| `non_retryable_errors_len` | `i32` | Length of non-retryable errors JSON |
+| `response_ptr` | `i32` | Output buffer for response |
+| `response_max_len` | `i32` | Output buffer capacity (65536) |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-7 | `errCode` — 0 = success, 1 = error |
+| 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
+| 40-63 | `responseLen` — bytes written to response buffer |
+
+### 2.17 `durable_call_heartbeat`
+
+Long-running call with progress updates. The host sends periodic progress updates; the progress callback is handled at the SDK layer.
+
+```
+(func (import "env" "durable_call_heartbeat")
+  (param i32 i32 i32 i32 i32 i32 i64 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `service_ptr` | `i32` | Service name pointer |
+| `service_len` | `i32` | Service name length |
+| `operation_ptr` | `i32` | Operation name pointer |
+| `operation_len` | `i32` | Operation name length |
+| `request_ptr` | `i32` | Request JSON pointer |
+| `request_len` | `i32` | Request JSON length |
+| `heartbeat_interval_ms` | `i64` | Heartbeat interval in milliseconds |
+| `response_ptr` | `i32` | Output buffer for response |
+| `response_max_len` | `i32` | Output buffer capacity (65536) |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-7 | `errCode` — 0 = success, 1 = error |
+| 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
+| 40-63 | `responseLen` — bytes written to response buffer |
+
+### 2.18 `durable_await_all_children`
+
+Batch await for multiple child workflows. Returns a JSON array of child results.
+
+```
+(func (import "env" "durable_await_all_children")
+  (param i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `run_ids_json_ptr` | `i32` | Pointer to JSON array of run IDs |
+| `run_ids_json_len` | `i32` | Length of run IDs JSON |
+| `results_ptr` | `i32` | Output buffer for results |
+| `results_max_len` | `i32` | Output buffer capacity (65536) |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-7 | `errCode` |
+| 32-63 | `resultLen` — bytes written to results buffer |
+
+### 2.19 `plugin_call`
+
+Host-only extension for plugin function calls. Not included in the Go SDK generator; available for non-Go WASM modules.
+
+```
+(func (import "env" "plugin_call")
+  (param i32 i32 i32 i32 i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `plugin_name_ptr` | `i32` | Plugin name pointer |
+| `plugin_name_len` | `i32` | Plugin name length |
+| `function_name_ptr` | `i32` | Function name pointer |
+| `function_name_len` | `i32` | Function name length |
+| `input_ptr` | `i32` | Input JSON pointer |
+| `input_len` | `i32` | Input JSON length |
+| `response_ptr` | `i32` | Output buffer for response |
+| `response_max_len` | `i32` | Output buffer capacity (65536) |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-7 | `errCode` |
+| 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
+| 40-63 | `responseLen` — bytes written to response buffer |
+
 ---
 
 ## 3. Memory Layout
@@ -409,7 +527,7 @@ The host ensures linear memory is at least `0xA20000` bytes (10 MiB + 128 KiB) b
 
 To add support for a new language, you need:
 
-1. **Host function declarations** — Declare the 15 `env` imports with correct WASM types.
+1. **Host function declarations** — Declare the 18 `env` imports (plus the optional `plugin_call` extension) with correct WASM types.
 2. **String helpers** — Read/write strings from linear memory at `(ptr, len)` pairs.
 3. **Bit-packing decode** — Extract result values from packed `i64` returns per the tables above.
 4. **Export wrapper** — A function with signature `(args_ptr, args_len, out_ptr, max_out_len) -> i64` that deserializes JSON args, calls the workflow, serializes the result, and encodes the packed return.
@@ -423,4 +541,5 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| 2 | 2026-05-06 | Added `durable_call_retry`, `durable_call_heartbeat`, `durable_await_all_children`, and `plugin_call` host functions. Updated documentation count. |
 | 1 | 2026-05-05 | Initial ABI specification. 15 host function imports, export convention, memory layout. |

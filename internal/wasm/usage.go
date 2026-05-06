@@ -51,7 +51,7 @@ var hostFunctions = []HostFunction{
 	{"durable_call_retry", "DurableCallWithRetry"},
 	// Versioning
 	{"durable_version", "Version"},
-	{"durable_version", "MinVersion"},
+	{"durable_min_version", "MinVersion"},
 	// State
 	{"set_query_state", "SetQueryState"},
 	// Time

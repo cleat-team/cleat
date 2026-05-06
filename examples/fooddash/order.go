@@ -365,7 +365,7 @@ func refundCharge(chargeID string) error {
 // ---- Step 4: Driver assignment ----
 
 func assignDriver(address DeliveryAddress) (driverResult, error) {
-	driverID, err := findDriver(address)
+	driver, err := findDriver(address)
 	if err != nil {
 		return driverResult{}, fmt.Errorf("dispatch service error: %w", err)
 	}
@@ -385,18 +385,16 @@ func assignDriver(address DeliveryAddress) (driverResult, error) {
 		return driverResult{}, fmt.Errorf("driver declined the delivery")
 	}
 
-	return driverResult{
-		DriverID:   driverID,
-		DriverName: "Alex", // would come from dispatch service
-		ETAMinutes: 15,
-	}, nil
+	return driver, nil
 }
 
 type findDriverResponse struct {
-	DriverID string `json:"driver_id"`
+	DriverID   string `json:"driver_id"`
+	DriverName string `json:"driver_name"`
+	ETAMinutes int    `json:"eta_minutes"`
 }
 
-func findDriver(address DeliveryAddress) (string, error) {
+func findDriver(address DeliveryAddress) (driverResult, error) {
 	type findDriverRequest struct {
 		Address string `json:"address"`
 	}
@@ -405,9 +403,13 @@ func findDriver(address DeliveryAddress) (string, error) {
 	if err := h.DurableCallTyped("dispatch", "FindDriver", findDriverRequest{
 		Address: fmt.Sprintf("%s, %s %s", address.Street, address.City, address.ZipCode),
 	}, &resp); err != nil {
-		return "", err
+		return driverResult{}, err
 	}
-	return resp.DriverID, nil
+	return driverResult{
+		DriverID:   resp.DriverID,
+		DriverName: resp.DriverName,
+		ETAMinutes: resp.ETAMinutes,
+	}, nil
 }
 
 func releaseDriver(driverID string) error {

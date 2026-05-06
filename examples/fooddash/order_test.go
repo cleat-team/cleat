@@ -35,8 +35,10 @@ func TestPlaceOrder_Success(t *testing.T) {
 
 	// Stub dispatch.
 	env.OnCall("dispatch", "FindDriver", nil).ReturnJSON(struct {
-		DriverID string `json:"driver_id"`
-	}{DriverID: "drv_xyz"}, nil)
+		DriverID   string `json:"driver_id"`
+		DriverName string `json:"driver_name"`
+		ETAMinutes int    `json:"eta_minutes"`
+	}{DriverID: "drv_xyz", DriverName: "Alex", ETAMinutes: 15}, nil)
 
 	// Signal driver acceptance immediately.
 	env.Signal("driver_accepted", `{"driver_name":"Alex"}`)
@@ -166,8 +168,10 @@ func TestPlaceOrder_PickupTimeoutCompensates(t *testing.T) {
 
 	// Dispatch succeeds.
 	env.OnCall("dispatch", "FindDriver", nil).ReturnJSON(struct {
-		DriverID string `json:"driver_id"`
-	}{DriverID: "drv_xyz"}, nil)
+		DriverID   string `json:"driver_id"`
+		DriverName string `json:"driver_name"`
+		ETAMinutes int    `json:"eta_minutes"`
+	}{DriverID: "drv_xyz", DriverName: "Alex", ETAMinutes: 15}, nil)
 
 	// Driver accepts immediately.
 	env.Signal("driver_accepted", `{"driver_name":"Alex"}`)

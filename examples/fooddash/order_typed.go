@@ -111,8 +111,8 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 				ETAMinutes int
 			}{
 				DriverID:   resp.DriverID,
-				DriverName: "Alex",
-				ETAMinutes: 15,
+				DriverName: resp.DriverName,
+				ETAMinutes: resp.ETAMinutes,
 			}
 			return "", nil
 		},

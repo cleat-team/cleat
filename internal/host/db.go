@@ -221,7 +221,8 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		SELECT step, event_type, service, operation, request, response, error,
 		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
-		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error
+		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+		       payload
 		FROM event_history
 		WHERE workflow_id = $1
 		ORDER BY step
@@ -240,12 +241,14 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		var deferDesc, deferID sql.NullString
 		var childName, childInput, runID, newInput sql.NullString
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
+		var payload sql.NullString
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
 			&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
-			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr); err != nil {
+			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
+			&payload); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
@@ -271,6 +274,10 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PluginOutput = pluginOutput.String
 		rec.PluginError = pluginErr.String
 
+		if payload.Valid {
+			populateFromPayload(&rec, []byte(payload.String))
+		}
+
 		history = append(history, rec)
 	}
 	return history, rows.Err()
@@ -288,8 +295,8 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 			defer_description, defer_id, child_name, child_input, run_id, new_input,
-			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error, payload)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 		ON CONFLICT (workflow_id, step) DO NOTHING
 	`)
 	if err != nil {
@@ -298,13 +305,19 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 	defer stmt.Close()
 
 	for _, rec := range recs {
-		_, err := stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
+		payload, err := eventRecordToPayload(rec)
+		payloadArg := nullStr("")
+		if err == nil && len(payload) > 0 {
+			payloadArg = sql.NullString{String: string(payload), Valid: true}
+		}
+		_, err = stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
 			nullStr(rec.SignalName), nullStr(rec.SignalPayload),
 			nullStr(rec.DeferDescription), nullStr(rec.DeferID),
 			nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
-				nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError))
+			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
+			payloadArg)
 		if err != nil {
 			return fmt.Errorf("append history batch: exec step %d: %w", rec.Step, err)
 		}
@@ -985,4 +998,118 @@ func nullStr(s string) sql.NullString {
 // nullInt64 returns a sql.NullInt64 that is valid if v is non-zero.
 func nullInt64(v int64) sql.NullInt64 {
 	return sql.NullInt64{Int64: v, Valid: v != 0}
+}
+
+// eventRecordToPayload serializes event-type-specific fields into a JSON map.
+func eventRecordToPayload(rec EventRecord) ([]byte, error) {
+	payload := make(map[string]interface{})
+	switch rec.EventType {
+	case "call":
+		payload["service"] = rec.Service
+		payload["operation"] = rec.Op
+		payload["request"] = rec.Request
+		if rec.Response != "" {
+			payload["response"] = rec.Response
+		}
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
+		if rec.DurationMs > 0 {
+			payload["duration_ms"] = rec.DurationMs
+		}
+	case "sleep":
+		payload["duration_ms"] = rec.DurationMs
+	case "await_signals":
+		if rec.SignalNames != "" {
+			payload["signal_names"] = rec.SignalNames
+		}
+		if rec.TimeoutMs > 0 {
+			payload["timeout_ms"] = rec.TimeoutMs
+		}
+	case "signal_received":
+		if rec.SignalName != "" {
+			payload["signal_name"] = rec.SignalName
+		}
+		if rec.SignalPayload != "" {
+			payload["signal_payload"] = rec.SignalPayload
+		}
+	case "defer":
+		if rec.DeferDescription != "" {
+			payload["defer_description"] = rec.DeferDescription
+		}
+		if rec.DeferID != "" {
+			payload["defer_id"] = rec.DeferID
+		}
+	case "child_workflow":
+		if rec.ChildName != "" {
+			payload["child_name"] = rec.ChildName
+		}
+		if rec.ChildInput != "" {
+			payload["child_input"] = rec.ChildInput
+		}
+		if rec.RunID != "" {
+			payload["run_id"] = rec.RunID
+		}
+	case "continue_as_new":
+		if rec.NewInput != "" {
+			payload["new_input"] = rec.NewInput
+		}
+	case "plugin_call":
+		if rec.PluginName != "" {
+			payload["plugin_name"] = rec.PluginName
+		}
+		if rec.PluginFunc != "" {
+			payload["plugin_func"] = rec.PluginFunc
+		}
+		if rec.PluginInput != "" {
+			payload["plugin_input"] = rec.PluginInput
+		}
+		if rec.PluginOutput != "" {
+			payload["plugin_output"] = rec.PluginOutput
+		}
+		if rec.PluginError != "" {
+			payload["plugin_error"] = rec.PluginError
+		}
+	}
+	return json.Marshal(payload)
+}
+
+// populateFromPayload fills event-type-specific fields from a JSONB payload.
+func populateFromPayload(rec *EventRecord, payload []byte) {
+	var m map[string]interface{}
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return
+	}
+	switch rec.EventType {
+	case "call":
+		if v, ok := m["service"].(string); ok { rec.Service = v }
+		if v, ok := m["operation"].(string); ok { rec.Op = v }
+		if v, ok := m["request"].(string); ok { rec.Request = v }
+		if v, ok := m["response"].(string); ok { rec.Response = v }
+		if v, ok := m["error"].(string); ok { rec.Err = v }
+		if v, ok := m["duration_ms"].(float64); ok { rec.DurationMs = int64(v) }
+	case "sleep":
+		if v, ok := m["duration_ms"].(float64); ok { rec.DurationMs = int64(v) }
+	case "await_signals":
+		if v, ok := m["signal_names"].(string); ok { rec.SignalNames = v }
+		if v, ok := m["timeout_ms"].(float64); ok { rec.TimeoutMs = int64(v) }
+	case "signal_received":
+		if v, ok := m["signal_name"].(string); ok { rec.SignalName = v }
+		if v, ok := m["signal_payload"].(string); ok { rec.SignalPayload = v }
+	case "defer":
+		if v, ok := m["defer_description"].(string); ok { rec.DeferDescription = v }
+		if v, ok := m["defer_id"].(string); ok { rec.DeferID = v }
+	case "child_workflow":
+		if v, ok := m["child_name"].(string); ok { rec.ChildName = v }
+		if v, ok := m["child_input"].(string); ok { rec.ChildInput = v }
+		if v, ok := m["run_id"].(string); ok { rec.RunID = v }
+	case "continue_as_new":
+		if v, ok := m["new_input"].(string); ok { rec.NewInput = v }
+	case "plugin_call":
+		if v, ok := m["plugin_name"].(string); ok { rec.PluginName = v }
+		if v, ok := m["plugin_func"].(string); ok { rec.PluginFunc = v }
+		if v, ok := m["plugin_input"].(string); ok { rec.PluginInput = v }
+		if v, ok := m["plugin_output"].(string); ok { rec.PluginOutput = v }
+		if v, ok := m["plugin_error"].(string); ok { rec.PluginError = v }
+	}
 }

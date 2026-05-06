@@ -27,6 +27,18 @@ type ServiceCaller interface {
 	Call(ctx context.Context, service, operation, requestJSON string) (responseJSON string, err error)
 }
 
+// ChildWorkflowRunner executes a child workflow by name.
+// Implementations should run the child synchronously and return its result.
+type ChildWorkflowRunner interface {
+	RunChild(ctx context.Context, name string, inputJSON string) (resultJSON string, err error)
+}
+
+// childResult holds the result of a completed child workflow.
+type childResult struct {
+	result string
+	err    error
+}
+
 // Event records a single event during workflow execution.
 type Event struct {
 	Type      string `json:"type"`                // "call", "sleep", "signal", "log", etc.
@@ -79,6 +91,14 @@ func WithVersion(v, minV int) Option {
 	}
 }
 
+// WithChildWorkflowRunner configures a runner for executing child workflows.
+// Without this, child workflows return stub results.
+func WithChildWorkflowRunner(runner ChildWorkflowRunner) Option {
+	return func(r *LocalRunner) {
+		r.childRunner = runner
+	}
+}
+
 // LocalRunner is a pure-Go implementation of durable.HostCalls for local
 // development. It makes real API calls via a ServiceCaller, uses wall-clock
 // time, and records events in memory.
@@ -95,13 +115,16 @@ func WithVersion(v, minV int) Option {
 //	    log.Printf("[%s] %s", evt.Elapsed, evt.Type)
 //	}
 type LocalRunner struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 
 	h         durable.HostCalls
 	caller    ServiceCaller
 	logWriter io.Writer
 	signalCh  chan Signal
 	events    []Event
+
+	childRunner  ChildWorkflowRunner
+	childResults map[string]childResult
 
 	workflowID    string
 	versionVal    int
@@ -126,6 +149,7 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		versionVal:    1,
 		minVersionVal: 1,
 		queryState:    make(map[string]string),
+		childResults:  make(map[string]childResult),
 	}
 	for _, o := range opts {
 		o(r)
@@ -406,6 +430,13 @@ func (r *LocalRunner) continueAsNew(newInputJSON string) error {
 
 func (r *LocalRunner) childWorkflow(name, inputJSON string) (string, error) {
 	runID := fmt.Sprintf("child-%s-%d", name, r.deferCounter)
+	if r.childRunner != nil {
+		ctx := context.Background()
+		result, err := r.childRunner.RunChild(ctx, name, inputJSON)
+		r.mu.Lock()
+		r.childResults[runID] = childResult{result: result, err: err}
+		r.mu.Unlock()
+	}
 	r.mu.Lock()
 	r.events = append(r.events, Event{
 		Type:      "child_workflow",
@@ -420,6 +451,15 @@ func (r *LocalRunner) childWorkflow(name, inputJSON string) (string, error) {
 }
 
 func (r *LocalRunner) awaitChild(runID string) (string, error) {
+	r.mu.RLock()
+	cr, ok := r.childResults[runID]
+	r.mu.RUnlock()
+	if ok {
+		if cr.err != nil {
+			return "", cr.err
+		}
+		return cr.result, nil
+	}
 	r.mu.Lock()
 	r.events = append(r.events, Event{
 		Type:    "await_child",

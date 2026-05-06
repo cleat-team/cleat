@@ -9,7 +9,9 @@ type FindDriverRequest struct {
 }
 
 type FindDriverResponse struct {
-	DriverID string `json:"driver_id"`
+	DriverID   string `json:"driver_id"`
+	DriverName string `json:"driver_name"`
+	ETAMinutes int    `json:"eta_minutes"`
 }
 
 type ReleaseDriverRequest struct {
