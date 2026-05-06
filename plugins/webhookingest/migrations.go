@@ -1,0 +1,46 @@
+package webhookingest
+
+import "github.com/rcownie/durable/internal/plugin"
+
+// Migrations returns the database schema for webhook source management and
+// event storage. Tables are idempotent (IF NOT EXISTS) and safe to run
+// multiple times.
+func (p *Plugin) Migrations() []plugin.Migration {
+	return []plugin.Migration{
+		{
+			Version: 1,
+			Up: `
+				CREATE TABLE IF NOT EXISTS webhook_sources (
+					tenant_id   UUID NOT NULL,
+					id          UUID PRIMARY KEY,
+					name        TEXT,
+					source_type TEXT NOT NULL DEFAULT 'generic',
+					secret      TEXT NOT NULL DEFAULT '',
+					enabled     BOOLEAN NOT NULL DEFAULT true,
+					created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+					updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+				);
+
+				CREATE TABLE IF NOT EXISTS webhook_events (
+					id          UUID PRIMARY KEY,
+					source_id   UUID NOT NULL REFERENCES webhook_sources(id),
+					tenant_id   UUID NOT NULL,
+					event_type  TEXT NOT NULL DEFAULT '',
+					headers     JSONB NOT NULL DEFAULT '{}',
+					payload     JSONB NOT NULL DEFAULT '{}',
+					received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+					processed   BOOLEAN NOT NULL DEFAULT false
+				);
+
+				CREATE INDEX IF NOT EXISTS idx_webhook_sources_tenant ON webhook_sources(tenant_id);
+				CREATE INDEX IF NOT EXISTS idx_webhook_events_source ON webhook_events(source_id);
+				CREATE INDEX IF NOT EXISTS idx_webhook_events_tenant ON webhook_events(tenant_id);
+				CREATE INDEX IF NOT EXISTS idx_webhook_events_processed ON webhook_events(processed);
+			`,
+			Down: `
+				DROP TABLE IF EXISTS webhook_events;
+				DROP TABLE IF EXISTS webhook_sources;
+			`,
+		},
+	}
+}

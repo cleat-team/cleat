@@ -1,0 +1,216 @@
+package notifications
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Run starts the delivery retry loop. It runs every 30 seconds, finding
+// undelivered webhook deliveries whose next_attempt_at <= now() and
+// attempting HTTP POST delivery. Returns when ctx is cancelled.
+func (p *Plugin) Run(ctx context.Context) error {
+	if p.db == nil {
+		p.logger.Warn("notifications: no database, delivery loop disabled")
+		<-ctx.Done()
+		return nil
+	}
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	p.logger.Info("notifications: delivery retry loop started, interval=30s")
+
+	for {
+		select {
+		case <-ctx.Done():
+			p.logger.Info("notifications: delivery retry loop stopped")
+			return nil
+
+		case <-ticker.C:
+			if err := p.processDeliveries(ctx); err != nil {
+				p.logger.Error("notifications: delivery processing failed", "error", err)
+			}
+		}
+	}
+}
+
+// deliveryRow represents a pending or retrying delivery fetched from the database.
+type deliveryRow struct {
+	ID           uuid.UUID
+	WebhookID    uuid.UUID
+	EventType    string
+	Payload      json.RawMessage
+	AttemptCount int
+}
+
+// webhookConfigRow represents the webhook configuration needed for delivery.
+type webhookConfigRow struct {
+	URL    string
+	Secret string
+}
+
+// processDeliveries queries for pending and retrying deliveries whose retry
+// time has elapsed, and attempts HTTP POST delivery for each.
+func (p *Plugin) processDeliveries(ctx context.Context) error {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
+		FROM webhook_delivery d
+		WHERE d.status IN ('pending', 'retrying')
+		  AND d.next_attempt_at <= now()
+		ORDER BY d.next_attempt_at ASC
+		LIMIT 100
+	`)
+	if err != nil {
+		return fmt.Errorf("query deliveries: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var d deliveryRow
+		if err := rows.Scan(&d.ID, &d.WebhookID, &d.EventType, &d.Payload, &d.AttemptCount); err != nil {
+			p.logger.Error("notifications: scan delivery row", "error", err)
+			continue
+		}
+
+		if err := p.deliver(ctx, d); err != nil {
+			p.logger.Error("notifications: deliver", "delivery_id", d.ID, "error", err)
+		}
+	}
+
+	return rows.Err()
+}
+
+// deliver attempts a single webhook delivery. It reads the webhook config,
+// builds and sends an HTTP POST with HMAC-SHA256 signing, and updates the
+// delivery status accordingly.
+func (p *Plugin) deliver(ctx context.Context, d deliveryRow) error {
+	// Look up the webhook config.
+	var cfg webhookConfigRow
+	err := p.db.QueryRowContext(ctx, `
+		SELECT url, secret FROM webhook_config WHERE id = $1
+	`, d.WebhookID).Scan(&cfg.URL, &cfg.Secret)
+	if err != nil {
+		return fmt.Errorf("lookup webhook config: %w", err)
+	}
+
+	// Build the request body.
+	payloadBytes := []byte(d.Payload)
+	mac := hmac.New(sha256.New, []byte(cfg.Secret))
+	mac.Write(payloadBytes)
+	signature := hex.EncodeToString(mac.Sum(nil))
+
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.URL, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Webhook-Event", d.EventType)
+	req.Header.Set("X-Webhook-Signature", "sha256="+signature)
+
+	// Execute the HTTP request.
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		// Network or timeout error — record and retry.
+		newCount := d.AttemptCount + 1
+		if newCount >= 10 {
+			return p.markFailed(ctx, d.ID, newCount, fmt.Sprintf("request failed: %v", err))
+		}
+		return p.markRetrying(ctx, d.ID, newCount, fmt.Sprintf("request failed: %v", err))
+	}
+	defer resp.Body.Close()
+
+	respBodyBytes, _ := io.ReadAll(resp.Body)
+	respBody := string(respBodyBytes)
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return p.markDelivered(ctx, d.ID, d.AttemptCount+1, resp.StatusCode, respBody)
+	}
+
+	// Non-2xx response — retry.
+	newCount := d.AttemptCount + 1
+	if newCount >= 10 {
+		return p.markFailed(ctx, d.ID, newCount, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
+	}
+	return p.markRetrying(ctx, d.ID, newCount, fmt.Sprintf("HTTP %d: %s", resp.StatusCode, respBody))
+}
+
+// markDelivered updates the delivery as successfully delivered.
+func (p *Plugin) markDelivered(ctx context.Context, id uuid.UUID, attemptCount, statusCode int, responseBody string) error {
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE webhook_delivery
+		SET status = 'delivered',
+		    attempt_count = $1,
+		    last_attempt_at = now(),
+		    delivered_at = now(),
+		    response_code = $2,
+		    response_body = $3
+		WHERE id = $4
+	`, attemptCount, statusCode, responseBody, id)
+	if err != nil {
+		return fmt.Errorf("mark delivered: %w", err)
+	}
+	p.logger.Info("notifications: delivery delivered", "id", id, "attempts", attemptCount)
+	return nil
+}
+
+// markRetrying updates the delivery for retry with exponential backoff.
+func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount int, reason string) error {
+	nextAt := time.Now().Add(nextBackoff(attemptCount))
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE webhook_delivery
+		SET status = 'retrying',
+		    attempt_count = $1,
+		    last_attempt_at = now(),
+		    next_attempt_at = $2,
+		    response_body = $3
+		WHERE id = $4
+	`, attemptCount, nextAt, reason, id)
+	if err != nil {
+		return fmt.Errorf("mark retrying: %w", err)
+	}
+	p.logger.Info("notifications: delivery retrying",
+		"id", id, "attempt", attemptCount, "next_attempt", nextAt, "reason", reason)
+	return nil
+}
+
+// markFailed updates the delivery as permanently failed.
+func (p *Plugin) markFailed(ctx context.Context, id uuid.UUID, attemptCount int, reason string) error {
+	_, err := p.db.ExecContext(ctx, `
+		UPDATE webhook_delivery
+		SET status = 'failed',
+		    attempt_count = $1,
+		    last_attempt_at = now(),
+		    response_body = $2
+		WHERE id = $3
+	`, attemptCount, reason, id)
+	if err != nil {
+		return fmt.Errorf("mark failed: %w", err)
+	}
+	p.logger.Warn("notifications: delivery failed", "id", id, "attempts", attemptCount, "reason", reason)
+	return nil
+}
+
+// nextBackoff returns the delay before the next retry based on the attempt
+// count. The backoff schedule is: 1m, 5m, 15m, then 1h for subsequent retries.
+func nextBackoff(attemptCount int) time.Duration {
+	switch attemptCount {
+	case 1:
+		return 1 * time.Minute
+	case 2:
+		return 5 * time.Minute
+	case 3:
+		return 15 * time.Minute
+	default:
+		return 1 * time.Hour
+	}
+}
