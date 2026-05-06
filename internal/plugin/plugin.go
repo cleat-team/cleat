@@ -14,7 +14,6 @@ package plugin
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -41,7 +40,7 @@ type Plugin interface {
 type Environment struct {
 	DB       *sql.DB
 	Mux      *http.ServeMux
-	Config   json.RawMessage
+	Config   []byte
 	Logger   *slog.Logger
 	TenantID uuid.UUID
 	Done     <-chan struct{}

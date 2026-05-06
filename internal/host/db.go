@@ -24,6 +24,7 @@ type WorkflowInstance struct {
 	Error      string          `json:"error,omitempty"`
 	AssignedTo string          `json:"assigned_to"`
 	NextWakeAt time.Time       `json:"next_wake_at"`
+	TenantID   string          `json:"tenant_id,omitempty"`
 }
 
 // Schedule is a row from workflow_schedules.
@@ -197,9 +198,9 @@ func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID, namespa
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id
 	`, workerID, namespace, pq.Array(s.taskQueues)).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-		&wf.AssignedTo, &nextWakeAt)
+			&wf.AssignedTo, &nextWakeAt, &wf.TenantID)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -219,7 +220,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT step, event_type, service, operation, request, response, error,
 		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
-		       defer_description, defer_id, child_name, child_input, run_id, new_input
+		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error
 		FROM event_history
 		WHERE workflow_id = $1

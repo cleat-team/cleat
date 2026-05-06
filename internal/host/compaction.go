@@ -25,6 +25,7 @@ const (
 	EventCodeContinueAsNew    = 7
 	EventCodeHeartbeat        = 8
 	EventCodeAwaitAllChildren = 9
+	EventCodePluginCall      = 10
 )
 
 var eventTypeToCode = map[EventType]int{
@@ -38,6 +39,7 @@ var eventTypeToCode = map[EventType]int{
 	EventTypeContinueAsNew:    EventCodeContinueAsNew,
 	EventTypeHeartbeat:        EventCodeHeartbeat,
 	EventTypeAwaitAllChildren: EventCodeAwaitAllChildren,
+	EventTypePluginCall:       EventCodePluginCall,
 }
 
 var codeToEventType = map[int]EventType{
@@ -51,6 +53,7 @@ var codeToEventType = map[int]EventType{
 	EventCodeContinueAsNew:    EventTypeContinueAsNew,
 	EventCodeHeartbeat:        EventTypeHeartbeat,
 	EventCodeAwaitAllChildren: EventTypeAwaitAllChildren,
+	EventCodePluginCall:       EventTypePluginCall,
 }
 
 // CompactionState holds the minimal state needed to reconstruct the compacted
@@ -86,6 +89,13 @@ type CompactedEvent struct {
 	ChildInput    string `json:"ci,omitempty"`
 	RunID         string `json:"rid,omitempty"`
 	NewInput      string `json:"ni,omitempty"`
+
+	// Plugin call fields.
+	PluginName   string `json:"pn,omitempty"`
+	PluginFunc   string `json:"pf,omitempty"`
+	PluginInput  string `json:"pi,omitempty"`
+	PluginOutput string `json:"po,omitempty"`
+	PluginError  string `json:"pe,omitempty"`
 }
 
 // CompactedDefer represents a deferred cleanup callback registered in the
@@ -199,6 +209,12 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.Response = ev.Response
 			// All children resolved.
 			openChildren = make(map[string]bool)
+		case EventTypePluginCall:
+			ce.PluginName = ev.PluginName
+			ce.PluginFunc = ev.PluginFunc
+			ce.PluginInput = ev.PluginInput
+			ce.PluginOutput = ev.PluginOutput
+			ce.PluginError = ev.PluginError
 		}
 		cs.Events = append(cs.Events, ce)
 	}
@@ -274,6 +290,12 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.Op = ce.Op
 		case EventCodeAwaitAllChildren:
 			rec.Response = ce.Response
+		case EventCodePluginCall:
+			rec.PluginName = ce.PluginName
+			rec.PluginFunc = ce.PluginFunc
+			rec.PluginInput = ce.PluginInput
+			rec.PluginOutput = ce.PluginOutput
+			rec.PluginError = ce.PluginError
 		}
 		full = append(full, rec)
 	}
@@ -292,7 +314,8 @@ func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID stri
 	rows, err := db.QueryContext(ctx, `
 		SELECT step, event_type, service, operation, request, response, error,
 		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
-		       defer_description, defer_id, child_name, child_input, run_id, new_input
+			       defer_description, defer_id, child_name, child_input, run_id, new_input,
+			       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error
 		FROM event_history
 		WHERE workflow_id = $1
 		ORDER BY step
@@ -310,11 +333,13 @@ func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID stri
 		var signalNames, signalName, signalPayload sql.NullString
 		var deferDesc, deferID sql.NullString
 		var childName, childInput, runID, newInput sql.NullString
+		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
 			&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
-			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput); err != nil {
+				&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
+				&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr); err != nil {
 			return nil, fmt.Errorf("scan compaction events: %w", err)
 		}
 
@@ -333,7 +358,12 @@ func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID stri
 		rec.ChildName = childName.String
 		rec.ChildInput = childInput.String
 		rec.RunID = runID.String
-		rec.NewInput = newInput.String
+			rec.NewInput = newInput.String
+			rec.PluginName = pluginName.String
+			rec.PluginFunc = pluginFunc.String
+			rec.PluginInput = pluginInput.String
+			rec.PluginOutput = pluginOutput.String
+			rec.PluginError = pluginErr.String
 
 		history = append(history, rec)
 	}

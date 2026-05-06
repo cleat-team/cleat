@@ -35,11 +35,11 @@ func TestRegistration(t *testing.T) {
 }
 
 func TestTopologicalSort(t *testing.T) {
-	ctors := map[string]func() Plugin{
-		"a": func() Plugin { return &testPlugin{info: PluginInfo{Name: "a", Requires: []string{"b"}}} },
-		"b": func() Plugin { return &testPlugin{info: PluginInfo{Name: "b"}} },
+	entries := map[string]registryEntry{
+		"a": {info: PluginInfo{Name: "a", Requires: []string{"b"}}, ctor: func() Plugin { return &testPlugin{info: PluginInfo{Name: "a", Requires: []string{"b"}}} }},
+		"b": {info: PluginInfo{Name: "b"}, ctor: func() Plugin { return &testPlugin{info: PluginInfo{Name: "b"}} }},
 	}
-	sorted, err := topologicalSort(ctors)
+	sorted, err := topologicalSort(entries)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,21 +49,21 @@ func TestTopologicalSort(t *testing.T) {
 }
 
 func TestCircularDependency(t *testing.T) {
-	ctors := map[string]func() Plugin{
-		"a": func() Plugin { return &testPlugin{info: PluginInfo{Name: "a", Requires: []string{"b"}}} },
-		"b": func() Plugin { return &testPlugin{info: PluginInfo{Name: "b", Requires: []string{"a"}}} },
+	entries := map[string]registryEntry{
+		"a": {info: PluginInfo{Name: "a", Requires: []string{"b"}}, ctor: func() Plugin { return &testPlugin{info: PluginInfo{Name: "a", Requires: []string{"b"}}} }},
+		"b": {info: PluginInfo{Name: "b", Requires: []string{"a"}}, ctor: func() Plugin { return &testPlugin{info: PluginInfo{Name: "b", Requires: []string{"a"}}} }},
 	}
-	_, err := topologicalSort(ctors)
+	_, err := topologicalSort(entries)
 	if err == nil {
 		t.Error("expected error for circular dependency")
 	}
 }
 
 func TestMissingDependency(t *testing.T) {
-	ctors := map[string]func() Plugin{
-		"a": func() Plugin { return &testPlugin{info: PluginInfo{Name: "a", Requires: []string{"nonexistent"}}} },
+	entries := map[string]registryEntry{
+		"a": {info: PluginInfo{Name: "a", Requires: []string{"nonexistent"}}, ctor: func() Plugin { return &testPlugin{info: PluginInfo{Name: "a", Requires: []string{"nonexistent"}}} }},
 	}
-	_, err := topologicalSort(ctors)
+	_, err := topologicalSort(entries)
 	if err == nil {
 		t.Error("expected error for missing dependency")
 	}

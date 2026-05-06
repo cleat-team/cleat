@@ -9,8 +9,15 @@ import (
 
 var (
 	registryMu sync.Mutex
-	registry   = make(map[string]func() Plugin)
+	registry   = make(map[string]registryEntry)
 )
+
+// registryEntry stores plugin metadata alongside the constructor so that
+// Info is available without instantiating the plugin again.
+type registryEntry struct {
+	info PluginInfo
+	ctor func() Plugin
+}
 
 // Register registers a plugin constructor. Call from init().
 func Register(constructor func() Plugin) {
@@ -25,7 +32,7 @@ func Register(constructor func() Plugin) {
 	if _, exists := registry[info.Name]; exists {
 		panic(fmt.Sprintf("plugin %q registered twice", info.Name))
 	}
-	registry[info.Name] = constructor
+	registry[info.Name] = registryEntry{info: info, ctor: constructor}
 }
 
 // LoadedPlugin wraps a plugin instance with its current state.
@@ -35,55 +42,74 @@ type LoadedPlugin struct {
 	Error   error
 }
 
-// LoadAll instantiates all registered plugins in dependency order,
-// calls Init on each, and returns the successfully loaded plugins.
-// A plugin that panics during Init is disabled and reported.
-func LoadAll(ctx context.Context, env *Environment) ([]*LoadedPlugin, error) {
+// Discover instantiates all registered plugins in dependency order without
+// calling Init. The caller should call RunMigrations followed by InitAll
+// to complete plugin initialization.
+func Discover() ([]*LoadedPlugin, error) {
 	registryMu.Lock()
-	constructors := make(map[string]func() Plugin, len(registry))
-	for name, ctor := range registry {
-		constructors[name] = ctor
+	entries := make(map[string]registryEntry, len(registry))
+	for name, entry := range registry {
+		entries[name] = entry
 	}
 	registryMu.Unlock()
 
-	// Build dependency graph and topologically sort.
-	ordered, err := topologicalSort(constructors)
+	ordered, err := topologicalSort(entries)
 	if err != nil {
 		return nil, err
 	}
 
 	var loaded []*LoadedPlugin
 	for _, name := range ordered {
-		ctor := constructors[name]
+		entry := entries[name]
 		lp := &LoadedPlugin{Healthy: true}
+		lp.Plugin = entry.ctor()
+		loaded = append(loaded, lp)
+	}
+
+	return loaded, nil
+}
+
+// InitAll calls Init on each loaded plugin in order. Plugins that panic
+// or return an error during Init are marked unhealthy but do not halt
+// initialization of remaining plugins.
+func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
+	for _, lp := range plugins {
+		if !lp.Healthy {
+			continue
+		}
 
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					lp.Healthy = false
 					lp.Error = fmt.Errorf("panic during Init: %v", r)
-					if env.Logger != nil {
-						env.Logger.Error("plugin init panicked", "plugin", name, "panic", r)
+					if env != nil && env.Logger != nil {
+						env.Logger.Error("plugin init panicked", "plugin", lp.Plugin.Info().Name, "panic", r)
 					}
 				}
 			}()
 
-			p := ctor()
-			lp.Plugin = p
-
-			if err := p.Init(ctx, env); err != nil {
+			if err := lp.Plugin.Init(ctx, env); err != nil {
 				lp.Healthy = false
 				lp.Error = err
-				if env.Logger != nil {
-					env.Logger.Error("plugin init failed", "plugin", name, "error", err)
+				if env != nil && env.Logger != nil {
+					env.Logger.Error("plugin init failed", "plugin", lp.Plugin.Info().Name, "error", err)
 				}
 			}
 		}()
-
-		loaded = append(loaded, lp)
 	}
+}
 
-	return loaded, nil
+// LoadAll instantiates all registered plugins in dependency order,
+// calls Init on each, and returns the successfully loaded plugins.
+// A plugin that panics during Init is disabled and reported.
+func LoadAll(ctx context.Context, env *Environment) ([]*LoadedPlugin, error) {
+	plugins, err := Discover()
+	if err != nil {
+		return nil, err
+	}
+	InitAll(ctx, env, plugins)
+	return plugins, nil
 }
 
 // List returns metadata for all registered plugins.
@@ -92,8 +118,8 @@ func List() []PluginInfo {
 	defer registryMu.Unlock()
 
 	var infos []PluginInfo
-	for _, ctor := range registry {
-		infos = append(infos, ctor().Info())
+	for _, entry := range registry {
+		infos = append(infos, entry.info)
 	}
 	sort.Slice(infos, func(i, j int) bool {
 		return infos[i].Name < infos[j].Name
@@ -103,15 +129,15 @@ func List() []PluginInfo {
 
 // topologicalSort orders plugins by their Requires dependencies using
 // Kahn's algorithm.
-func topologicalSort(constructors map[string]func() Plugin) ([]string, error) {
+func topologicalSort(entries map[string]registryEntry) ([]string, error) {
 	inDegree := make(map[string]int)
 	graph := make(map[string][]string)
 
-	for name, ctor := range constructors {
-		info := ctor().Info()
+	for name, entry := range entries {
+		info := entry.info
 		inDegree[name] = len(info.Requires)
 		for _, dep := range info.Requires {
-			if _, exists := constructors[dep]; !exists {
+			if _, exists := entries[dep]; !exists {
 				return nil, fmt.Errorf("plugin %q requires %q which is not registered", name, dep)
 			}
 			graph[dep] = append(graph[dep], name)
@@ -139,7 +165,7 @@ func topologicalSort(constructors map[string]func() Plugin) ([]string, error) {
 		}
 	}
 
-	if len(sorted) != len(constructors) {
+	if len(sorted) != len(entries) {
 		return nil, fmt.Errorf("circular dependency detected among plugins")
 	}
 

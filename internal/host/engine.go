@@ -10,7 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/tetratelabs/wazero/api"
+
+	"github.com/rcownie/durable/internal/plugin"
 )
 
 // EventType classifies event history records.
@@ -143,19 +146,39 @@ type PluginFunc func(ctx context.Context, inputJSON string) (outputJSON string, 
 
 // PluginRegistry maps plugin function names to implementations.
 type PluginRegistry struct {
-	funcs map[string]PluginFunc // fullName = "pluginName/functionName"
+	funcs map[string]PluginFunc // key = lookupKey(pluginName, funcName)
 }
 
 func NewPluginRegistry() *PluginRegistry {
 	return &PluginRegistry{funcs: make(map[string]PluginFunc)}
 }
 
-func (pr *PluginRegistry) Register(pluginName, funcName string, fn PluginFunc) {
-	pr.funcs[pluginName+"/"+funcName] = fn
+// lookupKey returns a unique key for a plugin function. The \x00 separator
+// prevents collisions between names like "a/b" and "a/b" (which would collide
+// with "/") and is guaranteed not to appear in valid plugin or function names.
+func lookupKey(pluginName, funcName string) string {
+	return pluginName + "\x00" + funcName
+}
+
+// Register adds a plugin function. Returns an error if the function name
+// is already registered for this plugin.
+func (pr *PluginRegistry) Register(pluginName, funcName string, fn PluginFunc) error {
+	key := lookupKey(pluginName, funcName)
+	if _, exists := pr.funcs[key]; exists {
+		return fmt.Errorf("plugin function %q already registered", key)
+	}
+	pr.funcs[key] = fn
+	return nil
+}
+
+// Has reports whether a plugin function is registered.
+func (pr *PluginRegistry) Has(pluginName, funcName string) bool {
+	_, ok := pr.funcs[lookupKey(pluginName, funcName)]
+	return ok
 }
 
 func (pr *PluginRegistry) Lookup(pluginName, funcName string) (PluginFunc, bool) {
-	fn, ok := pr.funcs[pluginName+"/"+funcName]
+	fn, ok := pr.funcs[lookupKey(pluginName, funcName)]
 	return fn, ok
 }
 
@@ -176,7 +199,8 @@ type Engine struct {
 	workflowID      string
 	childWfStore    ChildWorkflowStore
 	compactionState *CompactionState
-		pluginRegistry  *PluginRegistry
+	pluginRegistry  *PluginRegistry
+	tenantID        string
 }
 
 // EngineOption configures an Engine.
@@ -210,6 +234,12 @@ func WithCompactionState(cs *CompactionState) EngineOption {
 // WithPluginRegistry sets the plugin registry for plugin host function dispatch.
 func WithPluginRegistry(pr *PluginRegistry) EngineOption {
 	return func(e *Engine) { e.pluginRegistry = pr }
+}
+
+// WithTenantID sets the tenant ID for the engine, which is injected into
+// the context before calling plugin host functions.
+func WithTenantID(id string) EngineOption {
+	return func(e *Engine) { e.tenantID = id }
 }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
@@ -270,6 +300,7 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 		nowMs:       nowMs.Load(),
 		deferrals:   make(map[string]string),
 		workflowID:  e.workflowID,
+		tenantID:    e.tenantID,
 	}
 
 	execCtx := withHandler(ctx, session)
@@ -344,6 +375,7 @@ type execSession struct {
 	deferrals   map[string]string // registered defer callbacks (deferID -> description)
 	workflowID  string            // parent workflow instance ID (for child workflows)
 	queryState  map[string]string // key-value state set via SetQueryState
+	tenantID    string            // tenant ID injected into plugin function context
 }
 
 var _ HostHandler = (*execSession)(nil)
@@ -495,8 +527,17 @@ func (s *execSession) freshPluginCall(ctx context.Context, m api.Module,
 		return packDurableCallResult(int(written), 1, 1)
 	}
 
-	// Actually call the plugin.
-	outputJSON, err := fn(ctx, inputJSON)
+		// Inject tenant ID into context for plugin functions that need it.
+		callCtx := ctx
+		if s.tenantID != "" {
+			tid, err := uuid.Parse(s.tenantID)
+			if err == nil {
+				callCtx = plugin.WithTenant(callCtx, tid)
+			}
+		}
+
+		// Actually call the plugin.
+		outputJSON, err := fn(callCtx, inputJSON)
 
 	var errStr string
 	if err != nil {

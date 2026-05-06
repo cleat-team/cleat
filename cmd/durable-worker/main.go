@@ -132,14 +132,14 @@ func main() {
 			plugMux = http.NewServeMux()
 		}
 
-		var rawPluginConfig json.RawMessage
+		var rawPluginConfig []byte
 		if *pluginConfigFile != "" {
 			data, ferr := os.ReadFile(*pluginConfigFile)
 			if ferr != nil {
 				log.Fatalf("[worker %s] plugin config: %v", workerID, ferr)
 			}
 			if json.Valid(data) {
-				rawPluginConfig = json.RawMessage(data)
+				rawPluginConfig = data
 			} else {
 				log.Fatalf("[worker %s] plugin config: must be valid JSON", workerID)
 			}
@@ -799,8 +799,16 @@ type hostPluginRegistryAdapter struct {
 }
 
 func (a *hostPluginRegistryAdapter) Register(funcName string, fn plugin.PluginFunc) error {
-	a.registry.Register(a.pluginName, funcName, host.PluginFunc(fn))
-	return nil
+	if funcName == "" {
+		return fmt.Errorf("function name must not be empty")
+	}
+	if strings.Contains(funcName, "/") || strings.Contains(funcName, "\x00") {
+		return fmt.Errorf("function name %q contains invalid characters", funcName)
+	}
+	if a.registry.Has(a.pluginName, funcName) {
+		return fmt.Errorf("function %q already registered for plugin %q", funcName, a.pluginName)
+	}
+	return a.registry.Register(a.pluginName, funcName, host.PluginFunc(fn))
 }
 
 // determineEntryPoint extracts the entry point name from workflow input.
