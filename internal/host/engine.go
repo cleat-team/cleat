@@ -113,10 +113,11 @@ type SuspendResult struct {
 
 // ExecutionResult holds the complete outcome of a workflow run.
 type ExecutionResult struct {
-	Result    string
-	History   []EventRecord
-	Suspended *SuspendResult
-	Deferrals map[string]string
+	Result     string
+	History    []EventRecord
+	Suspended  *SuspendResult
+	Deferrals  map[string]string
+	QueryState map[string]string
 }
 
 // ChildWorkflowStore provides child workflow creation and polling for the engine.
@@ -179,31 +180,33 @@ func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine 
 // along with the complete event history. If the workflow suspends (sleep,
 // await signals), it returns a nil result with non-nil SuspendResult.
 // deferrals maps deferID -> description for any defers registered during execution.
-func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage) (result string, history []EventRecord, suspended *SuspendResult, deferrals map[string]string, err error) {
+// queryState contains key-value state set via SetQueryState during execution.
+func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage) (result string, history []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
 	return e.run(ctx, wasmBytes, entryPoint, input, nil)
 }
 
 // Replay replays a workflow from existing event history. Cached results are
 // returned for matching steps; divergence triggers an error.
-func (e *Engine) Replay(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, history []EventRecord) (result string, resultHistory []EventRecord, suspended *SuspendResult, deferrals map[string]string, err error) {
+// queryState contains key-value state set via SetQueryState during execution.
+func (e *Engine) Replay(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, history []EventRecord) (result string, resultHistory []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
 	return e.run(ctx, wasmBytes, entryPoint, input, history)
 }
 
-func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, history []EventRecord) (string, []EventRecord, *SuspendResult, map[string]string, error) {
+func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, history []EventRecord) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
 	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {
-		return "", nil, nil, nil, fmt.Errorf("host: compile module: %w", err)
+		return "", nil, nil, nil, nil, fmt.Errorf("host: compile module: %w", err)
 	}
 	defer compiled.Close(ctx)
 
 	mod, err := e.rt.InstantiateModule(ctx, compiled)
 	if err != nil {
-		return "", nil, nil, nil, fmt.Errorf("host: instantiate module: %w", err)
+		return "", nil, nil, nil, nil, fmt.Errorf("host: instantiate module: %w", err)
 	}
 	defer mod.Close(ctx)
 
 	if err := e.rt.InitModule(ctx, mod); err != nil {
-		return "", nil, nil, nil, fmt.Errorf("host: init module: %w", err)
+		return "", nil, nil, nil, nil, fmt.Errorf("host: init module: %w", err)
 	}
 
 	session := &execSession{
@@ -230,12 +233,12 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 				Reason:       se.Reason,
 				NewInput:     se.NewInput,
 				Deferrals:    session.deferrals,
-			}, session.deferrals, nil
+			}, session.deferrals, session.queryState, nil
 		}
-		return "", session.history, nil, nil, err
+		return "", session.history, nil, nil, nil, err
 	}
 
-	return result, session.history, nil, session.deferrals, nil
+	return result, session.history, nil, session.deferrals, session.queryState, nil
 }
 
 // RunDefer invokes a defer cleanup function in the WASM module.

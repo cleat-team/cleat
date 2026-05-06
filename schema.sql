@@ -68,12 +68,19 @@ ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS cancellation_reason TEXT
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS result JSONB;
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS error_msg TEXT;
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS parent_workflow_id TEXT;
+ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS query_state JSONB DEFAULT '{}';
 
 -- Migration: add min_version column to workflow_defs
 ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS min_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS namespace TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS namespace TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS max_history_length INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS trace_id TEXT;
 
 -- Index for zombie instance reaper (reclaim instances with stale heartbeats)
 CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running';
+-- Index for namespace-routed workflow claims
+CREATE INDEX IF NOT EXISTS idx_instances_namespace_ready ON workflow_instances(namespace, status, next_wake_at) WHERE status = 'ready';
 
 -- ---------------------------------------------------------------------------
 -- New: workflow_signals table
@@ -84,4 +91,19 @@ CREATE TABLE IF NOT EXISTS workflow_signals (
     payload JSONB NOT NULL DEFAULT '{}',
     delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (workflow_id, signal_name)
+);
+
+-- ---------------------------------------------------------------------------
+-- Schedules: cron-based recurring workflow execution
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS workflow_schedules (
+    name TEXT PRIMARY KEY,
+    def_name TEXT NOT NULL,
+    entry_point TEXT NOT NULL DEFAULT '',
+    cron_expression TEXT NOT NULL,
+    input JSONB NOT NULL DEFAULT '{}',
+    enabled BOOLEAN NOT NULL DEFAULT true,
+    next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_run_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

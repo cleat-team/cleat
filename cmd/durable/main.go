@@ -12,10 +12,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"go/token"
+	"time"
 
 	_ "github.com/lib/pq"
 	"os"
@@ -28,6 +31,7 @@ import (
 	"github.com/rcownie/durable/internal/analyzer"
 	"github.com/rcownie/durable/internal/callgraph"
 	"github.com/rcownie/durable/internal/closure"
+	"github.com/rcownie/durable/internal/host"
 	"github.com/rcownie/durable/internal/transform"
 	"github.com/rcownie/durable/internal/wasm"
 )
@@ -37,13 +41,18 @@ var dbConnStr string
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set DURABLE_DATABASE_URL)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback|dev> [flags] <package>\n")
+		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback|dev|schedule> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  durable build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable vet <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable deploy [--name <name>] [--namespace <ns>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  durable versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  durable rollback <workflow-name> <version>\n")
 		fmt.Fprintf(os.Stderr, "  durable dev [--input <json>] [--entry-point <name>] <package>\n")
+		fmt.Fprintf(os.Stderr, "  durable schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>]\n")
+		fmt.Fprintf(os.Stderr, "  durable schedule list\n")
+		fmt.Fprintf(os.Stderr, "  durable schedule delete <name>\n")
+		fmt.Fprintf(os.Stderr, "  durable schedule enable <name>\n")
+		fmt.Fprintf(os.Stderr, "  durable schedule disable <name>\n")
 		fmt.Fprintf(os.Stderr, "Common flags:\n")
 		fmt.Fprintf(os.Stderr, "  --db <connstr>  PostgreSQL connection string\n")
 		fmt.Fprintf(os.Stderr, "Example: durable build -o ./out ./testdata/basic/\n")
@@ -92,6 +101,8 @@ func main() {
 		runRollback(args[1], version)
 	case "dev":
 		runDev(flag.Args()[1:])
+	case "schedule":
+		runSchedule(flag.Args()[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		flag.Usage()
@@ -297,7 +308,7 @@ func runVet(pattern string) {
 func runDeploy(args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
 	nameFlag := fs.String("name", "", "workflow name (derived from filename if not set)")
-	nsFlag := fs.String("namespace", "", "workflow namespace (reserved for future use)")
+	nsFlag := fs.String("namespace", "", "workflow namespace (default: \"default\")")
 	fs.Parse(args)
 
 	remainder := fs.Args()
@@ -346,9 +357,14 @@ func runDeploy(args []string) {
 		os.Exit(1)
 	}
 
+	namespace := *nsFlag
+	if namespace == "" {
+		namespace = "default"
+	}
+
 	_, err = db.Exec(
-		"INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points) VALUES ($1, $2, $3, $4)",
-		name, version, wasmBytes, []string{},
+		"INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, namespace) VALUES ($1, $2, $3, $4, $5)",
+		name, version, wasmBytes, []string{}, namespace,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error inserting workflow definition: %v\n", err)
@@ -514,6 +530,135 @@ func runRollback(name string, version int) {
 	}
 
 	fmt.Printf("Rolled back %q to version %d. New instances will use version %d.\n", name, version, version)
+}
+
+// runSchedule manages cron schedules for recurring workflow execution.
+func runSchedule(args []string) {
+	if len(args) < 1 {
+		fmt.Fprintf(os.Stderr, "Usage: durable schedule <add|list|delete|enable|disable> [args]\n")
+		os.Exit(1)
+	}
+
+	subCmd := args[0]
+	remainder := args[1:]
+
+	connStr := getDBConnStr()
+	if connStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: --db flag or DURABLE_DATABASE_URL is required\n")
+		os.Exit(1)
+	}
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\n", err)
+		os.Exit(1)
+	}
+
+	store := host.NewPostgresStore(db)
+	ctx := context.Background()
+
+	switch subCmd {
+	case "add":
+		if len(remainder) < 1 {
+			fmt.Fprintf(os.Stderr, "Usage: durable schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>]\n")
+			os.Exit(1)
+		}
+		fs := flag.NewFlagSet("schedule add", flag.ExitOnError)
+		cronExpr := fs.String("cron", "", "cron expression (5-field: minute hour dom month dow)")
+		defName := fs.String("def", "", "workflow definition name")
+		entryPoint := fs.String("entry-point", "", "entry point function name")
+		inputJSON := fs.String("input", "{}", "workflow input JSON")
+		fs.Parse(remainder)
+
+		fsArgs := fs.Args()
+		if len(fsArgs) < 1 || *cronExpr == "" || *defName == "" {
+			fmt.Fprintf(os.Stderr, "Usage: durable schedule add <name> --cron <expr> --def <wf-name> [--entry-point <name>] [--input <json>]\n")
+			os.Exit(1)
+		}
+		name := fsArgs[0]
+
+		nextRun := host.NextCronTime(*cronExpr, time.Now())
+		sch := host.Schedule{
+			Name:           name,
+			DefName:        *defName,
+			EntryPoint:     *entryPoint,
+			CronExpression: *cronExpr,
+			Input:          json.RawMessage(*inputJSON),
+			Enabled:        true,
+			NextRunAt:      nextRun,
+		}
+
+		if err := store.CreateSchedule(ctx, sch); err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating schedule: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Created schedule %q: %s every %s (next at %s)\n",
+			name, *defName, *cronExpr, nextRun.Format(time.RFC3339))
+
+	case "list":
+		schedules, err := store.ListSchedules(ctx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error listing schedules: %v\n", err)
+			os.Exit(1)
+		}
+		if len(schedules) == 0 {
+			fmt.Println("No schedules found.")
+			return
+		}
+		fmt.Printf("%-20s %-20s %-20s %-7s %s\n", "NAME", "DEFINITION", "CRON", "ENABLED", "NEXT RUN")
+		for _, sch := range schedules {
+			enabled := "no"
+			if sch.Enabled {
+				enabled = "yes"
+			}
+			fmt.Printf("%-20s %-20s %-20s %-7s %s\n",
+				sch.Name, sch.DefName, sch.CronExpression, enabled,
+				sch.NextRunAt.Format(time.RFC3339))
+		}
+
+	case "delete":
+		if len(remainder) < 1 {
+			fmt.Fprintf(os.Stderr, "Usage: durable schedule delete <name>\n")
+			os.Exit(1)
+		}
+		if err := store.DeleteSchedule(ctx, remainder[0]); err != nil {
+			fmt.Fprintf(os.Stderr, "Error deleting schedule: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Deleted schedule %q\n", remainder[0])
+
+	case "enable":
+		if len(remainder) < 1 {
+			fmt.Fprintf(os.Stderr, "Usage: durable schedule enable <name>\n")
+			os.Exit(1)
+		}
+		if err := store.SetScheduleEnabled(ctx, remainder[0], true); err != nil {
+			fmt.Fprintf(os.Stderr, "Error enabling schedule: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Enabled schedule %q\n", remainder[0])
+
+	case "disable":
+		if len(remainder) < 1 {
+			fmt.Fprintf(os.Stderr, "Usage: durable schedule disable <name>\n")
+			os.Exit(1)
+		}
+		if err := store.SetScheduleEnabled(ctx, remainder[0], false); err != nil {
+			fmt.Fprintf(os.Stderr, "Error disabling schedule: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Disabled schedule %q\n", remainder[0])
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown schedule subcommand: %s\n", subCmd)
+		os.Exit(1)
+	}
 }
 
 func formatSize(n int64) string {

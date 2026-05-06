@@ -70,7 +70,7 @@ func TestRustWorkflowExecute(t *testing.T) {
 
 	// Rust workflow expects snake_case JSON fields matching Rust structs.
 	input := []byte(`{"user_id":"test-user","cart":[{"sku":"SKU-001","quantity":2}]}`)
-	result, history, suspended, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+	result, history, suspended, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute Rust workflow: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestRustWorkflowReplay(t *testing.T) {
 	caller1 := &mockCaller{}
 	engine1 := NewEngine(rt, caller1)
 	input := []byte(`{"user_id":"test-user","cart":[{"sku":"SKU-001","quantity":2}]}`)
-	result1, history, _, _, err := engine1.Execute(ctx, wasmBytes, "place_order", input)
+	result1, history, _, _, _, err := engine1.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute (first): %v", err)
 	}
@@ -132,7 +132,7 @@ func TestRustWorkflowReplay(t *testing.T) {
 	// Replay with recorded history
 	caller2 := &mockCaller{}
 	engine2 := NewEngine(rt, caller2)
-	result2, _, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, history)
+	result2, _, _, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, history)
 	if err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
@@ -167,7 +167,7 @@ func TestRustWorkflowCancelOrder(t *testing.T) {
 	caller := &mockCaller{}
 	engine := NewEngine(rt, caller)
 	input := []byte(`{"user_id":"test-user","cart":[{"sku":"SKU-001","quantity":1}]}`)
-	result, history, _, _, err := engine.Execute(ctx, wasmBytes, "cancel_order", input)
+	result, history, _, _, _, err := engine.Execute(ctx, wasmBytes, "cancel_order", input)
 	if err != nil {
 		t.Fatalf("Execute cancel_order: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestRustWorkflowCompensation(t *testing.T) {
 	caller := &failingCaller{failService: "shipping", failOperation: "CreateShipment"}
 	engine := NewEngine(rt, caller)
 	input := []byte(`{"user_id":"test-user","cart":[{"sku":"SKU-001","quantity":2}]}`)
-	_, history, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+	_, history, _, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
 	// Expect error from workflow
 	if err == nil {
 		t.Log("expected error from compensation path, got nil")

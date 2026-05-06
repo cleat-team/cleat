@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -20,11 +21,23 @@ type WorkflowInstance struct {
 	NextWakeAt time.Time
 }
 
+// Schedule is a row from workflow_schedules.
+type Schedule struct {
+	Name          string
+	DefName       string
+	EntryPoint    string
+	CronExpression string
+	Input         json.RawMessage
+	Enabled       bool
+	NextRunAt     time.Time
+	LastRunAt     *time.Time
+}
+
 // WorkflowStore is the database interface for the worker.
 type WorkflowStore interface {
 	// ClaimWorkflow atomically dequeues a runnable workflow instance.
-	// Uses SELECT ... FOR UPDATE SKIP LOCKED.
-	ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error)
+	// Uses SELECT ... FOR UPDATE SKIP LOCKED. Filters by namespace.
+	ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error)
 
 	// LoadEventHistory returns the full event history for a workflow.
 	LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error)
@@ -47,10 +60,10 @@ type WorkflowStore interface {
 	Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error)
 
 	// CompleteWorkflow marks a workflow as completed with a result.
-	CompleteWorkflow(ctx context.Context, workflowID, workerID, result string) error
+	CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
 
 	// FailWorkflow marks a workflow as failed.
-	FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string) error
+	FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error
 
 	// ReleaseWorkflow returns a workflow to the ready queue.
 	// Used when a workflow suspends (sleep/await signals).
@@ -81,6 +94,39 @@ type WorkflowStore interface {
 	// but whose heartbeat has not been updated within the given timeout.
 	// Returns the number of instances reclaimed.
 	ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error)
+
+	// GetQueryState returns the query state for a workflow instance key.
+	GetQueryState(ctx context.Context, workflowID, key string) (string, error)
+
+	// ListWorkflows returns workflow instances filtered by status.
+	ListWorkflows(ctx context.Context, status string, limit int) ([]WorkflowInstance, error)
+
+	// GetWorkflowByID returns a single workflow instance by ID.
+	GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error)
+
+	// CreateSchedule inserts a new cron schedule.
+	CreateSchedule(ctx context.Context, s Schedule) error
+
+	// ListSchedules returns all registered schedules.
+	ListSchedules(ctx context.Context) ([]Schedule, error)
+
+	// DeleteSchedule removes a schedule by name.
+	DeleteSchedule(ctx context.Context, name string) error
+
+	// SetScheduleEnabled enables or disables a schedule.
+	SetScheduleEnabled(ctx context.Context, name string, enabled bool) error
+
+	// GetDueSchedules returns enabled schedules whose next_run_at <= now().
+	GetDueSchedules(ctx context.Context) ([]Schedule, error)
+
+	// UpdateScheduleNextRun updates a schedule's next_run_at after firing.
+	UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error
+
+	// LoadWorkflowConfig returns the max_history_length for a workflow definition.
+	LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error)
+
+	// TraceWorkflow sets the W3C trace_id on a workflow instance.
+	TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error)
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
@@ -94,39 +140,11 @@ func NewPostgresStore(db *sql.DB) *PostgresStore {
 }
 
 // ClaimWorkflow atomically claims a runnable workflow using SKIP LOCKED.
-func (s *PostgresStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("claim: begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	row := tx.QueryRowContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'running',
-		    assigned_to = $2,
-		    heartbeat_at = now()
-		WHERE id = (
-			SELECT id FROM workflow_instances
-			WHERE status = 'ready'
-			  AND next_wake_at <= now()
-			ORDER BY created_at
-			LIMIT 1
-			FOR UPDATE SKIP LOCKED
-		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at
-	`, workerID, workerID) // first $1 is not used in subquery
-
-	// The above won't work directly because the subquery can't reference $1.
-	// Let me use a cleaner approach.
-	_ = row
-	tx.Rollback()
-
-	// Correct approach: use a CTE or direct UPDATE.
-	return s.claimWorkflowImpl(ctx, workerID)
+func (s *PostgresStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
+	return s.claimWorkflowImpl(ctx, workerID, namespace)
 }
 
-func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID string) (*WorkflowInstance, error) {
+func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
 	var wf WorkflowInstance
 	var nextWakeAt sql.NullTime
 
@@ -139,12 +157,13 @@ func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID string) 
 			SELECT id FROM workflow_instances
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
+			  AND namespace = $2
 			ORDER BY created_at
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at
-	`, workerID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+	`, workerID, namespace).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 		&wf.AssignedTo, &nextWakeAt)
 
 	if err == sql.ErrNoRows {
@@ -267,6 +286,28 @@ func (s *PostgresStore) LoadWASM(ctx context.Context, defName string, defVersion
 	return wasmBytes, nil
 }
 
+// TraceWorkflow sets the W3C trace_id on a workflow instance.
+func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
+	return s.db.ExecContext(ctx, `
+		UPDATE workflow_instances SET trace_id = $2 WHERE id = $1
+	`, workflowID, traceID)
+}
+
+// LoadWorkflowConfig returns configuration for a workflow definition.
+func (s *PostgresStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
+	var maxHistoryLength int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT max_history_length FROM workflow_defs WHERE name = $1 AND version = $2
+	`, defName, defVersion).Scan(&maxHistoryLength)
+	if err == sql.ErrNoRows {
+		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("load workflow config: %w", err)
+	}
+	return maxHistoryLength, nil
+}
+
 // ListVersions returns all deployed versions of a workflow.
 func (s *PostgresStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	rows, err := s.db.QueryContext(ctx, `
@@ -303,22 +344,30 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 }
 
 // CompleteWorkflow marks a workflow as done.
-func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string) error {
+func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
+	qsJSON, _ := json.Marshal(queryState)
+	if qsJSON == nil {
+		qsJSON = []byte("{}")
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL
+		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2
-	`, workflowID, workerID, result)
+	`, workflowID, workerID, result, qsJSON)
 	return err
 }
 
 // FailWorkflow marks a workflow as failed.
-func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string) error {
+func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+	qsJSON, _ := json.Marshal(queryState)
+	if qsJSON == nil {
+		qsJSON = []byte("{}")
+	}
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'failed', error_msg = $3, completed_at = now(), assigned_to = NULL
+		SET status = 'failed', error_msg = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2
-	`, workflowID, workerID, errMsg)
+	`, workflowID, workerID, errMsg, qsJSON)
 	return err
 }
 
@@ -382,8 +431,9 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage) (string, error) {
 	var runID string
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input)
-		VALUES (gen_random_uuid(), $1, $2, 'ready', $3)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace)
+		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
+		        COALESCE((SELECT namespace FROM workflow_defs WHERE name = $1 AND version = $2), 'default'))
 		RETURNING id
 	`, defName, defVersion, input).Scan(&runID)
 	if err != nil {
@@ -393,11 +443,13 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 }
 
 // StartChildWorkflow creates a child workflow instance linked to a parent.
+// The child inherits the namespace from the parent.
 func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (string, error) {
 	var runID string
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id)
-		VALUES (gen_random_uuid(), $1, (SELECT MAX(version) FROM workflow_defs WHERE name = $1), 'ready', $2, $3)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, namespace)
+		VALUES (gen_random_uuid(), $1, (SELECT MAX(version) FROM workflow_defs WHERE name = $1), 'ready', $2, $3,
+		        COALESCE((SELECT namespace FROM workflow_instances WHERE id = $3), 'default'))
 		RETURNING id
 	`, defName, inputJSON, parentID).Scan(&runID)
 	if err != nil {
@@ -460,6 +512,244 @@ func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName s
 // PollCancellation satisfies the SignalStore interface.
 func (s *PostgresStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	return s.CheckCancellation(ctx, workflowID)
+}
+
+// GetQueryState returns the value for a key in the workflow's query_state JSONB.
+func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
+	var value sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT query_state ->> $2 FROM workflow_instances WHERE id = $1
+	`, workflowID, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get query state: %w", err)
+	}
+	return value.String, nil
+}
+
+// ListWorkflows returns workflow instances filtered by status, ordered by creation time.
+func (s *PostgresStore) ListWorkflows(ctx context.Context, status string, limit int) ([]WorkflowInstance, error) {
+	query := `
+		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at
+		FROM workflow_instances
+		WHERE 1=1
+	`
+	var args []interface{}
+	argN := 0
+
+	if status != "" {
+		argN++
+		query += fmt.Sprintf(" AND status = $%d", argN)
+		args = append(args, status)
+	}
+
+	query += " ORDER BY created_at DESC"
+
+	if limit > 0 {
+		argN++
+		query += fmt.Sprintf(" LIMIT $%d", argN)
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list workflows: %w", err)
+	}
+	defer rows.Close()
+
+	var workflows []WorkflowInstance
+	for rows.Next() {
+		var wf WorkflowInstance
+		var nextWakeAt sql.NullTime
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+			&wf.AssignedTo, &nextWakeAt); err != nil {
+			return nil, fmt.Errorf("scan workflow: %w", err)
+		}
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		workflows = append(workflows, wf)
+	}
+	return workflows, rows.Err()
+}
+
+// GetWorkflowByID returns a single workflow instance by ID.
+func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
+	var wf WorkflowInstance
+	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
+	var assignedTo, errorMsg sql.NullString
+	var result json.RawMessage
+
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, def_name, def_version, status, input,
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, result, error_msg
+		FROM workflow_instances WHERE id = $1
+	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get workflow: %w", err)
+	}
+	wf.AssignedTo = assignedTo.String
+	if nextWakeAt.Valid {
+		wf.NextWakeAt = nextWakeAt.Time
+	}
+	return &wf, nil
+}
+
+// ---- Schedule methods ----
+
+func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt)
+	return err
+}
+
+func (s *PostgresStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at
+		FROM workflow_schedules ORDER BY name
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var schedules []Schedule
+	for rows.Next() {
+		var sch Schedule
+		var lastRunAt sql.NullTime
+		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
+			return nil, err
+		}
+		if lastRunAt.Valid {
+			sch.LastRunAt = &lastRunAt.Time
+		}
+		schedules = append(schedules, sch)
+	}
+	return schedules, rows.Err()
+}
+
+func (s *PostgresStore) DeleteSchedule(ctx context.Context, name string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM workflow_schedules WHERE name = $1`, name)
+	return err
+}
+
+func (s *PostgresStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_schedules SET enabled = $2 WHERE name = $1
+	`, name, enabled)
+	return err
+}
+
+func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at
+		FROM workflow_schedules
+		WHERE enabled = true AND next_run_at <= now()
+		FOR UPDATE SKIP LOCKED
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var schedules []Schedule
+	for rows.Next() {
+		var sch Schedule
+		var lastRunAt sql.NullTime
+		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
+			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
+			return nil, err
+		}
+		if lastRunAt.Valid {
+			sch.LastRunAt = &lastRunAt.Time
+		}
+		schedules = append(schedules, sch)
+	}
+	return schedules, rows.Err()
+}
+
+func (s *PostgresStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_schedules SET next_run_at = $2, last_run_at = now() WHERE name = $1
+	`, name, nextRun)
+	return err
+}
+
+// NextCronTime computes the next firing time for a 5-field cron expression
+// (minute hour day-of-month month day-of-week) from the given time.
+func NextCronTime(cronExpr string, from time.Time) time.Time {
+	fields := strings.Fields(cronExpr)
+	if len(fields) != 5 {
+		return from.Add(24 * time.Hour) // fallback: daily
+	}
+
+	// Start at the next minute.
+	t := from.Truncate(time.Minute).Add(time.Minute)
+
+	// Search up to 4 years ahead.
+	end := from.AddDate(4, 0, 0)
+	for t.Before(end) {
+		if matchField(fields[0], t.Minute(), 0, 59) &&
+			matchField(fields[1], t.Hour(), 0, 23) &&
+			matchField(fields[2], t.Day(), 1, 31) &&
+			matchField(fields[3], int(t.Month()), 1, 12) &&
+			matchField(fields[4], int(t.Weekday()), 0, 6) {
+			// Also verify day-of-month is valid for this month.
+			if t.Day() <= daysInMonth(t.Year(), t.Month()) {
+				return t
+			}
+		}
+		t = t.Add(time.Minute)
+	}
+	return from.Add(24 * time.Hour)
+}
+
+func matchField(pattern string, value int, min, max int) bool {
+	if pattern == "*" {
+		return true
+	}
+	// Handle step values: */N
+	if strings.HasPrefix(pattern, "*/") {
+		step := atoi(strings.TrimPrefix(pattern, "*/"))
+		if step > 0 {
+			return (value-min)%step == 0
+		}
+		return false
+	}
+	// Handle comma-separated lists.
+	for _, part := range strings.Split(pattern, ",") {
+		part = strings.TrimSpace(part)
+		// Handle ranges: N-M
+		if strings.Contains(part, "-") {
+			rangeParts := strings.Split(part, "-")
+			lo, hi := atoi(rangeParts[0]), atoi(rangeParts[1])
+			if value >= lo && value <= hi {
+				return true
+			}
+		} else if atoi(part) == value {
+			return true
+		}
+	}
+	return false
+}
+
+func daysInMonth(year int, month time.Month) int {
+	return time.Date(year, month+1, 0, 0, 0, 0, 0, time.UTC).Day()
+}
+
+func atoi(s string) int {
+	var n int
+	fmt.Sscanf(strings.TrimSpace(s), "%d", &n)
+	return n
 }
 
 // nullStr returns a sql.NullString that is valid if s is non-empty.

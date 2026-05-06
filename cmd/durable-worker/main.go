@@ -23,10 +23,12 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,11 +37,26 @@ import (
 	"github.com/rcownie/durable/internal/host"
 )
 
+// -- Prometheus metrics --
+var (
+	metricsWorkflowsActive   int64
+	metricsWorkflowsCompleted int64
+	metricsWorkflowsFailed   int64
+	metricsWorkflowsClaimed  int64
+	metricsDurableCallsTotal int64
+	metricsReplayDurationUs int64
+	metricsReplayCount      int64
+	metricsPollWaitCount    int64
+	metricsPollWaitTotalUs  int64
+)
+
 func main() {
 	dbURL := flag.String("db", "", "PostgreSQL connection URL (required)")
 	concurrency := flag.Int("concurrency", 10, "Max concurrent workflow executions")
 	heartbeatInterval := flag.Duration("heartbeat", 5*time.Second, "Heartbeat interval")
 	pollInterval := flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
+	apiAddr := flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
+	namespace := flag.String("namespace", "default", "Workflow namespace to claim from")
 	flag.Parse()
 
 	if *dbURL == "" {
@@ -76,7 +93,30 @@ func main() {
 		pollInterval:      *pollInterval,
 		ctx:               ctx,
 		cancel:            cancel,
+		namespace:         *namespace,
 		wasmCache:         make(map[string][]byte),
+		scheduleInterval:  15 * time.Second,
+	}
+
+	// Start HTTP API server if configured.
+	if *apiAddr != "" {
+		api := &apiServer{store: store, worker: w}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/healthz", api.handleHealthz)
+		mux.HandleFunc("/metrics", handleMetrics)
+		mux.HandleFunc("/api/workflows/", api.handleWorkflows)
+		mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
+		srv := &http.Server{Addr: *apiAddr, Handler: mux}
+		go func() {
+			log.Printf("[worker %s] HTTP API listening on %s", workerID, *apiAddr)
+			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+				log.Printf("[worker %s] HTTP server error: %v", workerID, err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			srv.Shutdown(context.Background())
+		}()
 	}
 
 	// Handle shutdown signals.
@@ -98,6 +138,7 @@ type Worker struct {
 	concurrency       int
 	heartbeatInterval time.Duration
 	pollInterval      time.Duration
+	namespace         string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -106,6 +147,14 @@ type Worker struct {
 	inflight  sync.Map // map[workflowID]*host.WorkflowInstance
 	wasmCache map[string][]byte
 	wasmMu    sync.RWMutex
+
+	scheduleMu       sync.Mutex
+	scheduleInterval time.Duration
+
+	// Backpressure / circuit breaker state.
+	consecutiveDBErrors int
+	backoffUntil        time.Time
+	circuitOpen         atomic.Bool
 }
 
 func (w *Worker) Run() {
@@ -120,6 +169,10 @@ func (w *Worker) Run() {
 	// Dispatch loop.
 	w.wg.Add(1)
 	go w.dispatchLoop()
+
+	// Cron schedule loop.
+	w.wg.Add(1)
+	go w.scheduleLoop()
 
 	log.Printf("[worker %s] Running", w.id)
 
@@ -151,11 +204,20 @@ func (w *Worker) dispatchLoop() {
 			continue
 		}
 
-		wf, err := w.store.ClaimWorkflow(w.ctx, w.id)
+		wf, err := w.store.ClaimWorkflow(w.ctx, w.id, w.namespace)
 		if err != nil {
 			if isConnectionError(err) {
-				log.Printf("[worker %s] DB unreachable during claim, waiting...", w.id)
-				w.waitForDB()
+				w.consecutiveDBErrors++
+				backoff := time.Duration(w.consecutiveDBErrors) * time.Second
+				if backoff > 30*time.Second {
+					backoff = 30 * time.Second
+				}
+				log.Printf("[worker %s] DB unreachable during claim, backing off %v", w.id, backoff)
+				select {
+				case <-w.ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
 				continue
 			}
 			log.Printf("[worker %s] claim error: %v", w.id, err)
@@ -187,11 +249,19 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		}
 	}()
 
+	// ---- Assign trace ID ----
+	traceID := generateTraceID()
+	if true {
+		if _, err := w.store.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
+			log.Printf("[worker %s] %s: failed to set trace_id: %v", w.id, wf.ID, err)
+		}
+	}
+
 	// ---- Load WASM ----
 	wasmBytes, err := w.loadWASM(wf.DefName, wf.DefVersion)
 	if err != nil {
 		log.Printf("[worker %s] %s: failed to load WASM: %v", w.id, wf.ID, err)
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error())
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), nil)
 		return
 	}
 
@@ -203,7 +273,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
 			return
 		}
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("history load: %v", err))
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("history load: %v", err), nil)
 		return
 	}
 
@@ -215,7 +285,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	// ---- Create engine ----
 	rt, err := host.NewRuntime(w.ctx)
 	if err != nil {
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("create runtime: %v", err))
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("create runtime: %v", err), nil)
 		return
 	}
 	defer rt.Close(w.ctx)
@@ -230,10 +300,10 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 
 	// ---- Execute/Resume ----
 	inputJSON := wf.Input
-	result, resultHistory, suspended, deferrals, err := engine.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
+	result, resultHistory, suspended, deferrals, queryState, err := engine.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
 	if err != nil {
 		log.Printf("[worker %s] %s: execution error: %v", w.id, wf.ID, err)
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error())
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), nil)
 		return
 	}
 
@@ -248,7 +318,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				return
 			}
 			log.Printf("[worker %s] %s: save events error: %v", w.id, wf.ID, err)
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error())
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), nil)
 			return
 		}
 	}
@@ -260,12 +330,12 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			newRunID, err := w.store.StartNewRun(w.ctx, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput))
 			if err != nil {
 				log.Printf("[worker %s] %s: continue_as_new start failed: %v", w.id, wf.ID, err)
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("continue_as_new: %v", err))
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("continue_as_new: %v", err), nil)
 				return
 			}
 			log.Printf("[worker %s] %s: continued as new run %s", w.id, wf.ID, newRunID)
 			continueAsNewResult, _ := json.Marshal(map[string]interface{}{"continue_as_new": true, "new_run_id": newRunID})
-			w.store.CompleteWorkflow(context.Background(), wf.ID, w.id, string(continueAsNewResult))
+			w.store.CompleteWorkflow(context.Background(), wf.ID, w.id, string(continueAsNewResult), nil)
 			return
 		}
 
@@ -288,7 +358,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 
 	log.Printf("[worker %s] %s: completed → %s", w.id, wf.ID, result)
-	w.store.CompleteWorkflow(context.Background(), wf.ID, w.id, result)
+	w.store.CompleteWorkflow(context.Background(), wf.ID, w.id, result, queryState)
 }
 
 func (w *Worker) heartbeatLoop() {
@@ -343,6 +413,74 @@ func (w *Worker) reaperLoop() {
 	}
 }
 
+func (w *Worker) scheduleLoop() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(w.scheduleInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			w.scheduleMu.Lock()
+			schedules, err := w.store.GetDueSchedules(w.ctx)
+			if err != nil {
+				w.scheduleMu.Unlock()
+				if isConnectionError(err) {
+					log.Printf("[worker %s] Scheduler: DB appears down", w.id)
+				} else {
+					log.Printf("[worker %s] Scheduler: %v", w.id, err)
+				}
+				continue
+			}
+
+			for _, sch := range schedules {
+				// Build input with entry point if specified.
+				input := sch.Input
+				if len(input) == 0 {
+					input = json.RawMessage("{}")
+				}
+				if sch.EntryPoint != "" {
+					var m map[string]interface{}
+					json.Unmarshal(input, &m)
+					if m == nil {
+						m = make(map[string]interface{})
+					}
+					m["__entry_point"] = sch.EntryPoint
+					input, _ = json.Marshal(m)
+				}
+
+				// Find latest version.
+				versions, verr := w.store.ListVersions(w.ctx, sch.DefName)
+				if verr != nil || len(versions) == 0 {
+					log.Printf("[worker %s] Scheduler: definition %s not found for schedule %s",
+						w.id, sch.DefName, sch.Name)
+					continue
+				}
+
+				runID, serr := w.store.StartNewRun(w.ctx, sch.DefName, versions[0], input)
+				if serr != nil {
+					log.Printf("[worker %s] Scheduler: failed to start %s for schedule %s: %v",
+						w.id, sch.DefName, sch.Name, serr)
+					continue
+				}
+
+				// Compute next run time and update.
+				nextRun := host.NextCronTime(sch.CronExpression, time.Now())
+				if uerr := w.store.UpdateScheduleNextRun(w.ctx, sch.Name, nextRun); uerr != nil {
+					log.Printf("[worker %s] Scheduler: failed to update next run for %s: %v",
+						w.id, sch.Name, uerr)
+				}
+
+				log.Printf("[worker %s] Scheduler: fired %s → %s (next at %s)",
+					w.id, sch.Name, runID, nextRun.Format(time.RFC3339))
+			}
+			w.scheduleMu.Unlock()
+		}
+	}
+}
+
 func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 	key := fmt.Sprintf("%s:%d", defName, defVersion)
 
@@ -374,7 +512,7 @@ func (w *Worker) waitForDB() {
 		default:
 		}
 
-		if _, err := w.store.ClaimWorkflow(w.ctx, ""); err == nil || !isConnectionError(err) {
+		if _, err := w.store.ClaimWorkflow(w.ctx, "", w.namespace); err == nil || !isConnectionError(err) {
 			// DB is back (or claim returned no work, which means DB is reachable).
 			log.Printf("[worker %s] DB connection re-established", w.id)
 			return
@@ -389,7 +527,7 @@ func (w *Worker) waitForDB() {
 
 func (w *Worker) releaseOrFail(wf *host.WorkflowInstance, errMsg string) {
 	if errMsg != "" {
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, nil)
 	} else {
 		w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
 	}
@@ -476,6 +614,12 @@ func generateWorkerID() string {
 	return hex.EncodeToString(b)
 }
 
+func generateTraceID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func isConnectionError(err error) bool {
 	if err == nil {
 		return false
@@ -498,4 +642,270 @@ func isConnectionError(err error) bool {
 		}
 	}
 	return false
+}
+
+// ---- HTTP API server ----
+
+type apiServer struct {
+	store  *host.PostgresStore
+	worker *Worker
+}
+
+func (s *apiServer) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(v)
+}
+
+func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
+	s.writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	s.writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+// handleWorkflowsList handles GET /api/workflows (without trailing path).
+func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, 405, "method not allowed")
+		return
+	}
+	status := r.URL.Query().Get("status")
+	limit := 100
+	workflows, err := s.store.ListWorkflows(r.Context(), status, limit)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if workflows == nil {
+		workflows = []host.WorkflowInstance{}
+	}
+	s.writeJSON(w, 200, workflows)
+}
+
+// handleWorkflows routes /api/workflows/* requests.
+func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
+	// Strip /api/workflows/ prefix.
+	path := strings.TrimPrefix(r.URL.Path, "/api/workflows/")
+	if path == "" || path == "/" {
+		s.handleWorkflowsList(w, r)
+		return
+	}
+
+	// Split remaining path.
+	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
+	if len(parts) == 0 {
+		s.writeError(w, 400, "bad request")
+		return
+	}
+
+	id := parts[0]
+
+	switch {
+	case len(parts) == 1 && r.Method == http.MethodGet:
+		// GET /api/workflows/:id or GET /api/workflows/:id?key=X
+		s.handleGetWorkflow(w, r, id)
+	case len(parts) == 2 && parts[1] == "start" && r.Method == http.MethodPost:
+		// POST /api/workflows/:name/start
+		s.handleStartWorkflow(w, r, id)
+	case len(parts) == 2 && parts[1] == "signal" && r.Method == http.MethodPost:
+		// POST /api/workflows/:id/signal
+		s.handleSignal(w, r, id)
+	case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
+		// POST /api/workflows/:id/cancel
+		s.handleCancel(w, r, id)
+	case len(parts) == 2 && parts[1] == "history" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/history
+		s.handleGetHistory(w, r, id)
+	case len(parts) == 2 && parts[1] == "query" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/query?key=X
+		s.handleGetQueryState(w, r, id)
+	default:
+		s.writeError(w, 404, "not found")
+	}
+}
+
+func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id string) {
+	// Check if this is a query state request.
+	if key := r.URL.Query().Get("key"); key != "" {
+		value, err := s.store.GetQueryState(r.Context(), id, key)
+		if err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		s.writeJSON(w, 200, map[string]string{"key": key, "value": value})
+		return
+	}
+
+	// Return full workflow info.
+	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if wf == nil {
+		s.writeError(w, 404, "workflow not found")
+		return
+	}
+	s.writeJSON(w, 200, wf)
+}
+
+func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, name string) {
+	var input struct {
+		Input      json.RawMessage `json:"input"`
+		EntryPoint string          `json:"entry_point"`
+	}
+	if r.Body != nil {
+		json.NewDecoder(r.Body).Decode(&input)
+	}
+	if input.Input == nil {
+		input.Input = json.RawMessage("{}")
+	}
+
+	// Find the latest version of this workflow.
+	versions, err := s.store.ListVersions(r.Context(), name)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if len(versions) == 0 {
+		s.writeError(w, 404, "workflow definition not found")
+		return
+	}
+
+	// Inject entry point into input if provided.
+	in := input.Input
+	if input.EntryPoint != "" {
+		in, _ = json.Marshal(map[string]interface{}{
+			"__entry_point": input.EntryPoint,
+		})
+		// Merge with provided input.
+		var merged map[string]interface{}
+		json.Unmarshal(input.Input, &merged)
+		merged["__entry_point"] = input.EntryPoint
+		in, _ = json.Marshal(merged)
+	}
+
+	runID, err := s.store.StartNewRun(r.Context(), name, versions[0], in)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 201, map[string]string{"id": runID})
+}
+
+func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		SignalName string `json:"signal_name"`
+		Payload    string `json:"payload"`
+	}
+	if r.Body != nil {
+		json.NewDecoder(r.Body).Decode(&req)
+	}
+	if req.SignalName == "" {
+		s.writeError(w, 400, "signal_name is required")
+		return
+	}
+	if err := s.store.DeliverSignal(r.Context(), id, req.SignalName, req.Payload); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "delivered"})
+}
+
+func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		json.NewDecoder(r.Body).Decode(&req)
+	}
+	if err := s.store.RequestCancellation(r.Context(), id, req.Reason); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "cancellation_requested"})
+}
+
+func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id string) {
+	history, err := s.store.LoadEventHistory(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if history == nil {
+		history = []host.EventRecord{}
+	}
+	s.writeJSON(w, 200, history)
+}
+
+func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, id string) {
+	key := r.URL.Query().Get("key")
+	value, err := s.store.GetQueryState(r.Context(), id, key)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"key": key, "value": value})
+}
+
+// handleMetrics serves Prometheus-format metrics.
+func handleMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+
+	active := atomic.LoadInt64(&metricsWorkflowsActive)
+	completed := atomic.LoadInt64(&metricsWorkflowsCompleted)
+	failed := atomic.LoadInt64(&metricsWorkflowsFailed)
+	claimed := atomic.LoadInt64(&metricsWorkflowsClaimed)
+	durableCalls := atomic.LoadInt64(&metricsDurableCallsTotal)
+	replayTotalUs := atomic.LoadInt64(&metricsReplayDurationUs)
+	replayCount := atomic.LoadInt64(&metricsReplayCount)
+	pollWaitCount := atomic.LoadInt64(&metricsPollWaitCount)
+	pollWaitTotalUs := atomic.LoadInt64(&metricsPollWaitTotalUs)
+
+	fmt.Fprintf(w, "# HELP durable_workflows_active Currently claimed workflow instances\n")
+	fmt.Fprintf(w, "# TYPE durable_workflows_active gauge\n")
+	fmt.Fprintf(w, "durable_workflows_active %d\n\n", active)
+
+	fmt.Fprintf(w, "# HELP durable_workflows_completed_total Workflows completed successfully\n")
+	fmt.Fprintf(w, "# TYPE durable_workflows_completed_total counter\n")
+	fmt.Fprintf(w, "durable_workflows_completed_total %d\n\n", completed)
+
+	fmt.Fprintf(w, "# HELP durable_workflows_failed_total Workflows that failed\n")
+	fmt.Fprintf(w, "# TYPE durable_workflows_failed_total counter\n")
+	fmt.Fprintf(w, "durable_workflows_failed_total %d\n\n", failed)
+
+	fmt.Fprintf(w, "# HELP durable_workflows_claimed_total Workflows claimed from the queue\n")
+	fmt.Fprintf(w, "# TYPE durable_workflows_claimed_total counter\n")
+	fmt.Fprintf(w, "durable_workflows_claimed_total %d\n\n", claimed)
+
+	fmt.Fprintf(w, "# HELP durable_durable_calls_total DurableCall invocations\n")
+	fmt.Fprintf(w, "# TYPE durable_durable_calls_total counter\n")
+	fmt.Fprintf(w, "durable_durable_calls_total %d\n\n", durableCalls)
+
+	fmt.Fprintf(w, "# HELP durable_replay_duration_seconds Replay duration histogram\n")
+	fmt.Fprintf(w, "# TYPE durable_replay_duration_seconds summary\n")
+	if replayCount > 0 {
+		avgUs := replayTotalUs / replayCount
+		fmt.Fprintf(w, "durable_replay_duration_seconds_count %d\n", replayCount)
+		fmt.Fprintf(w, "durable_replay_duration_seconds_sum %.6f\n", float64(replayTotalUs)/1e6)
+		fmt.Fprintf(w, "durable_replay_duration_seconds{quantile=\"0.5\"} %.6f\n", float64(avgUs)/1e6)
+	} else {
+		fmt.Fprintf(w, "durable_replay_duration_seconds_count 0\n")
+		fmt.Fprintf(w, "durable_replay_duration_seconds_sum 0\n")
+	}
+	fmt.Fprintf(w, "\n")
+
+	fmt.Fprintf(w, "# HELP durable_poll_wait_seconds Time spent waiting for work\n")
+	fmt.Fprintf(w, "# TYPE durable_poll_wait_seconds summary\n")
+	if pollWaitCount > 0 {
+		avgWaitUs := pollWaitTotalUs / pollWaitCount
+		fmt.Fprintf(w, "durable_poll_wait_seconds_count %d\n", pollWaitCount)
+		fmt.Fprintf(w, "durable_poll_wait_seconds_sum %.6f\n", float64(pollWaitTotalUs)/1e6)
+		fmt.Fprintf(w, "durable_poll_wait_seconds{quantile=\"0.5\"} %.6f\n", float64(avgWaitUs)/1e6)
+	} else {
+		fmt.Fprintf(w, "durable_poll_wait_seconds_count 0\n")
+		fmt.Fprintf(w, "durable_poll_wait_seconds_sum 0\n")
+	}
 }

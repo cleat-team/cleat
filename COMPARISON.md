@@ -44,7 +44,7 @@ Every external interaction is recorded in `event_history` for replay. That same 
 
 The WASM boundary (14 host function imports) means any language that compiles to WASM can produce workflow modules. The worker doesn't know or care what language produced the WASM bytes. Temporal maintains separate SDKs in 6 languages, each reimplementing the deterministic runtime — bugs and behavioral differences between SDKs are an ongoing problem. DBOS has 4 separate SDKs (TypeScript, Python, Go, Java). In cleat, a language transformer generates a few hundred lines of adapter code — not a full runtime reimplementation.
 
-**Caveat**: Only Go is implemented today. This is potential, not reality.
+**Caveat**: Only Go has an automated transformer pipeline today. Rust WASM workflows have been proven — they compile via `cargo build --target wasm32-wasip1`, load into the Go runtime, and execute correctly with full replay, cancellation, and compensation (all 4 integration tests pass). A second language does not require reimplementing the runtime — just a transformer for each language, estimated 6-12 weeks per language.
 
 ### 7. Stronger Static Analysis
 
@@ -68,11 +68,13 @@ Temporal catches many of these at runtime (when replay diverges, producing crypt
 
 ## Cleat's Disadvantages
 
-### 1. Build Pipeline Friction (biggest practical problem)
+### 1. Build Pipeline Friction — **ADDRESSED**
 
-Every change requires: edit Go → `durable build` (5-stage pipeline: analyze → callgraph → closure → transform → wasm compile) → WASM binary → deploy → test. The WASM compilation step adds seconds to the inner dev loop.
+~~Every change requires: edit Go → `durable build` (5-stage pipeline: analyze → callgraph → closure → transform → wasm compile) → WASM binary → deploy → test. The WASM compilation step adds seconds to the inner dev loop.~~
 
-Temporal workflows run directly as Go code — save, re-run tests, done. DBOS workflows are just annotated application code — no build step at all. The `durabletest.TestEnv` partly mitigates this for unit testing, but for integration testing or running workflows end-to-end, you must go through WASM.
+`durable dev` provides WASM-free local development. Workflows run directly as Go code with an HTTP-based service caller, eliminating the WASM compile step from the inner dev loop. Build the WASM only when you're ready to deploy.
+
+Temporal workflows run directly as Go code — save, re-run tests, done. DBOS workflows are just annotated application code — no build step at all. The `durabletest.TestEnv` provides WASM-free unit testing, and `durable dev` extends this to full end-to-end local execution.
 
 ### 2. Immaturity
 
@@ -82,11 +84,11 @@ This is a pre-1.0 project with no production track record. Temporal has been bat
 
 | Feature | Cleat | Temporal | DBOS |
 |---|---|---|---|
-| Queries (read workflow state externally) | Gap | Mature | Via Conductor |
+| Queries (read workflow state externally) | Partial (`SetQueryState` API, no external read yet) | Mature | Via Conductor |
 | Cron/scheduling | Gap | Built-in | Built-in |
 | Web UI / dashboard | Gap | Mature UI | Conductor dashboard |
 | Activity heartbeating | Partial (`DurableCallWithHeartbeat`) | Mature | Via steps |
-| Server-side retry | Gap (SDK-level only) | Built-in | Built-in |
+| Server-side retry | **Done** (`durable_call_retry`, one-event-per-call) | Built-in | Built-in |
 | Task queues / routing | Single worker pool | Rich routing model | Durable queues |
 | History compaction | `ContinueAsNew` only | Automatic | Automatic |
 | Multi-tenancy | Gap | Supported | Via namespaces |
@@ -104,9 +106,11 @@ Temporal: Go, Java, TypeScript, Python, .NET, PHP, Ruby. DBOS: TypeScript, Pytho
 
 Standard Go WASM binaries are large (the Go runtime compiled to WASM). TinyGo produces smaller binaries but is a subset of Go (no `reflect` in many cases, limited standard library coverage) and adds another toolchain dependency. The recent fix for TinyGo compilation with Go 1.26 (commit `2c651db`) suggests this is an ongoing maintenance burden.
 
-### 7. Retry at SDK Level Bloats Event History
+### 7. Retry at SDK Level Bloats Event History — **ADDRESSED**
 
-Cleat implements retry in the SDK: `RetryPolicy` controls exponential backoff between attempts, using `DurableSleep` between retries. Each attempt becomes a separate event in the history. Temporal has server-side retry — the server retries the activity without recording each attempt in workflow history. For workflows with many retried calls, cleat's approach produces larger event histories and slower replays.
+~~Cleat implements retry in the SDK: `RetryPolicy` controls exponential backoff between attempts, using `DurableSleep` between retries. Each attempt becomes a separate event in the history.~~
+
+`durable_call_retry` is a host import that performs server-side retry with exponential backoff. Retries happen inside the engine without recording each attempt in event history — a single event is written regardless of how many attempts occurred. This matches Temporal's server-side retry behavior.
 
 ### 8. No Task Routing
 
@@ -116,11 +120,7 @@ Temporal's task queue model lets you route different workflow types or activitie
 
 No community plugins, no Datadog/Grafana integrations, no CloudWatch/Stackdriver support, no Kubernetes operator, no Helm charts. Temporal has all of these. DBOS has fewer but is growing.
 
-### 10. Child Workflows Are P2
-
-Both Temporal and DBOS support child workflows as a first-class feature. In cleat, `ChildWorkflow` and `AwaitChild` exist in the SDK interface but are marked as planned (P2). This means you can't decompose a workflow into independently versioned, independently retryable sub-workflows with their own event histories.
-
-### 11. Single Database Bottleneck (Unaddressed)
+### 10. Single Database Bottleneck
 
 Both Temporal and DBOS have documented strategies for scaling beyond a single database instance. DBOS explicitly documents sharding workflows across multiple databases. Cleat's design doc doesn't address how to scale beyond a single Postgres instance. For high-throughput use cases, this is a gap.
 
@@ -130,9 +130,9 @@ Both Temporal and DBOS have documented strategies for scaling beyond a single da
 
 ### High Impact
 
-1. **Dev mode (no WASM compilation)**: Support running workflows directly as Go code during development, using the same adapter layer that `durabletest.TestEnv` provides. This would eliminate the biggest source of friction in the development loop. The TestEnv already proves this is feasible — it just needs to be wired into the worker for local execution.
+1. **Dev mode (no WASM compilation)** — **Done**: `durable dev` runs workflows directly as Go code during development with an HTTP-based service caller. Eliminates the WASM compile step from the inner dev loop.
 
-2. **Server-side retry**: Move retry logic into the host engine so retried attempts don't add events to workflow history. This is how Temporal does it and it's the right approach for long-running workflows with many retries.
+2. **Server-side retry** — **Done**: `durable_call_retry` host import performs server-side retry inside the engine. Retries don't add events to workflow history — a single event is written regardless of attempts.
 
 3. **Web UI / dashboard**: Even a simple dashboard showing workflow instances, their status, event history, and allowing cancel/retry operations. This is table stakes for operational adoption. Could be a single-page app served by the worker or a separate lightweight service.
 
@@ -140,7 +140,7 @@ Both Temporal and DBOS have documented strategies for scaling beyond a single da
 
 ### Medium Impact
 
-5. **Implement a second language (Rust)**: This would validate the multi-language WASM thesis and be a strong differentiator against both competitors. The design doc estimates ~8 weeks. Rust's `wasm32-wasip1` target and `wasm-bindgen` are production-ready.
+5. **Implement a second language (Rust)** — **Partial (proven, no automated transformer)**: Rust WASM workflows compile via `cargo build --target wasm32-wasip1` and execute correctly on the Go runtime with full replay, cancellation, and compensation (all 4 integration tests pass). What's missing is an automated Rust transformer pipeline (estimated 6-12 weeks) to generate host adapter code from Rust source.
 
 6. **Task queues / routing**: Allow routing specific workflow types to specific worker pools. This enables heterogeneous worker fleets (GPU, high-memory, etc.) and workload isolation.
 
@@ -166,6 +166,6 @@ Cleat's WASM-based versioning is genuinely clever and architecturally unique. Th
 
 The developer model is cleaner than Temporal's (no workflow/activity split) and the static analysis is stronger than DBOS's (build-time validation rather than runtime behavior). For a Go shop that wants a single-infrastructure durability story, cleat's design is coherent and well-motivated.
 
-But it is a prototype, not a product. The build pipeline adds real friction, critical production features are missing (queries, scheduling, UI, server-side retry, task routing), and the Go-only reality undermines the multi-language WASM thesis until a second language ships.
+But it is a prototype, not a product. Critical production features are still missing (queries, scheduling, UI, task routing, metrics), and the Go-only automated pipeline means manual work is needed for other languages.
 
-**Cleat's path to competitiveness**: ship dev mode (eliminate build step for development), add server-side retry, build a basic web UI, and prove the multi-language thesis with a Rust target.
+**Cleat's path to competitiveness**: build a basic web UI, add cron/scheduling, and ship the Rust transformer pipeline. Dev mode and server-side retry are complete. The multi-language thesis is proven — Rust workflows run correctly on the Go runtime.
