@@ -24,6 +24,7 @@ const (
 	EventTypeChildWorkflow  EventType = "child_workflow"
 	EventTypeAwaitChild     EventType = "await_child"
 	EventTypeContinueAsNew  EventType = "continue_as_new"
+	EventTypeHeartbeat    EventType = "heartbeat"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -365,6 +366,115 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 	// Past recorded history — switch to fresh execution.
 	s.isReplay = false
 	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+}
+
+func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
+	if s.isReplay {
+		return s.replayCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
+	}
+	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
+}
+
+func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	type callResult struct {
+		resp string
+		err  error
+	}
+	resultCh := make(chan callResult, 1)
+
+	go func() {
+		resp, err := s.engine.caller.Call(ctx, service, operation, requestJSON)
+		resultCh <- callResult{resp: resp, err: err}
+	}()
+
+	ticker := time.NewTicker(time.Duration(heartbeatIntervalMs) * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeHeartbeat,
+				Service:   service,
+				Op:        operation,
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+
+		case res := <-resultCh:
+			var callErr string
+			if res.err != nil {
+				callErr = res.err.Error()
+			}
+
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeCall,
+				Service:   service,
+				Op:        operation,
+				Request:   requestJSON,
+				Response:  res.resp,
+				Err:       callErr,
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+
+			if res.err != nil {
+				written := writeWasmString(mem, responsePtr, res.err.Error(), responseMaxLen)
+				return packDurableCallResult(int(written), 1, 1)
+			}
+			written := writeWasmString(mem, responsePtr, res.resp, responseMaxLen)
+			return packDurableCallResult(int(written), 0, 0)
+		}
+	}
+}
+
+func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	// Consume any heartbeat events that occurred during the call.
+	for s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		if rec.EventType == EventTypeHeartbeat {
+			s.stepCount++
+			continue
+		}
+		break
+	}
+
+	// Now find the matching call event.
+	if s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		s.stepCount++
+
+		if rec.EventType != EventTypeCall {
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s", rec.Step, rec.EventType)
+			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		if rec.Service != service || rec.Op != operation {
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s",
+				rec.Step, service, operation, rec.Service, rec.Op)
+			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		if rec.Err != "" {
+			written := writeWasmString(mem, responsePtr, rec.Err, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		written := writeWasmString(mem, responsePtr, rec.Response, responseMaxLen)
+		return packDurableCallResult(int(written), 0, 0)
+	}
+
+	// Past recorded history — switch to fresh execution.
+	s.isReplay = false
+	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
 }
 
 const (

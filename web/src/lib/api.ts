@@ -1,0 +1,77 @@
+import type { WorkflowInstance, EventRecord, Schedule } from './types';
+
+const BASE = '';
+
+async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
+  const res = await fetch(BASE + url, opts);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error || res.statusText);
+  }
+  return res.json();
+}
+
+export async function listWorkflows(status?: string): Promise<WorkflowInstance[]> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+  return fetchJSON<WorkflowInstance[]>(`/api/workflows${qs}`);
+}
+
+export async function getWorkflow(id: string): Promise<WorkflowInstance> {
+  return fetchJSON<WorkflowInstance>(`/api/workflows/${id}`);
+}
+
+export async function startWorkflow(name: string, input?: object, entryPoint?: string): Promise<{ id: string }> {
+  return fetchJSON(`/api/workflows/${name}/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input, entry_point: entryPoint }),
+  });
+}
+
+export async function signalWorkflow(id: string, signalName: string, payload?: string): Promise<void> {
+  await fetchJSON(`/api/workflows/${id}/signal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ signal_name: signalName, payload }),
+  });
+}
+
+export async function cancelWorkflow(id: string, reason?: string): Promise<void> {
+  await fetchJSON(`/api/workflows/${id}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export async function getWorkflowHistory(id: string): Promise<EventRecord[]> {
+  return fetchJSON<EventRecord[]>(`/api/workflows/${id}/history`);
+}
+
+export async function getQueryState(id: string, key: string): Promise<{ key: string; value: string }> {
+  return fetchJSON(`/api/workflows/${id}/query?key=${encodeURIComponent(key)}`);
+}
+
+export async function listSchedules(): Promise<Schedule[]> {
+  return fetchJSON<Schedule[]>('/api/schedules');
+}
+
+export async function createSchedule(schedule: { name: string; cron: string; def_name: string; entry_point?: string; input?: string }): Promise<void> {
+  await fetchJSON('/api/schedules', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(schedule),
+  });
+}
+
+export async function deleteSchedule(name: string): Promise<void> {
+  await fetchJSON(`/api/schedules/${name}`, { method: 'DELETE' });
+}
+
+export async function enableSchedule(name: string): Promise<void> {
+  await fetchJSON(`/api/schedules/${name}/enable`, { method: 'POST' });
+}
+
+export async function disableSchedule(name: string): Promise<void> {
+  await fetchJSON(`/api/schedules/${name}/disable`, { method: 'POST' });
+}

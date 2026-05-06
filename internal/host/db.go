@@ -11,26 +11,28 @@ import (
 
 // WorkflowInstance is a row from workflow_instances.
 type WorkflowInstance struct {
-	ID         string
-	DefName    string
-	DefVersion int
-	MinVersion int
-	Status     string
-	Input      json.RawMessage
-	AssignedTo string
-	NextWakeAt time.Time
+	ID         string          `json:"id"`
+	DefName    string          `json:"def_name"`
+	DefVersion int             `json:"def_version"`
+	MinVersion int             `json:"min_version"`
+	Status     string          `json:"status"`
+	Input      json.RawMessage `json:"input"`
+	Result     string          `json:"result,omitempty"`
+	Error      string          `json:"error,omitempty"`
+	AssignedTo string          `json:"assigned_to"`
+	NextWakeAt time.Time       `json:"next_wake_at"`
 }
 
 // Schedule is a row from workflow_schedules.
 type Schedule struct {
-	Name          string
-	DefName       string
-	EntryPoint    string
-	CronExpression string
-	Input         json.RawMessage
-	Enabled       bool
-	NextRunAt     time.Time
-	LastRunAt     *time.Time
+	Name           string          `json:"name"`
+	DefName        string          `json:"def_name"`
+	EntryPoint     string          `json:"entry_point"`
+	CronExpression string          `json:"cron_expression"`
+	Input          json.RawMessage `json:"input"`
+	Enabled        bool            `json:"enabled"`
+	NextRunAt      time.Time       `json:"next_run_at"`
+	LastRunAt      *time.Time      `json:"last_run_at,omitempty"`
 }
 
 // WorkflowStore is the database interface for the worker.
@@ -580,13 +582,14 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	var wf WorkflowInstance
 	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
-	var result json.RawMessage
+	var result sql.NullString
+	var inputRaw json.RawMessage
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, result, error_msg
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, result::text, error_msg
 		FROM workflow_instances WHERE id = $1
-	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -594,7 +597,10 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	if err != nil {
 		return nil, fmt.Errorf("get workflow: %w", err)
 	}
+	wf.Input = inputRaw
 	wf.AssignedTo = assignedTo.String
+	wf.Result = result.String
+	wf.Error = errorMsg.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}

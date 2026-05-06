@@ -75,7 +75,7 @@ func main() {
 		var target string
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
-		fs.StringVar(&target, "target", "go", "compilation target: go or tinygo")
+		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, or rust")
 		fs.Parse(os.Args[2:])
 		remainder := fs.Args()
 		if len(remainder) > 0 {
@@ -111,6 +111,13 @@ func main() {
 }
 
 func runBuild(pattern, outDir, target string) {
+	if target == "rust" {
+		if outDir == "" {
+			outDir = "."
+		}
+		runBuildRust(pattern, outDir)
+		return
+	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = cg
 

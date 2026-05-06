@@ -17,10 +17,12 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log"
 	"math"
 	"net/http"
@@ -36,6 +38,9 @@ import (
 
 	"github.com/rcownie/durable/internal/host"
 )
+
+//go:embed web/dist
+var webDist embed.FS
 
 // -- Prometheus metrics --
 var (
@@ -104,8 +109,28 @@ func main() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", api.handleHealthz)
 		mux.HandleFunc("/metrics", handleMetrics)
+		// Schedule API routes (registered before workflows so /api/schedules is not caught by /api/workflows/).
+		mux.HandleFunc("/api/schedules/", api.handleSchedules)
+		mux.HandleFunc("/api/schedules", api.handleSchedulesList)
 		mux.HandleFunc("/api/workflows/", api.handleWorkflows)
 		mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
+		// Serve embedded SPA for non-API paths.
+		webFS, fsErr := fs.Sub(webDist, "web/dist")
+		if fsErr != nil {
+			log.Printf("[worker %s] WARNING: web/dist not found in embedded FS (build without SPA?): %v", workerID, fsErr)
+		} else {
+			fileServer := http.FileServer(http.FS(webFS))
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				path := strings.TrimPrefix(r.URL.Path, "/")
+				f, ferr := webFS.Open(path)
+				if ferr != nil {
+					r.URL.Path = "/"
+				} else {
+					f.Close()
+				}
+				fileServer.ServeHTTP(w, r)
+			})
+		}
 		srv := &http.Server{Addr: *apiAddr, Handler: mux}
 		go func() {
 			log.Printf("[worker %s] HTTP API listening on %s", workerID, *apiAddr)
@@ -848,6 +873,103 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"key": key, "value": value})
+}
+
+// ---- Schedule API handlers ----
+
+// handleSchedulesList handles GET /api/schedules and POST /api/schedules
+func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		s.handleCreateSchedule(w, r)
+		return
+	}
+	if r.Method != http.MethodGet {
+		s.writeError(w, 405, "method not allowed")
+		return
+	}
+	schedules, err := s.store.ListSchedules(r.Context())
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if schedules == nil {
+		schedules = []host.Schedule{}
+	}
+	s.writeJSON(w, 200, schedules)
+}
+
+// handleSchedules routes /api/schedules/* requests.
+func (s *apiServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/schedules/")
+	if path == "" || path == "/" {
+		s.handleSchedulesList(w, r)
+		return
+	}
+	parts := strings.Split(strings.TrimSuffix(path, "/"), "/")
+	if len(parts) == 0 {
+		s.writeError(w, 400, "bad request")
+		return
+	}
+	name := parts[0]
+
+	switch {
+	case len(parts) == 2 && parts[1] == "enable" && r.Method == http.MethodPost:
+		if err := s.store.SetScheduleEnabled(r.Context(), name, true); err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		s.writeJSON(w, 200, map[string]string{"status": "enabled"})
+	case len(parts) == 2 && parts[1] == "disable" && r.Method == http.MethodPost:
+		if err := s.store.SetScheduleEnabled(r.Context(), name, false); err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		s.writeJSON(w, 200, map[string]string{"status": "disabled"})
+	case len(parts) == 1 && r.Method == http.MethodDelete:
+		if err := s.store.DeleteSchedule(r.Context(), name); err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		s.writeJSON(w, 200, map[string]string{"status": "deleted"})
+	default:
+		s.writeError(w, 404, "not found")
+	}
+}
+
+// handleCreateSchedule handles POST /api/schedules
+func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, 405, "method not allowed")
+		return
+	}
+	var req struct {
+		Name       string          `json:"name"`
+		Cron       string          `json:"cron"`
+		DefName    string          `json:"def_name"`
+		EntryPoint string          `json:"entry_point"`
+		Input      json.RawMessage `json:"input"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.Name == "" || req.Cron == "" || req.DefName == "" {
+		s.writeError(w, 400, "name, cron, and def_name are required")
+		return
+	}
+	sch := host.Schedule{
+		Name:           req.Name,
+		DefName:        req.DefName,
+		EntryPoint:     req.EntryPoint,
+		CronExpression: req.Cron,
+		Input:          req.Input,
+		Enabled:        true,
+	}
+	if err := s.store.CreateSchedule(r.Context(), sch); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 201, map[string]string{"status": "created"})
 }
 
 // handleMetrics serves Prometheus-format metrics.

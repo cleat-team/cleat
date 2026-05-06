@@ -115,6 +115,16 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
+	"durable_call_heartbeat": {
+		ImportName: "durable_call_heartbeat",
+		Params: []paramSpec{
+			{"service", kindInString},
+			{"operation", kindInString},
+			{"requestJSON", kindInString},
+			{"heartbeatIntervalMs", kindInt64},
+			{"response", kindOutString},
+		},
+	},
 	"durable_version": {
 		ImportName: "durable_version",
 	},

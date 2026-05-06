@@ -201,6 +201,31 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
 		},
 	},
+	"DurableCallWithHeartbeat": {
+		FieldName:  "DurableCallWithHeartbeat",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"service", "string"},
+			{"operation", "string"},
+			{"requestJSON", "string"},
+			{"heartbeatInterval", "time.Duration"},
+			{"onProgress", "func(string)"},
+		},
+		ResultStmts: []string{
+			"responseLen := uint32(uint64(result) >> 40)",
+			"callErrorCode := durable.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
+			"errCode := uint32(result & 0xFF)",
+			"if errCode != 0 {",
+			`	return "", &durable.CallError{`,
+			`		Service:   service,`,
+			`		Operation: operation,`,
+			`		Code:      callErrorCode,`,
+			`		Message:   fmt.Sprintf("durable_call_heartbeat: error code %d", errCode),`,
+			`	}`,
+			"}",
+			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
+		},
+	},
 	"Version": {
 		FieldName:  "Version",
 		ReturnType: "int",
@@ -380,6 +405,10 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 			closureParams = append(closureParams, p.Name+" []string")
 		case "int64":
 			closureParams = append(closureParams, p.Name+" int64")
+		case "time.Duration":
+			closureParams = append(closureParams, p.Name+" time.Duration")
+		case "func(string)":
+			closureParams = append(closureParams, p.Name+" func(string)")
 		}
 	}
 	buf.WriteString(strings.Join(closureParams, ", "))
@@ -407,6 +436,13 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 			fmt.Fprintf(buf, "\t\t\t%sJSON, err := json.Marshal(%s)\n", p.Name, p.Name)
 			fmt.Fprintf(buf, "\t\t\tif err != nil { panic(\"json.Marshal for %s: \" + err.Error()) }\n", p.Name)
 			fmt.Fprintf(buf, "\t\t\t%sPtr, %sLen := stringPtr(string(%sJSON))\n", p.Name, p.Name, p.Name)
+		}
+	}
+
+	// Convert time.Duration params to int64 milliseconds for WASM.
+	for _, p := range adef.Params {
+		if p.Type == "time.Duration" {
+			fmt.Fprintf(buf, "\t\t\t%sMs := %s.Milliseconds()\n", p.Name, p.Name)
 		}
 	}
 

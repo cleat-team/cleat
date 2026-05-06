@@ -26,7 +26,7 @@ var hostFunctions = []HostFunction{
 	{"durable_call", "DurableCallJSON"},
 	{"durable_call", "DurableCallWithOptions"},
 	{"durable_call", "DurableCallJSONWithOptions"},
-	{"durable_call", "DurableCallWithHeartbeat"},
+	{"durable_call_heartbeat", "DurableCallWithHeartbeat"},
 	// Sleep
 	{"durable_sleep", "DurableSleep"},
 	{"durable_sleep", "DurableSleepMs"},

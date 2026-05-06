@@ -33,6 +33,7 @@ type HostHandler interface {
 	ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
 	AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
 	DurableCallWithRetry(ctx context.Context, m api.Module, service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string, responsePtr, responseMaxLen uint32) int64
+	DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64
 	Version(ctx context.Context) int64
 	MinVersion(ctx context.Context) int64
 	SetQueryState(ctx context.Context, m api.Module, key, value string) int64
@@ -167,6 +168,19 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		val := readWasmString(mem, valPtr, valLen)
 		return uint64(handlerFromContext(ctx).SetQueryState(ctx, m, key, val))
 	}).Export("set_query_state")
+
+	// durable_call_heartbeat: (ptr,len x3, i64, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32,
+		heartbeatIntervalMs int64,
+		respPtr, respMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		service := readWasmString(mem, svcPtr, svcLen)
+		op := readWasmString(mem, opPtr, opLen)
+		req := readWasmString(mem, reqPtr, reqLen)
+		return uint64(h.DurableCallWithHeartbeat(ctx, m, service, op, req, heartbeatIntervalMs, respPtr, respMaxLen))
+	}).Export("durable_call_heartbeat")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

@@ -10,6 +10,11 @@
 ast_demo
 ast_demo_v2
 durable-gen
+/durable-worker
+
+# Node/Svelte
+web/node_modules/
+web/dist/
 
 # Rust build artifacts
 **/target/
