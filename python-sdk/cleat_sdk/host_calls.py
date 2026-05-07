@@ -35,6 +35,7 @@ imported and tested without WASM.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, TypeVar
@@ -594,6 +595,7 @@ class HostCalls:
         """Initialize the HostCalls instance."""
         self._update_handlers: dict[str, tuple[Callable[[str], str], Optional[Callable[[str], bool]]]] = {}
         self._query_handlers: dict[str, Callable[[str], str]] = {}
+        self._scope_prefix: str = ""
 
     # --------------------------------------------------------------------
     # Internal helpers
@@ -609,6 +611,111 @@ class HostCalls:
         if isinstance(value, str):
             return value
         return json.dumps(value)
+
+    # --------------------------------------------------------------------
+    # Scope management for virtual object instances
+    # --------------------------------------------------------------------
+
+    def _scoped_key(self, key: str) -> str:
+        """Apply the current scope prefix to *key*, if a scope is active."""
+        if self._scope_prefix:
+            return self._scope_prefix + key
+        return key
+
+    def set_scope(self, object_type: str, instance_key: str) -> str:
+        """Set the state key prefix for virtual object instances.
+
+        All subsequent ``set_state``/``get_state``/etc calls are
+        automatically prefixed with ``"vo:<object_type>:<instance_key>:"``.
+        Returns the previous scope prefix for stack-style save/restore.
+
+        Parameters
+        ----------
+        object_type : str
+            The virtual object type name.
+        instance_key : str
+            The instance key for this specific object.
+
+        Returns
+        -------
+        str
+            The previous scope prefix (empty string if none was set).
+        """
+        prev = self._scope_prefix
+        self._scope_prefix = (
+            f"vo:{object_type}:{instance_key}:"
+            if object_type and instance_key
+            else ""
+        )
+        return prev
+
+    def get_scope(self) -> tuple[str, str]:
+        """Get the current virtual object scope.
+
+        Returns
+        -------
+        tuple[str, str]
+            ``(object_type, instance_key)`` or ``("", "")`` if no scope is
+            active.
+        """
+        if not self._scope_prefix:
+            return "", ""
+        # Parse "vo:<type>:<key>:" format
+        prefix = self._scope_prefix.rstrip(":")
+        parts = prefix.split(":", 2)
+        if len(parts) == 3 and parts[0] == "vo":
+            return parts[1], parts[2]
+        return "", ""
+
+    def clear_scope(self) -> str:
+        """Remove the current scope and return the previous scope prefix.
+
+        Returns
+        -------
+        str
+            The scope prefix that was active before clearing (empty string
+            if none was set).
+        """
+        prev = self._scope_prefix
+        self._scope_prefix = ""
+        return prev
+
+    # --------------------------------------------------------------------
+    # UUID — deterministic ID generation
+    # --------------------------------------------------------------------
+
+    def uuid(self, seed: str) -> str:
+        """Return a deterministic UUID scoped to the current workflow
+        and the given *seed*. The same seed always produces the same UUID
+        for this workflow instance.
+
+        Useful for generating predictable entity IDs, correlation IDs, or
+        other identifiers that must be stable across workflow replays.
+
+        Parameters
+        ----------
+        seed : str
+            A seed string that determines the UUID within this workflow.
+
+        Returns
+        -------
+        str
+            A UUID-formatted string (e.g. ``"550e8400-e29b-... "``).
+        """
+        wf_id = self.current_workflow_id()
+        data = (wf_id + ":" + seed).encode("utf-8")
+        h = hashlib.sha256(data).digest()[:16]
+        # Set UUIDv5 version and variant bits
+        h_bytes = bytearray(h)
+        h_bytes[6] = (h_bytes[6] & 0x0f) | 0x50  # Version 5
+        h_bytes[8] = (h_bytes[8] & 0x3f) | 0x80  # Variant 1
+        return (
+            f"{h_bytes[0:4].hex()}-"
+            f"{h_bytes[4:6].hex()}-"
+            f"{h_bytes[6:8].hex()}-"
+            f"{h_bytes[8:10].hex()}-"
+            f"{h_bytes[10:16].hex()}"
+        )
 
     # --------------------------------------------------------------------
     # 1. now — wall-clock time
@@ -1377,11 +1484,12 @@ class HostCalls:
         Parameters
         ----------
         key : str
-            State key.
+            State key.  If a scope is active via :meth:`set_scope`, the
+            key is automatically prefixed with the scope prefix.
         value : Any
             State value.  Dicts and lists are JSON-serialised automatically.
         """
-        self.durable_call("state", "set", {"key": key, "value": value})
+        self.durable_call("state", "set", {"key": self._scoped_key(key), "value": value})
 
     # --------------------------------------------------------------------
     # 20. get_state — get typed durable state

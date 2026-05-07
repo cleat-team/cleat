@@ -24,7 +24,7 @@ import {
 } from "./memory";
 
 // ═══════════════════════════════════════════════
-// 19 raw host function imports from "env" module
+// 21 raw host function imports from "env" module
 // ═══════════════════════════════════════════════
 
 /**
@@ -233,6 +233,26 @@ export declare function import_plugin_call(
   responseMaxLen: i32,
 ): i64;
 
+/**
+ * 20. durable_workflow_id: Get the current workflow ID.
+ * (import "env" "durable_workflow_id") (param i32 i32) (result i64)
+ */
+@external("env", "durable_workflow_id")
+export declare function import_durable_workflow_id(
+  idPtr: i32,
+  idMaxLen: i32,
+): i64;
+
+/**
+ * 21. durable_run_id: Get the current run ID.
+ * (import "env" "durable_run_id") (param i32 i32) (result i64)
+ */
+@external("env", "durable_run_id")
+export declare function import_durable_run_id(
+  idPtr: i32,
+  idMaxLen: i32,
+): i64;
+
 // ═══════════════════════════════════════════════
 // High-level result types for HostCalls methods
 // ═══════════════════════════════════════════════
@@ -391,6 +411,9 @@ export class AwaitPromiseOutcome {
 export class HostCalls {
   /** Memory helper for string I/O in linear memory. */
   protected memory: Memory;
+
+  /** Current scope prefix for virtual object state operations. */
+  private _scopePrefix: string = "";
 
   /**
    * @param memory - Optional Memory instance. A default one is created if
@@ -1008,5 +1031,158 @@ export class HostCalls {
     let resp: string =
       responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "";
     return new PluginCallOutcome(resp, null, 0);
+  }
+
+  // ────────────────────────────────────────────
+  // 20. currentWorkflowId
+  // ────────────────────────────────────────────
+
+  /**
+   * Get the current workflow ID from the host runtime.
+   *
+   * @returns The workflow ID string.
+   */
+  currentWorkflowId(): string {
+    let result: i64 = import_durable_workflow_id(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      return "";
+    }
+    return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+  }
+
+  // ────────────────────────────────────────────
+  // 21. setScope
+  // ────────────────────────────────────────────
+
+  /**
+   * Set the state key prefix for virtual object instances.
+   * All subsequent setQueryState calls are automatically prefixed
+   * with "vo:<objectType>:<instanceKey>:".
+   *
+   * @param objectType  - The virtual object type name.
+   * @param instanceKey - The instance key for this specific object.
+   * @returns The previous scope prefix (empty string if none was set).
+   */
+  setScope(objectType: string, instanceKey: string): string {
+    let prev: string = this._scopePrefix;
+    this._scopePrefix =
+      objectType.length > 0 && instanceKey.length > 0
+        ? "vo:" + objectType + ":" + instanceKey + ":"
+        : "";
+    return prev;
+  }
+
+  // ────────────────────────────────────────────
+  // 22. getScope
+  // ────────────────────────────────────────────
+
+  /**
+   * Get the current virtual object scope.
+   *
+   * @returns A tuple [objectType, instanceKey] or ["", ""] if no scope
+   *          is set.
+   */
+  getScope(): string[] {
+    if (this._scopePrefix.length === 0) {
+      return ["", ""];
+    }
+    let trimmed: string = this._scopePrefix.substring(0, this._scopePrefix.length - 1);
+    let parts: string[] = trimmed.split(":");
+    if (parts.length === 3 && parts[0] === "vo") {
+      return [parts[1], parts[2]];
+    }
+    return ["", ""];
+  }
+
+  // ────────────────────────────────────────────
+  // 23. clearScope
+  // ────────────────────────────────────────────
+
+  /**
+   * Remove the current scope and return the previous scope prefix.
+   *
+   * @returns The scope prefix that was active before clearing (empty
+   *          string if none was set).
+   */
+  clearScope(): string {
+    let prev: string = this._scopePrefix;
+    this._scopePrefix = "";
+    return prev;
+  }
+
+  // ────────────────────────────────────────────
+  // 24. uuid — deterministic ID generation
+  // ────────────────────────────────────────────
+
+  /**
+   * Return a deterministic UUID scoped to the current workflow
+   * and the given seed. Same seed always produces the same UUID for
+   * this workflow instance.
+   *
+   * Uses a 128-bit FNV-1a hash of "{workflowID}:{seed}" to produce
+   * a UUID-formatted string.
+   *
+   * @param seed - A seed string that determines the UUID within this
+   *               workflow.
+   * @returns A UUID-formatted string.
+   */
+  uuid(seed: string): string {
+    let wfId: string = this.currentWorkflowId();
+    let data: string = wfId + ":" + seed;
+
+    // FNV-1a 128-bit hash for deterministic UUID generation
+    let h1: u64 = 0xcbf29ce484222325;
+    let h2: u64 = 0x6c62272e07bb0142;
+    for (let i: i32 = 0; i < data.length; i++) {
+      let c: u32 = data.charCodeAt(i);
+      h1 ^= c;
+      h1 *= 0x100000001b3;
+      h2 ^= c;
+      h2 *= 0x100000001b3;
+    }
+
+    // Set UUIDv5 version bits in byte 6 (top nibble of h1's 7th byte)
+    // h1 byte 6 is at bits 8-15: clear top nibble, set version 5
+    h1 = (h1 & ~(u64(0xf0) << 8)) | (u64(0x50) << 8);
+
+    // Set UUID variant 1 bits in byte 8 (top nibble of h2's 1st byte)
+    // h2 byte 0 is at bits 56-63: clear top 2 bits, set variant 1
+    h2 = (h2 & ~(u64(0xc0) << 56)) | (u64(0x80) << 56);
+
+    // Format as UUID: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+    let hexChars: string = "0123456789abcdef";
+    let parts: string[] = ["", "", "", "", ""];
+
+    // Part 0 (8 hex chars): first 32 bits from h1 (bits 63-32)
+    // Part 1 (4 hex chars): next 16 bits from h1 (bits 31-16)
+    // Part 2 (4 hex chars): last 16 bits from h1 (bits 15-0)
+    let temp: u64 = h1;
+    for (let i: i32 = 0; i < 8; i++) {
+      parts[0] += hexChars.charAt((temp >> 60) as u32);
+      temp <<= 4;
+    }
+    for (let i: i32 = 0; i < 4; i++) {
+      parts[1] += hexChars.charAt((temp >> 60) as u32);
+      temp <<= 4;
+    }
+    for (let i: i32 = 0; i < 4; i++) {
+      parts[2] += hexChars.charAt((temp >> 60) as u32);
+      temp <<= 4;
+    }
+
+    // Part 3 (4 hex chars): first 16 bits from h2 (bits 63-48)
+    // Part 4 (12 hex chars): remaining 48 bits from h2 (bits 47-0)
+    temp = h2;
+    for (let i: i32 = 0; i < 4; i++) {
+      parts[3] += hexChars.charAt((temp >> 60) as u32);
+      temp <<= 4;
+    }
+    for (let i: i32 = 0; i < 12; i++) {
+      parts[4] += hexChars.charAt((temp >> 60) as u32);
+      temp <<= 4;
+    }
+
+    return parts[0] + "-" + parts[1] + "-" + parts[2] + "-" + parts[3] + "-" + parts[4];
   }
 }

@@ -102,7 +102,7 @@ func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uui
 	}
 
 	// Look up matching subscriptions and dispatch workflows.
-	matched, err := p.triggerMatchingWorkflows(ctx, eventID, tenantID, eventType, eventData)
+	matched, err := triggerMatchingWorkflows(ctx, p.db, p.logger, p.env, eventID, tenantID, eventType, eventData)
 	if err != nil {
 		p.logger.Warn("event-triggers: retry failed to query subscriptions",
 			"event_id", eventID, "error", err)

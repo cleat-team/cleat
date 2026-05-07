@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/durable/internal/auth"
+	"github.com/rcownie/durable/plugins/eventtriggers"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -194,7 +195,39 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 		"event_type", eventType,
 	)
 
-	// If this source is bound to a workflow, deliver a signal immediately.
+	// ---- Publish as an event through the event-triggers system ----
+
+	// Build event data that includes both headers and payload.
+	var payloadData interface{}
+	if json.Valid(body) {
+		json.Unmarshal(body, &payloadData)
+	} else {
+		payloadData = string(body)
+	}
+
+	eventData := map[string]interface{}{
+		"source_id":   sourceID.String(),
+		"source_name": source.Name,
+		"webhook_id":  eventID.String(),
+		"event_type":  eventType,
+		"headers":     headersMap,
+		"payload":     payloadData,
+	}
+
+	matched, pubErr := eventtriggers.PublishEvent(
+		r.Context(), p.db, p.logger, p.env,
+		eventID, source.TenantID, eventType, eventData,
+	)
+	if pubErr != nil {
+		p.logger.Error("webhook-ingest: publish event failed", "error", pubErr)
+	} else if matched > 0 {
+		p.logger.Info("webhook-ingest: event triggered workflows",
+			"event_id", eventID,
+			"workflows_started", matched,
+		)
+	}
+
+	// Also deliver a signal if this source is bound to a workflow (legacy path).
 	if source.SignalWorkflowID != "" {
 		signalPayload := map[string]interface{}{
 			"source_id":   sourceID.String(),
@@ -263,7 +296,8 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var s webhookSourceJSON
 		if err := rows.Scan(&s.ID, &s.TenantID, &s.Name, &s.SourceType,
-			&s.Secret, &s.Enabled, &s.CreatedAt, &s.UpdatedAt); err != nil {
+			&s.Secret, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
+			&s.CreatedAt, &s.UpdatedAt); err != nil {
 			p.logger.Error("webhook-ingest: scan source", "error", err)
 			continue
 		}

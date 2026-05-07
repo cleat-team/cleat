@@ -28,5 +28,16 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS kafka_config;
 			`,
 		},
+		{
+			Version: 2,
+			Up: `
+				ALTER TABLE kafka_config ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT '';
+				CREATE INDEX IF NOT EXISTS idx_kafka_config_enabled ON kafka_config(enabled);
+			`,
+			Down: `
+				ALTER TABLE kafka_config DROP COLUMN IF EXISTS event_type;
+				DROP INDEX IF EXISTS idx_kafka_config_enabled;
+			`,
+		},
 	}
 }

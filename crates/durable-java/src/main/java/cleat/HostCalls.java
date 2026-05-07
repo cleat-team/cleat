@@ -1,6 +1,8 @@
 package cleat;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import org.teavm.interop.Import;
 
 /**
@@ -40,6 +42,9 @@ import org.teavm.interop.Import;
  * @see Memory
  */
 public class HostCalls {
+
+    /** Current scope prefix for virtual object state operations. */
+    private String _scopePrefix = "";
 
     // ========================================================================
     // Raw WASM imports (18 host functions from the "env" module)
@@ -127,6 +132,12 @@ public class HostCalls {
         int functionNamePtr, int functionNameLen,
         int inputPtr, int inputLen,
         int responsePtr, int responseMaxLen);
+
+    @Import(module = "env", name = "durable_workflow_id")
+    private static native long durableWorkflowIdRaw(int outPtr, int maxLen);
+
+    @Import(module = "env", name = "durable_run_id")
+    private static native long durableRunIdRaw(int outPtr, int maxLen);
 
     // ========================================================================
     // Internal helpers: pack strings in scratch region, read output buffer
@@ -740,6 +751,111 @@ public class HostCalls {
 
         String response = readOutput(responseLen);
         return new PluginCallOutcome(response, null, callErrorCode);
+    }
+
+    // ========================================================================
+    // Scope management for virtual object instances
+    // ========================================================================
+
+    /**
+     * Get the current workflow ID from the host runtime.
+     *
+     * @return the workflow ID string
+     */
+    public String currentWorkflowId() {
+        long result = durableWorkflowIdRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int idLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0 || idLen == 0) {
+            return "";
+        }
+        return readOutput(idLen);
+    }
+
+    /**
+     * Set the state key prefix for virtual object instances.
+     * All subsequent state operations are automatically prefixed
+     * with "vo:&lt;objectType&gt;:&lt;instanceKey&gt;:".
+     *
+     * @param objectType  the virtual object type name
+     * @param instanceKey the instance key for this specific object
+     * @return the previous scope prefix (empty string if none was set)
+     */
+    public String setScope(String objectType, String instanceKey) {
+        String prev = this._scopePrefix;
+        this._scopePrefix = (objectType != null && !objectType.isEmpty()
+            && instanceKey != null && !instanceKey.isEmpty())
+            ? "vo:" + objectType + ":" + instanceKey + ":"
+            : "";
+        return prev;
+    }
+
+    /**
+     * Get the current virtual object scope.
+     *
+     * @return a two-element array {@code [objectType, instanceKey]}, or
+     *         {@code ["", ""]} if no scope is set
+     */
+    public String[] getScope() {
+        if (this._scopePrefix.isEmpty()) {
+            return new String[]{"", ""};
+        }
+        // Parse "vo:<type>:<key>:" format
+        String trimmed = this._scopePrefix.substring(0, this._scopePrefix.length() - 1);
+        String[] parts = trimmed.split(":", 3);
+        if (parts.length == 3 && "vo".equals(parts[0])) {
+            return new String[]{parts[1], parts[2]};
+        }
+        return new String[]{"", ""};
+    }
+
+    /**
+     * Remove the current scope and return the previous scope prefix.
+     *
+     * @return the scope prefix that was active before clearing (empty string
+     *         if none was set)
+     */
+    public String clearScope() {
+        String prev = this._scopePrefix;
+        this._scopePrefix = "";
+        return prev;
+    }
+
+    /**
+     * Return a deterministic UUID scoped to the current workflow
+     * and the given seed. The same seed always produces the same UUID
+     * for this workflow instance.
+     * <p>
+     * Uses SHA-256 of "{workflowID}:{seed}" to produce a UUIDv5-formatted
+     * string.
+     *
+     * @param seed a seed string that determines the UUID within this workflow
+     * @return a UUID-formatted string
+     */
+    public String uuid(String seed) {
+        String wfId = this.currentWorkflowId();
+        String data = wfId + ":" + seed;
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(data.getBytes(StandardCharsets.UTF_8));
+
+            // Take first 16 bytes and set version/variant bits
+            hash[6] = (byte) ((hash[6] & 0x0f) | 0x50); // Version 5
+            hash[8] = (byte) ((hash[8] & 0x3f) | 0x80); // Variant 1
+
+            // Format as UUID: 8-4-4-4-12
+            StringBuilder sb = new StringBuilder(36);
+            for (int i = 0; i < 16; i++) {
+                if (i == 4 || i == 6 || i == 8 || i == 10) {
+                    sb.append('-');
+                }
+                sb.append(String.format("%02x", hash[i] & 0xff));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            // Fallback: improbable - SHA-256 is always available
+            return "00000000-0000-0000-0000-000000000000";
+        }
     }
 
     // ========================================================================

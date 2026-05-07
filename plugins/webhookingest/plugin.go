@@ -21,6 +21,7 @@ func init() {
 		Version:     "0.1.0",
 		Description: "Receive inbound webhooks and deliver as workflow signals",
 		Author:      "cleat",
+		Requires:    []string{"event-triggers"},
 	}, func() plugin.Plugin {
 		return &Plugin{}
 	})

@@ -174,3 +174,47 @@ def durable_entry(name: Optional[str] = None) -> Callable:
         return _make_entry(name)
 
     return _make_entry
+
+
+def virtual_object(name: Optional[str] = None) -> Callable:
+    """Register a function as a virtual object entry point.
+
+    This decorator wraps :func:`durable_entry` and marks the function as
+    a virtual object handler for key-scoped stateful services.
+
+    Usage::
+
+        from cleat_sdk import HostCalls, virtual_object
+
+        @virtual_object("counter")
+        def counter(h: HostCalls, input: str) -> str:
+            vo = HostCalls()  # or use h directly with set_scope
+            ...
+            return "{\"result\": \"ok\"}"
+
+    The decorated function carries the attribute
+    ``wrapper._is_virtual_object = True`` for introspection.
+
+    Parameters
+    ----------
+    name:
+        The virtual object type name.  Defaults to the Python function name.
+
+    Returns
+    -------
+    Callable
+        A wrapper function with the WASM-export ABI signature, identical
+        to :func:`durable_entry` but additionally marked as a virtual object
+        handler.
+    """
+
+    def _make_entry(func: Callable) -> Callable:
+        entry_name = name if name is not None else func.__name__
+        decorated = durable_entry(entry_name)(func)
+        decorated._is_virtual_object = True  # type: ignore[attr-defined]
+        return decorated
+
+    if callable(name):
+        return _make_entry(name)
+
+    return _make_entry

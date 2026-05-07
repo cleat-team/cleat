@@ -114,7 +114,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 	)
 
 	// Clean up any pending awaiter registration for this workflow + event type.
-	p.unregisterAwaiter(ctx, cc.WorkflowID, input.EventType)
+	unregisterAwaiter(ctx, p.db, p.logger, cc.WorkflowID, input.EventType)
 
 	output := awaitEventOutput{
 		Found:      true,
@@ -142,69 +142,3 @@ func (p *Plugin) registerAwaiter(ctx context.Context, tenantID uuid.UUID, workfl
 	}
 }
 
-// unregisterAwaiter removes the awaiter record for the given workflow and
-// event type after the event has been successfully consumed.
-func (p *Plugin) unregisterAwaiter(ctx context.Context, workflowID, eventType string) {
-	if workflowID == "" {
-		return
-	}
-	_, err := p.db.ExecContext(ctx, `
-		DELETE FROM event_awaiters
-		WHERE workflow_id = $1 AND event_type = $2
-	`, workflowID, eventType)
-	if err != nil {
-		p.logger.Warn("event-triggers: unregister awaiter", "error", err)
-	}
-}
-
-// signalAwaiters delivers a signal to all workflows that are registered as
-// waiting for the given event type.  Called from the publish handler after
-// an event has been successfully stored.
-func (p *Plugin) signalAwaiters(ctx context.Context, tenantID uuid.UUID, eventType string, eventData string) {
-	if p.env == nil || p.env.SignalWorkflow == nil {
-		return
-	}
-
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT workflow_id
-		FROM event_awaiters
-		WHERE tenant_id = $1 AND event_type = $2
-	`, tenantID, eventType)
-	if err != nil {
-		p.logger.Error("event-triggers: query awaiters", "error", err)
-		return
-	}
-	defer rows.Close()
-
-	var workflowIDs []string
-	for rows.Next() {
-		var wfID string
-		if err := rows.Scan(&wfID); err != nil {
-			p.logger.Error("event-triggers: scan awaiter", "error", err)
-			continue
-		}
-		workflowIDs = append(workflowIDs, wfID)
-	}
-	if err := rows.Err(); err != nil {
-		p.logger.Error("event-triggers: awaiters rows error", "error", err)
-		return
-	}
-
-	signalName := "__evt:" + eventType
-	for _, wfID := range workflowIDs {
-		if err := p.env.SignalWorkflow(ctx, wfID, signalName, eventData); err != nil {
-			p.logger.Warn("event-triggers: signal awaiter failed",
-				"workflow_id", wfID,
-				"signal", signalName,
-				"error", err,
-			)
-			continue
-		}
-		p.logger.Info("event-triggers: signal delivered to awaiter",
-			"workflow_id", wfID,
-			"signal", signalName,
-		)
-		// Remove the awaiter record so it is not signaled again.
-		p.unregisterAwaiter(ctx, wfID, eventType)
-	}
-}

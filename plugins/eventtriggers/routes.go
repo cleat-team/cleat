@@ -1,7 +1,6 @@
 package eventtriggers
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -120,13 +119,6 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 
 	if req.Data == nil {
 		req.Data = make(map[string]interface{})
-	}
-
-	eventDataJSON, err := json.Marshal(req.Data)
-	if err != nil {
-		p.logger.Error("event-triggers: marshal event data", "error", err)
-		p.writeError(w, 500, "failed to encode event data")
-		return
 	}
 
 	// Dispatch through the core publish pipeline — stores the event,

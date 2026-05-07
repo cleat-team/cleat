@@ -147,17 +147,26 @@ func TestProduceValidateInput(t *testing.T) {
 func TestMigrations(t *testing.T) {
 	p := &Plugin{}
 	migrations := p.Migrations()
-	if len(migrations) != 1 {
-		t.Fatalf("expected 1 migration, got %d", len(migrations))
+	if len(migrations) != 2 {
+		t.Fatalf("expected 2 migrations, got %d", len(migrations))
 	}
 	if migrations[0].Version != 1 {
 		t.Errorf("expected Version 1, got %d", migrations[0].Version)
 	}
 	if migrations[0].Up == "" {
-		t.Error("expected non-empty Up SQL")
+		t.Error("expected non-empty Up SQL for migration 1")
 	}
 	if migrations[0].Down == "" {
-		t.Error("expected non-empty Down SQL")
+		t.Error("expected non-empty Down SQL for migration 1")
+	}
+	if migrations[1].Version != 2 {
+		t.Errorf("expected Version 2, got %d", migrations[1].Version)
+	}
+	if migrations[1].Up == "" {
+		t.Error("expected non-empty Up SQL for migration 2")
+	}
+	if migrations[1].Down == "" {
+		t.Error("expected non-empty Down SQL for migration 2")
 	}
 }
 

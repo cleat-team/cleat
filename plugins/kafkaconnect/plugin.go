@@ -22,6 +22,7 @@ func init() {
 		Version:     "0.1.0",
 		Description: "Publish and consume Kafka messages",
 		Author:      "cleat",
+		Requires:    []string{"event-triggers"},
 	}, func() plugin.Plugin {
 		return &Plugin{}
 	})
@@ -34,6 +35,7 @@ type Plugin struct {
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config
+	env        *plugin.Environment
 }
 
 // Config holds optional configuration for the kafka-connect plugin.
@@ -61,6 +63,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	}
 
 	p.db = env.DB
+	p.env = env
 	p.httpClient = &http.Client{
 		Timeout: 10 * time.Second,
 	}

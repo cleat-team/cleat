@@ -17,7 +17,7 @@ Quick start:
 
 from .host_calls import HostCalls, SuspendSentinel, RetryPolicy
 from .host_calls import SignalResult, ChildResult, PromiseResult
-from .entry import durable_entry
+from .entry import durable_entry, virtual_object
 from .types import ChildWorkflow, Saga, SagaStep, TerminalError, DurableDefer
 from .client import CleatClient
 from .plugins import (
@@ -42,6 +42,7 @@ __all__ = [
     "ChildResult",
     "PromiseResult",
     "durable_entry",
+    "virtual_object",
     "ChildWorkflow",
     "Saga",
     "SagaStep",

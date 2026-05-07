@@ -49,6 +49,7 @@ type kafkaConfigJSON struct {
 	Brokers       string    `json:"brokers"`
 	Topic         string    `json:"topic"`
 	ConsumerGroup string    `json:"consumer_group"`
+	EventType     string    `json:"event_type"`
 	Enabled       bool      `json:"enabled"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -59,6 +60,7 @@ type createConfigRequest struct {
 	Brokers       string `json:"brokers"`
 	Topic         string `json:"topic"`
 	ConsumerGroup string `json:"consumer_group,omitempty"`
+	EventType     string `json:"event_type,omitempty"`
 }
 
 // ---- POST /kafka/configs ----
@@ -100,14 +102,18 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	if consumerGroup == "" {
 		consumerGroup = "cleat-consumer"
 	}
+	eventType := req.EventType
+	if eventType == "" {
+		eventType = req.Topic // Default event_type maps to the topic name
+	}
 
 	id := uuid.New()
 	now := time.Now()
 
 	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO kafka_config (tenant_id, id, name, brokers, topic, consumer_group, enabled, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, true, $7, $7)
-	`, tid, id, req.Name, req.Brokers, req.Topic, consumerGroup, now)
+		INSERT INTO kafka_config (tenant_id, id, name, brokers, topic, consumer_group, event_type, enabled, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $8)
+	`, tid, id, req.Name, req.Brokers, req.Topic, consumerGroup, eventType, now)
 	if err != nil {
 		p.logger.Error("kafka-connect: create config", "error", err)
 		p.writeError(w, 500, "failed to create config")
@@ -123,6 +129,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 		Brokers:       req.Brokers,
 		Topic:         req.Topic,
 		ConsumerGroup: consumerGroup,
+		EventType:     eventType,
 		Enabled:       true,
 		CreatedAt:     now,
 		UpdatedAt:     now,
@@ -139,7 +146,7 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := p.db.QueryContext(r.Context(), `
-		SELECT id, name, brokers, topic, consumer_group, enabled, created_at, updated_at
+		SELECT id, name, brokers, topic, consumer_group, event_type, enabled, created_at, updated_at
 		FROM kafka_config
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -154,7 +161,7 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 	var configs []kafkaConfigJSON
 	for rows.Next() {
 		var c kafkaConfigJSON
-		if err := rows.Scan(&c.ID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.EventType, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("kafka-connect: scan config", "error", err)
 			continue
 		}
