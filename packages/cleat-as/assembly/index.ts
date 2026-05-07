@@ -37,5 +37,6 @@
 export * from "./memory";
 export * from "./host-calls";
 export * from "./durable-entry";
+export * from "./json";
 export * from "./plugins";
 export * from "./saga";

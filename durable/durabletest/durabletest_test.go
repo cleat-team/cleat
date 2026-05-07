@@ -1030,6 +1030,83 @@ func TestAcquireConcurrencyKeyMultipleKeys(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Retry simulation tests
+// ---------------------------------------------------------------------------
+
+func TestWithRetrySimulation(t *testing.T) {
+	env := NewTestEnv(WithRetrySimulation(2))
+	env.OnCall("svc", "op", nil).Return("success", nil)
+
+	// First call should fail (attempt 1/2).
+	_, err := env.H().DurableCall("svc", "op", "req")
+	if err == nil {
+		t.Fatal("expected retry simulation failure on first call")
+	}
+
+	// Second call should also fail (attempt 2/2).
+	_, err = env.H().DurableCall("svc", "op", "req")
+	if err == nil {
+		t.Fatal("expected retry simulation failure on second call")
+	}
+
+	// Third call should succeed.
+	resp, err := env.H().DurableCall("svc", "op", "req")
+	if err != nil {
+		t.Fatalf("unexpected error on third call: %v", err)
+	}
+	if resp != "success" {
+		t.Fatalf("expected %q, got %q", "success", resp)
+	}
+}
+
+func TestWithRetrySimulationZero(t *testing.T) {
+	// Zero retry simulation count = no simulation.
+	env := NewTestEnv(WithRetrySimulation(0))
+	env.OnCall("svc", "op", nil).Return("success", nil)
+
+	resp, err := env.H().DurableCall("svc", "op", "req")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != "success" {
+		t.Fatalf("expected %q, got %q", "success", resp)
+	}
+}
+
+func TestWithRetrySimulationPerServiceOp(t *testing.T) {
+	// Retry simulation should be per-service, per-operation.
+	env := NewTestEnv(WithRetrySimulation(1))
+	env.OnCall("svc1", "op1", nil).Return("ok1", nil)
+	env.OnCall("svc2", "op2", nil).Return("ok2", nil)
+
+	// svc1.op1 should fail once then succeed.
+	_, err := env.H().DurableCall("svc1", "op1", "req1")
+	if err == nil {
+		t.Fatal("expected retry simulation failure for svc1.op1")
+	}
+	resp, err := env.H().DurableCall("svc1", "op1", "req1")
+	if err != nil {
+		t.Fatalf("unexpected error for svc1.op1: %v", err)
+	}
+	if resp != "ok1" {
+		t.Fatalf("expected %q, got %q", "ok1", resp)
+	}
+
+	// svc2.op2 should fail once then succeed.
+	_, err = env.H().DurableCall("svc2", "op2", "req2")
+	if err == nil {
+		t.Fatal("expected retry simulation failure for svc2.op2")
+	}
+	resp, err = env.H().DurableCall("svc2", "op2", "req2")
+	if err != nil {
+		t.Fatalf("unexpected error for svc2.op2: %v", err)
+	}
+	if resp != "ok2" {
+		t.Fatalf("expected %q, got %q", "ok2", resp)
+	}
+}
+
 func TestAcquireConcurrencyKeyReset(t *testing.T) {
 	env := NewTestEnv()
 

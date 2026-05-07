@@ -243,22 +243,24 @@ def decode_await_signals_result(result: int) -> Tuple[int, int, bool, int]:
 # ---------------------------------------------------------------------------
 
 
-def decode_await_promise_result(result: int) -> Tuple[int, bool, int]:
+def decode_await_promise_result(result: int) -> Tuple[int, bool, bool, int]:
     """Decode a ``durable_await_promise`` result.
 
     Bit layout:
         bits  0-15 = errCode (16 bits)
         bits 16-23 = timedOut flag (non-zero = timed out)
+        bits 24-31 = rejected flag (non-zero = rejected)
         bits 32-63 = resultLen (32 bits)
 
     Returns:
-        Tuple of ``(result_len, timed_out, err_code)``.
+        Tuple of ``(result_len, timed_out, rejected, err_code)``.
     """
     r = _to_u64(result)
     result_len = (r >> 32) & 0xFFFFFFFF
     timed_out = ((r >> 16) & 0xFF) != 0
+    rejected = ((r >> 24) & 0xFF) != 0
     err_code = r & 0xFFFF
-    return (result_len, timed_out, err_code)
+    return (result_len, timed_out, rejected, err_code)
 
 
 # ---------------------------------------------------------------------------

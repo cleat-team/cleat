@@ -6,6 +6,7 @@
 package durable
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -103,6 +104,18 @@ type HostCalls interface {
 	// Use NewSaga() for structured compensation patterns.
 	DurableDefer(description string) (deferID string, err error)
 
+	// DurableDeferFunc registers a function (as a closure) to run when the
+	// workflow exits (LIFO order, always runs even on error). Unlike DurableDefer
+	// which takes a description string, this takes a function that is called
+	// at cleanup time. Returns a deferID.
+	DurableDeferFunc(fn func()) (deferID string, err error)
+
+	// WorkflowID returns the unique identifier for the current workflow execution.
+	WorkflowID() string
+
+	// RunID returns the run identifier for the current workflow execution.
+	RunID() string
+
 	// DurableLog emits a log message recorded in the event history.
 	DurableLog(message string)
 
@@ -177,6 +190,11 @@ type HostCalls interface {
 	// validator runs first (read-only). Called during workflow init, before durable ops.
 	RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error)
 
+	// RegisterQueryHandler registers a read-only query handler that can be
+	// invoked on-demand by external callers without journaling.
+	// Queries are deterministic, read-only, and do not record events.
+	RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
+
 	// RunDetached runs fn with a fresh HostCalls that ignores cancellation.
 	// fn executes immediately, is recorded in history, and survives crash/replay.
 	// On replay, fn IS re-executed (not replayed from cache).
@@ -206,6 +224,26 @@ type HostCalls interface {
 	// Random returns a deterministic random number seeded from the event
 	// history. Use instead of math/rand for deterministic replay.
 	Random() int64
+
+	// SetScope sets the state key prefix for virtual object instances.
+	// All subsequent SetState/GetState/etc calls are automatically prefixed
+	// with "vo:<objectType>:<instanceKey>:". Returns the previous scope
+	// prefix for stack-style save/restore.
+	SetScope(objectType, instanceKey string) (previousScope string)
+
+	// GetScope returns the current (objectType, instanceKey) or ("", "")
+	// if no scope is set.
+	GetScope() (objectType, instanceKey string)
+
+	// ClearScope removes the current scope and returns the previous scope
+	// prefix (empty string if none was set).
+	ClearScope() (previousScope string)
+
+	// UUID returns a deterministic UUID scoped to the current workflow
+	// and the given seed. Same seed always produces the same UUID for
+	// this workflow instance. Useful for generating predictable IDs
+	// (e.g. entity IDs, correlation IDs) that are stable across replays.
+	UUID(seed string) string
 }
 
 // ---- Result types ----
@@ -327,12 +365,132 @@ func (e *CallError) Retryable() bool {
 	}
 }
 
+// ---- Virtual Object definitions ----
+
+// VirtualObjectDef describes a virtual object type for key-scoped
+// stateful services.
+type VirtualObjectDef struct {
+	// Name is the unique name for this virtual object type.
+	Name string
+
+	// EntryPoint is the function that handles invocations for this
+	// virtual object type. It receives a HostCalls (with state scoped
+	// to the instance) and the input JSON, and returns the result JSON
+	// or an error.
+	EntryPoint func(h HostCalls, input string) (string, error)
+}
+
+// virtualObjectRegistry is the package-level registry of virtual object
+// definitions.
+var virtualObjectRegistry = struct {
+	mu   sync.RWMutex
+	defs map[string]VirtualObjectDef
+}{
+	defs: make(map[string]VirtualObjectDef),
+}
+
+// RegisterVirtualObject registers a virtual object definition in the
+// global registry. Panics if a definition with the same name already
+// exists or if the name is empty.
+func RegisterVirtualObject(def VirtualObjectDef) {
+	virtualObjectRegistry.mu.Lock()
+	defer virtualObjectRegistry.mu.Unlock()
+	if def.Name == "" {
+		panic("durable: virtual object name must not be empty")
+	}
+	if _, exists := virtualObjectRegistry.defs[def.Name]; exists {
+		panic(fmt.Sprintf("durable: virtual object %q already registered", def.Name))
+	}
+	virtualObjectRegistry.defs[def.Name] = def
+}
+
+// GetVirtualObject returns a registered virtual object definition by name.
+// The second return value is false if no definition with that name exists.
+func GetVirtualObject(name string) (VirtualObjectDef, bool) {
+	virtualObjectRegistry.mu.RLock()
+	defer virtualObjectRegistry.mu.RUnlock()
+	def, ok := virtualObjectRegistry.defs[name]
+	return def, ok
+}
+
+
+// TerminalError is a sentinel error that marks a workflow error as
+// non-retryable. When a Saga encounters a TerminalError, it compensates
+// all completed steps. When the runtime encounters a TerminalError from
+// a step or activity, it does not retry.
+type TerminalError struct {
+	Err error
+}
+
+func (e *TerminalError) Error() string {
+	return "terminal: " + e.Err.Error()
+}
+
+func (e *TerminalError) Unwrap() error {
+	return e.Err
+}
+
+// NewTerminalError wraps an error as a terminal (non-retryable) error.
+func NewTerminalError(err error) error {
+	return &TerminalError{Err: err}
+}
+
+// IsTerminalError returns true if err is or wraps a TerminalError.
+func IsTerminalError(err error) bool {
+	var te *TerminalError
+	return errors.As(err, &te)
+}
+
+// DurableCallError is returned by DurableCall when the service call fails
+// in a non-retryable way (e.g., service not found, invalid request).
+type DurableCallError struct {
+	Service   string
+	Operation string
+	Message   string
+	Err       error
+}
+
+func (e *DurableCallError) Error() string {
+	return fmt.Sprintf("durable call %s.%s: %s", e.Service, e.Operation, e.Message)
+}
+
+func (e *DurableCallError) Unwrap() error {
+	return e.Err
+}
+
+// ServiceNotFoundError is returned when a service is not found or unavailable.
+type ServiceNotFoundError struct {
+	Service string
+	Err     error
+}
+
+func (e *ServiceNotFoundError) Error() string {
+	return fmt.Sprintf("service not found: %s", e.Service)
+}
+
+func (e *ServiceNotFoundError) Unwrap() error {
+	return e.Err
+}
+
+// CallTimeoutError is returned when a call exceeds its timeout.
+type CallTimeoutError struct {
+	Service   string
+	Operation string
+	Timeout   time.Duration
+}
+
+func (e *CallTimeoutError) Error() string {
+	return fmt.Sprintf("call %s.%s timed out after %v", e.Service, e.Operation, e.Timeout)
+}
+
 // ---- Call options ----
 
 // CallOptions provides per-call configuration.
+
 type CallOptions struct {
 	Retry           *RetryPolicy
-	MaxResponseSize int // 0 = use default (64KB), capped at outBufSize
+	MaxResponseSize int    // 0 = use default (64KB), capped at outBufSize
+	Timeout         time.Duration // 0 = no timeout
 }
 
 // RetryPolicy configures automatic retry behavior for durable calls.
@@ -355,6 +513,24 @@ func DefaultRetryPolicy() RetryPolicy {
 	}
 }
 
+// MaximumAttempts returns the maximum number of retry attempts.
+// Returns 0 if rp is nil.
+func (rp *RetryPolicy) MaximumAttempts() int {
+	if rp == nil {
+		return 0
+	}
+	return rp.MaxAttempts
+}
+
+// MaximumInterval returns the maximum backoff interval.
+// Returns 0 if rp is nil.
+func (rp *RetryPolicy) MaximumInterval() time.Duration {
+	if rp == nil {
+		return 0
+	}
+	return rp.MaxInterval
+}
+
 // ---- Concrete implementation ----
 
 // hostCallsImpl is the default concrete implementation of HostCalls.
@@ -371,7 +547,12 @@ type hostCallsImpl struct {
 	durableAwaitSignals       func(signalNames []string, timeoutMs int64) (string, string, bool, error)
 	createPromise    func(name string) (promiseID string, err error)
 	awaitPromise     func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
+	resolvePromise   func(id, value string) error
+	rejectPromise    func(id, errMsg string) error
 	durableDefer              func(description string) (string, error)
+	durableDeferFunc          func(fn func()) (string, error)
+	workflowID                func() string
+	workflowRunID             func() string
 	durableLog                func(message string)
 	pollCancellation          func() (bool, string)
 	pollSignal                func(signalName string) (string, bool, error)
@@ -387,15 +568,26 @@ type hostCallsImpl struct {
 	minVersion                func() int
 	setQueryState             func(key, value string)
 	registerUpdateHandler     func(name string)
+	registerQueryHandler     func(name string)
+	handleQuery              func(name, payload string) (string, error)
 	runDetached               func(fn func(h HostCalls) error) error
 	now                       func() int64
 	random                    func() int64
 
 	pluginCall                func(pluginName, functionName, inputJSON string) (string, error)
+	durableSend               func(service, operation, requestJSON string) error
+	scheduleInvoke            func(service, operation, requestJSON string, delayMs int64) error
 
 	// State map for typed K/V operations.
 	stateMap       map[string]interface{}
 	updateHandlers map[string]updateHandlerEntry
+	queryHandlers map[string]func(payloadJSON string) (resultJSON string, err error)
+
+	// Scope management for virtual object instances.
+	scopePrefix  string // "vo:<type>:<key>:" prefix, empty if no scope
+	scopeObjType string // current object type in scope
+	scopeInstKey string // current instance key in scope
+	scopeSet     bool   // true when scope is active
 }
 
 // NewHostCalls creates a HostCalls from a set of function implementations.
@@ -412,7 +604,12 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		durableAwaitSignals:       opts.DurableAwaitSignals,
 		createPromise:              opts.CreatePromise,
 		awaitPromise:               opts.AwaitPromise,
+		resolvePromise:             opts.ResolvePromise,
+		rejectPromise:              opts.RejectPromise,
 		durableDefer:              opts.DurableDefer,
+		durableDeferFunc:          opts.DurableDeferFunc,
+		workflowID:                opts.WorkflowID,
+		workflowRunID:             opts.RunID,
 		durableLog:                opts.DurableLog,
 		pollCancellation:          opts.PollCancellation,
 		pollSignal:                opts.PollSignal,
@@ -428,10 +625,14 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		minVersion:                opts.MinVersion,
 		setQueryState:             opts.SetQueryState,
 		registerUpdateHandler:     opts.RegisterUpdateHandler,
+		registerQueryHandler:     opts.RegisterQueryHandler,
+		handleQuery:              opts.HandleQuery,
 		runDetached:               opts.RunDetached,
 		now:                       opts.Now,
 		random:                    opts.Random,
 		pluginCall:                opts.PluginCall,
+		durableSend:               opts.DurableSend,
+		scheduleInvoke:            opts.ScheduleInvoke,
 	}
 }
 
@@ -471,7 +672,12 @@ type HostCallsOptions struct {
 	DurableAwaitSignals       func(signalNames []string, timeoutMs int64) (string, string, bool, error)
 	CreatePromise func(name string) (promiseID string, err error)
 	AwaitPromise  func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
+	ResolvePromise func(id, value string) error
+	RejectPromise  func(id, errMsg string) error
 	DurableDefer              func(description string) (string, error)
+	DurableDeferFunc          func(fn func()) (string, error)
+	WorkflowID                func() string
+	RunID                     func() string
 	DurableLog                func(message string)
 	PollCancellation          func() (bool, string)
 	PollSignal                func(signalName string) (string, bool, error)
@@ -487,10 +693,14 @@ type HostCallsOptions struct {
 	MinVersion                func() int
 	SetQueryState             func(key, value string)
 	RegisterUpdateHandler     func(name string)
+	RegisterQueryHandler     func(name string)
+	HandleQuery              func(name, payload string) (string, error)
 	RunDetached               func(fn func(h HostCalls) error) error
 	Now                       func() int64
 	Random                    func() int64
 	PluginCall                func(pluginName, functionName, inputJSON string) (string, error)
+	DurableSend               func(service, operation, requestJSON string) error
+	ScheduleInvoke            func(service, operation, requestJSON string, delayMs int64) error
 }
 
 // ---- Interface method implementations ----
@@ -675,6 +885,20 @@ func (h *hostCallsImpl) PluginCall(pluginName, functionName, inputJSON string) (
 	return "", fmt.Errorf("durable: PluginCall not initialized")
 }
 
+func (h *hostCallsImpl) DurableSend(service, operation, requestJSON string) error {
+	if h.durableSend == nil {
+		return errors.New("durable: DurableSend not initialized")
+	}
+	return h.durableSend(service, operation, requestJSON)
+}
+
+func (h *hostCallsImpl) ScheduleInvoke(service, operation, requestJSON string, delayMs int64) error {
+	if h.scheduleInvoke == nil {
+		return errors.New("durable: ScheduleInvoke not initialized")
+	}
+	return h.scheduleInvoke(service, operation, requestJSON, delayMs)
+}
+
 func (h *hostCallsImpl) DurableSleep(d time.Duration) {
 	h.DurableSleepMs(d.Milliseconds())
 }
@@ -721,11 +945,46 @@ func (h *hostCallsImpl) AwaitPromiseMs(promiseID string, timeoutMs int64) (resul
 	return h.AwaitPromise(promiseID, time.Duration(timeoutMs)*time.Millisecond)
 }
 
+func (h *hostCallsImpl) ResolvePromise(id, value string) error {
+	if h.resolvePromise == nil {
+		return errors.New("durable: ResolvePromise not initialized")
+	}
+	return h.resolvePromise(id, value)
+}
+
+func (h *hostCallsImpl) RejectPromise(id, errMsg string) error {
+	if h.rejectPromise == nil {
+		return errors.New("durable: RejectPromise not initialized")
+	}
+	return h.rejectPromise(id, errMsg)
+}
+
 func (h *hostCallsImpl) DurableDefer(description string) (string, error) {
 	if h.durableDefer == nil {
 		return "", errors.New("durable: DurableDefer not initialized")
 	}
 	return h.durableDefer(description)
+}
+
+func (h *hostCallsImpl) DurableDeferFunc(fn func()) (string, error) {
+	if h.durableDeferFunc == nil {
+		return "", errors.New("durable: DurableDeferFunc not initialized")
+	}
+	return h.durableDeferFunc(fn)
+}
+
+func (h *hostCallsImpl) WorkflowID() string {
+	if h.workflowID == nil {
+		return ""
+	}
+	return h.workflowID()
+}
+
+func (h *hostCallsImpl) RunID() string {
+	if h.workflowRunID == nil {
+		return ""
+	}
+	return h.workflowRunID()
 }
 
 func (h *hostCallsImpl) DurableLog(message string) {
@@ -848,33 +1107,102 @@ func (h *hostCallsImpl) SetQueryState(key, value string) {
 	h.stateMap[key] = value
 }
 
+// scopedKey returns the internally-stored key, applying the current
+// virtual-object scope prefix when one is active.
+func (h *hostCallsImpl) scopedKey(key string) string {
+	if h.scopeSet && h.scopePrefix != "" {
+		return h.scopePrefix + key
+	}
+	return key
+}
+
+// SetScope sets the state key prefix for virtual object instances.
+// All subsequent SetState/GetState/etc calls are automatically prefixed
+// with "vo:<objectType>:<instanceKey>:". Returns the previous scope
+// prefix for stack-style save/restore.
+func (h *hostCallsImpl) SetScope(objectType, instanceKey string) (previousScope string) {
+	if h.scopeSet {
+		previousScope = h.scopePrefix
+	}
+	if objectType == "" && instanceKey == "" {
+		h.scopeSet = false
+		h.scopePrefix = ""
+		h.scopeObjType = ""
+		h.scopeInstKey = ""
+	} else {
+		h.scopeSet = true
+		h.scopeObjType = objectType
+		h.scopeInstKey = instanceKey
+		h.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
+	}
+	return
+}
+
+// GetScope returns the current (objectType, instanceKey) or ("", "")
+// if no scope is set.
+func (h *hostCallsImpl) GetScope() (objectType, instanceKey string) {
+	if !h.scopeSet {
+		return "", ""
+	}
+	return h.scopeObjType, h.scopeInstKey
+}
+
+// ClearScope removes the current scope and returns the previous scope
+// prefix (empty string if none was set).
+func (h *hostCallsImpl) ClearScope() (previousScope string) {
+	if h.scopeSet {
+		previousScope = h.scopePrefix
+	}
+	h.scopeSet = false
+	h.scopePrefix = ""
+	h.scopeObjType = ""
+	h.scopeInstKey = ""
+	return
+}
+
+// UUID returns a deterministic UUID scoped to the current workflow
+// and the given seed. Same seed always produces the same UUID for
+// this workflow instance.
+func (h *hostCallsImpl) UUID(seed string) string {
+	wfID := h.WorkflowID()
+	data := wfID + ":" + seed
+	hash := sha256.Sum256([]byte(data))
+	// Format as UUIDv5-like value (first 16 bytes of SHA-256, version bits set).
+	hash[6] = (hash[6] & 0x0f) | 0x50 // Version 5
+	hash[8] = (hash[8] & 0x3f) | 0x80 // Variant 1
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
+}
+
 func (h *hostCallsImpl) SetState(key string, value interface{}) {
+	sk := h.scopedKey(key)
 	if h.stateMap == nil {
 		h.stateMap = make(map[string]interface{})
 	}
 	// Store as json.RawMessage so GetState can unmarshal directly.
 	data, err := json.Marshal(value)
 	if err != nil {
-		h.stateMap[key] = value // fallback to raw value
+		h.stateMap[sk] = value // fallback to raw value
 	} else {
-		h.stateMap[key] = json.RawMessage(data)
+		h.stateMap[sk] = json.RawMessage(data)
 	}
 	// Persist via existing set_query_state mechanism.
 	if h.setQueryState != nil {
 		if data == nil {
 			data, _ = json.Marshal(value)
 		}
-		h.setQueryState(key, string(data))
+		h.setQueryState(sk, string(data))
 	}
 }
 
 func (h *hostCallsImpl) GetState(key string, result interface{}) error {
+	sk := h.scopedKey(key)
 	if h.stateMap == nil {
-		return errors.New("durable: state not found for key: " + key)
+		return errors.New("durable: state not found for key: " + sk)
 	}
-	val, ok := h.stateMap[key]
+	val, ok := h.stateMap[sk]
 	if !ok {
-		return errors.New("durable: state key not found: " + key)
+		return errors.New("durable: state key not found: " + sk)
 	}
 	// If val is already json.RawMessage, unmarshal directly.
 	if raw, ok := val.(json.RawMessage); ok {
@@ -889,11 +1217,12 @@ func (h *hostCallsImpl) GetState(key string, result interface{}) error {
 }
 
 func (h *hostCallsImpl) DeleteState(key string) {
+	sk := h.scopedKey(key)
 	if h.stateMap != nil {
-		delete(h.stateMap, key)
+		delete(h.stateMap, sk)
 	}
 	if h.setQueryState != nil {
-		h.setQueryState(key, "")
+		h.setQueryState(sk, "")
 	}
 }
 
@@ -901,16 +1230,17 @@ func (h *hostCallsImpl) HasState(key string) bool {
 	if h.stateMap == nil {
 		return false
 	}
-	_, ok := h.stateMap[key]
+	_, ok := h.stateMap[h.scopedKey(key)]
 	return ok
 }
 
 func (h *hostCallsImpl) IncrState(key string, delta int64) int64 {
+	sk := h.scopedKey(key)
 	if h.stateMap == nil {
 		h.stateMap = make(map[string]interface{})
 	}
 	var current int64
-	if val, ok := h.stateMap[key]; ok {
+	if val, ok := h.stateMap[sk]; ok {
 		switch v := val.(type) {
 		case int64:
 			current = v
@@ -923,12 +1253,12 @@ func (h *hostCallsImpl) IncrState(key string, delta int64) int64 {
 		}
 	}
 	current += delta
-	h.stateMap[key] = current
+	h.stateMap[sk] = current
 	// Persist via existing set_query_state mechanism.
 	if h.setQueryState != nil {
 		data, err := json.Marshal(current)
 		if err == nil {
-			h.setQueryState(key, string(data))
+			h.setQueryState(sk, string(data))
 		}
 	}
 	return current
@@ -938,10 +1268,16 @@ func (h *hostCallsImpl) ListState(prefix string) []string {
 	if h.stateMap == nil {
 		return nil
 	}
+	sk := h.scopedKey(prefix)
 	var keys []string
 	for k := range h.stateMap {
-		if prefix == "" || strings.HasPrefix(k, prefix) {
-			keys = append(keys, k)
+		if sk == "" || strings.HasPrefix(k, sk) {
+			// Strip scope prefix from returned key names.
+			if h.scopeSet && h.scopePrefix != "" && strings.HasPrefix(k, h.scopePrefix) {
+				keys = append(keys, k[len(h.scopePrefix):])
+			} else {
+				keys = append(keys, k)
+			}
 		}
 	}
 	return keys
@@ -998,6 +1334,28 @@ func RegisterTypedUpdateHandler[TReq, TResp any](h HostCalls, name string, handl
 			return validator(req)
 		},
 	)
+}
+
+func (h *hostCallsImpl) RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error)) {
+	if h.queryHandlers == nil {
+		h.queryHandlers = make(map[string]func(payloadJSON string) (resultJSON string, err error))
+	}
+	h.queryHandlers[name] = handler
+	if h.registerQueryHandler != nil {
+		h.registerQueryHandler(name)
+	}
+}
+
+// HandleQuery invokes a registered query handler by name with the given payload.
+func (h *hostCallsImpl) HandleQuery(name, payload string) (string, error) {
+	if h.handleQuery != nil {
+		return h.handleQuery(name, payload)
+	}
+	handler, ok := h.queryHandlers[name]
+	if !ok {
+		return "", fmt.Errorf("durable: no query handler registered for %q", name)
+	}
+	return handler(payload)
 }
 
 func (h *hostCallsImpl) RunDetached(fn func(h HostCalls) error) error {
@@ -1154,6 +1512,11 @@ func (s *Saga) Run(h HostCalls) error {
 		h.LogKV("saga: executing step", "step", i, "description", step.Description)
 		_, err := step.Forward(h)
 		if err != nil {
+			// Only compensate on TerminalError (non-retryable). For retryable
+			// errors, the caller should retry the entire saga.
+			if !IsTerminalError(err) {
+				return fmt.Errorf("saga: %w", err)
+			}
 			h.LogKV("saga: step failed, compensating",
 				"step", i,
 				"description", step.Description,

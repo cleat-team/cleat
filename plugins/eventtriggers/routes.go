@@ -129,129 +129,17 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Insert event with idempotency — ON CONFLICT DO NOTHING prevents
-	// duplicate processing of the same event ID.
-	result, err := p.db.ExecContext(r.Context(), `
-		INSERT INTO ingested_events (id, tenant_id, event_type, event_data, received_at, processed)
-		VALUES ($1, $2, $3, $4, NOW(), false)
-		ON CONFLICT (id) DO NOTHING
-	`, eventID, tid, req.EventType, string(eventDataJSON))
+	// Dispatch through the core publish pipeline — stores the event,
+	// matches subscriptions, starts workflows, and signals awaiters.
+	matched, err := PublishEvent(r.Context(), p.db, p.logger, p.env, eventID, tid, req.EventType, req.Data)
 	if err != nil {
-		p.logger.Error("event-triggers: store event", "error", err)
-		p.writeError(w, 500, "failed to store event")
-		return
+		p.logger.Error("event-triggers: publish event", "error", err)
 	}
-
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		// Event already ingested — idempotent return.
-		p.writeJSON(w, 200, publishEventResponse{Status: "duplicate"})
-		return
-	}
-
-	p.logger.Info("event-triggers: event stored",
-		"event_id", eventID,
-		"tenant", tid,
-		"event_type", req.EventType,
-	)
-
-	// Query matching subscriptions and dispatch workflows.
-	matched, err := p.triggerMatchingWorkflows(r.Context(), eventID, tid, req.EventType, req.Data)
-	if err != nil {
-		p.logger.Error("event-triggers: query subscriptions", "error", err)
-		p.db.ExecContext(r.Context(), `UPDATE ingested_events SET error_msg = $1 WHERE id = $2`,
-			"failed to query subscriptions: "+err.Error(), eventID)
-	}
-
-	// Broadcast a signal to any workflows awaiting this event type so they
-	// wake up promptly instead of waiting for their next poll cycle.
-	eventDataJSONStr := string(eventDataJSON)
-	p.signalAwaiters(r.Context(), tid, req.EventType, eventDataJSONStr)
 
 	p.writeJSON(w, 200, publishEventResponse{
 		Status:  "published",
 		Matched: matched,
 	})
-}
-
-// triggerMatchingWorkflows queries subscriptions matching the event and starts
-// a workflow for each one whose filter passes. Returns the number of workflows
-// started and any error from the subscription query itself (individual dispatch
-// errors are logged but do not halt processing).
-func (p *Plugin) triggerMatchingWorkflows(ctx context.Context, eventID uuid.UUID, tenantID uuid.UUID, eventType string, eventData map[string]interface{}) (int, error) {
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, enabled, created_at, max_retries
-		FROM event_subscriptions
-		WHERE tenant_id = $1 AND event_type = $2 AND enabled = true
-	`, tenantID, eventType)
-	if err != nil {
-		return 0, fmt.Errorf("query subscriptions: %w", err)
-	}
-	defer rows.Close()
-
-	matched := 0
-	for rows.Next() {
-		var (
-			sub              subscriptionJSON
-			inputTemplateRaw []byte
-		)
-		if err := rows.Scan(&sub.ID, &sub.TenantID, &sub.EventType, &sub.DefName,
-			&sub.EntryPoint, &inputTemplateRaw, &sub.FilterExpr, &sub.Enabled, &sub.CreatedAt, &sub.MaxRetries); err != nil {
-			p.logger.Error("event-triggers: scan subscription", "error", err)
-			continue
-		}
-		sub.InputTemplate = json.RawMessage(inputTemplateRaw)
-
-		// Evaluate filter expression.
-		if sub.FilterExpr != "" && sub.FilterExpr != "true" {
-			ok, err := EvaluateFilter(sub.FilterExpr, eventData)
-			if err != nil {
-				p.logger.Error("event-triggers: filter evaluation error",
-					"subscription_id", sub.ID,
-					"filter_expr", sub.FilterExpr,
-					"error", err,
-				)
-				continue
-			}
-			if !ok {
-				p.logger.Debug("event-triggers: filter did not match",
-					"subscription_id", sub.ID,
-					"event_id", eventID,
-				)
-				continue
-			}
-		}
-
-		// Build workflow input from input_template merged with event data.
-		inputJSON, err := mergeInputAndTemplate(sub.InputTemplate, eventData)
-		if err != nil {
-			p.logger.Error("event-triggers: build workflow input", "error", err)
-			continue
-		}
-
-		if p.env != nil && p.env.StartWorkflow != nil {
-			runID, err := p.env.StartWorkflow(ctx, sub.DefName, inputJSON)
-			if err != nil {
-				p.logger.Error("event-triggers: start workflow failed",
-					"def_name", sub.DefName,
-					"event_id", eventID,
-					"error", err,
-				)
-				continue
-			}
-			matched++
-			p.logger.Info("event-triggers: workflow started",
-				"def_name", sub.DefName,
-				"run_id", runID,
-				"event_id", eventID,
-			)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return matched, err
-	}
-
-	return matched, nil
 }
 
 // mergeInputAndTemplate builds the workflow input JSON by starting with the
@@ -500,7 +388,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-dispatch to matching subscriptions.
-	matched, err := p.triggerMatchingWorkflows(r.Context(), eventID, tid, eventType, eventData)
+	matched, err := triggerMatchingWorkflows(r.Context(), p.db, p.logger, p.env, eventID, tid, eventType, eventData)
 	if err != nil {
 		p.logger.Error("event-triggers: retry dispatch", "error", err)
 		p.db.ExecContext(r.Context(), `
@@ -512,7 +400,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 
 	// Also signal any awaiting workflows so they wake up promptly.
 	if len(eventDataRaw) > 0 {
-		p.signalAwaiters(r.Context(), tid, eventType, string(eventDataRaw))
+		signalAwaiters(r.Context(), p.db, p.logger, p.env, tid, eventType, string(eventDataRaw))
 	}
 
 	if matched > 0 {

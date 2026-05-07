@@ -137,6 +137,10 @@ class PromiseResult:
     timed_out: bool
     """``True`` if the timeout expired before the promise resolved."""
 
+    rejected: bool = False
+    """``True`` if the promise was rejected (i.e., the external caller
+    called ``reject_promise`` instead of ``resolve_promise``)."""
+
 
 # ========================================================================
 # 22 WASM host import stubs
@@ -432,8 +436,9 @@ def _import_durable_create_promise(
     name_len: int,
     id_out_ptr: int,
     id_out_max: int,
+    ttl_ms: int = 0,
 ) -> int:
-    """Stub for WASM import ``(import "env" "durable_create_promise") (param i32 i32 i32 i32) (result i64)``."""
+    """Stub for WASM import ``(import "env" "durable_create_promise") (param i32 i32 i32 i32 i64) (result i64)``."""
     raise NotImplementedError(
         "durable_create_promise can only be called within a cleat WASM runtime."
     )
@@ -455,6 +460,36 @@ def _import_durable_await_promise(
     )
 
 
+# -- 22. durable_resolve_promise -----------------------------------------------
+
+
+def _import_durable_resolve_promise(
+    id_ptr: int,
+    id_len: int,
+    value_ptr: int,
+    value_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "durable_resolve_promise") (param i32 i32 i32 i32) (result i64)``."""
+    raise NotImplementedError(
+        "durable_resolve_promise can only be called within a cleat WASM runtime."
+    )
+
+
+# -- 23. durable_reject_promise ------------------------------------------------
+
+
+def _import_durable_reject_promise(
+    id_ptr: int,
+    id_len: int,
+    error_ptr: int,
+    error_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "durable_reject_promise") (param i32 i32 i32 i32) (result i64)``."""
+    raise NotImplementedError(
+        "durable_reject_promise can only be called within a cleat WASM runtime."
+    )
+
+
 # -- 22. durable_register_update_handler --------------------------------------
 
 
@@ -462,6 +497,77 @@ def _import_durable_register_update_handler(name_ptr: int, name_len: int) -> int
     """Stub for WASM import ``(import "env" "durable_register_update_handler") (param i32 i32) (result i64)``."""
     raise NotImplementedError(
         "durable_register_update_handler can only be called within a cleat WASM runtime."
+    )
+
+
+# -- 23. durable_workflow_id ---------------------------------------------------
+
+
+def _import_durable_workflow_id(
+    id_ptr: int,
+    id_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "durable_workflow_id") (param i32 i32) (result i64)``."""
+    raise NotImplementedError(
+        "durable_workflow_id can only be called within a cleat WASM runtime."
+    )
+
+
+# -- 24. durable_run_id --------------------------------------------------------
+
+
+def _import_durable_run_id(
+    id_ptr: int,
+    id_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "durable_run_id") (param i32 i32) (result i64)``."""
+    raise NotImplementedError(
+        "durable_run_id can only be called within a cleat WASM runtime."
+    )
+
+
+# -- 25. durable_send ---------------------------------------------------------
+
+
+def _import_durable_send(
+    svc_ptr: int,
+    svc_len: int,
+    op_ptr: int,
+    op_len: int,
+    req_ptr: int,
+    req_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "durable_send") (param i32 i32 i32 i32 i32 i32) (result i64)``."""
+    raise NotImplementedError(
+        "durable_send can only be called within a cleat WASM runtime."
+    )
+
+
+# -- 26. durable_schedule_invoke ----------------------------------------------
+
+
+def _import_durable_schedule_invoke(
+    svc_ptr: int,
+    svc_len: int,
+    op_ptr: int,
+    op_len: int,
+    req_ptr: int,
+    req_len: int,
+    delay_ms: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "durable_schedule_invoke") (param i32 i32 i32 i32 i32 i32 i64) (result i64)``."""
+    raise NotImplementedError(
+        "durable_schedule_invoke can only be called within a cleat WASM runtime."
+    )
+
+
+# -- 27. durable_register_query_handler -------------------------------------------
+
+
+def _import_durable_register_query_handler(name_ptr: int, name_len: int) -> int:
+    """Stub for WASM import ``(import "env" "durable_register_query_handler") (param i32 i32) (result i64)``."""
+    raise NotImplementedError(
+        "durable_register_query_handler can only be called within a cleat WASM runtime."
     )
 
 
@@ -483,6 +589,11 @@ class HostCalls:
         * AssemblyScript: ``packages/cleat-as/assembly/host-calls.ts``
         * Java: ``crates/durable-java/src/main/java/cleat/HostCalls.java``
     """
+
+    def __init__(self) -> None:
+        """Initialize the HostCalls instance."""
+        self._update_handlers: dict[str, tuple[Callable[[str], str], Optional[Callable[[str], bool]]]] = {}
+        self._query_handlers: dict[str, Callable[[str], str]] = {}
 
     # --------------------------------------------------------------------
     # Internal helpers
@@ -535,7 +646,47 @@ class HostCalls:
         return _import_durable_random()
 
     # --------------------------------------------------------------------
-    # 3. version — workflow definition version
+    # 4. current_workflow_id — get workflow identity
+    # --------------------------------------------------------------------
+
+    def current_workflow_id(self) -> str:
+        """Get the current workflow's unique identifier.
+
+        Returns
+        -------
+        str
+            The workflow ID string.
+        """
+        result = _import_durable_workflow_id(OUTPUT_OFFSET, OUT_BUF_SIZE)
+        id_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"current_workflow_id failed with error code: {err_code}"
+            )
+        return read_string(OUTPUT_OFFSET, id_len)
+
+    # --------------------------------------------------------------------
+    # 5. current_run_id — get current run identity
+    # --------------------------------------------------------------------
+
+    def current_run_id(self) -> str:
+        """Get the current workflow run's unique identifier.
+
+        Returns
+        -------
+        str
+            The run ID string.
+        """
+        result = _import_durable_run_id(OUTPUT_OFFSET, OUT_BUF_SIZE)
+        id_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"current_run_id failed with error code: {err_code}"
+            )
+        return read_string(OUTPUT_OFFSET, id_len)
+
+    # --------------------------------------------------------------------
+    # 6. version — workflow definition version
     # --------------------------------------------------------------------
 
     def version(self) -> int:
@@ -1309,7 +1460,7 @@ class HostCalls:
     # 23. create_promise — create a durable promise
     # --------------------------------------------------------------------
 
-    def create_promise(self, name: str) -> str:
+    def create_promise(self, name: str, ttl_ms: Optional[int] = None) -> str:
         """Create a durable promise with the given name.
 
         The host allocates a promise ID that can be used to resolve or
@@ -1319,6 +1470,10 @@ class HostCalls:
         ----------
         name : str
             The promise name.
+        ttl_ms : int or None
+            Optional time-to-live in milliseconds.  The promise is
+            automatically garbage-collected after this duration.
+            ``None`` means no TTL (host default).
 
         Returns
         -------
@@ -1337,6 +1492,7 @@ class HostCalls:
             name_len,
             OUTPUT_OFFSET,
             OUT_BUF_SIZE,
+            ttl_ms or 0,
         )
 
         id_len, err_code = decode_simple_result(result)
@@ -1364,7 +1520,7 @@ class HostCalls:
         Returns
         -------
         PromiseResult
-            The resolved value and timeout indicator.
+            The resolved value, timeout indicator, and rejection flag.
 
         Raises
         ------
@@ -1381,7 +1537,7 @@ class HostCalls:
             OUT_BUF_SIZE,
         )
 
-        result_len, timed_out, err_code = decode_await_promise_result(result)
+        result_len, timed_out, rejected, err_code = decode_await_promise_result(result)
         if err_code != 0:
             raise RuntimeError(
                 f"await_promise failed with error code: {err_code}"
@@ -1390,25 +1546,231 @@ class HostCalls:
         result_str = (
             read_string(OUTPUT_OFFSET, result_len) if result_len > 0 else ""
         )
-        return PromiseResult(result=result_str, timed_out=timed_out)
+        return PromiseResult(
+            result=result_str,
+            timed_out=timed_out,
+            rejected=rejected,
+        )
+
+    # --------------------------------------------------------------------
+    # 25. resolve_promise — resolve a durable promise
+    # --------------------------------------------------------------------
+
+    def resolve_promise(self, promise_id: str, value: str) -> None:
+        """Resolve a durable promise with a value.
+
+        External callers can use this to fulfill a promise that the workflow
+        is awaiting.
+
+        Parameters
+        ----------
+        promise_id : str
+            The promise ID to resolve.
+        value : str
+            The JSON value to resolve the promise with.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        id_len = write_string(SCRATCH_BASE, promise_id, OUT_BUF_SIZE)
+        val_offset = SCRATCH_BASE + id_len
+        remaining = OUT_BUF_SIZE - id_len
+        val_len = write_string(val_offset, value, remaining)
+
+        result = _import_durable_resolve_promise(
+            SCRATCH_BASE,
+            id_len,
+            val_offset,
+            val_len,
+        )
+
+        _, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"resolve_promise failed with error code: {err_code}"
+            )
+
+    # --------------------------------------------------------------------
+    # 26. reject_promise — reject a durable promise
+    # --------------------------------------------------------------------
+
+    def reject_promise(self, promise_id: str, error: str) -> None:
+        """Reject a durable promise with an error.
+
+        External callers can use this to reject a promise that the workflow
+        is awaiting.  The workflow will receive the promise result with
+        ``rejected=True``.
+
+        Parameters
+        ----------
+        promise_id : str
+            The promise ID to reject.
+        error : str
+            The error message to reject the promise with.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        id_len = write_string(SCRATCH_BASE, promise_id, OUT_BUF_SIZE)
+        err_offset = SCRATCH_BASE + id_len
+        remaining = OUT_BUF_SIZE - id_len
+        err_len = write_string(err_offset, error, remaining)
+
+        result = _import_durable_reject_promise(
+            SCRATCH_BASE,
+            id_len,
+            err_offset,
+            err_len,
+        )
+
+        _, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"reject_promise failed with error code: {err_code}"
+            )
 
     # --------------------------------------------------------------------
     # 25. register_update_handler — register an update handler
     # --------------------------------------------------------------------
 
-    def register_update_handler(self, name: str) -> None:
+    def register_update_handler(
+        self,
+        name: str,
+        handler: Callable[[str], str],
+        validator: Optional[Callable[[str], bool]] = None,
+    ) -> None:
         """Register a handler for update calls on this workflow.
 
         Update handlers allow external clients to send update requests to
-        the workflow while it is executing.
+        the workflow while it is executing.  The handler receives a JSON
+        payload string and returns a JSON result string.  An optional
+        validator can be provided to validate the payload before the
+        handler is invoked.
 
         Parameters
         ----------
         name : str
             The update handler name.
+        handler : Callable[[str], str]
+            Handler function that takes a JSON payload string and returns
+            a JSON result string.
+        validator : Callable[[str], bool] or None
+            Optional validator function that takes a JSON payload string
+            and returns True if the payload is valid.
         """
+        self._update_handlers[name] = (handler, validator)
         name_len = write_string(SCRATCH_BASE, name, OUT_BUF_SIZE)
         _import_durable_register_update_handler(SCRATCH_BASE, name_len)
+
+    def _handle_update(self, name: str, payload: str) -> str:
+        """Internal: look up and invoke a registered update handler.
+
+        Parameters
+        ----------
+        name : str
+            The update handler name.
+        payload : str
+            The JSON payload string.
+
+        Returns
+        -------
+        str
+            The handler's JSON result string.
+
+        Raises
+        ------
+        RuntimeError
+            If no handler is registered for the given name.
+        """
+        entry = self._update_handlers.get(name)
+        if entry is None:
+            raise RuntimeError(
+                f"No update handler registered for '{name}'"
+            )
+        handler, _ = entry
+        return handler(payload)
+
+    def _validate_update(self, name: str, payload: str) -> bool:
+        """Internal: look up and invoke a registered update validator.
+
+        Parameters
+        ----------
+        name : str
+            The update handler name.
+        payload : str
+            The JSON payload string.
+
+        Returns
+        -------
+        bool
+            True if the payload is valid (or no validator is registered).
+            False if the validator rejects the payload.
+        """
+        entry = self._update_handlers.get(name)
+        if entry is None:
+            return False
+        _, validator = entry
+        if validator is None:
+            return True
+        return validator(payload)
+
+    # --------------------------------------------------------------------
+    # 27. register_query_handler — register a read-only query handler
+    # --------------------------------------------------------------------
+
+    def register_query_handler(
+        self,
+        name: str,
+        handler: Callable[[str], str],
+    ) -> None:
+        """Register a read-only handler for query calls on this workflow.
+
+        Query handlers allow external clients to read workflow state without
+        journaling.  Unlike update handlers, query handlers are deterministic
+        and read-only.
+
+        Parameters
+        ----------
+        name : str
+            The query handler name.
+        handler : Callable[[str], str]
+            Handler function that takes a JSON payload string and returns
+            a JSON result string.
+        """
+        self._query_handlers[name] = handler
+        name_len = write_string(SCRATCH_BASE, name, OUT_BUF_SIZE)
+        _import_durable_register_query_handler(SCRATCH_BASE, name_len)
+
+    def _handle_query(self, name: str, payload: str) -> str:
+        """Internal: look up and invoke a registered query handler.
+
+        Parameters
+        ----------
+        name : str
+            The query handler name.
+        payload : str
+            The JSON payload string.
+
+        Returns
+        -------
+        str
+            The handler's JSON result string.
+
+        Raises
+        ------
+        RuntimeError
+            If no handler is registered for the given name.
+        """
+        handler = self._query_handlers.get(name)
+        if handler is None:
+            raise RuntimeError(
+                f"No query handler registered for '{name}'"
+            )
+        return handler(payload)
 
     # --------------------------------------------------------------------
     # 26. durable_defer — register deferred cleanup
@@ -1503,7 +1865,94 @@ class HostCalls:
         fn(self)
 
     # --------------------------------------------------------------------
-    # 29. plugin_call — call a plugin host function
+    # 29. durable_send — fire-and-forget
+    # --------------------------------------------------------------------
+
+    def durable_send(self, service: str, operation: str, request: Any) -> None:
+        """Send a fire-and-forget request to an external service.
+
+        Unlike :meth:`durable_call`, this method does not wait for a
+        response.  The request is enqueued and the workflow continues
+        immediately.
+
+        Parameters
+        ----------
+        service : str
+            Service name (e.g., ``"email"``, ``"notification"``).
+        operation : str
+            Operation name (e.g., ``"send"``, ``"notify"``).
+        request : Any
+            Request payload.  Dicts are JSON-serialised automatically.
+        """
+        req_str = self._marshal(request)
+
+        svc_len = write_string(SCRATCH_BASE, service, OUT_BUF_SIZE)
+        op_offset = SCRATCH_BASE + svc_len
+        remaining = OUT_BUF_SIZE - svc_len
+        op_len = write_string(op_offset, operation, remaining)
+        req_offset = op_offset + op_len
+        remaining -= op_len
+        req_len = write_string(req_offset, req_str, remaining)
+
+        _import_durable_send(
+            SCRATCH_BASE,
+            svc_len,
+            op_offset,
+            op_len,
+            req_offset,
+            req_len,
+        )
+
+    # --------------------------------------------------------------------
+    # 30. schedule_invoke — delayed one-shot
+    # --------------------------------------------------------------------
+
+    def schedule_invoke(
+        self,
+        service: str,
+        operation: str,
+        request: Any,
+        delay_ms: int,
+    ) -> None:
+        """Schedule a delayed one-shot invocation.
+
+        The request is enqueued and will be delivered to the service
+        after the specified delay.  The workflow continues immediately
+        without waiting for the invocation to complete.
+
+        Parameters
+        ----------
+        service : str
+            Service name.
+        operation : str
+            Operation name.
+        request : Any
+            Request payload.  Dicts are JSON-serialised automatically.
+        delay_ms : int
+            Delay in milliseconds before the invocation is sent.
+        """
+        req_str = self._marshal(request)
+
+        svc_len = write_string(SCRATCH_BASE, service, OUT_BUF_SIZE)
+        op_offset = SCRATCH_BASE + svc_len
+        remaining = OUT_BUF_SIZE - svc_len
+        op_len = write_string(op_offset, operation, remaining)
+        req_offset = op_offset + op_len
+        remaining -= op_len
+        req_len = write_string(req_offset, req_str, remaining)
+
+        _import_durable_schedule_invoke(
+            SCRATCH_BASE,
+            svc_len,
+            op_offset,
+            op_len,
+            req_offset,
+            req_len,
+            delay_ms,
+        )
+
+    # --------------------------------------------------------------------
+    # 31. plugin_call — call a plugin host function
     # --------------------------------------------------------------------
 
     def plugin_call(

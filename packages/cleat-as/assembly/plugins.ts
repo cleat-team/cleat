@@ -398,4 +398,102 @@ export class Plugins {
     let r = outcome.response;
     return new AwaitWebhookResult(jsonBool(r, "found"), jsonStr(r, "id"), jsonStr(r, "event_type"), jsonStr(r, "payload"), jsonStr(r, "received_at"));
   }
+
+  // ── llm ─────────────────────────────────────
+
+  /**
+   * Result of an LLM chat completion.
+   */
+  chat(model: string, messagesJson: string, temperature: f64 = 0.0, maxTokens: i32 = 0): LlmChatResult {
+    let input = '{"model":"' + model + '","messages":' + messagesJson;
+    if (temperature != 0.0) input += ',"temperature":' + temperature.toString();
+    if (maxTokens > 0) input += ',"max_tokens":' + maxTokens.toString();
+    input += '}';
+    let outcome = this.host.pluginCall("llm", "chat", input);
+    if (outcome.isError) return new LlmChatResult("", "", 0, 0, 0, outcome.error);
+    let r = outcome.response;
+    let content = jsonStr(r, "content");
+    let model_used = jsonStr(r, "model");
+    let prompt_tokens = jsonI64(r, "prompt_tokens") as i32;
+    let completion_tokens = jsonI64(r, "completion_tokens") as i32;
+    let cost = jsonI64(r, "cost") as i32;
+    let error = jsonStr(r, "error");
+    return new LlmChatResult(content, model_used, prompt_tokens, completion_tokens, cost, error);
+  }
+
+  /**
+   * Generate an embedding via the LLM plugin.
+   *
+   * @param provider   - LLM provider name (e.g., "openai").
+   * @param model      - Model name for embeddings.
+   * @param inputJson  - JSON array of input strings to embed.
+   * @returns The embedding result with data and usage info.
+   */
+  embed(provider: string, model: string, inputJson: string): EmbedResult {
+    let input = '{"provider":"' + provider + '","model":"' + model + '","input":' + inputJson + '}';
+    let outcome = this.host.pluginCall("llm", "embed", input);
+    if (outcome.isError) return new EmbedResult("", 0, outcome.error);
+    let r = outcome.response;
+    let data = jsonStr(r, "data");
+    let totalTokens = jsonI64(r, "total_tokens") as i32;
+    let error = jsonStr(r, "error");
+    return new EmbedResult(data, totalTokens, error);
+  }
+
+  /**
+   * List available models for an LLM provider.
+   *
+   * @param provider - Optional provider name. If empty, lists all configured providers.
+   * @returns The list models result with model info.
+   */
+  listModels(provider: string = ""): string {
+    let input = '{';
+    if (provider.length > 0) input += '"provider":"' + provider + '"';
+    input += '}';
+    let outcome = this.host.pluginCall("llm", "list_models", input);
+    if (outcome.isError) return '{"error":"' + outcome.error + '"}';
+    return outcome.response;
+  }
+}
+
+// ── LLM result types ─────────────────────────
+
+/** Result of an LLM chat completion. */
+export class LlmChatResult {
+  constructor(
+    /** The generated response content text. */
+    public readonly content: string,
+    /** The model used for completion. */
+    public readonly model: string,
+    /** Number of prompt tokens used. */
+    public readonly promptTokens: i32,
+    /** Number of completion tokens used. */
+    public readonly completionTokens: i32,
+    /** Approximate cost of the request in micro-dollars. */
+    public readonly cost: i32,
+    /** Error message, or empty on success. */
+    public readonly error: string,
+  ) {}
+
+  /** Returns true when this result carries an error. */
+  get isError(): bool {
+    return this.error.length > 0;
+  }
+}
+
+/** Result of an LLM embedding request. */
+export class EmbedResult {
+  constructor(
+    /** JSON string of embedding data (array of {embedding, index} objects). */
+    public readonly data: string,
+    /** Total token count used. */
+    public readonly totalTokens: i32,
+    /** Error message, or empty on success. */
+    public readonly error: string,
+  ) {}
+
+  /** Returns true when this result carries an error. */
+  get isError(): bool {
+    return this.error.length > 0;
+  }
 }

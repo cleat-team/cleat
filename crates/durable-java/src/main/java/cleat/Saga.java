@@ -63,10 +63,98 @@ public class Saga {
         }
     }
 
-    private final List<Step> steps = new ArrayList<>();
+    private final List<Step> steps;
+
+    /**
+     * Construct a new Saga with no steps.
+     * <p>
+     * Steps can be added via {@link #addStep(String, SagaFunction, SagaCompensator)}
+     * for chaining, or use {@link #builder()} for the builder pattern.
+     */
+    public Saga() {
+        this.steps = new ArrayList<>();
+    }
+
+    /**
+     * Construct a new Saga with the given steps.
+     *
+     * @param steps the steps for this saga
+     */
+    private Saga(List<Step> steps) {
+        this.steps = new ArrayList<>(steps);
+    }
+
+    // ========================================================================
+    // Builder
+    // ========================================================================
+
+    /**
+     * Create a new {@link SagaBuilder} for constructing a Saga.
+     * <p>
+     * Usage:
+     * <pre>{@code
+     * Saga saga = Saga.builder()
+     *     .addStep("bookFlight",
+     *         h -> bookFlight(h),
+     *         h -> cancelFlight(h))
+     *     .addStep("chargePayment",
+     *         h -> chargePayment(h),
+     *         h -> refundPayment(h))
+     *     .build();
+     * saga.execute(h);
+     * }</pre>
+     *
+     * @return a new {@link SagaBuilder}
+     */
+    public static SagaBuilder builder() {
+        return new SagaBuilder();
+    }
+
+    /**
+     * Builder for constructing a {@link Saga} with a fluent API.
+     */
+    public static class SagaBuilder {
+        private final List<Step> steps = new ArrayList<>();
+
+        private SagaBuilder() {
+        }
+
+        /**
+         * Add a step to the saga.
+         *
+         * @param description human-readable description of the step
+         * @param forward     the forward action
+         * @param compensate  the compensating action
+         * @return {@code this} for chaining
+         */
+        public SagaBuilder addStep(String description, SagaFunction forward, SagaCompensator compensate) {
+            steps.add(new Step(description, forward, compensate));
+            return this;
+        }
+
+        /**
+         * Build the {@link Saga} with the configured steps.
+         *
+         * @return a new {@link Saga} instance
+         */
+        public Saga build() {
+            return new Saga(steps);
+        }
+    }
+
+    // ========================================================================
+    // Direct step addition (chaining, non-builder style)
+    // ========================================================================
 
     /**
      * Add a step to the saga.
+     * <p>
+     * This method supports the direct chaining style:
+     * <pre>{@code
+     * Saga saga = new Saga()
+     *     .addStep("desc", fwd, cmp)
+     *     .addStep("desc2", fwd2, cmp2);
+     * }</pre>
      *
      * @param description human-readable description of the step
      * @param forward     the forward action
@@ -76,6 +164,25 @@ public class Saga {
     public Saga addStep(String description, SagaFunction forward, SagaCompensator compensate) {
         steps.add(new Step(description, forward, compensate));
         return this;
+    }
+
+    // ========================================================================
+    // Execution
+    // ========================================================================
+
+    /**
+     * Execute all forward steps in order.  If any step throws an exception,
+     * all previously completed steps are compensated in reverse order.
+     * <p>
+     * Alias for {@link #run(HostCalls)}.
+     *
+     * @param h the HostCalls instance for this workflow execution
+     * @throws Exception if a forward step fails and compensation completes
+     * @throws RuntimeException if compensation itself fails (the original
+     *         forward exception is added as a suppressed exception)
+     */
+    public void execute(HostCalls h) throws Exception {
+        run(h);
     }
 
     /**

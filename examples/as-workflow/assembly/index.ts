@@ -4,9 +4,12 @@
 //   --initialMemory 170 -o dist/workflow.wasm
 //   --transform ./node_modules/@cleat/transform/index.js
 //
-// Uses direct ABI exports (no @durableEntry decorator) because --runtime stub
-// does not support JSON.parse<T>() or try/catch which the transformed wrappers
-// would require.  Input/output JSON is parsed manually via string helpers.
+// Uses direct ABI exports (no @durableEntry decorator).  Input/output JSON
+// is parsed manually via string helpers.
+//
+// NOTE: Scoped imports like `@cleat/sdk` do not resolve correctly in AS 0.27.32
+// due to a module resolution limitation with `@scope/name` packages in the
+// runtime library path. Use relative imports as the standard pattern.
 //
 // ABI export signature:
 //   (argsPtr: usize, argsLen: i32, outPtr: usize, maxOutLen: i32) -> i64

@@ -1,7 +1,7 @@
 {
   "targets": {
     "release": {
-      "runtime": "stub",
+      "runtime": "minimal",
       "optimize": true,
       "initialMemory": 170,
       "outFile": "dist/workflow.wasm"

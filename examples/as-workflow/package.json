@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "npx asc assembly/index.ts --runtime stub --optimize --initialMemory 170 -o dist/workflow.wasm --transform ./node_modules/@cleat/transform/index.js"
+    "build": "npx asc assembly/index.ts --target release --transform ./node_modules/@cleat/transform/index.js"
   },
   "devDependencies": {
     "assemblyscript": "^0.27.0",

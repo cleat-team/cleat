@@ -153,6 +153,20 @@ func (e *TestEnv) OnPluginCall(pluginName, functionName string) *PluginCallStubB
 	return &PluginCallStubBuilder{env: e, pluginName: pluginName, functionName: functionName}
 }
 
+// TestEnvOption configures a TestEnv.
+type TestEnvOption func(*TestEnv)
+
+// WithRetrySimulation configures the test env to simulate retries by
+// failing the first n calls to any service+operation before succeeding.
+// When n <= 0 (default), no retry simulation is applied.
+// Calls matching the simulated retry pattern will fail the first n times
+// with a transient error, then succeed on the (n+1)th attempt.
+func WithRetrySimulation(n int) TestEnvOption {
+	return func(e *TestEnv) {
+		e.retrySimCount = n
+	}
+}
+
 // TestEnv is a mock environment for testing workflows.
 // Use NewTestEnv to create one, then wire up stubs with OnCall
 // and drive the workflow via the HostCalls returned by H().
@@ -176,6 +190,15 @@ type TestEnv struct {
 	childWorkflowStubs map[string]*childWorkflowStub
 	childResults       map[string]*childStubResult
 
+	// childWorkflowHandlers maps child workflow names to handler functions.
+	// These take priority over stub results when set.
+	childWorkflowHandlers map[string]func(inputJSON string) (resultJSON string, err error)
+
+	// retrySimCount is the number of times a DurableCall is failed with a
+	// transient error before succeeding. 0 means no simulation.
+	retrySimCount    int
+	retrySimAttempts map[string]int // key: "service/operation" -> attempt count
+
 	ConcurrencyKeys           map[string]string
 	AcquireConcurrencyKeyFn   func(key, workflowID string) (bool, error)
 	ReleaseConcurrencyKeysFn  func(workflowID string)
@@ -185,7 +208,9 @@ type TestEnv struct {
 
 // NewTestEnv creates a new TestEnv with a clean initial state.
 // The simulated clock starts at 2024-01-01T00:00:00Z.
-func NewTestEnv() *TestEnv {
+// Optional TestEnvOption arguments can be passed to configure behavior
+// (e.g., WithRetrySimulation).
+func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 	e := &TestEnv{
 		nowMs:         time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(),
 		versionVal:    1,
@@ -194,7 +219,11 @@ func NewTestEnv() *TestEnv {
 		promises:      make(map[string]promiseState),
 		childWorkflowStubs: make(map[string]*childWorkflowStub),
 		childResults:       make(map[string]*childStubResult),
+		childWorkflowHandlers: make(map[string]func(inputJSON string) (resultJSON string, err error)),
 		ConcurrencyKeys: make(map[string]string),
+	}
+	for _, opt := range opts {
+		opt(e)
 	}
 	e.h = durable.NewHostCalls(durable.HostCallsOptions{
 		DurableCall:                  e.durableCallImpl,
@@ -220,6 +249,7 @@ func NewTestEnv() *TestEnv {
 		CreatePromise:                e.createPromiseImpl,
 		AwaitPromise:                 e.awaitPromiseImpl,
 		RegisterUpdateHandler:        e.registerUpdateHandlerImpl,
+		RegisterQueryHandler:        e.registerQueryHandlerImpl,
 		RunDetached:                  e.runDetachedImpl,
 		PluginCall: e.pluginCallImpl,
 	})
@@ -414,6 +444,9 @@ func (e *TestEnv) Reset() {
 	e.deferCounter = 0
 	e.childWorkflowStubs = make(map[string]*childWorkflowStub)
 	e.childResults = make(map[string]*childStubResult)
+	e.childWorkflowHandlers = make(map[string]func(inputJSON string) (resultJSON string, err error))
+	e.retrySimCount = 0
+	e.retrySimAttempts = nil
 	e.ConcurrencyKeys = make(map[string]string)
 	e.pluginCallStubs = nil
 }
@@ -430,6 +463,22 @@ func (e *TestEnv) durableCallImpl(service, operation, requestJSON string) (strin
 		Service:   service,
 		Operation: operation,
 		Request:   requestJSON,
+	}
+
+	// Retry simulation: fail the first n calls with a transient error.
+	if e.retrySimCount > 0 {
+		key := service + "/" + operation
+		if e.retrySimAttempts == nil {
+			e.retrySimAttempts = make(map[string]int)
+		}
+		attempt := e.retrySimAttempts[key]
+		if attempt < e.retrySimCount {
+			e.retrySimAttempts[key] = attempt + 1
+			err := fmt.Errorf("durabletest: simulated transient failure for %s.%s (attempt %d/%d)", service, operation, attempt+1, e.retrySimCount)
+			rec.Err = err
+			e.callHistory = append(e.callHistory, rec)
+			return "", err
+		}
 	}
 
 	// Find the first matching stub and consume it.
@@ -539,6 +588,15 @@ func (e *TestEnv) continueAsNewImpl(newInputJSON string) error {
 	return nil
 }
 
+// RegisterChildWorkflow registers a handler function for a child workflow with the
+// given name. The handler receives the input JSON and returns the result JSON and an
+// error. This takes priority over stub results set via OnChildWorkflow.
+func (e *TestEnv) RegisterChildWorkflow(name string, handler func(inputJSON string) (resultJSON string, err error)) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.childWorkflowHandlers[name] = handler
+}
+
 // OnChildWorkflow registers a stub builder for a child workflow with the given name.
 func (e *TestEnv) OnChildWorkflow(name string) *ChildWorkflowStubBuilder {
 	return &ChildWorkflowStubBuilder{
@@ -550,6 +608,16 @@ func (e *TestEnv) OnChildWorkflow(name string) *ChildWorkflowStubBuilder {
 func (e *TestEnv) childWorkflowImpl(name, inputJSON string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	// Check for a registered handler first.
+	if handler, ok := e.childWorkflowHandlers[name]; ok {
+		e.deferCounter++
+		runID := fmt.Sprintf("child-%s-%d", name, e.deferCounter)
+		result, err := handler(inputJSON)
+		e.childResults[runID] = &childStubResult{result: result, err: err}
+		return runID, nil
+	}
+
 	e.deferCounter++
 	runID := fmt.Sprintf("child-%s-%d", name, e.deferCounter)
 	if stub, ok := e.childWorkflowStubs[name]; ok {
@@ -665,6 +733,25 @@ func (e *TestEnv) createPromiseImpl(name string) (string, error) {
 
 func (e *TestEnv) registerUpdateHandlerImpl(name string) {
 	// No-op for testing. The SDK layer stores the handler+validator in a map.
+}
+
+func (e *TestEnv) registerQueryHandlerImpl(name string) {
+	// No-op for testing. The hostCallsImpl stores the handler in its
+	// queryHandlers map; HandleQuery falls back to that map when
+	// the host-provided handler function is nil.
+}
+
+
+// HandleQuery invokes a registered query handler by name with the given payload.
+// If the underlying HostCalls supports it, the host-provided handler is used.
+// Otherwise, falls back to the local queryHandlers map in hostCallsImpl.
+func (e *TestEnv) HandleQuery(name, payload string) (string, error) {
+	// The h field is a *hostCallsImpl which has a HandleQuery method.
+	// Type-assert to access it; if the assertion fails, try a simpler fallback.
+	if h, ok := e.h.(interface{ HandleQuery(string, string) (string, error) }); ok {
+		return h.HandleQuery(name, payload)
+	}
+	return "", fmt.Errorf("durabletest: HandleQuery not available")
 }
 
 func (e *TestEnv) runDetachedImpl(fn func(h durable.HostCalls) error) error {

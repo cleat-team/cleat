@@ -1,7 +1,14 @@
-plugins {
-    java
-    id("org.teavm") version "0.10.2"
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath("org.teavm:teavm-gradle-plugin:0.10.2")
+    }
 }
+
+apply(plugin = "java")
+apply(plugin = "org.teavm")
 
 group = "com.cleat.example"
 version = "0.1.0"
@@ -21,11 +28,14 @@ java {
 }
 
 teavm {
-    mainClass = "com.cleat.example.WorkflowEntry"
-    targetFileName = "workflow.wasm"
-    targetDirectory = file("build/wasm")
-    targetType = "WASM"
-    optimizationLevel = "FULL"
-    debugInformationGenerated = false
-    sourceMapsGenerated = false
+    // TeaVM 0.10.2 configuration:
+    // - Flat configuration (no nested "wasm {}" block)
+    // - Use .set() for Kotlin DSL Property delegates
+    mainClass.set("com.cleat.example.WorkflowEntry")
+    fileName.set("workflow.wasm")
+    outputDir.set(layout.buildDirectory.dir("wasm"))
+    targetType.set("WASM")
+    optimizationLevel.set("FULL")
+    debugInformationGenerated.set(false)
+    sourceMapsGenerated.set(false)
 }

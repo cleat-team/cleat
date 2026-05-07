@@ -18,7 +18,8 @@ Quick start:
 from .host_calls import HostCalls, SuspendSentinel, RetryPolicy
 from .host_calls import SignalResult, ChildResult, PromiseResult
 from .entry import durable_entry
-from .types import ChildWorkflow, Saga, SagaStep, DurableDefer
+from .types import ChildWorkflow, Saga, SagaStep, TerminalError, DurableDefer
+from .client import CleatClient
 from .plugins import (
     Plugins,
     BlobPutResult,
@@ -44,7 +45,9 @@ __all__ = [
     "ChildWorkflow",
     "Saga",
     "SagaStep",
+    "TerminalError",
     "DurableDefer",
+    "CleatClient",
     "Plugins",
     "BlobPutResult",
     "BlobGetResult",

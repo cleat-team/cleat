@@ -104,16 +104,15 @@ public class PlaceOrder {
 
     /**
      * Escape a string for safe embedding in a JSON string value.
+     * <p>
+     * Delegates to {@link cleat.JsonHelper#escapeJson} for TeaVM-safe
+     * escaping (no regex or {@code String.format}).
      *
      * @param s the raw string
      * @return the JSON-escaped string, or {@code "null"} if the input is null
      */
     private static String escapeJSON(String s) {
         if (s == null) return "null";
-        return s.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
+        return cleat.JsonHelper.escapeJson(s);
     }
 }

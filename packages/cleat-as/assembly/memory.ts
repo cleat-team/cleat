@@ -382,6 +382,39 @@ export class Memory {
 }
 
 // ──────────────────────────────────────────────
+// Workflow suspension detection
+// ──────────────────────────────────────────────
+
+/**
+ * Global flag set by HostCalls methods when the workflow needs to suspend
+ * (e.g., `durableSleep` returned "should suspend" on a fresh execution).
+ *
+ * The @durableEntry transform-generated wrapper resets this flag before
+ * calling the inner function and checks it afterward. If the flag is set,
+ * the wrapper returns the SUSPEND_SENTINEL i64 to the host instead of
+ * writing the result to the output buffer.
+ *
+ * This approach avoids requiring try/catch (not available with --runtime stub)
+ * while allowing clean suspension detection across host-call boundaries.
+ */
+let _workflowSuspended: bool = false;
+
+/** Returns `true` if the workflow suspended during the last host call. */
+export function isWorkflowSuspended(): bool {
+  return _workflowSuspended;
+}
+
+/** Reset the suspension flag before calling a user workflow function. */
+export function resetWorkflowSuspended(): void {
+  _workflowSuspended = false;
+}
+
+/** Set the suspension flag — called by HostCalls methods. */
+export function setWorkflowSuspended(): void {
+  _workflowSuspended = true;
+}
+
+// ──────────────────────────────────────────────
 // JSON escaping utilities
 // ──────────────────────────────────────────────
 

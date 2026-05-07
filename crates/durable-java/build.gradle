@@ -27,11 +27,12 @@ java {
 teavm {
     // The SDK is a library, not a WASM binary. But TeaVM needs a mainClass
     // for code inclusion analysis. HostCalls is used as the analysis root.
-    wasm {
-        mainClass = "cleat.HostCalls"
-        targetFileName = "workflow.wasm"
-        outputDir = file("build/wasm")
-    }
+    // TeaVM 0.10.2 uses a flat configuration (no nested "wasm {}" block).
+    mainClass = "cleat.HostCalls"
+    fileName = "workflow.wasm"
+    outputDir = file("build/wasm")
+    targetType = "WASM"
+    optimizationLevel = "BALANCED"
 }
 
 tasks.named("test") {

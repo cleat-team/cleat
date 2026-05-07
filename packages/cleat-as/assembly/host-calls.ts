@@ -20,6 +20,7 @@ import {
   OUT_BUF_SIZE,
   SCRATCH_BASE,
   OUTPUT_OFFSET,
+  setWorkflowSuspended,
 } from "./memory";
 
 // ═══════════════════════════════════════════════
@@ -502,7 +503,11 @@ export class HostCalls {
   durableSleep(durationMs: i64): bool {
     let result: i64 = import_durable_sleep(durationMs);
     let decoded = decodeSleepResult(result);
-    return decoded.status === 1; // SLEEP_STATUS_SUSPEND
+    let shouldSuspend: bool = decoded.status === 1;
+    if (shouldSuspend) {
+      setWorkflowSuspended();
+    }
+    return shouldSuspend;
   }
 
   // ────────────────────────────────────────────
@@ -752,6 +757,12 @@ export class HostCalls {
       OUTPUT_OFFSET as i32,
       OUT_BUF_SIZE,
     );
+
+    // Check for suspend signal: host sets bit 62 when child not yet complete
+    if ((result as u64 & (1 << 62)) != 0) {
+      setWorkflowSuspended();
+      return new DurableResult<string>("", "");
+    }
 
     let decoded = decodeSimpleResult(result);
 

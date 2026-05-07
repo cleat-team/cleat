@@ -29,12 +29,13 @@ java {
 }
 
 teavm {
-    wasm {
-        mainClass = "cleat.HostCalls"
-        targetFileName = "workflow.wasm"
-        outputDir = file("build/wasm")
-        optimization = org.teavm.gradle.api.OptimizationLevel.BALANCED
-    }
+    // TeaVM 0.10.2 uses a flat configuration (no nested "wasm {}" block)
+    // and Gradle Property delegates for all values.
+    mainClass.set("cleat.HostCalls")
+    fileName.set("workflow.wasm")
+    outputDir.set(layout.buildDirectory.dir("wasm"))
+    targetType.set("WASM")
+    optimizationLevel.set("BALANCED")
 }
 
 tasks.test {
