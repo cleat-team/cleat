@@ -402,49 +402,60 @@ export class Plugins {
   // ── llm ─────────────────────────────────────
 
   /**
-   * Result of an LLM chat completion.
+   * Send a chat completion request to an LLM via the llm plugin.
+   *
+   * @param model      - Model name (e.g., "gpt-4", "claude-3-opus").
+   * @param messages   - JSON array of message objects.
+   * @param tools      - Optional JSON array of tool definitions.
+   * @returns The chat result with response, tool calls, finish reason, and usage info.
    */
-  chat(model: string, messagesJson: string, temperature: f64 = 0.0, maxTokens: i32 = 0): LlmChatResult {
-    let input = '{"model":"' + model + '","messages":' + messagesJson;
-    if (temperature != 0.0) input += ',"temperature":' + temperature.toString();
-    if (maxTokens > 0) input += ',"max_tokens":' + maxTokens.toString();
+  chat(model: string, messages: string, tools: string = ""): LLMChatResult {
+    let input = '{"model":"' + model + '","messages":' + messages;
+    if (tools.length > 0) input += ',"tools":' + tools;
     input += '}';
     let outcome = this.host.pluginCall("llm", "chat", input);
-    if (outcome.isError) return new LlmChatResult("", "", 0, 0, 0, outcome.error);
+    if (outcome.isError) {
+      return new LLMChatResult("", "", "", "", outcome.error);
+    }
     let r = outcome.response;
-    let content = jsonStr(r, "content");
-    let model_used = jsonStr(r, "model");
-    let prompt_tokens = jsonI64(r, "prompt_tokens") as i32;
-    let completion_tokens = jsonI64(r, "completion_tokens") as i32;
-    let cost = jsonI64(r, "cost") as i32;
+    let response = jsonStr(r, "response");
+    let toolCalls = jsonStr(r, "tool_calls");
+    let finishReason = jsonStr(r, "finish_reason");
+    let usageInfo = jsonStr(r, "usage");
     let error = jsonStr(r, "error");
-    return new LlmChatResult(content, model_used, prompt_tokens, completion_tokens, cost, error);
+    return new LLMChatResult(response, toolCalls, finishReason, usageInfo, error);
   }
 
   /**
-   * Generate an embedding via the LLM plugin.
+   * Generate embeddings via the LLM plugin.
    *
-   * @param provider   - LLM provider name (e.g., "openai").
-   * @param model      - Model name for embeddings.
-   * @param inputJson  - JSON array of input strings to embed.
-   * @returns The embedding result with data and usage info.
+   * @param model      - Model name for embeddings (e.g., "text-embedding-3-small").
+   * @param textsJson  - JSON array of input strings to embed.
+   * @returns The embedding result with data JSON, model info, and token usage.
    */
-  embed(provider: string, model: string, inputJson: string): EmbedResult {
-    let input = '{"provider":"' + provider + '","model":"' + model + '","input":' + inputJson + '}';
+  embed(model: string, textsJson: string): EmbeddingsResult {
+    let input = '{"model":"' + model + '","input":' + textsJson + '}';
     let outcome = this.host.pluginCall("llm", "embed", input);
-    if (outcome.isError) return new EmbedResult("", 0, outcome.error);
+    if (outcome.isError) {
+      return new EmbeddingsResult("", "", 0, outcome.error);
+    }
     let r = outcome.response;
-    let data = jsonStr(r, "data");
+    let dataJson = jsonStr(r, "data");
+    let model_used = jsonStr(r, "model");
     let totalTokens = jsonI64(r, "total_tokens") as i32;
     let error = jsonStr(r, "error");
-    return new EmbedResult(data, totalTokens, error);
+    if (dataJson.length == 0) {
+      // Try alternate response format: embedding directly in response
+      dataJson = r;
+    }
+    return new EmbeddingsResult(dataJson, model_used, totalTokens, error);
   }
 
   /**
    * List available models for an LLM provider.
    *
    * @param provider - Optional provider name. If empty, lists all configured providers.
-   * @returns The list models result with model info.
+   * @returns JSON string of available models, or error JSON on failure.
    */
   listModels(provider: string = ""): string {
     let input = '{';
@@ -458,19 +469,21 @@ export class Plugins {
 
 // ── LLM result types ─────────────────────────
 
-/** Result of an LLM chat completion. */
-export class LlmChatResult {
+/**
+ * Result of an LLM chat completion.
+ *
+ * Mirrors the Python SDK `plugins.py` LLM patterns.
+ */
+export class LLMChatResult {
   constructor(
-    /** The generated response content text. */
-    public readonly content: string,
-    /** The model used for completion. */
-    public readonly model: string,
-    /** Number of prompt tokens used. */
-    public readonly promptTokens: i32,
-    /** Number of completion tokens used. */
-    public readonly completionTokens: i32,
-    /** Approximate cost of the request in micro-dollars. */
-    public readonly cost: i32,
+    /** The generated response text content. */
+    public readonly response: string,
+    /** JSON array of tool calls, or empty string if none. */
+    public readonly toolCalls: string,
+    /** Finish reason: "stop", "length", "tool_calls", "content_filter", etc. */
+    public readonly finishReason: string,
+    /** JSON object with token usage info (prompt_tokens, completion_tokens, total_tokens). */
+    public readonly usageInfo: string,
     /** Error message, or empty on success. */
     public readonly error: string,
   ) {}
@@ -481,12 +494,19 @@ export class LlmChatResult {
   }
 }
 
-/** Result of an LLM embedding request. */
-export class EmbedResult {
+/**
+ * Result of an LLM embedding request.
+ *
+ * Mirrors the Python SDK `plugins.py` LLM patterns.
+ */
+export class EmbeddingsResult {
   constructor(
-    /** JSON string of embedding data (array of {embedding, index} objects). */
-    public readonly data: string,
-    /** Total token count used. */
+    /** JSON string of embedding data. For single-text input, this is an array
+     *  of numbers. For multi-text input, an array of arrays. */
+    public readonly dataJson: string,
+    /** The model used for generating embeddings. */
+    public readonly model: string,
+    /** Total token count used in the request. */
     public readonly totalTokens: i32,
     /** Error message, or empty on success. */
     public readonly error: string,

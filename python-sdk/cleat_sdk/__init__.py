@@ -17,8 +17,15 @@ Quick start:
 
 from .host_calls import HostCalls, SuspendSentinel, RetryPolicy
 from .host_calls import SignalResult, ChildResult, PromiseResult
+from .host_calls import (
+    DurableCallError,
+    DurableCallTransientError,
+    DurableCallPermanentError,
+    DurableCallTimeoutError,
+    INFINITE_TIMEOUT_MS,
+)
 from .entry import durable_entry, virtual_object
-from .types import ChildWorkflow, Saga, SagaStep, TerminalError, DurableDefer
+from .types import ChildWorkflow, Saga, SagaStep, SagaStepResult, TerminalError, DurableDefer
 from .client import CleatClient
 from .test_harness import CleatTestHarness, CallRecord
 from .plugins import (
@@ -51,11 +58,17 @@ __all__ = [
     "SignalResult",
     "ChildResult",
     "PromiseResult",
+    "DurableCallError",
+    "DurableCallTransientError",
+    "DurableCallPermanentError",
+    "DurableCallTimeoutError",
+    "INFINITE_TIMEOUT_MS",
     "durable_entry",
     "virtual_object",
     "ChildWorkflow",
     "Saga",
     "SagaStep",
+    "SagaStepResult",
     "TerminalError",
     "DurableDefer",
     "CleatClient",

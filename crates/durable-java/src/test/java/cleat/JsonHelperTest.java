@@ -2,6 +2,7 @@ package cleat;
 
 import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
+import java.util.Map;
 
 /**
  * Unit tests for {@link JsonHelper}.
@@ -21,9 +22,72 @@ class JsonHelperTest {
     }
 
     @Test
-    void testParseUnsupportedTypeThrows() {
-        assertThrows(UnsupportedOperationException.class,
-            () -> JsonHelper.parse("42", Integer.class));
+    void testParseInteger() {
+        assertEquals(42, JsonHelper.parse("42", Integer.class));
+    }
+
+    @Test
+    void testParseIntegerNegative() {
+        assertEquals(-10, JsonHelper.parse("-10", Integer.class));
+    }
+
+    @Test
+    void testParseLong() {
+        assertEquals(9000000000000L, JsonHelper.parse("9000000000000", Long.class));
+    }
+
+    @Test
+    void testParseDouble() {
+        assertEquals(3.14, JsonHelper.parse("3.14", Double.class), 1e-10);
+    }
+
+    @Test
+    void testParseDoubleInteger() {
+        assertEquals(42.0, JsonHelper.parse("42.0", Double.class), 1e-10);
+    }
+
+    @Test
+    void testParseScientificNotation() {
+        assertEquals(1.5e10, JsonHelper.parse("1.5e10", Double.class), 1e0);
+    }
+
+    @Test
+    void testParseBooleanTrue() {
+        assertEquals(true, JsonHelper.parse("true", Boolean.class));
+    }
+
+    @Test
+    void testParseBooleanFalse() {
+        assertEquals(false, JsonHelper.parse("false", Boolean.class));
+    }
+
+    @Test
+    void testParseObject() {
+        assertEquals("world", JsonHelper.parse("{\"hello\":\"world\"}", Map.class).get("hello"));
+    }
+
+    @Test
+    void testParseObjectGeneric() {
+        Object val = JsonHelper.parse("{\"key\":42}", Object.class);
+        assertTrue(val instanceof Map);
+        assertEquals(42, ((Map<String, Object>) val).get("key"));
+    }
+
+    @Test
+    void testParseNull() {
+        assertNull(JsonHelper.parse("null", Object.class));
+    }
+
+    @Test
+    void testParsePrimitiveIntThrowsOnString() {
+        assertThrows(RuntimeException.class,
+            () -> JsonHelper.parse("\"hello\"", Integer.class));
+    }
+
+    @Test
+    void testParsePrimitiveDoubleThrowsOnString() {
+        assertThrows(RuntimeException.class,
+            () -> JsonHelper.parse("\"hello\"", Double.class));
     }
 
     // ---- stringify ----

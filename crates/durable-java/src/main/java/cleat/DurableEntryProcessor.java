@@ -18,6 +18,8 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Compile-time annotation processor for {@link DurableEntry @DurableEntry}.
@@ -56,35 +58,45 @@ public class DurableEntryProcessor extends AbstractProcessor {
 
     private final Set<String> generatedWrappers = new HashSet<>();
 
+    /** Maps wrapper FQCN -> export name for aggregator generation. */
+    private final Map<String, String> wrapperExportNames = new HashMap<>();
+
+    /** Whether the aggregator and WorkflowEntry have been generated. */
+    private boolean aggregatorGenerated = false;
+
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
-        if (annotations.isEmpty()) {
-            return false;
+        if (!annotations.isEmpty()) {
+            for (Element element : roundEnv.getElementsAnnotatedWith(DurableEntry.class)) {
+                if (element.getKind() != ElementKind.METHOD) {
+                    processingEnv.getMessager().printMessage(
+                        Diagnostic.Kind.ERROR,
+                        "@DurableEntry can only be applied to methods, not to "
+                            + element.getKind().name().toLowerCase(),
+                        element);
+                    continue;
+                }
+
+                ExecutableElement method = (ExecutableElement) element;
+                TypeElement classElement = (TypeElement) method.getEnclosingElement();
+
+                DurableEntry annotation = method.getAnnotation(DurableEntry.class);
+                String exportName = annotation.name();
+                if (exportName.isEmpty()) {
+                    exportName = method.getSimpleName().toString();
+                }
+
+                generateExportWrapper(classElement, method, exportName);
+            }
         }
 
-        for (Element element : roundEnv.getElementsAnnotatedWith(DurableEntry.class)) {
-            if (element.getKind() != ElementKind.METHOD) {
-                processingEnv.getMessager().printMessage(
-                    Diagnostic.Kind.ERROR,
-                    "@DurableEntry can only be applied to methods, not to "
-                        + element.getKind().name().toLowerCase(),
-                    element);
-                continue;
-            }
-
-            ExecutableElement method = (ExecutableElement) element;
-            TypeElement classElement = (TypeElement) method.getEnclosingElement();
-
-            DurableEntry annotation = method.getAnnotation(DurableEntry.class);
-            String exportName = annotation.name();
-            if (exportName.isEmpty()) {
-                exportName = method.getSimpleName().toString();
-            }
-
-            generateExportWrapper(classElement, method, exportName);
-        }
-        if (roundEnv.processingOver() && !generatedWrappers.isEmpty()) {
+        // Always generate the aggregator and WorkflowEntry at the end of
+        // annotation processing, even when there are no @DurableEntry methods.
+        // This ensures the TeaVM analysis root class always exists.
+        if (roundEnv.processingOver() && !aggregatorGenerated) {
             generateAggregator();
+            generateWorkflowEntry();
+            aggregatorGenerated = true;
         }
         return true;
     }
@@ -147,6 +159,7 @@ public class DurableEntryProcessor extends AbstractProcessor {
             JavaFileObject file = processingEnv.getFiler()
                 .createSourceFile(qualifiedName);
             generatedWrappers.add(qualifiedName);
+            wrapperExportNames.put(qualifiedName, exportName);
 
             try (PrintWriter out = new PrintWriter(file.openWriter())) {
                 writeGeneratedClass(
@@ -327,23 +340,35 @@ public class DurableEntryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Generate the DurableEntryAggregator source file that references all
+     * Generate the DurableEntryIndex source file that references all
      * generated export wrapper classes.
+     * <p>
+     * This class is generated in the {@code cleat.generated} package.
+     * Its {@code WRAPPER_CLASSES} field references all generated wrapper
+     * classes via {@code .class} literals, which prevents TeaVM from
+     * tree-shaking them during WASM compilation.
      */
     private void generateAggregator() {
         try {
             JavaFileObject file = processingEnv.getFiler()
-                .createSourceFile("cleat.DurableEntryAggregator");
+                .createSourceFile("cleat.generated.DurableEntryIndex");
 
             try (PrintWriter out = new PrintWriter(file.openWriter())) {
-                out.println("package cleat;");
+                out.println("package cleat.generated;");
                 out.println();
                 out.println("/**");
                 out.println(" * Auto-generated by DurableEntryProcessor. References all");
-                out.println(" * generated WASM export wrapper classes.");
+                out.println(" * generated WASM export wrapper classes via Class<?>[] to");
+                out.println(" * prevent TeaVM tree-shaking. Also exposes entry point");
+                out.println(" * metadata via getEntries().");
                 out.println(" */");
-                out.println("public class DurableEntryAggregator {");
+                out.println("public class DurableEntryIndex {");
                 out.println();
+                out.println("    /**");
+                out.println("     * Class references to all generated export wrappers.");
+                out.println("     * Kept as a static field accessed by WorkflowEntry to");
+                out.println("     * prevent TeaVM tree-shaking.");
+                out.println("     */");
                 out.println("    public static final Class<?>[] WRAPPER_CLASSES = new Class<?>[] {");
                 for (String fqcn : generatedWrappers) {
                     out.print("        ");
@@ -351,12 +376,76 @@ public class DurableEntryProcessor extends AbstractProcessor {
                     out.println(".class,");
                 }
                 out.println("    };");
+                out.println();
+                out.println("    /**");
+                out.println("     * Return the list of exported @DurableEntry entry point");
+                out.println("     * names. Useful for runtime introspection and testing.");
+                out.println("     */");
+                out.println("    public static String[] getEntries() {");
+                if (generatedWrappers.isEmpty()) {
+                    out.println("        return new String[0];");
+                } else {
+                    out.println("        return new String[] {");
+                    for (String fqcn : generatedWrappers) {
+                        String exportName = wrapperExportNames.get(fqcn);
+                        out.print("            \"");
+                        out.print(escapeJavaString(exportName != null ? exportName : ""));
+                        out.println("\",");
+                    }
+                    out.println("        };");
+                }
+                out.println("    }");
                 out.println("}");
             }
         } catch (IOException e) {
             processingEnv.getMessager().printMessage(
                 Diagnostic.Kind.ERROR,
-                "Failed to generate DurableEntryAggregator: " + e.getMessage());
+                "Failed to generate DurableEntryIndex: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Generate the WorkflowEntry class that the TeaVM compiler uses as its
+     * static analysis root.
+     * <p>
+     * This class references DurableEntryIndex.WRAPPER_CLASSES, which in turn
+     * references all generated {@code @Export} wrapper classes.  The chain of
+     * references prevents TeaVM from removing the exports during dead-code
+     * elimination.
+     * <p>
+     * The generated class is placed in the {@code cleat} package and set as
+     * {@code mainClass} in the TeaVM Gradle configuration.
+     */
+    private void generateWorkflowEntry() {
+        try {
+            JavaFileObject file = processingEnv.getFiler()
+                .createSourceFile("cleat.WorkflowEntry");
+
+            try (PrintWriter out = new PrintWriter(file.openWriter())) {
+                out.println("package cleat;");
+                out.println();
+                out.println("/**");
+                out.println(" * Auto-generated analysis root for TeaVM WASM compilation.");
+                out.println(" * References DurableEntryIndex to prevent tree-shaking of");
+                out.println(" * generated @DurableEntry export wrappers.");
+                out.println(" */");
+                out.println("public class WorkflowEntry {");
+                out.println();
+                out.println("    /**");
+                out.println("     * Static reference to DurableEntryIndex.WRAPPER_CLASSES");
+                out.println("     * prevents TeaVM from tree-shaking the export wrappers.");
+                out.println("     */");
+                out.println("    @SuppressWarnings(\"unused\")");
+                out.println("    private static final Class<?>[] AGGREGATOR_REF =");
+                out.println("        cleat.generated.DurableEntryIndex.WRAPPER_CLASSES;");
+                out.println();
+                out.println("    private WorkflowEntry() {}");
+                out.println("}");
+            }
+        } catch (IOException e) {
+            processingEnv.getMessager().printMessage(
+                Diagnostic.Kind.ERROR,
+                "Failed to generate WorkflowEntry: " + e.getMessage());
         }
     }
 }

@@ -10,6 +10,76 @@
 // Unlike localdev (which makes real API calls), the embedded runner uses
 // configurable handlers for external dependencies, making it ideal for
 // integration tests and simple standalone deployments.
+//
+// # Usage
+//
+// Create a runner, register workflow functions, and execute them:
+//
+//	runner := embedded.New()
+//
+//	// Register workflows by name:
+//	runner.Register("order_workflow", func(ctx *embedded.Context) error {
+//	    var input struct {
+//	        OrderID string `json:"order_id"`
+//	    }
+//	    if err := json.Unmarshal([]byte(ctx.Input), &input); err != nil {
+//	        ctx.SetOutputf(`{"error": "invalid input: %s"}`, err)
+//	        return nil
+//	    }
+//
+//	    // Make durable calls through ctx.H():
+//	    resp, err := ctx.H().DurableCall("inventory", "reserve", `{"sku":"s-1"}`)
+//	    if err != nil {
+//	        ctx.SetOutputf(`{"error": "reservation failed: %s"}`, err)
+//	        return nil
+//	    }
+//	    _ = resp
+//
+//	    ctx.SetOutput(`{"status": "completed", "order_id": "` + input.OrderID + `"}`)
+//	    return nil
+//	})
+//
+//	// Execute a workflow:
+//	result, err := runner.ExecuteWorkflow(context.Background(),
+//	    "order_workflow", `{"order_id": "ord-42"}`)
+//
+//	// Or use typed execution:
+//	var output OrderResult
+//	err = runner.ExecuteWorkflowTyped(context.Background(),
+//	    "order_workflow", OrderInput{OrderID: "ord-42"}, &output)
+//
+// # Signal injection
+//
+// The runner's Signal method injects signals that are picked up by
+// pollSignal/awaitSignals inside running workflows:
+//
+//	runner.Signal("order_workflow", "payment_received", `{"amount": 100}`)
+//
+// # Child workflows
+//
+// Child workflows are resolved from the same runner's registry. Register
+// the child before the parent so the runner can find it:
+//
+//	runner.Register("notify_user", func(ctx *embedded.Context) error {
+//	    ctx.SetOutput(`{"sent": true}`)
+//	    return nil
+//	})
+//
+//	runner.Register("order_workflow", func(ctx *embedded.Context) error {
+//	    runID, err := ctx.H().ChildWorkflow("notify_user", `{"user":"u-1"}`)
+//	    if err != nil { return err }
+//	    result, err := ctx.H().AwaitChild(runID)
+//	    if err != nil { return err }
+//	    _ = result
+//	    ctx.SetOutput(`{"status": "done"}`)
+//	    return nil
+//	})
+//
+// # Deterministic time
+//
+// The runner uses a simulated clock starting at 2024-01-01T00:00:00Z.
+// DurableSleep advances the clock by the requested duration. Use
+// ctx.H().Now() instead of time.Now() for deterministic replay behavior.
 package embedded
 
 import (

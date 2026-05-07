@@ -24,6 +24,15 @@ type CallRecord struct {
 	Request   string
 	Response  string
 	Err       error
+	RetryCount int // Number of retry attempts before this call succeeded (0 if no retry)
+}
+
+// ChildWorkflowCallRecord records a child workflow invocation made through the test env.
+type ChildWorkflowCallRecord struct {
+	Name      string
+	InputJSON string
+	RunID     string
+	Err       error
 }
 
 // CallStubBuilder builds and registers a call stub.
@@ -78,6 +87,15 @@ type childWorkflowStub struct {
 	name   string
 	result string
 	err    error
+}
+
+// retryBehavior stores the per-service/operation retry configuration.
+type retryBehavior struct {
+	service       string
+	operation     string
+	failCount     int
+	finalResponse string
+	attempts      int // current attempt count
 }
 
 // ChildWorkflowStubBuilder builds and registers a child workflow stub.
@@ -167,6 +185,45 @@ func WithRetrySimulation(n int) TestEnvOption {
 	}
 }
 
+// SetRetryBehavior configures a per-service/operation retry behavior.
+// Calls to the given service+operation will fail the first failCount times
+// with a transient error, then succeed with the given finalResponse on
+// call (failCount+1). This takes priority over the global WithRetrySimulation.
+func (e *TestEnv) SetRetryBehavior(service, operation string, failCount int, finalResponse string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	key := service + "/" + operation
+	e.retryBehaviors[key] = &retryBehavior{
+		service:       service,
+		operation:     operation,
+		failCount:     failCount,
+		finalResponse: finalResponse,
+		attempts:      0,
+	}
+}
+
+// RegisterChildStub registers a stub for a child workflow with the given name.
+// When a child workflow with this name is started, it returns the pre-configured
+// response string and no error. Supports multiple different child workflow names.
+func (e *TestEnv) RegisterChildStub(name, response string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.childWorkflowStubs[name] = &childWorkflowStub{
+		name:   name,
+		result: response,
+		err:    nil,
+	}
+}
+
+// ChildWorkflowCallHistory returns a copy of all recorded child workflow calls.
+func (e *TestEnv) ChildWorkflowCallHistory() []ChildWorkflowCallRecord {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	result := make([]ChildWorkflowCallRecord, len(e.childWorkflowCallHistory))
+	copy(result, e.childWorkflowCallHistory)
+	return result
+}
+
 // TestEnv is a mock environment for testing workflows.
 // Use NewTestEnv to create one, then wire up stubs with OnCall
 // and drive the workflow via the HostCalls returned by H().
@@ -199,6 +256,13 @@ type TestEnv struct {
 	retrySimCount    int
 	retrySimAttempts map[string]int // key: "service/operation" -> attempt count
 
+	// retryBehaviors stores per-service/operation retry configurations
+	// set via SetRetryBehavior. These take priority over the global retrySimCount.
+	retryBehaviors map[string]*retryBehavior // key: "service/operation" -> behavior
+
+	// childWorkflowCallHistory records all child workflow invocations.
+	childWorkflowCallHistory []ChildWorkflowCallRecord
+
 	ConcurrencyKeys           map[string]string
 	AcquireConcurrencyKeyFn   func(key, workflowID string) (bool, error)
 	ReleaseConcurrencyKeysFn  func(workflowID string)
@@ -224,6 +288,8 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		childWorkflowStubs: make(map[string]*childWorkflowStub),
 		childResults:       make(map[string]*childStubResult),
 		childWorkflowHandlers: make(map[string]func(inputJSON string) (resultJSON string, err error)),
+		retryBehaviors:       make(map[string]*retryBehavior),
+		childWorkflowCallHistory: make([]ChildWorkflowCallRecord, 0),
 		ConcurrencyKeys: make(map[string]string),
 			signalReplyChannels: make(map[string]chan string),
 	}
@@ -455,6 +521,8 @@ func (e *TestEnv) Reset() {
 	e.childWorkflowHandlers = make(map[string]func(inputJSON string) (resultJSON string, err error))
 	e.retrySimCount = 0
 	e.retrySimAttempts = nil
+	e.retryBehaviors = make(map[string]*retryBehavior)
+	e.childWorkflowCallHistory = nil
 	e.ConcurrencyKeys = make(map[string]string)
 	e.pluginCallStubs = nil
 		e.signalReplyChannels = make(map[string]chan string)
@@ -469,14 +537,27 @@ func (e *TestEnv) durableCallImpl(service, operation, requestJSON string) (strin
 	defer e.mu.Unlock()
 
 	rec := CallRecord{
-		Service:   service,
-		Operation: operation,
-		Request:   requestJSON,
+		Service:    service,
+		Operation:  operation,
+		Request:    requestJSON,
+		RetryCount: 0,
 	}
 
-	// Retry simulation: fail the first n calls with a transient error.
-	if e.retrySimCount > 0 {
-		key := service + "/" + operation
+	// Retry simulation: first check per-service/operation retry behaviors,
+	// then fall back to the global WithRetrySimulation.
+	key := service + "/" + operation
+	if rb, ok := e.retryBehaviors[key]; ok && rb.failCount > 0 {
+		if rb.attempts < rb.failCount {
+			rb.attempts++
+			err := fmt.Errorf("durabletest: simulated transient failure for %s.%s (attempt %d/%d)", service, operation, rb.attempts, rb.failCount)
+			rec.Err = err
+			rec.RetryCount = rb.attempts
+			e.callHistory = append(e.callHistory, rec)
+			return "", err
+		}
+		// Success on final attempt — track the retry count but proceed to stub.
+		rec.RetryCount = rb.attempts
+	} else if e.retrySimCount > 0 {
 		if e.retrySimAttempts == nil {
 			e.retrySimAttempts = make(map[string]int)
 		}
@@ -485,9 +566,11 @@ func (e *TestEnv) durableCallImpl(service, operation, requestJSON string) (strin
 			e.retrySimAttempts[key] = attempt + 1
 			err := fmt.Errorf("durabletest: simulated transient failure for %s.%s (attempt %d/%d)", service, operation, attempt+1, e.retrySimCount)
 			rec.Err = err
+			rec.RetryCount = attempt + 1
 			e.callHistory = append(e.callHistory, rec)
 			return "", err
 		}
+		rec.RetryCount = attempt
 	}
 
 	// Find the first matching stub and consume it.
@@ -618,12 +701,23 @@ func (e *TestEnv) childWorkflowImpl(name, inputJSON string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	// Record the child workflow invocation.
+	childRec := ChildWorkflowCallRecord{
+		Name:      name,
+		InputJSON: inputJSON,
+	}
+
 	// Check for a registered handler first.
 	if handler, ok := e.childWorkflowHandlers[name]; ok {
 		e.deferCounter++
 		runID := fmt.Sprintf("child-%s-%d", name, e.deferCounter)
 		result, err := handler(inputJSON)
 		e.childResults[runID] = &childStubResult{result: result, err: err}
+		childRec.RunID = runID
+		if err != nil {
+			childRec.Err = err
+		}
+		e.childWorkflowCallHistory = append(e.childWorkflowCallHistory, childRec)
 		return runID, nil
 	}
 
@@ -631,8 +725,15 @@ func (e *TestEnv) childWorkflowImpl(name, inputJSON string) (string, error) {
 	runID := fmt.Sprintf("child-%s-%d", name, e.deferCounter)
 	if stub, ok := e.childWorkflowStubs[name]; ok {
 		e.childResults[runID] = &childStubResult{result: stub.result, err: stub.err}
+		childRec.RunID = runID
+		if stub.err != nil {
+			childRec.Err = stub.err
+		}
+		e.childWorkflowCallHistory = append(e.childWorkflowCallHistory, childRec)
 	} else {
 		e.childResults[runID] = &childStubResult{result: `{"status":"completed"}`, err: nil}
+		childRec.RunID = runID
+		e.childWorkflowCallHistory = append(e.childWorkflowCallHistory, childRec)
 	}
 	return runID, nil
 }

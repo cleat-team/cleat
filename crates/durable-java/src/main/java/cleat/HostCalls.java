@@ -3,6 +3,7 @@ package cleat;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Map;
 import org.teavm.interop.Import;
 
 /**
@@ -158,6 +159,75 @@ public class HostCalls {
         int signalNamePtr, int signalNameLen,
         int payloadPtr, int payloadLen);
 
+    @Import(module = "env", name = "durable_resolve_promise")
+    private static native long durableResolvePromiseRaw(int idPtr, int idLen, int valuePtr, int valueLen);
+
+    @Import(module = "env", name = "durable_reject_promise")
+    private static native long durableRejectPromiseRaw(int idPtr, int idLen, int errorPtr, int errorLen);
+
+    @Import(module = "env", name = "durable_send")
+    private static native long durableSendRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen);
+
+    @Import(module = "env", name = "schedule_cron")
+    private static native long scheduleCronRaw(
+        int wfNamePtr, int wfNameLen,
+        int cronExprPtr, int cronExprLen,
+        int tzPtr, int tzLen,
+        int inputPtr, int inputLen,
+        int scheduleIdOutPtr, int scheduleIdOutMax);
+
+    @Import(module = "env", name = "delete_cron")
+    private static native long deleteCronRaw(int scheduleIdPtr, int scheduleIdLen);
+
+    @Import(module = "env", name = "list_crons")
+    private static native long listCronsRaw(int outPtr, int outMaxLen);
+
+    @Import(module = "env", name = "schedule_invoke")
+    private static native long scheduleInvokeRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen, long delayMs);
+
+    @Import(module = "env", name = "durable_register_query_handler")
+    private static native long durableRegisterQueryHandlerRaw(int namePtr, int nameLen);
+
+    @Import(module = "env", name = "durable_run_detached")
+    private static native long durableRunDetachedRaw(int namePtr, int nameLen, int inputPtr, int inputLen);
+
+    @Import(module = "env", name = "durable_set_state")
+    private static native long durableSetStateRaw(int keyPtr, int keyLen, int valPtr, int valLen);
+
+    @Import(module = "env", name = "durable_get_state")
+    private static native long durableGetStateRaw(int keyPtr, int keyLen, int outPtr, int maxLen);
+
+    @Import(module = "env", name = "durable_delete_state")
+    private static native long durableDeleteStateRaw(int keyPtr, int keyLen);
+
+    @Import(module = "env", name = "durable_incr_state")
+    private static native long durableIncrStateRaw(int keyPtr, int keyLen, long delta);
+
+    @Import(module = "env", name = "durable_has_state")
+    private static native long durableHasStateRaw(int keyPtr, int keyLen);
+
+    @Import(module = "env", name = "durable_list_state")
+    private static native long durableListStateRaw(int prefixPtr, int prefixLen, int outPtr, int maxLen);
+
+    @Import(module = "env", name = "durable_await_all_children")
+    private static native long durableAwaitAllChildrenRaw(int idsPtr, int idsLen, int outPtr, int maxLen);
+
+    @Import(module = "env", name = "durable_call_with_retry")
+    private static native long durableCallWithRetryRaw(
+        int svcPtr, int svcLen,
+        int opPtr, int opLen,
+        int reqPtr, int reqLen,
+        int retryPtr, int retryLen,
+        int respPtr, int respMaxLen);
+
+    @Import(module = "env", name = "durable_fetch")
+    private static native long durableFetchRaw(
+        int methodPtr, int methodLen,
+        int urlPtr, int urlLen,
+        int headersPtr, int headersLen,
+        int bodyPtr, int bodyLen,
+        int respPtr, int respMaxLen);
+
     // ========================================================================
     // Internal helpers: pack strings in scratch region, read output buffer
     // ========================================================================
@@ -217,6 +287,36 @@ public class HostCalls {
         }
         int clamped = Math.min(maxLen, Memory.OUT_BUF_SIZE);
         return Memory.readString(Memory.OUTPUT_OFFSET, clamped);
+    }
+
+    /**
+     * Prepend the current scope prefix (if set) to the given key.
+     * Used by state operations within virtual object instances.
+     */
+    private String scopedKey(String key) {
+        return _scopePrefix.isEmpty() ? key : _scopePrefix + key;
+    }
+
+    /**
+     * Serialize a {@code Map<String, String>} to a JSON object string.
+     * Used by {@link #durableFetch(String, String, Map, String)}.
+     */
+    private static String headersToJson(Map<String, String> headers) {
+        if (headers == null || headers.isEmpty()) {
+            return "{}";
+        }
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            if (!first) {
+                sb.append(",");
+            }
+            sb.append("\"").append(JsonHelper.escapeJson(entry.getKey())).append("\":\"")
+                .append(JsonHelper.escapeJson(entry.getValue())).append("\"");
+            first = false;
+        }
+        sb.append("}");
+        return sb.toString();
     }
 
     // ========================================================================
@@ -1036,6 +1136,677 @@ public class HostCalls {
     }
 
     // ========================================================================
+    // Promise operations
+    // ========================================================================
+
+    /**
+     * Resolve a promise with a value, making it available to any workflow
+     * awaiting it via {@link #awaitPromise(String, long)}.
+     *
+     * @param id    the promise ID (from {@link #createPromise(String)})
+     * @param value the resolved value (typically a JSON string)
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> resolvePromise(String id, String value) {
+        int[] p = packStrings(id, value);
+        int idOff = p[0], valOff = p[1];
+        int idLen = p[2], valLen = p[3];
+
+        long result = durableResolvePromiseRaw(idOff, idLen, valOff, valLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("resolvePromise failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
+    }
+
+    /**
+     * Reject a promise with an error, causing any workflow awaiting it via
+     * {@link #awaitPromise(String, long)} to receive a failure.
+     *
+     * @param id    the promise ID (from {@link #createPromise(String)})
+     * @param error the error description
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> rejectPromise(String id, String error) {
+        int[] p = packStrings(id, error);
+        int idOff = p[0], errOff = p[1];
+        int idLen = p[2], errLen = p[3];
+
+        long result = durableRejectPromiseRaw(idOff, idLen, errOff, errLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("rejectPromise failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
+    }
+
+    // ========================================================================
+    // Fire-and-forget service calls
+    // ========================================================================
+
+    /**
+     * Send a fire-and-forget message to a service (non-blocking).
+     * <p>
+     * Unlike {@link #durableCall(String, String, String)}, this method does
+     * not wait for a response and does not record the call in the workflow
+     * event history.  The message is delivered asynchronously.
+     *
+     * @param service     the service name
+     * @param operation   the operation name
+     * @param requestJSON the JSON request payload
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> durableSend(String service, String operation, String requestJSON) {
+        int[] p = packStrings(service, operation, requestJSON);
+        int svcOff = p[0], opOff = p[1], reqOff = p[2];
+        int svcLen = p[3], opLen = p[4], reqLen = p[5];
+
+        long result = durableSendRaw(svcOff, svcLen, opOff, opLen, reqOff, reqLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("durableSend failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
+    }
+
+    /**
+     * Schedule a service invocation to occur after a delay.
+     * <p>
+     * The invocation is queued and will be delivered to the target service
+     * after the specified delay.  This is a fire-and-forget operation.
+     *
+     * @param service     the service name
+     * @param operation   the operation name
+     * @param requestJSON the JSON request payload
+     * @param delayMs     delay in milliseconds before the invocation
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> scheduleInvoke(String service, String operation, String requestJSON, long delayMs) {
+        int[] p = packStrings(service, operation, requestJSON);
+        int svcOff = p[0], opOff = p[1], reqOff = p[2];
+        int svcLen = p[3], opLen = p[4], reqLen = p[5];
+
+        long result = scheduleInvokeRaw(svcOff, svcLen, opOff, opLen, reqOff, reqLen, delayMs);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("scheduleInvoke failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
+    }
+
+    // ========================================================================
+    // Cron-triggered workflow schedules
+    // ========================================================================
+
+    /**
+     * Create a recurring workflow trigger from a cron expression.
+     * <p>
+     * The host creates a recurring schedule that invokes the named workflow
+     * on the cron schedule.  Returns a schedule ID that can be used with
+     * {@link #deleteCron(String)} to remove the schedule.
+     *
+     * @param workflowName the workflow definition name to trigger
+     * @param cronExpr     standard 5-field cron expression (e.g. {@code "0 0 * * *"}
+     *                     for daily at midnight)
+     * @param timezone     IANA timezone name (e.g. {@code "America/New_York"},
+     *                     {@code "UTC"})
+     * @param inputJSON    JSON input string for each workflow invocation
+     * @return a result containing the schedule ID on success, or an error
+     *         description on failure
+     */
+    public DurableResult<String> scheduleCron(
+        String workflowName, String cronExpr, String timezone, String inputJSON) {
+        int[] p = packStrings(workflowName, cronExpr, timezone, inputJSON);
+        int wfOff = p[0], crOff = p[1], tzOff = p[2], inOff = p[3];
+        int wfLen = p[4], crLen = p[5], tzLen = p[6], inLen = p[7];
+
+        long result = scheduleCronRaw(
+            wfOff, wfLen,
+            crOff, crLen,
+            tzOff, tzLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int scheduleIdLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return DurableResult.err("scheduleCron failed with code " + errCode);
+        }
+
+        String scheduleId = readOutput(scheduleIdLen);
+        return DurableResult.ok(scheduleId);
+    }
+
+    /**
+     * Remove a recurring cron-triggered workflow schedule.
+     *
+     * @param scheduleId the schedule ID returned by
+     *                   {@link #scheduleCron(String, String, String, String)}
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> deleteCron(String scheduleId) {
+        int[] p = packStrings(scheduleId);
+        long result = deleteCronRaw(p[0], p[1]);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("deleteCron failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
+    }
+
+    /**
+     * List all registered cron-triggered workflow schedules.
+     *
+     * @return a result containing a JSON array of schedule objects on success,
+     *         or an error description on failure
+     */
+    public DurableResult<String> listCrons() {
+        long result = listCronsRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int scheduleListLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return DurableResult.err("listCrons failed with code " + errCode);
+        }
+
+        String scheduleList = readOutput(scheduleListLen);
+        return DurableResult.ok(scheduleList);
+    }
+
+    // ========================================================================
+    // Query handlers
+    // ========================================================================
+
+    /**
+     * Register a handler for a named query.
+     * <p>
+     * External clients can query this workflow using the cleat query API.
+     * The registered handler name is advertised to clients.
+     *
+     * @param name the query handler name
+     */
+    public void registerQueryHandler(String name) {
+        int[] p = packStrings(name);
+        durableRegisterQueryHandlerRaw(p[0], p[1]);
+    }
+
+    // ========================================================================
+    // Detached execution
+    // ========================================================================
+
+    /**
+     * Run a workflow in detached mode (fire-and-forget).
+     * <p>
+     * The workflow runs independently and its result is not awaited.
+     * Useful for fan-out patterns where the caller does not need the result.
+     *
+     * @param workflowName the workflow type/name to run
+     * @param inputJSON    the input JSON for the detached workflow
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> runDetached(String workflowName, String inputJSON) {
+        int[] p = packStrings(workflowName, inputJSON);
+        int nameOff = p[0], inOff = p[1];
+        int nameLen = p[2], inLen = p[3];
+
+        long result = durableRunDetachedRaw(nameOff, nameLen, inOff, inLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("runDetached failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
+    }
+
+    // ========================================================================
+    // Run ID
+    // ========================================================================
+
+    /**
+     * Get the current run ID for this workflow execution.
+     * <p>
+     * The run ID uniquely identifies this specific execution of the workflow
+     * (as opposed to the workflow ID which identifies the logical workflow
+     * instance across potential re-executions and continue-as-new).
+     *
+     * @return the run ID string, or empty string if unavailable
+     */
+    public String currentRunId() {
+        long result = durableRunIdRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int idLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0 || idLen == 0) {
+            return "";
+        }
+        return readOutput(idLen);
+    }
+
+    // ========================================================================
+    // State operations (scoped for virtual objects)
+    // ========================================================================
+
+    /**
+     * Set a key-value pair in the workflow's durable state.
+     * <p>
+     * If a virtual object scope has been set via
+     * {@link #setScope(String, String)}, the key is automatically prefixed.
+     *
+     * @param key   the state key
+     * @param value the state value (typically a JSON string)
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> setState(String key, String value) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped, value);
+        int keyOff = p[0], valOff = p[1];
+        int keyLen = p[2], valLen = p[3];
+
+        long result = durableSetStateRaw(keyOff, keyLen, valOff, valLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("setState failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
+    }
+
+    /**
+     * Get a value from the workflow's durable state by key.
+     * <p>
+     * If a virtual object scope has been set, the key is automatically prefixed.
+     *
+     * @param key the state key
+     * @return a result containing the state value on success, or an error
+     *         description on failure (including if the key is not found)
+     */
+    public DurableResult<String> getState(String key) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped);
+
+        long result = durableGetStateRaw(p[0], p[1], Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int valueLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return DurableResult.err("getState failed with code " + errCode);
+        }
+
+        String value = readOutput(valueLen);
+        return DurableResult.ok(value);
+    }
+
+    /**
+     * Delete a key from the workflow's durable state.
+     * <p>
+     * If a virtual object scope has been set, the key is automatically prefixed.
+     *
+     * @param key the state key to delete
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> deleteState(String key) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped);
+
+        long result = durableDeleteStateRaw(p[0], p[1]);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("deleteState failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
+    }
+
+    /**
+     * Atomically increment a numeric state value by the given delta.
+     * <p>
+     * If a virtual object scope has been set, the key is automatically prefixed.
+     * If the key does not exist, it is created with the delta as its initial value.
+     *
+     * @param key   the state key
+     * @param delta the amount to add (may be negative to decrement)
+     * @return a result containing the new value after increment, or an error
+     *         description on failure
+     */
+    public DurableResult<Long> incrState(String key, long delta) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped);
+
+        long result = durableIncrStateRaw(p[0], p[1], delta);
+
+        int errCode = (int) (result & 0xFFL);
+        if (errCode != 0) {
+            return DurableResult.err("incrState failed with code " + errCode);
+        }
+
+        long newValue = result >>> 8;
+        return DurableResult.ok(newValue);
+    }
+
+    /**
+     * Check whether a key exists in the workflow's durable state.
+     * <p>
+     * If a virtual object scope has been set, the key is automatically prefixed.
+     *
+     * @param key the state key
+     * @return {@code true} if the key exists in state, {@code false} otherwise
+     */
+    public boolean hasState(String key) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped);
+
+        long result = durableHasStateRaw(p[0], p[1]);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return false;
+        }
+        return Memory.decodeSimpleExtra(result) != 0;
+    }
+
+    /**
+     * List state keys matching the given prefix.
+     * <p>
+     * If a virtual object scope has been set, the prefix is automatically
+     * prefixed.  The returned keys include the scope prefix.
+     *
+     * @param prefix the key prefix to match
+     * @return a result containing the matching keys as a JSON array string,
+     *         or an error description on failure
+     */
+    public DurableResult<String> listState(String prefix) {
+        String scoped = scopedKey(prefix);
+        int[] p = packStrings(scoped);
+
+        long result = durableListStateRaw(p[0], p[1], Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int listLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return DurableResult.err("listState failed with code " + errCode);
+        }
+
+        String listJson = readOutput(listLen);
+        return DurableResult.ok(listJson);
+    }
+
+    // ========================================================================
+    // awaitAllChildren
+    // ========================================================================
+
+    /**
+     * Wait for all specified child workflow run IDs to complete.
+     * <p>
+     * The run IDs are passed as a JSON array string (e.g.
+     * {@code ["run-1","run-2"]}).  The method suspends until all children
+     * have completed, then returns their results as a JSON array.
+     *
+     * @param runIDs the child workflow run IDs to wait for
+     * @return a result containing the results JSON array on success, or an
+     *         error description on failure
+     */
+    public DurableResult<String> awaitAllChildren(String[] runIDs) {
+        // Serialize run IDs as a JSON string array.
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < runIDs.length; i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append("\"").append(JsonHelper.escapeJson(runIDs[i])).append("\"");
+        }
+        sb.append("]");
+        String idsJson = sb.toString();
+
+        int[] p = packStrings(idsJson);
+
+        long result = durableAwaitAllChildrenRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return DurableResult.err("awaitAllChildren failed with code " + errCode);
+        }
+
+        String response = readOutput(resultLen);
+        return DurableResult.ok(response);
+    }
+
+    // ========================================================================
+    // Typed child workflow wrappers
+    // ========================================================================
+
+    /**
+     * Start a child workflow with a typed input.
+     * <p>
+     * The input is serialized to JSON using {@link JsonHelper#stringify(Object)}.
+     * This method otherwise behaves identically to
+     * {@link #childWorkflow(String, String)}.
+     *
+     * @param name  the child workflow type/name
+     * @param input the input object (serialized to JSON)
+     * @param <T>   the input type
+     * @return a result containing the child's run ID on success, or an error
+     *         description on failure
+     */
+    public <T> DurableResult<String> childWorkflowTyped(String name, T input) {
+        String inputJson = JsonHelper.stringify(input);
+        return childWorkflow(name, inputJson);
+    }
+
+    /**
+     * Wait for a child workflow to complete and deserialize its result.
+     * <p>
+     * This is a typed wrapper around {@link #awaitChild(String)} that
+     * deserializes the result JSON into the requested type using
+     * {@link JsonHelper#parse(String, Class)}.
+     *
+     * @param runID the child workflow run ID
+     * @param clazz the expected result type class
+     * @param <T>   the result type
+     * @return a result containing the deserialized child output on success,
+     *         or an error description on failure
+     */
+    public <T> DurableResult<T> awaitChildTyped(String runID, Class<T> clazz) {
+        DurableResult<String> result = awaitChild(runID);
+        if (result.isErr()) {
+            return DurableResult.err(result.getError());
+        }
+        try {
+            T value = JsonHelper.parse(result.getValue(), clazz);
+            return DurableResult.ok(value);
+        } catch (Exception e) {
+            return DurableResult.err("awaitChildTyped: failed to parse result: " + e.getMessage());
+        }
+    }
+
+    // ========================================================================
+    // Typed durableCall wrappers
+    // ========================================================================
+
+    /**
+     * Make a typed durable call to an external service.
+     * <p>
+     * The request object is serialized to JSON and the response is
+     * deserialized to the requested type.
+     *
+     * @param service       the service name
+     * @param operation     the operation name
+     * @param request       the request object (serialized to JSON)
+     * @param responseClass the expected response type class
+     * @param <T>           the request type
+     * @param <R>           the response type
+     * @return a result containing the deserialized response on success, or an
+     *         error description on failure
+     */
+    public <T, R> DurableResult<R> durableCallTyped(
+            String service, String operation, T request, Class<R> responseClass) {
+        String requestJson = JsonHelper.stringify(request);
+
+        DurableResult<String> result = durableCall(service, operation, requestJson);
+        if (result.isErr()) {
+            return DurableResult.err(result.getError());
+        }
+
+        try {
+            R response = JsonHelper.parse(result.getValue(), responseClass);
+            return DurableResult.ok(response);
+        } catch (Exception e) {
+            return DurableResult.err("durableCallTyped: failed to parse response: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Make a typed durable call with a retry policy.
+     * <p>
+     * The retry policy is serialized and passed to the host runtime, which
+     * handles retries automatically.  The request and response are
+     * automatically serialized/deserialized.
+     *
+     * @param service       the service name
+     * @param operation     the operation name
+     * @param request       the request object (serialized to JSON)
+     * @param responseClass the expected response type class
+     * @param retryPolicy   the retry policy configuration
+     * @param <T>           the request type
+     * @param <R>           the response type
+     * @return a result containing the deserialized response on success, or an
+     *         error description on failure
+     */
+    public <T, R> DurableResult<R> durableCallWithRetry(
+            String service, String operation, T request,
+            Class<R> responseClass, RetryPolicy retryPolicy) {
+        String requestJson = JsonHelper.stringify(request);
+
+        // Serialize the retry policy as JSON.
+        String retryJson = "{\"max_attempts\":" + retryPolicy.maxAttempts
+            + ",\"initial_interval_ms\":" + retryPolicy.initialIntervalMs
+            + ",\"backoff_multiplier\":" + retryPolicy.backoffMultiplier
+            + ",\"maximum_interval_ms\":" + retryPolicy.maximumIntervalMs + "}";
+
+        int[] p = packStrings(service, operation, requestJson, retryJson);
+        int svcOff = p[0], opOff = p[1], reqOff = p[2], retryOff = p[3];
+        int svcLen = p[4], opLen = p[5], reqLen = p[6], retryLen = p[7];
+
+        long result = durableCallWithRetryRaw(
+            svcOff, svcLen,
+            opOff, opLen,
+            reqOff, reqLen,
+            retryOff, retryLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return DurableResult.err(errMsg);
+        }
+
+        try {
+            String response = readOutput(responseLen);
+            R parsed = JsonHelper.parse(response, responseClass);
+            return DurableResult.ok(parsed);
+        } catch (Exception e) {
+            return DurableResult.err("durableCallWithRetry: failed to parse response: " + e.getMessage());
+        }
+    }
+
+    // ========================================================================
+    // HTTP fetch helper
+    // ========================================================================
+
+    /**
+     * Make an HTTP request using the durable fetch host function.
+     * <p>
+     * The fetch call is deterministic and recorded in the workflow event
+     * history for replay.  The response includes the HTTP status code,
+     * response headers, and body.
+     *
+     * @param method  the HTTP method (e.g. {@code "GET"}, {@code "POST"})
+     * @param url     the request URL
+     * @param headers optional HTTP headers (may be null)
+     * @param body    optional request body (may be null for GET requests)
+     * @return a result containing the {@link FetchResult} on success, or an
+     *         error description on failure
+     */
+    public DurableResult<FetchResult> durableFetch(
+            String method, String url, Map<String, String> headers, String body) {
+        String headersJson = headersToJson(headers);
+        if (body == null) {
+            body = "";
+        }
+
+        int[] p = packStrings(method, url, headersJson, body);
+        int methodOff = p[0], urlOff = p[1], hdrOff = p[2], bodyOff = p[3];
+        int methodLen = p[4], urlLen = p[5], hdrLen = p[6], bodyLen = p[7];
+
+        long result = durableFetchRaw(
+            methodOff, methodLen,
+            urlOff, urlLen,
+            hdrOff, hdrLen,
+            bodyOff, bodyLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return DurableResult.err(errMsg);
+        }
+
+        String responseJson = readOutput(responseLen);
+        try {
+            java.util.Map<String, Object> parsed = JsonHelper.parseObject(responseJson);
+
+            int statusCode = 0;
+            Object sc = parsed.get("status_code");
+            if (sc instanceof Number) {
+                statusCode = ((Number) sc).intValue();
+            }
+
+            java.util.Map<String, String> respHeaders = new java.util.HashMap<>();
+            Object h = parsed.get("headers");
+            if (h instanceof Map) {
+                for (Map.Entry<String, Object> e : ((Map<String, Object>) h).entrySet()) {
+                    respHeaders.put(e.getKey(), e.getValue() != null ? e.getValue().toString() : "");
+                }
+            }
+
+            String respBody = parsed.get("body") != null ? parsed.get("body").toString() : "";
+
+            return DurableResult.ok(new FetchResult(statusCode, respHeaders, respBody));
+        } catch (Exception e) {
+            return DurableResult.err("durableFetch: failed to parse response: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Convenience method for HTTP GET requests.
+     * <p>
+     * Equivalent to {@code durableFetch("GET", url, null, null)}.
+     *
+     * @param url the request URL
+     * @return a result containing the {@link FetchResult} on success, or an
+     *         error description on failure
+     */
+    public DurableResult<FetchResult> fetchGet(String url) {
+        return durableFetch("GET", url, null, null);
+    }
+
+    // ========================================================================
     // Inner result type for awaitSignals
     // ========================================================================
 
@@ -1161,6 +1932,81 @@ public class HostCalls {
                     + ", callErrorCode=" + callErrorCode + ")";
             }
             return "PluginCallOutcome(response=" + response + ")";
+        }
+    }
+
+    // ========================================================================
+    // RetryPolicy
+    // ========================================================================
+
+    /**
+     * Configuration for retry behaviour in
+     * {@link #durableCallWithRetry(String, String, Object, Class, RetryPolicy)}.
+     * <p>
+     * Controls the maximum number of attempts, initial backoff interval,
+     * backoff multiplier, and maximum backoff interval for retried calls.
+     */
+    public static class RetryPolicy {
+        /** Maximum number of retry attempts (including the initial call). */
+        public final int maxAttempts;
+
+        /** Initial backoff interval in milliseconds. */
+        public final long initialIntervalMs;
+
+        /** Multiplier applied to the interval after each retry (e.g. 2.0 for exponential backoff). */
+        public final double backoffMultiplier;
+
+        /** Maximum backoff interval in milliseconds. */
+        public final long maximumIntervalMs;
+
+        /**
+         * Construct a new retry policy.
+         *
+         * @param maxAttempts        maximum number of retry attempts
+         * @param initialIntervalMs  initial backoff interval in milliseconds
+         * @param backoffMultiplier  backoff multiplier (> 1.0 for exponential backoff)
+         * @param maximumIntervalMs  maximum backoff interval in milliseconds
+         */
+        public RetryPolicy(int maxAttempts, long initialIntervalMs,
+                           double backoffMultiplier, long maximumIntervalMs) {
+            this.maxAttempts = maxAttempts;
+            this.initialIntervalMs = initialIntervalMs;
+            this.backoffMultiplier = backoffMultiplier;
+            this.maximumIntervalMs = maximumIntervalMs;
+        }
+    }
+
+    // ========================================================================
+    // FetchResult
+    // ========================================================================
+
+    /**
+     * Result of an HTTP fetch via {@link #durableFetch(String, String, Map, String)}
+     * or {@link #fetchGet(String)}.
+     * <p>
+     * Contains the HTTP status code, response headers, and response body.
+     */
+    public static class FetchResult {
+        /** The HTTP status code (e.g. 200, 404, 500). */
+        public final int statusCode;
+
+        /** Response headers as a map of header name to header value. */
+        public final Map<String, String> headers;
+
+        /** The response body as a string. */
+        public final String body;
+
+        /**
+         * Construct a new fetch result.
+         *
+         * @param statusCode the HTTP status code
+         * @param headers    response headers
+         * @param body       response body
+         */
+        public FetchResult(int statusCode, Map<String, String> headers, String body) {
+            this.statusCode = statusCode;
+            this.headers = headers;
+            this.body = body;
         }
     }
 }

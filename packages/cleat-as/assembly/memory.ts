@@ -43,6 +43,19 @@ export const SLEEP_STATUS_SUSPEND: u8 = 1;
 /** PollSignal found flag value (bit 8 set = 0x0100). */
 export const POLL_SIGNAL_FOUND: u32 = 0x0100;
 
+/**
+ * Error code used by the @durableEntry transform when a workflow function
+ * returns a TerminalError (non-retryable). The transform should return
+ * encodeExportResult(TERMINAL_ERROR_CODE, 0) to signal a terminal failure.
+ */
+export const TERMINAL_ERROR_CODE: u32 = 2;
+
+/**
+ * Error code used by the @durableEntry transform for regular errors
+ * that may be retried.
+ */
+export const RETRYABLE_ERROR_CODE: u32 = 1;
+
 // ──────────────────────────────────────────────
 // String I/O
 // ──────────────────────────────────────────────
@@ -412,6 +425,33 @@ export function resetWorkflowSuspended(): void {
 /** Set the suspension flag — called by HostCalls methods. */
 export function setWorkflowSuspended(): void {
   _workflowSuspended = true;
+}
+
+// ──────────────────────────────────────────────
+// Terminal error detection
+// ──────────────────────────────────────────────
+
+/**
+ * Global flag set when the workflow returns a TerminalError (non-retryable).
+ * The @durableEntry transform-generated wrapper checks this flag after
+ * calling the inner function. If set, the wrapper returns
+ * encodeExportResult(TERMINAL_ERROR_CODE, 0) instead of a retryable error.
+ */
+let _terminalError: string = "";
+
+/** Returns the terminal error message, or empty string if none. */
+export function getTerminalError(): string {
+  return _terminalError;
+}
+
+/** Set a terminal error message. */
+export function setTerminalError(msg: string): void {
+  _terminalError = msg;
+}
+
+/** Clear the terminal error flag. */
+export function clearTerminalError(): void {
+  _terminalError = "";
 }
 
 // ──────────────────────────────────────────────

@@ -11,7 +11,7 @@ import pytest
 
 try:
     from cleat_sdk.test_harness import CleatTestHarness, CallRecord
-    from cleat_sdk.host_calls import HostCalls, RetryPolicy, SignalResult, PromiseResult, ChildResult
+    from cleat_sdk.host_calls import HostCalls, RetryPolicy, SignalResult, PromiseResult, ChildResult, SuspendSentinel
 except ImportError as e:
     pytest.skip(
         f"Skipping test harness tests: {e}",
@@ -182,10 +182,23 @@ class TestSignals:
         assert result.name == ""
         assert result.payload == ""
 
-    def test_await_signals_zero_timeout(self):
+    def test_await_signals_indefinite_timeout_raises_suspend(self):
+        """timeout_ms=0 means wait indefinitely, which raises SuspendSentinel
+        in the test harness when no signal is available."""
         h = CleatTestHarness()
-        result = h.await_signals(["anything"], 0)
-        assert result.timed_out
+        with pytest.raises(SuspendSentinel):
+            h.await_signals(["anything"], 0)
+        with pytest.raises(SuspendSentinel):
+            h.await_signals(["anything"], -1)
+
+    def test_await_signals_indefinite_with_signal(self):
+        """With a signal available, indefinite wait returns immediately."""
+        h = CleatTestHarness()
+        h.stub_signal("greeting", "hello")
+        result = h.await_signals(["greeting"], 0)
+        assert not result.timed_out
+        assert result.name == "greeting"
+        assert result.payload == "hello"
 
     def test_poll_signal_still_available_after_await(self):
         h = CleatTestHarness()

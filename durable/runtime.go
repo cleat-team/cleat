@@ -27,6 +27,16 @@ func (SuspendSentinel) Error() string { return "durable: workflow suspended" }
 // ErrSuspend is the sentinel value panicked to suspend a workflow.
 var ErrSuspend error = SuspendSentinel{}
 
+// CronSchedule describes a scheduled workflow trigger created by ScheduleCron.
+type CronSchedule struct {
+	ScheduleID   string `json:"schedule_id"`
+	WorkflowName string `json:"workflow_name"`
+	CronExpr     string `json:"cron_expr"`
+	Timezone     string `json:"timezone"`
+	Input        string `json:"input"`
+	Enabled      bool   `json:"enabled"`
+}
+
 // HostCalls is the interface workflow code programs against. It provides
 // durable, deterministic access to external services, time, and randomness.
 //
@@ -223,6 +233,19 @@ type HostCalls interface {
 	// target workflow's signal queue. Unlike SendSignalAndWait, this is
 	// fire-and-forget -- the caller does not wait for a response.
 	SignalWorkflow(targetRunID, signalName, payload string) error
+
+	// ScheduleCron creates a recurring workflow trigger from a cron expression.
+	// cronExpr is a standard 5-field cron expression, timezone is an IANA timezone
+	// name (e.g. "America/New_York"), inputJSON is the workflow input.
+	// Returns the schedule ID on success.
+	ScheduleCron(workflowName, cronExpr, timezone, inputJSON string) (scheduleID string, err error)
+
+	// DeleteCron removes a recurring workflow trigger by schedule ID.
+	DeleteCron(scheduleID string) error
+
+	// ListCrons returns all recurring workflow triggers as a JSON array of
+	// CronSchedule entries.
+	ListCrons() (string, error)
 
 	// RunDetached runs fn with a fresh HostCalls that ignores cancellation.
 	// fn executes immediately, is recorded in history, and survives crash/replay.
@@ -532,15 +555,24 @@ func (e *CallTimeoutError) Error() string {
 // ---- Call options ----
 
 // CallOptions provides per-call configuration.
-
+//
+// Timeout and StartToCloseTimeout are respected when the host-side
+// durableCallWithOptions import is populated (the normal WASM runtime path).
+// When falling back to the SDK-level retry loop these fields are advisory
+// since the underlying DurableCall import has no timeout parameter.
 type CallOptions struct {
-	Retry           *RetryPolicy
-	MaxResponseSize int    // 0 = use default (64KB), capped at outBufSize
-	Timeout         time.Duration // 0 = no timeout
+	Retry              *RetryPolicy
+	MaxResponseSize    int           // 0 = use default (64KB), capped at outBufSize
+	Timeout            time.Duration // 0 = no timeout, per-call deadline
+	StartToCloseTimeout time.Duration // Temporal-compatible alias for Timeout
 }
 
 // RetryPolicy configures automatic retry behavior for durable calls.
 // When nil, no retry is performed (backward-compatible default).
+//
+// MaxAttempts is the canonical field. The method MaximumAttempts()
+// provides a convenience getter for the same value (also checks a
+// zero MaxAttempts for Temporal-compatible aliasing).
 type RetryPolicy struct {
 	MaxAttempts        int
 	InitialInterval    time.Duration
@@ -560,7 +592,8 @@ func DefaultRetryPolicy() RetryPolicy {
 }
 
 // MaximumAttempts returns the maximum number of retry attempts.
-// Returns 0 if rp is nil.
+// Returns the value of MaxAttempts, or 0 if rp is nil.
+// This is a convenience getter that mirrors the Temporal API naming.
 func (rp *RetryPolicy) MaximumAttempts() int {
 	if rp == nil {
 		return 0
@@ -628,6 +661,9 @@ type hostCallsImpl struct {
 	replyToSignal             func(correlationID, response string) error
 	awaitSignalsWithQuorum    func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
 	signalWorkflow            func(targetRunID, signalName, payload string) error
+	scheduleCron              func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
+	deleteCron                func(scheduleID string) error
+	listCrons                 func() (string, error)
 
 	// State map for typed K/V operations.
 	stateMap       map[string]interface{}
@@ -689,6 +725,9 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		replyToSignal:             opts.ReplyToSignal,
 		awaitSignalsWithQuorum:    opts.AwaitSignalsWithQuorum,
 		signalWorkflow:            opts.SignalWorkflow,
+		scheduleCron:              opts.ScheduleCron,
+		deleteCron:                opts.DeleteCron,
+		listCrons:                 opts.ListCrons,
 	}
 }
 
@@ -762,6 +801,9 @@ type HostCallsOptions struct {
 	ReplyToSignal             func(correlationID, response string) error
 	AwaitSignalsWithQuorum    func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
 	SignalWorkflow            func(targetRunID, signalName, payload string) error
+	ScheduleCron              func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
+	DeleteCron                func(scheduleID string) error
+	ListCrons                 func() (string, error)
 }
 
 // ---- Interface method implementations ----
@@ -1026,6 +1068,27 @@ func (h *hostCallsImpl) SignalWorkflow(targetRunID, signalName, payload string) 
 		return errors.New("durable: SignalWorkflow not initialized")
 	}
 	return h.signalWorkflow(targetRunID, signalName, payload)
+}
+
+func (h *hostCallsImpl) ScheduleCron(workflowName, cronExpr, timezone, inputJSON string) (string, error) {
+	if h.scheduleCron == nil {
+		return "", errors.New("durable: ScheduleCron not initialized")
+	}
+	return h.scheduleCron(workflowName, cronExpr, timezone, inputJSON)
+}
+
+func (h *hostCallsImpl) DeleteCron(scheduleID string) error {
+	if h.deleteCron == nil {
+		return errors.New("durable: DeleteCron not initialized")
+	}
+	return h.deleteCron(scheduleID)
+}
+
+func (h *hostCallsImpl) ListCrons() (string, error) {
+	if h.listCrons == nil {
+		return "", errors.New("durable: ListCrons not initialized")
+	}
+	return h.listCrons()
 }
 
 func (h *hostCallsImpl) DurableSleep(d time.Duration) {

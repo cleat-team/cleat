@@ -1,6 +1,7 @@
 {
   "entries": ["./assembly/index.ts"],
   "options": {
+    "use": ["ASC_WASI=0"],
     "paths": {
       "@cleat/sdk": "./assembly"
     }

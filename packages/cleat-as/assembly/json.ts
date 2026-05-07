@@ -133,8 +133,8 @@ class Lexer {
         else if (esc == 0x74) result += "\t";
         else if (esc == 0x75) {
           // unicode escape \uXXXX
-          if (this.pos + 4 < this.len) {
-            let hexStr: string = this.input.substring(this.pos + 1, this.pos + 5);
+          if (this.pos + 4 <= this.len) {
+            let hexStr: string = this.input.substring(this.pos, this.pos + 4);
             let codePoint: i32 = 0;
             for (let i: i32 = 0; i < 4; i++) {
               let hc: i32 = hexStr.charCodeAt(i);
@@ -143,8 +143,46 @@ class Lexer {
               else if (hc >= 0x41 && hc <= 0x46) codePoint |= (hc - 0x41 + 10);
               else if (hc >= 0x61 && hc <= 0x66) codePoint |= (hc - 0x61 + 10);
             }
-            result += String.fromCharCode(codePoint);
-            this.pos += 4;
+            // Handle surrogate pairs for characters beyond BMP (U+10000+)
+            if (codePoint >= 0xD800 && codePoint <= 0xDBFF) {
+              // High surrogate -- look for \uDC00-\uDFFF low surrogate
+              if (this.pos + 10 <= this.len) {
+                let next1: i32 = this.input.charCodeAt(this.pos + 4);
+                let next2: i32 = this.input.charCodeAt(this.pos + 5);
+                if (next1 == 0x5c && next2 == 0x75) {
+                  let lowHex: string = this.input.substring(this.pos + 6, this.pos + 10);
+                  let lowCode: i32 = 0;
+                  for (let i: i32 = 0; i < 4; i++) {
+                    let hc: i32 = lowHex.charCodeAt(i);
+                    lowCode <<= 4;
+                    if (hc >= 0x30 && hc <= 0x39) lowCode |= (hc - 0x30);
+                    else if (hc >= 0x41 && hc <= 0x46) lowCode |= (hc - 0x41 + 10);
+                    else if (hc >= 0x61 && hc <= 0x66) lowCode |= (hc - 0x61 + 10);
+                  }
+                  if (lowCode >= 0xDC00 && lowCode <= 0xDFFF) {
+                    // Valid surrogate pair -- encode as two UTF-16 code units
+                    result += String.fromCharCode(codePoint);
+                    result += String.fromCharCode(lowCode);
+                    this.pos += 10; // \uXXXX\uXXXX
+                  } else {
+                    // Invalid low surrogate, emit high surrogate as-is
+                    result += String.fromCharCode(codePoint);
+                    this.pos += 4;
+                  }
+                } else {
+                  // No following \u, emit high surrogate as-is
+                  result += String.fromCharCode(codePoint);
+                  this.pos += 4;
+                }
+              } else {
+                result += String.fromCharCode(codePoint);
+                this.pos += 4;
+              }
+            } else {
+              // BMP character or low surrogate -- emit directly
+              result += String.fromCharCode(codePoint);
+              this.pos += 4;
+            }
           }
         } else {
           result += String.fromCharCode(esc);
@@ -702,8 +740,38 @@ export class JsonBuilder {
 }
 
 // ═══════════════════════════════════════════════
+// Re-export escapeJson from memory.ts
+// ═══════════════════════════════════════════════
+
+import { escapeJson as _memEscapeJson } from "./memory";
+
+// ═══════════════════════════════════════════════
 // Standalone helpers
 // ═══════════════════════════════════════════════
+
+/**
+ * Escape a string for safe embedding in JSON.
+ *
+ * Handles all required JSON escape sequences:
+ *   `"`, `\`, `/`, `\b`, `\f`, `\n`, `\r`, `\t`
+ * and control characters (U+0000-U+001F) encoded as `\u00XX`.
+ *
+ * This function delegates to the existing `escapeJson` implementation in
+ * `memory.ts`. It is re-exported here for convenience so callers can import
+ * all JSON utilities from a single module.
+ *
+ * Example:
+ * ```ts
+ * let escaped = jsonEscape('hello "world"\nline2');
+ * // result: hello \"world\"\\nline2
+ * ```
+ *
+ * @param s - String to escape.
+ * @returns The escaped string, safe for embedding in JSON string values.
+ */
+export function jsonEscape(s: string): string {
+  return _memEscapeJson(s);
+}
 
 /**
  * Quick-and-dirty JSON string field extraction for flat JSON objects.
@@ -787,4 +855,96 @@ export function jsonExtractBool(json: string, field: string): bool {
   }
   if (start + 4 <= json.length && json.substring(start, start + 4) == "true") return true;
   return false;
+}
+
+/**
+ * Parse a JSON array of strings from a JSON string.
+ *
+ * Handles: [], ["a"], ["a","b","c"], ["a", null, "b"], [""], with optional
+ * whitespace. Null elements are included as empty strings. Strings containing
+ * braces or other special characters are handled correctly since the parser
+ * only looks for the closing quote character.
+ *
+ * Returns an empty array on parse failure or for unsupported element types
+ * (objects, nested arrays, numbers, booleans).
+ *
+ * This is a lightweight parser that does NOT handle escaped quotes or
+ * complex nested structures within the array elements. For robust parsing,
+ * use `JsonParser`.
+ *
+ * @param json - JSON string containing an array of strings.
+ * @returns Array of string values extracted from the JSON array.
+ */
+export function jsonStrArray(json: string): string[] {
+  let result: string[] = [];
+  let i: i32 = 0;
+  let len: i32 = json.length;
+
+  // Skip leading whitespace
+  while (i < len && json.charCodeAt(i) <= 0x20) i++;
+  // Expect '['
+  if (i >= len || json.charCodeAt(i) != 0x5b) return result;
+  i++; // skip '['
+
+  // Skip whitespace
+  while (i < len && json.charCodeAt(i) <= 0x20) i++;
+  if (i >= len) return result;
+  if (json.charCodeAt(i) == 0x5d) return result; // empty array
+
+  while (i < len) {
+    // Skip whitespace before element
+    while (i < len && json.charCodeAt(i) <= 0x20) i++;
+    if (i >= len) break;
+    if (json.charCodeAt(i) == 0x5d) break; // end of array
+
+    if (json.charCodeAt(i) == 0x22) {
+      // String element
+      i++; // skip opening quote
+      let start: i32 = i;
+      // Read until closing quote (handle escaped characters)
+      while (i < len) {
+        let c: i32 = json.charCodeAt(i);
+        if (c == 0x22) break; // closing quote
+        if (c == 0x5c) i++;   // skip escaped character
+        i++;
+      }
+      result.push(json.substring(start, i));
+      if (i >= len) break;
+      i++; // skip closing quote
+    } else if (i + 4 <= len && json.charCodeAt(i) == 0x6e) {
+      // null element -- check for "null" literal
+      if (json.charCodeAt(i + 1) == 0x75 &&  // u
+          json.charCodeAt(i + 2) == 0x6c &&  // l
+          json.charCodeAt(i + 3) == 0x6c) {  // l
+        // Push empty string as placeholder for null
+        result.push("");
+        i += 4;
+        // Skip whitespace after element and handle comma/]
+        while (i < len && json.charCodeAt(i) <= 0x20) i++;
+        if (i >= len) break;
+        if (json.charCodeAt(i) == 0x5d) break; // end of array
+        if (json.charCodeAt(i) == 0x2c) { i++; continue; } // comma
+        break;
+      } else {
+        break; // unexpected token
+      }
+    } else {
+      // Unknown token (number, bool, object, array) -- skip until comma or ]
+      while (i < len) {
+        let c: i32 = json.charCodeAt(i);
+        if (c == 0x2c || c == 0x5d) break;
+        i++;
+      }
+      if (i >= len) break;
+    }
+
+    // Skip whitespace after element
+    while (i < len && json.charCodeAt(i) <= 0x20) i++;
+    if (i >= len) break;
+    if (json.charCodeAt(i) == 0x5d) break; // end of array
+    if (json.charCodeAt(i) == 0x2c) { i++; continue; } // comma
+    break; // unexpected character
+  }
+
+  return result;
 }

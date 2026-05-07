@@ -208,7 +208,7 @@ Each `DurableCall` records the request and response in the event history. On rep
 
 ```go
 func CreateOrder(h durable.HostCalls, input string) error {
-    defer h.DurableDefer(func() {
+    defer h.DurableDeferFunc(func() {
         // Compensate on any failure.
         h.DurableCall("inventory", "ReleaseReservation", "order-123")
         h.DurableCall("payments", "Refund", "order-123")
@@ -233,6 +233,130 @@ if err := s.Run(h); err != nil {
 ```
 
 The Saga runs forward steps in order. If any step fails, previously completed steps are compensated in reverse order.
+
+### RetryPolicy field name mapping
+
+The `RetryPolicy` struct fields differ from Temporal/DBOS naming conventions:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `MaxAttempts` | `int` | Maximum retry attempts (not `MaximumAttempts`) |
+| `InitialInterval` | `time.Duration` | Initial backoff interval |
+| `BackoffCoefficient` | `float64` | Backoff multiplier (2.0 = double) |
+| `MaxInterval` | `time.Duration` | Maximum backoff interval |
+| `NonRetryableErrors` | `[]string` | Error substrings that skip retry |
+
+The struct field is `MaxAttempts` (not `MaximumAttempts`). Nil-safe accessor methods provide `MaximumAttempts`-style naming for interface compliance:
+
+```go
+rp.MaximumAttempts()  // returns rp.MaxAttempts (or 0 if rp is nil)
+rp.MaximumInterval()  // returns rp.MaxInterval (or 0 if rp is nil)
+```
+
+Usage examples:
+
+```go
+// Using the field directly:
+policy := durable.RetryPolicy{
+    MaxAttempts:        5,
+    InitialInterval:    1 * time.Second,
+    BackoffCoefficient: 2.0,
+    MaxInterval:        30 * time.Second,
+}
+
+// Using DefaultRetryPolicy():
+policy := durable.DefaultRetryPolicy()
+
+// Passing to a call:
+result, err := h.DurableCallWithOptions(
+    durable.CallOptions{Retry: &policy},
+    "service", "Op", requestJSON,
+)
+```
+
+### DurableDefer: string vs closure
+
+`DurableDefer` takes a **string description**, not a closure/callback:
+
+```go
+deferID, _ := h.DurableDefer("release inventory reservation")
+```
+
+The host records the description for observability during replay.
+
+For closure-based cleanup, use `DurableDeferFunc`:
+
+```go
+h.DurableDeferFunc(func() {
+    h.DurableCall("inventory", "ReleaseReservation", "order-123")
+})
+```
+
+For multi-step compensation, use `durable.NewSaga()` (defined in `durable/runtime.go`) instead of chaining multiple defers:
+
+```go
+s := durable.NewSaga()
+s.AddStep("charge", chargeFn, refundFn)
+s.AddStep("assign_driver", assignFn, releaseFn)
+if err := s.Run(h); err != nil {
+    return err
+}
+```
+
+The Saga provides structured, ordered compensation with typed result collection (`NewSagaTyped[T]`), concurrent step execution (`AddParallel`), and `TerminalError` handling, which `DurableDefer` does not support.
+
+### Per-call timeout limitations
+
+Per-call timeouts via `CallOptions.Timeout` are defined in the SDK but **not yet enforced on the host side** during WASM execution:
+
+```go
+opts := durable.CallOptions{
+    Timeout: 30 * time.Second,
+    Retry:   &policy,
+}
+result, err := h.DurableCallWithOptions(opts, "service", "Op", requestJSON)
+```
+
+Workaround: use `DurableSleep` + polling for timeout-aware patterns:
+
+```go
+deadline := h.Now().Add(30 * time.Second)
+for {
+    result, err := h.DurableCall("service", "Op", requestJSON)
+    if err == nil {
+        return result, nil
+    }
+    if h.Now().After(deadline) {
+        return "", fmt.Errorf("timed out after 30s")
+    }
+    h.DurableSleep(1 * time.Second)
+}
+```
+
+Host-side timeout enforcement is on the roadmap.
+
+### Multi-export WASM modules (Go)
+
+A single Go package can export multiple workflow entry points. The transformer pipeline generates a WASM export for each exported (capitalized) function that accepts `durable.HostCalls` as its first parameter:
+
+```go
+// assembly/myworkflows.go
+package myworkflows
+
+func PlaceOrder(h durable.HostCalls, input string) error {
+    // ...
+}
+
+func CancelOrder(h durable.HostCalls, input string) error {
+    // ...
+}
+
+func GetOrderStatus(h durable.HostCalls, input string) error {
+    // ...
+}
+```
+
+Compiled with `durable build`, each function becomes a named WASM export. The host dispatches workflow invocations by matching the called workflow name to the function name. WASM exports are named after the Go function names. There is no decorator required -- any exported function accepting `HostCalls` as its first parameter is automatically treated as an entry point.
 
 ### Signals (external events)
 

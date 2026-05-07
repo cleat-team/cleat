@@ -49,21 +49,54 @@ public final class JsonHelper {
         if (json == null) {
             return null;
         }
+        String trimmed = json.trim();
+
         if (type == String.class) {
             // For String targets, return the input as-is for plain strings,
             // but properly parse JSON string literals (strip quotes and unescape).
-            String trimmed = json.trim();
             if (trimmed.startsWith("\"")) {
                 ParseResult result = parseStringValue(trimmed, 0);
                 return (T) result.value;
             }
             return (T) json;
         }
+        if (type == Integer.class || type == int.class) {
+            ParseResult result = parseValue(trimmed, 0);
+            if (!(result.value instanceof Number)) {
+                throw new RuntimeException("Expected JSON number for Integer, got: " + trimmed);
+            }
+            return (T) Integer.valueOf(((Number) result.value).intValue());
+        }
+        if (type == Long.class || type == long.class) {
+            ParseResult result = parseValue(trimmed, 0);
+            if (!(result.value instanceof Number)) {
+                throw new RuntimeException("Expected JSON number for Long, got: " + trimmed);
+            }
+            return (T) Long.valueOf(((Number) result.value).longValue());
+        }
+        if (type == Double.class || type == double.class) {
+            ParseResult result = parseValue(trimmed, 0);
+            if (!(result.value instanceof Number)) {
+                throw new RuntimeException("Expected JSON number for Double, got: " + trimmed);
+            }
+            return (T) Double.valueOf(((Number) result.value).doubleValue());
+        }
+        if (type == Boolean.class || type == boolean.class) {
+            ParseResult result = parseValue(trimmed, 0);
+            if (!(result.value instanceof Boolean)) {
+                throw new RuntimeException("Expected JSON boolean, got: " + trimmed);
+            }
+            return (T) result.value;
+        }
         if (type == Map.class || type == HashMap.class) {
             return (T) parseObject(json);
         }
         if (type == List.class || type == ArrayList.class) {
             return (T) parseArray(json);
+        }
+        if (type == Object.class) {
+            // Return the raw parsed JSON value for generic consumers.
+            return (T) parseValue(trimmed, 0).value;
         }
         // Attempt POJO deserialization via parseObject(String, Class).
         return parseObject(json, type);

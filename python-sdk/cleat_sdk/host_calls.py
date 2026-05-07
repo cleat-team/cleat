@@ -93,6 +93,7 @@ try:
         durable_send_signal_and_wait as _import_durable_send_signal_and_wait,
         durable_reply_to_signal as _import_durable_reply_to_signal,
         durable_signal_workflow as _import_durable_signal_workflow,
+        durable_extend_timeout as _import_durable_extend_timeout,
     )
     _USING_WASM = True
 except ImportError:
@@ -115,6 +116,82 @@ class SuspendSentinel(Exception):
     """
 
     pass
+
+
+# ========================================================================
+# DurableCall exception hierarchy
+# ========================================================================
+
+
+class DurableCallError(RuntimeError):
+    """Base exception for all durable call failures.
+
+    Subclasses distinguish retryable from non-retryable errors.
+    Inherits from :class:`RuntimeError` for backward compatibility.
+    """
+
+    def __init__(
+        self,
+        service: str,
+        operation: str,
+        message: str,
+        *,
+        call_error_code: int = 0,
+    ) -> None:
+        self.service = service
+        self.operation = operation
+        self.call_error_code = call_error_code
+        super().__init__(
+            f"durable call {service}.{operation}: [{call_error_code}] {message}"
+        )
+
+
+class DurableCallTransientError(DurableCallError):
+    """Retryable durable call failure (e.g., network error, service unavailable).
+
+    The caller should retry the call.
+    """
+
+    pass
+
+
+class DurableCallPermanentError(DurableCallError):
+    """Non-retryable durable call failure (e.g., invalid request, auth error).
+
+    The caller should NOT retry; the error is permanent.
+    """
+
+    pass
+
+
+class DurableCallTimeoutError(DurableCallTransientError):
+    """Timeout-specific durable call failure.
+
+    The call exceeded its deadline. This is a transient / retryable error.
+    """
+
+    pass
+
+
+# Map of call_error_code values from the host to the appropriate exception class.
+# Matches the Go SDK's CallErrorCode constants in runtime.go.
+_CALL_ERROR_CODE_MAP: dict[int, type[DurableCallError]] = {
+    0: DurableCallError,  # CallErrorUnknown
+    1: DurableCallTimeoutError,  # CallErrorTimeout
+    2: DurableCallTransientError,  # CallErrorUnavailable
+    3: DurableCallPermanentError,  # CallErrorNotFound
+    4: DurableCallPermanentError,  # CallErrorInvalidRequest
+    5: DurableCallPermanentError,  # CallErrorPermissionDenied
+}
+
+
+# ========================================================================
+# Constants
+# ========================================================================
+
+# Sentinel value meaning "wait indefinitely" for signal/promise waits.
+# Passed to the host as i64::MAX when no timeout is desired.
+INFINITE_TIMEOUT_MS: int = 9223372036854775807  # i64::MAX / 2^63 - 1
 
 
 # ========================================================================
@@ -748,6 +825,36 @@ class HostCalls:
     # --------------------------------------------------------------------
 
     @staticmethod
+    def _raise_for_call_error(
+        service: str,
+        operation: str,
+        err_msg: str,
+        call_error_code: int,
+    ) -> None:
+        """Raise the appropriate :class:`DurableCallError` subclass for a
+        failed durable call.
+
+        Parameters
+        ----------
+        service :
+            The service name for the failed call.
+        operation :
+            The operation name for the failed call.
+        err_msg :
+            The error message from the host.
+        call_error_code :
+            The numeric call error code from the host.  Mapped to an
+            exception class via ``_CALL_ERROR_CODE_MAP``.
+        """
+        exc_cls = _CALL_ERROR_CODE_MAP.get(call_error_code, DurableCallError)
+        raise exc_cls(
+            service=service,
+            operation=operation,
+            message=err_msg,
+            call_error_code=call_error_code,
+        )
+
+    @staticmethod
     def _marshal(value: Any) -> str:
         """Convert *value* to a JSON string suitable for WASM host calls.
 
@@ -1020,7 +1127,13 @@ class HostCalls:
     # 6. durable_call — recorded API call
     # --------------------------------------------------------------------
 
-    def durable_call(self, service: str, operation: str, request: Any) -> str:
+    def durable_call(
+        self,
+        service: str,
+        operation: str,
+        request: Any,
+        timeout_ms: Optional[int] = None,
+    ) -> str:
         """Make a durable (deterministically replayed) call to an external service.
 
         The call is recorded in the workflow event history.  On replay, the
@@ -1036,6 +1149,10 @@ class HostCalls:
         request : Any
             Request payload.  If a :class:`dict`, it is JSON-serialised
             automatically.  Strings are passed through as-is.
+        timeout_ms : int or None
+            Optional per-call timeout in milliseconds.  When provided, the
+            host enforces a deadline for this call.  ``None`` means no
+            timeout (the host default).
 
         Returns
         -------
@@ -1044,8 +1161,18 @@ class HostCalls:
 
         Raises
         ------
+        DurableCallError
+            Base exception for all durable call failures.  Subclasses
+            distinguish retryable from non-retryable errors.
+        DurableCallTransientError
+            Retryable error (network, service unavailable).
+        DurableCallPermanentError
+            Non-retryable error (invalid request, auth failure).
+        DurableCallTimeoutError
+            Timeout-specific error (subclass of transient).
         RuntimeError
-            If the host reports an error from the service call.
+            Fallback when the host reports an error without a call error
+            code (backward compatibility).
         """
         req_str = self._marshal(request)
 
@@ -1057,20 +1184,51 @@ class HostCalls:
         remaining -= op_len
         req_len = write_string(req_offset, req_str, remaining)
 
-        result = _import_durable_call(
-            SCRATCH_BASE,
-            svc_len,
-            op_offset,
-            op_len,
-            req_offset,
-            req_len,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
+        if timeout_ms is not None and _USING_WASM:
+            # Use the retry import with a single attempt to convey the
+            # per-call timeout to the host.  When the host-side import
+            # supports timeout natively, this path passes it through.
+            non_retryable_str = "[]"
+            backoff_100x = 100  # 1.0 * 100
+            nre_offset = req_offset + req_len
+            remaining -= req_len
+            nre_len = write_string(nre_offset, non_retryable_str, remaining)
+
+            result = _import_durable_call_retry(
+                SCRATCH_BASE,
+                svc_len,
+                op_offset,
+                op_len,
+                req_offset,
+                req_len,
+                1,  # max_attempts: single attempt with timeout
+                timeout_ms,
+                backoff_100x,
+                timeout_ms,
+                nre_offset,
+                nre_len,
+                OUTPUT_OFFSET,
+                OUT_BUF_SIZE,
+            )
+        else:
+            result = _import_durable_call(
+                SCRATCH_BASE,
+                svc_len,
+                op_offset,
+                op_len,
+                req_offset,
+                req_len,
+                OUTPUT_OFFSET,
+                OUT_BUF_SIZE,
+            )
 
         response_len, call_error_code, err_code = decode_durable_call_result(result)
         if err_code != 0:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
+            if call_error_code != 0:
+                self._raise_for_call_error(
+                    service, operation, err_msg, call_error_code
+                )
             raise RuntimeError(f"durable_call failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
@@ -1182,6 +1340,10 @@ class HostCalls:
         response_len, call_error_code, err_code = decode_durable_call_result(result)
         if err_code != 0:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
+            if call_error_code != 0:
+                self._raise_for_call_error(
+                    service, operation, err_msg, call_error_code
+                )
             raise RuntimeError(f"durable_call_with_retry failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
@@ -1253,6 +1415,10 @@ class HostCalls:
         response_len, call_error_code, err_code = decode_durable_call_result(result)
         if err_code != 0:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
+            if call_error_code != 0:
+                self._raise_for_call_error(
+                    service, operation, err_msg, call_error_code
+                )
             raise RuntimeError(f"durable_call_with_heartbeat failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
@@ -1434,7 +1600,10 @@ class HostCalls:
         signal_names : list[str]
             List of signal names to wait for.
         timeout_ms : int
-            Maximum wait time in milliseconds.
+            Maximum wait time in milliseconds.  Pass ``0`` or a negative
+            value to wait indefinitely (no timeout).  When waiting
+            indefinitely the host suspends the workflow until a matching
+            signal arrives.
 
         Returns
         -------
@@ -1451,6 +1620,11 @@ class HostCalls:
         """
         names_json = json.dumps(signal_names)
 
+        # Support indefinite wait: timeout_ms <= 0 means "wait forever".
+        effective_timeout = timeout_ms
+        if timeout_ms <= 0:
+            effective_timeout = INFINITE_TIMEOUT_MS
+
         # Lower half of scratch buffer: signal names JSON.
         # Upper half of scratch buffer: signal payload output.
         names_len = write_string(SCRATCH_BASE, names_json, OUT_BUF_SIZE // 2)
@@ -1460,7 +1634,7 @@ class HostCalls:
         result = _import_durable_await_signals(
             SCRATCH_BASE,
             names_len,
-            timeout_ms,
+            effective_timeout,
             OUTPUT_OFFSET,
             OUT_BUF_SIZE,
             payload_offset,
@@ -2267,6 +2441,36 @@ class HostCalls:
             )
 
     # --------------------------------------------------------------------
+    # 27b. extend_timeout — extend workflow execution timeout
+    # --------------------------------------------------------------------
+
+    def extend_timeout(self, additional_ms: int) -> None:
+        """Extend the workflow's execution timeout.
+
+        This is useful for Human-In-The-Loop (HIL) patterns where a
+        workflow is waiting for human input via signals and needs to
+        extend its deadline to avoid timing out.
+
+        Parameters
+        ----------
+        additional_ms : int
+            Additional time in milliseconds to add to the workflow's
+            execution timeout.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error extending the timeout.
+        """
+        result = _import_durable_extend_timeout(additional_ms)
+
+        _, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"extend_timeout failed with error code: {err_code}"
+            )
+
+    # --------------------------------------------------------------------
     # 28. run_detached — execute detached from cancellation
     # --------------------------------------------------------------------
 
@@ -2428,6 +2632,10 @@ class HostCalls:
         response_len, call_error_code, err_code = decode_durable_call_result(result)
         if err_code != 0:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
+            if call_error_code != 0:
+                self._raise_for_call_error(
+                    f"plugin:{plugin_name}", function_name, err_msg, call_error_code
+                )
             raise RuntimeError(f"plugin_call failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
@@ -2492,6 +2700,10 @@ class HostCalls:
             response_len, call_error_code, err_code = decode_durable_call_result(result)
             if err_code != 0:
                 err_msg = read_string(OUTPUT_OFFSET, response_len) if response_len > 0 else "unknown error"
+                if call_error_code != 0:
+                    self._raise_for_call_error(
+                        f"plugin:{plugin_name}", function_name, err_msg, call_error_code
+                    )
                 raise RuntimeError(f"plugin_call_streaming failed: {err_msg}")
 
             if response_len == 0:
@@ -2728,3 +2940,211 @@ class HostCalls:
             raise RuntimeError(
                 f"signal_workflow failed with error code: {err_code}"
             )
+
+    # --------------------------------------------------------------------
+    # 36b. schedule_cron — create a recurring cron-triggered workflow
+    # --------------------------------------------------------------------
+
+    def schedule_cron(
+        self,
+        workflow_name: str,
+        cron_expr: str,
+        timezone: str,
+        input_json: str,
+    ) -> str:
+        """Create a recurring workflow trigger from a cron expression.
+
+        The host creates a recurring schedule that invokes the named
+        workflow on the cron schedule.  Returns a schedule ID that can
+        be used with :meth:`delete_cron` to remove the schedule.
+
+        Parameters
+        ----------
+        workflow_name : str
+            The workflow definition name to trigger.
+        cron_expr : str
+            Standard 5-field cron expression (e.g. ``"0 0 * * *"`` for
+            daily at midnight).
+        timezone : str
+            IANA timezone name (e.g. ``"America/New_York"``,
+            ``"UTC"``).
+        input_json : str
+            JSON input string for each workflow invocation.
+
+        Returns
+        -------
+        str
+            The schedule ID, which can be used to delete or inspect
+            the schedule later.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error creating the schedule.
+        """
+        wf_len = write_string(SCRATCH_BASE, workflow_name, OUT_BUF_SIZE)
+        cron_offset = SCRATCH_BASE + wf_len
+        remaining = OUT_BUF_SIZE - wf_len
+        cron_len = write_string(cron_offset, cron_expr, remaining)
+        tz_offset = cron_offset + cron_len
+        remaining -= cron_len
+        tz_len = write_string(tz_offset, timezone, remaining)
+        inp_offset = tz_offset + tz_len
+        remaining -= tz_len
+        inp_len = write_string(inp_offset, input_json, remaining)
+
+        result = _import_schedule_cron(
+            SCRATCH_BASE,
+            wf_len,
+            cron_offset,
+            cron_len,
+            tz_offset,
+            tz_len,
+            inp_offset,
+            inp_len,
+            OUTPUT_OFFSET,
+            OUT_BUF_SIZE,
+        )
+
+        id_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"schedule_cron failed with error code: {err_code}"
+            )
+
+        return read_string(OUTPUT_OFFSET, id_len)
+
+    # --------------------------------------------------------------------
+    # 36c. delete_cron — remove a cron-triggered workflow schedule
+    # --------------------------------------------------------------------
+
+    def delete_cron(self, schedule_id: str) -> None:
+        """Remove a recurring cron-triggered workflow schedule.
+
+        Parameters
+        ----------
+        schedule_id : str
+            The schedule ID returned by :meth:`schedule_cron`.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error deleting the schedule.
+        """
+        id_len = write_string(SCRATCH_BASE, schedule_id, OUT_BUF_SIZE)
+
+        result = _import_delete_cron(SCRATCH_BASE, id_len)
+
+        _, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"delete_cron failed with error code: {err_code}"
+            )
+
+    # --------------------------------------------------------------------
+    # 36d. list_crons — list all registered cron schedules
+    # --------------------------------------------------------------------
+
+    def list_crons(self) -> list[dict]:
+        """List all registered cron-triggered workflow schedules.
+
+        Returns
+        -------
+        list[dict]
+            A list of schedule objects, each containing schedule_id,
+            workflow_name, cron_expr, timezone, and enabled fields.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error listing schedules.
+        """
+        result = _import_list_crons(OUTPUT_OFFSET, OUT_BUF_SIZE)
+
+        list_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"list_crons failed with error code: {err_code}"
+            )
+
+        list_json = read_string(OUTPUT_OFFSET, list_len)
+        if not list_json:
+            return []
+        return json.loads(list_json)
+
+
+# -- 36c. schedule_cron ---------------------------------------------------------
+
+
+if not _USING_WASM:
+    def _import_schedule_cron(
+        wf_name_ptr: int,
+        wf_name_len: int,
+        cron_ptr: int,
+        cron_len: int,
+        tz_ptr: int,
+        tz_len: int,
+        input_ptr: int,
+        input_len: int,
+        schedule_id_ptr: int,
+        schedule_id_max: int,
+    ) -> int:
+        """Stub for WASM import ``(import "env" "schedule_cron") (param ...) (result i64)``.
+
+        Scheduled cron triggers are managed on the host side.  The workflow
+        registers a cron expression and input; the host creates the recurring
+        schedule and returns a schedule ID.
+        """
+        raise NotImplementedError(
+            "schedule_cron can only be called within a cleat WASM runtime."
+        )
+
+
+# -- 36d. delete_cron -----------------------------------------------------------
+
+
+if not _USING_WASM:
+    def _import_delete_cron(
+        schedule_id_ptr: int,
+        schedule_id_len: int,
+    ) -> int:
+        """Stub for WASM import ``(import "env" "delete_cron") (param i32 i32) (result i64)``.
+
+        Removes a previously created cron-triggered workflow schedule.
+        """
+        raise NotImplementedError(
+            "delete_cron can only be called within a cleat WASM runtime."
+        )
+
+
+# -- 36e. list_crons ------------------------------------------------------------
+
+
+if not _USING_WASM:
+    def _import_list_crons(
+        out_ptr: int,
+        out_max_len: int,
+    ) -> int:
+        """Stub for WASM import ``(import "env" "list_crons") (param i32 i32) (result i64)``.
+
+        Lists all registered cron-triggered workflow schedules as a JSON array.
+        """
+        raise NotImplementedError(
+            "list_crons can only be called within a cleat WASM runtime."
+        )
+
+
+# -- 36. durable_extend_timeout --------------------------------------------------
+
+
+if not _USING_WASM:
+    def _import_durable_extend_timeout(additional_ms: int) -> int:
+        """Stub for WASM import ``(import "env" "durable_extend_timeout") (param i64) (result i64)``.
+
+        Extends the workflow execution timeout by *additional_ms* milliseconds.
+        Useful for Human-In-The-Loop (HIL) patterns where a workflow waits
+        for human input via signals and needs to extend its deadline.
+        """
+        raise NotImplementedError(
+            "durable_extend_timeout can only be called within a cleat WASM runtime."
+        )

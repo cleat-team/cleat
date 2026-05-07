@@ -24,6 +24,7 @@ from __future__ import annotations
 import functools
 import inspect
 import json
+import typing
 from typing import Any, Callable, Optional, get_type_hints
 
 from .host_calls import HostCalls, SuspendSentinel
@@ -48,6 +49,123 @@ def _unwrap_result(result: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Typed construction helper
+# ---------------------------------------------------------------------------
+
+
+def _from_dict(
+    value: Any,
+    target_type: Any,
+    _cache: Optional[dict] = None,
+) -> Any:
+    """Recursively construct typed objects from JSON-deserialised values.
+
+    If *target_type* is a dataclass and *value* is a dict, constructs an
+    instance of that dataclass.  Nested dataclass fields,
+    ``list[Dataclass]``, ``Optional[Dataclass]``, and ``dict[str,
+    Dataclass]`` are handled recursively.  For all other type/value
+    combinations *value* is returned unchanged (safe fallback).
+
+    Parameters
+    ----------
+    value:
+        Raw value from ``json.loads`` (dict, list, str, int, float, bool,
+        None).
+    target_type:
+        Expected type (from ``get_type_hints`` or a dataclass field
+        annotation).
+    _cache:
+        Internal cache mapping dataclass types to their resolved field
+        type hints, used to avoid repeated ``get_type_hints`` calls
+        during recursive construction.
+
+    Returns
+    -------
+    Any
+        An instance of *target_type* constructed from *value*, or
+        *value* itself when construction is not applicable.
+    """
+    import dataclasses
+
+    # ---- Terminal values ----
+    if value is None:
+        return None
+
+    if isinstance(target_type, str):
+        # Unresolved forward reference / string annotation.
+        return value
+
+    origin = typing.get_origin(target_type)
+    args = typing.get_args(target_type)
+
+    # ---- Union / Optional (typing.Union) ----
+    if origin is typing.Union:
+        non_none_args = [a for a in args if a is not type(None)]
+        if len(non_none_args) == 1:
+            # Single non-None type inside Optional -> unwrap and recurse.
+            return _from_dict(value, non_none_args[0], _cache)
+        # Multiple union arms -- cannot choose; return raw value.
+        return value
+
+    # ---- Union / Optional (PEP 604: X | Y, Python 3.10+) ----
+    if origin is not None and getattr(origin, "__name__", None) == "UnionType":
+        non_none_args = [a for a in args if a is not type(None)]
+        if len(non_none_args) == 1:
+            return _from_dict(value, non_none_args[0], _cache)
+        return value
+
+    # ---- list[Element] / List[Element] ----
+    if origin in (list, typing.List):
+        if args and isinstance(value, (list, tuple)):
+            return [_from_dict(item, args[0], _cache) for item in value]
+        return value
+
+    # ---- dict[str, Value] / Dict[str, Value] ----
+    if origin in (dict, typing.Dict):
+        if args and len(args) == 2 and isinstance(value, dict):
+            return {
+                k: _from_dict(v, args[1], _cache) for k, v in value.items()
+            }
+        return value
+
+    # ---- Dataclass ----
+    try:
+        is_dc = dataclasses.is_dataclass(target_type)
+    except Exception:
+        is_dc = False
+
+    if is_dc:
+        if not isinstance(value, dict):
+            # Cannot construct a dataclass from a non-dict value.
+            return value
+
+        if _cache is None:
+            _cache = {}
+        type_hints = _cache.get(target_type)
+        if type_hints is None:
+            try:
+                type_hints = typing.get_type_hints(target_type)
+            except Exception:
+                type_hints = {}
+            _cache[target_type] = type_hints
+
+        # Build kwargs from the input dict, recursing per field.
+        kwargs = {}
+        for f in dataclasses.fields(target_type):
+            if f.name not in value:
+                # Field absent from input -- rely on dataclass field
+                # default, or let __init__ raise TypeError.
+                continue
+            field_type = type_hints.get(f.name, f.type)
+            kwargs[f.name] = _from_dict(value[f.name], field_type, _cache)
+
+        return target_type(**kwargs)
+
+    # ---- Fallthrough: return value unchanged ----
+    return value
+
+
+# ---------------------------------------------------------------------------
 # Decorator
 # ---------------------------------------------------------------------------
 
@@ -57,6 +175,43 @@ def durable_entry(name: Optional[str] = None) -> Callable:
     The decorated function **must** accept a :class:`HostCalls` instance as
     its first parameter.  Additional parameters are deserialised from the
     workflow input JSON by name.
+
+    **Typed parameter construction:** If a parameter's type annotation is a
+    :func:`dataclasses.dataclass`, the decorator automatically constructs an
+    instance from the corresponding JSON dict.  Nested dataclass fields,
+    ``list[Dataclass]``, ``Optional[Dataclass]``, and
+    ``dict[str, Dataclass]`` are handled recursively.  All other parameter
+    types receive the raw JSON-deserialised value (``str``, ``int``,
+    ``float``, ``bool``, ``list``, ``dict``).
+
+    Dataclass field names must match the corresponding JSON keys in the
+    workflow input.  Extra JSON keys that do not correspond to any dataclass
+    field are silently ignored.  Fields missing from the JSON input are
+    omitted from the dataclass constructor (the field's default value is
+    used, or :class:`TypeError` is raised if the field has no default).
+
+    Example::
+
+        from dataclasses import dataclass
+        from cleat_sdk.entry import durable_entry
+        from cleat_sdk.host_calls import HostCalls
+
+        @dataclass
+        class Address:
+            street: str
+            city: str
+
+        @dataclass
+        class OrderInput:
+            order_id: str
+            amount: float
+            shipping_address: Address
+
+        @durable_entry
+        def place_order(h: HostCalls, input: OrderInput) -> str:
+            # ``input`` is an ``OrderInput`` instance, not a raw dict.
+            # ``input.shipping_address`` is an ``Address`` instance.
+            return '{"status": "ok"}'
 
     Parameters
     ----------
@@ -132,11 +287,19 @@ def durable_entry(name: Optional[str] = None) -> Callable:
                     )
 
                 # (c) Build keyword arguments from the JSON keys that match
-                #     workflow parameters.
-                kwargs = {
-                    k: v for k, v in input_data.items()
-                    if k in workflow_param_names
-                }
+                #     workflow parameters, constructing dataclass instances
+                #     where the parameter type annotation is a dataclass.
+                _type_cache: dict = {}
+                kwargs = {}
+                for pname in workflow_param_names:
+                    if pname not in input_data:
+                        continue
+                    raw_val = input_data[pname]
+                    ptype = hints.get(pname)
+                    if ptype is not None:
+                        kwargs[pname] = _from_dict(raw_val, ptype, _type_cache)
+                    else:
+                        kwargs[pname] = raw_val
 
                 # (d) Create the HostCalls instance and invoke the workflow.
                 h = HostCalls()

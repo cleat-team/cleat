@@ -2,6 +2,8 @@
 // matching the cleat host runtime ABI from internal/host/imports.go.
 
 use crate::memory;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// All 18 host function imports from the "env" WASM module.
 /// Each returns i64 with a bit-packed result. Strings cross as (ptr, len) pairs.
@@ -149,6 +151,69 @@ mod imports {
             function_name_ptr: *const u8, function_name_len: u32,
             input_ptr: *const u8, input_len: u32,
             response_ptr: *mut u8, response_max_len: u32,
+        ) -> i64;
+
+        // durable_workflow_id - ABI 2.29, no params, one string out
+        pub fn durable_workflow_id(id_ptr: *mut u8, id_max_len: u32) -> i64;
+
+        // durable_run_id - ABI 2.30, no params, one string out
+        pub fn durable_run_id(id_ptr: *mut u8, id_max_len: u32) -> i64;
+
+        // durable_resolve_promise - ABI 2.31, two strings in
+        pub fn durable_resolve_promise(id_ptr: *const u8, id_len: u32, value_ptr: *const u8, value_len: u32) -> i64;
+
+        // durable_reject_promise - ABI 2.32, two strings in
+        pub fn durable_reject_promise(id_ptr: *const u8, id_len: u32, error_ptr: *const u8, error_len: u32) -> i64;
+
+        // durable_send - ABI 2.33, three strings in
+        pub fn durable_send(svc_ptr: *const u8, svc_len: u32, op_ptr: *const u8, op_len: u32, req_ptr: *const u8, req_len: u32) -> i64;
+
+        // schedule_invoke - ABI 2.34, three strings in, i64 delay
+        pub fn schedule_invoke(svc_ptr: *const u8, svc_len: u32, op_ptr: *const u8, op_len: u32, req_ptr: *const u8, req_len: u32, delay_ms: i64) -> i64;
+
+        // durable_register_query_handler - ABI 2.35, one string in
+        pub fn durable_register_query_handler(name_ptr: *const u8, name_len: u32) -> i64;
+
+        // durable_run_detached - ABI 2.36, two strings in
+        pub fn durable_run_detached(name_ptr: *const u8, name_len: u32, input_ptr: *const u8, input_len: u32) -> i64;
+
+        // durable_set_state - ABI 2.37, two strings in
+        pub fn durable_set_state(key_ptr: *const u8, key_len: u32, val_ptr: *const u8, val_len: u32) -> i64;
+
+        // durable_get_state - ABI 2.38, one string in, one string out
+        pub fn durable_get_state(key_ptr: *const u8, key_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
+
+        // durable_delete_state - ABI 2.39, one string in
+        pub fn durable_delete_state(key_ptr: *const u8, key_len: u32) -> i64;
+
+        // durable_incr_state - ABI 2.40, one string in, i64 delta, i64 out
+        pub fn durable_incr_state(key_ptr: *const u8, key_len: u32, delta: i64) -> i64;
+
+        // durable_has_state - ABI 2.41, one string in, i64 boolean out
+        pub fn durable_has_state(key_ptr: *const u8, key_len: u32) -> i64;
+
+        // durable_list_state - ABI 2.42, one string in (prefix), one string out
+        pub fn durable_list_state(prefix_ptr: *const u8, prefix_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
+
+        // durable_await_all_children - ABI 2.43, one string in (JSON run_ids), one string out
+        pub fn durable_await_all_children(run_ids_ptr: *const u8, run_ids_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
+
+        // durable_call_with_retry - ABI 2.44, 5 strings in (incl retry JSON), 1 string out
+        pub fn durable_call_with_retry(
+            svc_ptr: *const u8, svc_len: u32,
+            op_ptr: *const u8, op_len: u32,
+            req_ptr: *const u8, req_len: u32,
+            retry_ptr: *const u8, retry_len: u32,
+            resp_ptr: *mut u8, resp_max_len: u32,
+        ) -> i64;
+
+        // durable_fetch - ABI 2.45, 4 strings in, 1 string out
+        pub fn durable_fetch(
+            method_ptr: *const u8, method_len: u32,
+            url_ptr: *const u8, url_len: u32,
+            headers_ptr: *const u8, headers_len: u32,
+            body_ptr: *const u8, body_len: u32,
+            resp_ptr: *mut u8, resp_max_len: u32,
         ) -> i64;
     }
 }
@@ -637,6 +702,321 @@ impl HostCalls {
             String::new()
         }
     }
+
+    /// Get the current workflow ID.
+    pub fn workflow_id(&self) -> String {
+        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_workflow_id(buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+        };
+        let (id_len, _err_code) = memory::decode_simple_result(result);
+        if id_len > 0 {
+            unsafe { memory::read_string(buf.as_ptr(), id_len) }
+        } else {
+            String::new()
+        }
+    }
+
+    /// Get the current run ID.
+    pub fn run_id(&self) -> String {
+        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_run_id(buf.as_mut_ptr(), memory::OUT_BUF_SIZE)
+        };
+        let (id_len, _err_code) = memory::decode_simple_result(result);
+        if id_len > 0 {
+            unsafe { memory::read_string(buf.as_ptr(), id_len) }
+        } else {
+            String::new()
+        }
+    }
+
+    /// Resolve a promise with a value. Mirrors Go's ResolvePromise.
+    pub fn resolve_promise(&self, promise_id: &str, value: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::durable_resolve_promise(
+                promise_id.as_ptr(), promise_id.len() as u32,
+                value.as_ptr(), value.len() as u32,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("resolve_promise error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Reject a promise with an error. Mirrors Go's RejectPromise.
+    pub fn reject_promise(&self, promise_id: &str, error: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::durable_reject_promise(
+                promise_id.as_ptr(), promise_id.len() as u32,
+                error.as_ptr(), error.len() as u32,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("reject_promise error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Fire-and-forget durable call. Mirrors Go's DurableSend.
+    pub fn durable_send(&self, service: &str, operation: &str, request_json: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::durable_send(
+                service.as_ptr(), service.len() as u32,
+                operation.as_ptr(), operation.len() as u32,
+                request_json.as_ptr(), request_json.len() as u32,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("durable_send error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Schedule an invoke with a delay in milliseconds. Mirrors Go's ScheduleInvoke.
+    pub fn schedule_invoke(&self, service: &str, operation: &str, request_json: &str, delay_ms: i64) -> Result<(), String> {
+        let result = unsafe {
+            imports::schedule_invoke(
+                service.as_ptr(), service.len() as u32,
+                operation.as_ptr(), operation.len() as u32,
+                request_json.as_ptr(), request_json.len() as u32,
+                delay_ms,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("schedule_invoke error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Register a query handler by name. Mirrors Go's RegisterQueryHandler.
+    pub fn register_query_handler(&self, name: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::durable_register_query_handler(
+                name.as_ptr(), name.len() as u32,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("register_query_handler error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Run a child workflow detached (fire-and-forget). Mirrors Go's RunDetached.
+    pub fn run_detached(&self, name: &str, input_json: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::durable_run_detached(
+                name.as_ptr(), name.len() as u32,
+                input_json.as_ptr(), input_json.len() as u32,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("run_detached error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Set a state value by key. Mirrors Go's SetState.
+    pub fn set_state(&self, key: &str, value: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::durable_set_state(
+                key.as_ptr(), key.len() as u32,
+                value.as_ptr(), value.len() as u32,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("set_state error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Get a state value by key. Mirrors Go's GetState.
+    pub fn get_state(&self, key: &str) -> Result<String, String> {
+        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_get_state(
+                key.as_ptr(), key.len() as u32,
+                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (val_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("get_state error code: {}", err_code));
+        }
+        let val = unsafe { memory::read_string(buf.as_ptr(), val_len) };
+        Ok(val)
+    }
+
+    /// Delete a state key. Mirrors Go's DeleteState.
+    pub fn delete_state(&self, key: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::durable_delete_state(
+                key.as_ptr(), key.len() as u32,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("delete_state error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Atomically increment a state counter by delta. Returns the new value.
+    pub fn incr_state(&self, key: &str, delta: i64) -> Result<i64, String> {
+        let result = unsafe {
+            imports::durable_incr_state(
+                key.as_ptr(), key.len() as u32,
+                delta,
+            )
+        };
+        let (new_value, err_code) = memory::decode_incr_state_result(result);
+        if err_code != 0 {
+            return Err(format!("incr_state error code: {}", err_code));
+        }
+        Ok(new_value)
+    }
+
+    /// Check if a state key exists.
+    pub fn has_state(&self, key: &str) -> bool {
+        let result = unsafe {
+            imports::durable_has_state(
+                key.as_ptr(), key.len() as u32,
+            )
+        };
+        memory::decode_has_state_result(result)
+    }
+
+    /// List state keys with a given prefix. Returns deserialized JSON array of key names.
+    pub fn list_state(&self, prefix: &str) -> Result<Vec<String>, String> {
+        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_list_state(
+                prefix.as_ptr(), prefix.len() as u32,
+                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (data_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("list_state error code: {}", err_code));
+        }
+        let json_str = unsafe { memory::read_string(buf.as_ptr(), data_len) };
+        serde_json::from_str(&json_str).map_err(|e| format!("list_state parse error: {}", e))
+    }
+
+    /// Await all children workflows. Returns aggregated JSON results.
+    pub fn await_all_children(&self, run_ids: &[&str]) -> Result<String, String> {
+        let run_ids_json = serde_json::to_string(run_ids).map_err(|e| format!("serialize run_ids: {}", e))?;
+        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_await_all_children(
+                run_ids_json.as_ptr(), run_ids_json.len() as u32,
+                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        if result == memory::SUSPEND_SENTINEL {
+            std::panic::panic_any(crate::SuspendSentinel);
+        }
+        let (result_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("await_all_children error code: {}", err_code));
+        }
+        let resp = unsafe { memory::read_string(buf.as_ptr(), result_len) };
+        Ok(resp)
+    }
+
+    /// Typed version of child_workflow using serde for serialization.
+    pub fn child_workflow_typed<T: serde::Serialize>(&self, name: &str, input: &T) -> Result<String, String> {
+        let input_json = serde_json::to_string(input).map_err(|e| format!("serialize input: {}", e))?;
+        let (run_id, err) = self.child_workflow(name, &input_json);
+        if let Some(e) = err {
+            return Err(e);
+        }
+        Ok(run_id)
+    }
+
+    /// Typed version of await_child using serde for deserialization.
+    pub fn await_child_typed<T: serde::de::DeserializeOwned>(&self, run_id: &str) -> Result<T, String> {
+        let (result_json, err) = self.await_child(run_id);
+        if let Some(e) = err {
+            return Err(e);
+        }
+        serde_json::from_str(&result_json).map_err(|e| format!("deserialize result: {}", e))
+    }
+
+    /// Typed version of durable_call using serde for serialization/deserialization.
+    pub fn durable_call_typed<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self, service: &str, operation: &str, request: &T,
+    ) -> Result<R, String> {
+        let request_json = serde_json::to_string(request).map_err(|e| format!("serialize request: {}", e))?;
+        let (resp_json, err) = self.durable_call(service, operation, &request_json);
+        if let Some(e) = err {
+            return Err(e);
+        }
+        serde_json::from_str(&resp_json).map_err(|e| format!("deserialize response: {}", e))
+    }
+
+    /// Durable call with a retry policy.
+    pub fn durable_call_with_retry<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self, service: &str, operation: &str, request: &T, retry_policy: &RetryPolicy,
+    ) -> Result<R, String> {
+        let request_json = serde_json::to_string(request).map_err(|e| format!("serialize request: {}", e))?;
+        let retry_json = serde_json::to_string(retry_policy).map_err(|e| format!("serialize retry policy: {}", e))?;
+        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_call_with_retry(
+                service.as_ptr(), service.len() as u32,
+                operation.as_ptr(), operation.len() as u32,
+                request_json.as_ptr(), request_json.len() as u32,
+                retry_json.as_ptr(), retry_json.len() as u32,
+                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (response_len, _call_error_code, err_code) = memory::decode_durable_call_result(result);
+        if err_code != 0 {
+            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            return Err(err_msg);
+        }
+        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        serde_json::from_str(&resp).map_err(|e| format!("deserialize response: {}", e))
+    }
+
+    /// Make an HTTP fetch request to an external endpoint.
+    /// The headers parameter is a JSON object of string key-value pairs.
+    /// Returns a FetchResult with status, headers, and body.
+    pub fn durable_fetch(
+        &self, method: &str, url: &str, headers: &str, body: &str,
+    ) -> Result<FetchResult, String> {
+        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_fetch(
+                method.as_ptr(), method.len() as u32,
+                url.as_ptr(), url.len() as u32,
+                headers.as_ptr(), headers.len() as u32,
+                body.as_ptr(), body.len() as u32,
+                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (response_len, _call_error_code, err_code) = memory::decode_durable_call_result(result);
+        if err_code != 0 {
+            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            return Err(err_msg);
+        }
+        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        serde_json::from_str(&resp).map_err(|e| format!("parse fetch response: {}", e))
+    }
+
+    /// Convenience method for HTTP GET requests.
+    pub fn fetch_get(&self, url: &str) -> Result<FetchResult, String> {
+        self.durable_fetch("GET", url, "{}", "")
+    }
 }
 
 /// Result of an await_signals call.
@@ -645,4 +1025,23 @@ pub struct SignalResult {
     pub name: String,
     pub payload: String,
     pub timed_out: bool,
+}
+
+/// Retry policy for durable_call_with_retry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub initial_interval_ms: u64,
+    pub backoff_multiplier: f64,
+    pub maximum_interval_ms: u64,
+}
+
+/// Result from an HTTP fetch request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FetchResult {
+    pub status: u16,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub body: String,
 }

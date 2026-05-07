@@ -259,3 +259,43 @@ class CleatClient:
             f"/api/workflows/{run_id}",
         )
         return json.loads(response)
+
+    def send_update(
+        self,
+        run_id: str,
+        update_name: str,
+        payload: Any,
+    ) -> dict:
+        """Send an update to a running workflow.
+
+        Updates are like signals but carry a response from the workflow.
+        The update handler registered in the workflow processes the payload
+        and returns a result.
+
+        Parameters
+        ----------
+        run_id : str
+            The workflow run ID.
+        update_name : str
+            The update handler name (matches a registered update handler
+            in the workflow).
+        payload : Any
+            Update payload (JSON-serialisable).
+
+        Returns
+        -------
+        dict
+            The update response from the workflow.
+
+        Raises
+        ------
+        RuntimeError
+            If the host returns an error.
+        """
+        body = json.dumps(payload)
+        status, response = self._request(
+            "POST",
+            f"/api/workflows/{run_id}/update/{update_name}",
+            body,
+        )
+        return json.loads(response)

@@ -8,6 +8,7 @@ helpers --- for child workflows, sagas, and deferred cleanup.
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Optional, TypeVar
 
@@ -73,6 +74,24 @@ class ChildWorkflow(Generic[T]):
         input_json = json.dumps(self.input, default=str)
         self.run_id = h.child_workflow(self.name, input_json)
         return self.run_id
+
+    def run(self, h: HostCalls) -> T:
+        """Convenience method that starts the child workflow and immediately
+        awaits the result.  Combines :meth:`start` and :meth:`await_result`
+        in a single call.
+
+        Parameters
+        ----------
+        h:
+            HostCalls instance for the current execution context.
+
+        Returns
+        -------
+        T
+            Deserialised result of the child workflow.
+        """
+        self.start(h)
+        return self.await_result(h)
 
     def await_result(self, h: HostCalls) -> T:
         """Block (suspend if needed) until the child workflow completes.
@@ -154,6 +173,29 @@ class SagaStep(Generic[T]):
         raise NotImplementedError("SagaStep subclasses must implement compensate()")
 
 
+@dataclass
+class SagaStepResult(Generic[T]):
+    """Result of a single saga step execution.
+
+    Attributes
+    ----------
+    step_name:
+        Human-readable label for the step.
+    success:
+        ``True`` if the step completed without error.
+    result:
+        The return value of the step's action (only meaningful when
+        *success* is ``True``).
+    error:
+        Error message if the step failed, or ``None`` on success.
+    """
+
+    step_name: str
+    success: bool
+    result: Optional[T] = None
+    error: Optional[str] = None
+
+
 class Saga(Generic[SagaResultT]):
     """Orchestrates a sequence of steps with automatic compensation on failure.
 
@@ -200,9 +242,14 @@ class Saga(Generic[SagaResultT]):
         results: list[str] = saga.execute()
     """
 
-    def __init__(self, h: HostCalls) -> None:
+    def __init__(
+        self,
+        h: HostCalls,
+        terminal_exceptions: Optional[tuple[type[BaseException], ...]] = None,
+    ) -> None:
         self._h = h
         self._steps: list[SagaStep[Any]] = []
+        self._terminal_exceptions: tuple[type[BaseException], ...] = terminal_exceptions or ()
 
     def add_step(
         self,
@@ -277,19 +324,21 @@ class Saga(Generic[SagaResultT]):
     def execute(
         self,
         terminal_exceptions: Optional[tuple[type[BaseException], ...]] = None,
-    ) -> list[SagaResultT]:
+    ) -> list[SagaStepResult]:
         """Execute all steps in order, compensating on terminal failure.
 
         Parameters
         ----------
         terminal_exceptions :
             Additional exception types that should trigger compensation.
+            Merged with exceptions set in the constructor.
             :class:`TerminalError` is always treated as terminal.
 
         Returns
         -------
-        list[SagaResultT]
-            Results of each step, in order, typed to the Saga's type parameter.
+        list[SagaStepResult]
+            Results of each step, in order, each containing the step name,
+            success flag, result value, and optional error message.
 
         Raises
         ------
@@ -301,22 +350,46 @@ class Saga(Generic[SagaResultT]):
         """
         if terminal_exceptions is None:
             terminal_exceptions = ()
+        all_terminal = self._terminal_exceptions + terminal_exceptions
 
-        results: list[SagaResultT] = []
+        results: list[SagaStepResult] = []
         completed: list[SagaStep[Any]] = []
 
         for step in self._steps:
             try:
                 result = step.action(self._h)
-                results.append(result)
+                results.append(
+                    SagaStepResult(
+                        step_name=step.name,
+                        success=True,
+                        result=result,
+                        error=None,
+                    )
+                )
                 completed.append(step)
-            except terminal_exceptions + (TerminalError,) as exc:
+            except all_terminal + (TerminalError,) as exc:
                 # Terminal error: compensate and re-raise.
+                results.append(
+                    SagaStepResult(
+                        step_name=step.name,
+                        success=False,
+                        result=None,
+                        error=str(exc),
+                    )
+                )
                 _compensate_all(self._h, completed)
                 raise
-            except Exception:
-                # Transient error: re-raise without compensation so the
-                # caller can retry the saga.
+            except Exception as exc:
+                # Transient error: add result and re-raise without
+                # compensation so the caller can retry the saga.
+                results.append(
+                    SagaStepResult(
+                        step_name=step.name,
+                        success=False,
+                        result=None,
+                        error=str(exc),
+                    )
+                )
                 raise
 
         return results
@@ -376,6 +449,9 @@ def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
 
     Failures during compensation are logged via ``h.durable_log`` but do
     not prevent later compensations from running (best-effort).
+
+    If ``durable_log`` is not available (e.g. the workflow context has been
+    torn down), falls back to writing errors to ``sys.stderr``.
     """
     for step in reversed(completed):
         try:
@@ -386,7 +462,10 @@ def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
                     f"Saga compensation failed for step '{step.name}': {exc}"
                 )
             except Exception:
-                pass  # Nothing we can do if even logging fails.
+                # Fall back to stderr when durable_log is unavailable
+                # (e.g., workflow context already torn down).
+                msg = f"Saga compensation failed for step '{step.name}': {exc}\n"
+                sys.stderr.write(msg)
 
 
 # ---------------------------------------------------------------------------

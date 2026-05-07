@@ -110,6 +110,42 @@ The `HostCalls` class wraps all 36 WASM host function imports grouped by categor
 ### Plugin Calls
 - `plugin_call(plugin_name, function_name, input) -> str` -- call a host plugin function
 
+### durable_log vs print/stdout
+
+`durable_log()` writes to the **workflow event history** -- it is deterministic, recorded, and replayed. Messages appear in the workflow's event log and are visible through the Cleat monitoring UI, even when replaying from history.
+
+`print()` / `stdout` writes to the **host console** -- it is non-deterministic and **not** replayed. During replay, `print()` output will only appear if the workflow code actually executes (e.g., cached results skip execution entirely).
+
+```python
+@durable_entry
+def my_workflow(h: HostCalls, name: str) -> str:
+    # WRONG: stdout output is not deterministic, not visible in replay
+    print(f"Processing {name}")
+
+    # CORRECT: recorded in event history, visible in replay
+    h.durable_log(f"Processing {name}")
+
+    result = h.durable_call("service", "Op", {"name": name})
+
+    # WRONG: stdout is not replayed
+    print(f"Result: {result}")
+
+    # CORRECT: durable_log is replayed deterministically
+    h.durable_log(f"Result: {result}")
+    return result
+```
+
+**When to use each:**
+
+| Use Case | Method | Reason |
+|----------|--------|--------|
+| Workflow-visible logging | `durable_log()` | Survives replay, recorded in history |
+| Debugging during development | `print()` | Immediate stdout output, no host call overhead |
+| Structured observability | `log_kv()` | Key-value logging, recorded in history |
+| External logging pipeline | `plugin_call("logger", "send", ...)` | Forward events to an external system |
+
+Use `durable_log` for messages that should appear in the workflow event history. Use `print` sparingly for development-time debugging only.
+
 ## Examples
 
 The `examples/` directory contains ready-to-run workflows:
@@ -140,43 +176,167 @@ def my_workflow(h: HostCalls, name: str) -> str:
 
 When a workflow calls `durable_sleep()` or `await_signals()` on a fresh execution, the host suspends the workflow. On replay, the same calls return cached results without suspending. The user code never sees the suspend/resume cycle -- it is handled by the `@durable_entry` wrapper.
 
+### Converting async Python to synchronous WASM code
+
+When porting async Python code to Cleat, every `async def` / `await` pattern must be replaced with synchronous equivalents.
+
+**Before (async -- will not compile to WASM):**
+```python
+import asyncio
+import aiohttp
+
+async def fetch_data(url: str) -> dict:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            return await resp.json()
+
+async def process_order(order_id: str) -> dict:
+    data = await fetch_data(f"https://api.example.com/orders/{order_id}")
+    await asyncio.sleep(5)
+    return {"order_id": order_id, "data": data}
+```
+
+**After (Cleat synchronous -- compiles to WASM):**
+```python
+from cleat_sdk import HostCalls, durable_entry
+import json
+
+def fetch_data(h: HostCalls, url: str) -> dict:
+    response, status = h.durable_fetch(url, "GET")
+    return json.loads(response)
+
+@durable_entry
+def process_order(h: HostCalls, order_id: str) -> dict:
+    data = fetch_data(h, f"https://api.example.com/orders/{order_id}")
+    h.durable_sleep(5000)           # instead of asyncio.sleep(5)
+    return {"order_id": order_id, "data": data}
+```
+
+**Key conversion rules:**
+
+| Async pattern | Cleat synchronous replacement |
+|---------------|-------------------------------|
+| `async def fn()` | `def fn()` |
+| `await call()` | `call()` (synchronous) |
+| `asyncio.sleep(n)` | `h.durable_sleep(n * 1000)` |
+| `aiohttp.ClientSession()` | `h.durable_fetch()` or `h.durable_call()` |
+| `asyncio.gather(*tasks)` | `h.await_all_children(run_ids)` or sequential calls |
+| `asyncio.wait_for(coro, timeout)` | `h.await_signals(names, timeout_ms)` or `h.await_promise(id, timeout_ms)` |
+| `async for` (stream) | `h.plugin_call_streaming()` (iterator-based) |
+| `async with` (context manager) | Regular `with` statement |
+
+All Cleat workflows are synchronous. The host handles suspension and resumption transparently through the `SuspendSentinel` mechanism.
+
 ## Python Standard Library Compatibility
 
-When compiled to WASM via `componentize-py`, **only a subset of the Python standard library is available**.
+When compiled to WASM via `componentize-py`, **only a subset of the Python standard library is available**. The following tables document the compatibility status of commonly used modules.
 
-### Compatible modules (work in WASM)
+### Fully available
 
-- `json` -- JSON encoding/decoding (heavily used by the SDK)
-- `dataclasses` -- data class definitions (preferred for input/output types)
-- `typing` / `typing_extensions` -- type annotations
-- `functools` -- decorators and higher-order functions
-- `math` -- mathematical functions
-- `re` -- regular expressions
-- `enum` -- enumerations
-- `collections` / `collections.abc` -- container data types
-- `itertools` -- iterator tools
-- `datetime` -- date and time (basic usage)
-- `decimal` -- decimal arithmetic
-- `uuid` -- UUID generation
-- `copy` -- shallow/deep copy
-- `os` -- limited (no subprocess, no filesystem)
-- `pathlib` -- limited (no real filesystem I/O)
+These modules work without restrictions in WASM:
 
-### Incompatible modules (NOT available in WASM)
+| Module | Notes |
+|--------|-------|
+| `json` | JSON encoding/decoding (heavily used by the SDK) |
+| `math` | Mathematical functions |
+| `datetime` | Date and time types (basic usage) |
+| `collections` / `collections.abc` | Container data types |
+| `typing` / `typing_extensions` | Type annotations |
+| `dataclasses` | Data class definitions (preferred for input/output types) |
+| `hashlib` | Cryptographic hash functions |
+| `functools` | Decorators and higher-order functions |
+| `itertools` | Iterator tools |
+| `enum` | Enumerations |
+| `decimal` | Decimal arithmetic |
+| `uuid` | UUID generation |
+| `copy` | Shallow/deep copy |
+| `heapq` | Heap queue algorithm |
+| `bisect` | Array bisection algorithm |
+| `base64` | Base64 encoding/decoding |
+| `struct` | Pack/unpack binary data (limited to basic types) |
+| `abc` | Abstract base classes |
+| `contextlib` | Context manager utilities |
 
-- `asyncio` -- async/await not supported
-- `threading` -- no thread support in WASM
-- `socket` -- no raw socket access
-- `subprocess` -- no process spawning
-- `multiprocessing` -- no process support
-- `signal` -- no OS signal handling
-- `select` / `selectors` -- no I/O multiplexing
-- `mmap` -- no memory mapping
-- `ctypes` / `cffi` -- no native code interop
-- `ssl` -- no TLS/SSL (use the host's `durable_call` instead)
-- `http.client` / `urllib` / `requests` -- no outbound HTTP (use the host's `durable_call` instead)
+### Limited availability
 
-To make HTTP requests, use the host-provided `h.durable_call("http", "fetch", ...)` or `h.durable_fetch()` instead of `urllib` or `requests`.
+These modules are partially available with documented restrictions:
+
+| Module | Status | Restrictions |
+|--------|--------|--------------|
+| `os` | ⚠️ Limited | `os.environ.get()`, `os.name` work. No file I/O (`os.open`, `os.listdir`), no `os.fork`, no `os.pipe` |
+| `sys` | ⚠️ Limited | `sys.version`, `sys.platform`, `sys.getsizeof()` work. No `sys.stdin`, `sys.stdout`, `sys.stderr` access |
+| `re` | ⚠️ Limited | Basic matching works. Backreferences and lookahead/lookbehind may fail in some builds |
+| `pathlib` | ⚠️ Limited | Path manipulation works. No real filesystem I/O (`read_text`, `write_text`, etc.) |
+| `random` | ⚠️ Limited | Basic PRNG works. Use `h.random()` for deterministic workflow randomness instead |
+| `json` | ✅ Fully available, see above | |
+| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` is not available (use `h.durable_sleep()`) |
+
+### Not available
+
+These modules will **fail at import time or runtime** in WASM:
+
+| Module | Reason |
+|--------|--------|
+| `asyncio` | Async/await not supported in WASM CPython |
+| `threading` | No thread support in WASM |
+| `multiprocessing` | No process support |
+| `socket` | No raw socket access |
+| `subprocess` | No process spawning |
+| `signal` | No OS signal handling |
+| `select` / `selectors` | No I/O multiplexing |
+| `mmap` | No memory mapping |
+| `ctypes` / `cffi` | No native code interop |
+| `ssl` | No TLS/SSL (use host's `durable_call` instead) |
+| `http.client` / `urllib` | No outbound HTTP (use host calls instead) |
+| `requests` | Third-party HTTP library (use `h.durable_fetch()` instead) |
+| `xml` / `xmlrpc` | XML parsing may be unavailable; avoid |
+| `tkinter` | No GUI support in WASM |
+| `concurrent.futures` | Depends on threading |
+| `asyncio`-based libs | Any library depending on `asyncio` (e.g., `aiohttp`) |
+
+### Making HTTP requests
+
+Replace standard Python HTTP libraries with host-provided durable calls:
+
+```python
+# INSTEAD OF: import requests; requests.get(url)
+# USE:
+response = h.durable_fetch(url, "GET", {}, None)
+
+# INSTEAD OF: import urllib.request; urllib.request.urlopen(url)
+# USE:
+response = h.durable_call("http", "fetch", {"url": url, "method": "GET"})
+```
+
+The host calls are recorded in the workflow history and replayed deterministically, which standard HTTP libraries cannot provide.
+
+### No direct database access from WASM
+
+WASM workflows **cannot make direct database connections**. Modules like `sqlite3`, `psycopg2`, `pymongo`, or any library that opens sockets or file descriptors will fail at import time or runtime in the WASM environment.
+
+Data access must go through one of these deterministic alternatives:
+
+1. **`durable_call` to a service** -- Call a registered backend service that performs the database operation:
+
+```python
+# INSTEAD OF: import psycopg2; conn.execute("SELECT ...")
+# USE:
+response = h.durable_call("db-service", "query", {"sql": "SELECT * FROM orders"})
+```
+
+2. **`plugin_call` to a host plugin** -- Use a host-registered plugin that provides database access:
+
+```python
+response = h.plugin_call("postgres", "query", {"sql": "SELECT * FROM orders"})
+```
+
+3. **`durable_fetch` to a REST API** -- Call an external API that wraps database access:
+
+```python
+response, status = h.durable_fetch("https://api.example.com/orders", "GET")
+```
+
+All three approaches are recorded in the workflow event history and survive replay, which direct database connections cannot guarantee.
 
 ## Unit Differences (Cleat vs. Other Frameworks)
 
@@ -191,29 +351,414 @@ Cleat uses **milliseconds** for all time-related host calls. This is important w
 
 Cleat's `durable_sleep(duration_ms)` always takes **milliseconds**. The `advance_time(ms)` method in the test harness also uses milliseconds. This is consistent with the WASM host ABI which uses `i64` milliseconds for all timing operations.
 
-## Build
+Conversion examples when porting from other frameworks:
 
-Compile Python workflows to WASM using the Cleat CLI:
+```python
+# Temporal (Python): workflow.sleep(timedelta(seconds=5))
+# Cleat:
+h.durable_sleep(5000)  # 5 seconds in ms
+
+# DBOS: DBOS.sleepSeconds(5)
+# Cleat:
+h.durable_sleep(5_000)
+
+# Restate (Java): Duration.ofSeconds(5)
+# Cleat:
+h.durable_sleep(5_000)
+
+# Helper pattern for readability:
+def sleep_seconds(h: HostCalls, secs: int) -> None:
+    """Sleep for the given number of seconds."""
+    h.durable_sleep(secs * 1000)
+
+sleep_seconds(h, 5)  # 5 seconds
+```
+
+## Virtual Objects (Entity Workflows)
+
+The Virtual Object pattern models long-lived stateful entities that process signals over time. Use `set_scope`/`get_scope`/`clear_scope` on `HostCalls` to scope all state operations to a specific entity instance.
+
+### Complete entity workflow example
+
+```python
+from cleat_sdk import HostCalls, durable_entry
+
+@durable_entry
+def counter_entity(h: HostCalls, instance_key: str) -> str:
+    # Scope all state operations to this entity instance
+    h.set_scope("counter", instance_key)
+
+    # Initialize or restore state
+    count = 0
+    if h.has_state("count"):
+        count = int(h.get_state("count", int))
+
+    h.durable_log(f"Counter {instance_key} starting at {count}")
+
+    # Process signals in a loop (long-lived entity)
+    while True:
+        # Wait for the next signal
+        result = h.await_signals(["increment", "reset", "get", "stop"], None)
+
+        if result.timed_out:
+            continue
+
+        name = result.name
+        payload = result.payload
+
+        if name == "increment":
+            count = h.incr_state("count", 1)
+            h.durable_log(f"Counter {instance_key} incremented to {count}")
+
+        elif name == "reset":
+            h.set_state("count", 0)
+            count = 0
+            h.durable_log(f"Counter {instance_key} reset to 0")
+
+        elif name == "get":
+            # Return current value via query state
+            h.set_query_state("value", str(count))
+
+        elif name == "stop":
+            h.durable_log(f"Counter {instance_key} stopping at {count}")
+            return f'{{"final_count": {count}}}'
+
+    return f'{{"count": {count}}}'
+```
+
+This pattern:
+- Uses `set_scope("counter", instance_key)` to isolate state per instance
+- Loops on `await_signals` to stay alive across signals
+- Cleans up with `clear_scope()` when switching instances or at the end
+- Uses `continue_as_new()` periodically to compact history
+
+## Signals vs Update Handlers
+
+Cleat provides two patterns for external interaction with running workflows:
+
+### Signal patterns (fire-and-forget)
+
+Signals are one-way messages delivered to a workflow. The workflow polls or awaits them.
+
+**Fire-and-forget signal** (`signal_workflow`):
+```python
+# From another workflow:
+h.signal_workflow(target_run_id, "increment", '{"delta": 1}')
+```
+
+**Request-response with signals** (`send_signal_and_wait` / `reply_to_signal`):
+```python
+# Sender workflow:
+response = h.send_signal_and_wait(
+    target_run_id, "approve_request",
+    '{"id": "req-42"}', timeout_ms=30000
+)
+
+# Receiver workflow (inside signal handler):
+result = h.await_signals(["approve_request"], None)
+# Parse correlation ID from payload and respond:
+h.reply_to_signal(correlation_id, '{"approved": true}')
+```
+
+**Non-blocking signal poll** (`poll_signal`):
+```python
+payload, found = h.poll_signal("update")
+if found:
+    h.durable_log(f"Received signal: {payload}")
+```
+
+### Update handler pattern (bi-directional RPC)
+
+Update handlers provide synchronous request-response for external clients:
+
+```python
+@durable_entry
+def approval_workflow(h: HostCalls, input: str) -> str:
+    # Register an "approve" update handler with validation
+    def approve_handler(payload: str) -> str:
+        # Process the update
+        h.set_query_state("approved", payload)
+        return '{"status": "approved"}'
+
+    def approve_validator(payload: str) -> bool:
+        data = json.loads(payload)
+        return data.get("amount", 0) > 0
+
+    h.register_update_handler("approve", approve_handler, approve_validator)
+
+    # Workflow continues...
+    result = h.await_signals(["done"], 60000)
+    return '{"status": "completed"}'
+```
+
+### When to use each
+
+| Pattern | Method | Use Case |
+|---------|--------|----------|
+| Fire-and-forget signal | `signal_workflow` | Notifications, events without response needed |
+| Request-response (signal) | `send_signal_and_wait` / `reply_to_signal` | Cross-workflow RPC with a response |
+| Non-blocking poll | `poll_signal` | Periodic checks without suspending |
+| Update handler | `register_update_handler` | External client RPC with validation |
+
+**Key differences:**
+- Signals are recorded in event history and survive replay; update handlers execute during workflow init
+- Update handlers support validators that run before the handler
+- Signals support non-blocking polling (`poll_signal`); update handlers are always registered upfront
+- Use signals for cross-workflow communication; use update handlers for external client interactions
+
+## Per-call timeout limitations
+
+Per-call timeouts are **under development** and not yet enforced on the host side during WASM execution. The `durable_call_with_retry` host import does not accept a timeout parameter.
+
+**Workaround:** Use `durable_sleep` + polling for timeout-aware patterns:
+
+```python
+def call_with_timeout(
+    h: HostCalls, service: str, op: str, request: Any, timeout_ms: int
+) -> str:
+    """Call a service with a client-side timeout using polling."""
+    deadline = h.now() + timeout_ms
+    last_error = None
+
+    while h.now() < deadline:
+        try:
+            return h.durable_call(service, op, request)
+        except RuntimeError as e:
+            last_error = e
+            h.durable_sleep(1000)  # poll interval
+
+    raise RuntimeError(f"Call timed out after {timeout_ms}ms: {last_error}")
+```
+
+Host-side timeout enforcement is on the roadmap.
+
+## all_handlers_finished absence
+
+Cleat does **not** have an `all_handlers_finished` equivalent (found in Temporal for update/signal handler tracking). There is no built-in mechanism to wait until all in-flight update handlers have completed.
+
+**Alternative patterns:**
+
+1. **Manual handler counting** -- Track handler invocations with state keys:
+
+```python
+@durable_entry
+def tracked_workflow(h: HostCalls, input: str) -> str:
+    h.set_state("pending_handlers", 0)
+
+    def handler(payload: str) -> str:
+        h.incr_state("pending_handlers", 1)
+        try:
+            result = h.durable_call("service", "Op", payload)
+            return result
+        finally:
+            h.incr_state("pending_handlers", -1)
+
+    h.register_update_handler("process", handler)
+    # ... workflow continues ...
+```
+
+2. **Durable promises** -- External callers signal completion via promises:
+
+```python
+@durable_entry
+def promise_tracked_workflow(h: HostCalls, input: str) -> str:
+    promise_id = h.create_promise("all_handlers_done")
+
+    def handler(payload: str) -> str:
+        result = h.durable_call("service", "Op", payload)
+        # Signal done via the promise
+        h.resolve_promise(promise_id, "done")
+        return result
+
+    h.register_update_handler("process", handler)
+
+    # Wait for the promise instead of all_handlers_finished
+    result = h.await_promise(promise_id, 30000)
+    return result.result
+```
+
+For coordinating multiple concurrent operations, use `await_all_children` with child workflows or `await_signals` with a quorum pattern instead.
+
+## Multi-export WASM modules (Python)
+
+A single Python file can export multiple workflow entry points using `@durable_entry`:
+
+```python
+from cleat_sdk import HostCalls, durable_entry
+
+@durable_entry
+def place_order(h: HostCalls, input: str) -> str:
+    return h.durable_call("orders", "Place", input)
+
+@durable_entry
+def cancel_order(h: HostCalls, input: str) -> str:
+    return h.durable_call("orders", "Cancel", input)
+
+@durable_entry
+def get_order_status(h: HostCalls, input: str) -> str:
+    return h.durable_call("orders", "Status", input)
+```
+
+When compiled to WASM, `componentize-py` generates a named export for each decorated function. The host dispatches invocations by matching the called workflow name to the export name. Each export wrapper handles ABI marshalling, suspend/resume, and error serialization independently.
+
+## WASM Compilation Pipeline
+
+Compile Python workflows to WASM using `componentize-py` from the [Bytecode Alliance](https://github.com/bytecodealliance/componentize-py), which translates Python bytecode into a WASM component conforming to the Cleat WIT world.
+
+### Prerequisites
+
+Install the required tools:
+
+```bash
+# Install componentize-py (requires Python 3.10+)
+pip install componentize-py>=0.12.0
+
+# Install the Cleat Python SDK (ensures cleat_sdk is importable)
+pip install cleat-sdk
+# Or from source:
+# cd python-sdk/ && pip install -e .
+```
+
+Verify the installation:
+
+```bash
+componentize-py --version
+# Expected output: componentize-py 0.x.y
+```
+
+If you encounter `command not found`, ensure your Python Scripts/bin directory is on `PATH`:
+
+```bash
+# Unix/macOS:
+export PATH="$HOME/.local/bin:$PATH"
+# Windows:
+# pip install --user will add to %APPDATA%\Python\Scripts
+```
+
+### Configuration (pyproject.toml)
+
+The `componentize-py` tool reads WIT configuration from `pyproject.toml` under the `[tool.componentize-py]` table. The canonical configuration for this SDK is:
+
+```toml
+[tool.componentize-py]
+wit_path = "wit/"
+world = "cleat-workflow"
+```
+
+- `wit_path` -- directory containing the Cleat WIT files (`.wit` files defining the WASM component interface)
+- `world` -- the WIT world your workflow component implements (must match what `componentize-py` expects)
+
+If you are writing a workflow outside this repository, copy the `wit/` directory from the SDK or install the SDK as a dependency so the WIT files are discoverable.
+
+### Compilation Command
+
+The basic `componentize-py` invocation (modern syntax):
+
+```bash
+componentize-py componentize my_workflow.py \
+  --wit-path wit/ \
+  --world cleat-workflow \
+  -o my_workflow.wasm
+```
+
+Required flags:
+
+| Flag | Purpose |
+|------|---------|
+| `componentize <file>` | Subcommand; the Python file containing your `@durable_entry` workflow function |
+| `--wit-path <dir>` | Path to the directory with the Cleat WIT files (`cleat.wit`) |
+| `--world <name>` | The WIT world to implement (e.g. `cleat-workflow`) |
+| `-o <file>` | Output WASM file path |
+
+The SDK directory must be on `PYTHONPATH` so `cleat_sdk` is importable:
+
+```bash
+export PYTHONPATH=/path/to/python-sdk:$PYTHONPATH
+componentize-py componentize my_workflow.py --wit-path wit/ --world cleat-workflow -o my_workflow.wasm
+```
+
+The Cleat CLI provides a convenience wrapper that handles paths automatically:
 
 ```bash
 durable build --target python ./workflow.py
 ```
 
-Under the hood, this uses `componentize-py` from the [Bytecode Alliance](https://github.com/bytecodealliance/componentize-py) to compile Python to a WASM component, then wraps it in a shim that maps the Cleat ABI to the component model.
+### Handling Imports in WASM Context
 
-Direct `componentize-py` usage:
+When your workflow is compiled to WASM, `componentize-py` bundles a minimal CPython interpreter. Import behavior differs from native Python:
+
+- **Pure-Python imports** -- Pure Python modules on the Python path work normally
+- **C extension modules** -- Native code (`.so`/`.pyd`) does **not** work in WASM
+- **stdlib modules** -- Only pure-Python stdlib modules are available (see [compatibility section](#python-standard-library-compatibility))
+- **Third-party packages** -- Pure-Python packages (e.g., `langchain-core`) can work if they are on the Python path and do not depend on C extensions
+- **Relative imports** -- Use absolute imports within your workflow file; relative imports may not resolve correctly in the WASM context
+
+Always test your imports by compiling and running a minimal workflow before adding complex dependencies.
+
+### Step-by-Step Example
+
+Compile the `hello_workflow.py` example to WASM:
 
 ```bash
-componentize-py -d cleat_sdk -o workflow.wasm componentize my_workflow.py
+# 1. Install dependencies
+pip install componentize-py>=0.12.0
+pip install -e python-sdk/
+
+# 2. Verify the WIT directory exists
+ls python-sdk/wit/cleat.wit
+
+# 3. Compile the workflow
+cd python-sdk/
+componentize-py componentize examples/hello_workflow.py \
+  --wit-path wit/ \
+  --world cleat-workflow \
+  -o hello_workflow.wasm
+
+# 4. Verify the output
+ls -lh hello_workflow.wasm
+# Expected: hello_workflow.wasm (~5-15 MB for CPython + workflow code)
+
+# 5. Inspect the WASM exports (requires wasm-tools or wasm-objdump)
+wasm-tools dump hello_workflow.wasm | head -20
+# Or:
+wasm-objdump -x hello_workflow.wasm | grep Export
 ```
 
-The pyproject.toml in this directory provides the canonical `componentize-py` configuration. Make sure the `cleat_sdk` package is importable (e.g., `pip install -e python-sdk/` or set `PYTHONPATH`).
+The output WASM file can be loaded by the Cleat worker runtime. The compiled component exports entry points that dispatch to your `@durable_entry`-decorated functions.
+
+### Using the Makefile
+
+A `Makefile` in the SDK root provides convenience targets:
+
+```bash
+cd python-sdk/
+make wasm       # Compile all example workflows to WASM
+make test-wasm  # Compile and run WASM-specific tests
+make clean      # Remove compiled WASM artifacts
+```
+
+See the [Makefile](./Makefile) for details.
+
+### Troubleshooting
+
+| Error | Likely Cause | Solution |
+|-------|-------------|----------|
+| `componentize-py: command not found` | Not installed or not on `PATH` | `pip install componentize-py`; verify `PATH` includes `~/.local/bin` |
+| `Error: No such file or directory: 'wit/...'` | WIT path is incorrect | Pass `--wit-path` pointing to the directory with `cleat.wit` |
+| `ModuleNotFoundError: No module named 'cleat_sdk'` | SDK not on Python path | `pip install -e python-sdk/` or set `PYTHONPATH` |
+| `Error: Component model world 'cleat-workflow' not found` | WIT path does not contain the correct world | Verify WIT files; check the `world` name in `pyproject.toml` |
+| `RuntimeError: async function` | Async code in workflow | Remove `async`/`await`; all Cleat workflows are synchronous |
+| `Build FAILED (exit code 1)` without clear error | Try verbose mode | Add `--verbose` to see full `componentize-py` output |
+| WASM binary > 25 MB | Expected for CPython-in-WASM | Normal; the runtime caches the binary after first load |
+| WASM binary > 50 MB | Large or unnecessary imports | Check that imported modules are genuinely needed at runtime |
+| `ImportError: ...` at WASM runtime | Module not bundled | Only pure-Python modules are available; C extensions will not work |
 
 ## Requirements
 
 - **Python 3.10+** -- the SDK uses `typing.get_type_hints` and `inspect.signature` for parameter introspection
-- **componentize-py** -- required for WASM compilation (installed separately)
-- **Cleat CLI** (`durable build`) -- for the full build pipeline
+- **componentize-py >= 0.12.0** -- required for WASM compilation (installed via `pip install componentize-py`)
+- **Cleat CLI** (`durable build`) -- for the full build pipeline (optional; use `componentize-py` directly as shown above)
+- **WIT files** -- the `wit/` directory defining the Cleat component model interface
 
 Optional dependencies for development:
 

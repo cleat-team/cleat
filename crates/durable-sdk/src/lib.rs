@@ -6,11 +6,13 @@
 pub mod host_calls;
 pub mod memory;
 pub mod plugins;
+pub mod test;
 
-pub use host_calls::HostCalls;
+pub use host_calls::{FetchResult, HostCalls, RetryPolicy, SignalResult};
 pub use plugins::{
     AwaitEventResult, AwaitWebhookResult, BlobGetResult, BlobPutResult,
-    EvaluateFlagResult, Plugins, ProduceResult, ResolveIncidentResult,
+    EvaluateFlagResult, LlmChatMessage, LlmChatResult, LlmTool, LlmToolCall,
+    LlmUsageInfo, Plugins, ProduceResult, ResolveIncidentResult,
     SendMessageResult, SendWebhookResult, TriggerIncidentResult,
 };
 

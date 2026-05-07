@@ -40,3 +40,4 @@ export * from "./durable-entry";
 export * from "./json";
 export * from "./plugins";
 export * from "./saga";
+export * from "./utils";

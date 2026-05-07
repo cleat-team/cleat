@@ -1,5 +1,5 @@
 /**
- * AssemblyScript bindings for the 19 cleat WASM host function imports.
+ * AssemblyScript bindings for the cleat WASM host function imports.
  *
  * Provides raw `@external` import declarations and the `HostCalls` class
  * that wraps each import with idiomatic AssemblyScript methods.
@@ -22,6 +22,8 @@ import {
   OUTPUT_OFFSET,
   setWorkflowSuspended,
 } from "./memory";
+
+import { jsonStrArray, jsonExtractString, jsonExtractNumber } from "./json";
 
 // ═══════════════════════════════════════════════
 // 21 raw host function imports from "env" module
@@ -183,6 +185,27 @@ export declare function import_durable_call(
 ): i64;
 
 /**
+ * 15b. durable_call_with_timeout: Make a recorded API call with per-call deadline.
+ * (import "env" "durable_call_with_timeout") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
+ *
+ * NOTE: This import requires host-side ABI support. If the host does not expose
+ * this import, the call will fail at module instantiation. Use timeoutMs=0 to
+ * fall back to the standard durable_call import.
+ */
+@external("env", "durable_call_with_timeout")
+export declare function import_durable_call_with_timeout(
+  svcPtr: i32,
+  svcLen: i32,
+  opPtr: i32,
+  opLen: i32,
+  reqPtr: i32,
+  reqLen: i32,
+  timeoutMs: i64,
+  respPtr: i32,
+  respMaxLen: i32,
+): i64;
+
+/**
  * 16. durable_create_promise: Create a new durable promise.
  * (import "env" "durable_create_promise") (param i32 i32 i32 i32) (result i64)
  */
@@ -294,6 +317,216 @@ export declare function import_durable_signal_workflow(
   signalNameLen: i32,
   payloadPtr: i32,
   payloadLen: i32,
+): i64;
+
+/**
+ * 25. durable_resolve_promise: Resolve a durable promise with a value.
+ * (import "env" "durable_resolve_promise") (param i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_resolve_promise")
+export declare function import_durable_resolve_promise(
+  idPtr: i32,
+  idLen: i32,
+  valuePtr: i32,
+  valueLen: i32,
+): i64;
+
+/**
+ * 26. durable_reject_promise: Reject a durable promise with an error.
+ * (import "env" "durable_reject_promise") (param i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_reject_promise")
+export declare function import_durable_reject_promise(
+  idPtr: i32,
+  idLen: i32,
+  errorPtr: i32,
+  errorLen: i32,
+): i64;
+
+/**
+ * 27. durable_send: Fire-and-forget durable call to a service.
+ * (import "env" "durable_send") (param i32 i32 i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_send")
+export declare function import_durable_send(
+  svcPtr: i32,
+  svcLen: i32,
+  opPtr: i32,
+  opLen: i32,
+  reqPtr: i32,
+  reqLen: i32,
+): i64;
+
+/**
+ * 28. schedule_invoke: Schedule a one-shot delayed invocation.
+ * (import "env" "schedule_invoke") (param i32 i32 i32 i32 i32 i32 i64) (result i64)
+ */
+@external("env", "schedule_invoke")
+export declare function import_schedule_invoke(
+  svcPtr: i32,
+  svcLen: i32,
+  opPtr: i32,
+  opLen: i32,
+  reqPtr: i32,
+  reqLen: i32,
+  delayMs: i64,
+): i64;
+
+/**
+ * 29. durable_register_query_handler: Register a query handler.
+ * (import "env" "durable_register_query_handler") (param i32 i32) (result i64)
+ */
+@external("env", "durable_register_query_handler")
+export declare function import_durable_register_query_handler(
+  namePtr: i32,
+  nameLen: i32,
+): i64;
+
+/**
+ * 30. durable_run_detached: Run a function in a detached child workflow.
+ * (import "env" "durable_run_detached") (param i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_run_detached")
+export declare function import_durable_run_detached(
+  namePtr: i32,
+  nameLen: i32,
+  inputPtr: i32,
+  inputLen: i32,
+): i64;
+
+/**
+ * 31. durable_set_state: Set a key-value pair in workflow state.
+ * (import "env" "durable_set_state") (param i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_set_state")
+export declare function import_durable_set_state(
+  keyPtr: i32,
+  keyLen: i32,
+  valPtr: i32,
+  valLen: i32,
+): i64;
+
+/**
+ * 32. durable_get_state: Get a value from workflow state by key.
+ * (import "env" "durable_get_state") (param i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_get_state")
+export declare function import_durable_get_state(
+  keyPtr: i32,
+  keyLen: i32,
+  outPtr: i32,
+  maxLen: i32,
+): i64;
+
+/**
+ * 33. durable_delete_state: Delete a key from workflow state.
+ * (import "env" "durable_delete_state") (param i32 i32) (result i64)
+ */
+@external("env", "durable_delete_state")
+export declare function import_durable_delete_state(
+  keyPtr: i32,
+  keyLen: i32,
+): i64;
+
+/**
+ * 34. durable_incr_state: Atomically increment a numeric state value.
+ * (import "env" "durable_incr_state") (param i32 i32 i64) (result i64)
+ */
+@external("env", "durable_incr_state")
+export declare function import_durable_incr_state(
+  keyPtr: i32,
+  keyLen: i32,
+  delta: i64,
+): i64;
+
+/**
+ * 35. durable_has_state: Check if a key exists in workflow state.
+ * (import "env" "durable_has_state") (param i32 i32) (result i64)
+ */
+@external("env", "durable_has_state")
+export declare function import_durable_has_state(
+  keyPtr: i32,
+  keyLen: i32,
+): i64;
+
+/**
+ * 36. durable_list_state: List state keys matching a prefix.
+ * (import "env" "durable_list_state") (param i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_list_state")
+export declare function import_durable_list_state(
+  prefixPtr: i32,
+  prefixLen: i32,
+  outPtr: i32,
+  maxLen: i32,
+): i64;
+
+/**
+ * 37. durable_await_all_children: Wait for multiple child workflows.
+ * (import "env" "durable_await_all_children") (param i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_await_all_children")
+export declare function import_durable_await_all_children(
+  runIdsJsonPtr: i32,
+  runIdsJsonLen: i32,
+  outPtr: i32,
+  maxLen: i32,
+): i64;
+
+/**
+ * 38. durable_fetch: Make an HTTP request via the host runtime.
+ * (import "env" "durable_fetch") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_fetch")
+export declare function import_durable_fetch(
+  methodPtr: i32,
+  methodLen: i32,
+  urlPtr: i32,
+  urlLen: i32,
+  headersPtr: i32,
+  headersLen: i32,
+  bodyPtr: i32,
+  bodyLen: i32,
+  respPtr: i32,
+  respMaxLen: i32,
+): i64;
+
+/**
+ * 39. schedule_cron: Register a recurring cron-triggered workflow.
+ * (import "env" "schedule_cron") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
+ */
+@external("env", "schedule_cron")
+export declare function import_schedule_cron(
+  workflowNamePtr: i32,
+  workflowNameLen: i32,
+  cronExprPtr: i32,
+  cronExprLen: i32,
+  tzPtr: i32,
+  tzLen: i32,
+  inputPtr: i32,
+  inputLen: i32,
+  scheduleIdOutPtr: i32,
+  scheduleIdOutMax: i32,
+): i64;
+
+/**
+ * 40. delete_cron: Remove a previously registered cron schedule.
+ * (import "env" "delete_cron") (param i32 i32) (result i64)
+ */
+@external("env", "delete_cron")
+export declare function import_delete_cron(
+  scheduleIdPtr: i32,
+  scheduleIdLen: i32,
+): i64;
+
+/**
+ * 41. list_crons: List all registered cron schedules.
+ * (import "env" "list_crons") (param i32 i32) (result i64)
+ */
+@external("env", "list_crons")
+export declare function import_list_crons(
+  outPtr: i32,
+  outMaxLen: i32,
 ): i64;
 
 // ═══════════════════════════════════════════════
@@ -427,6 +660,25 @@ export class AwaitPromiseOutcome {
   }
 }
 
+/** Result of a durableFetch HTTP request. */
+export class FetchResult {
+  constructor(
+    /** HTTP status code (200, 404, etc.). 0 on error. */
+    public readonly statusCode: i32,
+    /** Response headers as a JSON string (e.g., '{"content-type":"application/json"}'). */
+    public readonly headers: string,
+    /** Response body string. */
+    public readonly body: string,
+    /** Error message, or null on success. */
+    public readonly error: string | null,
+  ) {}
+
+  /** Returns true when this result carries an error. */
+  get isError(): bool {
+    return this.error !== null;
+  }
+}
+
 // ═══════════════════════════════════════════════
 // HostCalls wrapper
 // ═══════════════════════════════════════════════
@@ -509,12 +761,17 @@ export class HostCalls {
    * Service, operation, and request JSON are encoded to the scratch buffer,
    * the host call is made, and the response is read from the output buffer.
    *
+   * When timeoutMs > 0, the host enforces a per-call deadline. If the host
+   * does not expose the `durable_call_with_timeout` import, pass 0 to use
+   * the standard (non-timeout) import.
+   *
    * @param service      - Service name (e.g., "payment", "email").
    * @param operation    - Operation name (e.g., "charge", "send").
    * @param requestJson  - Request payload as a JSON string.
+   * @param timeoutMs    - Optional per-call timeout in milliseconds (0 = no timeout).
    * @returns The call outcome containing response JSON or error details.
    */
-  durableCall(service: string, operation: string, requestJson: string): DurableCallOutcome {
+  durableCall(service: string, operation: string, requestJson: string, timeoutMs: i64 = 0): DurableCallOutcome {
     // Encode input strings sequentially into the scratch buffer
     let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
     let opOffset: usize = SCRATCH_BASE + svcLen;
@@ -524,17 +781,32 @@ export class HostCalls {
     remaining -= opLen;
     let reqLen: i32 = this.writeScratch(reqOffset, remaining, requestJson, "requestJson");
 
-    // Call the host import
-    let result: i64 = import_durable_call(
-      SCRATCH_BASE as i32,
-      svcLen,
-      opOffset as i32,
-      opLen,
-      reqOffset as i32,
-      reqLen,
-      OUTPUT_OFFSET as i32,
-      OUT_BUF_SIZE,
-    );
+    // Call the host import — use the timeout variant when timeoutMs > 0
+    let result: i64;
+    if (timeoutMs > 0) {
+      result = import_durable_call_with_timeout(
+        SCRATCH_BASE as i32,
+        svcLen,
+        opOffset as i32,
+        opLen,
+        reqOffset as i32,
+        reqLen,
+        timeoutMs,
+        OUTPUT_OFFSET as i32,
+        OUT_BUF_SIZE,
+      );
+    } else {
+      result = import_durable_call(
+        SCRATCH_BASE as i32,
+        svcLen,
+        opOffset as i32,
+        opLen,
+        reqOffset as i32,
+        reqLen,
+        OUTPUT_OFFSET as i32,
+        OUT_BUF_SIZE,
+      );
+    }
 
     // Decode the packed result
     let decoded = decodeCallResult(result);
@@ -1417,5 +1689,666 @@ export class HostCalls {
       return "signal_workflow error code: " + decoded.errCode.toString();
     }
     return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 29. resolvePromise — resolve a durable promise
+  // ────────────────────────────────────────────
+
+  /**
+   * Resolve a durable promise with a value.
+   *
+   * The promise must have been created by `createPromise` and the ID
+   * must be valid (obtained from the host when the promise was created).
+   *
+   * @param id    - The durable promise ID to resolve.
+   * @param value - The value to resolve the promise with.
+   * @returns An error message on failure, or null on success.
+   */
+  resolvePromise(id: string, value: string): string | null {
+    let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, id);
+    let valOffset: usize = SCRATCH_BASE + idLen;
+    let remaining: i32 = OUT_BUF_SIZE - idLen;
+    let valLen: i32 = this.writeScratch(valOffset, remaining, value, "value");
+
+    let result: i64 = import_durable_resolve_promise(
+      SCRATCH_BASE as i32,
+      idLen,
+      valOffset as i32,
+      valLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "resolve_promise error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 30. rejectPromise — reject a durable promise
+  // ────────────────────────────────────────────
+
+  /**
+   * Reject a durable promise with an error message.
+   *
+   * @param id    - The durable promise ID to reject.
+   * @param error - The error message to reject the promise with.
+   * @returns An error message on failure, or null on success.
+   */
+  rejectPromise(id: string, error: string): string | null {
+    let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, id);
+    let errOffset: usize = SCRATCH_BASE + idLen;
+    let remaining: i32 = OUT_BUF_SIZE - idLen;
+    let errLen: i32 = this.writeScratch(errOffset, remaining, error, "error");
+
+    let result: i64 = import_durable_reject_promise(
+      SCRATCH_BASE as i32,
+      idLen,
+      errOffset as i32,
+      errLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "reject_promise error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 31. durableSend — fire-and-forget durable call
+  // ────────────────────────────────────────────
+
+  /**
+   * Make a fire-and-forget durable call to an external service.
+   *
+   * Unlike `durableCall`, this does NOT wait for a response. The call is
+   * recorded for replay but the workflow continues immediately.
+   *
+   * @param service      - Service name (e.g., "payment", "email").
+   * @param operation    - Operation name (e.g., "charge", "send").
+   * @param requestJson  - Request payload as a JSON string.
+   * @returns An error message on failure, or null on success.
+   */
+  durableSend(service: string, operation: string, requestJson: string): string | null {
+    let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
+    let opOffset: usize = SCRATCH_BASE + svcLen;
+    let remaining: i32 = OUT_BUF_SIZE - svcLen;
+    let opLen: i32 = this.writeScratch(opOffset, remaining, operation, "operation");
+    let reqOffset: usize = opOffset + opLen;
+    remaining -= opLen;
+    let reqLen: i32 = this.writeScratch(reqOffset, remaining, requestJson, "requestJson");
+
+    let result: i64 = import_durable_send(
+      SCRATCH_BASE as i32,
+      svcLen,
+      opOffset as i32,
+      opLen,
+      reqOffset as i32,
+      reqLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "durable_send error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 32. scheduleInvoke — schedule delayed invocation
+  // ────────────────────────────────────────────
+
+  /**
+   * Schedule a one-shot delayed invocation of a service operation.
+   *
+   * The invocation will be executed after the delay has elapsed.
+   * This is fire-and-forget — no result is returned.
+   *
+   * @param service      - Service name.
+   * @param operation    - Operation name.
+   * @param requestJson  - Request payload as a JSON string.
+   * @param delayMs      - Delay in milliseconds before the invocation fires.
+   * @returns An error message on failure, or null on success.
+   */
+  scheduleInvoke(service: string, operation: string, requestJson: string, delayMs: i64): string | null {
+    let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
+    let opOffset: usize = SCRATCH_BASE + svcLen;
+    let remaining: i32 = OUT_BUF_SIZE - svcLen;
+    let opLen: i32 = this.writeScratch(opOffset, remaining, operation, "operation");
+    let reqOffset: usize = opOffset + opLen;
+    remaining -= opLen;
+    let reqLen: i32 = this.writeScratch(reqOffset, remaining, requestJson, "requestJson");
+
+    let result: i64 = import_schedule_invoke(
+      SCRATCH_BASE as i32,
+      svcLen,
+      opOffset as i32,
+      opLen,
+      reqOffset as i32,
+      reqLen,
+      delayMs,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "schedule_invoke error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 33. registerQueryHandler — register query handler
+  // ────────────────────────────────────────────
+
+  /**
+   * Register a query handler callback by name.
+   *
+   * In AS with --runtime stub (no closures), this uses a name-based
+   * registration pattern. The workflow must expose a named export function
+   * matching the handler name for the host to invoke when a query arrives.
+   *
+   * @param name - The query handler name.
+   * @returns An error message on failure, or null on success.
+   */
+  registerQueryHandler(name: string): string | null {
+    let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
+
+    let result: i64 = import_durable_register_query_handler(
+      SCRATCH_BASE as i32,
+      nameLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "register_query_handler error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 34. runDetached — run fire-and-forget child workflow
+  // ────────────────────────────────────────────
+
+  /**
+   * Run a function in a detached (fire-and-forget) child workflow context.
+   *
+   * The child workflow runs independently — no run ID or result is returned.
+   * Uses name-based dispatch to identify the workflow function.
+   *
+   * @param name      - The workflow function name to invoke.
+   * @param inputJson - Input JSON for the detached workflow.
+   * @returns An error message on failure, or null on success.
+   */
+  runDetached(name: string, inputJson: string): string | null {
+    let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
+    let inputOffset: usize = SCRATCH_BASE + nameLen;
+    let remaining: i32 = OUT_BUF_SIZE - nameLen;
+    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
+
+    let result: i64 = import_durable_run_detached(
+      SCRATCH_BASE as i32,
+      nameLen,
+      inputOffset as i32,
+      inputLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "run_detached error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // Private: scopedKey — apply scope prefix to state key
+  // ────────────────────────────────────────────
+
+  /**
+   * Prepend the current scope prefix to a state key if setScope was called.
+   *
+   * @param key - The raw state key.
+   * @returns The scoped key with prefix (if scope is set).
+   */
+  private scopedKey(key: string): string {
+    if (this._scopePrefix.length > 0) {
+      return this._scopePrefix + key;
+    }
+    return key;
+  }
+
+  // ────────────────────────────────────────────
+  // 35. setState — set workflow state
+  // ────────────────────────────────────────────
+
+  /**
+   * Set a key-value pair in workflow state.
+   *
+   * State keys are automatically scoped if `setScope` was called
+   * (prefixed with "vo:<type>:<key>:").
+   *
+   * @param key   - State key.
+   * @param value - State value.
+   * @returns An error message on failure, or null on success.
+   */
+  setState(key: string, value: string): string | null {
+    let fullKey: string = this.scopedKey(key);
+    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
+    let valOffset: usize = SCRATCH_BASE + keyLen;
+    let remaining: i32 = OUT_BUF_SIZE - keyLen;
+    let valLen: i32 = this.writeScratch(valOffset, remaining, value, "value");
+
+    let result: i64 = import_durable_set_state(
+      SCRATCH_BASE as i32,
+      keyLen,
+      valOffset as i32,
+      valLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "set_state error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 36. getState — get workflow state
+  // ────────────────────────────────────────────
+
+  /**
+   * Get a value from workflow state by key.
+   *
+   * Returns the value string, or null if the key does not exist
+   * or an error occurred.
+   *
+   * @param key - State key to look up.
+   * @returns The value string, or null if not found or on error.
+   */
+  getState(key: string): string | null {
+    let fullKey: string = this.scopedKey(key);
+    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
+
+    let result: i64 = import_durable_get_state(
+      SCRATCH_BASE as i32,
+      keyLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      return null;
+    }
+    return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+  }
+
+  // ────────────────────────────────────────────
+  // 37. deleteState — delete workflow state
+  // ────────────────────────────────────────────
+
+  /**
+   * Delete a key from workflow state.
+   *
+   * @param key - State key to delete.
+   * @returns An error message on failure, or null on success.
+   */
+  deleteState(key: string): string | null {
+    let fullKey: string = this.scopedKey(key);
+    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
+
+    let result: i64 = import_durable_delete_state(
+      SCRATCH_BASE as i32,
+      keyLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "delete_state error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 38. incrState — atomically increment state value
+  // ────────────────────────────────────────────
+
+  /**
+   * Atomically increment a numeric state value by the given delta.
+   *
+   * If the key does not exist, it is initialized to the delta value.
+   *
+   * @param key   - State key to increment.
+   * @param delta - Amount to add (can be negative for decrement).
+   * @returns The new value after increment, or 0 on error.
+   */
+  incrState(key: string, delta: i64): i64 {
+    let fullKey: string = this.scopedKey(key);
+    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
+
+    let result: i64 = import_durable_incr_state(
+      SCRATCH_BASE as i32,
+      keyLen,
+      delta,
+    );
+
+    return result; // Host returns the new value directly
+  }
+
+  // ────────────────────────────────────────────
+  // 39. hasState — check if state key exists
+  // ────────────────────────────────────────────
+
+  /**
+   * Check if a key exists in workflow state.
+   *
+   * @param key - State key to check.
+   * @returns True if the key exists, false otherwise.
+   */
+  hasState(key: string): bool {
+    let fullKey: string = this.scopedKey(key);
+    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
+
+    let result: i64 = import_durable_has_state(
+      SCRATCH_BASE as i32,
+      keyLen,
+    );
+
+    // Host returns non-zero for true, zero for false
+    return result !== 0;
+  }
+
+  // ────────────────────────────────────────────
+  // 40. listState — list state keys by prefix
+  // ────────────────────────────────────────────
+
+  /**
+   * List state keys matching a prefix.
+   *
+   * Returns an array of key names (not values) that match the prefix.
+   *
+   * @param prefix - Key prefix to match (empty string lists all keys).
+   * @returns Array of matching key names.
+   */
+  listState(prefix: string): string[] {
+    let fullPrefix: string = this.scopedKey(prefix);
+    let prefixLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullPrefix);
+
+    let result: i64 = import_durable_list_state(
+      SCRATCH_BASE as i32,
+      prefixLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      return [];
+    }
+    let jsonStr: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+    return jsonStrArray(jsonStr);
+  }
+
+  // ────────────────────────────────────────────
+  // 41. awaitAllChildren — wait for multiple child workflows
+  // ────────────────────────────────────────────
+
+  /**
+   * Wait for multiple child workflows to complete.
+   *
+   * Accepts a JSON array of child run IDs and returns aggregated results
+   * as a JSON array.
+   *
+   * @param runIdsJson - JSON array of child run IDs (e.g., '["run1","run2"]').
+   * @returns JSON string of aggregated results, or null on error.
+   */
+  awaitAllChildren(runIdsJson: string): string | null {
+    let runIdsLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, runIdsJson);
+
+    let result: i64 = import_durable_await_all_children(
+      SCRATCH_BASE as i32,
+      runIdsLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      return null;
+    }
+    return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+  }
+
+  // ────────────────────────────────────────────
+  // 43. isReplaying — check if workflow is in replay
+  // ────────────────────────────────────────────
+
+  /**
+   * Check whether the current workflow execution is replaying.
+   *
+   * **IMPORTANT:** There is no direct `durable_is_replaying` host import
+   * in the current ABI. This method ALWAYS returns `false`.
+   *
+   * To detect replay at runtime, use the `durableSleep` return-value pattern:
+   *
+   * ```ts
+   * // durableSleep returns `true` on fresh execution (should suspend).
+   * // On replay it returns `false` immediately (sleep already completed).
+   * let isReplay = !host.durableSleep(1); // 1ms sleep, non-zero
+   * ```
+   *
+   * **Caveat:** A 1ms sleep is recorded in the event history. Use this
+   * pattern sparingly and only for diagnostics/debugging.
+   *
+   * This method is a placeholder for future host-side support. When a
+   * `durable_is_replaying` import is added to the ABI, this method will
+   * delegate to it.
+   *
+   * @returns `false` (always — requires future host-side support).
+   */
+  isReplaying(): bool {
+    // TODO: Replace with import_durable_is_replaying() when available.
+    return false;
+  }
+
+  // ────────────────────────────────────────────
+  // 44. currentRunId — get current run ID
+  // ────────────────────────────────────────────
+
+  /**
+   * Get the current workflow run ID from the host runtime.
+   *
+   * The run ID uniquely identifies this specific execution of the workflow.
+   *
+   * @returns The run ID string, or empty string on error.
+   */
+  currentRunId(): string {
+    let result: i64 = import_durable_run_id(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      return "";
+    }
+    return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+  }
+
+  // ────────────────────────────────────────────
+  // 43. durableFetch — make HTTP request
+  // ────────────────────────────────────────────
+
+  /**
+   * Make an HTTP request via the host runtime.
+   *
+   * The host handles the actual HTTP call, recording it for replay.
+   * Returns a FetchResult containing status code, headers, and body.
+   *
+   * @param method      - HTTP method (e.g., "GET", "POST", "PUT", "DELETE").
+   * @param url         - The full URL to request.
+   * @param headersJson - Request headers as a JSON string (e.g., '{"Authorization":"Bearer ..."}').
+   * @param body        - Request body string (empty string for GET/HEAD).
+   * @returns The fetch result with status code, headers, body, and optional error.
+   */
+  durableFetch(method: string, url: string, headersJson: string, body: string): FetchResult {
+    let methodLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, method);
+    let urlOffset: usize = SCRATCH_BASE + methodLen;
+    let remaining: i32 = OUT_BUF_SIZE - methodLen;
+    let urlLen: i32 = this.writeScratch(urlOffset, remaining, url, "url");
+    let headersOffset: usize = urlOffset + urlLen;
+    remaining -= urlLen;
+    let headersLen: i32 = this.writeScratch(headersOffset, remaining, headersJson, "headersJson");
+    let bodyOffset: usize = headersOffset + headersLen;
+    remaining -= headersLen;
+    let bodyLen: i32 = this.writeScratch(bodyOffset, remaining, body, "body");
+
+    let result: i64 = import_durable_fetch(
+      SCRATCH_BASE as i32,
+      methodLen,
+      urlOffset as i32,
+      urlLen,
+      headersOffset as i32,
+      headersLen,
+      bodyOffset as i32,
+      bodyLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      let errMsg: string =
+        decoded.extra > 0
+          ? this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32)
+          : "fetch error";
+      return new FetchResult(0, "", "", errMsg);
+    }
+
+    let respJson: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+    // Parse the JSON response from the host
+    let status: i32 = jsonExtractNumber(respJson, "status") as i32;
+    let headers: string = jsonExtractString(respJson, "headers");
+    let bodyResp: string = jsonExtractString(respJson, "body");
+    return new FetchResult(status, headers, bodyResp, null);
+  }
+
+  // ────────────────────────────────────────────
+  // 44. fetchGet — convenience HTTP GET
+  // ────────────────────────────────────────────
+
+  /**
+   * Convenience wrapper that performs an HTTP GET request.
+   *
+   * @param url - The URL to fetch.
+   * @returns The fetch result.
+   */
+  fetchGet(url: string): FetchResult {
+    return this.durableFetch("GET", url, "{}", "");
+  }
+
+  // ────────────────────────────────────────────
+  // 45. scheduleCron — register a recurring workflow
+  // ────────────────────────────────────────────
+
+  /**
+   * Register a recurring cron-triggered workflow schedule.
+   *
+   * The actual cron execution engine runs on the HOST side. This SDK method
+   * only provides the API for workflows to register cron schedules with the
+   * host runtime.
+   *
+   * @param workflowName  - The workflow definition name to invoke on each tick.
+   * @param cronExpr      - Standard 5-field cron expression.
+   * @param timezone      - IANA timezone (e.g., "America/New_York", "UTC").
+   * @param inputJson     - Input JSON passed to each workflow invocation.
+   * @returns A DurableResult containing the schedule ID on success.
+   */
+  scheduleCron(
+    workflowName: string,
+    cronExpr: string,
+    timezone: string,
+    inputJson: string,
+  ): DurableResult<string> {
+    let wfLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, workflowName);
+    let cronOffset: usize = SCRATCH_BASE + wfLen;
+    let remaining: i32 = OUT_BUF_SIZE - wfLen;
+    let cronLen: i32 = this.writeScratch(cronOffset, remaining, cronExpr, "cronExpr");
+    let tzOffset: usize = cronOffset + cronLen;
+    remaining -= cronLen;
+    let tzLen: i32 = this.writeScratch(tzOffset, remaining, timezone, "timezone");
+    let inputOffset: usize = tzOffset + tzLen;
+    remaining -= tzLen;
+    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
+
+    let result: i64 = import_schedule_cron(
+      SCRATCH_BASE as i32,
+      wfLen,
+      cronOffset as i32,
+      cronLen,
+      tzOffset as i32,
+      tzLen,
+      inputOffset as i32,
+      inputLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return new DurableResult<string>(
+        "",
+        "schedule_cron error code: " + decoded.errCode.toString(),
+      );
+    }
+    let scheduleId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+    return new DurableResult<string>(scheduleId, null);
+  }
+
+  // ────────────────────────────────────────────
+  // 46. deleteCron — remove a cron schedule
+  // ────────────────────────────────────────────
+
+  /**
+   * Remove a previously registered cron schedule by its ID.
+   *
+   * @param scheduleId - The schedule ID returned by scheduleCron.
+   * @returns An error message on failure, or null on success.
+   */
+  deleteCron(scheduleId: string): string | null {
+    let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, scheduleId);
+
+    let result: i64 = import_delete_cron(
+      SCRATCH_BASE as i32,
+      idLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "delete_cron error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 47. listCrons — list all cron schedules
+  // ────────────────────────────────────────────
+
+  /**
+   * List all registered cron schedules.
+   *
+   * Returns a JSON array of schedule objects, each containing the
+   * schedule ID, workflow name, cron expression, timezone, and input.
+   *
+   * @returns A JSON string of schedule objects, or null on error.
+   */
+  listCrons(): string | null {
+    let result: i64 = import_list_crons(
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      return null;
+    }
+    return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
   }
 }

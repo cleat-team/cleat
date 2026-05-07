@@ -144,3 +144,15 @@ pub fn decode_get_scope_result(result: i64) -> (u32, u32) {
     let inst_key_len = (r & 0xFFFF_FFFF) as u32;
     (obj_type_len, inst_key_len)
 }
+
+/// Decode incr_state result: low byte = err_code, bits 8-63 = new value (shifted right 8).
+pub fn decode_incr_state_result(result: i64) -> (i64, u8) {
+    let err_code = (result & 0xFF) as u8;
+    let new_value = result >> 8;
+    (new_value, err_code)
+}
+
+/// Decode has_state result: non-zero means the key exists.
+pub fn decode_has_state_result(result: i64) -> bool {
+    result != 0
+}

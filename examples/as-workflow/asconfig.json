@@ -5,10 +5,18 @@
       "optimize": true,
       "initialMemory": 170,
       "outFile": "dist/workflow.wasm"
+    },
+    "debug": {
+      "runtime": "minimal",
+      "optimize": false,
+      "debug": true,
+      "initialMemory": 170,
+      "outFile": "dist/workflow.debug.wasm"
     }
   },
   "options": {
     "bindings": "raw",
+    "use": ["ASC_WASI=0"],
     "paths": {
       "@cleat/sdk": ["../../packages/cleat-as/assembly"]
     }

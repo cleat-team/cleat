@@ -1,5 +1,6 @@
 package cleat;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -317,7 +318,28 @@ public class Plugins {
         if (value instanceof Map) {
             return mapToJson((Map<String, Object>) value);
         }
+        if (value instanceof List) {
+            return listToJson((List<Object>) value);
+        }
         return "\"" + JsonHelper.escapeJson(value.toString()) + "\"";
+    }
+
+    /**
+     * Convert a {@code List<Object>} to a JSON array string.
+     */
+    private static String listToJson(List<Object> list) {
+        if (list == null || list.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < list.size(); i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append(valueToJson(list.get(i)));
+        }
+        sb.append("]");
+        return sb.toString();
     }
 
     /**
@@ -791,6 +813,61 @@ public class Plugins {
     }
 
     // ========================================================================
+    // LlmChatResult
+    // ========================================================================
+
+    /**
+     * Result of an LLM chat completion call via {@link #chat}.
+     * <p>
+     * Contains the model's response text, any tool calls made,
+     * the finish reason, and usage metadata.
+     */
+    public static class LlmChatResult {
+        /** The response text from the LLM (empty if only tool calls were made). */
+        public final String response;
+
+        /** Raw JSON of tool calls made by the LLM (empty if none). */
+        public final String toolCalls;
+
+        /** The finish reason (e.g. {@code "stop"}, {@code "tool_calls"}, {@code "length"}). */
+        public final String finishReason;
+
+        /** Raw JSON of usage information (e.g. prompt/completion tokens). */
+        public final String usageInfo;
+
+        /**
+         * Construct a new LLM chat result.
+         *
+         * @param response     the response text
+         * @param toolCalls    the tool calls JSON
+         * @param finishReason the finish reason
+         * @param usageInfo    the usage info JSON
+         */
+        public LlmChatResult(String response, String toolCalls,
+                             String finishReason, String usageInfo) {
+            this.response = response;
+            this.toolCalls = toolCalls;
+            this.finishReason = finishReason;
+            this.usageInfo = usageInfo;
+        }
+
+        /**
+         * Parse an {@code LlmChatResult} from a JSON response string.
+         *
+         * @param json the JSON response from the LLM plugin
+         * @return a parsed result
+         */
+        public static LlmChatResult fromJson(String json) {
+            return new LlmChatResult(
+                extractString(json, "response"),
+                extractJsonValue(json, "tool_calls"),
+                extractString(json, "finish_reason"),
+                extractJsonValue(json, "usage")
+            );
+        }
+    }
+
+    // ========================================================================
     // HostCalls wrapper
     // ========================================================================
 
@@ -1067,5 +1144,90 @@ public class Plugins {
 
         String response = host.pluginCall("webhookingest", "await_webhook", sb.toString());
         return AwaitWebhookResult.fromJson(response);
+    }
+
+    // --------------------------------------------------------------------
+    // llm (Large Language Model)
+    // --------------------------------------------------------------------
+
+    /**
+     * Send a chat completion request to an LLM.
+     * <p>
+     * The messages parameter should contain a list of message objects, each
+     * with {@code role} and {@code content} fields.  The tools parameter is
+     * an optional list of tool definitions the LLM may call.
+     *
+     * @param model    the model name (e.g. {@code "gpt-4"}, {@code "claude-3-opus-20240229"})
+     * @param messages the conversation messages (list of {@code {"role": ..., "content": ...}})
+     * @param tools    optional tool definitions (may be null)
+     * @return the LLM chat result with response, tool calls, and usage info
+     * @throws RuntimeException if the plugin call fails
+     */
+    public LlmChatResult chat(String model, List<Map<String, Object>> messages,
+                               List<Map<String, Object>> tools) {
+        StringBuilder sb = new StringBuilder("{");
+        sb.append("\"model\":\"").append(JsonHelper.escapeJson(model)).append("\"");
+        sb.append(",\"messages\":");
+        if (messages != null && !messages.isEmpty()) {
+            sb.append(listToJson(new java.util.ArrayList<Object>((List<?>) messages)));
+        } else {
+            sb.append("[]");
+        }
+        if (tools != null && !tools.isEmpty()) {
+            sb.append(",\"tools\":").append(listToJson(new java.util.ArrayList<Object>((List<?>) tools)));
+        }
+        sb.append("}");
+
+        String response = host.pluginCall("llm", "chat", sb.toString());
+        return LlmChatResult.fromJson(response);
+    }
+
+    /**
+     * Generate embeddings for a list of text strings.
+     * <p>
+     * Returns a list of embedding vectors, one for each input text.
+     * Each embedding vector is a list of double values.
+     *
+     * @param model the embedding model name (e.g. {@code "text-embedding-3-small"})
+     * @param texts the list of texts to embed
+     * @return a list of embedding vectors, each being a list of doubles
+     * @throws RuntimeException if the plugin call fails
+     */
+    public List<List<Double>> embed(String model, List<String> texts) {
+        StringBuilder sb = new StringBuilder("{");
+        sb.append("\"model\":\"").append(JsonHelper.escapeJson(model)).append("\"");
+        sb.append(",\"texts\":[");
+        for (int i = 0; i < texts.size(); i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append("\"").append(JsonHelper.escapeJson(texts.get(i))).append("\"");
+        }
+        sb.append("]}");
+
+        String response = host.pluginCall("llm", "embed", sb.toString());
+
+        // Parse response: {"embeddings": [[0.1, 0.2, ...], [0.3, 0.4, ...]]}
+        String rawEmbeddings = extractJsonValue(response, "embeddings");
+        if (rawEmbeddings.isEmpty()) {
+            return new java.util.ArrayList<>();
+        }
+
+        java.util.List<Object> parsedEmbeddings = JsonHelper.parseArray(rawEmbeddings);
+        List<List<Double>> result = new java.util.ArrayList<>();
+        for (Object obj : parsedEmbeddings) {
+            if (obj instanceof List) {
+                List<Double> embedding = new java.util.ArrayList<>();
+                for (Object val : (List<?>) obj) {
+                    if (val instanceof Number) {
+                        embedding.add(((Number) val).doubleValue());
+                    } else {
+                        embedding.add(0.0);
+                    }
+                }
+                result.add(embedding);
+            }
+        }
+        return result;
     }
 }

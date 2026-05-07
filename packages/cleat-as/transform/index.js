@@ -174,14 +174,20 @@ class CleatEntryTransformer {
   _injectWrappers(parser, sourceEntries) {
     for (const { source, entries } of sourceEntries) {
       const needsImport = !this._hasCleatSdkImport(source);
+      const needsJsonImport = this._hasMultiParamEntries(entries);
       const wrapperCode = this._generateWrappers(entries);
 
       try {
         // Insert @cleat/sdk import at the TOP of the source if needed
         if (needsImport) {
+          let importLine = 'import { HostCalls, Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended';
+          if (needsJsonImport) {
+            importLine += ', JsonParser, JsonVal';
+          }
+          importLine += ' } from "@cleat/sdk";\n';
           const importSrc = parser.parseFile(
             "~lib/generated/cleat-import.ts",
-            'import { HostCalls, Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended } from "@cleat/sdk";\n',
+            importLine,
             false
           );
           if (importSrc && importSrc.statements) {
@@ -339,9 +345,18 @@ class CleatEntryTransformer {
       code += `  const ${paramNames[0]}: string = argsJson;\n`;
       code += `  const _result: string = ${innerName}(h, ${paramNames[0]});\n`;
     } else {
-      // Multiple additional params -- pass all as strings (user parses them inside)
+      // Multiple additional params -- parse JSON and extract each field
+      code += `  // ---- Parse argsJson for multi-param entry ----\n`;
+      code += `  let _parser = new JsonParser();\n`;
+      code += `  let _parsed: JsonVal | null = _parser.parse(argsJson);\n`;
+      code += `  if (_parsed === null) {\n`;
+      code += `    const _errBody = '{"error":"invalid input JSON for multi-param entry"}';\n`;
+      code += `    const _errWritten = Memory.writeString(outPtr, maxOutLen, _errBody);\n`;
+      code += `    return Memory.encodeExportResult(1, _errWritten);\n`;
+      code += `  }\n\n`;
+      code += `  // Extract named params\n`;
       for (let i = 0; i < paramNames.length; i++) {
-        code += `  const ${paramNames[i]}: string = argsJson;\n`;
+        code += this._getDeserializeCode(paramNames[i], paramTypes[i]);
       }
       code += `  const _result: string = ${innerName}(h, ${paramNames.join(", ")});\n`;
     }
@@ -386,19 +401,34 @@ class CleatEntryTransformer {
   }
 
   // ---------------------------------------------------------------
+  // Check if any entry in the list has multiple user params
+  // ---------------------------------------------------------------
+  _hasMultiParamEntries(entries) {
+    return entries.some(e => e.paramNames.length > 1);
+  }
+
+  // ---------------------------------------------------------------
   // Generate deserialization code for a single parameter based on type
   // Used by the multi-parameter branch to select the correct JSON getter
   // ---------------------------------------------------------------
   _getDeserializeCode(pname, ptype) {
-    // Map AS types to the correct JSON getter from the AS JSON library
+    // Map AS types to the correct JsonParser getter
     if (ptype === "string" || ptype === "String") {
-      return `  let ${pname}: ${ptype} = _parsed.getString("${pname}") as ${ptype};\n`;
-    } else if (ptype === "i32" || ptype === "u32" || ptype === "i64" || ptype === "u64") {
-      return `  let ${pname}: ${ptype} = _parsed.getInteger("${pname}") as ${ptype};\n`;
-    } else if (ptype === "f64" || ptype === "f32") {
-      return `  let ${pname}: ${ptype} = _parsed.getFloat("${pname}") as ${ptype};\n`;
+      return `  let ${pname}: string = _parser.getString(_parsed, "${pname}");\n`;
+    } else if (ptype === "i32") {
+      return `  let ${pname}: i32 = <i32>_parser.getNumber(_parsed, "${pname}");\n`;
+    } else if (ptype === "u32") {
+      return `  let ${pname}: u32 = <u32>_parser.getNumber(_parsed, "${pname}");\n`;
+    } else if (ptype === "i64") {
+      return `  let ${pname}: i64 = <i64>_parser.getNumber(_parsed, "${pname}");\n`;
+    } else if (ptype === "u64") {
+      return `  let ${pname}: u64 = <u64>_parser.getNumber(_parsed, "${pname}");\n`;
+    } else if (ptype === "f64") {
+      return `  let ${pname}: f64 = _parser.getNumber(_parsed, "${pname}");\n`;
+    } else if (ptype === "f32") {
+      return `  let ${pname}: f32 = <f32>_parser.getNumber(_parsed, "${pname}");\n`;
     } else if (ptype === "bool" || ptype === "boolean") {
-      return `  let ${pname}: ${ptype} = _parsed.getBool("${pname}");\n`;
+      return `  let ${pname}: bool = _parser.getBool(_parsed, "${pname}");\n`;
     } else {
       // Unknown type — throw a compile-time error from the transformer
       throw new Error(

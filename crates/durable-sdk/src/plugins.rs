@@ -105,6 +105,57 @@ pub struct AwaitWebhookResult {
 }
 
 // ---------------------------------------------------------------------------
+// LLM result types
+// ---------------------------------------------------------------------------
+
+/// Message in an LLM chat conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// A tool/function definition for LLM tool calling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmTool {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub parameters: serde_json::Value,
+}
+
+/// A tool call returned by the LLM.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmToolCall {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+/// Token usage information for an LLM call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmUsageInfo {
+    #[serde(default)]
+    pub prompt_tokens: i64,
+    #[serde(default)]
+    pub completion_tokens: i64,
+    #[serde(default)]
+    pub total_tokens: i64,
+}
+
+/// Result from an LLM chat completion call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmChatResult {
+    pub response: String,
+    #[serde(default)]
+    pub tool_calls: Vec<LlmToolCall>,
+    #[serde(default)]
+    pub finish_reason: String,
+    #[serde(default)]
+    pub usage_info: Option<LlmUsageInfo>,
+}
+
+// ---------------------------------------------------------------------------
 // Plugins wrapper
 // ---------------------------------------------------------------------------
 
@@ -346,6 +397,49 @@ impl<'a> Plugins<'a> {
             payload: None,
             received_at: String::new(),
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // LLM (via plugin_call)
+    // -----------------------------------------------------------------------
+
+    /// Send a chat completion request to an LLM model.
+    /// Returns the model's response, including any tool calls and usage info.
+    pub fn chat(
+        &self,
+        model: &str,
+        messages: &[LlmChatMessage],
+        tools: &[LlmTool],
+    ) -> (LlmChatResult, Option<String>) {
+        let mut m = serde_json::Map::new();
+        m.insert("model".into(), model.into());
+        m.insert("messages".into(), serde_json::to_value(messages).unwrap_or_default());
+        if !tools.is_empty() {
+            m.insert("tools".into(), serde_json::to_value(tools).unwrap_or_default());
+        }
+        let (resp, err) = self.host.plugin_call("llm", "chat", &serde_json::Value::Object(m).to_string());
+        default_on_error::<LlmChatResult>(resp, err, || LlmChatResult {
+            response: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: String::new(),
+            usage_info: None,
+        })
+    }
+
+    /// Generate embeddings for a list of texts using the specified model.
+    /// Returns a list of embedding vectors, one per input text.
+    pub fn embed(&self, model: &str, texts: &[String]) -> (Vec<Vec<f64>>, Option<String>) {
+        let mut m = serde_json::Map::new();
+        m.insert("model".into(), model.into());
+        m.insert("texts".into(), serde_json::to_value(texts).unwrap_or_default());
+        let (resp, err) = self.host.plugin_call("llm", "embed", &serde_json::Value::Object(m).to_string());
+        if let Some(e) = err {
+            return (Vec::new(), Some(e));
+        }
+        match serde_json::from_str::<Vec<Vec<f64>>>(&resp) {
+            Ok(r) => (r, None),
+            Err(e) => (Vec::new(), Some(format!("parse error: {}", e))),
+        }
     }
 }
 

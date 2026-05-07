@@ -264,6 +264,25 @@ class CleatTestHarness(HostCalls):
         """
         self._child_stubs[name] = _ChildStub(name=name, result=result, error=error)
 
+    def register_child_stub(self, name: str, response: str) -> None:
+        """Register a stub for a child workflow with the given name.
+
+        When a child workflow with this name is started, ``child_workflow``
+        returns a run ID and the pre-configured response is returned by
+        ``await_child``. Supports multiple different child workflow names.
+
+        This is a simpler alternative to ``stub_child_workflow`` (no error
+        parameter).
+
+        Parameters
+        ----------
+        name:
+            Child workflow definition name.
+        response:
+            The response string to return when awaiting the child.
+        """
+        self._child_stubs[name] = _ChildStub(name=name, result=response, error=None)
+
     # ------------------------------------------------------------------
     # Clock control
     # ------------------------------------------------------------------
@@ -513,9 +532,10 @@ class CleatTestHarness(HostCalls):
                 self._pending_signals.pop(i)
                 return SignalResult(name=sig.name, payload=sig.payload, timed_out=False)
 
-        # If timeout is zero, return timed out
+        # Indefinite wait: timeout_ms <= 0 means "wait forever".
+        # Simulate by raising SuspendSentinel (matching real host behavior).
         if timeout_ms <= 0:
-            return SignalResult(name="", payload="", timed_out=True)
+            raise SuspendSentinel()
 
         # Advance time to simulate blocking
         self.now_ms += timeout_ms
@@ -537,11 +557,21 @@ class CleatTestHarness(HostCalls):
     def child_workflow(self, name: str, input: Any) -> str:
         input_str = self._marshal(input)
         stub = self._child_stubs.get(name)
+        run_id = f"test-child-{name}-{len(self.call_history)}"
+
+        # Record the child workflow invocation.
+        self.call_history.append(
+            CallRecord(
+                service="workflow",
+                operation=name,
+                request=input_str,
+                response=run_id,
+            )
+        )
+
         if stub:
-            run_id = f"test-child-{name}-{len(self.call_history)}"
             return run_id
 
-        run_id = f"test-child-{name}-{len(self.call_history)}"
         return run_id
 
     def await_child(self, run_id: str) -> str:
@@ -630,6 +660,10 @@ class CleatTestHarness(HostCalls):
         return f"test-defer-{len(self.call_history)}"
 
     def continue_as_new(self, input: Any) -> None:
+        pass
+
+    def extend_timeout(self, additional_ms: int) -> None:
+        """Extend the workflow's execution timeout (no-op in test harness)."""
         pass
 
     def durable_send(self, service: str, operation: str, request: Any) -> None:
