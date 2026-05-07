@@ -1,0 +1,23 @@
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - unconvert
+    - gocyclo
+    - gofmt
+linters-settings:
+  gocyclo:
+    min-complexity: 20
+  misspell:
+    locale: US
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+run:
+  timeout: 5m

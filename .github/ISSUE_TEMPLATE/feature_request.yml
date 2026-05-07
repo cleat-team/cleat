@@ -1,0 +1,25 @@
+name: Feature Request
+description: Suggest a new feature
+labels: [enhancement, triage]
+body:
+  - type: textarea
+    attributes:
+      label: Problem statement
+      description: What problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed solution
+      description: What would you like cleat to do?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives considered
+      description: What workarounds or alternative solutions have you tried?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Additional context

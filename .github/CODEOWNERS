@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# CODEOWNERS — automatically request review from the listed owners when
+# files matching the pattern are changed.
+#
+# Workstream 2 — Continuous Integration and Delivery
+#
+# More owners can be added as maintainers join the project.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+# ---------------------------------------------------------------------------
+
+# Core engine and SDK
+/cleat/          @rcownie
+/internal/host/  @rcownie
+/internal/wasm/  @rcownie
+
+# Tooling
+/cmd/cleat/      @rcownie
+/cmd/cleat-gen/  @rcownie
+
+# Worker and UI
+/cmd/cleat-worker/ @rcownie
+
+# Documentation
+*.md             @rcownie
+
+# CI and build
+/.github/        @rcownie
+/Makefile        @rcownie
+/go.mod          @rcownie
+/go.sum          @rcownie
+
+# Rust crates
+/crates/         @rcownie
+
+# Plugins
+/plugins/        @rcownie

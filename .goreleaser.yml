@@ -1,0 +1,106 @@
+# ---------------------------------------------------------------------------
+# GoReleaser configuration (v2 format)
+#
+# Builds cleat, cleat-worker, and cleat-gen for Linux and macOS on amd64/arm64.
+# The embedded Svelte UI (cmd/cleat-worker/web/dist/) is included in the
+# cleat-worker archive.
+# ---------------------------------------------------------------------------
+version: 2
+
+project_name: cleat
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cleat
+    main: ./cmd/cleat
+    binary: cleat
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: cleat-worker
+    main: ./cmd/cleat-worker
+    binary: cleat-worker
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: cleat-gen
+    main: ./cmd/cleat-gen
+    binary: cleat-gen
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+      - zip
+    format_overrides:
+      - goos: darwin
+        formats:
+          - zip
+      - goos: linux
+        formats:
+          - tar.gz
+    files:
+      - LICENSE
+      - README.md
+      - src: cmd/cleat-worker/web/dist/**
+        dst: web/dist/
+        strip_parent: true
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  name_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: rcownie
+    name: cleat
+  prerelease: auto
+  make_latest: true
+  header: |
+    ## cleat {{ .Version }}
+
+    See the [CHANGELOG](https://github.com/rcownie/cleat/blob/main/CHANGELOG.md) for full details.
+
+    ### Downloads
+    Pre-built binaries for Linux and macOS (amd64 + arm64) are attached below.

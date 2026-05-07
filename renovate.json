@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "packageRules": [
+    {
+      "matchPackagePatterns": ["^go", "^golang"],
+      "groupName": "Go modules",
+      "schedule": ["before 9am on Monday"]
+    },
+    {
+      "matchPackagePatterns": ["^github.com/tetratelabs/wazero"],
+      "groupName": "Wazero WebAssembly runtime",
+      "schedule": ["before 9am on Monday"]
+    },
+    {
+      "matchPackageNames": ["github.com/jackc/pgx", "github.com/jackc/pgx/v5"],
+      "groupName": "PostgreSQL driver",
+      "schedule": ["before 9am on Monday"]
+    }
+  ],
+  "postUpdateOptions": ["gomodTidy"],
+  "labels": ["area/deps"],
+  "prHourlyLimit": 5,
+  "semanticCommits": "enabled"
+}

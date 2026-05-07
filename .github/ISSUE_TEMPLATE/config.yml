@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discord Community
+    url: https://discord.gg/cleat
+    about: Ask questions and get help from the community
+  - name: GitHub Discussions
+    url: https://github.com/rcownie/cleat/discussions
+    about: Share ideas, show what you built, or discuss feature proposals
+  - name: Security Vulnerability
+    url: https://github.com/rcownie/cleat/security/advisories/new
+    about: Report a security vulnerability (do not open a public issue)

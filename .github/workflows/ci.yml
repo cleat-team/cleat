@@ -5,10 +5,14 @@
 #
 # Jobs:
 #   lint              — go vet, ruff, shellcheck, clippy
+#   lint-go           — golangci-lint: errcheck, gosimple, govet, ineffassign,
+#                       staticcheck, unused, misspell, unconvert, gocyclo, gofmt
+#   vulncheck         — govulncheck ./... (Go vulnerability scanner)
 #   test-go           — matrix (go version x package group), race detector
 #   test-python       — matrix (python 3.10 / 3.11 / 3.12)
 #   test-java         — gradle test (TeaVM + JUnit 5)
 #   test-assemblyscript — npm test (as-pect)
+#   fuzz              — fuzz tests on internal/wasm/... (60s per fuzz func)
 #   benchmarks        — push to main only; stores result + trend artifact
 #   cluster-tests     — docker-compose cluster, integration tests, tear-down
 #   build             — Go bin, Python SDK, Java, AssemblyScript, examples
@@ -85,6 +89,43 @@ jobs:
       - name: Clippy (cleat-sdk)
         working-directory: crates/cleat-sdk
         run: cargo clippy --all-targets -- -D warnings
+
+  # -------------------------------------------------------------------------
+  # Lint Go (golangci-lint with extended linters)
+  # -------------------------------------------------------------------------
+  lint-go:
+    name: Go Lint (golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+          args: --timeout=5m ./...
+
+  # -------------------------------------------------------------------------
+  # Vulnerability check (govulncheck)
+  # -------------------------------------------------------------------------
+  vulncheck:
+    name: Vulnerability Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   # -------------------------------------------------------------------------
   # Test Go (matrix: Go version x package group)
@@ -187,6 +228,23 @@ jobs:
       - name: Run tests
         working-directory: packages/cleat-as
         run: npm test
+
+  # -------------------------------------------------------------------------
+  # Fuzz tests (WASM boundary)
+  # -------------------------------------------------------------------------
+  fuzz:
+    name: Fuzz Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Run fuzz tests
+        run: go test -fuzz=. -fuzztime=60s ./internal/wasm/...
 
   # -------------------------------------------------------------------------
   # Benchmarks (push to main only)

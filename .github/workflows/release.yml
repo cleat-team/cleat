@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# Release workflow
+#
+# Triggered by pushing a tag matching v*. Builds and publishes GitHub
+# releases via GoReleaser.
+# ---------------------------------------------------------------------------
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Svelte UI
+        working-directory: cmd/cleat-worker/web
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+            npm run build
+          else
+            echo "No Svelte UI source found — using pre-built dist/."
+          fi
+
+      - name: Validate no dirty dist/
+        run: |
+          if [ -n "$(git status --porcelain cmd/cleat-worker/web/dist/)" ]; then
+            echo "::error::cmd/cleat-worker/web/dist/ has uncommitted changes."
+            echo "Run the Svelte UI build and commit the results before releasing."
+            exit 1
+          fi
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          distribution: goreleaser
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

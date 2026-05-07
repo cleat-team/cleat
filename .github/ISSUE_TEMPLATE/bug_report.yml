@@ -1,0 +1,42 @@
+name: Bug Report
+description: Report a bug in cleat
+labels: [bug, triage]
+body:
+  - type: input
+    attributes:
+      label: cleat version
+      description: Output of `cleat version`
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: OS / architecture
+      description: e.g. "Linux amd64", "macOS arm64"
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: PostgreSQL version
+      description: Output of `SELECT version()`
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to trigger the bug
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Additional context
+      description: Logs, screenshots, workflow code

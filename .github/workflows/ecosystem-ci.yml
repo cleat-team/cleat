@@ -1,0 +1,71 @@
+name: Ecosystem CI
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "cleat/**"
+      - "internal/**"
+      - "cmd/**"
+      - "go.mod"
+      - "go.sum"
+  push:
+    branches: [main]
+
+jobs:
+  python-sdk:
+    name: Python SDK Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install cleat
+        run: go install ./cmd/cleat
+      - name: Test Python SDK
+        working-directory: python-sdk
+        run: |
+          pip install --upgrade pip
+          pip install ".[dev]"
+          python -m pytest -v
+
+  rust-sdk:
+    name: Rust SDK Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test cleat-sdk
+        working-directory: crates/cleat-sdk
+        run: cargo test
+      - name: Test cleat-macro
+        working-directory: crates/cleat-macro
+        run: cargo test
+
+  java-sdk:
+    name: Java SDK Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v3
+      - name: Test Java SDK
+        working-directory: crates/cleat-java
+        run: gradle test
+
+  assemblyscript-sdk:
+    name: AssemblyScript SDK Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Test AS SDK
+        working-directory: packages/cleat-as
+        run: |
+          npm ci
+          npm test

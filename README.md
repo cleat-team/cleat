@@ -1,5 +1,24 @@
 # cleat
 
+[![CI](https://github.com/rcownie/cleat/actions/workflows/ci.yml/badge.svg)](https://github.com/rcownie/cleat/actions/workflows/ci.yml)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/doc/devel/release)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/rcownie/cleat/blob/main/LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/rcownie/cleat)](https://goreportcard.com/report/github.com/rcownie/cleat)
+[![Codecov](https://codecov.io/gh/rcownie/cleat/branch/main/graph/badge.svg)](https://codecov.io/gh/rcownie/cleat)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/rcownie/cleat/badge)](https://securityscorecards.dev/viewer/?uri=github.com/rcownie/cleat)
+[![Govulncheck](https://img.shields.io/badge/vulncheck-passing-brightgreen)](https://github.com/rcownie/cleat/security)
+[![Discord](https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/cleat)
+[![Go Reference](https://pkg.go.dev/badge/github.com/rcownie/cleat.svg)](https://pkg.go.dev/github.com/rcownie/cleat)
+[![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/XXXX/badge)](https://bestpractices.coreinfrastructure.org/projects/XXXX)
+
+> **Durable workflow engine on PostgreSQL — write in Go, compile to WASM, deploy via INSERT.**
+
+```bash
+brew install cleat/tap/cleat          # or: go install github.com/rcownie/cleat/cmd/cleat@latest
+docker compose up -d postgres         # PostgreSQL 16+ required
+cleat dev start                       # creates and runs a sample workflow locally
+```
+
 A cleat execution framework for Go and Rust. Workflows are written in near-standard Go (or Rust with `#[cleat_entry]`), compiled to WebAssembly, and stored in PostgreSQL. The framework handles replay, checkpointing, failover, and observability with minimal developer overhead. Includes an embedded Svelte web UI for workflow monitoring and schedule management.
 
 ## Installation
@@ -31,6 +50,10 @@ go install github.com/rcownie/cleat/cmd/cleat-gen@latest
 - **TinyGo** (optional) for smaller WASM binaries via `--target tinygo`
 - **Rust toolchain** (optional) for Rust workflows via `--target rust`
 - **Node.js** (optional) to build the web UI for the worker dashboard
+
+### License
+
+Cleat is licensed under [Apache 2.0](LICENSE). See [LICENSING.md](LICENSING.md) for license details.
 
 ## Quick start
 
@@ -727,3 +750,71 @@ Using `TestEnv` avoids the full WASM compilation cycle (seconds, not millisecond
 - **Getting-started tutorial** — end-to-end walkthrough
 - **Load testing and performance benchmarks**
 - **Ecosystem integrations** — Helm chart, Grafana dashboards
+
+## When NOT to Use Cleat
+
+Cleat solves a specific problem: durable workflow orchestration with
+deterministic replay on PostgreSQL. It is not a general-purpose application
+framework. Here are cases where cleat is a bad fit.
+
+### Single-service apps without orchestration needs
+
+If your application is a simple REST API, CRUD service, or batch job that does
+not need multi-step orchestration, durable execution introduces unnecessary
+complexity. The WASM compilation pipeline, replay model, and PostgreSQL round-
+trips add overhead that provides no benefit for stateless request-response
+workloads.
+
+**Use instead**: A web framework (Gin, Echo, Chi in Go; Express in Node; FastAPI
+in Python) or a simple CLI tool.
+
+### Teams requiring SOC 2 compliance today
+
+Cleat is a new, community-driven project without SOC 2, ISO 27001, or any
+formal compliance certifications. The project does not have a dedicated security
+team, a published incident response process, or a bug bounty program.
+
+**Use instead**: Temporal Cloud (SOC 2 compliant, HIPAA eligible, with
+dedicated security teams) or a managed cloud service with existing certifications.
+
+### TypeScript/Python-first teams without Go experience
+
+Cleat's primary SDK is Go. While Rust and Python AS SDKs exist, the Go SDK is
+the most mature, best-documented, and most thoroughly tested. Teams that are
+primarily TypeScript or Python developers will face a steeper learning curve
+and less mature tooling in non-Go SDKs.
+
+**Use instead**: Temporal (TypeScript and Python SDKs are production-quality),
+DBOS (TypeScript SDK), or Inngest (TypeScript-native).
+
+### Teams needing a managed service today
+
+Cleat is self-hosted only. There is no cleat Cloud, no managed hosting, no
+SLA. You operate your own PostgreSQL cluster and worker fleet. This requires
+operational expertise in PostgreSQL administration, capacity planning, and
+incident response.
+
+**Use instead**: Temporal Cloud (fully managed), AWS Step Functions (serverless,
+no infrastructure management), or DBOS Cloud (managed PostgreSQL + execution).
+
+### Ultra-low-latency requirements (<1ms)
+
+Every DurableCall crosses the WASM boundary (wazero marshalling), is recorded
+in the event history, and involves at least one PostgreSQL round-trip. This
+adds inherent latency that makes cleat unsuitable for sub-millisecond
+operations like high-frequency trading, real-time gaming backends, or
+signal-processing pipelines.
+
+**Use instead**: A custom event-sourced system with in-memory state, or a
+message queue (NATS, Redis Streams, Kafka) for ultra-low-latency messaging.
+
+### Teams that cannot run PostgreSQL
+
+PostgreSQL is the only supported backend. Cleat does not support SQLite, MySQL,
+DynamoDB, or any other database. If your organization standardizes on a
+different database or uses a serverless database that does not support
+`SKIP LOCKED` (e.g., DynamoDB, Cosmos DB), cleat will not work.
+
+**Use instead**: Temporal (supports SQLite, PostgreSQL, Cassandra, and
+Temporal Cloud), or a cloud-native workflow service that matches your database
+ecosystem.

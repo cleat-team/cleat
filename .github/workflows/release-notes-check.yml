@@ -1,0 +1,112 @@
+# ---------------------------------------------------------------------------
+# Release Notes Check
+#
+# Verifies that PRs with [FEATURE] or [BUGFIX] labels have a non-empty
+# release notes section in the PR body.
+# ---------------------------------------------------------------------------
+name: "Release Notes Check"
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check-release-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check PR body for release notes
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PR_BODY=$(gh pr view "${{ github.event.number }}" --json body --jq '.body // ""')
+
+          # If the PR has neither [FEATURE] nor [BUGFIX] label, skip the check
+          LABELS=$(gh pr view "${{ github.event.number }}" --json labels --jq '.labels[].name' || echo "")
+          HAS_REQUIRED_LABEL=false
+          while IFS= read -r label; do
+            if [ "$label" = "[FEATURE]" ] || [ "$label" = "[BUGFIX]" ]; then
+              HAS_REQUIRED_LABEL=true
+              break
+            fi
+          done <<< "$LABELS"
+
+          if [ "$HAS_REQUIRED_LABEL" = false ]; then
+            echo "PR does not have [FEATURE] or [BUGFIX] label — skipping release notes check."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+          # Define the required section headers
+          SECTIONS="### Added ### Fixed ### Changed ### Removed"
+          MISSING_SECTIONS=""
+
+          for section in $SECTIONS; do
+            # Extract content after the section header until the next ### or end of body
+            CONTENT=$(echo "$PR_BODY" | awk -v sec="$section" '
+              $0 ~ "^"sec"$" { found=1; next }
+              found && /^### / { exit }
+              found { print }
+            ')
+
+            # Strip whitespace and check if there is meaningful content
+            CLEAN=$(echo "$CONTENT" | sed '/^[[:space:]]*$/d' | sed '/^<!--/d' | sed '/^-->$/d' | tr -d '[:space:]')
+
+            if [ -z "$CLEAN" ]; then
+              MISSING_SECTIONS="$MISSING_SECTIONS $section"
+            fi
+          done
+
+          if [ -n "$MISSING_SECTIONS" ]; then
+            echo "missing_sections=$MISSING_SECTIONS" >> "$GITHUB_OUTPUT"
+            echo "pass=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "pass=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post comment if release notes missing
+        if: steps.check.outputs.skip == 'false' && steps.check.outputs.pass == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MISSING="${{ steps.check.outputs.missing_sections }}"
+          BODY=$(cat <<'BODYEOF'
+## Release Notes Missing
+
+This PR has a **FEATURE** or **BUGFIX** label but one or more required release
+notes sections are empty or missing.
+
+**Missing sections:**{{ MISSING }}
+
+Please add a brief description of the changes under each section header in the
+PR description. For example:
+
+```markdown
+### Added
+- New workflow poller for async task completion.
+```
+
+See the project changelog for examples of accepted release note entries.
+BODYEOF
+          )
+          # Replace placeholder
+          BODY="${BODY//\{\{ MISSING \}\}/$MISSING}"
+          gh pr comment "${{ github.event.number }}" --body "$BODY"
+
+      - name: Fail if release notes missing
+        if: steps.check.outputs.skip == 'false' && steps.check.outputs.pass == 'false'
+        run: |
+          echo "::error::Release notes are missing for sections:${{ steps.check.outputs.missing_sections }}"
+          echo "A comment has been posted on the PR with details."
+          exit 1

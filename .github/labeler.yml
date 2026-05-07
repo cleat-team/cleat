@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# Labeler configuration — maps file path globs to PR labels
+# Used by .github/workflows/labeler.yml (actions/labeler@v5)
+# ---------------------------------------------------------------------------
+
+# Area labels
+"area/cli":
+  - cmd/cleat/**/*
+  - cmd/cleat-gen/**/*
+
+"area/wasm":
+  - internal/wasm/**/*
+  - internal/transform/**/*
+
+"area/engine":
+  - internal/host/**/*
+  - internal/replay/**/*
+
+"area/ui":
+  - cmd/cleat-worker/web/**/*
+
+"area/sdk":
+  - cleat/**/*
+
+"area/docs":
+  - "*.md"
+  - "**/*.md"
+  - docs/**/*
+
+"area/ci":
+  - .github/**/*
+
+"area/plugins":
+  - plugins/**/*
+
+"area/rust":
+  - crates/**/*
+
+"area/python":
+  - python-sdk/**/*
+
+"area/java":
+  - crates/cleat-java/**/*
+
+"area/assemblyscript":
+  - packages/cleat-as/**/*
