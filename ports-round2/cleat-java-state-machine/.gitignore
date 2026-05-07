@@ -1,0 +1,8 @@
+.gradle/
+build/
+*.wasm
+*.class
+!gradle/wrapper/gradle-wrapper.jar
+local.properties
+.gradle/
+build/

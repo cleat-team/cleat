@@ -48,3 +48,30 @@ go.work.sum
 # .vscode/
 .claude/scheduled_tasks.lock
 durable-bench
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Node modules in ports
+ports-round2/*/node_modules/
+ports-round2/*/package-lock.json
+ports-round2/*/dist/
+
+# Cloned source repos (not our work product)
+ports-round2/dbos-demo-apps/
+ports-round2/examples/
+ports-round2/samples-go/
+ports-round2/samples-python/
+
+# Rust build artifacts in ports
+ports-round2/*/target/
+ports-round2/*/Cargo.lock
+
+# Go sum files in ports
+ports-round2/*/go.sum
+
+# Gradle build in ports
+ports-round2/*/gradle/wrapper/gradle-wrapper.jar
+ports-round2/*/.gradle/
+ports-round2/*/build/

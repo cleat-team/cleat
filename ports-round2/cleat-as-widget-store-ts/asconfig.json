@@ -1,0 +1,16 @@
+{
+  "targets": {
+    "release": {
+      "runtime": "minimal",
+      "optimize": true,
+      "initialMemory": 170,
+      "outFile": "dist/workflow.wasm"
+    }
+  },
+  "options": {
+    "bindings": "raw",
+    "paths": {
+      "@cleat/sdk": ["../../packages/cleat-as/assembly"]
+    }
+  }
+}
