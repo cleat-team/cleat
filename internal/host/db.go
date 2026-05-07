@@ -319,14 +319,18 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace 
 	for rows.Next() {
 		var wf WorkflowInstance
 		var nextWakeAt sql.NullTime
+		var tenantID sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &wf.TenantID); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
+		}
+		if tenantID.Valid {
+			wf.TenantID = tenantID.String
 		}
 		wfs = append(wfs, &wf)
 	}
@@ -371,14 +375,18 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, name
 	for rows.Next() {
 		var wf WorkflowInstance
 		var nextWakeAt sql.NullTime
+		var tenantID sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &wf.TenantID); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
+		}
+		if tenantID.Valid {
+			wf.TenantID = tenantID.String
 		}
 		wfs = append(wfs, &wf)
 	}
