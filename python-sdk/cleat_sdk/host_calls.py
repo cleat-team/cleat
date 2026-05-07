@@ -572,6 +572,58 @@ def _import_durable_register_query_handler(name_ptr: int, name_len: int) -> int:
     )
 
 
+# -- 28. durable_send_signal_and_wait ----------------------------------------------
+
+
+def _import_durable_send_signal_and_wait(
+    target_run_id_ptr: int,
+    target_run_id_len: int,
+    signal_name_ptr: int,
+    signal_name_len: int,
+    payload_ptr: int,
+    payload_len: int,
+    timeout_ms: int,
+    response_ptr: int,
+    response_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "durable_send_signal_and_wait") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)``."""
+    raise NotImplementedError(
+        "durable_send_signal_and_wait can only be called within a cleat WASM runtime."
+    )
+
+
+# -- 29. durable_reply_to_signal ---------------------------------------------------
+
+
+def _import_durable_reply_to_signal(
+    correlation_id_ptr: int,
+    correlation_id_len: int,
+    response_ptr: int,
+    response_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "durable_reply_to_signal") (param i32 i32 i32 i32) (result i64)``."""
+    raise NotImplementedError(
+        "durable_reply_to_signal can only be called within a cleat WASM runtime."
+    )
+
+
+# -- 30. durable_signal_workflow ---------------------------------------------------
+
+
+def _import_durable_signal_workflow(
+    target_run_id_ptr: int,
+    target_run_id_len: int,
+    signal_name_ptr: int,
+    signal_name_len: int,
+    payload_ptr: int,
+    payload_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "durable_signal_workflow") (param i32 i32 i32 i32 i32 i32) (result i64)``."""
+    raise NotImplementedError(
+        "durable_signal_workflow can only be called within a cleat WASM runtime."
+    )
+
+
 # ========================================================================
 # HostCalls — high-level wrapper
 # ========================================================================
@@ -2118,3 +2170,232 @@ class HostCalls:
             raise RuntimeError(f"plugin_call failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
+
+    # --------------------------------------------------------------------
+    # 32. send_signal_and_wait — send a signal and wait for a response
+    # --------------------------------------------------------------------
+
+    def send_signal_and_wait(
+        self,
+        target_run_id: str,
+        signal_name: str,
+        payload: str,
+        timeout_ms: int,
+    ) -> str:
+        """Send a signal to a target workflow and wait for a response.
+
+        The signal carries an embedded correlation ID. The target workflow
+        can call :meth:`reply_to_signal` to send a response back.
+
+        Parameters
+        ----------
+        target_run_id : str
+            The target workflow's run ID.
+        signal_name : str
+            The signal name to send.
+        payload : str
+            The signal payload as a JSON string (will be enriched with a
+            correlation ID).
+        timeout_ms : int
+            Maximum wait time in milliseconds for the response.
+
+        Returns
+        -------
+        str
+            The response payload from the target workflow.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error or the timeout expires.
+        """
+        target_len = write_string(SCRATCH_BASE, target_run_id, OUT_BUF_SIZE)
+        sig_offset = SCRATCH_BASE + target_len
+        remaining = OUT_BUF_SIZE - target_len
+        sig_len = write_string(sig_offset, signal_name, remaining)
+        payload_offset = sig_offset + sig_len
+        remaining -= sig_len
+        payload_len = write_string(payload_offset, self._marshal(payload), remaining)
+
+        result = _import_durable_send_signal_and_wait(
+            SCRATCH_BASE,
+            target_len,
+            sig_offset,
+            sig_len,
+            payload_offset,
+            payload_len,
+            timeout_ms,
+            OUTPUT_OFFSET,
+            OUT_BUF_SIZE,
+        )
+
+        response_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            err_msg = read_string(OUTPUT_OFFSET, response_len)
+            raise RuntimeError(f"send_signal_and_wait failed: {err_msg}")
+
+        return read_string(OUTPUT_OFFSET, response_len)
+
+    # --------------------------------------------------------------------
+    # 33. reply_to_signal — respond to a signal from within a handler
+    # --------------------------------------------------------------------
+
+    def reply_to_signal(self, correlation_id: str, response: str) -> None:
+        """Send a response back to the sender of a signal.
+
+        Only valid inside a signal handler context where the correlation ID
+        was embedded in the received signal payload (via
+        :meth:`send_signal_and_wait`).
+
+        Parameters
+        ----------
+        correlation_id : str
+            The correlation ID from the received signal's payload.
+        response : str
+            The response payload as a JSON string.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        cid_len = write_string(SCRATCH_BASE, correlation_id, OUT_BUF_SIZE)
+        resp_offset = SCRATCH_BASE + cid_len
+        remaining = OUT_BUF_SIZE - cid_len
+        resp_len = write_string(resp_offset, response, remaining)
+
+        result = _import_durable_reply_to_signal(
+            SCRATCH_BASE,
+            cid_len,
+            resp_offset,
+            resp_len,
+        )
+
+        _, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"reply_to_signal failed with error code: {err_code}"
+            )
+
+    # --------------------------------------------------------------------
+    # 34. await_signals_with_quorum — wait for quorum of signals
+    # --------------------------------------------------------------------
+
+    def await_signals_with_quorum(
+        self,
+        signal_names: list[str],
+        min_count: int,
+        max_rejections: int,
+        timeout_ms: int,
+    ) -> list[SignalResult]:
+        """Wait for at least ``min_count`` signals from the named set.
+
+        Collects signals until ``min_count`` is reached, ``max_rejections``
+        is exceeded (if >= 0), or the timeout expires.
+
+        Parameters
+        ----------
+        signal_names : list[str]
+            List of signal names to wait for.
+        min_count : int
+            Minimum number of signals required to proceed.
+        max_rejections : int
+            Maximum number of rejection signals tolerated before aborting.
+            Set to -1 to disable rejection tracking.
+        timeout_ms : int
+            Maximum wait time in milliseconds.
+
+        Returns
+        -------
+        list[SignalResult]
+            The collected signals.
+
+        Raises
+        ------
+        RuntimeError
+            If the timeout expires or max rejections is exceeded.
+        """
+        deadline_ns = time.monotonic_ns() + timeout_ms * 1_000_000
+        results: list[SignalResult] = []
+        rejection_count = 0
+
+        while len(results) < min_count:
+            remaining_ms = max(0, (deadline_ns - time.monotonic_ns()) // 1_000_000)
+
+            if remaining_ms <= 0:
+                raise RuntimeError(
+                    f"quorum timeout: got {len(results)}/{min_count} signals"
+                )
+
+            result = self.await_signals(signal_names, remaining_ms)
+            if result.timed_out:
+                raise RuntimeError(
+                    f"quorum timeout: got {len(results)}/{min_count} signals"
+                )
+            results.append(result)
+
+            # Check for rejection if max_rejections >= 0.
+            if max_rejections >= 0 and result.payload:
+                import json
+                try:
+                    payload_data = json.loads(result.payload)
+                    if isinstance(payload_data, dict) and payload_data.get("rejected"):
+                        rejection_count += 1
+                        if rejection_count > max_rejections:
+                            raise RuntimeError(
+                                f"quorum exceeded max rejections ({max_rejections})"
+                            )
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        return results
+
+    # --------------------------------------------------------------------
+    # 35. signal_workflow — send a signal to another workflow
+    # --------------------------------------------------------------------
+
+    def signal_workflow(
+        self,
+        target_run_id: str,
+        signal_name: str,
+        payload: Any,
+    ) -> None:
+        """Send a signal to a target workflow (fire-and-forget).
+
+        Unlike :meth:`send_signal_and_wait`, this method does not wait for a
+        response.  The signal is enqueued and the workflow continues
+        immediately.  This is a recorded (journaled) operation.
+
+        Parameters
+        ----------
+        target_run_id : str
+            The target workflow's run ID.
+        signal_name : str
+            The signal name to send.
+        payload : Any
+            The signal payload. Dicts are JSON-serialised automatically.
+        """
+        payload_str = self._marshal(payload)
+
+        target_len = write_string(SCRATCH_BASE, target_run_id, OUT_BUF_SIZE)
+        sig_offset = SCRATCH_BASE + target_len
+        remaining = OUT_BUF_SIZE - target_len
+        sig_len = write_string(sig_offset, signal_name, remaining)
+        payload_offset = sig_offset + sig_len
+        remaining -= sig_len
+        payload_len = write_string(payload_offset, payload_str, remaining)
+
+        result = _import_durable_signal_workflow(
+            SCRATCH_BASE,
+            target_len,
+            sig_offset,
+            sig_len,
+            payload_offset,
+            payload_len,
+        )
+
+        _, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"signal_workflow failed with error code: {err_code}"
+            )

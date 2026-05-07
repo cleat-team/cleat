@@ -20,6 +20,7 @@ from .host_calls import SignalResult, ChildResult, PromiseResult
 from .entry import durable_entry, virtual_object
 from .types import ChildWorkflow, Saga, SagaStep, TerminalError, DurableDefer
 from .client import CleatClient
+from .test_harness import CleatTestHarness, CallRecord
 from .plugins import (
     Plugins,
     BlobPutResult,
@@ -49,6 +50,8 @@ __all__ = [
     "TerminalError",
     "DurableDefer",
     "CleatClient",
+    "CleatTestHarness",
+    "CallRecord",
     "Plugins",
     "BlobPutResult",
     "BlobGetResult",

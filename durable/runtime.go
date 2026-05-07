@@ -195,6 +195,29 @@ type HostCalls interface {
 	// Queries are deterministic, read-only, and do not record events.
 	RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
 
+	// SendSignalAndWait sends a signal to another workflow and waits for a response.
+	// The signal is sent with an embedded correlation ID; the target workflow uses
+	// ReplyToSignal to send a response back.
+	SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (response string, err error)
+
+	// ReplyToSignal sends a response back to the sender of a signal identified by
+	// the given correlation ID. Only valid inside a signal handler context where
+	// the correlation ID was embedded in the received signal payload.
+	ReplyToSignal(correlationID, response string) error
+
+	// AwaitSignalsWithQuorum waits for at least minCount signals from the named
+	// set, up to an optional maxRejections threshold, within the given timeout.
+	// Returns the collected signals or an error if quorum was not met.
+	// When maxRejections >= 0, signals whose JSON payload contains "rejected":true
+	// count toward the rejection limit; exceeding it aborts the wait.
+	AwaitSignalsWithQuorum(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
+
+	// SignalWorkflow sends a signal to another workflow from within a workflow.
+	// This is a recorded (journaled) operation that delivers a signal to the
+	// target workflow's signal queue. Unlike SendSignalAndWait, this is
+	// fire-and-forget -- the caller does not wait for a response.
+	SignalWorkflow(targetRunID, signalName, payload string) error
+
 	// RunDetached runs fn with a fresh HostCalls that ignores cancellation.
 	// fn executes immediately, is recorded in history, and survives crash/replay.
 	// On replay, fn IS re-executed (not replayed from cache).
@@ -577,6 +600,10 @@ type hostCallsImpl struct {
 	pluginCall                func(pluginName, functionName, inputJSON string) (string, error)
 	durableSend               func(service, operation, requestJSON string) error
 	scheduleInvoke            func(service, operation, requestJSON string, delayMs int64) error
+	sendSignalAndWait         func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
+	replyToSignal             func(correlationID, response string) error
+	awaitSignalsWithQuorum    func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
+	signalWorkflow            func(targetRunID, signalName, payload string) error
 
 	// State map for typed K/V operations.
 	stateMap       map[string]interface{}
@@ -633,6 +660,10 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		pluginCall:                opts.PluginCall,
 		durableSend:               opts.DurableSend,
 		scheduleInvoke:            opts.ScheduleInvoke,
+		sendSignalAndWait:         opts.SendSignalAndWait,
+		replyToSignal:             opts.ReplyToSignal,
+		awaitSignalsWithQuorum:    opts.AwaitSignalsWithQuorum,
+		signalWorkflow:            opts.SignalWorkflow,
 	}
 }
 
@@ -701,6 +732,10 @@ type HostCallsOptions struct {
 	PluginCall                func(pluginName, functionName, inputJSON string) (string, error)
 	DurableSend               func(service, operation, requestJSON string) error
 	ScheduleInvoke            func(service, operation, requestJSON string, delayMs int64) error
+	SendSignalAndWait         func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
+	ReplyToSignal             func(correlationID, response string) error
+	AwaitSignalsWithQuorum    func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
+	SignalWorkflow            func(targetRunID, signalName, payload string) error
 }
 
 // ---- Interface method implementations ----
@@ -897,6 +932,67 @@ func (h *hostCallsImpl) ScheduleInvoke(service, operation, requestJSON string, d
 		return errors.New("durable: ScheduleInvoke not initialized")
 	}
 	return h.scheduleInvoke(service, operation, requestJSON, delayMs)
+}
+
+func (h *hostCallsImpl) SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
+	if h.sendSignalAndWait == nil {
+		return "", errors.New("durable: SendSignalAndWait not initialized")
+	}
+	return h.sendSignalAndWait(targetRunID, signalName, payload, timeout)
+}
+
+func (h *hostCallsImpl) ReplyToSignal(correlationID, response string) error {
+	if h.replyToSignal == nil {
+		return errors.New("durable: ReplyToSignal not initialized")
+	}
+	return h.replyToSignal(correlationID, response)
+}
+
+func (h *hostCallsImpl) AwaitSignalsWithQuorum(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error) {
+	if h.awaitSignalsWithQuorum != nil {
+		return h.awaitSignalsWithQuorum(signalNames, minCount, maxRejections, timeout)
+	}
+	// Fallback: poll-based loop using DurableAwaitSignals.
+	deadline := time.Now().Add(timeout)
+	var results []SignalResult
+	rejectionCount := 0
+	remaining := signalNames
+
+	for len(results) < minCount {
+		remainingTime := time.Until(deadline)
+		if remainingTime <= 0 {
+			return results, fmt.Errorf("durable: quorum timeout after %v: got %d/%d signals", timeout, len(results), minCount)
+		}
+		result := h.AwaitSignals(remaining, remainingTime)
+		if result.TimedOut {
+			return results, fmt.Errorf("durable: quorum timeout after %v: got %d/%d signals", timeout, len(results), minCount)
+		}
+		if result.Err != nil {
+			return results, fmt.Errorf("durable: quorum signal error: %w", result.Err)
+		}
+		results = append(results, result)
+
+		// Check for rejection if maxRejections >= 0.
+		if maxRejections >= 0 {
+			var payloadMap map[string]interface{}
+			if err := json.Unmarshal([]byte(result.Payload), &payloadMap); err == nil {
+				if rejected, ok := payloadMap["rejected"].(bool); ok && rejected {
+					rejectionCount++
+					if rejectionCount > maxRejections {
+						return results, fmt.Errorf("durable: quorum exceeded max rejections (%d)", maxRejections)
+					}
+				}
+			}
+		}
+	}
+	return results, nil
+}
+
+func (h *hostCallsImpl) SignalWorkflow(targetRunID, signalName, payload string) error {
+	if h.signalWorkflow == nil {
+		return errors.New("durable: SignalWorkflow not initialized")
+	}
+	return h.signalWorkflow(targetRunID, signalName, payload)
 }
 
 func (h *hostCallsImpl) DurableSleep(d time.Duration) {
@@ -1609,6 +1705,98 @@ func (s *Saga) AddParallel(steps ...SagaStep) *Saga {
 		// handles everything internally.
 	})
 	return s
+}
+
+// ---- SagaTyped: typed result collection ----
+
+// SagaStepTyped defines a single saga step with a typed result.
+// Generic parameter T is the forward action's result type.
+type SagaStepTyped[T any] struct {
+	Description string
+	Forward     func(HostCalls) (T, error)
+	Compensate  func(HostCalls) error
+}
+
+// SagaTyped provides structured compensation with typed result collection.
+// Generic parameter T is the result type of each step.
+//
+// Usage:
+//
+//	saga := durable.NewSagaTyped[ChargeResult]()
+//	saga.AddStep("charge",
+//	    func(h HostCalls) (ChargeResult, error) {
+//	        var result ChargeResult
+//	        err := h.DurableCallTyped("payment", "charge", req, &result)
+//	        return result, err
+//	    },
+//	    func(h HostCalls) error {
+//	        h.DurableCall("payment", "refund", refundJSON)
+//	        return nil
+//	    },
+//	)
+//	results, err := saga.Run(h)
+type SagaTyped[T any] struct {
+	steps []SagaStepTyped[T]
+}
+
+// NewSagaTyped creates a new SagaTyped helper.
+func NewSagaTyped[T any]() *SagaTyped[T] {
+	return &SagaTyped[T]{}
+}
+
+// AddStep adds a typed step to the saga. forward returns a (T, error);
+// compensate runs on failure of a later step. compensate may be nil
+// for best-effort steps.
+func (s *SagaTyped[T]) AddStep(description string, forward func(HostCalls) (T, error), compensate func(HostCalls) error) *SagaTyped[T] {
+	s.steps = append(s.steps, SagaStepTyped[T]{
+		Description: description,
+		Forward:     forward,
+		Compensate:  compensate,
+	})
+	return s
+}
+
+// Run executes all typed forward steps in order, collecting results.
+// If any step fails, previously completed steps are compensated in
+// reverse order. Returns the collected results or the first error.
+//
+// Only TerminalError triggers compensation (non-retryable). Transient
+// errors are returned without compensation so the caller can retry.
+func (s *SagaTyped[T]) Run(h HostCalls) ([]T, error) {
+	var completed int
+	var results []T
+
+	for i, step := range s.steps {
+		h.LogKV("saga: executing typed step", "step", i, "description", step.Description)
+		result, err := step.Forward(h)
+		if err != nil {
+			if !IsTerminalError(err) {
+				return results, fmt.Errorf("saga: %w", err)
+			}
+			h.LogKV("saga: typed step failed, compensating",
+				"step", i, "description", step.Description,
+				"error", err.Error(), "completed_count", completed)
+			var compErr error
+			for j := completed - 1; j >= 0; j-- {
+				cs := s.steps[j]
+				if cs.Compensate == nil {
+					continue
+				}
+				h.LogKV("saga: compensating", "step", j, "description", cs.Description)
+				if cerr := cs.Compensate(h); cerr != nil {
+					compErr = errors.Join(compErr, cerr)
+				}
+			}
+			if compErr != nil {
+				return results, fmt.Errorf("saga: %w", errors.Join(err, compErr))
+			}
+			return results, fmt.Errorf("saga: %w", err)
+		}
+		results = append(results, result)
+		completed++
+	}
+
+	return results, nil
 }
 
 // ---- PollUntil: sleep-based polling ----

@@ -178,6 +178,19 @@ When compiled to WASM via `componentize-py`, **only a subset of the Python stand
 
 To make HTTP requests, use the host-provided `h.durable_call("http", "fetch", ...)` or `h.durable_fetch()` instead of `urllib` or `requests`.
 
+## Unit Differences (Cleat vs. Other Frameworks)
+
+Cleat uses **milliseconds** for all time-related host calls. This is important when porting workflows from other frameworks:
+
+| Framework | Sleep Unit | Example |
+|-----------|-----------|---------|
+| **Cleat** | milliseconds | `durable_sleep(5000)` = 5 seconds |
+| **Temporal** | Go: `time.Duration`, Java: `Duration`, Python: `timedelta` / seconds | `sleep(Duration.ofSeconds(5))` |
+| **DBOS** | seconds | `DBOS.sleepSeconds(5)` |
+| **Restate** | `Duration` / milliseconds (SDK-dependent) | `Duration.ofSeconds(5)` |
+
+Cleat's `durable_sleep(duration_ms)` always takes **milliseconds**. The `advance_time(ms)` method in the test harness also uses milliseconds. This is consistent with the WASM host ABI which uses `i64` milliseconds for all timing operations.
+
 ## Build
 
 Compile Python workflows to WASM using the Cleat CLI:

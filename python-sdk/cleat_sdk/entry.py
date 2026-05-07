@@ -218,3 +218,53 @@ def virtual_object(name: Optional[str] = None) -> Callable:
         return _make_entry(name)
 
     return _make_entry
+
+
+def query_handler(name: Optional[str] = None) -> Callable:
+    """Mark a function as a read-only query handler (no journaling).
+
+    Unlike :func:`durable_entry`, which marks a workflow entry point that
+    journalises all durable operations, this decorator marks a function as a
+    read-only query handler.  Query handlers are invoked on-demand by external
+    callers without recording events in the workflow history.
+
+    The decorated function **must** accept a :class:`HostCalls` instance as
+    its first parameter.  Additional parameters are deserialised from the
+    query input JSON by name.
+
+    Usage::
+
+        from cleat_sdk import HostCalls, query_handler
+
+        @query_handler("get_status")
+        def get_status(h: HostCalls, order_id: str) -> str:
+            # Read-only — no durable_call, durable_sleep, etc.
+            state = h.get_state(order_id, dict)
+            return json.dumps({"status": state.get("status", "unknown")})
+
+    The decorated function carries ``wrapper._is_query_handler = True``
+    and ``wrapper._is_durable_entry = False`` for introspection.
+
+    Parameters
+    ----------
+    name:
+        Optional explicit query name.  Defaults to the Python function name.
+
+    Returns
+    -------
+    Callable
+        A wrapper function that behaves like :func:`durable_entry` but is
+        marked as a query handler.  The actual WASM export is identical; the
+        host runtime distinguishes queries by the ``_is_query_handler`` flag.
+    """
+
+    def _make_entry(func: Callable) -> Callable:
+        entry_name = name if name is not None else func.__name__
+        decorated = durable_entry(entry_name)(func)
+        decorated._is_query_handler = True  # type: ignore[attr-defined]
+        return decorated
+
+    if callable(name):
+        return _make_entry(name)
+
+    return _make_entry

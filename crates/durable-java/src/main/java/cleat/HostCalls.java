@@ -139,6 +139,25 @@ public class HostCalls {
     @Import(module = "env", name = "durable_run_id")
     private static native long durableRunIdRaw(int outPtr, int maxLen);
 
+    @Import(module = "env", name = "durable_send_signal_and_wait")
+    private static native long durableSendSignalAndWaitRaw(
+        int targetRunIdPtr, int targetRunIdLen,
+        int signalNamePtr, int signalNameLen,
+        int payloadPtr, int payloadLen,
+        long timeoutMs,
+        int responsePtr, int responseMaxLen);
+
+    @Import(module = "env", name = "durable_reply_to_signal")
+    private static native long durableReplyToSignalRaw(
+        int correlationIdPtr, int correlationIdLen,
+        int responsePtr, int responseLen);
+
+    @Import(module = "env", name = "durable_signal_workflow")
+    private static native long durableSignalWorkflowRaw(
+        int targetRunIdPtr, int targetRunIdLen,
+        int signalNamePtr, int signalNameLen,
+        int payloadPtr, int payloadLen);
+
     // ========================================================================
     // Internal helpers: pack strings in scratch region, read output buffer
     // ========================================================================
@@ -856,6 +875,164 @@ public class HostCalls {
             // Fallback: improbable - SHA-256 is always available
             return "00000000-0000-0000-0000-000000000000";
         }
+    }
+
+    // ========================================================================
+    // Signal correlation / response & quorum APIs
+    // ========================================================================
+
+    /**
+     * Send a signal to a target workflow and wait for a response.
+     * <p>
+     * The signal carries an embedded correlation ID. The target workflow
+     * can use {@link #replyToSignal(String, String)} to send a response back.
+     *
+     * @param targetRunId the target workflow's run ID
+     * @param signalName  the signal name to send
+     * @param payload     the signal payload JSON
+     * @param timeoutMs   maximum wait time in milliseconds
+     * @return a result containing the response on success, or an error
+     *         description on failure
+     */
+    public DurableResult<String> sendSignalAndWait(
+        String targetRunId, String signalName, String payload, long timeoutMs) {
+        int[] p = packStrings(targetRunId, signalName, payload);
+        int targetOff = p[0], sigOff = p[1], payOff = p[2];
+        int targetLen = p[3], sigLen = p[4], payLen = p[5];
+
+        long result = durableSendSignalAndWaitRaw(
+            targetOff, targetLen,
+            sigOff, sigLen,
+            payOff, payLen,
+            timeoutMs,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int responseLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return DurableResult.err(errMsg);
+        }
+
+        String response = readOutput(responseLen);
+        return DurableResult.ok(response);
+    }
+
+    /**
+     * Send a response back to the sender of a signal.
+     * <p>
+     * Only valid inside a signal handler context where the correlation ID
+     * was embedded in the received signal payload.
+     *
+     * @param correlationId the correlation ID from the received signal payload
+     * @param response      the response payload JSON
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> replyToSignal(String correlationId, String response) {
+        int[] p = packStrings(correlationId, response);
+        int cidOff = p[0], respOff = p[1];
+        int cidLen = p[2], respLen = p[3];
+
+        long result = durableReplyToSignalRaw(
+            cidOff, cidLen,
+            respOff, respLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("replyToSignal failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
+    }
+
+    /**
+     * Wait for at least {@code minCount} signals from the named set.
+     * <p>
+     * Collects signals until {@code minCount} is reached,
+     * {@code maxRejections} is exceeded (if {@code >= 0}), or the timeout
+     * expires.
+     *
+     * @param signalNames   the signal names to wait for
+     * @param minCount      minimum number of signals required to proceed
+     * @param maxRejections maximum rejections tolerated before aborting
+     *                      ({@code -1} to disable)
+     * @param timeoutMs     maximum wait time in milliseconds
+     * @return a result containing the list of collected signals, or an error
+     */
+    public DurableResult<java.util.List<AwaitSignalsResult>> awaitSignalsWithQuorum(
+        String[] signalNames, int minCount, int maxRejections, long timeoutMs) {
+        java.util.List<AwaitSignalsResult> results = new java.util.ArrayList<>();
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        int rejectionCount = 0;
+
+        while (results.size() < minCount) {
+            long remainingMs = deadline - System.currentTimeMillis();
+            if (remainingMs <= 0) {
+                return DurableResult.err(
+                    "quorum timeout: got " + results.size() + "/" + minCount + " signals");
+            }
+
+            DurableResult<AwaitSignalsResult> signalResult = this.awaitSignals(signalNames, remainingMs);
+            if (signalResult.isErr()) {
+                return DurableResult.err("quorum signal error: " + signalResult.getError());
+            }
+            AwaitSignalsResult asr = signalResult.getValue();
+            if (asr.timedOut) {
+                return DurableResult.err(
+                    "quorum timeout: got " + results.size() + "/" + minCount + " signals");
+            }
+
+            results.add(asr);
+
+            // Check for rejection if maxRejections >= 0.
+            if (maxRejections >= 0 && asr.payload != null && !asr.payload.isEmpty()) {
+                try {
+                    java.util.Map<String, Object> payloadMap = JsonHelper.parseObject(asr.payload);
+                    Object rejectedVal = payloadMap.get("rejected");
+                    if (rejectedVal instanceof Boolean && (Boolean) rejectedVal) {
+                        rejectionCount++;
+                        if (rejectionCount > maxRejections) {
+                            return DurableResult.err(
+                                "quorum exceeded max rejections (" + maxRejections + ")");
+                        }
+                    }
+                } catch (Exception e) {
+                    // Non-JSON payload, not a rejection.
+                }
+            }
+        }
+
+        return DurableResult.ok(results);
+    }
+
+    /**
+     * Send a signal to a target workflow (fire-and-forget).
+     * <p>
+     * Unlike {@link #sendSignalAndWait(String, String, String, long)},
+     * this method does not wait for a response. The signal is enqueued and
+     * the workflow continues immediately. This is a recorded (journaled)
+     * operation.
+     *
+     * @param targetRunId the target workflow's run ID
+     * @param signalName  the signal name to send
+     * @param payload     the signal payload JSON
+     * @return a result indicating success, or an error description on failure
+     */
+    public DurableResult<Void> signalWorkflow(String targetRunId, String signalName, String payload) {
+        int[] p = packStrings(targetRunId, signalName, payload);
+        int targetOff = p[0], sigOff = p[1], payOff = p[2];
+        int targetLen = p[3], sigLen = p[4], payLen = p[5];
+
+        long result = durableSignalWorkflowRaw(
+            targetOff, targetLen,
+            sigOff, sigLen,
+            payOff, payLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return DurableResult.err("signalWorkflow failed with code " + errCode);
+        }
+        return DurableResult.ok(null);
     }
 
     // ========================================================================

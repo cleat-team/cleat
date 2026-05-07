@@ -204,6 +204,10 @@ type TestEnv struct {
 	ReleaseConcurrencyKeysFn  func(workflowID string)
 
 	pluginCallStubs []*pluginCallStub
+
+	// signalReplyChannels maps correlation IDs to reply channels for
+	// SendSignalAndWait / ReplyToSignal.
+	signalReplyChannels map[string]chan string
 }
 
 // NewTestEnv creates a new TestEnv with a clean initial state.
@@ -221,6 +225,7 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		childResults:       make(map[string]*childStubResult),
 		childWorkflowHandlers: make(map[string]func(inputJSON string) (resultJSON string, err error)),
 		ConcurrencyKeys: make(map[string]string),
+			signalReplyChannels: make(map[string]chan string),
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -252,6 +257,9 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		RegisterQueryHandler:        e.registerQueryHandlerImpl,
 		RunDetached:                  e.runDetachedImpl,
 		PluginCall: e.pluginCallImpl,
+			SendSignalAndWait:            e.sendSignalAndWaitImpl,
+			ReplyToSignal:                e.replyToSignalImpl,
+			SignalWorkflow:               e.signalWorkflowImpl,
 	})
 	return e
 }
@@ -449,6 +457,7 @@ func (e *TestEnv) Reset() {
 	e.retrySimAttempts = nil
 	e.ConcurrencyKeys = make(map[string]string)
 	e.pluginCallStubs = nil
+		e.signalReplyChannels = make(map[string]chan string)
 }
 
 // ---------------------------------------------------------------------------
@@ -791,6 +800,72 @@ func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (st
 	}
 	return "", fmt.Errorf("durabletest: no stub registered for PluginCall(%q, %q)", pluginName, functionName)
 }
+
+// sendSignalAndWaitImpl sends a signal and registers a reply channel.
+func (e *TestEnv) sendSignalAndWaitImpl(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
+	e.mu.Lock()
+
+	// Generate a correlation ID and embed it in the payload.
+	correlationID := fmt.Sprintf("corr-%s-%s-%d", targetRunID, signalName, e.deferCounter)
+	e.deferCounter++
+
+	// Register a reply channel.
+	replyCh := make(chan string, 1)
+	e.signalReplyChannels[correlationID] = replyCh
+
+	// Create the enriched payload with correlation ID.
+	enrichedPayload := payload
+	if payload != "" && payload != "{}" {
+		// Try to merge correlation ID into the existing JSON payload.
+		var payloadMap map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &payloadMap); err == nil {
+			payloadMap["_correlation_id"] = correlationID
+			if data, err := json.Marshal(payloadMap); err == nil {
+				enrichedPayload = string(data)
+			}
+		}
+	} else {
+		enrichedPayload = fmt.Sprintf(`{"_correlation_id":%q}`, correlationID)
+	}
+
+	e.mu.Unlock()
+
+	// Send the signal.
+	err := e.H().SignalWorkflow(targetRunID, signalName, enrichedPayload)
+	if err != nil {
+		return "", err
+	}
+
+	// Wait for the reply with a timeout.
+	select {
+	case response := <-replyCh:
+		return response, nil
+	case <-time.After(timeout):
+		return "", fmt.Errorf("durabletest: SendSignalAndWait timed out after %v", timeout)
+	}
+}
+
+// replyToSignalImpl sends a response back via the correlation ID.
+func (e *TestEnv) replyToSignalImpl(correlationID, response string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ch, ok := e.signalReplyChannels[correlationID]
+	if !ok {
+		return fmt.Errorf("durabletest: no pending signal for correlation ID %q", correlationID)
+	}
+	delete(e.signalReplyChannels, correlationID)
+	ch <- response
+	return nil
+}
+
+
+// signalWorkflowImpl delivers a signal to a target workflow.
+// In the test env, the target workflow is the current workflow itself.
+func (e *TestEnv) signalWorkflowImpl(targetRunID, signalName, payload string) error {
+	e.Signal(signalName, payload)
+	return nil
+}
+
 
 // ResolvePromise resolves a promise with the given result.
 func (e *TestEnv) ResolvePromise(promiseID, result string) {

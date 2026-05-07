@@ -15,9 +15,6 @@ from .host_calls import HostCalls
 
 T = TypeVar("T")
 
-
-# ---------------------------------------------------------------------------
-# TerminalError — non-retryable error
 # ---------------------------------------------------------------------------
 
 
@@ -104,8 +101,13 @@ class ChildWorkflow(Generic[T]):
 # ---------------------------------------------------------------------------
 
 
-class SagaStep:
+SagaResultT = TypeVar("SagaResultT")
+
+
+class SagaStep(Generic[T]):
     """A single step in a saga, paired with its compensating action.
+
+    Generic parameter ``T`` is the return type of the step's action.
 
     Subclass this and override :meth:`action` and :meth:`compensate` for
     a non-closure-based alternative to the lambda API.  The methods
@@ -121,7 +123,7 @@ class SagaStep:
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def action(self, h: HostCalls) -> Any:
+    def action(self, h: HostCalls) -> T:
         """Perform the forward work for this step.
 
         Override in subclasses.
@@ -130,6 +132,12 @@ class SagaStep:
         ----------
         h : HostCalls
             HostCalls instance for the current execution context.
+
+        Returns
+        -------
+        T
+            The result of the forward action. The type parameter of the
+            :class:`SagaStep` determines the expected return type.
         """
         raise NotImplementedError("SagaStep subclasses must implement action()")
 
@@ -146,8 +154,11 @@ class SagaStep:
         raise NotImplementedError("SagaStep subclasses must implement compensate()")
 
 
-class Saga:
+class Saga(Generic[SagaResultT]):
     """Orchestrates a sequence of steps with automatic compensation on failure.
+
+    Generic parameter ``SagaResultT`` is the return type of each step's action.
+    ``execute()`` returns ``list[SagaResultT]``.
 
     If any step raises a :class:`TerminalError` (or any exception type in
     ``terminal_exceptions``), all previously completed steps are compensated
@@ -160,7 +171,7 @@ class Saga:
 
     Usage with lambda closures (convenient but captures ``h`` in scope)::
 
-        saga = Saga(h)
+        saga = Saga[str](h)
         saga.add_step(
             name="reserve_inventory",
             action=lambda: h.durable_call("inventory", "Reserve", reserve_json),
@@ -169,7 +180,7 @@ class Saga:
 
     Usage with explicit HostCalls (no closure capture)::
 
-        saga = Saga(h)
+        saga = Saga[str](h)
         saga.add_step_fn(
             name="reserve_inventory",
             action=lambda h: h.durable_call("inventory", "Reserve", reserve_json),
@@ -178,24 +189,25 @@ class Saga:
 
     Usage with subclassed steps (cleanest for WASM)::
 
-        class ReserveStep(SagaStep):
-            def action(self, h: HostCalls) -> Any:
+        class ReserveStep(SagaStep[str]):
+            def action(self, h: HostCalls) -> str:
                 return h.durable_call("inventory", "Reserve", reserve_json)
             def compensate(self, h: HostCalls) -> None:
                 h.durable_call("inventory", "Release", release_json)
 
-        saga = Saga(h)
+        saga = Saga[str](h)
         saga.add_step(ReserveStep("reserve_inventory"))
+        results: list[str] = saga.execute()
     """
 
     def __init__(self, h: HostCalls) -> None:
         self._h = h
-        self._steps: list[SagaStep] = []
+        self._steps: list[SagaStep[Any]] = []
 
     def add_step(
         self,
-        step_or_name: SagaStep | str,
-        action: Optional[Callable[..., Any]] = None,
+        step_or_name: SagaStep[SagaResultT] | str,
+        action: Optional[Callable[..., SagaResultT]] = None,
         compensate: Optional[Callable[..., Any]] = None,
     ) -> None:
         """Register a saga step.
@@ -238,7 +250,7 @@ class Saga:
     def add_step_fn(
         self,
         name: str,
-        action: Callable[[HostCalls], Any],
+        action: Callable[[HostCalls], SagaResultT],
         compensate: Optional[Callable[[HostCalls], None]] = None,
     ) -> None:
         """Register a saga step using callables that receive ``HostCalls``.
@@ -265,7 +277,7 @@ class Saga:
     def execute(
         self,
         terminal_exceptions: Optional[tuple[type[BaseException], ...]] = None,
-    ) -> list[Any]:
+    ) -> list[SagaResultT]:
         """Execute all steps in order, compensating on terminal failure.
 
         Parameters
@@ -276,8 +288,8 @@ class Saga:
 
         Returns
         -------
-        list[Any]
-            Results of each step, in order.
+        list[SagaResultT]
+            Results of each step, in order, typed to the Saga's type parameter.
 
         Raises
         ------
@@ -290,8 +302,8 @@ class Saga:
         if terminal_exceptions is None:
             terminal_exceptions = ()
 
-        results: list[Any] = []
-        completed: list[SagaStep] = []
+        results: list[SagaResultT] = []
+        completed: list[SagaStep[Any]] = []
 
         for step in self._steps:
             try:
@@ -359,7 +371,7 @@ class _FnSagaStep(SagaStep):
             self._compensate(h)
 
 
-def _compensate_all(h: HostCalls, completed: list[SagaStep]) -> None:
+def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
     """Run compensations for *completed* steps in reverse order.
 
     Failures during compensation are logged via ``h.durable_log`` but do

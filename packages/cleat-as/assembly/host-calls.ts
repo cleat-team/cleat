@@ -253,6 +253,49 @@ export declare function import_durable_run_id(
   idMaxLen: i32,
 ): i64;
 
+/**
+ * 22. durable_send_signal_and_wait: Send a signal and wait for a response.
+ * (import "env" "durable_send_signal_and_wait") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
+ */
+@external("env", "durable_send_signal_and_wait")
+export declare function import_durable_send_signal_and_wait(
+  targetRunIdPtr: i32,
+  targetRunIdLen: i32,
+  signalNamePtr: i32,
+  signalNameLen: i32,
+  payloadPtr: i32,
+  payloadLen: i32,
+  timeoutMs: i64,
+  responsePtr: i32,
+  responseMaxLen: i32,
+): i64;
+
+/**
+ * 23. durable_reply_to_signal: Respond to a signal from within a handler.
+ * (import "env" "durable_reply_to_signal") (param i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_reply_to_signal")
+export declare function import_durable_reply_to_signal(
+  correlationIdPtr: i32,
+  correlationIdLen: i32,
+  responsePtr: i32,
+  responseLen: i32,
+): i64;
+
+/**
+ * 24. durable_signal_workflow: Send a signal to another workflow.
+ * (import "env" "durable_signal_workflow") (param i32 i32 i32 i32 i32 i32) (result i64)
+ */
+@external("env", "durable_signal_workflow")
+export declare function import_durable_signal_workflow(
+  targetRunIdPtr: i32,
+  targetRunIdLen: i32,
+  signalNamePtr: i32,
+  signalNameLen: i32,
+  payloadPtr: i32,
+  payloadLen: i32,
+): i64;
+
 // ═══════════════════════════════════════════════
 // High-level result types for HostCalls methods
 // ═══════════════════════════════════════════════
@@ -1184,5 +1227,195 @@ export class HostCalls {
     }
 
     return parts[0] + "-" + parts[1] + "-" + parts[2] + "-" + parts[3] + "-" + parts[4];
+  }
+
+  // ────────────────────────────────────────────
+  // 25. sendSignalAndWait — send a signal and wait for a response
+  // ────────────────────────────────────────────
+
+  /**
+   * Send a signal to a target workflow and wait for a response.
+   *
+   * The signal carries an embedded correlation ID. The target workflow
+   * should use `replyToSignal` to send a response back.
+   *
+   * @param targetRunId - The target workflow's run ID.
+   * @param signalName  - The signal name to send.
+   * @param payload     - The signal payload JSON.
+   * @param timeoutMs   - Maximum wait time in milliseconds.
+   * @returns A DurableResult containing the response on success.
+   */
+  sendSignalAndWait(
+    targetRunId: string,
+    signalName: string,
+    payload: string,
+    timeoutMs: i64,
+  ): DurableResult<string> {
+    let targetLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, targetRunId);
+    let sigOffset: usize = SCRATCH_BASE + targetLen;
+    let remaining: i32 = OUT_BUF_SIZE - targetLen;
+    let sigLen: i32 = this.writeScratch(sigOffset, remaining, signalName, "signalName");
+    let payloadOffset: usize = sigOffset + sigLen;
+    remaining -= sigLen;
+    let payloadLen: i32 = this.writeScratch(payloadOffset, remaining, payload, "payload");
+
+    let result: i64 = import_durable_send_signal_and_wait(
+      SCRATCH_BASE as i32,
+      targetLen,
+      sigOffset as i32,
+      sigLen,
+      payloadOffset as i32,
+      payloadLen,
+      timeoutMs,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return new DurableResult<string>(
+        "",
+        "send_signal_and_wait error code: " + decoded.errCode.toString(),
+      );
+    }
+    let response: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+    return new DurableResult<string>(response, null);
+  }
+
+  // ────────────────────────────────────────────
+  // 26. replyToSignal — respond to a signal from within a handler
+  // ────────────────────────────────────────────
+
+  /**
+   * Send a response back to the sender of a signal.
+   *
+   * Only valid inside a signal handler context where the correlation ID
+   * was embedded in the received signal payload.
+   *
+   * @param correlationId - The correlation ID from the received signal payload.
+   * @param response      - The response payload JSON.
+   * @returns An error message on failure, or null on success.
+   */
+  replyToSignal(correlationId: string, response: string): string | null {
+    let cidLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, correlationId);
+    let respOffset: usize = SCRATCH_BASE + cidLen;
+    let remaining: i32 = OUT_BUF_SIZE - cidLen;
+    let respLen: i32 = this.writeScratch(respOffset, remaining, response, "response");
+
+    let result: i64 = import_durable_reply_to_signal(
+      SCRATCH_BASE as i32,
+      cidLen,
+      respOffset as i32,
+      respLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "reply_to_signal error code: " + decoded.errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 27. awaitSignalsWithQuorum — wait for quorum of signals
+  // ────────────────────────────────────────────
+
+  /**
+   * Wait for at least minCount signals from the named set.
+   *
+   * Collects signals until minCount is reached, maxRejections is exceeded,
+   * or the timeout expires.
+   *
+   * @param namesJson     - JSON array of signal names to wait for.
+   * @param minCount      - Minimum number of signals required to proceed.
+   * @param maxRejections - Maximum rejections tolerated (-1 to disable).
+   * @param timeoutMs     - Maximum wait time in milliseconds.
+   * @returns The collected signal results.
+   */
+  awaitSignalsWithQuorum(
+    namesJson: string,
+    minCount: i32,
+    maxRejections: i32,
+    timeoutMs: i64,
+  ): AwaitSignalsOutcome[] {
+    // Simple implementation: call awaitSignals in a loop.
+    let results: AwaitSignalsOutcome[] = [];
+    let deadline: i64 = this.now() + timeoutMs;
+    let rejectionCount: i32 = 0;
+
+    while (results.length < minCount) {
+      let remainingMs: i64 = deadline - this.now();
+      if (remainingMs <= 0) {
+        throw new Error(
+          "quorum timeout: got " + results.length.toString() + "/" + minCount.toString() + " signals",
+        );
+      }
+
+      let outcome: AwaitSignalsOutcome = this.awaitSignals(namesJson, remainingMs);
+      if (outcome.timedOut) {
+        throw new Error(
+          "quorum timeout: got " + results.length.toString() + "/" + minCount.toString() + " signals",
+        );
+      }
+      if (outcome.isError) {
+        throw new Error("quorum signal error: " + (outcome.error as string));
+      }
+
+      results.push(outcome);
+
+      // Check for rejection if maxRejections >= 0.
+      if (maxRejections >= 0 && outcome.payload.length > 0) {
+        // Look for "rejected": true in the JSON payload.
+        if (outcome.payload.indexOf('"rejected":true') !== -1 || outcome.payload.indexOf('"rejected": true') !== -1) {
+          rejectionCount++;
+          if (rejectionCount > maxRejections) {
+            throw new Error(
+              "quorum exceeded max rejections (" + maxRejections.toString() + ")",
+            );
+          }
+        }
+      }
+    }
+    return results;
+  }
+
+  // ────────────────────────────────────────────
+  // 28. signalWorkflow — send a signal to another workflow
+  // ────────────────────────────────────────────
+
+  /**
+   * Send a signal to a target workflow (fire-and-forget).
+   *
+   * Unlike sendSignalAndWait, this method does not wait for a response.
+   * The signal is enqueued and the workflow continues immediately.
+   *
+   * @param targetRunId - The target workflow's run ID.
+   * @param signalName  - The signal name to send.
+   * @param payload     - The signal payload JSON.
+   * @returns An error message on failure, or null on success.
+   */
+  signalWorkflow(targetRunId: string, signalName: string, payload: string): string | null {
+    let targetLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, targetRunId);
+    let sigOffset: usize = SCRATCH_BASE + targetLen;
+    let remaining: i32 = OUT_BUF_SIZE - targetLen;
+    let sigLen: i32 = this.writeScratch(sigOffset, remaining, signalName, "signalName");
+    let payloadOffset: usize = sigOffset + sigLen;
+    remaining -= sigLen;
+    let payloadLen: i32 = this.writeScratch(payloadOffset, remaining, payload, "payload");
+
+    let result: i64 = import_durable_signal_workflow(
+      SCRATCH_BASE as i32,
+      targetLen,
+      sigOffset as i32,
+      sigLen,
+      payloadOffset as i32,
+      payloadLen,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return "signal_workflow error code: " + decoded.errCode.toString();
+    }
+    return null;
   }
 }

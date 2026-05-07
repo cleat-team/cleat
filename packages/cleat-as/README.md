@@ -8,6 +8,19 @@ workflows that compile to WebAssembly.  Re-exports from `assembly/index.ts`:
 - `durable-entry.ts` -- `@durableEntry` marker decorator for workflow entry points
 - `plugins.ts` -- Typed convenience wrappers for all 8 plugins (18 functions)
 
+## Unit Differences (Cleat vs. Other Frameworks)
+
+Cleat uses **milliseconds** for all time-related host calls. This is important when porting workflows from other frameworks:
+
+| Framework | Sleep Unit | Example |
+|-----------|-----------|---------|
+| **Cleat** | milliseconds | `h.durableSleep(5000)` = 5 seconds |
+| **Temporal** | Go: `time.Duration`, Java: `Duration` | `sleep(Duration.ofSeconds(5))` |
+| **DBOS** | seconds | `DBOS.sleepSeconds(5)` |
+| **Restate** | SDK-dependent | `Duration.ofSeconds(5)` |
+
+Cleat's `durableSleep(durationMs)` always takes **milliseconds**, consistent with the WASM host ABI which uses `i64` milliseconds for all timing operations.
+
 ## AssemblyScript constraints
 
 The `--runtime stub` flag (required for cleat workflows) disables the full AS
