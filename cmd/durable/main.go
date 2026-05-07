@@ -41,7 +41,7 @@ var dbConnStr string
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set DURABLE_DATABASE_URL)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback|dev|schedule|run|dag> [flags] <args>\n")
+		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback|dev|schedule|run|dag|init> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  durable build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable vet <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>\n")
@@ -61,6 +61,11 @@ func main() {
 	flag.Parse()
 
 	args := flag.Args()
+	// init doesn't require a second argument (pattern)
+	if len(args) >= 1 && args[0] == "init" {
+		runInit(flag.Args()[1:])
+		return
+	}
 	if len(args) < 2 {
 		flag.Usage()
 		os.Exit(1)

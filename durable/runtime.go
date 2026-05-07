@@ -72,6 +72,9 @@ type HostCalls interface {
 	// request to JSON and unmarshals the response into result.
 	DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(progressJSON string)) error
 
+	// PluginCall invokes a named function on a registered plugin.
+	PluginCall(pluginName, functionName, inputJSON string) (string, error)
+
 	// DurableSleep suspends the workflow for the given duration.
 	DurableSleep(d time.Duration)
 
@@ -388,6 +391,8 @@ type hostCallsImpl struct {
 	now                       func() int64
 	random                    func() int64
 
+	pluginCall                func(pluginName, functionName, inputJSON string) (string, error)
+
 	// State map for typed K/V operations.
 	stateMap       map[string]interface{}
 	updateHandlers map[string]updateHandlerEntry
@@ -426,6 +431,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		runDetached:               opts.RunDetached,
 		now:                       opts.Now,
 		random:                    opts.Random,
+		pluginCall:                opts.PluginCall,
 	}
 }
 
@@ -484,6 +490,7 @@ type HostCallsOptions struct {
 	RunDetached               func(fn func(h HostCalls) error) error
 	Now                       func() int64
 	Random                    func() int64
+	PluginCall                func(pluginName, functionName, inputJSON string) (string, error)
 }
 
 // ---- Interface method implementations ----
@@ -659,6 +666,13 @@ func (h *hostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string,
 		return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
 	}
 	return nil
+}
+
+func (h *hostCallsImpl) PluginCall(pluginName, functionName, inputJSON string) (string, error) {
+	if h.pluginCall != nil {
+		return h.pluginCall(pluginName, functionName, inputJSON)
+	}
+	return "", fmt.Errorf("durable: PluginCall not initialized")
 }
 
 func (h *hostCallsImpl) DurableSleep(d time.Duration) {

@@ -39,6 +39,10 @@ import (
 
 	"github.com/rcownie/durable/internal/host"
 	"github.com/rcownie/durable/internal/plugin"
+
+	// Plugins
+	_ "github.com/rcownie/durable/plugins/llm"
+	_ "github.com/rcownie/durable/plugins/pgvector"
 )
 
 //go:embed web/dist

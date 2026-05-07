@@ -1,0 +1,5 @@
+project: "{{.ProjectName}}"
+language: go
+entry_points:
+  - name: agent
+    function: AgentLoop

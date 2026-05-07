@@ -343,7 +343,24 @@ var adapterDefs = map[string]adapterDef{
 				"_ = result",
 			},
 		},
-}
+		"PluginCall": {
+			FieldName:  "PluginCall",
+			ReturnType: "(string, error)",
+			Params: []adapterParam{
+				{"pluginName", "string"},
+				{"functionName", "string"},
+				{"inputJSON", "string"},
+			},
+			ResultStmts: []string{
+				"responseLen := uint32(uint64(result) >> 40)",
+				"errCode := uint32(result & 0xFF)",
+				"if errCode != 0 {",
+				`	return "", fmt.Errorf("plugin_call: error code %d", errCode)`,
+				"}",
+				"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
+			},
+		},
+		}
 
 // needsFmt returns true if any of the used adapter defs use fmt.Errorf or fmt.Sprintf.
 func needsFmt(usage *UsageInfo) bool {

@@ -208,6 +208,7 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		AwaitPromise:                  r.awaitPromiseImpl,
 		RegisterUpdateHandler:         r.registerUpdateHandler,
 		RunDetached:                   r.runDetached,
+		PluginCall:                   r.pluginCallImpl,
 	})
 	return r
 }
@@ -682,6 +683,10 @@ func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) 
 	case <-timer.C:
 		return "", true, nil
 	}
+}
+
+func (r *LocalRunner) pluginCallImpl(pluginName, functionName, inputJSON string) (string, error) {
+	return "", fmt.Errorf("localdev: PluginCall is not available in local dev mode (plugin %q, function %q)", pluginName, functionName)
 }
 
 // ---------------------------------------------------------------------------

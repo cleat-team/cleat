@@ -816,6 +816,55 @@ func TestRetryZeroMaxAttempts(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// PluginCall
+// ---------------------------------------------------------------------------
+
+func TestPluginCallSuccess(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		PluginCall: func(pluginName, functionName, inputJSON string) (string, error) {
+			if pluginName != "my_plugin" || functionName != "my_func" || inputJSON != `{"key":"val"}` {
+				t.Errorf("unexpected args: %q %q %q", pluginName, functionName, inputJSON)
+			}
+			return `{"result":"ok"}`, nil
+		},
+	})
+
+	resp, err := h.PluginCall("my_plugin", "my_func", `{"key":"val"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != `{"result":"ok"}` {
+		t.Errorf("expected %q, got %q", `{"result":"ok"}`, resp)
+	}
+}
+
+func TestPluginCallError(t *testing.T) {
+	expectedErr := errors.New("plugin error")
+	h := NewHostCalls(HostCallsOptions{
+		PluginCall: func(_, _, _ string) (string, error) {
+			return "", expectedErr
+		},
+	})
+
+	_, err := h.PluginCall("p", "f", "{}")
+	if err != expectedErr {
+		t.Errorf("expected error %v, got %v", expectedErr, err)
+	}
+}
+
+func TestPluginCallNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+
+	_, err := h.PluginCall("p", "f", "{}")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected not initialized error, got: %v", err)
+	}
+}
+
 func TestRetryBackoffCoefficientOne(t *testing.T) {
 	var attemptCount int
 	var sleepDurations []time.Duration

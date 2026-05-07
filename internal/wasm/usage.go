@@ -63,6 +63,7 @@ var hostFunctions = []HostFunction{
 	{"durable_await_promise", "AwaitPromise"},
 	// Update handlers
 	{"durable_register_update_handler", "RegisterUpdateHandler"},
+	{"plugin_call", "PluginCall"},
 	// Fetch / HTTP methods (all map to durable_call import)
 	{"durable_call", "DurableFetch"},
 	{"durable_call", "DurableFetchJSON"},

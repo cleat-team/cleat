@@ -172,6 +172,15 @@ var importDefs = map[string]importDef{
 			{"name", kindInString},
 		},
 	},
+	"plugin_call": {
+		ImportName: "plugin_call",
+		Params: []paramSpec{
+			{"pluginName", kindInString},
+			{"functionName", kindInString},
+			{"inputJSON", kindInString},
+			{"response", kindOutString},
+		},
+	},
 }
 
 const outBufSize = 65536

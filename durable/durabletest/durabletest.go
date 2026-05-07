@@ -127,6 +127,32 @@ type promiseState struct {
 	errorMsg string
 }
 
+type pluginCallStub struct {
+	pluginName   string
+	functionName string
+	result       string
+	err          error
+}
+
+type PluginCallStubBuilder struct {
+	env          *TestEnv
+	pluginName   string
+	functionName string
+}
+
+func (b *PluginCallStubBuilder) Return(result string, err error) {
+	b.env.pluginCallStubs = append(b.env.pluginCallStubs, &pluginCallStub{
+		pluginName:   b.pluginName,
+		functionName: b.functionName,
+		result:       result,
+		err:          err,
+	})
+}
+
+func (e *TestEnv) OnPluginCall(pluginName, functionName string) *PluginCallStubBuilder {
+	return &PluginCallStubBuilder{env: e, pluginName: pluginName, functionName: functionName}
+}
+
 // TestEnv is a mock environment for testing workflows.
 // Use NewTestEnv to create one, then wire up stubs with OnCall
 // and drive the workflow via the HostCalls returned by H().
@@ -153,6 +179,8 @@ type TestEnv struct {
 	ConcurrencyKeys           map[string]string
 	AcquireConcurrencyKeyFn   func(key, workflowID string) (bool, error)
 	ReleaseConcurrencyKeysFn  func(workflowID string)
+
+	pluginCallStubs []*pluginCallStub
 }
 
 // NewTestEnv creates a new TestEnv with a clean initial state.
@@ -193,6 +221,7 @@ func NewTestEnv() *TestEnv {
 		AwaitPromise:                 e.awaitPromiseImpl,
 		RegisterUpdateHandler:        e.registerUpdateHandlerImpl,
 		RunDetached:                  e.runDetachedImpl,
+		PluginCall: e.pluginCallImpl,
 	})
 	return e
 }
@@ -386,6 +415,7 @@ func (e *TestEnv) Reset() {
 	e.childWorkflowStubs = make(map[string]*childWorkflowStub)
 	e.childResults = make(map[string]*childStubResult)
 	e.ConcurrencyKeys = make(map[string]string)
+	e.pluginCallStubs = nil
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +694,15 @@ func (e *TestEnv) awaitPromiseImpl(promiseID string, timeout time.Duration) (str
 	e.mu.Unlock()
 
 	return "", true, nil
+}
+
+func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (string, error) {
+	for _, stub := range e.pluginCallStubs {
+		if stub.pluginName == pluginName && stub.functionName == functionName {
+			return stub.result, stub.err
+		}
+	}
+	return "", fmt.Errorf("durabletest: no stub registered for PluginCall(%q, %q)", pluginName, functionName)
 }
 
 // ResolvePromise resolves a promise with the given result.
