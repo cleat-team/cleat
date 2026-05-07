@@ -195,9 +195,9 @@ func (p *Plugin) listModels(ctx context.Context, inputJSON string) (string, erro
 	}
 
 	all := map[string][]modelInfo{}
-	for _, p := range []string{"openai", "anthropic", "groq", "ollama"} {
-		if cfg, ok := p.config.Providers[p]; ok && cfg.Enabled {
-			all[p] = models[p]
+	for _, provider := range []string{"openai", "anthropic", "groq", "ollama"} {
+		if cfg, ok := p.config.Providers[provider]; ok && cfg.Enabled {
+			all[provider] = models[provider]
 		}
 	}
 	outJSON, _ := json.Marshal(map[string]any{"providers": all})

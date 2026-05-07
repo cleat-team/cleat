@@ -26,6 +26,7 @@ type anthropicMsg struct {
 type anthropicContent struct {
 	Type         string          `json:"type"`
 	Text         string          `json:"text,omitempty"`
+	Content      string          `json:"content,omitempty"`
 	ToolUseID    string          `json:"tool_use_id,omitempty"`
 	ID           string          `json:"id,omitempty"`
 	Name         string          `json:"name,omitempty"`
@@ -84,7 +85,7 @@ func AnthropicChat(ctx context.Context, client *http.Client, apiKey, baseURL str
 			content = append(content, anthropicContent{
 				Type:      "tool_result",
 				ToolUseID: m.ToolCallID,
-				Content:   anthropicContent{Type: "text", Text: m.Content}.Text,
+				Content:   m.Content,
 			})
 			if len(content) == 0 {
 				content = append(content, anthropicContent{
