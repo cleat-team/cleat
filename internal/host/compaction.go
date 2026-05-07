@@ -351,6 +351,8 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseResult = ce.PromiseResult
 		case EventCodePromiseRejected:
+			rec.PromiseID = ce.PromiseID
+			rec.PromiseError = ce.PromiseError
 		case EventCodeUpdateHandler:
 			rec.UpdateHandlerName = ce.PromiseName
 		case EventCodeStateMutation:
