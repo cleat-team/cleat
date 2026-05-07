@@ -19,6 +19,19 @@ from .host_calls import HostCalls, SuspendSentinel, RetryPolicy
 from .host_calls import SignalResult, ChildResult, PromiseResult
 from .entry import durable_entry
 from .types import ChildWorkflow, Saga, SagaStep, DurableDefer
+from .plugins import (
+    Plugins,
+    BlobPutResult,
+    BlobGetResult,
+    AwaitEventResult,
+    EvaluateFlagResult,
+    ProduceResult,
+    SendWebhookResult,
+    TriggerIncidentResult,
+    ResolveIncidentResult,
+    SendMessageResult,
+    AwaitWebhookResult,
+)
 
 __all__ = [
     "HostCalls",
@@ -32,4 +45,15 @@ __all__ = [
     "Saga",
     "SagaStep",
     "DurableDefer",
+    "Plugins",
+    "BlobPutResult",
+    "BlobGetResult",
+    "AwaitEventResult",
+    "EvaluateFlagResult",
+    "ProduceResult",
+    "SendWebhookResult",
+    "TriggerIncidentResult",
+    "ResolveIncidentResult",
+    "SendMessageResult",
+    "AwaitWebhookResult",
 ]

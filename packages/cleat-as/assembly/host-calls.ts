@@ -1,5 +1,5 @@
 /**
- * AssemblyScript bindings for the 18 cleat WASM host function imports.
+ * AssemblyScript bindings for the 19 cleat WASM host function imports.
  *
  * Provides raw `@external` import declarations and the `HostCalls` class
  * that wraps each import with idiomatic AssemblyScript methods.
@@ -23,7 +23,7 @@ import {
 } from "./memory";
 
 // ═══════════════════════════════════════════════
-// 18 raw host function imports from "env" module
+// 19 raw host function imports from "env" module
 // ═══════════════════════════════════════════════
 
 /**
@@ -216,6 +216,22 @@ export declare function import_durable_register_update_handler(
   nameLen: i32,
 ): i64;
 
+/**
+ * 19. plugin_call: Host-only extension for plugin function calls.
+ * (import "env" "plugin_call") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
+ */
+@external("env", "plugin_call")
+export declare function import_plugin_call(
+  pluginNamePtr: i32,
+  pluginNameLen: i32,
+  functionNamePtr: i32,
+  functionNameLen: i32,
+  inputPtr: i32,
+  inputLen: i32,
+  responsePtr: i32,
+  responseMaxLen: i32,
+): i64;
+
 // ═══════════════════════════════════════════════
 // High-level result types for HostCalls methods
 // ═══════════════════════════════════════════════
@@ -254,6 +270,19 @@ export class DurableCallOutcome {
   get isError(): bool {
     return this.error !== null;
   }
+}
+
+/** Outcome of a plugin_call operation. */
+export class PluginCallOutcome {
+  constructor(
+    /** Response JSON from the plugin. Empty on error. */
+    public readonly response: string,
+    /** Error message, or null on success. */
+    public readonly error: string | null,
+    /** Structured call error code. */
+    public readonly callErrorCode: u32,
+  ) {}
+  get isError(): bool { return this.error !== null; }
 }
 
 /** Result of `pollCancellation`. */
@@ -339,7 +368,7 @@ export class AwaitPromiseOutcome {
 // ═══════════════════════════════════════════════
 
 /**
- * High-level AssemblyScript wrapper around the 18 cleat WASM host function
+ * High-level AssemblyScript wrapper around the 19 cleat WASM host function
  * imports.
  *
  * Each method handles string I/O (encode input strings to memory, decode
@@ -913,5 +942,60 @@ export class HostCalls {
   registerUpdateHandler(name: string): void {
     let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
     import_durable_register_update_handler(SCRATCH_BASE as i32, nameLen);
+  }
+
+  // ────────────────────────────────────────────
+  // 19. pluginCall
+  // ────────────────────────────────────────────
+
+  /**
+   * Call a plugin function via the host runtime.
+   *
+   * Plugin name, function name, and input JSON are encoded to the scratch
+   * buffer sequentially, the host call is made, and the response is read
+   * from the output buffer.
+   *
+   * @param pluginName    - Name of the plugin (e.g., "blobstore", "slacknotify").
+   * @param functionName  - Plugin function name (e.g., "put", "get").
+   * @param inputJson     - Input payload as a JSON string.
+   * @returns The plugin call outcome with response JSON or error details.
+   */
+  pluginCall(pluginName: string, functionName: string, inputJson: string): PluginCallOutcome {
+    // Encode input strings sequentially into the scratch buffer
+    let pluginNameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, pluginName);
+    let fnOffset: usize = SCRATCH_BASE + pluginNameLen;
+    let remaining: i32 = OUT_BUF_SIZE - pluginNameLen;
+    let fnLen: i32 = this.writeScratch(fnOffset, remaining, functionName, "functionName");
+    let inputOffset: usize = fnOffset + fnLen;
+    remaining -= fnLen;
+    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
+
+    // Call the host import
+    let result: i64 = import_plugin_call(
+      SCRATCH_BASE as i32,
+      pluginNameLen,
+      fnOffset as i32,
+      fnLen,
+      inputOffset as i32,
+      inputLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    // Decode the packed result (same bit layout as durable_call)
+    let decoded = decodeCallResult(result);
+    let responseLen: i32 = decoded.responseLen as i32;
+
+    // On error, the output buffer contains an error message
+    if (decoded.errCode !== 0) {
+      let errMsg: string =
+        responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "unknown error";
+      return new PluginCallOutcome("", errMsg, decoded.callErrorCode);
+    }
+
+    // Success: read the response
+    let resp: string =
+      responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "";
+    return new PluginCallOutcome(resp, null, 0);
   }
 }

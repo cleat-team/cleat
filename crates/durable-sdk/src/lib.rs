@@ -5,8 +5,14 @@
 
 pub mod host_calls;
 pub mod memory;
+pub mod plugins;
 
 pub use host_calls::HostCalls;
+pub use plugins::{
+    AwaitEventResult, AwaitWebhookResult, BlobGetResult, BlobPutResult,
+    EvaluateFlagResult, Plugins, ProduceResult, ResolveIncidentResult,
+    SendMessageResult, SendWebhookResult, TriggerIncidentResult,
+};
 
 /// A sentinel error used to signal workflow suspension via
 /// `std::panic::catch_unwind`.

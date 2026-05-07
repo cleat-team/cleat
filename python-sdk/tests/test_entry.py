@@ -152,15 +152,17 @@ class TestDurableEntry:
         assert output == {"status": "ok"}
 
     def test_durable_entry_missing_param(self):
-        """A ``ValueError`` is raised when a required parameter is absent
-        from the JSON input."""
+        """A missing required parameter produces ``err_code=1`` with an
+        error message listing the missing keys."""
 
         @durable_entry
         def my_func(h: HostCalls, name: str, count: int):
             return {"ok": True}
 
-        with pytest.raises(ValueError, match="Missing required"):
-            _call_export(my_func, {"name": "Alice"})  # missing "count"
+        packed = _call_export(my_func, {"name": "Alice"})  # missing "count"
+        err_code, output = _decode_output(packed)
+        assert err_code == 1
+        assert "count" in output.get("error", "")
 
     def test_durable_entry_extra_params(self):
         """Extra keys in the JSON input are silently ignored."""
@@ -317,7 +319,8 @@ class TestUnwrapResult:
         class OnlyValue:
             value = 42
 
-        assert _unwrap_result(OnlyValue()) is OnlyValue()
+        obj = OnlyValue()
+        assert _unwrap_result(obj) is obj
 
     def test_unwrap_result_integration_with_decorator(self):
         """The flow: decorate, call, and verify that the Result-like

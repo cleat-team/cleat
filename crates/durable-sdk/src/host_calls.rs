@@ -100,6 +100,15 @@ mod imports {
         pub fn durable_register_update_handler(
             name_ptr: *const u8, name_len: u32,
         ) -> i64;
+
+        // plugin_call - ABI 2.19 (WASM import name is "plugin_call")
+        #[link_name = "plugin_call"]
+        pub fn durable_plugin_call(
+            plugin_name_ptr: *const u8, plugin_name_len: u32,
+            function_name_ptr: *const u8, function_name_len: u32,
+            input_ptr: *const u8, input_len: u32,
+            response_ptr: *mut u8, response_max_len: u32,
+        ) -> i64;
     }
 }
 
@@ -376,5 +385,26 @@ impl HostCalls {
                 name.as_ptr(), name.len() as u32,
             );
         }
+    }
+
+    /// Call a plugin host function. Mirrors Go's PluginCall (ABI 2.19).
+    /// Returns (response_json, error_message).
+    pub fn plugin_call(&self, plugin_name: &str, function_name: &str, input_json: &str) -> (String, Option<String>) {
+        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_plugin_call(
+                plugin_name.as_ptr(), plugin_name.len() as u32,
+                function_name.as_ptr(), function_name.len() as u32,
+                input_json.as_ptr(), input_json.len() as u32,
+                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (response_len, _call_error_code, err_code) = memory::decode_durable_call_result(result);
+        if err_code != 0 {
+            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            return (String::new(), Some(err_msg));
+        }
+        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        (resp, None)
     }
 }

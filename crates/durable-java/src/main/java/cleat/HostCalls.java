@@ -118,6 +118,13 @@ public class HostCalls {
     private static native long setQueryStateRaw(
         int keyPtr, int keyLen, int valPtr, int valLen);
 
+    @Import(module = "env", name = "plugin_call")
+    private static native long importPluginCall(
+        int pluginNamePtr, int pluginNameLen,
+        int functionNamePtr, int functionNameLen,
+        int inputPtr, int inputLen,
+        int responsePtr, int responseMaxLen);
+
     // ========================================================================
     // Internal helpers: pack strings in scratch region, read output buffer
     // ========================================================================
@@ -619,6 +626,90 @@ public class HostCalls {
     }
 
     // ========================================================================
+    // plugin_call — call a plugin host function (ABI 2.19)
+    // ========================================================================
+
+    /**
+     * Call a plugin host function and return the response JSON string.
+     * <p>
+     * Plugins extend the host runtime with custom functionality beyond the
+     * standard host imports.  Unlike {@link #durableCall(String, String, String)},
+     * plugin calls are <em>not</em> recorded in the workflow event history
+     * and are not replayed.
+     *
+     * @param pluginName   name of the plugin (e.g. {@code "blobstore"},
+     *                     {@code "slacknotify"})
+     * @param functionName name of the function within the plugin
+     *                     (e.g. {@code "put"}, {@code "send_message"})
+     * @param inputJson    input JSON for the plugin function
+     * @return the plugin function's response as a JSON string
+     * @throws RuntimeException if the host reports an error from the plugin
+     *                          call
+     */
+    public String pluginCall(String pluginName, String functionName, String inputJson) {
+        int[] p = packStrings(pluginName, functionName, inputJson);
+        int pnOff = p[0], fnOff = p[1], inOff = p[2];
+        int pnLen = p[3], fnLen = p[4], inLen = p[5];
+
+        long result = importPluginCall(
+            pnOff, pnLen,
+            fnOff, fnLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            throw new RuntimeException("plugin_call failed: " + errMsg);
+        }
+
+        return readOutput(responseLen);
+    }
+
+    /**
+     * Call a plugin host function and return a structured
+     * {@link PluginCallOutcome} with the response, error message, and
+     * call-level error code.
+     * <p>
+     * Unlike {@link #pluginCall(String, String, String)}, this method does
+     * <em>not</em> throw on protocol errors.  Instead, the error is reported
+     * in the returned {@link PluginCallOutcome#error} field, allowing callers
+     * to inspect both the response and error information without exception
+     * handling.
+     *
+     * @param pluginName   name of the plugin
+     * @param functionName name of the function within the plugin
+     * @param inputJson    input JSON for the plugin function
+     * @return a {@link PluginCallOutcome} with response, error, and
+     *         call-level error code
+     */
+    public PluginCallOutcome pluginCallOutcome(String pluginName, String functionName, String inputJson) {
+        int[] p = packStrings(pluginName, functionName, inputJson);
+        int pnOff = p[0], fnOff = p[1], inOff = p[2];
+        int pnLen = p[3], fnLen = p[4], inLen = p[5];
+
+        long result = importPluginCall(
+            pnOff, pnLen,
+            fnOff, fnLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int callErrorCode = Memory.decodeCallErrorCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return new PluginCallOutcome(null, errMsg, callErrorCode);
+        }
+
+        String response = readOutput(responseLen);
+        return new PluginCallOutcome(response, null, callErrorCode);
+    }
+
+    // ========================================================================
     // Inner result type for awaitSignals
     // ========================================================================
 
@@ -691,6 +782,59 @@ public class HostCalls {
                 return "AwaitPromiseResult(timedOut)";
             }
             return "AwaitPromiseResult(result=" + result + ")";
+        }
+    }
+
+    // ========================================================================
+    // plugin_call outcome type
+    // ========================================================================
+
+    /**
+     * Result of a {@link #pluginCallOutcome(String, String, String)} call.
+     * <p>
+     * Contains the plugin function's response JSON (on success), an error
+     * message (on failure), and the call-level error code.  Use
+     * {@link #isError()} to check whether the call succeeded.
+     */
+    public static class PluginCallOutcome {
+        /** The plugin function's response JSON, or {@code null} on error. */
+        public final String response;
+
+        /** The error message, or {@code null} on success. */
+        public final String error;
+
+        /** The call-level error code (0 for success). */
+        public final int callErrorCode;
+
+        /**
+         * Construct a new plugin call outcome.
+         *
+         * @param response      the response JSON, or {@code null} on error
+         * @param error         the error message, or {@code null} on success
+         * @param callErrorCode the call-level error code
+         */
+        public PluginCallOutcome(String response, String error, int callErrorCode) {
+            this.response = response;
+            this.error = error;
+            this.callErrorCode = callErrorCode;
+        }
+
+        /**
+         * Returns {@code true} if the plugin call resulted in an error.
+         *
+         * @return {@code true} if {@link #error} is non-null
+         */
+        public boolean isError() {
+            return error != null;
+        }
+
+        @Override
+        public String toString() {
+            if (isError()) {
+                return "PluginCallOutcome(error=" + error
+                    + ", callErrorCode=" + callErrorCode + ")";
+            }
+            return "PluginCallOutcome(response=" + response + ")";
         }
     }
 }
