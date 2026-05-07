@@ -76,10 +76,10 @@ func main() {
 		var target string
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
-		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, rust, java, or assemblyscript")
+		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, rust, java, assemblyscript, or python")
 		fs.Parse(os.Args[2:])
 		if !isValidTarget(target) {
-			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript\n", target)
+			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript, python\n", target)
 			os.Exit(1)
 		}
 		remainder := fs.Args()
@@ -139,6 +139,13 @@ func runBuild(pattern, outDir, target string) {
 			outDir = "."
 		}
 		runBuildRust(pattern, outDir)
+		return
+	}
+	if target == "python" {
+		if outDir == "" {
+			outDir = "."
+		}
+		runBuildPython(pattern, outDir)
 		return
 	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
@@ -702,7 +709,7 @@ func runSchedule(args []string) {
 func isValidTarget(t string) bool {
 	valid := map[string]bool{
 		"go": true, "tinygo": true, "rust": true,
-		"java": true, "assemblyscript": true,
+		"java": true, "assemblyscript": true, "python": true,
 	}
 	return valid[t]
 }
