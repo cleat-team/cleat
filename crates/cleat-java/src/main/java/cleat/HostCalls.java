@@ -100,6 +100,13 @@ public class HostCalls {
         int inPtr, int inLen,
         int outPtr, int maxLen);
 
+    @Import(module = "env", name = "cleat_child_workflow_with_options")
+    private static native long cleatChildWorkflowWithOptionsRaw(
+        int namePtr, int nameLen,
+        int inPtr, int inLen,
+        int version,
+        int outPtr, int maxLen);
+
     @Import(module = "env", name = "cleat_await_child")
     private static native long cleatAwaitChildRaw(
         int runIdPtr, int runIdLen,
@@ -600,6 +607,41 @@ public class HostCalls {
 
         if (errCode != 0) {
             return CleatResult.err("childWorkflow failed with code " + errCode);
+        }
+
+        String runId = readOutput(runIdLen);
+        return CleatResult.ok(runId);
+    }
+
+    /**
+     * Start a child workflow instance with an explicit version.
+     * <p>
+     * Like {@link #childWorkflow(String, String)} but allows specifying
+     * the workflow definition version explicitly.
+     *
+     * @param name      the child workflow definition name
+     * @param inputJSON the input JSON for the child workflow
+     * @param version   the explicit workflow definition version
+     *                  (0 = use parent's version / default resolution)
+     * @return a result containing the child's run ID on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> childWorkflowWithOptions(String name, String inputJSON, int version) {
+        int[] p = packStrings(name, inputJSON);
+        int nameOff = p[0], inOff = p[1];
+        int nameLen = p[2], inLen = p[3];
+
+        long result = cleatChildWorkflowWithOptionsRaw(
+            nameOff, nameLen,
+            inOff, inLen,
+            version,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int runIdLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("childWorkflowWithOptions failed with code " + errCode);
         }
 
         String runId = readOutput(runIdLen);
@@ -1946,6 +1988,24 @@ public class HostCalls {
      * Controls the maximum number of attempts, initial backoff interval,
      * backoff multiplier, and maximum backoff interval for retried calls.
      */
+    /**
+     * Options for starting a child workflow with version control.
+     * Use with {@link #childWorkflowWithOptions(String, String, int)}.
+     * {@code version = 0} means default resolution (parent's version).
+     */
+    public static class ChildWorkflowOptions {
+        /** Explicit workflow definition version to use. 0 = default. */
+        public int version;
+
+        public ChildWorkflowOptions() {
+            this.version = 0;
+        }
+
+        public ChildWorkflowOptions(int version) {
+            this.version = version;
+        }
+    }
+
     public static class RetryPolicy {
         /** Maximum number of retry attempts (including the initial call). */
         public final int maxAttempts;

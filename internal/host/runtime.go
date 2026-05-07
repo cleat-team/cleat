@@ -61,10 +61,19 @@ func (r *Runtime) CompileModule(ctx context.Context, wasmBytes []byte) (wazero.C
 // InstantiateModule creates a new module instance without running _start.
 // Use InitModule to start the Go runtime afterwards.
 func (r *Runtime) InstantiateModule(ctx context.Context, compiled wazero.CompiledModule) (api.Module, error) {
+	return r.InstantiateModuleNamed(ctx, compiled, "")
+}
+
+// InstantiateModuleNamed instantiates a compiled module with the given name.
+// Named modules can be imported by other modules via wazero's module linking.
+// This is used when instantiating plugin modules alongside the workflow
+// module so that the workflow can import from named plugin modules.
+// If name is empty, the module gets wazero's default unnamed module config.
+func (r *Runtime) InstantiateModuleNamed(ctx context.Context, compiled wazero.CompiledModule, name string) (api.Module, error) {
 	r.stdout.Reset()
 	r.stderr.Reset()
 	config := wazero.NewModuleConfig().
-		WithName("").
+		WithName(name).
 		WithStdout(&r.stdout).
 		WithStderr(&r.stderr).
 		WithStartFunctions()

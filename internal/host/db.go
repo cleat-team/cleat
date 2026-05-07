@@ -12,6 +12,19 @@ import (
 	"github.com/lib/pq"
 )
 
+// WorkflowDef is a row from the workflow_defs table.
+// It represents a deployed version of a workflow definition.
+type WorkflowDef struct {
+	Name        string            `json:"name"`
+	Version     int               `json:"version"`
+	WASMBytes   []byte            `json:"wasm_bytes,omitempty"`
+	ABIVersion  int               `json:"abi_version"`
+	MinVersion  int               `json:"min_version"`
+	PluginDeps  map[string]string `json:"plugin_deps,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	Deprecated  bool              `json:"deprecated"`
+}
+
 // WorkflowInstance is a row from workflow_instances.
 type WorkflowInstance struct {
 	ID         string          `json:"id"`
@@ -137,7 +150,9 @@ type WorkflowStore interface {
 	StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (runID string, alreadyExisted bool, err error)
 
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
-	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (runID string, err error)
+	// defVersion is the explicit workflow definition version to use, or 0 to use
+	// default resolution (SELECT MAX(version)).
+	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int) (runID string, err error)
 
 	// GetChildResult checks whether a child workflow has completed and returns its result.
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
@@ -249,6 +264,31 @@ type WorkflowStore interface {
 
 	// ClearStickyWorker removes the sticky worker assignment.
 	ClearStickyWorker(ctx context.Context, workflowID string) error
+
+	// ---- Version Management methods ----
+
+	// DeployWorkflowDef inserts or updates a workflow definition.
+	DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error
+
+	// ListWorkflowDefs returns all versions of a workflow, ordered by version DESC.
+	// If name is empty, returns all workflow definitions across all workflows.
+	ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error)
+
+	// GetWorkflowDef returns a single workflow definition by name and version.
+	GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error)
+
+	// MarkVersionDeprecated sets the deprecated flag on a workflow version.
+	MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error
+
+	// PurgeWorkflowDef permanently deletes a workflow definition (WASM bytes and all).
+	PurgeWorkflowDef(ctx context.Context, name string, version int) error
+
+	// CountActiveInstances returns the number of running/ready instances for a version.
+	CountActiveInstances(ctx context.Context, name string, version int) (int, error)
+
+	// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count for
+	// all workflow definitions that have active instances.
+	GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error)
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
@@ -597,6 +637,192 @@ func (s *PostgresStore) ListVersions(ctx context.Context, defName string) ([]int
 	return versions, rows.Err()
 }
 
+// DeployWorkflowDef inserts or updates a workflow definition.
+func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
+	pluginDepsJSON, _ := json.Marshal(def.PluginDeps)
+	if pluginDepsJSON == nil {
+		pluginDepsJSON = []byte("{}")
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (name, version) DO UPDATE SET
+			wasm_bytes = EXCLUDED.wasm_bytes,
+			abi_version = EXCLUDED.abi_version,
+			min_version = EXCLUDED.min_version,
+			plugin_deps = EXCLUDED.plugin_deps,
+			deprecated = EXCLUDED.deprecated
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated)
+	if err != nil {
+		return fmt.Errorf("deploy workflow def: %w", err)
+	}
+	return nil
+}
+
+// ListWorkflowDefs returns all versions of a workflow, ordered by version DESC.
+// If name is empty, returns all workflow definitions across all workflows.
+func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
+	var rows *sql.Rows
+	var err error
+	if name == "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
+			FROM workflow_defs ORDER BY name, version DESC
+		`)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
+			FROM workflow_defs WHERE name = $1 ORDER BY version DESC
+		`, name)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list workflow defs: %w", err)
+	}
+	defer rows.Close()
+
+	var defs []WorkflowDef
+	for rows.Next() {
+		var def WorkflowDef
+		var pluginDepsRaw []byte
+		var createdAt time.Time
+		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
+			&pluginDepsRaw, &createdAt, &def.Deprecated); err != nil {
+			return nil, fmt.Errorf("scan workflow def: %w", err)
+		}
+		def.CreatedAt = createdAt
+		if len(pluginDepsRaw) > 0 {
+			json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+		}
+		if def.PluginDeps == nil {
+			def.PluginDeps = make(map[string]string)
+		}
+		defs = append(defs, def)
+	}
+	return defs, rows.Err()
+}
+
+// GetWorkflowDef returns a single workflow definition by name and version.
+func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
+	var def WorkflowDef
+	var pluginDepsRaw []byte
+	var wasmBytes []byte
+	var createdAt time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, deprecated
+		FROM workflow_defs WHERE name = $1 AND version = $2
+	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.Deprecated)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get workflow def: %w", err)
+	}
+	def.WASMBytes = wasmBytes
+	def.CreatedAt = createdAt
+	if len(pluginDepsRaw) > 0 {
+		json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+	}
+	if def.PluginDeps == nil {
+		def.PluginDeps = make(map[string]string)
+	}
+	return &def, nil
+}
+
+// MarkVersionDeprecated sets the deprecated flag on a workflow version.
+func (s *PostgresStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_defs SET deprecated = $3 WHERE name = $1 AND version = $2
+	`, name, version, deprecated)
+	if err != nil {
+		return fmt.Errorf("mark version deprecated: %w", err)
+	}
+	return nil
+}
+
+// PurgeWorkflowDef permanently deletes a workflow definition.
+func (s *PostgresStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM workflow_defs WHERE name = $1 AND version = $2
+	`, name, version)
+	if err != nil {
+		return fmt.Errorf("purge workflow def: %w", err)
+	}
+	return nil
+}
+
+// CountActiveInstances returns the number of ready or running instances for a version.
+func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM workflow_instances
+		WHERE def_name = $1 AND def_version = $2
+		  AND status IN ('ready', 'running')
+	`, name, version).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count active instances: %w", err)
+	}
+	return count, nil
+}
+
+// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count.
+func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT def_name, def_version, COUNT(*) as cnt
+		FROM workflow_instances
+		WHERE status IN ('ready', 'running')
+		GROUP BY def_name, def_version
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("get active instance counts: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var name string
+		var version, count int
+		if err := rows.Scan(&name, &version, &count); err != nil {
+			return nil, fmt.Errorf("scan active instance count: %w", err)
+		}
+		key := name + ":" + fmt.Sprintf("%d", version)
+		counts[key] = count
+	}
+	return counts, rows.Err()
+}
+
+// Heartbeat updates the heartbeat timestamp.
+func (s *PostgresStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) {
+	var version int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(version), 0) FROM workflow_defs
+		WHERE name = $1 AND NOT deprecated
+	`, defName).Scan(&version)
+	if err != nil {
+		return 0, fmt.Errorf("resolve latest version: %w", err)
+	}
+	return version, nil
+}
+
+// ValidateVersion checks whether a specific workflow definition version
+// exists and is not deprecated. Returns true if the version can be used.
+//
+//	SQL: SELECT EXISTS(SELECT 1 FROM workflow_defs
+//	     WHERE name = $1 AND version = $2 AND NOT deprecated)
+func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM workflow_defs
+			WHERE name = $1 AND version = $2 AND NOT deprecated
+		)
+	`, defName, defVersion).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("validate version: %w", err)
+	}
+	return exists, nil
+}
+
 // Heartbeat updates the heartbeat timestamp.
 func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `
@@ -814,15 +1040,19 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 
 // StartChildWorkflow creates a child workflow instance linked to a parent.
 // The child inherits the namespace from the parent.
-func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (string, error) {
+// If defVersion > 0, that version is used explicitly; otherwise the latest
+// non-deprecated version is used (SELECT MAX(version)).
+func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int) (string, error) {
 	var runID string
 	err := s.db.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, namespace, task_queue)
-		VALUES (gen_random_uuid(), $1, (SELECT MAX(version) FROM workflow_defs WHERE name = $1), 'ready', $2, $3,
+		VALUES (gen_random_uuid(), $1,
+		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated) END,
+		        'ready', $2, $3,
 		        COALESCE((SELECT namespace FROM workflow_instances WHERE id = $3), 'default'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'))
 		RETURNING id
-	`, defName, inputJSON, parentID).Scan(&runID)
+	`, defName, inputJSON, parentID, defVersion).Scan(&runID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}

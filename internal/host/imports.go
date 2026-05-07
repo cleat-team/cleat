@@ -30,7 +30,9 @@ type HostHandler interface {
 	PollCancellation(ctx context.Context, m api.Module, reasonPtr, reasonMaxLen uint32) int64
 	PollSignal(ctx context.Context, m api.Module, signalName string, payloadPtr, payloadMaxLen uint32) int64
 	ContinueAsNew(ctx context.Context, m api.Module, newInputJSON string) int64
+	ContinueAsNewWithVersion(ctx context.Context, m api.Module, newInputJSON string, newVersion int) int64
 	ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
+	ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int32, runIDPtr, runIDMaxLen uint32) int64
 	AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
 	AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64
 	DurableCallWithRetry(ctx context.Context, m api.Module, service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string, responsePtr, responseMaxLen uint32) int64
@@ -131,6 +133,14 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		newInput := readWasmString(mem, inputPtr, inputLen)
 		return uint64(handlerFromContext(ctx).ContinueAsNew(ctx, m, newInput))
 	}).Export("cleat_continue_as_new")
+
+	// cleat_continue_as_new_versioned: (ptr,len,i32) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		inputPtr, inputLen, newVersion uint32) uint64 {
+		mem := m.Memory()
+		newInput := readWasmString(mem, inputPtr, inputLen)
+		return uint64(handlerFromContext(ctx).ContinueAsNewWithVersion(ctx, m, newInput, int(newVersion)))
+	}).Export("cleat_continue_as_new_versioned")
 
 	// cleat_child_workflow: (ptr,len x3) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

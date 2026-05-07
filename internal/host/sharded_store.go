@@ -357,12 +357,13 @@ func (s *ShardedStore) StartNewRun(ctx context.Context, defName string, defVersi
 }
 
 // StartChildWorkflow places the child on the same shard as the parent.
-func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (string, error) {
+// defVersion is passed through to the underlying store for version resolution.
+func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int) (string, error) {
 	shard := s.getShard(parentID)
 	if shard == nil {
 		return "", fmt.Errorf("no shard available")
 	}
-	return shard.Store.StartChildWorkflow(ctx, parentID, defName, inputJSON)
+	return shard.Store.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion)
 }
 
 // GetChildResult routes by child run ID.
@@ -771,4 +772,99 @@ func (s *ShardedStore) CompleteUpdateRequest(ctx context.Context, workflowID, up
 		return fmt.Errorf("no shard available")
 	}
 	return shard.Store.CompleteUpdateRequest(ctx, workflowID, updateName, result, errMsg)
+}
+
+// ---- Version management methods ----
+
+// DeployWorkflowDef delegates to the shard determined by the workflow name.
+func (s *ShardedStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
+	shard := s.getShard(def.Name)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.DeployWorkflowDef(ctx, def)
+}
+
+// ListWorkflowDefs queries each shard and aggregates results.
+func (s *ShardedStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
+	var all []WorkflowDef
+	err := s.forEachShard(func(store *PostgresStore) error {
+		defs, err := store.ListWorkflowDefs(ctx, name)
+		if err != nil {
+			return err
+		}
+		all = append(all, defs...)
+		return nil
+	})
+	return all, err
+}
+
+// GetWorkflowDef delegates to the shard determined by the workflow name.
+func (s *ShardedStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
+	shard := s.getShard(name)
+	if shard == nil {
+		return nil, fmt.Errorf("no shard available")
+	}
+	return shard.Store.GetWorkflowDef(ctx, name, version)
+}
+
+// MarkVersionDeprecated delegates to the shard determined by the workflow name.
+func (s *ShardedStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
+	shard := s.getShard(name)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.MarkVersionDeprecated(ctx, name, version, deprecated)
+}
+
+// PurgeWorkflowDef delegates to the shard determined by the workflow name.
+func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
+	shard := s.getShard(name)
+	if shard == nil {
+		return fmt.Errorf("no shard available")
+	}
+	return shard.Store.PurgeWorkflowDef(ctx, name, version)
+}
+
+// CountActiveInstances delegates to the shard determined by the workflow name.
+func (s *ShardedStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
+	shard := s.getShard(name)
+	if shard == nil {
+		return 0, fmt.Errorf("no shard available")
+	}
+	return shard.Store.CountActiveInstances(ctx, name, version)
+}
+
+// GetActiveInstanceCountsByVersion queries each shard and aggregates results.
+func (s *ShardedStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
+	result := make(map[string]int)
+	err := s.forEachShard(func(store *PostgresStore) error {
+		counts, err := store.GetActiveInstanceCountsByVersion(ctx)
+		if err != nil {
+			return err
+		}
+		for k, v := range counts {
+			result[k] += v
+		}
+		return nil
+	})
+	return result, err
+}
+
+// ResolveLatestVersion delegates to the shard determined by the workflow name.
+func (s *ShardedStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) {
+	shard := s.getShard(defName)
+	if shard == nil {
+		return 0, fmt.Errorf("no shard available")
+	}
+	return shard.Store.ResolveLatestVersion(ctx, defName)
+}
+
+// ValidateVersion delegates to the shard determined by the workflow name.
+func (s *ShardedStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
+	shard := s.getShard(defName)
+	if shard == nil {
+		return false, fmt.Errorf("no shard available")
+	}
+	return shard.Store.ValidateVersion(ctx, defName, defVersion)
 }

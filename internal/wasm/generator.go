@@ -86,6 +86,13 @@ var importDefs = map[string]importDef{
 			{"newInputJSON", kindInString},
 		},
 	},
+	"cleat_continue_as_new_versioned": {
+		ImportName: "cleat_continue_as_new_versioned",
+		Params: []paramSpec{
+			{"newInputJSON", kindInString},
+			{"newVersion", kindInt64},
+		},
+	},
 	"cleat_child_workflow": {
 		ImportName: "cleat_child_workflow",
 		Params: []paramSpec{

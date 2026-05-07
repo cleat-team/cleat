@@ -179,7 +179,7 @@ def get_wasm_info(output: str) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build a Python workflow into a WASM component"
+        description="Build a Python workflow into a WASM component, with optional metadata stamping"
     )
     parser.add_argument(
         "--entry", "-e",
@@ -200,6 +200,38 @@ def main():
         "--validate-only",
         action="store_true",
         help="Only validate the entry point, don't compile",
+    )
+    # Metadata stamping options.
+    parser.add_argument(
+        "--name",
+        default=None,
+        help="Workflow name (or CLEAT_WORKFLOW_NAME env var)",
+    )
+    parser.add_argument(
+        "--version",
+        type=int,
+        default=None,
+        help="Workflow version (or CLEAT_WORKFLOW_VERSION env var)",
+    )
+    parser.add_argument(
+        "--min-version",
+        type=int,
+        default=None,
+        dest="min_version",
+        help="Min compatible version (or CLEAT_MIN_COMPATIBLE_VERSION env var)",
+    )
+    parser.add_argument(
+        "--abi-version",
+        type=int,
+        default=None,
+        dest="abi_version",
+        help="ABI version (or CLEAT_ABI_VERSION env var)",
+    )
+    parser.add_argument(
+        "--plugin-deps",
+        default=None,
+        dest="plugin_deps",
+        help="Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)",
     )
 
     args = parser.parse_args()
@@ -259,6 +291,45 @@ def main():
     if info["size_mb"] > 25:
         print(f"  Warning: WASM binary is large ({info['size_mb']} MB).")
         print(f"  This is expected for CPython-in-WASM but may affect load times.")
+
+    # ---- Post-compile metadata stamping ----
+    stamp_name = args.name or os.environ.get("CLEAT_WORKFLOW_NAME")
+    stamp_version = args.version
+    if stamp_version is None and os.environ.get("CLEAT_WORKFLOW_VERSION"):
+        stamp_version = int(os.environ["CLEAT_WORKFLOW_VERSION"])
+    stamp_min = args.min_version
+    if stamp_min is None and os.environ.get("CLEAT_MIN_COMPATIBLE_VERSION"):
+        stamp_min = int(os.environ["CLEAT_MIN_COMPATIBLE_VERSION"])
+    stamp_abi = args.abi_version
+    if stamp_abi is None and os.environ.get("CLEAT_ABI_VERSION"):
+        stamp_abi = int(os.environ["CLEAT_ABI_VERSION"])
+    stamp_deps = args.plugin_deps or os.environ.get("CLEAT_PLUGIN_DEPS")
+
+    # If any stamping arg is set, run stamp_metadata.py.
+    if stamp_name is not None or stamp_version is not None:
+        stamp_args = [
+            sys.executable,
+            str(sdk_root / "scripts" / "stamp_metadata.py"),
+            output,
+        ]
+        if stamp_name is not None:
+            stamp_args.extend(["--name", stamp_name])
+        if stamp_version is not None:
+            stamp_args.extend(["--version", str(stamp_version)])
+        if stamp_min is not None:
+            stamp_args.extend(["--min-version", str(stamp_min)])
+        if stamp_abi is not None:
+            stamp_args.extend(["--abi-version", str(stamp_abi)])
+        if stamp_deps is not None:
+            stamp_args.extend(["--plugin-deps", stamp_deps])
+        if args.verbose:
+            stamp_args.append("--verbose")
+
+        try:
+            subprocess.run(stamp_args, check=True)
+            print("  Metadata stamped successfully.")
+        except subprocess.CalledProcessError:
+            print("  Warning: metadata stamping failed (non-fatal)", file=sys.stderr)
 
 
 if __name__ == "__main__":

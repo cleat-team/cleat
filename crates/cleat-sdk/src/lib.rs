@@ -7,6 +7,7 @@ pub mod host_calls;
 pub mod memory;
 pub mod plugins;
 pub mod test;
+pub mod version;
 
 pub use host_calls::{FetchResult, HostCalls, RetryPolicy, SignalResult};
 pub use plugins::{

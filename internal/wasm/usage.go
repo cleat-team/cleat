@@ -55,6 +55,7 @@ var hostFunctions = []HostFunction{
 	{"cleat_poll_signal", "PollSignal"},
 	// Lifecycle
 	{"cleat_continue_as_new", "ContinueAsNew"},
+	{"cleat_continue_as_new_versioned", "ContinueAsNewWithVersion"},
 	{"cleat_child_workflow", "ChildWorkflow"},
 	{"cleat_child_workflow", "ChildWorkflowTyped"},
 	{"cleat_await_child", "AwaitChild"},

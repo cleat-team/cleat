@@ -150,6 +150,21 @@ var adapterDefs = map[string]adapterDef{
 			"return nil",
 		},
 	},
+	"ContinueAsNewWithVersion": {
+		FieldName:  "ContinueAsNewWithVersion",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"newInputJSON", "string"},
+			{"newVersion", "int64"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_continue_as_new_versioned: error code %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
 	"ChildWorkflow": {
 		FieldName:  "ChildWorkflow",
 		ReturnType: "(string, error)",

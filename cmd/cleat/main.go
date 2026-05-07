@@ -382,15 +382,47 @@ func runDeploy(args []string) {
 		os.Exit(1)
 	}
 
+	// Extract metadata from the WASM custom section.
+	meta, metaErr := wasm.ReadMetadata(wasmBytes)
+	if metaErr == nil {
+		fmt.Printf("  Workflow: %s v%d (ABI v%d, min compatible: %d)\n",
+			meta.WorkflowName, meta.WorkflowVersion,
+			meta.ABIVersion, meta.MinCompatibleVersion)
+		if len(meta.PluginDeps) > 0 {
+			fmt.Printf("  Plugin deps: %v\n", meta.PluginDeps)
+		}
+		if err := meta.Validate(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: metadata validation failed: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Printf("  Note: no cleat.metadata section found in WASM binary (%v)\n", metaErr)
+		fmt.Printf("  Continuing with flags-only configuration.\n")
+	}
+
 	name := *nameFlag
 	if name == "" {
-		name = strings.TrimSuffix(filepath.Base(wasmPath), ".wasm")
+		if metaErr == nil && meta.WorkflowName != "unknown" {
+			name = meta.WorkflowName
+		} else {
+			name = strings.TrimSuffix(filepath.Base(wasmPath), ".wasm")
+		}
 	}
 
 	connStr := getDBConnStr()
 
 	if connStr == "" {
-		fmt.Printf("Would deploy workflow %q (version 1) from %s (%d bytes) to queue %q\n", name, wasmPath, len(wasmBytes), *taskQueueFlag)
+		version := 1
+		if metaErr == nil && meta.WorkflowVersion > 0 {
+			version = meta.WorkflowVersion
+		}
+		fmt.Printf("Would deploy workflow %q (version %d) from %s (%d bytes) to queue %q\n",
+			name, version, wasmPath, len(wasmBytes), *taskQueueFlag)
+		if metaErr == nil {
+			fmt.Printf("  Metadata: %s v%d (ABI: %d, min ver: %d)\n",
+				meta.WorkflowName, meta.WorkflowVersion,
+				meta.ABIVersion, meta.MinCompatibleVersion)
+		}
 		fmt.Println("Dry run; set CLEAT_DATABASE_URL or --db to deploy.")
 		return
 	}
@@ -419,9 +451,21 @@ func runDeploy(args []string) {
 		namespace = "default"
 	}
 
+	// Build the SQL with metadata columns if available.
+	abiVersion := 1
+	minVersion := 1
+	pluginDepsJSON := "{}"
+	if metaErr == nil {
+		abiVersion = meta.ABIVersion
+		minVersion = meta.MinCompatibleVersion
+		if depsBytes, merr := json.Marshal(meta.PluginDeps); merr == nil {
+			pluginDepsJSON = string(depsBytes)
+		}
+	}
+
 	_, err = db.Exec(
-		"INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, namespace, task_queue) VALUES ($1, $2, $3, $4, $5, $6)",
-		name, version, wasmBytes, []string{}, namespace, *taskQueueFlag,
+		"INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, namespace, task_queue) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)",
+		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, namespace, *taskQueueFlag,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error inserting workflow definition: %v\n", err)
@@ -429,6 +473,11 @@ func runDeploy(args []string) {
 	}
 
 	fmt.Printf("Deployed workflow %q version %d (%d bytes) to queue %q\n", name, version, len(wasmBytes), *taskQueueFlag)
+	if metaErr == nil {
+		fmt.Printf("  Metadata: %s v%d (ABI: %d, min ver: %d, plugins: %v)\n",
+			meta.WorkflowName, meta.WorkflowVersion,
+			meta.ABIVersion, meta.MinCompatibleVersion, meta.PluginDeps)
+	}
 }
 
 func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {

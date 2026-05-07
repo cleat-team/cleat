@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 
 	"github.com/rcownie/cleat/internal/plugin"
@@ -81,7 +82,8 @@ type EventRecord struct {
 	ParentWorkflowID string `json:"parent_workflow_id,omitempty"`
 
 	// ContinueAsNew fields.
-	NewInput string `json:"new_input,omitempty"`
+	NewInput   string `json:"new_input,omitempty"`
+	NewVersion int    `json:"new_version,omitempty"` // for versioned continue_as_new
 
 	// Plugin call fields.
 	PluginName   string `json:"plugin_name,omitempty"`
@@ -144,9 +146,10 @@ type WorkflowState interface {
 
 // SuspendError signals that the workflow should be suspended.
 type SuspendError struct {
-	Reason   string
-	Until    time.Time // if non-zero, the workflow should wake at this time
-	NewInput string    // for continue_as_new: the new input payload
+	Reason     string
+	Until      time.Time // if non-zero, the workflow should wake at this time
+	NewInput   string    // for continue_as_new: the new input payload
+	NewVersion int       // for continue_as_new with version: the new workflow version
 }
 
 func (e *SuspendError) Error() string {
@@ -162,6 +165,7 @@ type SuspendResult struct {
 	SuspendUntil time.Time
 	Reason       string
 	NewInput     string            // for continue_as_new: the new input payload
+	NewVersion   int               // for continue_as_new with version: the new workflow version
 	Deferrals    map[string]string // registered defers (deferID -> description)
 }
 
@@ -176,7 +180,10 @@ type ExecutionResult struct {
 
 // ChildWorkflowStore provides child workflow creation and polling for the engine.
 type ChildWorkflowStore interface {
-	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string) (string, error)
+	// StartChildWorkflow creates a child workflow instance linked to a parent.
+	// defVersion is the explicit workflow definition version to use, or 0 to use
+	// default resolution (SELECT MAX(version)).
+	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int) (string, error)
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
 }
 
@@ -366,23 +373,43 @@ func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine 
 // deferrals maps deferID -> description for any defers registered during execution.
 // queryState contains key-value state set via SetQueryState during execution.
 func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage) (result string, history []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
-	return e.run(ctx, wasmBytes, entryPoint, input, nil)
+	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
+	if err != nil {
+		return "", nil, nil, nil, nil, fmt.Errorf("host: compile module: %w", err)
+	}
+	defer compiled.Close(ctx)
+	return e.executeCompiled(ctx, compiled, entryPoint, input, nil)
+}
+
+// ExecuteCompiled is like Execute but takes a pre-compiled module.
+// Use this when the module has already been compiled and cached by a
+// WorkflowLoader, avoiding redundant compilation.
+func (e *Engine) ExecuteCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage) (result string, history []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
+	return e.executeCompiled(ctx, compiled, entryPoint, input, nil)
 }
 
 // Replay replays a workflow from existing event history. Cached results are
 // returned for matching steps; divergence triggers an error.
 // queryState contains key-value state set via SetQueryState during execution.
 func (e *Engine) Replay(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, history []EventRecord) (result string, resultHistory []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
-	return e.run(ctx, wasmBytes, entryPoint, input, history)
-}
-
-func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, history []EventRecord) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
 	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: compile module: %w", err)
 	}
 	defer compiled.Close(ctx)
+	return e.replayCompiled(ctx, compiled, entryPoint, input, history)
+}
 
+// ReplayCompiled is like Replay but takes a pre-compiled module.
+// Use this when the module has already been compiled and cached by a
+// WorkflowLoader, avoiding redundant compilation.
+func (e *Engine) ReplayCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord) (result string, resultHistory []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
+	return e.replayCompiled(ctx, compiled, entryPoint, input, history)
+}
+
+// executeCompiled runs a fresh execution using a pre-compiled module.
+// history is the event history to replay (nil for fresh execution).
+func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
 	mod, err := e.rt.InstantiateModule(ctx, compiled)
 	if err != nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: instantiate module: %w", err)
@@ -427,6 +454,7 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 				SuspendUntil: se.Until,
 				Reason:       se.Reason,
 				NewInput:     se.NewInput,
+				NewVersion:   se.NewVersion,
 				Deferrals:    session.deferrals,
 			}, session.deferrals, session.queryState, nil
 		}
@@ -434,6 +462,11 @@ func (e *Engine) run(ctx context.Context, wasmBytes []byte, entryPoint string, i
 	}
 
 	return result, stripCompactedEvents(session.history, compactedStep), nil, session.deferrals, session.queryState, nil
+}
+
+// replayCompiled runs a replay using a pre-compiled module.
+func (e *Engine) replayCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
+	return e.executeCompiled(ctx, compiled, entryPoint, input, history)
 }
 
 // RunDefer invokes a defer cleanup function in the WASM module.
@@ -445,7 +478,11 @@ func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName strin
 		return "", fmt.Errorf("host: compile module for defer: %w", err)
 	}
 	defer compiled.Close(ctx)
+	return e.RunDeferCompiled(ctx, compiled, deferName, input)
+}
 
+// RunDeferCompiled is like RunDefer but takes a pre-compiled module.
+func (e *Engine) RunDeferCompiled(ctx context.Context, compiled wazero.CompiledModule, deferName string, input json.RawMessage) (string, error) {
 	mod, err := e.rt.InstantiateModule(ctx, compiled)
 	if err != nil {
 		return "", fmt.Errorf("host: instantiate module for defer: %w", err)
@@ -1026,7 +1063,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 						written := writeWasmString(mem, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
 						_ = writeWasmString(mem, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
 						return packAwaitSignalsResult(uint32(written), uint32(len(nextRec.SignalPayload)), false, 0)
-					}
+			}
 				}
 				// No signal yet — this is a replay of a wait that hasn't resolved.
 				// Should not happen in practice (we only wake when signal arrives),
@@ -1173,7 +1210,59 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 	return 0
 }
 
+// ContinueAsNewWithVersion restarts the workflow with new input and optionally
+// a new version. If newVersion is 0, uses the current version (same as ContinueAsNew).
+func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module, newInputJSON string, newVersion int) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeContinueAsNew {
+				s.stepCount++
+				s.suspendErr = &SuspendError{
+					Reason:     "continue_as_new",
+					NewInput:   rec.NewInput,
+					NewVersion: rec.NewVersion,
+				}
+				return 0
+			}
+		}
+		s.isReplay = false
+	}
+
+	rec := EventRecord{
+		Step:       s.stepCount,
+		EventType:  EventTypeContinueAsNew,
+		NewInput:   newInputJSON,
+		NewVersion: newVersion,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	s.suspendErr = &SuspendError{
+		Reason:     "continue_as_new",
+		NewInput:   newInputJSON,
+		NewVersion: newVersion,
+	}
+	return 0
+}
+
 func (s *execSession) ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
+	// Use parent's version as default. ResolveChildVersion with opts.Version <= 0
+	// will fall through to the parent's version rule.
+	parentVersion := 1
+	if s.engine.state != nil {
+		parentVersion = s.engine.state.Version()
+	}
+	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, parentVersion, runIDPtr, runIDMaxLen)
+}
+
+func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int32, runIDPtr, runIDMaxLen uint32) int64 {
+	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), runIDPtr, runIDMaxLen)
+}
+
+// childWorkflowWithVersion is the shared implementation for creating child workflows.
+// If version <= 0, the parent's version is used as the default.
+func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, runIDPtr, runIDMaxLen uint32) int64 {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
@@ -1195,7 +1284,16 @@ func (s *execSession) ChildWorkflow(ctx context.Context, m api.Module, name, inp
 			parentID = fmt.Sprintf("unknown-%s-%d", name, s.stepCount)
 		}
 		var err error
-		runID, err = s.engine.childWfStore.StartChildWorkflow(ctx, parentID, name, inputJSON)
+		// Resolve version: if > 0 use explicit, otherwise use parent's version.
+		childVersion := version
+		if childVersion <= 0 {
+			if s.engine.state != nil {
+				childVersion = s.engine.state.Version()
+			} else {
+				childVersion = 0
+			}
+		}
+		runID, err = s.engine.childWfStore.StartChildWorkflow(ctx, parentID, name, inputJSON, childVersion)
 		if err != nil {
 			runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
 		}
@@ -1232,7 +1330,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 					if rec.Err != "" {
 						written := writeWasmString(mem, resultPtr, rec.Err, resultMaxLen)
 						return packAwaitChildResult(uint32(written), 1)
-					}
+			}
 					written := writeWasmString(mem, resultPtr, rec.Response, resultMaxLen)
 					return packAwaitChildResult(uint32(written), 0)
 				}

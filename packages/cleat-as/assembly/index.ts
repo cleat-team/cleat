@@ -41,3 +41,4 @@ export * from "./json";
 export * from "./plugins";
 export * from "./saga";
 export * from "./utils";
+export * from "./version";

@@ -150,8 +150,17 @@ type HostCalls interface {
 	// passing the current state as input.
 	ContinueAsNew(newInputJSON string) error
 
+	// ContinueAsNewWithVersion restarts the workflow with new input and
+	// optionally a new version. If newVersion is 0, uses the current version.
+	ContinueAsNewWithVersion(newInputJSON string, newVersion int64) error
+
 	// ChildWorkflow starts a child workflow with its own event history.
 	ChildWorkflow(name string, inputJSON string) (runID string, err error)
+
+	// ChildWorkflowWithOptions starts a child workflow with version options.
+	// Use ChildWorkflowOptions to pin a specific child version.
+	// When opts.Version is 0 (default), the child uses the parent's version.
+	ChildWorkflowWithOptions(name string, inputJSON string, opts ChildWorkflowOptions) (runID string, err error)
 
 	// AwaitChild waits for a child workflow to complete.
 	AwaitChild(runID string) (resultJSON string, err error)
@@ -552,6 +561,40 @@ func (e *CallTimeoutError) Error() string {
 	return fmt.Sprintf("call %s.%s timed out after %v", e.Service, e.Operation, e.Timeout)
 }
 
+// ---- Plugin and versioning types ----
+
+// PluginDependency declares a dependency on a named plugin with a version
+// constraint. Workflows set these at compile time; the host resolves them
+// at instance creation time.
+type PluginDependency struct {
+	Name       string `json:"name"`
+	Constraint string `json:"constraint"` // e.g., ">=1.2.0", "~1.2.0", "^1.2.0", "=1.2.0"
+}
+
+// WorkflowPluginDeps is set at build time (e.g., via ldflags or init())
+// to declare which plugin versions this workflow requires. The host reads
+// these from the workflow_defs.plugin_deps column at instance creation.
+//
+// Example (set in an init function):
+//
+//	func init() {
+//	    cleat.WorkflowPluginDeps = []cleat.PluginDependency{
+//	        {Name: "llm", Constraint: ">=1.2.0"},
+//	        {Name: "blobstore", Constraint: "~2.0.0"},
+//	    }
+//	}
+var WorkflowPluginDeps []PluginDependency
+
+// ChildWorkflowOptions carries version resolution configuration for
+// spawning a child workflow.
+//
+// Version resolution priority:
+//  1. Version > 0: use that explicit version
+//  2. Version <= 0 (default): child uses the same version as the parent workflow
+type ChildWorkflowOptions struct {
+	Version int // 0 = use default resolution (parent's version)
+}
+
 // ---- Call options ----
 
 // CallOptions provides per-call configuration.
@@ -636,7 +679,9 @@ type hostCallsImpl struct {
 	pollCancellation          func() (bool, string)
 	pollSignal                func(signalName string) (string, bool, error)
 	continueAsNew             func(newInputJSON string) error
+	continueAsNewWithVersion func(newInputJSON string, newVersion int64) error
 	childWorkflow             func(name, inputJSON string) (string, error)
+	childWorkflowWithOptions  func(name, inputJSON string, version int) (string, error)
 	awaitChild                func(runID string) (string, error)
 	awaitAllChildren           func(runIDs []string) ([]ChildResult, error)
 	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
@@ -701,7 +746,9 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		pollCancellation:          opts.PollCancellation,
 		pollSignal:                opts.PollSignal,
 		continueAsNew:             opts.ContinueAsNew,
+		continueAsNewWithVersion:  opts.ContinueAsNewWithVersion,
 		childWorkflow:             opts.ChildWorkflow,
+		childWorkflowWithOptions:  opts.ChildWorkflowWithOptions,
 		awaitChild:                opts.AwaitChild,
 		awaitAllChildren:           opts.AwaitAllChildren,
 		durableCallTypedWithHeartbeat: opts.DurableCallTypedWithHeartbeat,
@@ -777,7 +824,9 @@ type HostCallsOptions struct {
 	PollCancellation          func() (bool, string)
 	PollSignal                func(signalName string) (string, bool, error)
 	ContinueAsNew                func(newInputJSON string) error
+	ContinueAsNewWithVersion     func(newInputJSON string, newVersion int64) error
 	ChildWorkflow                func(name, inputJSON string) (string, error)
+	ChildWorkflowWithOptions    func(name, inputJSON string, version int) (string, error)
 	AwaitChild                   func(runID string) (string, error)
 	AwaitAllChildren              func(runIDs []string) ([]ChildResult, error)
 	DurableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
@@ -1228,11 +1277,26 @@ func (h *hostCallsImpl) ContinueAsNew(newInputJSON string) error {
 	return h.continueAsNew(newInputJSON)
 }
 
+func (h *hostCallsImpl) ContinueAsNewWithVersion(newInputJSON string, newVersion int64) error {
+	if h.continueAsNewWithVersion == nil {
+		return errors.New("durable: ContinueAsNewWithVersion not initialized")
+	}
+	return h.continueAsNewWithVersion(newInputJSON, newVersion)
+}
+
 func (h *hostCallsImpl) ChildWorkflow(name, inputJSON string) (string, error) {
 	if h.childWorkflow == nil {
 		return "", errors.New("durable: ChildWorkflow not initialized")
 	}
 	return h.childWorkflow(name, inputJSON)
+}
+
+func (h *hostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts ChildWorkflowOptions) (string, error) {
+	if h.childWorkflowWithOptions != nil {
+		return h.childWorkflowWithOptions(name, inputJSON, opts.Version)
+	}
+	// Fall back to plain ChildWorkflow if options handler is not available.
+	return h.ChildWorkflow(name, inputJSON)
 }
 
 func (h *hostCallsImpl) AwaitChild(runID string) (string, error) {

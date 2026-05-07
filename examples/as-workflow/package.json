@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "npx asc assembly/index.ts --target release --transform ./node_modules/@cleat/transform/index.js",
-    "build:debug": "npx asc assembly/index.ts --target debug --transform ./node_modules/@cleat/transform/index.js",
+    "build": "npx asc assembly/index.ts --target release --transform ./node_modules/@cleat/transform/index.js && node ../../packages/cleat-as/scripts/inject-metadata.js dist/workflow.wasm --name PlaceOrder --version 1 --output dist/workflow.stamped.wasm",
+    "build:debug": "npx asc assembly/index.ts --target debug --transform ./node_modules/@cleat/transform/index.js && node ../../packages/cleat-as/scripts/inject-metadata.js dist/workflow.wasm --name PlaceOrder --version 1 --output dist/workflow.stamped.wasm",
+    "stamp": "node ../../packages/cleat-as/scripts/inject-metadata.js dist/workflow.wasm --name PlaceOrder --version 1",
     "clean": "rm -rf dist/"
   },
   "devDependencies": {

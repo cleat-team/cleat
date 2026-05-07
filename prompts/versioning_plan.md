@@ -447,3 +447,33 @@ WASM. The worker binary only changes when the host interface changes.
    changes, workflows compiled against the old interface break.
    Mitigation: plugin host interfaces follow the same additive-only
    policy as the main host interface.
+
+---
+
+## 8. Implementation Progress Log
+
+**Implemented:** 2026-05-07, ~4 subagent runs, ~50 minutes total wall-clock time.
+
+### Phase 1: Database Schema + Loader ✅
+- **Files created:** `migrations/008_workflow_versioning.sql`, `internal/host/versioned_loader.go`, `internal/host/plugin_loader.go`
+- **Files modified:** `internal/host/runtime.go`, `internal/host/engine.go`, `internal/host/db.go`
+- WorkflowLoader with bounded LRU cache (100 entries), PluginLoader with semver resolution (tilde/caret/exact), version-aware workflow start via `ResolveLatestVersion`, `ExecuteCompiled`/`ReplayCompiled` for cached modules
+
+### Phase 2: Build-Time Version Stamping ✅
+- **Files created:** `internal/wasm/metadata.go` (17 tests), `cleat/version.go`, `cleat_sdk/version.py`, `scripts/stamp_metadata.py`, `assembly/version.ts`, `scripts/inject-metadata.js`, `src/version.rs`, `src/bin/inject_metadata.rs`, `WorkflowVersion.java`, `scripts/inject-metadata.sh`
+- **Files modified:** `cmd/cleat/main.go`, `python-sdk/Makefile`, `scripts/build_wasm.py`, `assembly/index.ts`, `examples/as-workflow/package.json`, `crates/durable-sdk/src/lib.rs`, `crates/durable-sdk/Makefile`, `crates/durable-java/Makefile`
+- Cross-compatibility verified: Python, Node.js, Go stampers produce identical WASM binary format
+
+### Phases 3-4: Plugin + Child Workflow Versioning ✅
+- **Files created:** `internal/host/plugin_resolver.go`, `internal/host/child_version.go`
+- **Files modified:** `internal/host/engine.go`, `internal/host/imports.go`, `internal/host/db.go`, `internal/host/sharded_store.go`
+- **SDK changes:** `ChildWorkflowOptions` + `child_workflow_with_options` added to all 5 SDKs (Go, Python, AS, Rust, Java)
+- Plugin resolution: custom semver matching with `>=`, `<=`, `>`, `<`, `=`, `~`, `^` operators
+- Child version resolution: explicit pin > parent's version > latest compatible
+
+### Phases 5-6: Migration + GC + CLI ✅
+- **Files created:** `internal/host/version_compat.go`, `internal/host/version_gc.go`, `internal/host/version_metrics.go`, `internal/host/version_handler.go`, `cmd/cleatctl/main.go`, `cmd/cleatctl/versions.go`, `cmd/cleatctl/deploy.go`
+- `ValidateVersionCompatibility`, `GarbageCollectVersions` (dry-run), `PurgeVersions` (age threshold)
+- `CollectVersionMetrics`, `CheckStaleVersions`, stale alerts
+- HTTP endpoints for version management
+- `cleatctl` CLI: `versions list/deprecate/restore/purge/active/gc` + `deploy workflow/plugin`

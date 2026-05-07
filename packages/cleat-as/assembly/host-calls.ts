@@ -130,6 +130,21 @@ export declare function import_cleat_child_workflow(
 ): i64;
 
 /**
+ * 11b. cleat_child_workflow_with_options: Start a child workflow with version options.
+ * (import "env" "cleat_child_workflow_with_options") (param i32 i32 i32 i32 i32 i32 i32) (result i64)
+ */
+@external("env", "cleat_child_workflow_with_options")
+export declare function import_cleat_child_workflow_with_options(
+  namePtr: i32,
+  nameLen: i32,
+  inputPtr: i32,
+  inputLen: i32,
+  version: i32,
+  runIdPtr: i32,
+  runIdMaxLen: i32,
+): i64;
+
+/**
  * 12. cleat_await_child: Wait for a child workflow to complete.
  * (import "env" "cleat_await_child") (param i32 i32 i32 i32) (result i64)
  */
@@ -1066,6 +1081,43 @@ export class HostCalls {
       return new DurableResult<string>(
         "",
         "child_workflow error code: " + decoded.errCode.toString(),
+      );
+    }
+
+    let runId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+    return new DurableResult<string>(runId, null);
+  }
+
+  /**
+   * Start a child workflow instance with an explicit version.
+   *
+   * @param name      - Child workflow definition name.
+   * @param inputJson - Input JSON for the child workflow.
+   * @param version   - Explicit workflow definition version (0 = use parent's version).
+   * @returns A DurableResult containing the child run ID on success.
+   */
+  childWorkflowWithOptions(name: string, inputJson: string, version: i32 = 0): DurableResult<string> {
+    let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
+    let inputOffset: usize = SCRATCH_BASE + nameLen;
+    let remaining: i32 = OUT_BUF_SIZE - nameLen;
+    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
+
+    let result: i64 = import_cleat_child_workflow_with_options(
+      SCRATCH_BASE as i32,
+      nameLen,
+      inputOffset as i32,
+      inputLen,
+      version,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+
+    if (decoded.errCode !== 0) {
+      return new DurableResult<string>(
+        "",
+        "childWorkflowWithOptions error code: " + decoded.errCode.toString(),
       );
     }
 

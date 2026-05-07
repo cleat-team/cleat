@@ -248,6 +248,19 @@ class ChildResult:
 
 
 @dataclass
+class ChildWorkflowOptions:
+    """Options for starting a child workflow with version control.
+
+    Parameters
+    ----------
+    version : int
+        Explicit workflow definition version to use.
+        0 = use default resolution (parent's version).
+    """
+    version: int = 0
+
+
+@dataclass
 class PromiseResult:
     """Result of an :meth:`HostCalls.await_promise` call."""
 
@@ -410,6 +423,22 @@ if not _USING_WASM:
         """Stub for WASM import ``(import "env" "cleat_child_workflow") (param i32 i32 i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_child_workflow can only be called within a cleat WASM runtime."
+        )
+
+
+if not _USING_WASM:
+    def _import_cleat_child_workflow_with_options(
+        name_ptr: int,
+        name_len: int,
+        input_ptr: int,
+        input_len: int,
+        version: int,
+        run_id_ptr: int,
+        run_id_max_len: int,
+    ) -> int:
+        """Stub for WASM import \`."""
+        raise NotImplementedError(
+            "cleat_child_workflow_with_options can only be called within a cleat WASM runtime."
         )
 
 
@@ -1787,6 +1816,53 @@ class HostCalls:
         if err_code != 0:
             raise RuntimeError(
                 f"child_workflow failed with error code: {err_code}"
+            )
+
+        return read_string(OUTPUT_OFFSET, run_id_len)
+
+    def child_workflow_with_options(
+        self, name: str, input: Any, options: ChildWorkflowOptions = ChildWorkflowOptions()
+    ) -> str:
+        """Start a child workflow instance with version options.
+
+        Like :meth:`child_workflow` but allows specifying the workflow
+        definition version explicitly.
+
+        Parameters
+        ----------
+        name : str
+            Child workflow definition name.
+        input : Any
+            Input for the child workflow.
+        options : ChildWorkflowOptions
+            Version options for the child workflow (default: version=0).
+
+        Returns
+        -------
+        str
+            The child workflow's run ID.
+        """
+        input_str = self._marshal(input)
+
+        name_len = write_string(SCRATCH_BASE, name, OUT_BUF_SIZE)
+        input_offset = SCRATCH_BASE + name_len
+        remaining = OUT_BUF_SIZE - name_len
+        input_len = write_string(input_offset, input_str, remaining)
+
+        result = _import_cleat_child_workflow_with_options(
+            SCRATCH_BASE,
+            name_len,
+            input_offset,
+            input_len,
+            options.version,
+            OUTPUT_OFFSET,
+            OUT_BUF_SIZE,
+        )
+
+        run_id_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"child_workflow_with_options failed with error code: {err_code}"
             )
 
         return read_string(OUTPUT_OFFSET, run_id_len)
