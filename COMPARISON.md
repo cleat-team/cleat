@@ -2,7 +2,7 @@
 
 ## What Cleat Is
 
-Cleat is a durable execution framework for Go. Workflows are written in near-standard Go, compiled to WebAssembly via a transformer pipeline, stored as versioned WASM blobs in PostgreSQL, and executed on stateless wazero-based workers with automatic replay, checkpointing, and failover. The core abstraction is a single `HostCalls` interface — there is no workflow/activity distinction.
+Cleat is a durable execution framework for Go and Python. Workflows are written in near-standard Go or Python, compiled to WebAssembly via a transformer pipeline, stored as versioned WASM blobs in PostgreSQL, and executed on stateless wazero-based workers with automatic replay, checkpointing, and failover. The core abstraction is a single `HostCalls` interface — there is no workflow/activity distinction.
 
 ---
 
@@ -44,7 +44,7 @@ Every external interaction is recorded in `event_history` for replay. That same 
 
 The WASM boundary (15 host function imports from the `"env"` module, plus retry and heartbeat variants) means any language that compiles to WASM can produce workflow modules. The worker doesn't know or care what language produced the WASM bytes. Temporal maintains separate SDKs in 6 languages, each reimplementing the deterministic runtime — bugs and behavioral differences between SDKs are an ongoing problem. DBOS has 4 separate SDKs (TypeScript, Python, Go, Java). In cleat, a language transformer generates a few hundred lines of adapter code — not a full runtime reimplementation.
 
-**Caveat**: Go has a fully automated transformer pipeline (`durable build`). Rust has an automated transformer via the `durable-sdk` crate and `#[durable_entry]` proc-macro. Java/Kotlin (TeaVM) and TypeScript (AssemblyScript) SDKs with transformer plugins and build integrations are implemented (`durable build --target java` / `--target assemblyscript`). Additional languages are possible since the host ABI is language-agnostic — each requires ~2-3 weeks for an SDK and transformer.
+**Caveat**: Go has a fully automated transformer pipeline (`durable build`). Python has a WIT-based WASM compilation pipeline with `componentize-py` integration (`durable build --target python`) and full LangChain/LangGraph support. Rust has an automated transformer via the `durable-sdk` crate and `#[durable_entry]` proc-macro. Java/Kotlin (TeaVM) and TypeScript (AssemblyScript) SDKs with transformer plugins and build integrations are implemented (`durable build --target java` / `--target assemblyscript`). Additional languages are possible since the host ABI is language-agnostic — each requires ~2-3 weeks for an SDK and transformer.
 
 ### 7. Stronger Static Analysis
 
