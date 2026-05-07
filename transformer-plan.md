@@ -26,7 +26,7 @@ Before diving into phases, it's worth understanding the target output. Given a
 user workflow like:
 
 ```go
-func PlaceOrder(h *durable.HostCalls, userID string, cart []CartItem) (string, error) {
+func PlaceOrder(h *cleat.HostCalls, userID string, cart []CartItem) (string, error) {
     reservation, err := validateAndReserve(h, userID, cart)
     if err != nil {
         return "", err
@@ -67,8 +67,8 @@ them, and produce a data structure that the rest of the transformer can work wit
 ### Tasks
 
 1.1 **Set up the transformer project.**
-   - Create `cmd/durable/` CLI skeleton (cobra or plain `flag`).
-   - Command: `durable build ./workflows/` — accepts a package pattern.
+   - Create `cmd/cleat/` CLI skeleton (cobra or plain `flag`).
+   - Command: `cleat build ./workflows/` — accepts a package pattern.
    - Use `golang.org/x/tools/go/packages` to load packages in `packages.LoadMode`
      that includes `NeedName`, `NeedFiles`, `NeedCompiledGoFiles`, `NeedTypes`,
      `NeedTypesInfo`, `NeedSyntax`, and `NeedDeps`.
@@ -89,15 +89,15 @@ them, and produce a data structure that the rest of the transformer can work wit
      `workflows.PlaceOrder`, `workflows.validateAndReserve`).
 
 1.4 **Detect workflow entry points.**
-   - A function is an entry point if its first parameter is `*durable.HostCalls`
+   - A function is an entry point if its first parameter is `*cleat.HostCalls`
      AND it is exported (capitalized name) AND it is in the root of the target
-     package. Alternative: use a `//durable:workflow` comment directive.
+     package. Alternative: use a `//cleat:workflow` comment directive.
    - Report an error if no entry points found.
 
 ### Deliverable
 A CLI that loads a Go package and prints:
 ```
-$ durable build ./testdata/basic/
+$ cleat build ./testdata/basic/
   Package: testdata/basic
   Functions: 12 (3 exported, 9 unexported)
   Entry points: PlaceOrder, CancelOrder, ApprovalWorkflow
@@ -149,13 +149,13 @@ Identify which functions directly call `HostCalls` methods (durable leaves).
      `DurableLog`, `DurablePollCancellation`, `DurablePollSignal`,
      `DurableContinueAsNew`, `DurableChildWorkflow`, `DurableAwaitChild`,
      `DurableVersion`, `SetQueryState`.
-   - These are methods on `*durable.HostCalls`. Match by looking for
+   - These are methods on `*cleat.HostCalls`. Match by looking for
      `*ast.CallExpr` where the selector resolves to a method of
-     `*durable.HostCalls`.
+     `*cleat.HostCalls`.
 
 ### Deliverable
 ```
-$ durable build ./testdata/basic/
+$ cleat build ./testdata/basic/
   Call graph: 12 functions, 34 edges
   Durable leaves: reserveInventory, chargeCustomer, createShipment, ...
 ```
@@ -204,7 +204,7 @@ restrictions and must have access to `*HostCalls`.
 
 ### Deliverable
 ```
-$ durable build ./testdata/basic/
+$ cleat build ./testdata/basic/
   Durable functions: 8 (2 leaves + 6 closure)
   Pure functions: 4
   Warnings: order.go:42 — map iteration with conditional on key
@@ -215,14 +215,14 @@ $ durable build ./testdata/basic/
 ## Phase 4: HostCalls threading verification (Week 3)
 
 **Goal:** Verify that every function in the durable closure has access to
-`*durable.HostCalls` through its parameter list or through a caller that
+`*cleat.HostCalls` through its parameter list or through a caller that
 passes it.
 
 ### Tasks
 
 4.1 **Track `*HostCalls` flow.**
    - For each function in the durable closure, check whether its first
-     parameter is `*durable.HostCalls`.
+     parameter is `*cleat.HostCalls`.
    - If yes: the function has direct access. Mark it as "threaded."
    - If no: check each caller. If any caller has `*HostCalls` as a parameter
      AND passes it as an argument to this function, the function has indirect
@@ -236,23 +236,23 @@ passes it.
      the receiver.
    - This requires a simple intra-procedural dataflow analysis. For the
      initial implementation, handle the common patterns:
-     - Direct parameter: `func foo(h *durable.HostCalls, ...)`
-     - Struct field: `type S struct { h *durable.HostCalls }` with
+     - Direct parameter: `func foo(h *cleat.HostCalls, ...)`
+     - Struct field: `type S struct { h *cleat.HostCalls }` with
        `func (s *S) Method(...)` where `s.h` is set from a parameter
      - Closure capture: `h := h; func() { h.DurableCall(...) }()` — the
        closure captures `h` from the enclosing scope
 
 4.3 **Report errors with source locations.**
    - Error format: `shipping.go:15: createShipment is in the durable closure
-     (it calls DurableCall) but has no access to *durable.HostCalls. Add
-     'h *durable.HostCalls' as the first parameter or pass it from a caller.`
+     (it calls DurableCall) but has no access to *cleat.HostCalls. Add
+     'h *cleat.HostCalls' as the first parameter or pass it from a caller.`
    - Include the call chain that leads to the error.
 
 ### Deliverable
 ```
-$ durable build ./testdata/threading-error/
+$ cleat build ./testdata/threading-error/
   Error: shipping.go:15: createShipment is in the durable closure
-         but has no access to *durable.HostCalls.
+         but has no access to *cleat.HostCalls.
          Call chain: PlaceOrder → fulfillOrder → createShipment
          createShipment is missing the HostCalls parameter.
 ```
@@ -270,15 +270,15 @@ generated host adapter calls.
 5.1 **Determine which host functions are used.**
    - Scan the durable closure for calls to each `HostCalls` method.
    - Only generate imports for methods that are actually called. If a workflow
-     never calls `DurableSleep`, omit the `durable_sleep` import.
+     never calls `DurableSleep`, omit the `cleat_sleep` import.
    - This produces smaller WASM binaries and fewer host functions to register.
 
 5.2 **Generate import stubs.**
    - Write `gen_wasm_imports.go` with a `//go:build wasip1` constraint.
    - Each import has the signature:
      ```go
-     //go:wasmimport env durable_call
-     func durableCallImport(
+     //go:wasmimport env cleat_call
+     func cleatCallImport(
          svcPtr unsafe.Pointer, svcLen uint32,
          opPtr unsafe.Pointer, opLen uint32,
          reqPtr unsafe.Pointer, reqLen uint32,
@@ -321,28 +321,28 @@ interface to the low-level `//go:wasmimport` calls. This is the glue between
 
 6.1 **Generate the adapter struct.**
    - Write `gen_host_adapter.go` with `//go:build wasip1`.
-   - The adapter is a function `makeHostCalls(mem *wasmMemory) *durable.HostCalls`
+   - The adapter is a function `makeHostCalls(mem *wasmMemory) *cleat.HostCalls`
      that returns a `HostCalls` struct populated with closures. Each closure
      calls the corresponding `//go:wasmimport` function.
 
 6.2 **Implement each HostCalls method.**
    - `DurableCall(service, operation, request) → (response, error)`:
      1. Allocate string in WASM memory: `svcPtr, svcLen := mem.AllocString(service)`
-     2. Call import: `respPtr, respLen, errCode := durableCallImport(svcPtr, svcLen, ...)`
+     2. Call import: `respPtr, respLen, errCode := cleatCallImport(svcPtr, svcLen, ...)`
      3. If errCode != 0: read error string from memory, return error
      4. Read response string from memory, return response
    - `DurableSleep(durationMs)`:
-     1. Call `durableSleepImport(durationMs)`. The host handles the actual
+     1. Call `cleatSleepImport(durationMs)`. The host handles the actual
         sleep by releasing the workflow and setting `next_wake_at`.
    - `DurableAwaitSignals(signalNames, timeoutMs) → (signalName, payload, timedOut, error)`:
      1. JSON-serialize signalNames, allocate in WASM memory.
-     2. Call `durableAwaitSignalsImport(...)`.
+     2. Call `cleatAwaitSignalsImport(...)`.
      3. The host suspends the workflow. On resume (signal arrived or timeout),
         the import returns.
    - `DurableLog(message)`:
-     1. Allocate message in WASM memory, call `durableLogImport(...)`.
+     1. Allocate message in WASM memory, call `cleatLogImport(...)`.
    - `Now() int64`:
-     1. Call `durableNowImport()`. The host provides the current wall-clock
+     1. Call `cleatNowImport()`. The host provides the current wall-clock
         time in milliseconds since epoch.
    - (And similarly for DurableDefer, DurablePollCancellation, etc.)
 
@@ -445,28 +445,28 @@ binary from the user's Go source.
    - The output is a single WASM binary.
    - Validate the binary:
      - Check that it exports the expected functions (`place_order`, etc.)
-     - Check that it imports the expected host functions (`durable_call`, etc.)
+     - Check that it imports the expected host functions (`cleat_call`, etc.)
      - Check that the binary size is reasonable (< 5MB for standard Go,
        < 500KB for tinygo)
 
 8.3 **Run a smoke test.**
    - Load the compiled WASM in a minimal wazero host.
    - Call the entry point with a known input.
-   - Verify that the host intercepts the `durable_call` import.
+   - Verify that the host intercepts the `cleat_call` import.
    - Verify that the workflow produces the expected output.
    - This is the same pattern as the WASM boundary demo in `cmd/host/`.
 
 8.4 **CLI polish.**
-   - `durable build ./workflows/` — compiles and writes `.wasm` to the
+   - `cleat build ./workflows/` — compiles and writes `.wasm` to the
      current directory.
-   - `durable build ./workflows/ -o /path/to/output.wasm` — explicit output.
-   - `durable build ./workflows/ --target tinygo` — use tinygo instead of
+   - `cleat build ./workflows/ -o /path/to/output.wasm` — explicit output.
+   - `cleat build ./workflows/ --target tinygo` — use tinygo instead of
      standard Go.
-   - `durable build ./workflows/ --json` — machine-readable output with
+   - `cleat build ./workflows/ --json` — machine-readable output with
      diagnostics (call graph, durable closure, entry points, warnings).
 
 ### Deliverable
-A working `durable build` command that produces a WASM binary from Go source.
+A working `cleat build` command that produces a WASM binary from Go source.
 
 ---
 
@@ -501,31 +501,31 @@ experience — it's the difference between "write Go with restrictions" and
    - The suggested fix
    - The call chain that leads to the error (for threading errors)
 
-9.3 **Implement `durable vet`.**
+9.3 **Implement `cleat vet`.**
    - A read-only analysis command that checks for violations without
      generating code or compiling. Suitable for CI, pre-commit hooks,
      and editor integration.
-   - `durable vet ./workflows/` — runs only Phases 1-4 (load, call graph,
+   - `cleat vet ./workflows/` — runs only Phases 1-4 (load, call graph,
      closure, threading). No WASM compilation.
    - Output format: machine-readable (JSON) + human-readable (colored
      terminal output).
 
 ### Deliverable
-Comprehensive error checking with clear, actionable messages. The `durable vet`
+Comprehensive error checking with clear, actionable messages. The `cleat vet`
 command for CI integration.
 
 ### Example output
 ```
-$ durable vet ./workflows/
+$ cleat vet ./workflows/
   workflows/order.go:42: E001: goroutine in durable function
     → goroutines are not allowed in durable functions.
     → Use child workflows (h.DurableChildWorkflow) for parallelism.
   workflows/order.go:88: E003: time.Now() in durable function
     → use h.Now() instead for deterministic time.
   workflows/shipping.go:15: E010: createShipment is in the durable closure
-    but has no access to *durable.HostCalls.
+    but has no access to *cleat.HostCalls.
     → call chain: PlaceOrder → fulfillOrder → createShipment
-    → add 'h *durable.HostCalls' as the first parameter.
+    → add 'h *cleat.HostCalls' as the first parameter.
   3 errors, 0 warnings
 ```
 
@@ -539,7 +539,7 @@ $ durable vet ./workflows/
 ### Tasks
 
 10.1 **Detect tinygo installation.**
-   - `durable build --target tinygo` checks for `tinygo` in `$PATH`.
+   - `cleat build --target tinygo` checks for `tinygo` in `$PATH`.
    - If not found, print installation instructions.
 
 10.2 **Adjust generated code for tinygo.**
@@ -556,20 +556,20 @@ $ durable vet ./workflows/
    - Validate the binary (same checks as Phase 8.2).
 
 ### Deliverable
-`durable build --target tinygo` produces a ~50-200KB WASM binary.
+`cleat build --target tinygo` produces a ~50-200KB WASM binary.
 
 ---
 
 ## Phase 11: Module storage and deployment (Week 11)
 
-**Goal:** Wire the transformer output into the database. `durable deploy`
+**Goal:** Wire the transformer output into the database. `cleat deploy`
 INSERTs the WASM blob into `workflow_defs`.
 
 ### Tasks
 
-11.1 **`durable deploy` command.**
-   - Reads the WASM binary produced by `durable build`.
-   - Connects to PostgreSQL (configured via `DURABLE_DATABASE_URL` env var or
+11.1 **`cleat deploy` command.**
+   - Reads the WASM binary produced by `cleat build`.
+   - Connects to PostgreSQL (configured via `CLEAT_DATABASE_URL` env var or
      `--db` flag).
    - `INSERT INTO workflow_defs (namespace, name, version, wasm_bytes) VALUES ($1, $2, $3, $4)`
    - Auto-increments the version number (SELECT MAX(version) + 1).
@@ -580,19 +580,19 @@ INSERTs the WASM blob into `workflow_defs`.
    - `--rollout-percent` flag to set the initial rollout percentage for canary
      deployments (Section 10.1a).
 
-11.2 **`durable versions` command.**
-   - Lists all versions of a workflow: `durable versions PlaceOrder`
+11.2 **`cleat versions` command.**
+   - Lists all versions of a workflow: `cleat versions PlaceOrder`
    - Shows: version, created_at, rollout_percent, deprecated, active instances
-   - `durable versions PlaceOrder --deprecate v3` — marks a version as deprecated.
-   - `durable versions PlaceOrder --rollout v5=10%` — adjusts rollout percentage.
+   - `cleat versions PlaceOrder --deprecate v3` — marks a version as deprecated.
+   - `cleat versions PlaceOrder --rollout v5=10%` — adjusts rollout percentage.
 
-11.3 **`durable rollback` command.**
-   - `durable rollback PlaceOrder --to v4` — sets v4's rollout_percent to 100%,
+11.3 **`cleat rollback` command.**
+   - `cleat rollback PlaceOrder --to v4` — sets v4's rollout_percent to 100%,
      sets v5's to 0%, marks v5 as deprecated.
    - This is the operational rollback — it's an UPDATE, not a deployment.
 
 ### Deliverable
-End-to-end: `durable build && durable deploy` puts a WASM blob in the database,
+End-to-end: `cleat build && cleat deploy` puts a WASM blob in the database,
 ready for workers to load and execute.
 
 ---
@@ -625,7 +625,7 @@ for a variety of workflow patterns.
 
 12.3 **Compiled WASM conformance tests.**
    - For valid fixtures: compile to WASM, load in wazero, execute with a
-     test host that records all `durable_call` invocations.
+     test host that records all `cleat_call` invocations.
    - Verify the sequence of calls matches expectations.
    - Verify replay determinism: run twice with the same input, compare
      the sequence of calls — must be identical.
@@ -636,7 +636,7 @@ for a variety of workflow patterns.
      input, verify the host detects divergence.
 
 12.4 **Performance benchmarks.**
-   - Compilation time: how long does `durable build` take for a 50-function
+   - Compilation time: how long does `cleat build` take for a 50-function
      workflow? Target: < 30 seconds for standard Go, < 10 seconds for tinygo.
    - WASM binary size: standard Go vs. tinygo for a representative workflow.
    - Execution time: how long does a 10-step workflow take to execute fresh?
@@ -660,7 +660,7 @@ for common workflow patterns, and baseline performance numbers.
    - When the workflow calls `h.DurableDefer(fn)`, the host adapter:
      1. Assigns a unique `deferID`.
      2. Stores the closure in a side table (in WASM memory).
-     3. Calls `durableDeferRegister(deferID, description)` — an import that
+     3. Calls `cleatDeferRegister(deferID, description)` — an import that
         records `defer_registered` in the event history.
 
 13.2 **Defer execution on exit.**
@@ -728,16 +728,16 @@ are not on the critical path.
 
 | Week | Milestone |
 |---|---|
-| 1 | `durable build` loads a package and lists entry points |
+| 1 | `cleat build` loads a package and lists entry points |
 | 2 | Call graph shows durable leaves and their callers |
 | 3 | Durable closure computed; threading violations flagged |
 | 4 | WASM imports generated for a simple workflow |
 | 6 | Host adapter bridges HostCalls to WASM imports |
 | 7 | WASM exports generated; end-to-end compilation works |
-| 8 | `durable build` produces a valid WASM binary |
-| 9 | `durable vet` catches all known error patterns |
-| 10 | `durable build --target tinygo` works |
-| 11 | `durable deploy` INSERTs into PostgreSQL |
+| 8 | `cleat build` produces a valid WASM binary |
+| 9 | `cleat vet` catches all known error patterns |
+| 10 | `cleat build --target tinygo` works |
+| 11 | `cleat deploy` INSERTs into PostgreSQL |
 | 12 | Test suite passes; conformance tests verify replay determinism |
 | 14 | (Optional) Defer execution engine works |
 
@@ -746,8 +746,8 @@ are not on the critical path.
 A developer writes:
 
 ```go
-//durable:workflow
-func PlaceOrder(h *durable.HostCalls, userID string, cart []CartItem) (string, error) {
+//cleat:workflow
+func PlaceOrder(h *cleat.HostCalls, userID string, cart []CartItem) (string, error) {
     reservation, err := validateAndReserve(h, userID, cart)
     if err != nil {
         return "", err
@@ -770,7 +770,7 @@ func PlaceOrder(h *durable.HostCalls, userID string, cart []CartItem) (string, e
 They run:
 
 ```
-$ durable build ./workflows/
+$ cleat build ./workflows/
   Analyzing package workflows...
   Found 12 functions, 1 entry point, 8 in durable closure.
   Durable leaves: catalogLookup, reserveInventory, chargeCustomer,
@@ -782,11 +782,11 @@ $ durable build ./workflows/
   Compiling WASM module (standard Go)... OK
   Wrote place_order.wasm (2.3 MB)
 
-$ durable deploy ./place_order.wasm
+$ cleat deploy ./place_order.wasm
   Deployed PlaceOrder v7 (2.3 MB, rollout 100%)
   → INSERT INTO workflow_defs (namespace, name, version, wasm_bytes) VALUES (...)
 
-$ durable versions PlaceOrder
+$ cleat versions PlaceOrder
   VERSION  ROLLOUT  ACTIVE  CREATED
   v7       100%     0       2026-05-15 14:32 UTC
   v6       0%       12      2026-05-08 09:15 UTC

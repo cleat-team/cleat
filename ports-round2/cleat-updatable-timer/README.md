@@ -1,6 +1,6 @@
 # Cleat Updatable Timer
 
-Port of the Temporal [updatable-timer](https://github.com/temporalio/samples-go/tree/main/updatabletimer) sample to the Cleat Go SDK (`github.com/rcownie/durable`).
+Port of the Temporal [updatable-timer](https://github.com/temporalio/samples-go/tree/main/updatabletimer) sample to the Cleat Go SDK (`github.com/rcownie/cleat`).
 
 ## What It Demonstrates
 
@@ -43,7 +43,7 @@ This avoids the history-bloat problem of polling-based approaches (like `Durable
 ## Prerequisites
 
 - Go 1.26+
-- The Cleat Go SDK (`github.com/rcownie/durable`) at `../../durable` relative to this project
+- The Cleat Go SDK (`github.com/rcownie/cleat`) at `../../durable` relative to this project
 
 ## Running Tests
 

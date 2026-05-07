@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/plugins/eventtriggers"
+	"github.com/rcownie/cleat/plugins/eventtriggers"
 )
 
 // Run starts the consumer polling loop. It runs every 5 seconds, reading

@@ -99,7 +99,7 @@ your reference – the store does not use it for routing).
 ### 3. Start the Worker with `--shards-file`
 
 ```bash
-durable-worker \
+cleat-worker \
   --shards-file /etc/cleat/sharding.json \
   --task-queue default \
   --concurrency 10

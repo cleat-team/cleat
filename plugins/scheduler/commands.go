@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // RegisterCommands returns the CLI subcommands for the scheduler plugin.

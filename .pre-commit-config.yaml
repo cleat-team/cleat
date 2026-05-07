@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Pre-commit hook configuration for cleat/durable
+# Pre-commit hook configuration for cleat
 #
 # Install:
 #   pip install pre-commit

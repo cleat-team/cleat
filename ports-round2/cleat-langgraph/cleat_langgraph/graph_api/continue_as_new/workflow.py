@@ -19,14 +19,14 @@ from __future__ import annotations
 
 import json
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 from cleat_langgraph import CleatLangGraph
 
 # State keys for caching stage results
 CACHE_PREFIX = "pipeline:cache:"
 
 
-@durable_entry(name="pipeline")
+@cleat_entry(name="pipeline")
 def pipeline_workflow(h: HostCalls, input_data: int) -> int:
     """Run a 3-stage pipeline with result caching.
 
@@ -66,17 +66,17 @@ def pipeline_workflow(h: HostCalls, input_data: int) -> int:
             except (json.JSONDecodeError, TypeError, ValueError):
                 cached_value = int(cached)
             state["value"] = cached_value
-            h.durable_log(f"{stage}: using cached result {cached_value}")
+            h.cleat_log(f"{stage}: using cached result {cached_value}")
             # Mark the node as visited in the state
             state["__node__"] = stage
             continue
 
-        # Execute the stage (durable_call)
-        h.durable_log(f"{stage}: executing with value {state['value']}")
+        # Execute the stage (cleat_call)
+        h.cleat_log(f"{stage}: executing with value {state['value']}")
         state = agent.execute_node(stage, state)
 
         # Cache the result
         h.set_state(cache_key, json.dumps(state["value"]))
 
-    h.durable_log(f"Pipeline complete: {input_data} → {state['value']}")
+    h.cleat_log(f"Pipeline complete: {input_data} → {state['value']}")
     return state["value"]

@@ -84,7 +84,7 @@ TLA+ model in under 200 lines.
 
 ## 3. Component 2: SKIP LOCKED Claim Protocol
 
-**Files:** `internal/host/db.go` lines 277-370, `cmd/durable-worker/main.go`
+**Files:** `internal/host/db.go` lines 277-370, `cmd/cleat-worker/main.go`
 
 **The algorithm:**
 

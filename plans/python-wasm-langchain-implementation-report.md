@@ -31,11 +31,11 @@ All 4 workstreams (D1-D4) from the plan are implemented. 10 tasks completed acro
 - `python-sdk/cleat_sdk/langgraph/checkpoint.py` — ~250 lines, get_tuple/put/put_writes/list
 
 ### Templates
-- `cmd/durable/templates/agent-python/agent.py` — Research agent workflow
-- `cmd/durable/templates/agent-python/requirements.txt`
-- `cmd/durable/templates/agent-python/cleat.toml`
-- `cmd/durable/templates/agent-python/README.md`
-- `cmd/durable/templates/agent-python/.gitignore`
+- `cmd/cleat/templates/agent-python/agent.py` — Research agent workflow
+- `cmd/cleat/templates/agent-python/requirements.txt`
+- `cmd/cleat/templates/agent-python/cleat.toml`
+- `cmd/cleat/templates/agent-python/README.md`
+- `cmd/cleat/templates/agent-python/.gitignore`
 
 ### Examples
 - `examples/python-hello/hello_workflow.py` — Simplest possible Cleat workflow
@@ -63,8 +63,8 @@ All 4 workstreams (D1-D4) from the plan are implemented. 10 tasks completed acro
 | `python-sdk/pyproject.toml` | v0.2.0, langchain/langgraph optional deps, componentize-py config, classifiers |
 | `internal/wasm/build.go` | `BuildPythonWasm()`, `FindRepoRoot()` |
 | `internal/wasm/usage.go` | `PythonTarget` constant |
-| `cmd/durable/build_python.go` | Full rewrite: entry detection, dispatch to build script |
-| `cmd/durable/main.go` | `--entry` flag on build subcommand |
+| `cmd/cleat/build_python.go` | Full rewrite: entry detection, dispatch to build script |
+| `cmd/cleat/main.go` | `--entry` flag on build subcommand |
 
 ---
 
@@ -76,7 +76,7 @@ All 4 workstreams (D1-D4) from the plan are implemented. 10 tasks completed acro
 |------|--------|
 | WIT interface definition (33 imports, 12 interfaces) | Done |
 | Conditional WIT imports in host_calls.py | Done |
-| Compilation pipeline (`durable build --target python`) | Done |
+| Compilation pipeline (`cleat build --target python`) | Done |
 | E2E validation (hello workflow + 12 tests) | Done |
 | Remaining stub wiring (all 33 verified) | Done |
 
@@ -109,12 +109,12 @@ All 4 workstreams (D1-D4) from the plan are implemented. 10 tasks completed acro
 ## Build Pipeline Flow
 
 ```
-durable build --target python --entry my_workflow.py:place_order
+cleat build --target python --entry my_workflow.py:place_order
   │
-  ├─ cmd/durable/main.go
+  ├─ cmd/cleat/main.go
   │   └─ parses --target, --entry, dispatches
   │
-  ├─ cmd/durable/build_python.go
+  ├─ cmd/cleat/build_python.go
   │   └─ detects @durable_entry, calls wasm.BuildPythonWasm()
   │
   ├─ internal/wasm/build.go

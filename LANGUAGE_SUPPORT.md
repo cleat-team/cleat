@@ -22,21 +22,21 @@ The host runtime doesn't know or care what language produced the WASM bytes.
 
 **How:** `clang --target=wasm32-wasip1` produces standalone WASM. No runtime needed.
 
-**SDK:** A `durable.h` header declaring the 15 `extern` imports plus inline memory
+**SDK:** A `cleat.h` header declaring the 15 `extern` imports plus inline memory
 helpers (`read_string`, `write_string`, `encode_export_result`). ~200 lines.
 
 **Transformer:** None needed. The user `#include`s the header and writes `extern "C"`
 export functions. The "build" is `clang --target=wasm32-wasip1 -o workflow.wasm workflow.c`.
 
 **DX:** Manual FFI, no macros. The user writes the export wrapper by hand, similar to
-the Rust proof-of-concept before `#[durable_entry]`. A `DUREBLE_EXPORT(name, input_type)`
+the Rust proof-of-concept before `#[cleat_entry]`. A `CLEAT_EXPORT(name, input_type)`
 C macro could reduce boilerplate to ~5 lines per export.
 
 **Showstoppers:** None. C has been compiling to WASM since the MVP of wasmtime in 2019.
 
 **Binary size:** ~10-50 KB (no runtime, no GC).
 
-**Verdict:** Lowest cost. Do this first. The `durable.h` header proves the ABI works
+**Verdict:** Lowest cost. Do this first. The `cleat.h` header proves the ABI works
 for all compiled languages.
 
 ### Zig — Cost: ~1 week, Value: Medium
@@ -44,7 +44,7 @@ for all compiled languages.
 **How:** `zig build-exe -target wasm32-wasi` (Zig ships its own WASM linker). Even
 simpler toolchain setup than C — no clang/WASI sysroot needed.
 
-**SDK:** A `durable.zig` module with comptime-generated import wrappers and memory
+**SDK:** A `cleat.zig` module with comptime-generated import wrappers and memory
 helpers. Zig's `comptime` could auto-generate the 15 import declarations. ~150 lines.
 
 **Transformer:** None needed, but Zig's comptime reflection could generate export
@@ -69,19 +69,19 @@ transformer entirely.
 WASM (no embedded JVM — it's an AOT compiler). Compiles `.class` files to `.wasm`.
 Also works for Kotlin, Scala, and any JVM language.
 
-**SDK:** A `durable-java` JAR with:
+**SDK:** A `cleat-java` JAR with:
 - `HostCalls` class declaring the 15 native imports via TeaVM's `@Import` annotations
 - `Memory` helper class for string I/O
-- `@DurableEntry` annotation for marking workflow methods
+- `@CleatEntry` annotation for marking workflow methods
 
 **Transformer:**
-- Annotation processor (javac plugin) that reads `@DurableEntry` annotations at
+- Annotation processor (javac plugin) that reads `@CleatEntry` annotations at
   compile time and generates export wrapper methods
 - The export wrapper handles JSON deserialization (using a bundled JSON library or
   TeaVM's built-in JavaScript interop), HostCalls construction, and result packing
 
-**DX:** Familiar to Temporal Java users. `@DurableEntry` on a method, `HostCalls`
-injected. Gradle/Maven plugin runs `durable build --target java`.
+**DX:** Familiar to Temporal Java users. `@CleatEntry` on a method, `HostCalls`
+injected. Gradle/Maven plugin runs `cleat build --target java`.
 
 **Showstoppers:**
 - TeaVM's class library is a subset of the JDK. No `java.lang.reflect`, limited
@@ -89,7 +89,7 @@ injected. Gradle/Maven plugin runs `durable build --target java`.
 - JSON libraries: need one that works under TeaVM (TeaVM has its own JSON support, or
   a minimal `org.json`-compatible library).
 - Debugging: stack traces from WASM are opaque. Need source maps or a dev-mode
-  that runs on the JVM directly (like `durable dev` for Go).
+  that runs on the JVM directly (like `cleat dev` for Go).
 
 **Binary size:** ~200-500 KB (TeaVM includes a minimal class library + GC).
 
@@ -103,7 +103,7 @@ ecosystem (Camunda, Temporal Java SDK). 4-8 weeks for a solid v0.1.
 **A) AssemblyScript** (a TypeScript-like language that compiles directly to WASM):
 - Mature compiler, produces small WASM binaries (~10-50 KB)
 - Subset of TypeScript (no closures, no `any`, manual memory management)
-- SDK: `durable-as` package with `HostCalls` class and `@durableEntry` decorator
+- SDK: `cleat-as` package with `HostCalls` class and `@cleatEntry` decorator
 - Transformer: AssemblyScript transformer plugin that generates exports
 - **Showstopper:** AssemblyScript is NOT TypeScript. It's a different language that
   looks like TypeScript. Existing TS code won't compile. This is a significant
@@ -112,7 +112,7 @@ ecosystem (Camunda, Temporal Java SDK). 4-8 weeks for a solid v0.1.
 **B) Javy / QuickJS-in-WASM** (Shopify's approach):
 - Embeds the QuickJS JavaScript engine compiled to WASM
 - Runs actual JavaScript/TypeScript code inside the WASM module
-- SDK: `durable-js` npm package with `HostCalls` class and `durableEntry()` decorator
+- SDK: `cleat-js` npm package with `HostCalls` class and `cleatEntry()` decorator
 - Transformer: Babel plugin or `tsc` plugin that wraps entry functions with ABI glue
 - **Binary size:** 1-5 MB (embedded JS engine)
 - **Debugging:** Very difficult — JS running inside QuickJS inside WASM inside wazero.
@@ -139,11 +139,11 @@ as a stepping stone.
 ### Python — SDK exists, WASM FFI incomplete. Remaining: ~4-5 weeks to MVP
 
 **Status (May 2026):** The Python SDK exists at 4,508 lines with full ABI
-conformance — all 22 host imports are defined, the `@durable_entry` decorator
+conformance — all 22 host imports are defined, the `@cleat_entry` decorator
 generates WASM export wrappers, and typed wrappers (Saga, ChildWorkflow,
 DurableDefer, Plugins) are built. 80 tests pass (61 memory/encoding, 19 entry
-decorator). `durable build --target python` is wired via `componentize-py` in
-`cmd/durable/build_python.go`. Three example workflows exist (hello, saga,
+decorator). `cleat build --target python` is wired via `componentize-py` in
+`cmd/cleat/build_python.go`. Three example workflows exist (hello, saga,
 child fan-out).
 
 **The critical gap:** The 22 `_import_*` functions in `host_calls.py` are
@@ -174,7 +174,7 @@ cleat worker loading and executing a Python-compiled WASM module.
    `DurableFetchJSON`, typed `Promise[T]`, typed update handlers.
 6. Add AI plugin wrappers to `plugins.py`: `llm_chat`, `llm_embed`,
    `pgvector_search`, `pgvector_upsert`.
-7. Add `durable init --template agent --language python`.
+7. Add `cleat init --template agent --language python`.
 
 *Phase 3: Ecosystem Integration (P2, ~3-4 weeks)*
 8. LangChain integration — a `CleatCallbackHandler` that records LangChain
@@ -198,7 +198,7 @@ cleat worker loading and executing a Python-compiled WASM module.
   proves the ABI works; if `componentize-py` fights back, fall back to a
   Python→Rust FFI bridge or a gRPC proxy to Go workers.
 - Binary size (5-20 MB). Mitigation: server-side deployment tolerates larger
-  binaries. `durable deploy` can use S3 URLs for WASM blobs over a size
+  binaries. `cleat deploy` can use S3 URLs for WASM blobs over a size
   threshold rather than storing in PostgreSQL `BYTEA`.
 
 **Verdict:** The Python SDK is much further along than the original analysis
@@ -215,8 +215,8 @@ code across 5 packages.
 
 ### Rust — Already Done
 
-`durable-sdk` crate (290 lines) + `durable-macro` proc-macro (121 lines) +
-`durable build --target rust`. ~537 lines total for the SDK.
+`cleat-sdk` crate (290 lines) + `cleat-macro` proc-macro (121 lines) +
+`cleat build --target rust`. ~537 lines total for the SDK.
 
 ---
 
@@ -256,7 +256,7 @@ If Python/TypeScript via embedded interpreters is essential, consider:
 
 ## Recommended Order
 
-1. **C + Zig** (week 1-2): Prove the ABI works for compiled languages. The `durable.h`
+1. **C + Zig** (week 1-2): Prove the ABI works for compiled languages. The `cleat.h`
    header is < 200 lines and validates that no host changes are needed.
 2. **Java** (weeks 3-8): Highest value for enterprise adoption. TeaVM is mature.
    The annotation processor pattern is well-understood from Lombok/Dagger.

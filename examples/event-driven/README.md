@@ -22,14 +22,14 @@ events that weren't successfully dispatched.
 ## Prerequisites
 
 - A running PostgreSQL database
-- The `durable-worker` binary compiled with the event-triggers plugin
+- The `cleat-worker` binary compiled with the event-triggers plugin
 
 ## Running the Worker
 
 Start the worker with the HTTP API enabled:
 
 ```bash
-durable-worker \
+cleat-worker \
   --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
   --api-addr :8080
 ```
@@ -191,10 +191,10 @@ they wake up promptly.
 Build the example workflow to WASM:
 
 ```bash
-durable build -o /tmp/out ./examples/event-driven/
+cleat build -o /tmp/out ./examples/event-driven/
 
 # Deploy the WASM module:
-durable deploy event-driven /tmp/out/event-driven.wasm
+cleat deploy event-driven /tmp/out/event-driven.wasm
 ```
 
 ## Architecture

@@ -4,7 +4,7 @@
  *
  * Provides:
  *   - MockHostCalls class — drop-in replacement for HostCalls with record/replay
- *   - Call recording — every durableCall, durableSleep, durableSend, etc. is tracked
+ *   - Call recording — every cleatCall, cleatSleep, cleatSend, etc. is tracked
  *   - Signal delivery — simulate external signals via deliverSignal()
  *   - Stub registration — pre-configure call responses with registerCallStub()
  *   - Assertions — assertCalled(), assertNotCalled(), assertState()
@@ -98,9 +98,9 @@ class PluginCallStub {
 // ═════════════════════════════════════════════════════════════════════════════
 
 /**
- * Outcome of a durableCall operation.
+ * Outcome of a cleatCall operation.
  */
-export class DurableCallOutcome {
+export class CleatCallOutcome {
   constructor(
     public readonly response: string,
     public readonly error: string | null,
@@ -212,7 +212,7 @@ export class AwaitPromiseOutcome {
 }
 
 /**
- * Result of a durableFetch HTTP request.
+ * Result of a cleatFetch HTTP request.
  */
 export class FetchResult {
   constructor(
@@ -344,14 +344,14 @@ export class MockHostCalls {
   continueAsNewInput: string = "";
 
   // ────────────────────────────────────────────
-  // 1. durableCall
+  // 1. cleatCall
   // ────────────────────────────────────────────
 
   /**
    * Make a recorded API call to an external service.
    * Returns a pre-programmed stub response if one is registered.
    */
-  durableCall(service: string, operation: string, requestJson: string): DurableCallOutcome {
+  cleatCall(service: string, operation: string, requestJson: string): CleatCallOutcome {
     // Retry simulation
     if (this.retrySimCount > 0) {
       let key: string = service + "/" + operation;
@@ -363,7 +363,7 @@ export class MockHostCalls {
         this.retrySimAttempts.set(key, attempt + 1);
         let errMsg: string = "simulated transient failure for " + key + " (attempt " + (attempt + 1).toString() + "/" + this.retrySimCount.toString() + ")";
         this.callHistory.push(new CallRecord(service, operation, requestJson, "", errMsg));
-        return new DurableCallOutcome("", errMsg, 1);
+        return new CleatCallOutcome("", errMsg, 1);
       }
     }
 
@@ -380,27 +380,27 @@ export class MockHostCalls {
         }
         this.callHistory.push(new CallRecord(service, operation, requestJson, resp, err));
         if (err !== null) {
-          return new DurableCallOutcome("", err, 1);
+          return new CleatCallOutcome("", err, 1);
         }
-        return new DurableCallOutcome(resp, null, 0);
+        return new CleatCallOutcome(resp, null, 0);
       }
     }
 
     // No stub registered
     let errMsg: string = "no stub registered for " + service + "." + operation;
     this.callHistory.push(new CallRecord(service, operation, requestJson, "", errMsg));
-    return new DurableCallOutcome("", errMsg, 1);
+    return new CleatCallOutcome("", errMsg, 1);
   }
 
   // ────────────────────────────────────────────
-  // 2. durableSleep
+  // 2. cleatSleep
   // ────────────────────────────────────────────
 
   /**
    * Simulate workflow suspension for a duration.
    * Advances the simulated clock.
    */
-  durableSleep(durationMs: i64): bool {
+  cleatSleep(durationMs: i64): bool {
     this.nowMs += durationMs;
     return false; // In mock mode, never suspend
   }
@@ -956,13 +956,13 @@ export class MockHostCalls {
   }
 
   // ────────────────────────────────────────────
-  // 31. durableSend (fire-and-forget)
+  // 31. cleatSend (fire-and-forget)
   // ────────────────────────────────────────────
 
   /**
    * Fire-and-forget durable call.
    */
-  durableSend(service: string, operation: string, requestJson: string): string | null {
+  cleatSend(service: string, operation: string, requestJson: string): string | null {
     this.callHistory.push(new CallRecord(service, operation, requestJson, "", null));
     return null;
   }
@@ -1136,15 +1136,15 @@ export class MockHostCalls {
   }
 
   // ────────────────────────────────────────────
-  // 43. durableFetch
+  // 43. cleatFetch
   // ────────────────────────────────────────────
 
   /**
    * Make an HTTP request via the host runtime.
    */
-  durableFetch(method: string, url: string, headersJson: string, body: string): FetchResult {
+  cleatFetch(method: string, url: string, headersJson: string, body: string): FetchResult {
     // No stubs for fetch yet — return an error
-    return new FetchResult(0, "{}", "", "durableFetch not supported in mock mode");
+    return new FetchResult(0, "{}", "", "cleatFetch not supported in mock mode");
   }
 
   // ────────────────────────────────────────────
@@ -1155,7 +1155,7 @@ export class MockHostCalls {
    * Convenience HTTP GET.
    */
   fetchGet(url: string): FetchResult {
-    return this.durableFetch("GET", url, "{}", "");
+    return this.cleatFetch("GET", url, "{}", "");
   }
 
   // ────────────────────────────────────────────

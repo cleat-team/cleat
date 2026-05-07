@@ -7,8 +7,8 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-durable-sdk = { path = "../../crates/durable-sdk" }
-durable-macro = { path = "../../crates/durable-macro" }
+cleat-sdk = { path = "../../crates/cleat-sdk" }
+cleat-macro = { path = "../../crates/cleat-macro" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/auth"
+	"github.com/rcownie/cleat/internal/auth"
 )
 
 // RegisterRoutes registers HTTP handlers for the event-triggers plugin.

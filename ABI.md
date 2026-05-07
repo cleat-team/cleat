@@ -74,12 +74,12 @@ The function returns error code 1 in bits 0-31, and the output buffer contains:
 
 All host functions are imported from the `"env"` WASM module. Every function returns `i64` with a bit-packed result. Strings cross the boundary as `(ptr: i32, len: i32)` pairs — input strings use `(ptr, actual_len)`, output buffers use `(out_ptr, max_len)` where the host writes the result and returns the actual length in the packed result.
 
-### 2.1 `durable_call`
+### 2.1 `cleat_call`
 
 Make a recorded API call to an external service.
 
 ```
-(func (import "env" "durable_call")
+(func (import "env" "cleat_call")
   (param i32 i32 i32 i32 i32 i32 i32 i32)
   (result i64))
 ```
@@ -105,12 +105,12 @@ Make a recorded API call to an external service.
 
 If `errCode == 0`, the response buffer contains valid JSON. If `errCode == 1`, the response buffer contains an error message string.
 
-### 2.2 `durable_sleep`
+### 2.2 `cleat_sleep`
 
 Suspend workflow execution for a duration.
 
 ```
-(func (import "env" "durable_sleep") (param i64) (result i64))
+(func (import "env" "cleat_sleep") (param i64) (result i64))
 ```
 
 | Param | Type | Description |
@@ -126,32 +126,32 @@ Suspend workflow execution for a duration.
 
 On fresh execution, `status == 1` and the workflow should propagate the suspend by returning the suspension sentinel. On replay, `status == 0`.
 
-### 2.3 `durable_now`
+### 2.3 `cleat_now`
 
 Get current wall-clock time.
 
 ```
-(func (import "env" "durable_now") (result i64))
+(func (import "env" "cleat_now") (result i64))
 ```
 
 Returns: current time in **milliseconds since Unix epoch** as `i64`.
 
-### 2.4 `durable_random`
+### 2.4 `cleat_random`
 
 Get a deterministic random value.
 
 ```
-(func (import "env" "durable_random") (result i64))
+(func (import "env" "cleat_random") (result i64))
 ```
 
 Returns: deterministic `i64` value. The same value is returned on replay.
 
-### 2.5 `durable_log`
+### 2.5 `cleat_log`
 
 Log a message to the host.
 
 ```
-(func (import "env" "durable_log") (param i32 i32) (result i64))
+(func (import "env" "cleat_log") (param i32 i32) (result i64))
 ```
 
 | Param | Type | Description |
@@ -161,32 +161,32 @@ Log a message to the host.
 
 Return value is ignored.
 
-### 2.6 `durable_version`
+### 2.6 `cleat_version`
 
 Get the workflow definition version.
 
 ```
-(func (import "env" "durable_version") (result i64))
+(func (import "env" "cleat_version") (result i64))
 ```
 
 Returns: workflow definition version as `i64` (cast from `uint32`).
 
-### 2.7 `durable_min_version`
+### 2.7 `cleat_min_version`
 
 Get the minimum supported version for this workflow definition.
 
 ```
-(func (import "env" "durable_min_version") (result i64))
+(func (import "env" "cleat_min_version") (result i64))
 ```
 
 Returns: minimum version as `i64` (cast from `uint32`).
 
-### 2.8 `durable_defer`
+### 2.8 `cleat_defer`
 
 Register a cleanup callback to run on workflow exit.
 
 ```
-(func (import "env" "durable_defer")
+(func (import "env" "cleat_defer")
   (param i32 i32 i32 i32)
   (result i64))
 ```
@@ -205,12 +205,12 @@ Register a cleanup callback to run on workflow exit.
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `deferIDLen` — bytes written to defer ID buffer |
 
-### 2.9 `durable_poll_cancellation`
+### 2.9 `cleat_poll_cancellation`
 
 Check if workflow cancellation has been requested.
 
 ```
-(func (import "env" "durable_poll_cancellation")
+(func (import "env" "cleat_poll_cancellation")
   (param i32 i32)
   (result i64))
 ```
@@ -227,12 +227,12 @@ Check if workflow cancellation has been requested.
 | 0-31 | `cancelled` — non-zero if cancelled |
 | 32-63 | `reasonLen` — bytes written to reason buffer (if cancelled) |
 
-### 2.10 `durable_poll_signal`
+### 2.10 `cleat_poll_signal`
 
 Poll for a specific pending signal.
 
 ```
-(func (import "env" "durable_poll_signal")
+(func (import "env" "cleat_poll_signal")
   (param i32 i32 i32 i32)
   (result i64))
 ```
@@ -252,12 +252,12 @@ Poll for a specific pending signal.
 | 8-15 | `found` flag — `0x0100` if signal was found |
 | 32-63 | `payloadLen` — bytes written to payload buffer |
 
-### 2.11 `durable_continue_as_new`
+### 2.11 `cleat_continue_as_new`
 
 Start a new workflow run with fresh input (history compaction).
 
 ```
-(func (import "env" "durable_continue_as_new")
+(func (import "env" "cleat_continue_as_new")
   (param i32 i32)
   (result i64))
 ```
@@ -275,12 +275,12 @@ Start a new workflow run with fresh input (history compaction).
 
 After this call, the workflow should return the suspension sentinel.
 
-### 2.12 `durable_child_workflow`
+### 2.12 `cleat_child_workflow`
 
 Start a child workflow instance.
 
 ```
-(func (import "env" "durable_child_workflow")
+(func (import "env" "cleat_child_workflow")
   (param i32 i32 i32 i32 i32 i32)
   (result i64))
 ```
@@ -301,12 +301,12 @@ Start a child workflow instance.
 | 0-31 | `errCode` |
 | 32-63 | `runIDLen` — bytes written to run ID buffer |
 
-### 2.13 `durable_await_child`
+### 2.13 `cleat_await_child`
 
 Wait for a child workflow to complete.
 
 ```
-(func (import "env" "durable_await_child")
+(func (import "env" "cleat_await_child")
   (param i32 i32 i32 i32)
   (result i64))
 ```
@@ -327,12 +327,12 @@ Wait for a child workflow to complete.
 
 If the child is not complete, the workflow should suspend.
 
-### 2.14 `durable_await_signals`
+### 2.14 `cleat_await_signals`
 
 Wait for one or more external signals, with a timeout.
 
 ```
-(func (import "env" "durable_await_signals")
+(func (import "env" "cleat_await_signals")
   (param i32 i32 i64 i32 i32 i32 i32)
   (result i64))
 ```
@@ -375,12 +375,12 @@ Set a key-value pair in the workflow's query state.
 
 Return value is ignored.
 
-### 2.16 `durable_call_retry`
+### 2.16 `cleat_call_retry`
 
-Server-side retry variant of `durable_call`. Retries happen inside the host; one event is recorded regardless of attempt count.
+Server-side retry variant of `cleat_call`. Retries happen inside the host; one event is recorded regardless of attempt count.
 
 ```
-(func (import "env" "durable_call_retry")
+(func (import "env" "cleat_call_retry")
   (param i32 i32 i32 i32 i32 i32 i64 i64 i64 i64 i32 i32 i32 i32)
   (result i64))
 ```
@@ -410,12 +410,12 @@ Server-side retry variant of `durable_call`. Retries happen inside the host; one
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
-### 2.17 `durable_call_heartbeat`
+### 2.17 `cleat_call_heartbeat`
 
 Long-running call with progress updates. The host sends periodic progress updates; the progress callback is handled at the SDK layer.
 
 ```
-(func (import "env" "durable_call_heartbeat")
+(func (import "env" "cleat_call_heartbeat")
   (param i32 i32 i32 i32 i32 i32 i64 i32 i32)
   (result i64))
 ```
@@ -440,12 +440,12 @@ Long-running call with progress updates. The host sends periodic progress update
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
-### 2.18 `durable_await_all_children`
+### 2.18 `cleat_await_all_children`
 
 Batch await for multiple child workflows. Returns a JSON array of child results.
 
 ```
-(func (import "env" "durable_await_all_children")
+(func (import "env" "cleat_await_all_children")
   (param i32 i32 i32 i32)
   (result i64))
 ```
@@ -493,12 +493,12 @@ Host-only extension for plugin function calls. Not included in the Go SDK genera
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
-### 2.20 `durable_create_promise`
+### 2.20 `cleat_create_promise`
 
 Create a named durable promise. Returns a promise ID that external callers use to resolve or reject the promise.
 
 ```
-(func (import "env" "durable_create_promise")
+(func (import "env" "cleat_create_promise")
   (param i32 i32 i32 i32)
   (result i64))
 ```
@@ -517,12 +517,12 @@ Create a named durable promise. Returns a promise ID that external callers use t
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `promiseIDLen` — bytes written to promise ID buffer |
 
-### 2.21 `durable_await_promise`
+### 2.21 `cleat_await_promise`
 
 Wait for a promise to be resolved by an external caller. Blocks until resolved or timeout expires.
 
 ```
-(func (import "env" "durable_await_promise")
+(func (import "env" "cleat_await_promise")
   (param i32 i32 i64 i32 i32)
   (result i64))
 ```
@@ -543,12 +543,12 @@ Wait for a promise to be resolved by an external caller. Blocks until resolved o
 | 16-31 | `timedOut` — non-zero if timeout expired |
 | 32-63 | `resultLen` — bytes written to result buffer |
 
-### 2.22 `durable_register_update_handler`
+### 2.22 `cleat_register_update_handler`
 
 Register an update handler for workflow updates (bi-directional RPC). Handler registration is one-way; no output buffer is needed.
 
 ```
-(func (import "env" "durable_register_update_handler")
+(func (import "env" "cleat_register_update_handler")
   (param i32 i32)
   (result i64))
 ```
@@ -591,7 +591,7 @@ The host ensures linear memory is at least `0xA20000` bytes (10 MiB + 128 KiB) b
 
 | Language | Status | File |
 |---|---|---|
-| **Go** | Production | SDK: `durable/runtime.go`, WASM gen: `internal/wasm/` |
+| **Go** | Production | SDK: `cleat/runtime.go`, WASM gen: `internal/wasm/` |
 | **Rust** | Proof of concept | `examples/rust-workflow/src/` |
 
 ### Implementing a new language
@@ -612,5 +612,5 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
-| 2 | 2026-05-06 | Added `durable_call_retry`, `durable_call_heartbeat`, `durable_await_all_children`, and `plugin_call` host functions. Updated documentation count. |
+| 2 | 2026-05-06 | Added `cleat_call_retry`, `cleat_call_heartbeat`, `cleat_await_all_children`, and `plugin_call` host functions. Updated documentation count. |
 | 1 | 2026-05-05 | Initial ABI specification. 15 host function imports, export convention, memory layout. |

@@ -1,8 +1,8 @@
-// Package autothread demonstrates auto-threading of durable.HostCalls.
+// Package autothread demonstrates auto-threading of cleat.HostCalls.
 //
 // Developers declare a package-level var h as a "context object":
 //
-//	var h durable.HostCalls
+//	var h cleat.HostCalls
 //
 // Entry points take h as a first parameter (shadows the global). Internal
 // helper functions use h directly without declaring it in their signatures.
@@ -11,7 +11,7 @@
 //
 // Build:
 //
-//	durable build -o /tmp/out ./testdata/autothread/
+//	cleat build -o /tmp/out ./testdata/autothread/
 //
 // NOTE: This fixture uses raw json.Marshal to exercise the low-level
 // DurableCall API. Production code should prefer DurableCallTyped.
@@ -21,13 +21,13 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // h is the package-level context object. Functions in the durable closure
-// that reference this global will have h durable.HostCalls automatically
+// that reference this global will have h cleat.HostCalls automatically
 // added as a first parameter by the transformer.
-var h durable.HostCalls
+var h cleat.HostCalls
 
 // ---- Domain types ----
 
@@ -48,7 +48,7 @@ type Charge struct {
 
 // ---- Entry points (declare h in signature) ----
 
-func PlaceOrder(h durable.HostCalls, userID string, cart []CartItem) (string, error) {
+func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, error) {
 	if len(cart) == 0 {
 		return "", fmt.Errorf("cart is empty")
 	}
@@ -75,7 +75,7 @@ func PlaceOrder(h durable.HostCalls, userID string, cart []CartItem) (string, er
 	return trackingID, nil
 }
 
-func CancelOrder(h durable.HostCalls, orderID string) error {
+func CancelOrder(h cleat.HostCalls, orderID string) error {
 	_ = refundPayment(orderID)
 	return releaseReservation(orderID)
 }

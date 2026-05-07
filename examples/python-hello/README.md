@@ -6,10 +6,10 @@ Simplest Cleat Python/WASM workflow.
 
 ```bash
 # 1. Build to WASM
-durable build --target python --entry hello_workflow.py:hello
+cleat build --target python --entry hello_workflow.py:hello
 
 # 2. Run
-durable run hello '{"name": "World"}'
+cleat run hello '{"name": "World"}'
 ```
 
 ## What This Demonstrates

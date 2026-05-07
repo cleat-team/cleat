@@ -113,7 +113,7 @@ Additional metrics to collect manually:
 ```
 goos: linux
 goarch: amd64
-pkg: github.com/rcownie/durable/benchmarks
+pkg: github.com/rcownie/cleat/benchmarks
 cpu: Intel(R) Xeon(R) Gold 6438M
 BenchmarkSimpleWorkflow/steps=10-128         	   59320	     20210 ns/op	  48577 wf/s	485766 steps/s
 BenchmarkSimpleWorkflow/steps=100-128         	   10120	    118200 ns/op	   8460 wf/s	 84600 steps/s

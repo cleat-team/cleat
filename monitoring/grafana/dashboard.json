@@ -29,7 +29,7 @@
       }
     ]
   },
-  "description": "Monitoring dashboard for the Cleat Durable Workflow Engine. Provides visibility into throughput, latency, error rates, and system health.",
+  "description": "Monitoring dashboard for the Cleat Workflow Engine. Provides visibility into throughput, latency, error rates, and system health.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -689,7 +689,7 @@
     {
       "id": 11,
       "title": "Step Execution Rate",
-      "description": "Rate of durable step executions and replay operations",
+      "description": "Rate of cleat step executions and replay operations",
       "datasource": {
         "type": "prometheus",
         "uid": "$datasource"
@@ -1369,8 +1369,7 @@
   "style": "dark",
   "tags": [
     "cleat",
-    "workflow-engine",
-    "durable"
+    "workflow-engine"
   ],
   "templating": {
     "list": [

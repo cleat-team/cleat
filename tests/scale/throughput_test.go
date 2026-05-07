@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/rcownie/durable/internal/host"
+	host "github.com/rcownie/cleat/internal/host"
 
 	_ "github.com/lib/pq"
 )
@@ -20,7 +20,7 @@ func testDB(t *testing.T) *sql.DB {
 	if testing.Short() {
 		t.Skip("Skipping scale test in short mode")
 	}
-	dsn := os.Getenv("DURABLE_TEST_DB")
+	dsn := os.Getenv("CLEAT_TEST_DB")
 	if dsn == "" {
 		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
 	}

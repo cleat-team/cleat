@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/tetratelabs/wazero/api"
 
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // EventType classifies event history records.
@@ -111,7 +111,7 @@ type EventRecord struct {
 // CallRecord is kept for backward compatibility in tests.
 type CallRecord = EventRecord
 
-// ServiceCaller makes actual external API calls on behalf of durable workflows.
+// ServiceCaller makes actual external API calls on behalf of cleat workflows.
 type ServiceCaller interface {
 	Call(ctx context.Context, service, operation, requestJSON string) (responseJSON string, err error)
 }
@@ -151,9 +151,9 @@ type SuspendError struct {
 
 func (e *SuspendError) Error() string {
 	if !e.Until.IsZero() {
-		return fmt.Sprintf("durable: suspend until %s: %s", e.Until, e.Reason)
+		return fmt.Sprintf("cleat: suspend until %s: %s", e.Until, e.Reason)
 	}
-	return fmt.Sprintf("durable: suspend: %s", e.Reason)
+	return fmt.Sprintf("cleat: suspend: %s", e.Reason)
 }
 
 // SuspendResult holds the outcome of a suspended workflow execution.
@@ -283,7 +283,7 @@ type RetryableError interface {
 	Retryable() bool
 }
 
-// Engine provides durable execution semantics (Execute/Replay) on top of a
+// Engine provides cleat execution semantics (Execute/Replay) on top of a
 // Runtime. It implements the checkpoint/replay model: on first execution,
 // every DurableCall is recorded in the event history; on replay, cached
 // results are returned and divergence is detected.
@@ -997,7 +997,7 @@ func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs
 	s.stepCount++
 
 	s.suspendErr = &SuspendError{
-		Reason: fmt.Sprintf("durable_sleep(%dms)", durationMs),
+		Reason: fmt.Sprintf("cleat_sleep(%dms)", durationMs),
 		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(durationMs) * time.Millisecond),
 	}
 

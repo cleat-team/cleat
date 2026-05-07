@@ -1,8 +1,8 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: durable-worker-config
+  name: cleat-worker-config
   labels:
-    app: durable-worker
+    app: cleat-worker
 data:
   database_url: "postgres://user:pass@postgres:5432/cleat?sslmode=disable"

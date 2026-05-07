@@ -1,6 +1,6 @@
 package ratelimiter
 
-import "github.com/rcownie/durable/internal/plugin"
+import "github.com/rcownie/cleat/internal/plugin"
 
 // Migrations returns the database schema for rate limit storage. The table is
 // idempotent (IF NOT EXISTS) and safe to run multiple times.

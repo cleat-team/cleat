@@ -50,7 +50,7 @@ class ChildWorkflow(Generic[T]):
     """
 
     name: str
-    """Child workflow definition name (matches an ``@durable_entry``)."""
+    """Child workflow definition name (matches an ``@cleat_entry``)."""
 
     input: Any
     """Input payload --- will be JSON-serialised before sending to the host."""
@@ -216,8 +216,8 @@ class Saga(Generic[SagaResultT]):
         saga = Saga[str](h)
         saga.add_step(
             name="reserve_inventory",
-            action=lambda: h.durable_call("inventory", "Reserve", reserve_json),
-            compensate=lambda: h.durable_call("inventory", "Release", release_json),
+            action=lambda: h.cleat_call("inventory", "Reserve", reserve_json),
+            compensate=lambda: h.cleat_call("inventory", "Release", release_json),
         )
 
     Usage with explicit HostCalls (no closure capture)::
@@ -225,17 +225,17 @@ class Saga(Generic[SagaResultT]):
         saga = Saga[str](h)
         saga.add_step_fn(
             name="reserve_inventory",
-            action=lambda h: h.durable_call("inventory", "Reserve", reserve_json),
-            compensate=lambda h: h.durable_call("inventory", "Release", release_json),
+            action=lambda h: h.cleat_call("inventory", "Reserve", reserve_json),
+            compensate=lambda h: h.cleat_call("inventory", "Release", release_json),
         )
 
     Usage with subclassed steps (cleanest for WASM)::
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("inventory", "Reserve", reserve_json)
+                return h.cleat_call("inventory", "Reserve", reserve_json)
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("inventory", "Release", release_json)
+                h.cleat_call("inventory", "Release", release_json)
 
         saga = Saga[str](h)
         saga.add_step(ReserveStep("reserve_inventory"))
@@ -447,10 +447,10 @@ class _FnSagaStep(SagaStep):
 def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
     """Run compensations for *completed* steps in reverse order.
 
-    Failures during compensation are logged via ``h.durable_log`` but do
+    Failures during compensation are logged via ``h.cleat_log`` but do
     not prevent later compensations from running (best-effort).
 
-    If ``durable_log`` is not available (e.g. the workflow context has been
+    If ``cleat_log`` is not available (e.g. the workflow context has been
     torn down), falls back to writing errors to ``sys.stderr``.
     """
     for step in reversed(completed):
@@ -458,33 +458,33 @@ def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
             step.compensate(h)
         except Exception as exc:
             try:
-                h.durable_log(
+                h.cleat_log(
                     f"Saga compensation failed for step '{step.name}': {exc}"
                 )
             except Exception:
-                # Fall back to stderr when durable_log is unavailable
+                # Fall back to stderr when cleat_log is unavailable
                 # (e.g., workflow context already torn down).
                 msg = f"Saga compensation failed for step '{step.name}': {exc}\n"
                 sys.stderr.write(msg)
 
 
 # ---------------------------------------------------------------------------
-# Durable defer
+# Cleat defer
 # ---------------------------------------------------------------------------
 
 @dataclass
-class DurableDefer:
+class CleatDefer:
     """Context manager for registering deferred cleanup with the host.
 
-    The ``durable_defer`` host call registers a cleanup description that
+    The ``cleat_defer`` host call registers a cleanup description that
     the host will execute when the workflow exits (normally or abnormally).
     This context manager provides a convenient ``with``-statement wrapper.
 
     Usage::
 
-        with DurableDefer("release inventory reservation", h):
+        with CleatDefer("release inventory reservation", h):
             # ... workflow logic ...
-            pass   # ``durable_defer`` registered on entry
+            pass   # ``cleat_defer`` registered on entry
     """
 
     description: str
@@ -496,10 +496,10 @@ class DurableDefer:
     _defer_id: Optional[str] = field(default=None, repr=False)
     """Defer ID returned by the host, if applicable."""
 
-    def __enter__(self) -> DurableDefer:
+    def __enter__(self) -> CleatDefer:
         """Register the defer with the host on context entry."""
         if self._h is not None:
-            self._defer_id = self._h.durable_defer(self.description)
+            self._defer_id = self._h.cleat_defer(self.description)
         return self
 
     def __exit__(

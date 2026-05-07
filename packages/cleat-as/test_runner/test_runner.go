@@ -7,7 +7,7 @@
 //
 // Usage:
 //
-//	import "github.com/rcownie/durable/packages/cleat-as/test_runner"
+//	import "github.com/rcownie/cleat/packages/cleat-as/test_runner"
 //
 //	func TestPlaceOrder(t *testing.T) {
 //	    env := test_runner.NewWASMTestEnv(t, "path/to/workflow.wasm")
@@ -149,35 +149,35 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	// Build the host module with all cleat imports.
 	host := r.NewHostModuleBuilder("env")
 
-	// durable_sleep (param i64) (result i64)
+	// cleat_sleep (param i64) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, durationMs int64) int64 {
 		return env.durableSleep(durationMs)
-	}).Export("durable_sleep")
+	}).Export("cleat_sleep")
 
-	// durable_now (result i64)
+	// cleat_now (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
 		return env.durableNow()
-	}).Export("durable_now")
+	}).Export("cleat_now")
 
-	// durable_log (param i32 i32) (result i64)
+	// cleat_log (param i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, msgPtr, msgLen int32) int64 {
 		env.durableLog(msgPtr, msgLen)
 		return 0
-	}).Export("durable_log")
+	}).Export("cleat_log")
 
-	// durable_call (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
+	// cleat_call (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen int32) int64 {
 		return env.durableCall(m, svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen)
-	}).Export("durable_call")
+	}).Export("cleat_call")
 
-	// durable_await_signals (param i32 i32 i64 i32 i32 i32 i32) (result i64)
+	// cleat_await_signals (param i32 i32 i64 i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		namesPtr, namesLen int32, timeoutMs int64,
 		sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen int32) int64 {
 		return env.durableAwaitSignals(m, namesPtr, namesLen, timeoutMs,
 			sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen)
-	}).Export("durable_await_signals")
+	}).Export("cleat_await_signals")
 
 	// set_query_state (param i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
@@ -185,81 +185,81 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 		return 0 // no-op for testing
 	}).Export("set_query_state")
 
-	// durable_random (result i64)
+	// cleat_random (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
 		return 42
-	}).Export("durable_random")
+	}).Export("cleat_random")
 
-	// durable_version (result i64)
+	// cleat_version (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
 		return 1
-	}).Export("durable_version")
+	}).Export("cleat_version")
 
-	// durable_min_version (result i64)
+	// cleat_min_version (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
 		return 1
-	}).Export("durable_min_version")
+	}).Export("cleat_min_version")
 
-	// durable_defer (param i32 i32 i32 i32) (result i64)
+	// cleat_defer (param i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		descPtr, descLen, deferIdPtr, deferIdMaxLen int32) int64 {
 		// Write a defer ID to output buffer
 		deferID := "test-defer-1"
 		env.writeString(uint32(deferIdPtr), deferID)
 		return encodeSimpleResult(int64(len(deferID)), 0)
-	}).Export("durable_defer")
+	}).Export("cleat_defer")
 
-	// durable_poll_cancellation (param i32 i32) (result i64)
+	// cleat_poll_cancellation (param i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, reasonPtr, reasonMaxLen int32) int64 {
 		return 0 // not cancelled
-	}).Export("durable_poll_cancellation")
+	}).Export("cleat_poll_cancellation")
 
-	// durable_poll_signal (param i32 i32 i32 i32) (result i64)
+	// cleat_poll_signal (param i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		namePtr, nameLen, payloadPtr, payloadMaxLen int32) int64 {
 		return 0 // signal not found
-	}).Export("durable_poll_signal")
+	}).Export("cleat_poll_signal")
 
-	// durable_continue_as_new (param i32 i32) (result i64)
+	// cleat_continue_as_new (param i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, inputPtr, inputLen int32) int64 {
 		return 0 // no-op for testing
-	}).Export("durable_continue_as_new")
+	}).Export("cleat_continue_as_new")
 
-	// durable_child_workflow (param i32 i32 i32 i32 i32 i32) (result i64)
+	// cleat_child_workflow (param i32 i32 i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		namePtr, nameLen, inputPtr, inputLen, runIdPtr, runIdMaxLen int32) int64 {
 		name := env.readString(uint32(namePtr), uint32(nameLen))
 		runID := fmt.Sprintf("test-child-%s", name)
 		env.writeString(uint32(runIdPtr), runID)
 		return encodeSimpleResult(int64(len(runID)), 0)
-	}).Export("durable_child_workflow")
+	}).Export("cleat_child_workflow")
 
-	// durable_await_child (param i32 i32 i32 i32) (result i64)
+	// cleat_await_child (param i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		runIdPtr, runIdLen, resultPtr, resultMaxLen int32) int64 {
 		result := `{"status":"completed"}`
 		env.writeString(uint32(resultPtr), result)
 		return encodeSimpleResult(int64(len(result)), 0)
-	}).Export("durable_await_child")
+	}).Export("cleat_await_child")
 
-	// durable_create_promise (param i32 i32 i32 i32) (result i64)
+	// cleat_create_promise (param i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		namePtr, nameLen, idOutPtr, idOutMax int32) int64 {
 		promiseID := "test-promise-1"
 		env.writeString(uint32(idOutPtr), promiseID)
 		return encodeSimpleResult(int64(len(promiseID)), 0)
-	}).Export("durable_create_promise")
+	}).Export("cleat_create_promise")
 
-	// durable_await_promise (param i32 i32 i64 i32 i32) (result i64)
+	// cleat_await_promise (param i32 i32 i64 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		idPtr, idLen int32, timeoutMs int64, resultOutPtr, resultOutMax int32) int64 {
 		return 0 // timed out
-	}).Export("durable_await_promise")
+	}).Export("cleat_await_promise")
 
-	// durable_register_update_handler (param i32 i32) (result i64)
+	// cleat_register_update_handler (param i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, namePtr, nameLen int32) int64 {
 		return 0
-	}).Export("durable_register_update_handler")
+	}).Export("cleat_register_update_handler")
 
 	// plugin_call (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
@@ -267,71 +267,71 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 		return encodeCallResult(0, 0, 1) // error — no plugin stubs
 	}).Export("plugin_call")
 
-	// durable_workflow_id (param i32 i32) (result i64)
+	// cleat_workflow_id (param i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, idPtr, idMaxLen int32) int64 {
 		wfID := "test-workflow"
 		env.writeString(uint32(idPtr), wfID)
 		return encodeSimpleResult(int64(len(wfID)), 0)
-	}).Export("durable_workflow_id")
+	}).Export("cleat_workflow_id")
 
-	// durable_run_id (param i32 i32) (result i64)
+	// cleat_run_id (param i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, idPtr, idMaxLen int32) int64 {
 		runID := "test-run"
 		env.writeString(uint32(idPtr), runID)
 		return encodeSimpleResult(int64(len(runID)), 0)
-	}).Export("durable_run_id")
+	}).Export("cleat_run_id")
 
-	// durable_send (param i32 i32 i32 i32 i32 i32) (result i64)
+	// cleat_send (param i32 i32 i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32) int64 {
 		return 0
-	}).Export("durable_send")
+	}).Export("cleat_send")
 
-	// durable_schedule_invoke (param i32 i32 i32 i32 i32 i32 i64) (result i64)
+	// cleat_schedule_invoke (param i32 i32 i32 i32 i32 i32 i64) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32, delayMs int64) int64 {
 		return 0
-	}).Export("durable_schedule_invoke")
+	}).Export("cleat_schedule_invoke")
 
-	// durable_register_query_handler (param i32 i32) (result i64)
+	// cleat_register_query_handler (param i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, namePtr, nameLen int32) int64 {
 		return 0
-	}).Export("durable_register_query_handler")
+	}).Export("cleat_register_query_handler")
 
-	// durable_call_retry (param ...) (result i64)
+	// cleat_call_retry (param ...) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		maxAttempts, initialIntervalMs, backoff100x, maxIntervalMs int64,
 		nrePtr, nreLen, respPtr, respMaxLen int32) int64 {
 		return env.durableCall(m, svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen)
-	}).Export("durable_call_retry")
+	}).Export("cleat_call_retry")
 
-	// durable_call_heartbeat (param ...) (result i64)
+	// cleat_call_heartbeat (param ...) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		heartbeatIntervalMs int64, respPtr, respMaxLen int32) int64 {
 		return env.durableCall(m, svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen)
-	}).Export("durable_call_heartbeat")
+	}).Export("cleat_call_heartbeat")
 
-	// durable_await_all_children (param i32 i32 i32 i32) (result i64)
+	// cleat_await_all_children (param i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		runIdsPtr, runIdsLen, resultsPtr, resultsMaxLen int32) int64 {
 		result := `[]`
 		env.writeString(uint32(resultsPtr), result)
 		return encodeSimpleResult(int64(len(result)), 0)
-	}).Export("durable_await_all_children")
+	}).Export("cleat_await_all_children")
 
-	// durable_resolve_promise (param i32 i32 i32 i32) (result i64)
+	// cleat_resolve_promise (param i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		idPtr, idLen, valPtr, valLen int32) int64 {
 		return 0
-	}).Export("durable_resolve_promise")
+	}).Export("cleat_resolve_promise")
 
-	// durable_reject_promise (param i32 i32 i32 i32) (result i64)
+	// cleat_reject_promise (param i32 i32 i32 i32) (result i64)
 	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		idPtr, idLen, errPtr, errLen int32) int64 {
 		return 0
-	}).Export("durable_reject_promise")
+	}).Export("cleat_reject_promise")
 
 	// Instantiate the host module.
 	if _, err := host.Instantiate(ctx); err != nil {

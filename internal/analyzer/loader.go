@@ -121,7 +121,7 @@ func LoadPackages(pattern string, fset *token.FileSet) (*AnalysisResult, error) 
 	}
 
 	if len(result.EntryPoints) == 0 {
-		return nil, fmt.Errorf("no workflow entry points found in %s (entry points must be exported functions with durable.HostCalls as first parameter)", pattern)
+		return nil, fmt.Errorf("no workflow entry points found in %s (entry points must be exported functions with cleat.HostCalls as first parameter)", pattern)
 	}
 
 	return result, nil
@@ -151,7 +151,7 @@ func newFuncDecl(fn *ast.FuncDecl, pkg *Package) *FuncDecl {
 }
 
 // IsEntryPoint checks if a function is a workflow entry point.
-// It must be exported, not a method, and have durable.HostCalls as
+// It must be exported, not a method, and have cleat.HostCalls as
 // its first parameter.
 func IsEntryPoint(fd *FuncDecl) bool {
 	if !fd.IsExported {

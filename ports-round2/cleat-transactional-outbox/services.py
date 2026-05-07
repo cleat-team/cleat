@@ -2,14 +2,14 @@
 Host-side service implementations for the transactional-outbox pattern.
 
 These services run on the Cleat host (outside the WASM sandbox) and are
-called by the workflow via ``HostCalls.durable_call()``.
+called by the workflow via ``HostCalls.cleat_call()``.
 
 In a production deployment these services would be registered with the
 Cleat host runtime.  For local development they can be instantiated
 directly and used with the :class:`LocalRuntime`.
 
 Each method accepts keyword arguments matching the dict that the
-workflow sends via ``durable_call(service, operation, request_dict)``.
+workflow sends via ``cleat_call(service, operation, request_dict)``.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ orders = sa.Table(
 class DBService:
     """Host-side service for order database operations.
 
-    Called by the workflow via ``h.durable_call("db", "<operation>", {...})``.
+    Called by the workflow via ``h.cleat_call("db", "<operation>", {...})``.
 
     Methods are designed to accept the exact dict keys that the workflow
     sends, so they can be dispatched via simple ``getattr``.
@@ -68,7 +68,7 @@ class DBService:
     def create_orders_table(self, **kwargs: Any) -> dict:
         """Ensure the orders table exists.
 
-        Called as ``durable_call("db", "create_orders_table", {})``.
+        Called as ``cleat_call("db", "create_orders_table", {})``.
         Note: schema migrations are typically not part of the workflow
         (they run at startup), but included here for completeness.
         """
@@ -82,7 +82,7 @@ class DBService:
 
         Expected workflow call::
 
-            h.durable_call("db", "insert_order", {
+            h.cleat_call("db", "insert_order", {
                 "customer": customer, "item": item, "quantity": quantity,
             })
         """
@@ -103,7 +103,7 @@ class DBService:
 
         Expected workflow call::
 
-            h.durable_call("db", "update_notification_status", {
+            h.cleat_call("db", "update_notification_status", {
                 "order_id": order_id, "status": "SENT",
             })
         """
@@ -145,7 +145,7 @@ class NotifierService:
 
     Expected workflow call::
 
-        h.durable_call("notifier", "send_notification", {
+        h.cleat_call("notifier", "send_notification", {
             "order_id": order_id, "customer": customer, "item": item,
         })
     """

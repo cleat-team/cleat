@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/rcownie/durable v0.0.0
+	github.com/rcownie/cleat v0.0.0
 	github.com/stretchr/testify v1.11.1
 )
 
@@ -48,4 +48,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/rcownie/durable => /localssd/rcownie/cleat-agent1
+replace github.com/rcownie/cleat => /localssd/rcownie/cleat-agent1

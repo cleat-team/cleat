@@ -18,19 +18,19 @@ Signal model in Cleat:
 
 from __future__ import annotations
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 from cleat_langgraph import CleatLangGraph
 
 
-@durable_entry(name="chatbot")
+@cleat_entry(name="chatbot")
 def chatbot_workflow(h: HostCalls, user_message: str) -> str:
     """Run a chatbot that pauses for human review.
 
     Workflow:
-    1. Generate a draft response (graph node via durable_call)
+    1. Generate a draft response (graph node via cleat_call)
     2. Expose the draft via query state
     3. Wait for human feedback via signal (up to 7 days)
-    4. Process the feedback (graph node via durable_call)
+    4. Process the feedback (graph node via cleat_call)
     5. Return the final response
 
     Args:
@@ -49,26 +49,26 @@ def chatbot_workflow(h: HostCalls, user_message: str) -> str:
     }
 
     # Step 1: Generate draft
-    h.durable_log("Generating draft response...")
+    h.cleat_log("Generating draft response...")
     state = agent.step(state)  # runs generate_draft node
     draft = state.get("value", "")
-    h.durable_log(f"Draft generated: {draft[:60]}...")
+    h.cleat_log(f"Draft generated: {draft[:60]}...")
 
     # Expose draft via query state for external polling
     h.set_query_state("draft", draft)
 
     # Step 2: Wait for human feedback via signal
-    h.durable_log("Waiting for human feedback (signal: human_feedback)...")
+    h.cleat_log("Waiting for human feedback (signal: human_feedback)...")
     # Wait up to 7 days for human feedback
     signal_result = h.await_signals(["human_feedback"], timeout_ms=604800000)
 
     if signal_result.timed_out:
-        h.durable_log("Timed out waiting for human feedback")
+        h.cleat_log("Timed out waiting for human feedback")
         # Default: proceed with the draft as-is
         state["approved"] = True
     else:
         feedback = signal_result.value
-        h.durable_log(f"Received human feedback: {feedback}")
+        h.cleat_log(f"Received human feedback: {feedback}")
         state["feedback"] = feedback
         state["approved"] = feedback == "approve"
 
@@ -76,5 +76,5 @@ def chatbot_workflow(h: HostCalls, user_message: str) -> str:
     state = agent.step(state)  # runs human_review node
     final_response = state.get("value", draft)
 
-    h.durable_log("Chatbot workflow complete")
+    h.cleat_log("Chatbot workflow complete")
     return final_response

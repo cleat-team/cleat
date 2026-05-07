@@ -6,8 +6,8 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/plugin"
-	"github.com/rcownie/durable/plugins/llm/providers"
+	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/rcownie/cleat/plugins/llm/providers"
 )
 
 // RegisterHostFunctions registers workflow-callable functions.

@@ -3,13 +3,13 @@ package main
 import (
 	"testing"
 
-	"github.com/rcownie/durable/durable/durabletest"
+	"github.com/rcownie/cleat/cleat/cleattest"
 )
 
 // TestSampleFileProcessingWorkflow_Success verifies the happy path:
 // download -> process -> upload, all operations succeed.
 func TestSampleFileProcessingWorkflow_Success(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	// Stub all three service calls.
@@ -62,7 +62,7 @@ func TestSampleFileProcessingWorkflow_Success(t *testing.T) {
 // one set of stubs) -- on retry we provide fresh stubs. The test env does not
 // re-arm stubs automatically, so we leave a second set available for the retry.
 func TestSampleFileProcessingWorkflow_RetryThenSucceed(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	// First attempt stubs: Download succeeds, Process fails.
@@ -95,7 +95,7 @@ func TestSampleFileProcessingWorkflow_RetryThenSucceed(t *testing.T) {
 // TestSampleFileProcessingWorkflow_AllRetriesExhausted verifies that when the
 // outer retry loop is exhausted the workflow returns an error.
 func TestSampleFileProcessingWorkflow_AllRetriesExhausted(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	// All Download calls fail -- the outer loop will retry 4 times then give up.

@@ -3,7 +3,7 @@ package workflows
 import (
 	"fmt"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // LLMInput configures the AI agent loop simulation.
@@ -27,7 +27,7 @@ type LLMOutput struct {
 //
 // Equivalent Temporal: a workflow with N activity loops.
 // Equivalent DBOS: a workflow with N iteration steps.
-func LLMWorkflow(h durable.HostCalls, input LLMInput) (LLMOutput, error) {
+func LLMWorkflow(h cleat.HostCalls, input LLMInput) (LLMOutput, error) {
 	totalCalls := 0
 	for i := 0; i < input.Prompts; i++ {
 		// Simulate an LLM chat call (e.g., GPT-4, Claude).

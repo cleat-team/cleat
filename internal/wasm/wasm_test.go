@@ -6,19 +6,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/durable/internal/analyzer"
-	"github.com/rcownie/durable/internal/callgraph"
-	"github.com/rcownie/durable/internal/closure"
+	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/rcownie/cleat/internal/callgraph"
+	"github.com/rcownie/cleat/internal/closure"
 )
 
 func basicFQ(name string) string {
-	return "github.com/rcownie/durable/testdata/basic." + name
+	return "github.com/rcownie/cleat/testdata/basic." + name
 }
 
 func loadBasic(t *testing.T) (*analyzer.AnalysisResult, *closure.Result) {
 	t.Helper()
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -33,7 +33,7 @@ func loadBasic(t *testing.T) (*analyzer.AnalysisResult, *closure.Result) {
 func loadErrors(t *testing.T) (*analyzer.AnalysisResult, *closure.Result) {
 	t.Helper()
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -58,14 +58,14 @@ func syntaxCheck(t *testing.T, name, source string) {
 func TestAnalyzeUsageBasicDetectsDurableCall(t *testing.T) {
 	result, cr := loadBasic(t)
 	usage := AnalyzeUsage(result, cr)
-	if !usage.Used["durable_call"] {
+	if !usage.Used["cleat_call"] {
 		t.Error("expected durable_call to be used")
 	}
-	unused := []string{"durable_sleep", "durable_await_signals", "durable_defer",
-		"durable_log", "durable_poll_cancellation", "durable_poll_signal",
-		"durable_continue_as_new", "durable_child_workflow", "durable_await_child",
-		"durable_version", "durable_min_version", "set_query_state",
-		"durable_now", "durable_random"}
+	unused := []string{"cleat_sleep", "cleat_await_signals", "cleat_defer",
+		"cleat_log", "cleat_poll_cancellation", "cleat_poll_signal",
+		"cleat_continue_as_new", "cleat_child_workflow", "cleat_await_child",
+		"cleat_version", "cleat_min_version", "set_query_state",
+		"cleat_now", "cleat_random"}
 	for _, name := range unused {
 		if usage.Used[name] {
 			t.Errorf("expected %q to not be used in basic testdata", name)
@@ -79,10 +79,10 @@ func TestAnalyzeUsageBasicDetectsDurableCall(t *testing.T) {
 func TestAnalyzeUsageErrorsDetectsMultiple(t *testing.T) {
 	result, cr := loadErrors(t)
 	usage := AnalyzeUsage(result, cr)
-	if !usage.Used["durable_log"] {
+	if !usage.Used["cleat_log"] {
 		t.Error("expected durable_log (leafFunc calls DurableLog)")
 	}
-	if !usage.Used["durable_call"] {
+	if !usage.Used["cleat_call"] {
 		t.Error("expected durable_call (BadWithGoroutine calls DurableCall)")
 	}
 	if usage.Count() < 2 {
@@ -182,8 +182,8 @@ func TestGenerateHostAdapterBasic(t *testing.T) {
 	usage := AnalyzeUsage(result, cr)
 	code := string(GenerateHostAdapter("basic", usage))
 	for _, c := range []string{"//go:build wasip1", "package basic",
-		`"fmt"`, `"unsafe"`, `"github.com/rcownie/durable/durable"`,
-		"func makeHostCalls() durable.HostCalls {",
+		`"fmt"`, `"unsafe"`, `"github.com/rcownie/cleat/cleat"`,
+		"func makeHostCalls() cleat.HostCalls {",
 		"DurableCall: func(", "responseBuf := make([]byte, _durableOutBufSize)",
 	} {
 		if !strings.Contains(code, c) {
@@ -253,13 +253,13 @@ func TestBuildOutputsBasic(t *testing.T) {
 
 func TestGoName(t *testing.T) {
 	tests := []struct{ in, want string }{
-		{"durable_call", "durableCall"},
-		{"durable_sleep", "durableSleep"},
-		{"durable_await_signals", "durableAwaitSignals"},
+		{"cleat_call", "durableCall"},
+		{"cleat_sleep", "durableSleep"},
+		{"cleat_await_signals", "durableAwaitSignals"},
 		{"set_query_state", "setQueryState"},
-		{"durable_now", "durableNow"},
-		{"durable_child_workflow", "durableChildWorkflow"},
-		{"durable_min_version", "durableMinVersion"},
+		{"cleat_now", "durableNow"},
+		{"cleat_child_workflow", "durableChildWorkflow"},
+		{"cleat_min_version", "durableMinVersion"},
 	}
 	for _, tt := range tests {
 		if got := goName(tt.in); got != tt.want {
@@ -305,39 +305,39 @@ func TestCapitalize(t *testing.T) {
 // ---- needsFmt/needsJSON/needsUnsafe ----
 
 func TestNeedsFmt(t *testing.T) {
-	usage := &UsageInfo{Used: map[string]bool{"durable_call": true},
-		Funcs: []HostFunction{{ImportName: "durable_call", FieldName: "DurableCall"}}}
+	usage := &UsageInfo{Used: map[string]bool{"cleat_call": true},
+		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
 	if !needsFmt(usage) {
 		t.Error("durable_call adapter uses fmt.Sprintf")
 	}
-	usage2 := &UsageInfo{Used: map[string]bool{"durable_sleep": true},
-		Funcs: []HostFunction{{ImportName: "durable_sleep", FieldName: "DurableSleep"}}}
+	usage2 := &UsageInfo{Used: map[string]bool{"cleat_sleep": true},
+		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleep"}}}
 	if needsFmt(usage2) {
 		t.Error("durable_sleep should not need fmt")
 	}
 }
 
 func TestNeedsJSON(t *testing.T) {
-	usage := &UsageInfo{Used: map[string]bool{"durable_await_signals": true},
-		Funcs: []HostFunction{{ImportName: "durable_await_signals", FieldName: "DurableAwaitSignals"}}}
+	usage := &UsageInfo{Used: map[string]bool{"cleat_await_signals": true},
+		Funcs: []HostFunction{{ImportName: "cleat_await_signals", FieldName: "DurableAwaitSignals"}}}
 	if !needsJSON(usage) {
 		t.Error("durable_await_signals uses []string params")
 	}
-	usage2 := &UsageInfo{Used: map[string]bool{"durable_call": true},
-		Funcs: []HostFunction{{ImportName: "durable_call", FieldName: "DurableCall"}}}
+	usage2 := &UsageInfo{Used: map[string]bool{"cleat_call": true},
+		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
 	if needsJSON(usage2) {
 		t.Error("durable_call should not need json")
 	}
 }
 
 func TestNeedsUnsafe(t *testing.T) {
-	usage := &UsageInfo{Used: map[string]bool{"durable_call": true},
-		Funcs: []HostFunction{{ImportName: "durable_call", FieldName: "DurableCall"}}}
+	usage := &UsageInfo{Used: map[string]bool{"cleat_call": true},
+		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
 	if !needsUnsafe(usage) {
 		t.Error("durable_call uses unsafe.String")
 	}
-	usage2 := &UsageInfo{Used: map[string]bool{"durable_log": true},
-		Funcs: []HostFunction{{ImportName: "durable_log", FieldName: "DurableLog"}}}
+	usage2 := &UsageInfo{Used: map[string]bool{"cleat_log": true},
+		Funcs: []HostFunction{{ImportName: "cleat_log", FieldName: "DurableLog"}}}
 	if needsUnsafe(usage2) {
 		t.Error("durable_log should not need unsafe")
 	}
@@ -347,10 +347,10 @@ func TestNeedsUnsafe(t *testing.T) {
 
 func TestNumOutBufs(t *testing.T) {
 	tests := map[string]int{
-		"durable_call": 1, "durable_sleep": 0, "durable_await_signals": 2,
-		"durable_defer": 1, "durable_log": 0, "durable_poll_cancellation": 1,
-		"durable_poll_signal": 1, "durable_child_workflow": 1,
-		"durable_await_child": 1, "durable_version": 0, "nonexistent": 0,
+		"cleat_call": 1, "cleat_sleep": 0, "cleat_await_signals": 2,
+		"cleat_defer": 1, "cleat_log": 0, "cleat_poll_cancellation": 1,
+		"cleat_poll_signal": 1, "cleat_child_workflow": 1,
+		"cleat_await_child": 1, "cleat_version": 0, "nonexistent": 0,
 	}
 	for name, want := range tests {
 		if got := numOutBufs(name); got != want {
@@ -360,14 +360,14 @@ func TestNumOutBufs(t *testing.T) {
 }
 
 func TestOutBufNames(t *testing.T) {
-	if names := outBufNames("durable_call"); len(names) != 1 || names[0] != "responseBuf" {
+	if names := outBufNames("cleat_call"); len(names) != 1 || names[0] != "responseBuf" {
 		t.Errorf("outBufNames(durable_call)=%v", names)
 	}
-	if names := outBufNames("durable_await_signals"); len(names) != 2 ||
+	if names := outBufNames("cleat_await_signals"); len(names) != 2 ||
 		names[0] != "signalNameBuf" || names[1] != "payloadBuf" {
 		t.Errorf("outBufNames(durable_await_signals)=%v", names)
 	}
-	if names := outBufNames("durable_sleep"); names != nil {
+	if names := outBufNames("cleat_sleep"); names != nil {
 		t.Errorf("outBufNames(durable_sleep) should be nil, got %v", names)
 	}
 }

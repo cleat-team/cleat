@@ -4,19 +4,19 @@ import (
 	"go/token"
 	"testing"
 
-	"github.com/rcownie/durable/internal/analyzer"
-	"github.com/rcownie/durable/internal/callgraph"
+	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/rcownie/cleat/internal/callgraph"
 )
 
 // basicFQ builds a fully-qualified name for a function in the
 // testdata/basic package.
 func basicFQ(name string) string {
-	return "github.com/rcownie/durable/testdata/basic." + name
+	return "github.com/rcownie/cleat/testdata/basic." + name
 }
 
 func TestComputeBasicIdentifiesDurableLeaves(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -42,25 +42,25 @@ func TestComputeBasicIdentifiesDurableLeaves(t *testing.T) {
 
 	for name := range expectedLeaves {
 		if !cr.DurableLeaves[name] {
-			t.Errorf("expected %s to be a durable leaf", name)
+			t.Errorf("expected %s to be a cleat leaf", name)
 		}
 	}
 
 	// No unexpected leaves.
 	for name := range cr.DurableLeaves {
 		if !expectedLeaves[name] {
-			t.Errorf("unexpected durable leaf: %s", name)
+			t.Errorf("unexpected cleat leaf: %s", name)
 		}
 	}
 
 	if len(cr.DurableLeaves) != len(expectedLeaves) {
-		t.Errorf("expected %d durable leaves, got %d", len(expectedLeaves), len(cr.DurableLeaves))
+		t.Errorf("expected %d cleat leaves, got %d", len(expectedLeaves), len(cr.DurableLeaves))
 	}
 }
 
 func TestComputeBasicIdentifiesDurableClosure(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestComputeBasicIdentifiesDurableClosure(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	// Functions that transitively reach a durable leaf.
+	// Functions that transitively reach a cleat leaf.
 	expectedClosure := map[string]bool{
 		basicFQ("PlaceOrder"):          true,
 		basicFQ("CancelOrder"):         true,
@@ -82,25 +82,25 @@ func TestComputeBasicIdentifiesDurableClosure(t *testing.T) {
 
 	for name := range expectedClosure {
 		if !cr.DurableClosure[name] {
-			t.Errorf("expected %s to be in durable closure", name)
+			t.Errorf("expected %s to be in cleat closure", name)
 		}
 	}
 
 	// No unexpected closure entries.
 	for name := range cr.DurableClosure {
 		if !expectedClosure[name] {
-			t.Errorf("unexpected durable closure: %s", name)
+			t.Errorf("unexpected cleat closure: %s", name)
 		}
 	}
 
 	if len(cr.DurableClosure) != len(expectedClosure) {
-		t.Errorf("expected %d durable closure, got %d", len(expectedClosure), len(cr.DurableClosure))
+		t.Errorf("expected %d cleat closure, got %d", len(expectedClosure), len(cr.DurableClosure))
 	}
 }
 
 func TestComputeBasicCorrectlyTagsPureFunctions(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestComputeBasicCorrectlyTagsPureFunctions(t *testing.T) {
 
 func TestComputeBasicTagsAreConsistentWithFuncDecl(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestComputeBasicTagsAreConsistentWithFuncDecl(t *testing.T) {
 
 func TestComputeErrorsDetectsGoroutine(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestComputeErrorsDetectsGoroutine(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	badName := "github.com/rcownie/durable/testdata/errors.BadWithGoroutine"
+	badName := "github.com/rcownie/cleat/testdata/errors.BadWithGoroutine"
 
 	errs := cr.Errors[badName]
 	if len(errs) == 0 {
@@ -220,7 +220,7 @@ func TestComputeErrorsDetectsGoroutine(t *testing.T) {
 
 func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -233,34 +233,34 @@ func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 	cr := Compute(result, cg)
 
 	expectedLeaves := map[string]bool{
-		"github.com/rcownie/durable/testdata/errors.leafFunc":                   true,
-		"github.com/rcownie/durable/testdata/errors.BadWithGoroutine":           true,
-		"github.com/rcownie/durable/testdata/errors.BadWithInterfaceDispatch":   true,
-		"github.com/rcownie/durable/testdata/errors.BadWithFuncValue":           true,
-		"github.com/rcownie/durable/testdata/errors.BadWithFloatCondition":      true,
+		"github.com/rcownie/cleat/testdata/errors.leafFunc":                   true,
+		"github.com/rcownie/cleat/testdata/errors.BadWithGoroutine":           true,
+		"github.com/rcownie/cleat/testdata/errors.BadWithInterfaceDispatch":   true,
+		"github.com/rcownie/cleat/testdata/errors.BadWithFuncValue":           true,
+		"github.com/rcownie/cleat/testdata/errors.BadWithFloatCondition":      true,
 	}
 
 	for name := range expectedLeaves {
 		if !cr.DurableLeaves[name] {
-			t.Errorf("expected %s to be a durable leaf", name)
+			t.Errorf("expected %s to be a cleat leaf", name)
 		}
 	}
 
 	// No unexpected leaves.
 	for name := range cr.DurableLeaves {
 		if !expectedLeaves[name] {
-			t.Errorf("unexpected durable leaf: %s", name)
+			t.Errorf("unexpected cleat leaf: %s", name)
 		}
 	}
 
 	if len(cr.DurableLeaves) != len(expectedLeaves) {
-		t.Errorf("expected %d durable leaves, got %d", len(expectedLeaves), len(cr.DurableLeaves))
+		t.Errorf("expected %d cleat leaves, got %d", len(expectedLeaves), len(cr.DurableLeaves))
 	}
 }
 
 func TestComputeErrorsDetectsClosure(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -273,20 +273,20 @@ func TestComputeErrorsDetectsClosure(t *testing.T) {
 	cr := Compute(result, cg)
 
 	expectedClosure := map[string]bool{
-		"github.com/rcownie/durable/testdata/errors.BadWorkflow":      true,
-		"github.com/rcownie/durable/testdata/errors.unthreadedHelper": true,
+		"github.com/rcownie/cleat/testdata/errors.BadWorkflow":      true,
+		"github.com/rcownie/cleat/testdata/errors.unthreadedHelper": true,
 	}
 
 	for name := range expectedClosure {
 		if !cr.DurableClosure[name] {
-			t.Errorf("expected %s to be in durable closure", name)
+			t.Errorf("expected %s to be in cleat closure", name)
 		}
 	}
 }
 
 func TestComputeErrorsCorrectlyTagsPure(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestComputeErrorsCorrectlyTagsPure(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	pureName := "github.com/rcownie/durable/testdata/errors.pureHelper"
+	pureName := "github.com/rcownie/cleat/testdata/errors.pureHelper"
 	if !cr.Pure[pureName] {
 		t.Errorf("expected %s to be pure", pureName)
 	}
@@ -306,7 +306,7 @@ func TestComputeErrorsCorrectlyTagsPure(t *testing.T) {
 
 func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	badName := "github.com/rcownie/durable/testdata/errors.BadWithInterfaceDispatch"
+	badName := "github.com/rcownie/cleat/testdata/errors.BadWithInterfaceDispatch"
 
 	errs := cr.Errors[badName]
 	if len(errs) == 0 {
@@ -342,7 +342,7 @@ func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
 
 func TestComputeErrorsDetectsFuncValueCall(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestComputeErrorsDetectsFuncValueCall(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	badName := "github.com/rcownie/durable/testdata/errors.BadWithFuncValue"
+	badName := "github.com/rcownie/cleat/testdata/errors.BadWithFuncValue"
 
 	errs := cr.Errors[badName]
 	if len(errs) == 0 {
@@ -378,7 +378,7 @@ func TestComputeErrorsDetectsFuncValueCall(t *testing.T) {
 
 func TestComputeErrorsDetectsFloatInCondition(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestComputeErrorsDetectsFloatInCondition(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	badName := "github.com/rcownie/durable/testdata/errors.BadWithFloatCondition"
+	badName := "github.com/rcownie/cleat/testdata/errors.BadWithFloatCondition"
 
 	warns := cr.Warnings[badName]
 	if len(warns) == 0 {

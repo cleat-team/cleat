@@ -12,7 +12,7 @@ plugin.
 ```go
 package helloworld
 
-import "github.com/rcownie/durable/internal/plugin"
+import "github.com/rcownie/cleat/internal/plugin"
 
 func init() {
     plugin.Register(plugin.PluginInfo{
@@ -376,7 +376,7 @@ package myplugin
 import (
     "context"
     "testing"
-    "github.com/rcownie/durable/internal/plugin"
+    "github.com/rcownie/cleat/internal/plugin"
 )
 
 func TestInfo(t *testing.T) {
@@ -404,10 +404,10 @@ tables, runs the plugin's migrations, and verifies endpoint behavior.
 To activate a plugin, import it in the worker binary:
 
 ```go
-// cmd/durable-worker/main.go
+// cmd/cleat-worker/main.go
 import (
-    _ "github.com/rcownie/durable/plugins/blobstore"
-    _ "github.com/rcownie/durable/plugins/my-plugin"
+    _ "github.com/rcownie/cleat/plugins/blobstore"
+    _ "github.com/rcownie/cleat/plugins/my-plugin"
 )
 ```
 

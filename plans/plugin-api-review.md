@@ -16,7 +16,7 @@ lost, and replay after compaction will fail with divergence errors.
 
 ### B2: Migrations run after Init — plugin can't use its own tables
 
-In `cmd/durable-worker/main.go`, `LoadAll` (which calls `Init`) runs before
+In `cmd/cleat-worker/main.go`, `LoadAll` (which calls `Init`) runs before
 `RunMigrations`. A plugin that creates tables in its migration can't query
 them in `Init()` — the table doesn't exist yet.
 

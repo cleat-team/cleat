@@ -3,7 +3,7 @@
 Port of the DBOS widget-store Go application to the Cleat Go durable execution SDK.
 
 Source: `dbos-demo-apps/golang/widget-store/`
-Cleat SDK: `github.com/rcownie/durable/durable`
+Cleat SDK: `github.com/rcownie/cleat/durable`
 
 ## Migration Map: DBOS to Cleat API
 

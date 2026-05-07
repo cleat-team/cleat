@@ -3,7 +3,7 @@ ReAct Agent — Functional API host-side definitions.
 
 Defines LangGraph ``@task`` functions and the ``@entrypoint`` that
 runs on the host side. The Cleat workflow calls each task via
-``durable_call`` for per-task durability.
+``cleat_call`` for per-task durability.
 """
 
 from langgraph.func import entrypoint, task
@@ -56,7 +56,7 @@ async def react_agent_entrypoint(query: str) -> dict:
 
     This is the reference implementation. In the Cleat version, this
     entrypoint runs on the host side when invoked via
-    ``durable_call("langgraph", "invoke_entrypoint", ...)``.
+    ``cleat_call("langgraph", "invoke_entrypoint", ...)``.
     """
     history: list[str] = []
 

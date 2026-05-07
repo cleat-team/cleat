@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 const PAYMENT_STATUS = "payment_status"
@@ -20,7 +20,7 @@ const ORDER_ID = "order_id"
 //  5. On success: mark order PAID, start dispatchOrder child workflow
 //     On failure/timeout: undo inventory reservation, cancel order
 //  6. Publish the order ID externally via query state
-func checkoutWorkflow(h durable.HostCalls, _ string) (string, error) {
+func checkoutWorkflow(h cleat.HostCalls, _ string) (string, error) {
 	workflowID := h.WorkflowID()
 	if workflowID == "" {
 		return "", fmt.Errorf("workflow ID is empty")
@@ -75,7 +75,7 @@ func checkoutWorkflow(h durable.HostCalls, _ string) (string, error) {
 
 // dispatchOrderWorkflow simulates order fulfillment over 10 seconds.
 // Updates progress each second, dispatching the order when progress reaches 0.
-func dispatchOrderWorkflow(h durable.HostCalls, orderIDStr string) (string, error) {
+func dispatchOrderWorkflow(h cleat.HostCalls, orderIDStr string) (string, error) {
 	for range 10 {
 		h.DurableSleep(1 * time.Second)
 		if _, err := h.DurableCall("store", "updateOrderProgress", orderIDStr); err != nil {

@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func init() {

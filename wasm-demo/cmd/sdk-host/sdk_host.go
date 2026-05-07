@@ -1,7 +1,7 @@
 // Host runtime for durable WASM workflows — SDK-integrated version.
 //
 // This demonstrates the same lifecycle as main.go but uses the
-// durable.HostCalls interface from the SDK instead of a raw *host type:
+// cleat.HostCalls interface from the SDK instead of a raw *host type:
 //  1. First execution with the host intercepting API calls
 //  2. Mid-execution crash (simulated at the host level)
 //  3. Resume from checkpoint via replay
@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // ---- Durable host state ----
@@ -38,7 +38,7 @@ type workflowState struct {
 	FinalErr   string       `json:"final_err,omitempty"`
 }
 
-// durableHost wraps a workflowState and provides a durable.HostCalls
+// durableHost wraps a workflowState and provides a cleat.HostCalls
 // that records calls, replays from cache, and handles crashes/fencing.
 type durableHost struct {
 	state     *workflowState
@@ -69,9 +69,9 @@ func newDurableHostFromCheckpoint(state *workflowState) *durableHost {
 	}
 }
 
-// H returns a durable.HostCalls backed by this host.
-func (dh *durableHost) H() durable.HostCalls {
-	return durable.NewHostCalls(durable.HostCallsOptions{
+// H returns a cleat.HostCalls backed by this host.
+func (dh *durableHost) H() cleat.HostCalls {
+	return cleat.NewHostCalls(cleat.HostCallsOptions{
 		DurableCall: func(service, operation, requestJSON string) (string, error) {
 			if dh.fenced {
 				return "", fmt.Errorf("worker fenced — another worker claimed this workflow")
@@ -219,7 +219,7 @@ func realAPICall(service, op, requestJSON string) (string, error) {
 	}
 }
 
-// ---- The workflow — same logic, now using durable.HostCalls ----
+// ---- The workflow — same logic, now using cleat.HostCalls ----
 
 type cartItem struct {
 	SKU      string
@@ -228,7 +228,7 @@ type cartItem struct {
 
 // runWorkflowSDK is the durable workflow using the SDK interface.
 // All external calls go through h.DurableCall / h.DurableCallTyped.
-func runWorkflowSDK(h durable.HostCalls, userID string, cart []cartItem) (string, error) {
+func runWorkflowSDK(h cleat.HostCalls, userID string, cart []cartItem) (string, error) {
 	if len(cart) == 0 {
 		return "", fmt.Errorf("cart is empty")
 	}

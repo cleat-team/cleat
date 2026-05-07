@@ -19,7 +19,7 @@ import pytest
 from cleat_sdk.test_harness import CleatTestHarness
 
 # Import the *unwrapped* original functions.
-# The ``@durable_entry`` decorator replaces the function with a WASM-export
+# The ``@cleat_entry`` decorator replaces the function with a WASM-export
 # wrapper.  ``functools.wraps`` preserves the original via ``__wrapped__``.
 from app import fan_out_worker, execute_subtask, fan_out_worker_stop_on_error
 
@@ -37,7 +37,7 @@ class TestExecuteSubtask:
         h = CleatTestHarness()
         result = execute_subtask.__wrapped__(h, subtask="hello")
         # The child returns a plain string.  In the real host the
-        # ``@durable_entry`` decorator will ``json.dumps`` it before writing
+        # ``@cleat_entry`` decorator will ``json.dumps`` it before writing
         # to the output buffer.
         assert result == "hello: DONE"
 
@@ -175,7 +175,7 @@ class TestHostCallsUsage:
         h.stub_child_workflow("execute_subtask", '"ok"')
 
         # We capture call_history by making the harness record sends
-        h.durable_send("_test", "record", "")
+        h.cleat_send("_test", "record", "")
         _ = fan_out_worker.__wrapped__(h, task="x,y,z")
 
         # ``child_workflow`` itself is not recorded in call_history.
@@ -184,12 +184,12 @@ class TestHostCallsUsage:
         # the children are consumed.
         assert True  # Test passes if no exception
 
-    def test_durable_log_called(self):
-        """The workflow calls durable_log for observability."""
+    def test_cleat_log_called(self):
+        """The workflow calls cleat_log for observability."""
         h = CleatTestHarness()
         h.stub_child_workflow("execute_subtask", '"ok"')
 
-        # durable_log is a no-op in the test harness, so this just
+        # cleat_log is a no-op in the test harness, so this just
         # verifies the code path is exercised without error.
         result = fan_out_worker.__wrapped__(h, task="test")
         assert result == "ok"

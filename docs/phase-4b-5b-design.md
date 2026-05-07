@@ -41,7 +41,7 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 }
 ```
 
-Wiring in `cmd/durable-worker/main.go` (alongside `StartWorkflow` added in Phase 1):
+Wiring in `cmd/cleat-worker/main.go` (alongside `StartWorkflow` added in Phase 1):
 ```go
 SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
     return store.DeliverSignal(ctx, workflowID, signalName, payload)
@@ -128,7 +128,7 @@ result, err := h.DurableCallTyped("webhook-ingest", "await_webhook",
 | File | Change |
 |------|--------|
 | `internal/plugin/plugin.go` | Add `SignalWorkflow` func field |
-| `cmd/durable-worker/main.go` | Wire `SignalWorkflow` from `store.DeliverSignal` |
+| `cmd/cleat-worker/main.go` | Wire `SignalWorkflow` from `store.DeliverSignal` |
 | `plugins/webhookingest/plugin.go` | Store `env` reference |
 | `plugins/webhookingest/migrations.go` | Add `signal_workflow_id`, `signal_name` columns |
 | `plugins/webhookingest/routes.go` | Ingest handler: signal delivery; create/get source: new fields |
@@ -209,7 +209,7 @@ This gives:
 
 #### Step 3: Graceful shutdown with WaitGroup
 
-**File:** `cmd/durable-worker/main.go`
+**File:** `cmd/cleat-worker/main.go`
 
 Currently (lines 216-228):
 ```go
@@ -257,7 +257,7 @@ case <-time.After(30 * time.Second):
 }
 ```
 
-Read the existing signal handler in `cmd/durable-worker/main.go` to find where SIGTERM is handled, and add the bgWg.Wait() there.
+Read the existing signal handler in `cmd/cleat-worker/main.go` to find where SIGTERM is handled, and add the bgWg.Wait() there.
 
 #### Step 4: Plugin-specific instrumentation spots
 
@@ -278,7 +278,7 @@ Each plugin with a background worker gets the standardized logging:
 
 | File | Change |
 |------|--------|
-| `cmd/durable-worker/main.go` | Add WaitGroup, graceful shutdown wait loop |
+| `cmd/cleat-worker/main.go` | Add WaitGroup, graceful shutdown wait loop |
 | `plugins/auditlog/background.go` | Add duration + count logging |
 | `plugins/blobstore/background.go` | Add per-phase counts |
 | `plugins/eventstore/background.go` | Add deleted count logging |

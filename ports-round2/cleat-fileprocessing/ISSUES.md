@@ -88,7 +88,7 @@
 
 **Temporal feature**: SDK is published to a Go module registry (`go.temporal.io/sdk`).
 
-**Cleat status**: The SDK (`github.com/rcownie/durable`) is not published to any registry. Any module importing it must use a `replace` directive pointing to a local checkout.
+**Cleat status**: The SDK (`github.com/rcownie/cleat`) is not published to any registry. Any module importing it must use a `replace` directive pointing to a local checkout.
 
 **Impact**: Non-trivial for CI/CD. Every environment that builds the workflow must have the SDK source at the expected path. There is no way to pin a version or use normal Go module versioning.
 

@@ -2,7 +2,7 @@
 Tests for the transactional-outbox Cleat port.
 
 Two test layers:
-1. **Unit tests** using ``CleatTestHarness`` — stub all ``durable_call``
+1. **Unit tests** using ``CleatTestHarness`` — stub all ``cleat_call``
    responses, verify call order and parameters.
 2. **Integration tests** using ``LocalRuntime`` — exercise the workflow
    against service implementations with a real SQLite in-memory DB.
@@ -32,7 +32,7 @@ def harness() -> CleatTestHarness:
     """Create a fresh CleatTestHarness with stubbed services."""
     h = CleatTestHarness()
 
-    # Stub all three durable_calls the workflow makes, in order.
+    # Stub all three cleat_calls the workflow makes, in order.
     h.stub_call("db", "insert_order", '{"order_id": 42}')
     h.stub_call(
         "notifier", "send_notification", '{"status": "sent"}'
@@ -101,7 +101,7 @@ class TestWorkflowUnit:
         harness.reset()
         harness.stub_call("db", "insert_order", error="connection refused")
 
-        with pytest.raises(RuntimeError, match="durable_call failed"):
+        with pytest.raises(RuntimeError, match="cleat_call failed"):
             place_order_workflow.__wrapped__(  # type: ignore[attr-defined]
                 harness, customer="Charlie", item="Doohickey", quantity=3
             )
@@ -124,7 +124,7 @@ class TestWorkflowUnit:
             "notifier", "send_notification", error="broker timeout"
         )
 
-        with pytest.raises(RuntimeError, match="durable_call failed"):
+        with pytest.raises(RuntimeError, match="cleat_call failed"):
             place_order_workflow.__wrapped__(  # type: ignore[attr-defined]
                 harness, customer="Diana", item="Thingy", quantity=1
             )

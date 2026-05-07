@@ -9,8 +9,8 @@ import (
 
 // ---------------------------------------------------------------------------
 // Concurrency key tests against PostgresStore directly.
-// These require a real PostgreSQL database. Set DURABLE_TEST_DB to run.
-// Example: DURABLE_TEST_DB="postgres://localhost:5432/cleat?sslmode=disable" go test -v -run TestConcurrency
+// These require a real PostgreSQL database. Set CLEAT_TEST_DB to run.
+// Example: CLEAT_TEST_DB="postgres://localhost:5432/cleat?sslmode=disable" go test -v -run TestConcurrency
 // ---------------------------------------------------------------------------
 
 func TestConcurrencyKeyAcquireRelease(t *testing.T) {

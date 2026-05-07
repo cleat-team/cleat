@@ -1,14 +1,14 @@
 # -- Number of worker replicas to run.
 replicaCount: 3
 
-# -- Image configuration for the durable-worker container.
+# -- Image configuration for the cleat-worker container.
 image:
-  repository: ghcr.io/rcownie/durable-worker
+  repository: ghcr.io/rcownie/cleat-worker
   tag: latest
   pullPolicy: IfNotPresent
 
 # -- Worker runtime configuration.
-# These map to CLI flags on the durable-worker binary.
+# These map to CLI flags on the cleat-worker binary.
 worker:
   # -- Max concurrent workflow executions (--concurrency).
   concurrency: 10

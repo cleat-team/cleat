@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ const (
 // worker-affinity concept, so the pipeline runs as sequential DurableCall
 // operations. File operations must live in host-side services because the
 // workflow runs in WASM and cannot access the local filesystem directly.
-func SampleFileProcessingWorkflow(h durable.HostCalls, fileName string) (err error) {
+func SampleFileProcessingWorkflow(h cleat.HostCalls, fileName string) (err error) {
 	for i := 1; i < 5; i++ {
 		err = processFile(h, fileName)
 		if err == nil {
@@ -91,11 +91,11 @@ func SampleFileProcessingWorkflow(h durable.HostCalls, fileName string) (err err
 // Each step calls the FileService host-side service via DurableCallTyped.
 // The process step demonstrates DurableCallWithHeartbeat for progress
 // reporting, and per-call retry via CallOptions.
-func processFile(h durable.HostCalls, fileName string) error {
+func processFile(h cleat.HostCalls, fileName string) error {
 	// Shared retry policy for all file operations, matching the Temporal
 	// original's ActivityOptions.
-	opts := durable.CallOptions{
-		Retry: &durable.RetryPolicy{
+	opts := cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
 			MaxAttempts:        3,
 			InitialInterval:    1 * time.Second,
 			BackoffCoefficient: 2.0,

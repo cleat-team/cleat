@@ -1,0 +1,2012 @@
+package cleat;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Map;
+import org.teavm.interop.Import;
+
+/**
+ * High-level wrapper around all 18 cleat WASM host function imports.
+ * <p>
+ * Each WASM host function is imported from the {@code "env"} module via
+ * {@link Import @Import}.  The raw native methods return packed {@code long}
+ * values; the public wrapper methods unpack the results and present a
+ * Java-friendly API.
+ * <p>
+ * <strong>Memory convention:</strong> Input strings are written to the
+ * scratch region at {@link Memory#SCRATCH_BASE} before each host call.
+ * Output strings are read from {@link Memory#OUTPUT_OFFSET}.  The scratch
+ * region is a single-threaded buffer — safe because WASM execution is
+ * single-threaded.
+ * <p>
+ * <strong>Thread safety:</strong> This class is <em>not</em> thread-safe.
+ * WASM modules execute on a single thread, so concurrent access is not
+ * expected.
+ * <p>
+ * <strong>Usage:</strong> Workflow entry-point methods receive a
+ * {@code HostCalls} instance as their first parameter:
+ * <pre>{@code
+ * @CleatEntry(name = "place_order")
+ * public static String placeOrder(HostCalls h, String input) {
+ *     h.cleatLog("Processing order");
+ *     CleatResult<String> reserved = h.cleatCall("inventory", "Reserve", input);
+ *     if (reserved.isErr()) {
+ *         return "{\"error\": \"reservation failed\"}";
+ *     }
+ *     return reserved.getValue();
+ * }
+ * }</pre>
+ *
+ * @see CleatEntry
+ * @see CleatResult
+ * @see Memory
+ */
+public class HostCalls {
+
+    /** Current scope prefix for virtual object state operations. */
+    private String _scopePrefix = "";
+
+    // ========================================================================
+    // Raw WASM imports (18 host functions from the "env" module)
+    // ========================================================================
+
+    @Import(module = "env", name = "cleat_call")
+    private static native long cleatCallRaw(
+        int svcPtr, int svcLen,
+        int opPtr, int opLen,
+        int reqPtr, int reqLen,
+        int respPtr, int respMaxLen);
+
+    @Import(module = "env", name = "cleat_sleep")
+    private static native long cleatSleepRaw(long durationMs);
+
+    @Import(module = "env", name = "cleat_now")
+    private static native long cleatNowRaw();
+
+    @Import(module = "env", name = "cleat_random")
+    private static native long cleatRandomRaw();
+
+    @Import(module = "env", name = "cleat_log")
+    private static native long cleatLogRaw(int msgPtr, int msgLen);
+
+    @Import(module = "env", name = "cleat_version")
+    private static native long cleatVersionRaw();
+
+    @Import(module = "env", name = "cleat_min_version")
+    private static native long cleatMinVersionRaw();
+
+    @Import(module = "env", name = "cleat_defer")
+    private static native long cleatDeferRaw(
+        int descPtr, int descLen, int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_poll_cancellation")
+    private static native long cleatPollCancellationRaw(int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_poll_signal")
+    private static native long cleatPollSignalRaw(
+        int namePtr, int nameLen, int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_continue_as_new")
+    private static native long cleatContinueAsNewRaw(int inPtr, int inLen);
+
+    @Import(module = "env", name = "cleat_create_promise")
+    private static native long cleatCreatePromiseRaw(
+        int namePtr, int nameLen, int idOutPtr, int idOutMax);
+
+    @Import(module = "env", name = "cleat_child_workflow")
+    private static native long cleatChildWorkflowRaw(
+        int namePtr, int nameLen,
+        int inPtr, int inLen,
+        int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_await_child")
+    private static native long cleatAwaitChildRaw(
+        int runIdPtr, int runIdLen,
+        int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_await_promise")
+    private static native long cleatAwaitPromiseRaw(
+        int idPtr, int idLen, long timeoutMs,
+        int resultOutPtr, int resultOutMax);
+
+    @Import(module = "env", name = "cleat_await_signals")
+    private static native long cleatAwaitSignalsRaw(
+        int namesPtr, int namesLen, long timeoutMs,
+        int sigNameOut, int sigNameMax,
+        int payloadOut, int payloadMax);
+
+    @Import(module = "env", name = "cleat_register_update_handler")
+    private static native long cleatRegisterUpdateHandlerRaw(
+        int namePtr, int nameLen);
+
+    @Import(module = "env", name = "set_query_state")
+    private static native long setQueryStateRaw(
+        int keyPtr, int keyLen, int valPtr, int valLen);
+
+    @Import(module = "env", name = "get_query_state")
+    private static native long getQueryStateRaw(int keyPtr, int keyLen, int outPtr, int outMaxLen);
+
+    @Import(module = "env", name = "plugin_call")
+    private static native long importPluginCall(
+        int pluginNamePtr, int pluginNameLen,
+        int functionNamePtr, int functionNameLen,
+        int inputPtr, int inputLen,
+        int responsePtr, int responseMaxLen);
+
+    @Import(module = "env", name = "cleat_workflow_id")
+    private static native long cleatWorkflowIdRaw(int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_run_id")
+    private static native long cleatRunIdRaw(int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_send_signal_and_wait")
+    private static native long cleatSendSignalAndWaitRaw(
+        int targetRunIdPtr, int targetRunIdLen,
+        int signalNamePtr, int signalNameLen,
+        int payloadPtr, int payloadLen,
+        long timeoutMs,
+        int responsePtr, int responseMaxLen);
+
+    @Import(module = "env", name = "cleat_reply_to_signal")
+    private static native long cleatReplyToSignalRaw(
+        int correlationIdPtr, int correlationIdLen,
+        int responsePtr, int responseLen);
+
+    @Import(module = "env", name = "cleat_signal_workflow")
+    private static native long cleatSignalWorkflowRaw(
+        int targetRunIdPtr, int targetRunIdLen,
+        int signalNamePtr, int signalNameLen,
+        int payloadPtr, int payloadLen);
+
+    @Import(module = "env", name = "cleat_resolve_promise")
+    private static native long cleatResolvePromiseRaw(int idPtr, int idLen, int valuePtr, int valueLen);
+
+    @Import(module = "env", name = "cleat_reject_promise")
+    private static native long cleatRejectPromiseRaw(int idPtr, int idLen, int errorPtr, int errorLen);
+
+    @Import(module = "env", name = "cleat_send")
+    private static native long cleatSendRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen);
+
+    @Import(module = "env", name = "schedule_cron")
+    private static native long scheduleCronRaw(
+        int wfNamePtr, int wfNameLen,
+        int cronExprPtr, int cronExprLen,
+        int tzPtr, int tzLen,
+        int inputPtr, int inputLen,
+        int scheduleIdOutPtr, int scheduleIdOutMax);
+
+    @Import(module = "env", name = "delete_cron")
+    private static native long deleteCronRaw(int scheduleIdPtr, int scheduleIdLen);
+
+    @Import(module = "env", name = "list_crons")
+    private static native long listCronsRaw(int outPtr, int outMaxLen);
+
+    @Import(module = "env", name = "schedule_invoke")
+    private static native long scheduleInvokeRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen, long delayMs);
+
+    @Import(module = "env", name = "cleat_register_query_handler")
+    private static native long cleatRegisterQueryHandlerRaw(int namePtr, int nameLen);
+
+    @Import(module = "env", name = "cleat_run_detached")
+    private static native long cleatRunDetachedRaw(int namePtr, int nameLen, int inputPtr, int inputLen);
+
+    @Import(module = "env", name = "cleat_set_state")
+    private static native long cleatSetStateRaw(int keyPtr, int keyLen, int valPtr, int valLen);
+
+    @Import(module = "env", name = "cleat_get_state")
+    private static native long cleatGetStateRaw(int keyPtr, int keyLen, int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_delete_state")
+    private static native long cleatDeleteStateRaw(int keyPtr, int keyLen);
+
+    @Import(module = "env", name = "cleat_incr_state")
+    private static native long cleatIncrStateRaw(int keyPtr, int keyLen, long delta);
+
+    @Import(module = "env", name = "cleat_has_state")
+    private static native long cleatHasStateRaw(int keyPtr, int keyLen);
+
+    @Import(module = "env", name = "cleat_list_state")
+    private static native long cleatListStateRaw(int prefixPtr, int prefixLen, int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_await_all_children")
+    private static native long cleatAwaitAllChildrenRaw(int idsPtr, int idsLen, int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_call_with_retry")
+    private static native long cleatCallWithRetryRaw(
+        int svcPtr, int svcLen,
+        int opPtr, int opLen,
+        int reqPtr, int reqLen,
+        int retryPtr, int retryLen,
+        int respPtr, int respMaxLen);
+
+    @Import(module = "env", name = "cleat_fetch")
+    private static native long cleatFetchRaw(
+        int methodPtr, int methodLen,
+        int urlPtr, int urlLen,
+        int headersPtr, int headersLen,
+        int bodyPtr, int bodyLen,
+        int respPtr, int respMaxLen);
+
+    // ========================================================================
+    // Internal helpers: pack strings in scratch region, read output buffer
+    // ========================================================================
+
+    /**
+     * Writes multiple strings consecutively into the scratch region at
+     * {@link Memory#SCRATCH_BASE}, returning their offsets and lengths.
+     * <p>
+     * Example: writing {@code ["svc", "op"]} at {@code SCRATCH_BASE} produces:
+     * <pre>
+     * offset 0: [s][v][c]
+     * offset 3: [o][p]
+     * </pre>
+     * Returns {@code [off0, off1, len0, len1]} = {@code [0, 3, 3, 2]}.
+     *
+     * @param strings the strings to write consecutively into scratch memory
+     * @return an array of 2*N ints: first N are offsets, remaining N are
+     *         byte lengths
+     */
+    private static int[] packStrings(String... strings) {
+        int count = strings.length;
+        int[] offsets = new int[count];
+        int[] lengths = new int[count];
+        int current = Memory.SCRATCH_BASE;
+
+        for (int i = 0; i < count; i++) {
+            String s = strings[i];
+            if (s == null) {
+                s = "";
+            }
+            offsets[i] = current;
+            byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+            lengths[i] = bytes.length;
+            int written = Memory.writeString(current, Memory.OUT_BUF_SIZE, s);
+            current += written;
+        }
+
+        // Flatten into single array: [offsets..., lengths...]
+        int[] result = new int[count * 2];
+        for (int i = 0; i < count; i++) {
+            result[i] = offsets[i];
+            result[i + count] = lengths[i];
+        }
+        return result;
+    }
+
+    /**
+     * Read a string from the output buffer ({@link Memory#OUTPUT_OFFSET}),
+     * clamped to the buffer size.
+     *
+     * @param maxLen the number of bytes to read
+     * @return the decoded string, or empty if maxLen is zero
+     */
+    private static String readOutput(int maxLen) {
+        if (maxLen <= 0) {
+            return "";
+        }
+        int clamped = Math.min(maxLen, Memory.OUT_BUF_SIZE);
+        return Memory.readString(Memory.OUTPUT_OFFSET, clamped);
+    }
+
+    /**
+     * Prepend the current scope prefix (if set) to the given key.
+     * Used by state operations within virtual object instances.
+     */
+    private String scopedKey(String key) {
+        return _scopePrefix.isEmpty() ? key : _scopePrefix + key;
+    }
+
+    /**
+     * Serialize a {@code Map<String, String>} to a JSON object string.
+     * Used by {@link #cleatFetch(String, String, Map, String)}.
+     */
+    private static String headersToJson(Map<String, String> headers) {
+        if (headers == null || headers.isEmpty()) {
+            return "{}";
+        }
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (Map.Entry<String, String> entry : headers.entrySet()) {
+            if (!first) {
+                sb.append(",");
+            }
+            sb.append("\"").append(JsonHelper.escapeJson(entry.getKey())).append("\":\"")
+                .append(JsonHelper.escapeJson(entry.getValue())).append("\"");
+            first = false;
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
+    // ========================================================================
+    // Public API methods
+    // ========================================================================
+
+    /**
+     * Make a durable (deterministically replayed) call to an external service.
+     * <p>
+     * The call is recorded in the workflow event history.  On replay, the
+     * recorded response is returned without making the real call, ensuring
+     * deterministic re-execution.
+     *
+     * @param service     the service name (e.g. {@code "orders"})
+     * @param operation   the operation name (e.g. {@code "create"})
+     * @param requestJSON the JSON request payload
+     * @return a result containing the JSON response on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> cleatCall(String service, String operation, String requestJSON) {
+        int[] p = packStrings(service, operation, requestJSON);
+        int svcOff = p[0], opOff = p[1], reqOff = p[2];
+        int svcLen = p[3], opLen = p[4], reqLen = p[5];
+
+        long result = cleatCallRaw(
+            svcOff, svcLen,
+            opOff, opLen,
+            reqOff, reqLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return CleatResult.err(errMsg);
+        }
+
+        String response = readOutput(responseLen);
+        return CleatResult.ok(response);
+    }
+
+    /**
+     * Suspend workflow execution for a duration.
+     * <p>
+     * On replay ({@link Memory#SLEEP_STATUS_COMPLETED}), this returns
+     * {@code false} — the workflow should continue without actually sleeping.
+     * On fresh execution ({@link Memory#SLEEP_STATUS_SUSPEND}), returns
+     * {@code true} — the workflow should propagate the suspension by
+     * returning {@link Memory#SUSPEND_SENTINEL} from the export.
+     *
+     * @param durationMs sleep duration in milliseconds
+     * @return {@code true} if the workflow should suspend (fresh execution),
+     *         {@code false} to continue (replay)
+     */
+    public boolean cleatSleep(long durationMs) {
+        long result = cleatSleepRaw(durationMs);
+        int status = Memory.decodeSleepStatus(result);
+        return status == Memory.SLEEP_STATUS_SUSPEND;
+    }
+
+    /**
+     * Get the deterministic current wall-clock time.
+     * <p>
+     * Returns the time in milliseconds since the Unix epoch.  The same value
+     * is returned on replay as during the original execution.
+     *
+     * @return milliseconds since Unix epoch (full 64-bit value)
+     */
+    public long now() {
+        return cleatNowRaw();
+    }
+
+    /**
+     * Get a deterministic random value.
+     * <p>
+     * The same value is returned on replay as during the original execution.
+     * The value is a full 64-bit integer.
+     *
+     * @return a deterministic 64-bit random value
+     */
+    public long random() {
+        return cleatRandomRaw();
+    }
+
+    /**
+     * Log a message to the workflow event history.
+     * <p>
+     * Log messages are recorded deterministically and replayed during
+     * workflow re-execution.  This is intended for debugging and
+     * observability, not for side-effect logic.
+     *
+     * @param message the log message (must not be null)
+     */
+    public void cleatLog(String message) {
+        int[] p = packStrings(message);
+        cleatLogRaw(p[0], p[1]);
+    }
+
+    /**
+     * Get the current workflow definition version.
+     * <p>
+     * Used for versioned workflow deployments.  The version is set when the
+     * workflow is compiled and deployed.
+     *
+     * @return the workflow definition version (unsigned 32-bit)
+     */
+    public int version() {
+        long result = cleatVersionRaw();
+        return (int) (result & 0xFFFFFFFFL);
+    }
+
+    /**
+     * Get the minimum supported workflow definition version.
+     * <p>
+     * Workflow instances at versions below this threshold are either migrated
+     * to a newer version or rejected by the host.
+     *
+     * @return the minimum supported version (unsigned 32-bit)
+     */
+    public int minVersion() {
+        long result = cleatMinVersionRaw();
+        return (int) (result & 0xFFFFFFFFL);
+    }
+
+    /**
+     * Register a deferred cleanup callback to run when the workflow exits.
+     * <p>
+     * Deferred callbacks are executed in LIFO order (last-registered,
+     * first-executed), analogous to Go's {@code defer} or Java's
+     * {@code try/finally}.  The returned defer ID can be used to cancel
+     * the deferred action before the workflow completes.
+     *
+     * @param description a human-readable description of the cleanup action
+     * @return a result containing the defer ID on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> cleatDefer(String description) {
+        int[] p = packStrings(description);
+
+        long result = cleatDeferRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int deferIdLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("defer failed with code " + errCode);
+        }
+
+        String deferId = readOutput(deferIdLen);
+        return CleatResult.ok(deferId);
+    }
+
+    /**
+     * Poll whether a cancellation has been requested for this workflow.
+     * <p>
+     * Workflows should periodically check for cancellation and perform
+     * cleanup if cancelled.
+     *
+     * @return a result whose value is {@code true} if cancellation has been
+     *         requested, {@code false} otherwise
+     */
+    public CleatResult<Boolean> pollCancellation() {
+        long result = cleatPollCancellationRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        boolean cancelled = Memory.decodePollCancelCancelled(result);
+        int reasonLen = Memory.decodePollCancelReasonLen(result);
+
+        // The cancellation reason is written to the output buffer when
+        // cancelled.  We do not propagate the reason here; callers that
+        // need it can expand this wrapper.
+        return CleatResult.ok(cancelled);
+    }
+
+    /**
+     * Poll for a specific pending external signal.
+     * <p>
+     * Unlike {@link #awaitSignals(String[], long)}, this call is non-blocking
+     * and checks once.  If no signal is pending with the given name, the
+     * result carries an error.
+     *
+     * @param signalName the signal name to look up
+     * @return a result containing the signal payload if found, or an error
+     *         if the signal is not pending
+     */
+    public CleatResult<String> pollSignal(String signalName) {
+        int[] p = packStrings(signalName);
+
+        long result = cleatPollSignalRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        boolean found = Memory.decodePollSigFound(result);
+        if (!found) {
+            return CleatResult.err("signal not found: " + signalName);
+        }
+
+        int payloadLen = Memory.decodePollSigPayloadLen(result);
+        String payload = readOutput(payloadLen);
+        return CleatResult.ok(payload);
+    }
+
+    /**
+     * Replace the current workflow's input and restart execution from the
+     * beginning ("continue-as-new").
+     * <p>
+     * This is used for workflow history compaction — after many events, the
+     * workflow can compact its history by starting fresh with new input.
+     * After this call, the workflow should return
+     * {@link Memory#SUSPEND_SENTINEL} to signal the host.
+     *
+     * @param newInputJSON the new input JSON for the restarted workflow
+     * @return a result indicating success, or an error description
+     */
+    public CleatResult<Void> continueAsNew(String newInputJSON) {
+        int[] p = packStrings(newInputJSON);
+
+        long result = cleatContinueAsNewRaw(p[0], p[1]);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("continueAsNew failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
+     * Create a promise with the given name.
+     * <p>
+     * Promises are durable, first-class entities in cleat. They can be
+     * resolved by this or another workflow, and awaited by one or more
+     * workflows using {@link #awaitPromise(String, long)}.
+     *
+     * @param name the promise name
+     * @return a result containing the promise ID on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> createPromise(String name) {
+        int[] p = packStrings(name);
+
+        long result = cleatCreatePromiseRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int idLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("createPromise failed with code " + errCode);
+        }
+
+        String promiseId = readOutput(idLen);
+        return CleatResult.ok(promiseId);
+    }
+
+    /**
+     * Start a child workflow execution.
+     * <p>
+     * The child runs asynchronously.  Use {@link #awaitChild(String)} to
+     * wait for its completion and retrieve the result.
+     *
+     * @param name      the child workflow type/name
+     * @param inputJSON the input JSON for the child workflow
+     * @return a result containing the child's run ID on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> childWorkflow(String name, String inputJSON) {
+        int[] p = packStrings(name, inputJSON);
+        int nameOff = p[0], inOff = p[1];
+        int nameLen = p[2], inLen = p[3];
+
+        long result = cleatChildWorkflowRaw(
+            nameOff, nameLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int runIdLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("childWorkflow failed with code " + errCode);
+        }
+
+        String runId = readOutput(runIdLen);
+        return CleatResult.ok(runId);
+    }
+
+    /**
+     * Wait for a child workflow to complete and retrieve its result.
+     * <p>
+     * If the child has not yet completed, this call triggers a workflow
+     * suspension.  The host resumes the workflow when the child finishes.
+     *
+     * @param runID the child workflow run ID (from
+     *              {@link #childWorkflow(String, String)})
+     * @return a result containing the child's output JSON on success, or an
+     *         error description on failure
+     */
+    public CleatResult<String> awaitChild(String runID) {
+        int[] p = packStrings(runID);
+
+        long result = cleatAwaitChildRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("awaitChild failed with code " + errCode);
+        }
+
+        String childResult = readOutput(resultLen);
+        return CleatResult.ok(childResult);
+    }
+
+    /**
+     * Wait for a promise to resolve, with an optional timeout.
+     * <p>
+     * Blocks until the promise with the given ID is resolved or the timeout
+     * expires. On timeout, {@link AwaitPromiseResult#timedOut} is
+     * {@code true}.
+     *
+     * @param promiseId the promise ID to wait for
+     * @param timeoutMs maximum wait time in milliseconds (use
+     *                  {@link Long#MAX_VALUE} for no timeout)
+     * @return a result containing an {@link AwaitPromiseResult} with the
+     *         resolved value and timeout indicator
+     */
+    public CleatResult<AwaitPromiseResult> awaitPromise(String promiseId, long timeoutMs) {
+        int[] p = packStrings(promiseId);
+
+        long result = cleatAwaitPromiseRaw(
+            p[0], p[1], timeoutMs,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeAwaitErrCode(result);
+        boolean timedOut = Memory.decodeAwaitPromiseTimedOut(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("awaitPromise failed with code " + errCode);
+        }
+
+        String promiseResult = readOutput(resultLen);
+        return CleatResult.ok(new AwaitPromiseResult(promiseResult, timedOut));
+    }
+
+    /**
+     * Wait for one or more external signals, with an optional timeout.
+     * <p>
+     * Blocks until one of the named signals is received or the timeout
+     * expires.  On timeout, {@link AwaitSignalsResult#timedOut} is
+     * {@code true}.
+     * <p>
+     * The signal names are serialized internally as a JSON string array
+     * (e.g. {@code ["payment_received","order_cancelled"]}).  The returned
+     * signal name and payload are from whichever signal arrives first.
+     *
+     * @param signalNames the signal names to wait for
+     * @param timeoutMs   maximum wait time in milliseconds (use
+     *                    {@link Long#MAX_VALUE} for no timeout)
+     * @return a result containing an {@link AwaitSignalsResult} with the
+     *         received signal name, payload, and timeout indicator
+     */
+    public CleatResult<AwaitSignalsResult> awaitSignals(String[] signalNames, long timeoutMs) {
+        // Serialize signal names as a JSON string array (matching Go adapter).
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < signalNames.length; i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append("\"").append(JsonHelper.escapeJson(signalNames[i])).append("\"");
+        }
+        sb.append("]");
+        String namesJSON = sb.toString();
+
+        int[] p = packStrings(namesJSON);
+        int namesOff = p[0];
+        int namesLen = p[1];
+
+        // Split the output buffer: first 1024 bytes for signal name, rest for
+        // payload.
+        final int sigNameBufSize = 1024;
+        final int payloadBufOffset = Memory.OUTPUT_OFFSET + sigNameBufSize;
+        final int payloadBufSize = Memory.OUT_BUF_SIZE - sigNameBufSize;
+
+        long result = cleatAwaitSignalsRaw(
+            namesOff, namesLen, timeoutMs,
+            Memory.OUTPUT_OFFSET, sigNameBufSize,
+            payloadBufOffset, payloadBufSize);
+
+        int errCode = Memory.decodeAwaitErrCode(result);
+        boolean timedOut = Memory.decodeAwaitTimedOut(result);
+        int sigNameLen = Memory.decodeAwaitSigNameLen(result);
+        int payloadLen = Memory.decodeAwaitPayloadLen(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("awaitSignals failed with code " + errCode);
+        }
+
+        String sigName = Memory.readString(Memory.OUTPUT_OFFSET,
+            Math.min(sigNameLen, sigNameBufSize));
+        String payload = Memory.readString(payloadBufOffset,
+            Math.min(payloadLen, payloadBufSize));
+
+        return CleatResult.ok(new AwaitSignalsResult(sigName, payload, timedOut));
+    }
+
+    /**
+     * Register a handler for a named update.
+     * <p>
+     * External clients can send updates to this workflow using the cleat
+     * update API. The registered handler is invoked when an update is
+     * received with the matching name.
+     *
+     * @param name the update handler name
+     */
+    public void registerUpdateHandler(String name) {
+        int[] p = packStrings(name);
+        cleatRegisterUpdateHandlerRaw(p[0], p[1]);
+    }
+
+    /**
+     * Set a key-value pair in the workflow's queryable state.
+     * <p>
+     * External clients can query this state while the workflow is running or
+     * after completion using the cleat query API.
+     *
+     * @param key   the state key
+     * @param value the state value (typically a JSON string)
+     */
+    public void setQueryState(String key, String value) {
+        int[] p = packStrings(key, value);
+        int keyOff = p[0], valOff = p[1];
+        int keyLen = p[2], valLen = p[3];
+        setQueryStateRaw(keyOff, keyLen, valOff, valLen);
+    }
+
+    /**
+     * Get a key-value pair from the workflow's queryable state.
+     * <p>
+     * Retrieves the state value previously set via
+     * {@link #setQueryState(String, String)}.
+     *
+     * @param key the state key
+     * @return a result containing the state value on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> getQueryState(String key) {
+        int[] p = packStrings(key);
+        int keyOff = p[0], keyLen = p[1];
+
+        long result = getQueryStateRaw(
+            keyOff, keyLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return CleatResult.err(errMsg);
+        }
+
+        String response = readOutput(responseLen);
+        return CleatResult.ok(response);
+    }
+
+    // ========================================================================
+    // plugin_call — call a plugin host function (ABI 2.19)
+    // ========================================================================
+
+    /**
+     * Call a plugin host function and return the response JSON string.
+     * <p>
+     * Plugins extend the host runtime with custom functionality beyond the
+     * standard host imports.  Unlike {@link #cleatCall(String, String, String)},
+     * plugin calls are <em>not</em> recorded in the workflow event history
+     * and are not replayed.
+     *
+     * @param pluginName   name of the plugin (e.g. {@code "blobstore"},
+     *                     {@code "slacknotify"})
+     * @param functionName name of the function within the plugin
+     *                     (e.g. {@code "put"}, {@code "send_message"})
+     * @param inputJson    input JSON for the plugin function
+     * @return the plugin function's response as a JSON string
+     * @throws RuntimeException if the host reports an error from the plugin
+     *                          call
+     */
+    public String pluginCall(String pluginName, String functionName, String inputJson) {
+        int[] p = packStrings(pluginName, functionName, inputJson);
+        int pnOff = p[0], fnOff = p[1], inOff = p[2];
+        int pnLen = p[3], fnLen = p[4], inLen = p[5];
+
+        long result = importPluginCall(
+            pnOff, pnLen,
+            fnOff, fnLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            throw new RuntimeException("plugin_call failed: " + errMsg);
+        }
+
+        return readOutput(responseLen);
+    }
+
+    /**
+     * Call a plugin host function and return a structured
+     * {@link PluginCallOutcome} with the response, error message, and
+     * call-level error code.
+     * <p>
+     * Unlike {@link #pluginCall(String, String, String)}, this method does
+     * <em>not</em> throw on protocol errors.  Instead, the error is reported
+     * in the returned {@link PluginCallOutcome#error} field, allowing callers
+     * to inspect both the response and error information without exception
+     * handling.
+     *
+     * @param pluginName   name of the plugin
+     * @param functionName name of the function within the plugin
+     * @param inputJson    input JSON for the plugin function
+     * @return a {@link PluginCallOutcome} with response, error, and
+     *         call-level error code
+     */
+    public PluginCallOutcome pluginCallOutcome(String pluginName, String functionName, String inputJson) {
+        int[] p = packStrings(pluginName, functionName, inputJson);
+        int pnOff = p[0], fnOff = p[1], inOff = p[2];
+        int pnLen = p[3], fnLen = p[4], inLen = p[5];
+
+        long result = importPluginCall(
+            pnOff, pnLen,
+            fnOff, fnLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int callErrorCode = Memory.decodeCallErrorCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return new PluginCallOutcome(null, errMsg, callErrorCode);
+        }
+
+        String response = readOutput(responseLen);
+        return new PluginCallOutcome(response, null, callErrorCode);
+    }
+
+    // ========================================================================
+    // Scope management for virtual object instances
+    // ========================================================================
+
+    /**
+     * Get the current workflow ID from the host runtime.
+     *
+     * @return the workflow ID string
+     */
+    public String currentWorkflowId() {
+        long result = cleatWorkflowIdRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int idLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0 || idLen == 0) {
+            return "";
+        }
+        return readOutput(idLen);
+    }
+
+    /**
+     * Set the state key prefix for virtual object instances.
+     * All subsequent state operations are automatically prefixed
+     * with "vo:&lt;objectType&gt;:&lt;instanceKey&gt;:".
+     *
+     * @param objectType  the virtual object type name
+     * @param instanceKey the instance key for this specific object
+     * @return the previous scope prefix (empty string if none was set)
+     */
+    public String setScope(String objectType, String instanceKey) {
+        String prev = this._scopePrefix;
+        this._scopePrefix = (objectType != null && !objectType.isEmpty()
+            && instanceKey != null && !instanceKey.isEmpty())
+            ? "vo:" + objectType + ":" + instanceKey + ":"
+            : "";
+        return prev;
+    }
+
+    /**
+     * Get the current virtual object scope.
+     *
+     * @return a two-element array {@code [objectType, instanceKey]}, or
+     *         {@code ["", ""]} if no scope is set
+     */
+    public String[] getScope() {
+        if (this._scopePrefix.isEmpty()) {
+            return new String[]{"", ""};
+        }
+        // Parse "vo:<type>:<key>:" format
+        String trimmed = this._scopePrefix.substring(0, this._scopePrefix.length() - 1);
+        String[] parts = trimmed.split(":", 3);
+        if (parts.length == 3 && "vo".equals(parts[0])) {
+            return new String[]{parts[1], parts[2]};
+        }
+        return new String[]{"", ""};
+    }
+
+    /**
+     * Remove the current scope and return the previous scope prefix.
+     *
+     * @return the scope prefix that was active before clearing (empty string
+     *         if none was set)
+     */
+    public String clearScope() {
+        String prev = this._scopePrefix;
+        this._scopePrefix = "";
+        return prev;
+    }
+
+    /**
+     * Return a deterministic UUID scoped to the current workflow
+     * and the given seed. The same seed always produces the same UUID
+     * for this workflow instance.
+     * <p>
+     * Uses SHA-256 of "{workflowID}:{seed}" to produce a UUIDv5-formatted
+     * string.
+     *
+     * @param seed a seed string that determines the UUID within this workflow
+     * @return a UUID-formatted string
+     */
+    public String uuid(String seed) {
+        String wfId = this.currentWorkflowId();
+        String data = wfId + ":" + seed;
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(data.getBytes(StandardCharsets.UTF_8));
+
+            // Take first 16 bytes and set version/variant bits
+            hash[6] = (byte) ((hash[6] & 0x0f) | 0x50); // Version 5
+            hash[8] = (byte) ((hash[8] & 0x3f) | 0x80); // Variant 1
+
+            // Format as UUID: 8-4-4-4-12
+            StringBuilder sb = new StringBuilder(36);
+            for (int i = 0; i < 16; i++) {
+                if (i == 4 || i == 6 || i == 8 || i == 10) {
+                    sb.append('-');
+                }
+                sb.append(String.format("%02x", hash[i] & 0xff));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            // Fallback: improbable - SHA-256 is always available
+            return "00000000-0000-0000-0000-000000000000";
+        }
+    }
+
+    // ========================================================================
+    // Signal correlation / response & quorum APIs
+    // ========================================================================
+
+    /**
+     * Send a signal to a target workflow and wait for a response.
+     * <p>
+     * The signal carries an embedded correlation ID. The target workflow
+     * can use {@link #replyToSignal(String, String)} to send a response back.
+     *
+     * @param targetRunId the target workflow's run ID
+     * @param signalName  the signal name to send
+     * @param payload     the signal payload JSON
+     * @param timeoutMs   maximum wait time in milliseconds
+     * @return a result containing the response on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> sendSignalAndWait(
+        String targetRunId, String signalName, String payload, long timeoutMs) {
+        int[] p = packStrings(targetRunId, signalName, payload);
+        int targetOff = p[0], sigOff = p[1], payOff = p[2];
+        int targetLen = p[3], sigLen = p[4], payLen = p[5];
+
+        long result = cleatSendSignalAndWaitRaw(
+            targetOff, targetLen,
+            sigOff, sigLen,
+            payOff, payLen,
+            timeoutMs,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int responseLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return CleatResult.err(errMsg);
+        }
+
+        String response = readOutput(responseLen);
+        return CleatResult.ok(response);
+    }
+
+    /**
+     * Send a response back to the sender of a signal.
+     * <p>
+     * Only valid inside a signal handler context where the correlation ID
+     * was embedded in the received signal payload.
+     *
+     * @param correlationId the correlation ID from the received signal payload
+     * @param response      the response payload JSON
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> replyToSignal(String correlationId, String response) {
+        int[] p = packStrings(correlationId, response);
+        int cidOff = p[0], respOff = p[1];
+        int cidLen = p[2], respLen = p[3];
+
+        long result = cleatReplyToSignalRaw(
+            cidOff, cidLen,
+            respOff, respLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("replyToSignal failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
+     * Wait for at least {@code minCount} signals from the named set.
+     * <p>
+     * Collects signals until {@code minCount} is reached,
+     * {@code maxRejections} is exceeded (if {@code >= 0}), or the timeout
+     * expires.
+     *
+     * @param signalNames   the signal names to wait for
+     * @param minCount      minimum number of signals required to proceed
+     * @param maxRejections maximum rejections tolerated before aborting
+     *                      ({@code -1} to disable)
+     * @param timeoutMs     maximum wait time in milliseconds
+     * @return a result containing the list of collected signals, or an error
+     */
+    public CleatResult<java.util.List<AwaitSignalsResult>> awaitSignalsWithQuorum(
+        String[] signalNames, int minCount, int maxRejections, long timeoutMs) {
+        java.util.List<AwaitSignalsResult> results = new java.util.ArrayList<>();
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        int rejectionCount = 0;
+
+        while (results.size() < minCount) {
+            long remainingMs = deadline - System.currentTimeMillis();
+            if (remainingMs <= 0) {
+                return CleatResult.err(
+                    "quorum timeout: got " + results.size() + "/" + minCount + " signals");
+            }
+
+            CleatResult<AwaitSignalsResult> signalResult = this.awaitSignals(signalNames, remainingMs);
+            if (signalResult.isErr()) {
+                return CleatResult.err("quorum signal error: " + signalResult.getError());
+            }
+            AwaitSignalsResult asr = signalResult.getValue();
+            if (asr.timedOut) {
+                return CleatResult.err(
+                    "quorum timeout: got " + results.size() + "/" + minCount + " signals");
+            }
+
+            results.add(asr);
+
+            // Check for rejection if maxRejections >= 0.
+            if (maxRejections >= 0 && asr.payload != null && !asr.payload.isEmpty()) {
+                try {
+                    java.util.Map<String, Object> payloadMap = JsonHelper.parseObject(asr.payload);
+                    Object rejectedVal = payloadMap.get("rejected");
+                    if (rejectedVal instanceof Boolean && (Boolean) rejectedVal) {
+                        rejectionCount++;
+                        if (rejectionCount > maxRejections) {
+                            return CleatResult.err(
+                                "quorum exceeded max rejections (" + maxRejections + ")");
+                        }
+                    }
+                } catch (Exception e) {
+                    // Non-JSON payload, not a rejection.
+                }
+            }
+        }
+
+        return CleatResult.ok(results);
+    }
+
+    /**
+     * Send a signal to a target workflow (fire-and-forget).
+     * <p>
+     * Unlike {@link #sendSignalAndWait(String, String, String, long)},
+     * this method does not wait for a response. The signal is enqueued and
+     * the workflow continues immediately. This is a recorded (journaled)
+     * operation.
+     *
+     * @param targetRunId the target workflow's run ID
+     * @param signalName  the signal name to send
+     * @param payload     the signal payload JSON
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> signalWorkflow(String targetRunId, String signalName, String payload) {
+        int[] p = packStrings(targetRunId, signalName, payload);
+        int targetOff = p[0], sigOff = p[1], payOff = p[2];
+        int targetLen = p[3], sigLen = p[4], payLen = p[5];
+
+        long result = cleatSignalWorkflowRaw(
+            targetOff, targetLen,
+            sigOff, sigLen,
+            payOff, payLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("signalWorkflow failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    // ========================================================================
+    // Promise operations
+    // ========================================================================
+
+    /**
+     * Resolve a promise with a value, making it available to any workflow
+     * awaiting it via {@link #awaitPromise(String, long)}.
+     *
+     * @param id    the promise ID (from {@link #createPromise(String)})
+     * @param value the resolved value (typically a JSON string)
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> resolvePromise(String id, String value) {
+        int[] p = packStrings(id, value);
+        int idOff = p[0], valOff = p[1];
+        int idLen = p[2], valLen = p[3];
+
+        long result = cleatResolvePromiseRaw(idOff, idLen, valOff, valLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("resolvePromise failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
+     * Reject a promise with an error, causing any workflow awaiting it via
+     * {@link #awaitPromise(String, long)} to receive a failure.
+     *
+     * @param id    the promise ID (from {@link #createPromise(String)})
+     * @param error the error description
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> rejectPromise(String id, String error) {
+        int[] p = packStrings(id, error);
+        int idOff = p[0], errOff = p[1];
+        int idLen = p[2], errLen = p[3];
+
+        long result = cleatRejectPromiseRaw(idOff, idLen, errOff, errLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("rejectPromise failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    // ========================================================================
+    // Fire-and-forget service calls
+    // ========================================================================
+
+    /**
+     * Send a fire-and-forget message to a service (non-blocking).
+     * <p>
+     * Unlike {@link #cleatCall(String, String, String)}, this method does
+     * not wait for a response and does not record the call in the workflow
+     * event history.  The message is delivered asynchronously.
+     *
+     * @param service     the service name
+     * @param operation   the operation name
+     * @param requestJSON the JSON request payload
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> cleatSend(String service, String operation, String requestJSON) {
+        int[] p = packStrings(service, operation, requestJSON);
+        int svcOff = p[0], opOff = p[1], reqOff = p[2];
+        int svcLen = p[3], opLen = p[4], reqLen = p[5];
+
+        long result = cleatSendRaw(svcOff, svcLen, opOff, opLen, reqOff, reqLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("cleatSend failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
+     * Schedule a service invocation to occur after a delay.
+     * <p>
+     * The invocation is queued and will be delivered to the target service
+     * after the specified delay.  This is a fire-and-forget operation.
+     *
+     * @param service     the service name
+     * @param operation   the operation name
+     * @param requestJSON the JSON request payload
+     * @param delayMs     delay in milliseconds before the invocation
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> scheduleInvoke(String service, String operation, String requestJSON, long delayMs) {
+        int[] p = packStrings(service, operation, requestJSON);
+        int svcOff = p[0], opOff = p[1], reqOff = p[2];
+        int svcLen = p[3], opLen = p[4], reqLen = p[5];
+
+        long result = scheduleInvokeRaw(svcOff, svcLen, opOff, opLen, reqOff, reqLen, delayMs);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("scheduleInvoke failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    // ========================================================================
+    // Cron-triggered workflow schedules
+    // ========================================================================
+
+    /**
+     * Create a recurring workflow trigger from a cron expression.
+     * <p>
+     * The host creates a recurring schedule that invokes the named workflow
+     * on the cron schedule.  Returns a schedule ID that can be used with
+     * {@link #deleteCron(String)} to remove the schedule.
+     *
+     * @param workflowName the workflow definition name to trigger
+     * @param cronExpr     standard 5-field cron expression (e.g. {@code "0 0 * * *"}
+     *                     for daily at midnight)
+     * @param timezone     IANA timezone name (e.g. {@code "America/New_York"},
+     *                     {@code "UTC"})
+     * @param inputJSON    JSON input string for each workflow invocation
+     * @return a result containing the schedule ID on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> scheduleCron(
+        String workflowName, String cronExpr, String timezone, String inputJSON) {
+        int[] p = packStrings(workflowName, cronExpr, timezone, inputJSON);
+        int wfOff = p[0], crOff = p[1], tzOff = p[2], inOff = p[3];
+        int wfLen = p[4], crLen = p[5], tzLen = p[6], inLen = p[7];
+
+        long result = scheduleCronRaw(
+            wfOff, wfLen,
+            crOff, crLen,
+            tzOff, tzLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int scheduleIdLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("scheduleCron failed with code " + errCode);
+        }
+
+        String scheduleId = readOutput(scheduleIdLen);
+        return CleatResult.ok(scheduleId);
+    }
+
+    /**
+     * Remove a recurring cron-triggered workflow schedule.
+     *
+     * @param scheduleId the schedule ID returned by
+     *                   {@link #scheduleCron(String, String, String, String)}
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> deleteCron(String scheduleId) {
+        int[] p = packStrings(scheduleId);
+        long result = deleteCronRaw(p[0], p[1]);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("deleteCron failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
+     * List all registered cron-triggered workflow schedules.
+     *
+     * @return a result containing a JSON array of schedule objects on success,
+     *         or an error description on failure
+     */
+    public CleatResult<String> listCrons() {
+        long result = listCronsRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int scheduleListLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("listCrons failed with code " + errCode);
+        }
+
+        String scheduleList = readOutput(scheduleListLen);
+        return CleatResult.ok(scheduleList);
+    }
+
+    // ========================================================================
+    // Query handlers
+    // ========================================================================
+
+    /**
+     * Register a handler for a named query.
+     * <p>
+     * External clients can query this workflow using the cleat query API.
+     * The registered handler name is advertised to clients.
+     *
+     * @param name the query handler name
+     */
+    public void registerQueryHandler(String name) {
+        int[] p = packStrings(name);
+        cleatRegisterQueryHandlerRaw(p[0], p[1]);
+    }
+
+    // ========================================================================
+    // Detached execution
+    // ========================================================================
+
+    /**
+     * Run a workflow in detached mode (fire-and-forget).
+     * <p>
+     * The workflow runs independently and its result is not awaited.
+     * Useful for fan-out patterns where the caller does not need the result.
+     *
+     * @param workflowName the workflow type/name to run
+     * @param inputJSON    the input JSON for the detached workflow
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> runDetached(String workflowName, String inputJSON) {
+        int[] p = packStrings(workflowName, inputJSON);
+        int nameOff = p[0], inOff = p[1];
+        int nameLen = p[2], inLen = p[3];
+
+        long result = cleatRunDetachedRaw(nameOff, nameLen, inOff, inLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("runDetached failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    // ========================================================================
+    // Run ID
+    // ========================================================================
+
+    /**
+     * Get the current run ID for this workflow execution.
+     * <p>
+     * The run ID uniquely identifies this specific execution of the workflow
+     * (as opposed to the workflow ID which identifies the logical workflow
+     * instance across potential re-executions and continue-as-new).
+     *
+     * @return the run ID string, or empty string if unavailable
+     */
+    public String currentRunId() {
+        long result = cleatRunIdRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int idLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0 || idLen == 0) {
+            return "";
+        }
+        return readOutput(idLen);
+    }
+
+    // ========================================================================
+    // State operations (scoped for virtual objects)
+    // ========================================================================
+
+    /**
+     * Set a key-value pair in the workflow's durable state.
+     * <p>
+     * If a virtual object scope has been set via
+     * {@link #setScope(String, String)}, the key is automatically prefixed.
+     *
+     * @param key   the state key
+     * @param value the state value (typically a JSON string)
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> setState(String key, String value) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped, value);
+        int keyOff = p[0], valOff = p[1];
+        int keyLen = p[2], valLen = p[3];
+
+        long result = cleatSetStateRaw(keyOff, keyLen, valOff, valLen);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("setState failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
+     * Get a value from the workflow's durable state by key.
+     * <p>
+     * If a virtual object scope has been set, the key is automatically prefixed.
+     *
+     * @param key the state key
+     * @return a result containing the state value on success, or an error
+     *         description on failure (including if the key is not found)
+     */
+    public CleatResult<String> getState(String key) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped);
+
+        long result = cleatGetStateRaw(p[0], p[1], Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int valueLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("getState failed with code " + errCode);
+        }
+
+        String value = readOutput(valueLen);
+        return CleatResult.ok(value);
+    }
+
+    /**
+     * Delete a key from the workflow's durable state.
+     * <p>
+     * If a virtual object scope has been set, the key is automatically prefixed.
+     *
+     * @param key the state key to delete
+     * @return a result indicating success, or an error description on failure
+     */
+    public CleatResult<Void> deleteState(String key) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped);
+
+        long result = cleatDeleteStateRaw(p[0], p[1]);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("deleteState failed with code " + errCode);
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
+     * Atomically increment a numeric state value by the given delta.
+     * <p>
+     * If a virtual object scope has been set, the key is automatically prefixed.
+     * If the key does not exist, it is created with the delta as its initial value.
+     *
+     * @param key   the state key
+     * @param delta the amount to add (may be negative to decrement)
+     * @return a result containing the new value after increment, or an error
+     *         description on failure
+     */
+    public CleatResult<Long> incrState(String key, long delta) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped);
+
+        long result = cleatIncrStateRaw(p[0], p[1], delta);
+
+        int errCode = (int) (result & 0xFFL);
+        if (errCode != 0) {
+            return CleatResult.err("incrState failed with code " + errCode);
+        }
+
+        long newValue = result >>> 8;
+        return CleatResult.ok(newValue);
+    }
+
+    /**
+     * Check whether a key exists in the workflow's durable state.
+     * <p>
+     * If a virtual object scope has been set, the key is automatically prefixed.
+     *
+     * @param key the state key
+     * @return {@code true} if the key exists in state, {@code false} otherwise
+     */
+    public boolean hasState(String key) {
+        String scoped = scopedKey(key);
+        int[] p = packStrings(scoped);
+
+        long result = cleatHasStateRaw(p[0], p[1]);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return false;
+        }
+        return Memory.decodeSimpleExtra(result) != 0;
+    }
+
+    /**
+     * List state keys matching the given prefix.
+     * <p>
+     * If a virtual object scope has been set, the prefix is automatically
+     * prefixed.  The returned keys include the scope prefix.
+     *
+     * @param prefix the key prefix to match
+     * @return a result containing the matching keys as a JSON array string,
+     *         or an error description on failure
+     */
+    public CleatResult<String> listState(String prefix) {
+        String scoped = scopedKey(prefix);
+        int[] p = packStrings(scoped);
+
+        long result = cleatListStateRaw(p[0], p[1], Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int listLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("listState failed with code " + errCode);
+        }
+
+        String listJson = readOutput(listLen);
+        return CleatResult.ok(listJson);
+    }
+
+    // ========================================================================
+    // awaitAllChildren
+    // ========================================================================
+
+    /**
+     * Wait for all specified child workflow run IDs to complete.
+     * <p>
+     * The run IDs are passed as a JSON array string (e.g.
+     * {@code ["run-1","run-2"]}).  The method suspends until all children
+     * have completed, then returns their results as a JSON array.
+     *
+     * @param runIDs the child workflow run IDs to wait for
+     * @return a result containing the results JSON array on success, or an
+     *         error description on failure
+     */
+    public CleatResult<String> awaitAllChildren(String[] runIDs) {
+        // Serialize run IDs as a JSON string array.
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < runIDs.length; i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append("\"").append(JsonHelper.escapeJson(runIDs[i])).append("\"");
+        }
+        sb.append("]");
+        String idsJson = sb.toString();
+
+        int[] p = packStrings(idsJson);
+
+        long result = cleatAwaitAllChildrenRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("awaitAllChildren failed with code " + errCode);
+        }
+
+        String response = readOutput(resultLen);
+        return CleatResult.ok(response);
+    }
+
+    // ========================================================================
+    // Typed child workflow wrappers
+    // ========================================================================
+
+    /**
+     * Start a child workflow with a typed input.
+     * <p>
+     * The input is serialized to JSON using {@link JsonHelper#stringify(Object)}.
+     * This method otherwise behaves identically to
+     * {@link #childWorkflow(String, String)}.
+     *
+     * @param name  the child workflow type/name
+     * @param input the input object (serialized to JSON)
+     * @param <T>   the input type
+     * @return a result containing the child's run ID on success, or an error
+     *         description on failure
+     */
+    public <T> CleatResult<String> childWorkflowTyped(String name, T input) {
+        String inputJson = JsonHelper.stringify(input);
+        return childWorkflow(name, inputJson);
+    }
+
+    /**
+     * Wait for a child workflow to complete and deserialize its result.
+     * <p>
+     * This is a typed wrapper around {@link #awaitChild(String)} that
+     * deserializes the result JSON into the requested type using
+     * {@link JsonHelper#parse(String, Class)}.
+     *
+     * @param runID the child workflow run ID
+     * @param clazz the expected result type class
+     * @param <T>   the result type
+     * @return a result containing the deserialized child output on success,
+     *         or an error description on failure
+     */
+    public <T> CleatResult<T> awaitChildTyped(String runID, Class<T> clazz) {
+        CleatResult<String> result = awaitChild(runID);
+        if (result.isErr()) {
+            return CleatResult.err(result.getError());
+        }
+        try {
+            T value = JsonHelper.parse(result.getValue(), clazz);
+            return CleatResult.ok(value);
+        } catch (Exception e) {
+            return CleatResult.err("awaitChildTyped: failed to parse result: " + e.getMessage());
+        }
+    }
+
+    // ========================================================================
+    // Typed cleatCall wrappers
+    // ========================================================================
+
+    /**
+     * Make a typed durable call to an external service.
+     * <p>
+     * The request object is serialized to JSON and the response is
+     * deserialized to the requested type.
+     *
+     * @param service       the service name
+     * @param operation     the operation name
+     * @param request       the request object (serialized to JSON)
+     * @param responseClass the expected response type class
+     * @param <T>           the request type
+     * @param <R>           the response type
+     * @return a result containing the deserialized response on success, or an
+     *         error description on failure
+     */
+    public <T, R> CleatResult<R> cleatCallTyped(
+            String service, String operation, T request, Class<R> responseClass) {
+        String requestJson = JsonHelper.stringify(request);
+
+        CleatResult<String> result = cleatCall(service, operation, requestJson);
+        if (result.isErr()) {
+            return CleatResult.err(result.getError());
+        }
+
+        try {
+            R response = JsonHelper.parse(result.getValue(), responseClass);
+            return CleatResult.ok(response);
+        } catch (Exception e) {
+            return CleatResult.err("cleatCallTyped: failed to parse response: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Make a typed durable call with a retry policy.
+     * <p>
+     * The retry policy is serialized and passed to the host runtime, which
+     * handles retries automatically.  The request and response are
+     * automatically serialized/deserialized.
+     *
+     * @param service       the service name
+     * @param operation     the operation name
+     * @param request       the request object (serialized to JSON)
+     * @param responseClass the expected response type class
+     * @param retryPolicy   the retry policy configuration
+     * @param <T>           the request type
+     * @param <R>           the response type
+     * @return a result containing the deserialized response on success, or an
+     *         error description on failure
+     */
+    public <T, R> CleatResult<R> cleatCallWithRetry(
+            String service, String operation, T request,
+            Class<R> responseClass, RetryPolicy retryPolicy) {
+        String requestJson = JsonHelper.stringify(request);
+
+        // Serialize the retry policy as JSON.
+        String retryJson = "{\"max_attempts\":" + retryPolicy.maxAttempts
+            + ",\"initial_interval_ms\":" + retryPolicy.initialIntervalMs
+            + ",\"backoff_multiplier\":" + retryPolicy.backoffMultiplier
+            + ",\"maximum_interval_ms\":" + retryPolicy.maximumIntervalMs + "}";
+
+        int[] p = packStrings(service, operation, requestJson, retryJson);
+        int svcOff = p[0], opOff = p[1], reqOff = p[2], retryOff = p[3];
+        int svcLen = p[4], opLen = p[5], reqLen = p[6], retryLen = p[7];
+
+        long result = cleatCallWithRetryRaw(
+            svcOff, svcLen,
+            opOff, opLen,
+            reqOff, reqLen,
+            retryOff, retryLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return CleatResult.err(errMsg);
+        }
+
+        try {
+            String response = readOutput(responseLen);
+            R parsed = JsonHelper.parse(response, responseClass);
+            return CleatResult.ok(parsed);
+        } catch (Exception e) {
+            return CleatResult.err("cleatCallWithRetry: failed to parse response: " + e.getMessage());
+        }
+    }
+
+    // ========================================================================
+    // HTTP fetch helper
+    // ========================================================================
+
+    /**
+     * Make an HTTP request using the durable fetch host function.
+     * <p>
+     * The fetch call is deterministic and recorded in the workflow event
+     * history for replay.  The response includes the HTTP status code,
+     * response headers, and body.
+     *
+     * @param method  the HTTP method (e.g. {@code "GET"}, {@code "POST"})
+     * @param url     the request URL
+     * @param headers optional HTTP headers (may be null)
+     * @param body    optional request body (may be null for GET requests)
+     * @return a result containing the {@link FetchResult} on success, or an
+     *         error description on failure
+     */
+    public CleatResult<FetchResult> cleatFetch(
+            String method, String url, Map<String, String> headers, String body) {
+        String headersJson = headersToJson(headers);
+        if (body == null) {
+            body = "";
+        }
+
+        int[] p = packStrings(method, url, headersJson, body);
+        int methodOff = p[0], urlOff = p[1], hdrOff = p[2], bodyOff = p[3];
+        int methodLen = p[4], urlLen = p[5], hdrLen = p[6], bodyLen = p[7];
+
+        long result = cleatFetchRaw(
+            methodOff, methodLen,
+            urlOff, urlLen,
+            hdrOff, hdrLen,
+            bodyOff, bodyLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return CleatResult.err(errMsg);
+        }
+
+        String responseJson = readOutput(responseLen);
+        try {
+            java.util.Map<String, Object> parsed = JsonHelper.parseObject(responseJson);
+
+            int statusCode = 0;
+            Object sc = parsed.get("status_code");
+            if (sc instanceof Number) {
+                statusCode = ((Number) sc).intValue();
+            }
+
+            java.util.Map<String, String> respHeaders = new java.util.HashMap<>();
+            Object h = parsed.get("headers");
+            if (h instanceof Map) {
+                for (Map.Entry<String, Object> e : ((Map<String, Object>) h).entrySet()) {
+                    respHeaders.put(e.getKey(), e.getValue() != null ? e.getValue().toString() : "");
+                }
+            }
+
+            String respBody = parsed.get("body") != null ? parsed.get("body").toString() : "";
+
+            return CleatResult.ok(new FetchResult(statusCode, respHeaders, respBody));
+        } catch (Exception e) {
+            return CleatResult.err("cleatFetch: failed to parse response: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Convenience method for HTTP GET requests.
+     * <p>
+     * Equivalent to {@code cleatFetch("GET", url, null, null)}.
+     *
+     * @param url the request URL
+     * @return a result containing the {@link FetchResult} on success, or an
+     *         error description on failure
+     */
+    public CleatResult<FetchResult> fetchGet(String url) {
+        return cleatFetch("GET", url, null, null);
+    }
+
+    // ========================================================================
+    // Inner result type for awaitSignals
+    // ========================================================================
+
+    /**
+     * Result of an {@link #awaitSignals(String[], long)} call.
+     * <p>
+     * Contains the signal that was received (or empty if timed out), its
+     * payload, and whether the timeout expired before any signal arrived.
+     */
+    public static class AwaitSignalsResult {
+        /** The name of the signal that was received (empty if timed out). */
+        public final String signalName;
+
+        /** The payload of the received signal (empty if timed out). */
+        public final String payload;
+
+        /** {@code true} if the timeout expired before any signal arrived. */
+        public final boolean timedOut;
+
+        /**
+         * Construct a new await-signals result.
+         *
+         * @param signalName the received signal name
+         * @param payload    the signal payload
+         * @param timedOut   whether the wait timed out
+         */
+        public AwaitSignalsResult(String signalName, String payload, boolean timedOut) {
+            this.signalName = signalName;
+            this.payload = payload;
+            this.timedOut = timedOut;
+        }
+
+        @Override
+        public String toString() {
+            if (timedOut) {
+                return "AwaitSignalsResult(timedOut)";
+            }
+            return "AwaitSignalsResult(signalName=" + signalName
+                + ", payload=" + payload + ")";
+        }
+    }
+
+    /**
+     * Result of an {@link #awaitPromise(String, long)} call.
+     * <p>
+     * Contains the promise's resolved value (or empty if timed out), and
+     * whether the timeout expired before the promise was resolved.
+     */
+    public static class AwaitPromiseResult {
+        /** The resolved value of the promise (empty if timed out). */
+        public final String result;
+
+        /** {@code true} if the timeout expired before the promise resolved. */
+        public final boolean timedOut;
+
+        /**
+         * Construct a new await-promise result.
+         *
+         * @param result   the resolved value
+         * @param timedOut whether the wait timed out
+         */
+        public AwaitPromiseResult(String result, boolean timedOut) {
+            this.result = result;
+            this.timedOut = timedOut;
+        }
+
+        @Override
+        public String toString() {
+            if (timedOut) {
+                return "AwaitPromiseResult(timedOut)";
+            }
+            return "AwaitPromiseResult(result=" + result + ")";
+        }
+    }
+
+    // ========================================================================
+    // plugin_call outcome type
+    // ========================================================================
+
+    /**
+     * Result of a {@link #pluginCallOutcome(String, String, String)} call.
+     * <p>
+     * Contains the plugin function's response JSON (on success), an error
+     * message (on failure), and the call-level error code.  Use
+     * {@link #isError()} to check whether the call succeeded.
+     */
+    public static class PluginCallOutcome {
+        /** The plugin function's response JSON, or {@code null} on error. */
+        public final String response;
+
+        /** The error message, or {@code null} on success. */
+        public final String error;
+
+        /** The call-level error code (0 for success). */
+        public final int callErrorCode;
+
+        /**
+         * Construct a new plugin call outcome.
+         *
+         * @param response      the response JSON, or {@code null} on error
+         * @param error         the error message, or {@code null} on success
+         * @param callErrorCode the call-level error code
+         */
+        public PluginCallOutcome(String response, String error, int callErrorCode) {
+            this.response = response;
+            this.error = error;
+            this.callErrorCode = callErrorCode;
+        }
+
+        /**
+         * Returns {@code true} if the plugin call resulted in an error.
+         *
+         * @return {@code true} if {@link #error} is non-null
+         */
+        public boolean isError() {
+            return error != null;
+        }
+
+        @Override
+        public String toString() {
+            if (isError()) {
+                return "PluginCallOutcome(error=" + error
+                    + ", callErrorCode=" + callErrorCode + ")";
+            }
+            return "PluginCallOutcome(response=" + response + ")";
+        }
+    }
+
+    // ========================================================================
+    // RetryPolicy
+    // ========================================================================
+
+    /**
+     * Configuration for retry behaviour in
+     * {@link #cleatCallWithRetry(String, String, Object, Class, RetryPolicy)}.
+     * <p>
+     * Controls the maximum number of attempts, initial backoff interval,
+     * backoff multiplier, and maximum backoff interval for retried calls.
+     */
+    public static class RetryPolicy {
+        /** Maximum number of retry attempts (including the initial call). */
+        public final int maxAttempts;
+
+        /** Initial backoff interval in milliseconds. */
+        public final long initialIntervalMs;
+
+        /** Multiplier applied to the interval after each retry (e.g. 2.0 for exponential backoff). */
+        public final double backoffMultiplier;
+
+        /** Maximum backoff interval in milliseconds. */
+        public final long maximumIntervalMs;
+
+        /**
+         * Construct a new retry policy.
+         *
+         * @param maxAttempts        maximum number of retry attempts
+         * @param initialIntervalMs  initial backoff interval in milliseconds
+         * @param backoffMultiplier  backoff multiplier (> 1.0 for exponential backoff)
+         * @param maximumIntervalMs  maximum backoff interval in milliseconds
+         */
+        public RetryPolicy(int maxAttempts, long initialIntervalMs,
+                           double backoffMultiplier, long maximumIntervalMs) {
+            this.maxAttempts = maxAttempts;
+            this.initialIntervalMs = initialIntervalMs;
+            this.backoffMultiplier = backoffMultiplier;
+            this.maximumIntervalMs = maximumIntervalMs;
+        }
+    }
+
+    // ========================================================================
+    // FetchResult
+    // ========================================================================
+
+    /**
+     * Result of an HTTP fetch via {@link #cleatFetch(String, String, Map, String)}
+     * or {@link #fetchGet(String)}.
+     * <p>
+     * Contains the HTTP status code, response headers, and response body.
+     */
+    public static class FetchResult {
+        /** The HTTP status code (e.g. 200, 404, 500). */
+        public final int statusCode;
+
+        /** Response headers as a map of header name to header value. */
+        public final Map<String, String> headers;
+
+        /** The response body as a string. */
+        public final String body;
+
+        /**
+         * Construct a new fetch result.
+         *
+         * @param statusCode the HTTP status code
+         * @param headers    response headers
+         * @param body       response body
+         */
+        public FetchResult(int statusCode, Map<String, String> headers, String body) {
+            this.statusCode = statusCode;
+            this.headers = headers;
+            this.body = body;
+        }
+    }
+}

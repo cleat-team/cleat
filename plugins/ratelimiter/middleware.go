@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/auth"
+	"github.com/rcownie/cleat/internal/auth"
 )
 
 // tokenBucket implements a simple token bucket rate limiter. All operations

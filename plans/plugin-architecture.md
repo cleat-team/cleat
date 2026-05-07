@@ -21,11 +21,11 @@ import, rebuild the worker.
 ### Example: Installing the blob store plugin
 
 ```go
-// cmd/durable-worker/main.go (user's custom worker)
+// cmd/cleat-worker/main.go (user's custom worker)
 package main
 
 import (
-    "github.com/rcownie/cleat/cmd/durable-worker"
+    "github.com/rcownie/cleat/cmd/cleat-worker"
     
     // Built-in plugins
     _ "github.com/rcownie/cleat/plugins/blobstore"   // S3-backed blob storage
@@ -39,7 +39,7 @@ import (
 )
 
 func main() {
-    durable_worker.Run()
+    cleat_worker.Run()
 }
 ```
 
@@ -251,7 +251,7 @@ func (p *BlobStorePlugin) Run(ctx context.Context) error {
 ## Worker Startup Sequence
 
 ```go
-// cmd/durable-worker/main.go (simplified)
+// cmd/cleat-worker/main.go (simplified)
 
 func Run() {
     // 1. Parse flags
@@ -424,8 +424,8 @@ and returns a clear error if missing.
 
 ## Verification
 
-- `go build ./cmd/durable-worker/` with all built-in plugins imported: compiles
-- `go build ./cmd/durable-worker/` with zero plugins imported: compiles, core works
+- `go build ./cmd/cleat-worker/` with all built-in plugins imported: compiles
+- `go build ./cmd/cleat-worker/` with zero plugins imported: compiles, core works
 - Add a plugin that panics in Init: worker starts, panicking plugin is disabled, health endpoint reports it
 - Two plugins declare the same route: second registration is rejected with clear error
 - Plugin adds a migration: migration runs, table exists, second startup is idempotent

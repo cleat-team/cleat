@@ -2,7 +2,7 @@
 //
 // These tests verify that the DAG composition model correctly orchestrates
 // child workflows level by level, passes parent outputs to children, and
-// surfaces errors. They use durabletest.TestEnv to simulate the host
+// surfaces errors. They use cleattest.TestEnv to simulate the host
 // runtime with registered child workflow stubs.
 package dagexample_test
 
@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	dagexample "github.com/rcownie/durable/examples/dag"
-	"github.com/rcownie/durable/durable/durabletest"
+	dagexample "github.com/rcownie/cleat/examples/dag"
+	"github.com/rcownie/cleat/cleat/cleattest"
 
-	dagplugin "github.com/rcownie/durable/plugins/dag"
+	dagplugin "github.com/rcownie/cleat/plugins/dag"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,9 +22,9 @@ import (
 // ---------------------------------------------------------------------------
 
 // TestPipelineWithDurableTest verifies the full diamond DAG pipeline
-// executes through the durabletest mock host.
+// executes through the cleattest mock host.
 func TestPipelineWithDurableTest(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	env.OnChildWorkflow("extract").Return(`{"data":"extracted"}`, nil)
 	env.OnChildWorkflow("classify").Return(`{"category":"tech"}`, nil)
 	env.OnChildWorkflow("translate").Return(`{"language":"es"}`, nil)
@@ -42,7 +42,7 @@ func TestPipelineWithDurableTest(t *testing.T) {
 // TestPipelineTaskError verifies that when a child workflow returns an error,
 // the Pipeline propagates it.
 func TestPipelineTaskError(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	env.OnChildWorkflow("extract").Return(`{"data":"extracted"}`, nil)
 	env.OnChildWorkflow("classify").Return("", fmt.Errorf("classification failed"))
 	env.OnChildWorkflow("translate").Return(`{"language":"es"}`, nil)
@@ -58,13 +58,13 @@ func TestPipelineTaskError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DAG orchestration tests using durabletest
+// DAG orchestration tests using cleattest
 // ---------------------------------------------------------------------------
 
 // TestDAGExecuteDiamond verifies a diamond DAG executes correctly through
-// the durabletest mock host.
+// the cleattest mock host.
 func TestDAGExecuteDiamond(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	env.OnChildWorkflow("extract").Return(`{"data":"extracted"}`, nil)
 	env.OnChildWorkflow("classify").Return(`{"category":"tech"}`, nil)
 	env.OnChildWorkflow("translate").Return(`{"language":"es"}`, nil)
@@ -91,7 +91,7 @@ func TestDAGExecuteDiamond(t *testing.T) {
 
 // TestDAGExecuteLinearChain verifies a linear chain of tasks.
 func TestDAGExecuteLinearChain(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	env.OnChildWorkflow("a").Return(`"level0"`, nil)
 	env.OnChildWorkflow("b").Return(`"level1"`, nil)
 	env.OnChildWorkflow("c").Return(`"level2"`, nil)
@@ -116,7 +116,7 @@ func TestDAGExecuteLinearChain(t *testing.T) {
 
 // TestDAGExecuteCycleDetection verifies that cyclic graphs are rejected.
 func TestDAGExecuteCycleDetection(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 
 	d := dagplugin.NewDAG()
 	d.AddTask("a", []string{"b"}, nil)
@@ -134,7 +134,7 @@ func TestDAGExecuteCycleDetection(t *testing.T) {
 // TestDAGExecuteUnknownParent verifies that unknown parent references are
 // caught during execution.
 func TestDAGExecuteUnknownParent(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 
 	d := dagplugin.NewDAG()
 	d.AddTask("a", nil, nil)
@@ -152,7 +152,7 @@ func TestDAGExecuteUnknownParent(t *testing.T) {
 // TestDAGExecuteDisconnectedNodes verifies that multiple independent
 // sub-graphs execute without interfering.
 func TestDAGExecuteDisconnectedNodes(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	env.OnChildWorkflow("a").Return(`"a"`, nil)
 	env.OnChildWorkflow("b").Return(`"b"`, nil)
 	env.OnChildWorkflow("c").Return(`"c"`, nil)
@@ -183,7 +183,7 @@ func TestDAGExecuteDisconnectedNodes(t *testing.T) {
 // TestDAGExecuteMaxParallelism verifies that MaxParallelism limits the
 // number of concurrent child workflows within a level.
 func TestDAGExecuteMaxParallelism(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	env.OnChildWorkflow("a").Return(`"a"`, nil)
 	env.OnChildWorkflow("b").Return(`"b"`, nil)
 	env.OnChildWorkflow("c").Return(`"c"`, nil)
@@ -210,7 +210,7 @@ func TestDAGExecuteMaxParallelism(t *testing.T) {
 
 // TestDAGExecuteEmpty verifies that an empty DAG executes without error.
 func TestDAGExecuteEmpty(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 
 	d := dagplugin.NewDAG()
 	if err := d.Execute(env.H(), nil); err != nil {

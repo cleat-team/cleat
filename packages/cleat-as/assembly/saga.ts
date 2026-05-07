@@ -1,7 +1,7 @@
 /**
  * Saga pattern for structured compensation in AssemblyScript.
  *
- * Ported from the Go Saga at durable/runtime.go.
+ * Ported from the Go Saga at cleat/runtime.go.
  *
  * ## Usage (with named functions — required by AS constraint #13)
  *
@@ -9,13 +9,13 @@
  * import { HostCalls, Saga } from "@cleat/sdk";
  *
  * function reserveAction(h: HostCalls): string {
- *   let r = h.durableCall("inventory", "Reserve", '{"items":["A","B"]}');
+ *   let r = h.cleatCall("inventory", "Reserve", '{"items":["A","B"]}');
  *   if (r.isError) return r.error;
  *   return ""; // success
  * }
  *
  * function reserveCompensate(h: HostCalls): void {
- *   h.durableCall("inventory", "Release", '{"reservation_id":"..."}');
+ *   h.cleatCall("inventory", "Release", '{"reservation_id":"..."}');
  * }
  *
  * function myWorkflow(h: HostCalls, input: string): string {
@@ -121,7 +121,7 @@ export class Saga {
    * @param h - HostCalls instance for making workflow calls.
    * @returns "" on success, or an error message on failure.
    *
-   * On suspension (durableSleep or awaitChild suspend during execution),
+   * On suspension (cleatSleep or awaitChild suspend during execution),
    * the step will set the workflowSuspended flag. The caller should check
    * isWorkflowSuspended() after saga.run() returns and return the SUSPEND_SENTINEL
    * if the workflow suspended mid-execution.

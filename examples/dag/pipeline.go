@@ -8,15 +8,15 @@
 //
 // Build:
 //
-//	durable build -o /tmp/out ./examples/dag/
+//	cleat build -o /tmp/out ./examples/dag/
 package dagexample
 
 import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rcownie/durable/durable"
-	dagplugin "github.com/rcownie/durable/plugins/dag"
+	"github.com/rcownie/cleat/cleat"
+	dagplugin "github.com/rcownie/cleat/plugins/dag"
 )
 
 // ---- Domain types ----
@@ -106,7 +106,7 @@ func summarizeDocument(ctx *dagplugin.TaskContext) (string, error) {
 // executes it level by level:
 //
 //	extract -> classify + translate -> summarize
-func Pipeline(h durable.HostCalls, input DocumentInput) (string, error) {
+func Pipeline(h cleat.HostCalls, input DocumentInput) (string, error) {
 	d := dagplugin.NewDAG()
 	d.AddTask("extract", nil, extractText)
 	d.AddTask("classify", []string{"extract"}, classifyDocument)

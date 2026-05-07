@@ -1,7 +1,7 @@
 /**
  * Memory helpers for WASM linear memory and bit-packing decoders.
  *
- * Matches the Rust SDK at crates/durable-sdk/src/memory.rs and
+ * Matches the Rust SDK at crates/cleat-sdk/src/memory.rs and
  * the ABI specification in ABI.md.
  *
  * All 15 host functions return i64 with bit-packed results. The decode
@@ -44,14 +44,14 @@ export const SLEEP_STATUS_SUSPEND: u8 = 1;
 export const POLL_SIGNAL_FOUND: u32 = 0x0100;
 
 /**
- * Error code used by the @durableEntry transform when a workflow function
+ * Error code used by the @cleatEntry transform when a workflow function
  * returns a TerminalError (non-retryable). The transform should return
  * encodeExportResult(TERMINAL_ERROR_CODE, 0) to signal a terminal failure.
  */
 export const TERMINAL_ERROR_CODE: u32 = 2;
 
 /**
- * Error code used by the @durableEntry transform for regular errors
+ * Error code used by the @cleatEntry transform for regular errors
  * that may be retried.
  */
 export const RETRYABLE_ERROR_CODE: u32 = 1;
@@ -113,7 +113,7 @@ export class ExportDecode {
   ) {}
 }
 
-/** Decoded durable_call result. */
+/** Decoded cleat_call result. */
 export class CallResult {
   constructor(
     /** Bytes written to the response buffer (bits 40-63, 24 bits). */
@@ -125,7 +125,7 @@ export class CallResult {
   ) {}
 }
 
-/** Decoded durable_sleep result. */
+/** Decoded cleat_sleep result. */
 export class SleepResult {
   constructor(
     /** Sleep status: 0 = completed (replay), 1 = suspend (fresh). */
@@ -145,7 +145,7 @@ export class SimpleResult {
   ) {}
 }
 
-/** Decoded durable_await_signals result. */
+/** Decoded cleat_await_signals result. */
 export class AwaitSignalsResult {
   constructor(
     /** Signal name length in bytes (bits 48-63, 16 bits). */
@@ -159,7 +159,7 @@ export class AwaitSignalsResult {
   ) {}
 }
 
-/** Decoded durable_poll_signal result. */
+/** Decoded cleat_poll_signal result. */
 export class PollSignalResult {
   constructor(
     /** Payload length in bytes (bits 32-63). */
@@ -171,7 +171,7 @@ export class PollSignalResult {
   ) {}
 }
 
-/** Decoded durable_poll_cancellation result. */
+/** Decoded cleat_poll_cancellation result. */
 export class PollCancellationResult {
   constructor(
     /** Whether cancellation has been requested (bits 0-31, non-zero = yes). */
@@ -213,7 +213,7 @@ export function decodeExportResult(result: i64): ExportDecode {
 }
 
 /**
- * Decode a durable_call result.
+ * Decode a cleat_call result.
  *
  * Bit layout:
  *   bits  0-7  = errCode (8 bits)
@@ -244,7 +244,7 @@ export function decodeSimpleResult(result: i64): SimpleResult {
 }
 
 /**
- * Decode a durable_sleep result.
+ * Decode a cleat_sleep result.
  *
  * Bit layout:
  *   bits  0-55 = durationMs (56 bits)
@@ -258,7 +258,7 @@ export function decodeSleepResult(result: i64): SleepResult {
 }
 
 /**
- * Decode a durable_await_signals result.
+ * Decode a cleat_await_signals result.
  *
  * Bit layout:
  *   bits  0-15 = errCode (16 bits)
@@ -276,7 +276,7 @@ export function decodeAwaitSignalsResult(result: i64): AwaitSignalsResult {
 }
 
 /**
- * Decode a durable_poll_signal result.
+ * Decode a cleat_poll_signal result.
  *
  * Bit layout:
  *   bits  0-7  = errCode (8 bits)
@@ -293,7 +293,7 @@ export function decodePollSignalResult(result: i64): PollSignalResult {
 }
 
 /**
- * Decode a durable_poll_cancellation result.
+ * Decode a cleat_poll_cancellation result.
  *
  * Bit layout:
  *   bits  0-31 = cancelled flag (non-zero = cancelled)
@@ -306,7 +306,7 @@ export function decodePollCancellationResult(result: i64): PollCancellationResul
   return new PollCancellationResult(cancelled, reasonLen);
 }
 
-/** Decoded durable_await_promise result. */
+/** Decoded cleat_await_promise result. */
 export class AwaitPromiseResult {
   constructor(
     /** Result length in bytes (bits 32-63). */
@@ -319,7 +319,7 @@ export class AwaitPromiseResult {
 }
 
 /**
- * Decode a durable_await_promise result.
+ * Decode a cleat_await_promise result.
  *
  * Bit layout:
  *   bits  0-15 = errCode (16 bits)
@@ -400,9 +400,9 @@ export class Memory {
 
 /**
  * Global flag set by HostCalls methods when the workflow needs to suspend
- * (e.g., `durableSleep` returned "should suspend" on a fresh execution).
+ * (e.g., `cleatSleep` returned "should suspend" on a fresh execution).
  *
- * The @durableEntry transform-generated wrapper resets this flag before
+ * The @cleatEntry transform-generated wrapper resets this flag before
  * calling the inner function and checks it afterward. If the flag is set,
  * the wrapper returns the SUSPEND_SENTINEL i64 to the host instead of
  * writing the result to the output buffer.
@@ -433,7 +433,7 @@ export function setWorkflowSuspended(): void {
 
 /**
  * Global flag set when the workflow returns a TerminalError (non-retryable).
- * The @durableEntry transform-generated wrapper checks this flag after
+ * The @cleatEntry transform-generated wrapper checks this flag after
  * calling the inner function. If set, the wrapper returns
  * encodeExportResult(TERMINAL_ERROR_CODE, 0) instead of a retryable error.
  */

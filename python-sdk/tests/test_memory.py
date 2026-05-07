@@ -104,12 +104,12 @@ class TestExportResult:
 
 
 # ---------------------------------------------------------------------------
-# durable_call result decoding
+# cleat_call result decoding
 # ---------------------------------------------------------------------------
 
 
-class TestDurableCallResult:
-    """Tests for decode_durable_call_result.
+class TestCleatCallResult:
+    """Tests for decode_cleat_call_result.
 
     Bit layout:
         bits  0-7  = errCode
@@ -117,49 +117,49 @@ class TestDurableCallResult:
         bits 40-63 = responseLen
     """
 
-    def test_decode_durable_call_result_success(self):
+    def test_decode_cleat_call_result_success(self):
         """errCode=0, callErrorCode=0, responseLen=100."""
         result = (100 << 40) | (0 << 8) | 0
-        response_len, call_error_code, err_code = memory.decode_durable_call_result(result)
+        response_len, call_error_code, err_code = memory.decode_cleat_call_result(result)
         assert err_code == 0
         assert call_error_code == 0
         assert response_len == 100
 
-    def test_decode_durable_call_result_error(self):
+    def test_decode_cleat_call_result_error(self):
         """errCode=1, callErrorCode=5, responseLen=50."""
         result = (50 << 40) | (5 << 8) | 1
-        response_len, call_error_code, err_code = memory.decode_durable_call_result(result)
+        response_len, call_error_code, err_code = memory.decode_cleat_call_result(result)
         assert err_code == 1
         assert call_error_code == 5
         assert response_len == 50
 
-    def test_decode_durable_call_result_max_values(self):
+    def test_decode_cleat_call_result_max_values(self):
         """errCode=0xFF, callErrorCode=0xFFFFFFFF, responseLen=0xFFFFFF."""
         result = (0xFF_FFFF << 40) | (0xFFFF_FFFF << 8) | 0xFF
-        response_len, call_error_code, err_code = memory.decode_durable_call_result(result)
+        response_len, call_error_code, err_code = memory.decode_cleat_call_result(result)
         assert err_code == 0xFF
         assert call_error_code == 0xFFFF_FFFF
         assert response_len == 0xFF_FFFF
 
-    def test_decode_durable_call_result_zero(self):
-        assert memory.decode_durable_call_result(0) == (0, 0, 0)
+    def test_decode_cleat_call_result_zero(self):
+        assert memory.decode_cleat_call_result(0) == (0, 0, 0)
 
-    def test_decode_durable_call_result_negative_input(self):
+    def test_decode_cleat_call_result_negative_input(self):
         """Negative i64 values should be handled via _to_u64."""
         # High bit (sign) in responseLen field
         result = (1 << 63) | (1 << 40)
-        response_len, call_error_code, err_code = memory.decode_durable_call_result(result)
+        response_len, call_error_code, err_code = memory.decode_cleat_call_result(result)
         # responseLen is 24 bits so the sign bit gets masked
         assert response_len == 0x80_0000  # bit 63 >> 40 = bit 23
         assert err_code == 0
 
-    def test_decode_durable_call_result_suspect_negative(self):
+    def test_decode_cleat_call_result_suspect_negative(self):
         """When the i64 value is negative (high bit set in practice),
         _to_u64 must convert correctly."""
         # Simulate a result where the i64 representation would be negative.
         # Set bit 63 so Python sees it as a negative value when cast.
         result = 0x8000_0000_0000_0000  # bit 63 set
-        response_len, call_error_code, err_code = memory.decode_durable_call_result(result)
+        response_len, call_error_code, err_code = memory.decode_cleat_call_result(result)
         # bit 63 >> 40 = bit 23. response_len is 24-bit mask: 0x800000.
         assert response_len == 0x80_0000
         assert call_error_code == 0  # bits 8-39 are zero
@@ -176,8 +176,8 @@ class TestDurableCallResult:
             ((0 << 40) | (0xFFFF_FFFF << 8) | 0xFF, (0, 0xFFFF_FFFF, 0xFF)),
         ],
     )
-    def test_decode_durable_call_result_parametrized(self, packed, expected):
-        assert memory.decode_durable_call_result(packed) == expected
+    def test_decode_cleat_call_result_parametrized(self, packed, expected):
+        assert memory.decode_cleat_call_result(packed) == expected
 
 
 # ---------------------------------------------------------------------------

@@ -56,7 +56,7 @@ ProcessBatchWorkflow
 - `workflow.go` - All workflow logic (ProcessBatchWorkflow, SlidingWindowWorkflow, RecordProcessorWorkflow)
 - `workflow_test.go` - Tests for all workflows and utility functions
 - `ISSUES.md` - Gap analysis and issues found
-- `go.mod` - Module with dependency on `github.com/rcownie/durable`
+- `go.mod` - Module with dependency on `github.com/rcownie/cleat`
 
 ## Running Tests
 

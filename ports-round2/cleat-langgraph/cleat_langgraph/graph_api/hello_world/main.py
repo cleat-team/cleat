@@ -53,9 +53,9 @@ class MockCleatRuntime:
         """Simulate invoking a Cleat workflow.
 
         In reality, this would:
-        1. Load the WASM module containing the ``@durable_entry`` function.
+        1. Load the WASM module containing the ``@cleat_entry`` function.
         2. Execute it in the sandbox.
-        3. Intercept ``durable_call`` calls and dispatch to registered services.
+        3. Intercept ``cleat_call`` calls and dispatch to registered services.
         4. Record events in the durable log.
         5. Return the result.
 
@@ -66,12 +66,12 @@ class MockCleatRuntime:
 
         # Create a mock HostCalls that dispatches to our registered services
         class MockHostCalls:
-            def durable_call(self, service: str, operation: str, request: dict) -> dict:
+            def cleat_call(self, service: str, operation: str, request: dict) -> dict:
                 if service in self._services:
                     return self._services[service](operation, request)
                 raise RuntimeError(f"Unknown service: {service}")
 
-            def durable_log(self, msg: str) -> None:
+            def cleat_log(self, msg: str) -> None:
                 logger.info("[workflow log] %s", msg)
 
             def set_query_state(self, key: str, value: str) -> None:
@@ -84,7 +84,7 @@ class MockCleatRuntime:
                 logger.debug("State set: %s = %s", key, value)
 
             # Stub methods for completeness
-            def durable_sleep(self, ms: int) -> None:
+            def cleat_sleep(self, ms: int) -> None:
                 logger.debug("Sleep: %d ms", ms)
 
             def await_signals(self, names: list[str], timeout_ms: int) -> dict:

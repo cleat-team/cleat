@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func init() {

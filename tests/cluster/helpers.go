@@ -122,7 +122,7 @@ func waitForPostgres(t *testing.T, timeout time.Duration) {
 // GetDB returns a *sql.DB connected to the cluster's PostgreSQL instance.
 func GetDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := os.Getenv("DURABLE_TEST_DB")
+	dsn := os.Getenv("CLEAT_TEST_DB")
 	if dsn == "" {
 		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
 	}

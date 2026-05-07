@@ -6,17 +6,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/durable/internal/analyzer"
+	"github.com/rcownie/cleat/internal/analyzer"
 )
 
 func cgBasicFQ(name string) string {
-	return "github.com/rcownie/durable/testdata/basic." + name
+	return "github.com/rcownie/cleat/testdata/basic." + name
 }
 
 func cgLoadBasic(t *testing.T) (*analyzer.AnalysisResult, *Graph) {
 	t.Helper()
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/durable/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestNumEdges(t *testing.T) {
 func TestGraphString(t *testing.T) {
 	_, g := cgLoadBasic(t)
 	s := g.String()
-	for _, want := range []string{"Call graph", "edges", "durable leaves"} {
+	for _, want := range []string{"Call graph", "edges", "cleat leaves"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("String() should contain %q, got: %s", want, s)
 		}
@@ -151,7 +151,7 @@ func TestGraphStringEmpty(t *testing.T) {
 		CalledBy:      make(map[string]map[string]bool),
 		DurableLeaves: make(map[string]bool),
 	}
-	if s := g.String(); s != "Call graph: 0 functions, 0 edges, 0 durable leaves" {
+	if s := g.String(); s != "Call graph: 0 functions, 0 edges, 0 cleat leaves" {
 		t.Errorf("got %q", s)
 	}
 }

@@ -1,6 +1,6 @@
 // Package benchmarks provides performance benchmarks for the cleat durable
 // workflow engine. These benchmarks use an in-process HostCalls implementation
-// (via durable.NewHostCalls) that avoids WASM compilation overhead, measuring
+// (via cleat.NewHostCalls) that avoids WASM compilation overhead, measuring
 // pure framework throughput.
 //
 // Usage:
@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/durable/benchmarks/workflows"
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/benchmarks/workflows"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // ---------------------------------------------------------------------------
@@ -41,10 +41,10 @@ type benchHarness struct {
 	calls int64
 
 	// Cached HostCalls instance (function closures capture bh pointer).
-	h durable.HostCalls
+	h cleat.HostCalls
 
 	// Registered child workflow functions.
-	childFuncs map[string]func(durable.HostCalls, string) (string, error)
+	childFuncs map[string]func(cleat.HostCalls, string) (string, error)
 
 	// Child workflow result storage (keyed by runID).
 	childResults map[string]string
@@ -53,7 +53,7 @@ type benchHarness struct {
 
 // newBenchHarness creates a new benchmark harness with the given child
 // workflow registrations. Pass nil if no child workflows are needed.
-func newBenchHarness(childFuncs map[string]func(durable.HostCalls, string) (string, error)) *benchHarness {
+func newBenchHarness(childFuncs map[string]func(cleat.HostCalls, string) (string, error)) *benchHarness {
 	bh := &benchHarness{
 		wfID:         "bench-wf",
 		runID:        "bench-run-00000000-0000-0000-0000-000000000000",
@@ -64,7 +64,7 @@ func newBenchHarness(childFuncs map[string]func(durable.HostCalls, string) (stri
 	}
 	// Build the HostCalls once and cache it. Method-value closures capture
 	// the bh pointer, so calls go to the current bh state even after reset().
-	bh.h = durable.NewHostCalls(durable.HostCallsOptions{
+	bh.h = cleat.NewHostCalls(cleat.HostCallsOptions{
 		DurableCall:      bh.durableCall,
 		DurableSleep:     bh.durableSleep,
 		WorkflowID:       bh.workflowID,
@@ -96,7 +96,7 @@ func (bh *benchHarness) reset() {
 }
 
 // H returns the HostCalls interface for this harness.
-func (bh *benchHarness) H() durable.HostCalls {
+func (bh *benchHarness) H() cleat.HostCalls {
 	return bh.h
 }
 
@@ -204,14 +204,14 @@ func (bh *benchHarness) awaitChild(runID string) (string, error) {
 	return result, nil
 }
 
-func (bh *benchHarness) awaitAllChildren(runIDs []string) ([]durable.ChildResult, error) {
-	results := make([]durable.ChildResult, len(runIDs))
+func (bh *benchHarness) awaitAllChildren(runIDs []string) ([]cleat.ChildResult, error) {
+	results := make([]cleat.ChildResult, len(runIDs))
 	for i, runID := range runIDs {
 		result, err := bh.awaitChild(runID)
 		if err != nil {
-			results[i] = durable.ChildResult{RunID: runID, Error: err.Error()}
+			results[i] = cleat.ChildResult{RunID: runID, Error: err.Error()}
 		} else {
-			results[i] = durable.ChildResult{RunID: runID, Result: result}
+			results[i] = cleat.ChildResult{RunID: runID, Result: result}
 		}
 	}
 	return results, nil
@@ -290,7 +290,7 @@ func BenchmarkFanOutWorkflow(b *testing.B) {
 }
 
 func benchmarkFanOut(b *testing.B, children int) {
-	childFuncs := map[string]func(durable.HostCalls, string) (string, error){
+	childFuncs := map[string]func(cleat.HostCalls, string) (string, error){
 		"noop_child": workflows.NoopChild,
 	}
 	bh := newBenchHarness(childFuncs)

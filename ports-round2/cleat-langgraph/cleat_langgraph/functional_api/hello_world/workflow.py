@@ -3,22 +3,22 @@ Hello World — LangGraph Functional API (host-side) + Cleat workflow.
 
 The Functional API uses ``@task`` for individual work items and
 ``@entrypoint`` to orchestrate them. In the Cleat port, each ``@task``
-maps to a ``durable_call`` (per-task durability), and the ``@entrypoint``
-maps to the ``@durable_entry`` workflow.
+maps to a ``cleat_call`` (per-task durability), and the ``@entrypoint``
+maps to the ``@cleat_entry`` workflow.
 
 Architecture:
   - ``process_query`` is a LangGraph ``@task`` that runs on the host side.
-  - The Cleat workflow calls ``h.durable_call("langgraph", "execute_task",
+  - The Cleat workflow calls ``h.cleat_call("langgraph", "execute_task",
     {"task_name": "process_query", "input": query})`` for each task.
   - On replay, the cached result is returned without re-execution.
 """
 
 from __future__ import annotations
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
 
-@durable_entry(name="hello_functional")
+@cleat_entry(name="hello_functional")
 def hello_functional_workflow(h: HostCalls, query: str) -> str:
     """Process a query through a single LangGraph task.
 
@@ -36,8 +36,8 @@ def hello_functional_workflow(h: HostCalls, query: str) -> str:
     Returns:
         The processed result.
     """
-    # Execute the task via durable_call
-    result = h.durable_call(
+    # Execute the task via cleat_call
+    result = h.cleat_call(
         "langgraph",
         "execute_task",
         {

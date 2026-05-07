@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // ---------------------------------------------------------------------------
@@ -101,7 +101,7 @@ func divideIntoPartitions(number, n int) []int {
 //
 // The parent workflow ID is included in SingleRecord.ParentWorkflowID so the
 // child can route the signal correctly, even across ContinueAsNew boundaries.
-func RecordProcessorWorkflow(h durable.HostCalls, inputJSON string) (string, error) {
+func RecordProcessorWorkflow(h cleat.HostCalls, inputJSON string) (string, error) {
 	var record SingleRecord
 	if err := json.Unmarshal([]byte(inputJSON), &record); err != nil {
 		return "", fmt.Errorf("RecordProcessorWorkflow: invalid input: %w", err)
@@ -147,7 +147,7 @@ type slidingWindow struct {
 // Children signal completion via "ReportCompletion". A signal pump loop
 // (using PollSignal + AwaitSignals) drains signals and starts new children
 // as slots free up.
-func SlidingWindowWorkflow(h durable.HostCalls, inputJSON string) (string, error) {
+func SlidingWindowWorkflow(h cleat.HostCalls, inputJSON string) (string, error) {
 	var input SlidingWindowWorkflowInput
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		return "", fmt.Errorf("SlidingWindowWorkflow: invalid input: %w", err)
@@ -169,7 +169,7 @@ func SlidingWindowWorkflow(h durable.HostCalls, inputJSON string) (string, error
 	return wf.execute(h)
 }
 
-func (w *slidingWindow) setState(h durable.HostCalls) {
+func (w *slidingWindow) setState(h cleat.HostCalls) {
 	if h == nil {
 		return
 	}
@@ -185,7 +185,7 @@ func (w *slidingWindow) setState(h durable.HostCalls) {
 	h.SetQueryState("state", mustJSON(state))
 }
 
-func (w *slidingWindow) execute(h durable.HostCalls) (string, error) {
+func (w *slidingWindow) execute(h cleat.HostCalls) (string, error) {
 	workflowID := h.WorkflowID()
 	logMsg := fmt.Sprintf("SlidingWindowExecute offset=%d maxOffset=%d progress=%d inFlight=%d",
 		w.offset, w.input.MaximumOffset, w.progress, len(w.currentRecords))
@@ -251,7 +251,7 @@ func (w *slidingWindow) execute(h durable.HostCalls) (string, error) {
 
 // waitForSlot blocks until a child slot opens up (len(currentRecords) < SlidingWindowSize).
 // It drains pending completion signals first, then waits with AwaitSignals.
-func (w *slidingWindow) waitForSlot(h durable.HostCalls) error {
+func (w *slidingWindow) waitForSlot(h cleat.HostCalls) error {
 	for len(w.currentRecords) >= w.input.SlidingWindowSize {
 		// Drain any pending signals without blocking.
 		if w.drainOneSignal(h) {
@@ -271,7 +271,7 @@ func (w *slidingWindow) waitForSlot(h durable.HostCalls) error {
 
 // drainOneSignal attempts to receive one pending "ReportCompletion" signal
 // without blocking. Returns true if a signal was processed.
-func (w *slidingWindow) drainOneSignal(h durable.HostCalls) bool {
+func (w *slidingWindow) drainOneSignal(h cleat.HostCalls) bool {
 	payload, found, err := h.PollSignal("ReportCompletion")
 	if err != nil || !found {
 		return false
@@ -294,7 +294,7 @@ func (w *slidingWindow) handleCompletion(payload string) {
 }
 
 // drainChildren waits for all in-flight children to complete.
-func (w *slidingWindow) drainChildren(h durable.HostCalls) error {
+func (w *slidingWindow) drainChildren(h cleat.HostCalls) error {
 	for len(w.currentRecords) > 0 {
 		// First try to drain any pending signals.
 		if w.drainOneSignal(h) {
@@ -314,7 +314,7 @@ func (w *slidingWindow) drainChildren(h durable.HostCalls) error {
 
 // continueAsNew drains pending signals, packages the current state into
 // a new SlidingWindowWorkflowInput, and calls ContinueAsNew.
-func (w *slidingWindow) continueAsNew(h durable.HostCalls) (string, error) {
+func (w *slidingWindow) continueAsNew(h cleat.HostCalls) (string, error) {
 	// Drain any pending signals before ContinueAsNew to avoid signal loss.
 	for w.drainOneSignal(h) {
 	}
@@ -353,7 +353,7 @@ func (w *slidingWindow) continueAsNew(h durable.HostCalls) (string, error) {
 //
 // This mirrors the Temporal ProcessBatchWorkflow which fans out to N
 // SlidingWindowWorkflow children and aggregates their results.
-func ProcessBatchWorkflow(h durable.HostCalls, inputJSON string) (string, error) {
+func ProcessBatchWorkflow(h cleat.HostCalls, inputJSON string) (string, error) {
 	var input ProcessBatchWorkflowInput
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		return "", fmt.Errorf("ProcessBatchWorkflow: invalid input: %w", err)

@@ -1,4 +1,4 @@
-module github.com/rcownie/durable/benchmarks/comparative/workflows/02-fanout/temporal
+module github.com/rcownie/cleat/benchmarks/comparative/workflows/02-fanout/temporal
 
 go 1.22
 

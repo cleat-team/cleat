@@ -1,5 +1,5 @@
 /**
- * `@cleat/sdk` — AssemblyScript SDK for the cleat durable execution framework.
+ * `@cleat/sdk` — AssemblyScript SDK for the cleat cleat execution framework.
  *
  * This package provides the ABI-compatible bindings needed to write cleat
  * workflows in AssemblyScript that compile to WebAssembly.
@@ -13,7 +13,7 @@
  *
  * export function myWorkflow(argsPtr: i32, argsLen: i32, outPtr: i32, maxOutLen: i32): i64 {
  *   host.log("workflow started");
- *   let outcome = host.durableCall("payment", "charge", `{"amount": 100}`);
+ *   let outcome = host.cleatCall("payment", "charge", `{"amount": 100}`);
  *   if (outcome.isError) {
  *     return encodeExportResult(1, 0); // error
  *   }
@@ -28,7 +28,7 @@
  *   decoders for all 15 host function result types.
  * - `host-calls.ts` — Raw `@external` import declarations and the `HostCalls`
  *   class with idiomatic AssemblyScript methods for each host function.
- * - `durable-entry.ts` — Marker decorator for workflow entry points (used by
+ * - `cleat-entry.ts` — Marker decorator for workflow entry points (used by
  *   the cleat-as-transformer plugin).
  *
  * @packageDocumentation
@@ -36,7 +36,7 @@
 
 export * from "./memory";
 export * from "./host-calls";
-export * from "./durable-entry";
+export * from "./cleat-entry";
 export * from "./json";
 export * from "./plugins";
 export * from "./saga";

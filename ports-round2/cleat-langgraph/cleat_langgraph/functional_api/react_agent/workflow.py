@@ -2,7 +2,7 @@
 ReAct Agent — Cleat durable workflow (WASM-side).
 
 The Functional API ReAct loop ported to Cleat. Each task execution
-is a separate ``durable_call``, giving per-task durability.
+is a separate ``cleat_call``, giving per-task durability.
 
 Two granularity levels are demonstrated:
 1. ``invoke_entrypoint`` — full agent loop as a single durable event
@@ -16,17 +16,17 @@ multiple LLM calls, so each LLM call is individually recorded.
 
 from __future__ import annotations
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 from cleat_langgraph import CleatLangGraph
 
 
-@durable_entry(name="react_agent_functional")
+@cleat_entry(name="react_agent_functional")
 def react_agent_functional_workflow(h: HostCalls, query: str) -> dict:
     """Run a ReAct agent using per-task durable calls.
 
     Workflow:
-    1. Call ``agent_think`` task via durable_call.
-    2. If agent wants a tool, call ``execute_tool`` via durable_call.
+    1. Call ``agent_think`` task via cleat_call.
+    2. If agent wants a tool, call ``execute_tool`` via cleat_call.
     3. Repeat until agent produces a final answer.
     4. Return the result.
 
@@ -44,10 +44,10 @@ def react_agent_functional_workflow(h: HostCalls, query: str) -> dict:
     max_iterations = 10
 
     for iteration in range(max_iterations):
-        h.durable_log(f"Functional agent: iteration {iteration + 1}")
+        h.cleat_log(f"Functional agent: iteration {iteration + 1}")
 
         # Call agent_think task (durable)
-        decision = h.durable_call(
+        decision = h.cleat_call(
             "langgraph",
             "execute_task",
             {
@@ -62,13 +62,13 @@ def react_agent_functional_workflow(h: HostCalls, query: str) -> dict:
                 "answer": decision.get("answer", ""),
                 "steps": len(history),
             }
-            h.durable_log(f"Functional agent complete: {result}")
+            h.cleat_log(f"Functional agent complete: {result}")
             return result
 
         # Call execute_tool task (durable)
         tool_name = decision.get("tool_name", "")
         tool_input = decision.get("tool_input", "")
-        tool_result = h.durable_call(
+        tool_result = h.cleat_call(
             "langgraph",
             "execute_task",
             {
@@ -83,7 +83,7 @@ def react_agent_functional_workflow(h: HostCalls, query: str) -> dict:
     return {"answer": "Max iterations reached", "steps": len(history)}
 
 
-@durable_entry(name="react_agent_functional_simple")
+@cleat_entry(name="react_agent_functional_simple")
 def react_agent_simple_workflow(h: HostCalls, query: str) -> dict:
     """Simpler version: run the full entrypoint as a single durable call.
 
@@ -97,9 +97,9 @@ def react_agent_simple_workflow(h: HostCalls, query: str) -> dict:
     Returns:
         dict with ``answer`` and ``steps``.
     """
-    h.durable_log("Running full agent entrypoint (single durable call)")
+    h.cleat_log("Running full agent entrypoint (single durable call)")
 
-    result = h.durable_call(
+    result = h.cleat_call(
         "langgraph",
         "invoke_entrypoint",
         {

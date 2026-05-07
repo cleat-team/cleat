@@ -50,7 +50,7 @@ WHERE status='ready' AND next_wake_at <= now() AND tenant_id = $2 AND task_queue
 
 **Deploy command:**
 ```
-durable deploy --task-queue gpu ./ml_workflow.wasm
+cleat deploy --task-queue gpu ./ml_workflow.wasm
 ```
 
 If no `--task-queue` is specified, defaults to `'default'`.
@@ -61,8 +61,8 @@ If no `--task-queue` is specified, defaults to `'default'`.
 |--------|------|
 | Modify | `schema.sql` — add `task_queue` columns and index |
 | Modify | `internal/host/db.go` — add `task_queue` to queries |
-| Modify | `cmd/durable-worker/main.go` — repeatable `--task-queue` flag |
-| Modify | `cmd/durable/main.go` — `--task-queue` on deploy |
+| Modify | `cmd/cleat-worker/main.go` — repeatable `--task-queue` flag |
+| Modify | `cmd/cleat/main.go` — `--task-queue` on deploy |
 | Create | `migrations/003_task_routing.sql` |
 
 ### Effort: 1 week
@@ -130,7 +130,7 @@ the threshold.
 | Create | `internal/host/compaction.go` — compactor logic |
 | Modify | `internal/host/engine.go` — support replay from compaction state |
 | Modify | `internal/host/db.go` — `CompactHistory`, `LoadCompactedHistory` |
-| Modify | `cmd/durable-worker/main.go` — compaction goroutine in reaper loop |
+| Modify | `cmd/cleat-worker/main.go` — compaction goroutine in reaper loop |
 | Create | `migrations/004_history_compaction.sql` |
 
 ### Effort: 2 weeks
@@ -205,7 +205,7 @@ A background job cleans up expired keys.
 |--------|------|
 | Modify | `schema.sql` — add `idempotency_keys` table |
 | Modify | `internal/host/db.go` — idempotency-aware `StartNewRun`, `CompleteWorkflow` |
-| Modify | `cmd/durable-worker/main.go` — extract `Idempotency-Key` header in handler |
+| Modify | `cmd/cleat-worker/main.go` — extract `Idempotency-Key` header in handler |
 | Create | `migrations/005_exactly_once.sql` |
 
 ### Effort: 1-2 weeks
@@ -235,7 +235,7 @@ charts/cleat/
 ```yaml
 replicaCount: 3
 image:
-  repository: ghcr.io/rcownie/durable-worker
+  repository: ghcr.io/rcownie/cleat-worker
   tag: latest
 
 worker:
@@ -314,7 +314,7 @@ Worker flag: `--otel-endpoint localhost:4317` (OTLP gRPC).
 | Create | `charts/cleat/` — Helm chart |
 | Create | `monitoring/grafana-dashboard.json` |
 | Create | `internal/telemetry/tracing.go` |
-| Modify | `cmd/durable-worker/main.go` — `--otel-endpoint` flag, init tracing |
+| Modify | `cmd/cleat-worker/main.go` — `--otel-endpoint` flag, init tracing |
 | Modify | `go.mod` — add `go.opentelemetry.io/otel` deps |
 
 ### Effort: 1 week
@@ -407,7 +407,7 @@ is needed when you exceed this or when you need geographic distribution.
 | Action | File |
 |--------|------|
 | Create | `internal/host/sharded_store.go` — `ShardedStore` implementation |
-| Modify | `cmd/durable-worker/main.go` — `--shards-file` flag, multi-shard dispatch |
+| Modify | `cmd/cleat-worker/main.go` — `--shards-file` flag, multi-shard dispatch |
 | Create | `docs/sharding.md` — documentation with capacity planning |
 
 ### Effort: 1-2 weeks

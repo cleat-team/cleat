@@ -12,7 +12,7 @@ Cleat is a durable execution framework for Go and Python. Workflows are written 
 
 Workflow code is stored as versioned WASM blobs in the database. In-flight instances carry a `(def_name, def_version)` pointer, so they always replay against the exact code they started with.
 
-- **Deploy is an INSERT**: `durable deploy` writes a row to `workflow_defs`. No worker redeployment needed.
+- **Deploy is an INSERT**: `cleat deploy` writes a row to `workflow_defs`. No worker redeployment needed.
 - **Rollback is an UPDATE**: Set the old version as active again. No re-deploying old worker pools.
 - **Workers are a stable runtime**: The worker binary changes only when the `HostCalls` ABI changes (rare). In Temporal, you must keep old worker pools running for the lifetime of in-flight workflows — sometimes months. In DBOS, you use application-level patching and versioning decorators within the same deployment.
 
@@ -28,7 +28,7 @@ DBOS has a similar simplification (`@workflow` and `@step` decorators), but clea
 
 ### 3. Auto-Threading
 
-In Temporal, you must explicitly pass context/activity stubs through every level of your call chain. In DBOS, each step function must be separately annotated. In cleat, you can declare `var h durable.HostCalls` at package level and the transformer automatically propagates `h` as a first parameter through all callers (`testdata/autothread/order.go`). This eliminates boilerplate that both Temporal and DBOS developers deal with daily.
+In Temporal, you must explicitly pass context/activity stubs through every level of your call chain. In DBOS, each step function must be separately annotated. In cleat, you can declare `var h cleat.HostCalls` at package level and the transformer automatically propagates `h` as a first parameter through all callers (`testdata/autothread/order.go`). This eliminates boilerplate that both Temporal and DBOS developers deal with daily.
 
 ### 4. Single Infrastructure, Cleaner Separation
 
@@ -44,7 +44,7 @@ Every external interaction is recorded in `event_history` for replay. That same 
 
 The WASM boundary (15 host function imports from the `"env"` module, plus retry and heartbeat variants) means any language that compiles to WASM can produce workflow modules. The worker doesn't know or care what language produced the WASM bytes. Temporal maintains separate SDKs in 6 languages, each reimplementing the deterministic runtime — bugs and behavioral differences between SDKs are an ongoing problem. DBOS has 4 separate SDKs (TypeScript, Python, Go, Java). In cleat, a language transformer generates a few hundred lines of adapter code — not a full runtime reimplementation.
 
-**Caveat**: Go has a fully automated transformer pipeline (`durable build`). Python has a WIT-based WASM compilation pipeline with `componentize-py` integration (`durable build --target python`) and full LangChain/LangGraph support. Rust has an automated transformer via the `durable-sdk` crate and `#[durable_entry]` proc-macro. Java/Kotlin (TeaVM) and TypeScript (AssemblyScript) SDKs with transformer plugins and build integrations are implemented (`durable build --target java` / `--target assemblyscript`). Additional languages are possible since the host ABI is language-agnostic — each requires ~2-3 weeks for an SDK and transformer.
+**Caveat**: Go has a fully automated transformer pipeline (`cleat build`). Python has a WIT-based WASM compilation pipeline with `componentize-py` integration (`cleat build --target python`) and full LangChain/LangGraph support. Rust has an automated transformer via the `cleat-sdk` crate and `#[cleat_entry]` proc-macro. Java/Kotlin (TeaVM) and TypeScript (AssemblyScript) SDKs with transformer plugins and build integrations are implemented (`cleat build --target java` / `--target assemblyscript`). Additional languages are possible since the host ABI is language-agnostic — each requires ~2-3 weeks for an SDK and transformer.
 
 ### 7. Stronger Static Analysis
 
@@ -62,15 +62,15 @@ Temporal catches many of these at runtime (when replay diverges, producing crypt
 
 ### 8. Lightweight Testing Framework
 
-`durabletest.TestEnv` avoids WASM compilation entirely — it provides a mock `HostCalls` with stub registration, simulated clock, signal delivery, and call history assertions (`AssertCalled`/`AssertNotCalled`). Tests run in milliseconds with deterministic time control. Temporal's test framework runs the actual workflow runtime, which is heavier. DBOS's testing story is less mature.
+`cleattest.TestEnv` avoids WASM compilation entirely — it provides a mock `HostCalls` with stub registration, simulated clock, signal delivery, and call history assertions (`AssertCalled`/`AssertNotCalled`). Tests run in milliseconds with deterministic time control. Temporal's test framework runs the actual workflow runtime, which is heavier. DBOS's testing story is less mature.
 
 ### 9. AI/LLM Integration
 
-Cleat includes typed Go AI wrapper packages (`durable/ai/...`) supporting 6 LLM providers: OpenAI, Anthropic, Groq, Ollama, Gemini, and Mistral. Workflows can call LLMs with the same durability guarantees as any other external call — the AI call is recorded in event history and replayed deterministically.
+Cleat includes typed Go AI wrapper packages (`cleat/ai/...`) supporting 6 LLM providers: OpenAI, Anthropic, Groq, Ollama, Gemini, and Mistral. Workflows can call LLMs with the same durability guarantees as any other external call — the AI call is recorded in event history and replayed deterministically.
 
 - **Streaming SSE output**: LLM streaming responses are supported with deterministic replay. The event history captures the stream, so replay reproduces the exact same token sequence — no non-determinism from streaming.
 - **Cost observability**: A built-in dashboard tracks per-model pricing for 25+ models, giving instant visibility into LLM spend by workflow, provider, and model.
-- **Unified interface**: All 6 providers share a common `durable/ai` client interface. Switching providers is a configuration change, not a code change.
+- **Unified interface**: All 6 providers share a common `cleat/ai` client interface. Switching providers is a configuration change, not a code change.
 - **Benchmark suite**: Core engine throughput benchmarks at 88M steps/second, demonstrating the WASM execution overhead is negligible for I/O-bound AI workflows.
 
 ---
@@ -79,11 +79,11 @@ Cleat includes typed Go AI wrapper packages (`durable/ai/...`) supporting 6 LLM 
 
 ### 1. Build Pipeline Friction — **FIXED**
 
-~~Every change requires: edit Go → `durable build` (5-stage pipeline: analyze → callgraph → closure → transform → wasm compile) → WASM binary → deploy → test. The WASM compilation step adds seconds to the inner dev loop.~~
+~~Every change requires: edit Go → `cleat build` (5-stage pipeline: analyze → callgraph → closure → transform → wasm compile) → WASM binary → deploy → test. The WASM compilation step adds seconds to the inner dev loop.~~
 
-`durable dev` provides WASM-free local development. Workflows run directly as Go code with an HTTP-based service caller, eliminating the WASM compile step from the inner dev loop. Build the WASM only when you're ready to deploy.
+`cleat dev` provides WASM-free local development. Workflows run directly as Go code with an HTTP-based service caller, eliminating the WASM compile step from the inner dev loop. Build the WASM only when you're ready to deploy.
 
-Temporal workflows run directly as Go code — save, re-run tests, done. DBOS workflows are just annotated application code — no build step at all. The `durabletest.TestEnv` provides WASM-free unit testing, and `durable dev` extends this to full end-to-end local execution.
+Temporal workflows run directly as Go code — save, re-run tests, done. DBOS workflows are just annotated application code — no build step at all. The `cleattest.TestEnv` provides WASM-free unit testing, and `cleat dev` extends this to full end-to-end local execution.
 
 ### 2. Immaturity
 
@@ -96,8 +96,8 @@ This is a pre-1.0 project with no production track record. Temporal has been bat
 | Queries (read workflow state externally) | Done (`SetQueryState` + `GET /api/workflows/:id/query?key=X`) | Mature | Via Conductor |
 | Cron/scheduling | Done (built-in scheduler + REST API) | Built-in | Built-in |
 | Web UI / dashboard | Done (Svelte SPA embedded in worker) | Mature UI | Conductor dashboard |
-| Activity heartbeating | Done (`durable_call_heartbeat` host import + heartbeat goroutine) | Mature | Via steps |
-| Server-side retry | Done (`durable_call_retry`, one-event-per-call) | Built-in | Built-in |
+| Activity heartbeating | Done (`cleat_call_heartbeat` host import + heartbeat goroutine) | Mature | Via steps |
+| Server-side retry | Done (`cleat_call_retry`, one-event-per-call) | Built-in | Built-in |
 | Task queues / routing | Done (`task_queue` column + `--task-queue` flag, worker claims from specific queues) | Rich routing model | Durable queues |
 | History compaction | Done (automatic compaction after threshold, virtual replay from checkpoint) | Automatic | Automatic |
 | Multi-tenancy | Tenant foundation: `tenant_id` on all tables, API key auth middleware, PostgreSQL RLS | Supported | Via namespaces |
@@ -121,7 +121,7 @@ Standard Go WASM binaries are large (the Go runtime compiled to WASM). TinyGo pr
 
 ~~Cleat implements retry in the SDK: `RetryPolicy` controls exponential backoff between attempts, using `DurableSleep` between retries. Each attempt becomes a separate event in the history.~~
 
-`durable_call_retry` is a host import that performs server-side retry with exponential backoff. Retries happen inside the engine without recording each attempt in event history — a single event is written regardless of how many attempts occurred. This matches Temporal's server-side retry behavior.
+`cleat_call_retry` is a host import that performs server-side retry with exponential backoff. Retries happen inside the engine without recording each attempt in event history — a single event is written regardless of how many attempts occurred. This matches Temporal's server-side retry behavior.
 
 ### 8. No Task Routing — **FIXED**
 
@@ -149,15 +149,15 @@ Still missing: Datadog/CloudWatch integrations, a Kubernetes operator, and a com
 
 ### High Impact
 
-1. **Dev mode (no WASM compilation)** — **Done**: `durable dev` runs workflows directly as Go code during development with an HTTP-based service caller. Eliminates the WASM compile step from the inner dev loop.
+1. **Dev mode (no WASM compilation)** — **Done**: `cleat dev` runs workflows directly as Go code during development with an HTTP-based service caller. Eliminates the WASM compile step from the inner dev loop.
 
-2. **Server-side retry** — **Done**: `durable_call_retry` host import performs server-side retry inside the engine. Retries don't add events to workflow history — a single event is written regardless of attempts.
+2. **Server-side retry** — **Done**: `cleat_call_retry` host import performs server-side retry inside the engine. Retries don't add events to workflow history — a single event is written regardless of attempts.
 
 3. **Web UI / dashboard** — **Done**: Svelte 5 + Vite SPA embedded in the worker binary via `embed.FS`. Dashboard with summary cards and recent workflows, workflow list with status filters, workflow detail with event timeline, signal/cancel actions, and schedule management with CRUD.
 
-4. **Cron/scheduling** — **Done**: Built-in scheduler runs in the worker via `scheduleLoop()`. Schedules managed via CLI (`durable schedule add|list|delete|enable|disable`) and REST API (`GET/POST/DELETE /api/schedules`). Uses standard 5-field cron expressions.
+4. **Cron/scheduling** — **Done**: Built-in scheduler runs in the worker via `scheduleLoop()`. Schedules managed via CLI (`cleat schedule add|list|delete|enable|disable`) and REST API (`GET/POST/DELETE /api/schedules`). Uses standard 5-field cron expressions.
 
-5. **Implement a second language (Rust)** — **Done**: The `durable-sdk` crate provides `HostCalls` struct with all 15 WASM host imports and memory helpers. The `durable-macro` proc-macro crate provides `#[durable_entry]` for automatic WASM export generation. Rust workflows compile via `durable build --target rust` (delegates to `cargo build --target wasm32-wasip1`).
+5. **Implement a second language (Rust)** — **Done**: The `cleat-sdk` crate provides `HostCalls` struct with all 15 WASM host imports and memory helpers. The `cleat-macro` proc-macro crate provides `#[cleat_entry]` for automatic WASM export generation. Rust workflows compile via `cleat build --target rust` (delegates to `cargo build --target wasm32-wasip1`).
 
 6. **Queries** — **Done**: Workflows set query state via `h.SetQueryState(key, value)`. External systems read it via `GET /api/workflows/:id/query?key=X`. Query state is persisted as JSONB in the `workflow_instances` table.
 
@@ -183,7 +183,7 @@ Still missing: Datadog/CloudWatch integrations, a Kubernetes operator, and a com
 
 14. **Cost observability dashboard** — **Done**: Built-in dashboard tracking per-model pricing for 25+ models. Instant visibility into LLM spend by workflow, provider, and model.
 
-15. **Typed AI wrappers** — **Done**: `durable/ai/` packages provide a unified Go interface across 6 providers. Switching providers is a configuration change.
+15. **Typed AI wrappers** — **Done**: `cleat/ai/` packages provide a unified Go interface across 6 providers. Switching providers is a configuration change.
 
 16. **Gemini and Mistral providers** — **Done**: Added alongside existing OpenAI, Anthropic, Groq, and Ollama support — now 6 providers total.
 

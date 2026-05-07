@@ -13,7 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // ---- Domain types ----
@@ -36,7 +36,7 @@ type Charge struct {
 // ---- Entry points ----
 
 // PlaceOrder is the main workflow entry point.
-func PlaceOrder(h durable.HostCalls, userID string, cart []CartItem) (string, error) {
+func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, error) {
 	if len(cart) == 0 {
 		return "", fmt.Errorf("cart is empty")
 	}
@@ -64,14 +64,14 @@ func PlaceOrder(h durable.HostCalls, userID string, cart []CartItem) (string, er
 }
 
 // CancelOrder is an entry point for cancelling an active order.
-func CancelOrder(h durable.HostCalls, orderID string) error {
+func CancelOrder(h cleat.HostCalls, orderID string) error {
 	_ = refundPayment(h, orderID)
 	return releaseReservation(h, orderID)
 }
 
 // ---- Library helpers ----
 
-func validateAndReserve(h durable.HostCalls, userID string, cart []CartItem) (Reservation, error) {
+func validateAndReserve(h cleat.HostCalls, userID string, cart []CartItem) (Reservation, error) {
 	for _, item := range cart {
 		if err := checkItemAvailability(h, item.SKU); err != nil {
 			return Reservation{}, fmt.Errorf("item %s unavailable: %w", item.SKU, err)
@@ -80,7 +80,7 @@ func validateAndReserve(h durable.HostCalls, userID string, cart []CartItem) (Re
 	return reserveInventory(h, userID, cart)
 }
 
-func checkItemAvailability(h durable.HostCalls, sku string) error {
+func checkItemAvailability(h cleat.HostCalls, sku string) error {
 	req, _ := json.Marshal(map[string]string{"sku": sku})
 	response, err := h.DurableCall("catalog", "LookupItem", string(req))
 	if err != nil {
@@ -92,7 +92,7 @@ func checkItemAvailability(h durable.HostCalls, sku string) error {
 	return nil
 }
 
-func processPayment(h durable.HostCalls, userID string, amountCents int) (Charge, error) {
+func processPayment(h cleat.HostCalls, userID string, amountCents int) (Charge, error) {
 	pm, err := getDefaultPaymentMethod(h, userID)
 	if err != nil {
 		return Charge{}, err
@@ -105,7 +105,7 @@ type PaymentMethod struct {
 	Type  string `json:"type"`
 }
 
-func getDefaultPaymentMethod(h durable.HostCalls, userID string) (PaymentMethod, error) {
+func getDefaultPaymentMethod(h cleat.HostCalls, userID string) (PaymentMethod, error) {
 	req, _ := json.Marshal(map[string]string{"user_id": userID})
 	response, err := h.DurableCall("payments", "GetDefaultMethod", string(req))
 	if err != nil {
@@ -115,7 +115,7 @@ func getDefaultPaymentMethod(h durable.HostCalls, userID string) (PaymentMethod,
 	return PaymentMethod{Token: "pm_tok_555", Type: "card"}, nil
 }
 
-func fulfillOrder(h durable.HostCalls, r Reservation, c Charge) (string, error) {
+func fulfillOrder(h cleat.HostCalls, r Reservation, c Charge) (string, error) {
 	req, _ := json.Marshal(map[string]string{
 		"reservation_id": r.ReservationID,
 		"charge_id":      c.ChargeID,
@@ -130,7 +130,7 @@ func fulfillOrder(h durable.HostCalls, r Reservation, c Charge) (string, error) 
 
 // ---- Leaf API calls ----
 
-func reserveInventory(h durable.HostCalls, userID string, items []CartItem) (Reservation, error) {
+func reserveInventory(h cleat.HostCalls, userID string, items []CartItem) (Reservation, error) {
 	req, _ := json.Marshal(map[string]interface{}{
 		"user_id":    userID,
 		"item_count": len(items),
@@ -143,7 +143,7 @@ func reserveInventory(h durable.HostCalls, userID string, items []CartItem) (Res
 	return Reservation{ReservationID: "resv_abc123", TotalCents: 3299}, nil
 }
 
-func chargeCustomer(h durable.HostCalls, token string, amountCents int) (Charge, error) {
+func chargeCustomer(h cleat.HostCalls, token string, amountCents int) (Charge, error) {
 	req, _ := json.Marshal(map[string]interface{}{
 		"token":        token,
 		"amount_cents": amountCents,
@@ -156,19 +156,19 @@ func chargeCustomer(h durable.HostCalls, token string, amountCents int) (Charge,
 	return Charge{ChargeID: "chg_xyz789", Amount: amountCents}, nil
 }
 
-func releaseReservation(h durable.HostCalls, reservationID string) error {
+func releaseReservation(h cleat.HostCalls, reservationID string) error {
 	req, _ := json.Marshal(map[string]string{"reservation_id": reservationID})
 	_, err := h.DurableCall("inventory", "Release", string(req))
 	return err
 }
 
-func refundPayment(h durable.HostCalls, chargeID string) error {
+func refundPayment(h cleat.HostCalls, chargeID string) error {
 	req, _ := json.Marshal(map[string]string{"charge_id": chargeID})
 	_, err := h.DurableCall("payments", "Refund", string(req))
 	return err
 }
 
-func notifyCustomer(h durable.HostCalls, userID, trackingID string) error {
+func notifyCustomer(h cleat.HostCalls, userID, trackingID string) error {
 	req, _ := json.Marshal(map[string]string{
 		"user_id":     userID,
 		"tracking_id": trackingID,

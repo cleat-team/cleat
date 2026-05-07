@@ -1,4 +1,4 @@
-module github.com/rcownie/durable/benchmarks/comparative/workflows/04-llm-agent/temporal
+module github.com/rcownie/cleat/benchmarks/comparative/workflows/04-llm-agent/temporal
 
 go 1.22
 

@@ -1,9 +1,9 @@
 """
 Workflow definition for the transactional-outbox pattern.
 
-This module contains the Cleat @durable_entry decorated function that
+This module contains the Cleat @cleat_entry decorated function that
 coordinates the outbox workflow.  It runs inside a WASM sandbox and
-uses HostCalls.durable_call() for all external interactions.
+uses HostCalls.cleat_call() for all external interactions.
 
 In the classic outbox pattern, an outbox table stores events atomically
 with business data, and a background poller publishes them to a broker.
@@ -11,22 +11,22 @@ With Cleat (as with DBOS), the workflow engine itself provides the
 durability guarantee, so no outbox table is needed.
 
     place_order
-        ├── durable_call("db", "insert_order", ...)   → order_id
+        ├── cleat_call("db", "insert_order", ...)   → order_id
         ├── set_query_state("order_id", order_id)      → visible to API
-        ├── durable_call("notifier", "send_notification", ...)  → status
-        └── durable_call("db", "update_notification_status", ...) → ok
+        ├── cleat_call("notifier", "send_notification", ...)  → status
+        └── cleat_call("db", "update_notification_status", ...) → ok
 """
 
 from __future__ import annotations
 
 import json
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
 ORDER_ID_STATE_KEY = "order_id"
 
 
-@durable_entry(name="place_order")
+@cleat_entry(name="place_order")
 def place_order_workflow(h: HostCalls, customer: str, item: str, quantity: int) -> str:
     """Place an order atomically with notification sending.
 
@@ -55,7 +55,7 @@ def place_order_workflow(h: HostCalls, customer: str, item: str, quantity: int) 
         - ``db.update_notification_status(order_id, status) -> {"status": "ok"}``
     """
     # Step 1: Insert the order into the database via the host DB service.
-    order_result = h.durable_call(
+    order_result = h.cleat_call(
         "db",
         "insert_order",
         {"customer": customer, "item": item, "quantity": quantity},
@@ -68,14 +68,14 @@ def place_order_workflow(h: HostCalls, customer: str, item: str, quantity: int) 
     h.set_query_state(ORDER_ID_STATE_KEY, str(order_id))
 
     # Step 2: Send a notification (e.g. email, Kafka message, webhook).
-    h.durable_call(
+    h.cleat_call(
         "notifier",
         "send_notification",
         {"order_id": order_id, "customer": customer, "item": item},
     )
 
     # Step 3: Mark the notification as sent in the database.
-    h.durable_call(
+    h.cleat_call(
         "db",
         "update_notification_status",
         {"order_id": order_id, "status": "SENT"},

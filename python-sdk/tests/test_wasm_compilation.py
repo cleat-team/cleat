@@ -2,7 +2,7 @@
 
 These tests validate that:
 1. Entry points are correctly detected
-2. The build script validates @durable_entry decorators
+2. The build script validates @cleat_entry decorators
 3. All stubs are properly wrapped for conditional import
 4. The WIT file covers all required imports
 """
@@ -225,7 +225,7 @@ def test_all_stubs_accounted_for():
             print(f"  - {imp}")
 
     # This is informational - we don't assert because some stubs might delegate
-    # to durable_call internally and not need direct WIT imports
+    # to cleat_call internally and not need direct WIT imports
     print(f"Stub coverage: {len(stub_defs) - len(missing_from_imports)}/{len(stub_defs)} stubs have WIT imports")
 
 
@@ -250,10 +250,10 @@ def test_hello_workflow_exists():
     assert (hello_dir / "cleat.toml").exists(), "cleat.toml not found"
     assert (hello_dir / "README.md").exists(), "README.md not found"
 
-    # Verify the workflow file has @durable_entry
+    # Verify the workflow file has @cleat_entry
     with open(hello_dir / "hello_workflow.py") as f:
         source = f.read()
-    assert "@durable_entry" in source
+    assert "@cleat_entry" in source
     assert "def hello" in source
 
 

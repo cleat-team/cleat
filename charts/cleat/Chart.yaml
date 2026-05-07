@@ -5,13 +5,13 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 keywords:
-  - durable-execution
+  - cleat-execution
   - workflow
   - wasm
   - postgres
-home: https://github.com/rcownie/durable
+home: https://github.com/rcownie/cleat
 sources:
-  - https://github.com/rcownie/durable
+  - https://github.com/rcownie/cleat
 maintainers:
   - name: rcownie
     email: rcownie@users.noreply.github.com

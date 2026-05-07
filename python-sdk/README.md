@@ -1,6 +1,6 @@
 # Cleat Python SDK
 
-Python SDK for the [Cleat](https://github.com/rcownie/durable) durable execution framework. Write workflows in Python, compile to WASM, and run on the Cleat engine.
+Python SDK for the [Cleat](https://github.com/rcownie/cleat) durable execution framework. Write workflows in Python, compile to WASM, and run on the Cleat engine.
 
 ```python
 from cleat_sdk import HostCalls, durable_entry
@@ -680,7 +680,7 @@ componentize-py componentize my_workflow.py --wit-path wit/ --world cleat-workfl
 The Cleat CLI provides a convenience wrapper that handles paths automatically:
 
 ```bash
-durable build --target python ./workflow.py
+cleat build --target python ./workflow.py
 ```
 
 ### Handling Imports in WASM Context
@@ -757,7 +757,7 @@ See the [Makefile](./Makefile) for details.
 
 - **Python 3.10+** -- the SDK uses `typing.get_type_hints` and `inspect.signature` for parameter introspection
 - **componentize-py >= 0.12.0** -- required for WASM compilation (installed via `pip install componentize-py`)
-- **Cleat CLI** (`durable build`) -- for the full build pipeline (optional; use `componentize-py` directly as shown above)
+- **Cleat CLI** (`cleat build`) -- for the full build pipeline (optional; use `componentize-py` directly as shown above)
 - **WIT files** -- the `wit/` directory defining the Cleat component model interface
 
 Optional dependencies for development:

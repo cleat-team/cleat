@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func init() {

@@ -5,18 +5,18 @@ package errors
 import (
 	"io"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // BadWorkflow is an entry point but calls a helper in the durable closure
 // that lacks HostCalls access.
-func BadWorkflow(h durable.HostCalls, input string) (string, error) {
+func BadWorkflow(h cleat.HostCalls, input string) (string, error) {
 	result := unthreadedHelper(input)
 	return result, nil
 }
 
 // leafFunc is a durable leaf — it calls a HostCalls method.
-func leafFunc(h durable.HostCalls) {
+func leafFunc(h cleat.HostCalls) {
 	h.DurableLog("leaf")
 }
 
@@ -30,7 +30,7 @@ func unthreadedHelper(input string) string {
 
 // BadWithGoroutine uses a goroutine in a function that calls a durable
 // leaf, making it part of the durable closure.
-func BadWithGoroutine(h durable.HostCalls) {
+func BadWithGoroutine(h cleat.HostCalls) {
 	go func() {
 		_, _ = h.DurableCall("svc", "op", "{}")
 	}()
@@ -42,7 +42,7 @@ func pureHelper(input string) string {
 }
 
 // BadWithInterfaceDispatch calls a method on an interface, which cannot be statically resolved.
-func BadWithInterfaceDispatch(h durable.HostCalls, reader io.Reader) error {
+func BadWithInterfaceDispatch(h cleat.HostCalls, reader io.Reader) error {
 	buf := make([]byte, 1024)
 	_, err := reader.Read(buf) // interface dispatch - unresolvable
 	h.DurableLog("read some data")
@@ -50,7 +50,7 @@ func BadWithInterfaceDispatch(h durable.HostCalls, reader io.Reader) error {
 }
 
 // BadWithFuncValue stores a function in a variable and calls it.
-func BadWithFuncValue(h durable.HostCalls) {
+func BadWithFuncValue(h cleat.HostCalls) {
 	fn := func() {
 		h.DurableLog("inside func value")
 	}
@@ -58,7 +58,7 @@ func BadWithFuncValue(h durable.HostCalls) {
 }
 
 // BadWithFloatCondition uses a float in an if condition (non-deterministic).
-func BadWithFloatCondition(h durable.HostCalls) {
+func BadWithFloatCondition(h cleat.HostCalls) {
 	ratio := 0.95
 	if ratio > 0.5 {
 		h.DurableLog("above threshold")

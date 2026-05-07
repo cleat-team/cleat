@@ -509,7 +509,7 @@ ALTER TABLE workflow_instances DROP COLUMN namespace;
   on read. Add `crypto *TenantCrypto` field. Change query parameter types
   from `string`/`[]byte` to handle `BYTEA` encrypted columns.
 - `internal/host/engine.go` — pass `TenantCrypto` to store operations.
-- `cmd/durable-worker/main.go` — load tenant keys at startup, initialize
+- `cmd/cleat-worker/main.go` — load tenant keys at startup, initialize
   `TenantCrypto`, pass to `PostgresStore`.
 
 **Key changes in `PostgresStore`:**
@@ -540,18 +540,18 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 - `internal/auth/tenant_store.go` — `LookupTenantByKeyHash`
 
 **Files to modify:**
-- `cmd/durable-worker/main.go` — wrap HTTP mux with `TenantAuthMiddleware`
-- `cmd/durable/main.go` — add `--tenant-id` flag for CLI operations (deploy,
+- `cmd/cleat-worker/main.go` — wrap HTTP mux with `TenantAuthMiddleware`
+- `cmd/cleat/main.go` — add `--tenant-id` flag for CLI operations (deploy,
   schedule, versions, rollback) — these bypass API key auth and use direct DB
   access with the tenant ID flag
 
 ### Phase 5: CLI & Worker Multi-Tenant Support (Week 5)
 
 **Files to modify:**
-- `cmd/durable-worker/main.go` — add `--multi-tenant` flag, `--tenant-key-file`
+- `cmd/cleat-worker/main.go` — add `--multi-tenant` flag, `--tenant-key-file`
   flag. In multi-tenant mode, load all tenants from config and use
   `MultiTenantWorker` dispatch loop.
-- `cmd/durable/main.go` — add `--tenant-id` flag to deploy/schedule/versions/
+- `cmd/cleat/main.go` — add `--tenant-id` flag to deploy/schedule/versions/
   rollback subcommands. Remove `--namespace` flag.
 
 **New config format:**

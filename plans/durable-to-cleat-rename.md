@@ -28,24 +28,24 @@ Every `go.mod` and `go.sum` in the repo and sub-modules.
 
 **What changes**:
 ```
-github.com/rcownie/durable          → github.com/rcownie/cleat
-github.com/rcownie/durable/durable  → github.com/rcownie/cleat/cleat
-github.com/rcownie/durable/...      → github.com/rcownie/cleat/...
+github.com/rcownie/cleat          → github.com/rcownie/cleat
+github.com/rcownie/cleat/durable  → github.com/rcownie/cleat/cleat
+github.com/rcownie/cleat/...      → github.com/rcownie/cleat/...
 ```
 
 **Files to change**:
 
 | Scope | Count | Method |
 |-------|-------|--------|
-| Root `go.mod` line 1 | 1 | Edit `module github.com/rcownie/durable` → `module github.com/rcownie/cleat` |
-| `.go` files importing `github.com/rcownie/durable/...` | ~182 | `find . -name '*.go' -exec sed -i 's|github.com/rcownie/durable|github.com/rcownie/cleat|g'` |
+| Root `go.mod` line 1 | 1 | Edit `module github.com/rcownie/cleat` → `module github.com/rcownie/cleat` |
+| `.go` files importing `github.com/rcownie/cleat/...` | ~182 | `find . -name '*.go' -exec sed -i 's|github.com/rcownie/cleat|github.com/rcownie/cleat|g'` |
 | Sub-module `go.mod` files | ~8 | Manual edit each: `wasm-demo/go.mod`, `ports-round2/*/go.mod`, `benchmarks/comparative/*/temporal/go.mod` |
 | `go.sum` | 1 | Delete and run `go mod tidy` |
 
 **Post-rename verification**:
 ```bash
 # Verify no old import paths remain
-grep -r 'github.com/rcownie/durable' --include='*.go' .
+grep -r 'github.com/rcownie/cleat' --include='*.go' .
 # should produce no output
 
 # Rebuild everything
@@ -73,12 +73,12 @@ renamed to match. This is a two-step:
 |-----|-----|
 | `cmd/durable/` | `cmd/cleat/` |
 | `cmd/durable-worker/` | `cmd/cleat-worker/` |
-| `cmd/durable-gen/` | `cmd/cleat-gen/` |
-| `cmd/durable-bench/` | `cmd/cleat-bench/` |
+| `cmd/cleat-gen/` | `cmd/cleat-gen/` |
+| `cmd/cleat-bench/` | `cmd/cleat-bench/` |
 | Binary `durable` | Binary `cleat` |
 | Binary `durable-worker` | Binary `cleat-worker` |
-| Binary `durable-gen` | Binary `cleat-gen` |
-| Binary `durable-bench` | Binary `cleat-bench` |
+| Binary `cleat-gen` | Binary `cleat-gen` |
+| Binary `cleat-bench` | Binary `cleat-bench` |
 
 **Files to change**:
 
@@ -86,8 +86,8 @@ renamed to match. This is a two-step:
 |------|------|
 | `cmd/durable/` → `cmd/cleat/` | `git mv` directory |
 | `cmd/durable-worker/` → `cmd/cleat-worker/` | `git mv` directory |
-| `cmd/durable-gen/` → `cmd/cleat-gen/` | `git mv` directory |
-| `cmd/durable-bench/` → `cmd/cleat-bench/` | `git mv` directory |
+| `cmd/cleat-gen/` → `cmd/cleat-gen/` | `git mv` directory |
+| `cmd/cleat-bench/` → `cmd/cleat-bench/` | `git mv` directory |
 | `cmd/cleat/main.go` | Any internal references to old binary names in help text |
 | `Makefile` | `go build -o cleat ./cmd/cleat`, etc. — 4 binary targets |
 | `.gitignore` | `cleat`, `cleat-worker`, `cleat-gen`, `cleat-bench` |
@@ -390,8 +390,8 @@ packages/cleat-as/assembly/saga.ts       — any string references
 |----------|----------|
 | `cmd/durable/` | `cmd/cleat/` |
 | `cmd/durable-worker/` | `cmd/cleat-worker/` |
-| `cmd/durable-gen/` | `cmd/cleat-gen/` |
-| `cmd/durable-bench/` | `cmd/cleat-bench/` |
+| `cmd/cleat-gen/` | `cmd/cleat-gen/` |
+| `cmd/cleat-bench/` | `cmd/cleat-bench/` |
 | `durable/` | `cleat/` |
 | `durable/durabletest/` | `cleat/cleattest/` |
 | `durable/durabletest/durabletest.go` | `cleat/cleattest/cleattest.go` |

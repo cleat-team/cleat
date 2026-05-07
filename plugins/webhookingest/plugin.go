@@ -12,7 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func init() {

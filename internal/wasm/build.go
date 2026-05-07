@@ -21,7 +21,7 @@ type BuildConfig struct {
 	PkgName string
 
 	// ModulePath is the module path from the project's go.mod
-	// (e.g., "github.com/rcownie/durable").
+	// (e.g., "github.com/rcownie/cleat").
 	ModulePath string
 
 	// ProjectRoot is the absolute path to the project root (where go.mod lives).
@@ -147,14 +147,14 @@ func main() {
 		// Create a minimal dependency tree with go 1.24 so tinygo doesn't
 		// reject the project root's go 1.26 requirement.
 		depsDir := filepath.Join(cfg.OutDir, ".deps")
-		if err := os.MkdirAll(filepath.Join(depsDir, "durable"), 0755); err != nil {
-			return fmt.Errorf("creating .deps/durable: %w", err)
+		if err := os.MkdirAll(filepath.Join(depsDir, "cleat"), 0755); err != nil {
+			return fmt.Errorf("creating .deps/cleat: %w", err)
 		}
-		// Copy durable SDK into .deps/
-		srcDurable := filepath.Join(cfg.ProjectRoot, "durable")
-		goFiles, err := filepath.Glob(filepath.Join(srcDurable, "*.go"))
+		// Copy cleat SDK into .deps/
+		srcCleat := filepath.Join(cfg.ProjectRoot, "cleat")
+		goFiles, err := filepath.Glob(filepath.Join(srcCleat, "*.go"))
 		if err != nil {
-			return fmt.Errorf("globbing durable source: %w", err)
+			return fmt.Errorf("globbing cleat source: %w", err)
 		}
 		for _, gf := range goFiles {
 			base := filepath.Base(gf)
@@ -165,24 +165,24 @@ func main() {
 			if err != nil {
 				return fmt.Errorf("reading %s: %w", base, err)
 			}
-			if err := os.WriteFile(filepath.Join(depsDir, "durable", base), content, 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(depsDir, "cleat", base), content, 0644); err != nil {
 				return fmt.Errorf("writing %s: %w", base, err)
 			}
 		}
-		// Also copy durabletest if present.
-		srcDurabletest := filepath.Join(srcDurable, "durabletest")
-		if st, err := os.Stat(srcDurabletest); err == nil && st.IsDir() {
-			if err := os.MkdirAll(filepath.Join(depsDir, "durabletest"), 0755); err != nil {
-				return fmt.Errorf("creating .deps/durabletest: %w", err)
+		// Also copy cleattest if present.
+		srcCleattest := filepath.Join(srcCleat, "cleattest")
+		if st, err := os.Stat(srcCleattest); err == nil && st.IsDir() {
+			if err := os.MkdirAll(filepath.Join(depsDir, "cleattest"), 0755); err != nil {
+				return fmt.Errorf("creating .deps/cleattest: %w", err)
 			}
-			testGoFiles, _ := filepath.Glob(filepath.Join(srcDurabletest, "*.go"))
+			testGoFiles, _ := filepath.Glob(filepath.Join(srcCleattest, "*.go"))
 			for _, gf := range testGoFiles {
 				base := filepath.Base(gf)
 				content, err := os.ReadFile(gf)
 				if err != nil {
 					continue
 				}
-				os.WriteFile(filepath.Join(depsDir, "durabletest", base), content, 0644)
+				os.WriteFile(filepath.Join(depsDir, "cleattest", base), content, 0644)
 			}
 		}
 		// Write .deps/go.mod with a compatible version.
@@ -196,7 +196,7 @@ go 1.24
 		replaceRoot = depsDir
 	}
 
-	modContent := fmt.Sprintf(`module durable-build
+	modContent := fmt.Sprintf(`module cleat-build
 
 go %s
 

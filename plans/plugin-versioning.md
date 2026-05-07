@@ -136,7 +136,7 @@ If a workflow never calls a plugin, `required_plugin_versions` stays `{}`.
 ## Worker Plugin Map
 
 ```go
-// In cmd/durable-worker/main.go or internal/plugin/registry.go
+// In cmd/cleat-worker/main.go or internal/plugin/registry.go
 func GetWorkerPluginMap() map[string]string {
     plugins := make(map[string]string)
     for _, info := range plugin.List() {

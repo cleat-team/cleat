@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/durable/durable"
-	"github.com/rcownie/durable/durable/durabletest"
+	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/cleat/cleattest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -18,7 +18,7 @@ type testResult struct {
 
 // workflowIDWrapper wraps a HostCalls to override WorkflowID().
 type workflowIDWrapper struct {
-	durable.HostCalls
+	cleat.HostCalls
 	wfID string
 }
 
@@ -32,7 +32,7 @@ func (w *workflowIDWrapper) WorkflowID() string {
 
 func TestCheckoutWorkflow(t *testing.T) {
 	t.Run("Payment success with dispatch", func(t *testing.T) {
-		env := durabletest.NewTestEnv()
+		env := cleattest.NewTestEnv()
 		defer env.Reset()
 
 		// Stub store operations in call order
@@ -71,7 +71,7 @@ func TestCheckoutWorkflow(t *testing.T) {
 	})
 
 	t.Run("Inventory reservation fails", func(t *testing.T) {
-		env := durabletest.NewTestEnv()
+		env := cleattest.NewTestEnv()
 		defer env.Reset()
 
 		env.OnCall("store", "createOrder", nil).ReturnJSON(2, nil)
@@ -105,7 +105,7 @@ func TestCheckoutWorkflow(t *testing.T) {
 	})
 
 	t.Run("Payment timeout", func(t *testing.T) {
-		env := durabletest.NewTestEnv()
+		env := cleattest.NewTestEnv()
 		defer env.Reset()
 
 		env.OnCall("store", "createOrder", nil).ReturnJSON(3, nil)
@@ -140,7 +140,7 @@ func TestCheckoutWorkflow(t *testing.T) {
 	})
 
 	t.Run("Payment failed status", func(t *testing.T) {
-		env := durabletest.NewTestEnv()
+		env := cleattest.NewTestEnv()
 		defer env.Reset()
 
 		env.OnCall("store", "createOrder", nil).ReturnJSON(4, nil)
@@ -175,7 +175,7 @@ func TestCheckoutWorkflow(t *testing.T) {
 	})
 
 	t.Run("CreateOrder step fails", func(t *testing.T) {
-		env := durabletest.NewTestEnv()
+		env := cleattest.NewTestEnv()
 		defer env.Reset()
 
 		env.OnCall("store", "createOrder", nil).Return("", errors.New("database error"))
@@ -199,7 +199,7 @@ func TestCheckoutWorkflow(t *testing.T) {
 	})
 
 	t.Run("WorkflowID is empty", func(t *testing.T) {
-		env := durabletest.NewTestEnv()
+		env := cleattest.NewTestEnv()
 		defer env.Reset()
 
 		// No stubs needed -- the empty WorkflowID check should short-circuit
@@ -228,7 +228,7 @@ func TestCheckoutWorkflow(t *testing.T) {
 
 func TestDispatchOrderWorkflow(t *testing.T) {
 	t.Run("Happy path - successful dispatch", func(t *testing.T) {
-		env := durabletest.NewTestEnv()
+		env := cleattest.NewTestEnv()
 		defer env.Reset()
 
 		// Stub 10 progress-update calls in sequence
@@ -256,7 +256,7 @@ func TestDispatchOrderWorkflow(t *testing.T) {
 	})
 
 	t.Run("UpdateOrderProgress step fails mid-execution", func(t *testing.T) {
-		env := durabletest.NewTestEnv()
+		env := cleattest.NewTestEnv()
 		defer env.Reset()
 
 		// First 5 calls succeed
@@ -287,7 +287,7 @@ func TestDispatchOrderWorkflow(t *testing.T) {
 	})
 
 	t.Run("Multiple order IDs produce different behavior", func(t *testing.T) {
-		env := durabletest.NewTestEnv()
+		env := cleattest.NewTestEnv()
 		defer env.Reset()
 
 		for i := 0; i < 10; i++ {
@@ -321,7 +321,7 @@ func TestDispatchOrderWorkflow(t *testing.T) {
 // This shows how the checkout could be rewritten using the structured Saga
 // pattern for automatic compensation on any step failure.
 func TestSagaPattern(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	defer env.Reset()
 
 	var orderID int
@@ -334,27 +334,27 @@ func TestSagaPattern(t *testing.T) {
 	h := &workflowIDWrapper{HostCalls: env.H(), wfID: "test-saga-checkout"}
 
 	// Build a Saga-powered checkout
-	saga := durable.NewSaga()
+	saga := cleat.NewSaga()
 	saga.AddStep("createOrder",
-		func(h durable.HostCalls) (string, error) {
+		func(h cleat.HostCalls) (string, error) {
 			err := h.DurableCallTyped("store", "createOrder", &struct{}{}, &orderID)
 			return "", err
 		},
 		nil, // no compensation for order creation in this variant
 	)
 	saga.AddStep("reserveInventory",
-		func(h durable.HostCalls) (string, error) {
+		func(h cleat.HostCalls) (string, error) {
 			var reserved bool
 			err := h.DurableCallTyped("store", "reserveInventory", WIDGET_ID, &reserved)
 			if err != nil {
-				return "", durable.NewTerminalError(err)
+				return "", cleat.NewTerminalError(err)
 			}
 			if !reserved {
-				return "", durable.NewTerminalError(errors.New("no inventory"))
+				return "", cleat.NewTerminalError(errors.New("no inventory"))
 			}
 			return "", nil
 		},
-		func(h durable.HostCalls) error {
+		func(h cleat.HostCalls) error {
 			return h.DurableCallTyped("store", "undoReserveInventory", WIDGET_ID, nil)
 		},
 	)

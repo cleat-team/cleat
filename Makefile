@@ -40,8 +40,8 @@ lint-python:
 
 .PHONY: lint-rust
 lint-rust:
-	cd crates/durable-macro && cargo clippy --all-targets -- -D warnings
-	cd crates/durable-sdk && cargo clippy --all-targets -- -D warnings
+	cd crates/cleat-macro && cargo clippy --all-targets -- -D warnings
+	cd crates/cleat-sdk && cargo clippy --all-targets -- -D warnings
 
 .PHONY: lint-sh
 lint-sh:
@@ -62,7 +62,7 @@ test-python:
 
 .PHONY: test-java
 test-java:
-	cd crates/durable-java && if [ -x gradlew ]; then ./gradlew test; else gradle test; fi
+	cd crates/cleat-java && if [ -x gradlew ]; then ./gradlew test; else gradle test; fi
 
 .PHONY: test-as
 test-as:
@@ -107,7 +107,7 @@ build-python:
 
 .PHONY: build-java
 build-java:
-	cd crates/durable-java && if [ -x gradlew ]; then ./gradlew build; else gradle build; fi
+	cd crates/cleat-java && if [ -x gradlew ]; then ./gradlew build; else gradle build; fi
 
 .PHONY: build-as
 build-as:
@@ -117,8 +117,8 @@ build-as:
 
 .PHONY: cluster-up
 cluster-up:
-	go build -o durable-worker ./cmd/durable-worker
-	docker build -t durable-worker:latest .
+	go build -o cleat-worker ./cmd/cleat-worker
+	docker build -t cleat-worker:latest .
 	docker compose -f docker-compose.cluster.yml up -d
 
 .PHONY: cluster-down
@@ -145,5 +145,5 @@ fmt-python:
 
 .PHONY: fmt-rust
 fmt-rust:
-	cd crates/durable-macro && cargo fmt
-	cd crates/durable-sdk && cargo fmt
+	cd crates/cleat-macro && cargo fmt
+	cd crates/cleat-sdk && cargo fmt

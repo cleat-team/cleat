@@ -8,17 +8,17 @@
 //
 // Build:
 //
-//	durable build -o /tmp/out ./examples/travel/
+//	cleat build -o /tmp/out ./examples/travel/
 package travel
 
 import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
-var h durable.HostCalls
+var h cleat.HostCalls
 
 // ---- Domain types ----
 
@@ -60,7 +60,7 @@ type BookingResult struct {
 
 // ---- Entry point ----
 
-func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error) {
+func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
 	if err := validateInput(input); err != nil {
 		return nil, err
 	}
@@ -80,9 +80,9 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 	var flightRef, hotelRef, carRef string
 	var totalUSD int
 
-	parallelSteps := []durable.SagaStep{
+	parallelSteps := []cleat.SagaStep{
 		{
-			Forward: func(h durable.HostCalls) (string, error) {
+			Forward: func(h cleat.HostCalls) (string, error) {
 				resp, err := h.DurableCall("flights", "Book", toJSON(input.Flight))
 				if err != nil {
 					return "", fmt.Errorf("flight booking failed: %w", err)
@@ -95,7 +95,7 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 				flightRef = r.Ref
 				return r.Ref, nil
 			},
-			Compensate: func(h durable.HostCalls) error {
+			Compensate: func(h cleat.HostCalls) error {
 				if flightRef == "" {
 					return nil
 				}
@@ -105,7 +105,7 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 			},
 		},
 		{
-			Forward: func(h durable.HostCalls) (string, error) {
+			Forward: func(h cleat.HostCalls) (string, error) {
 				resp, err := h.DurableCall("hotels", "Book", toJSON(input.Hotel))
 				if err != nil {
 					return "", fmt.Errorf("hotel booking failed: %w", err)
@@ -118,7 +118,7 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 				hotelRef = r.Ref
 				return r.Ref, nil
 			},
-			Compensate: func(h durable.HostCalls) error {
+			Compensate: func(h cleat.HostCalls) error {
 				if hotelRef == "" {
 					return nil
 				}
@@ -130,8 +130,8 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 	}
 
 	if input.Car.City != "" {
-		parallelSteps = append(parallelSteps, durable.SagaStep{
-			Forward: func(h durable.HostCalls) (string, error) {
+		parallelSteps = append(parallelSteps, cleat.SagaStep{
+			Forward: func(h cleat.HostCalls) (string, error) {
 				resp, err := h.DurableCall("cars", "Book", toJSON(input.Car))
 				if err != nil {
 					return "", fmt.Errorf("car booking failed: %w", err)
@@ -144,7 +144,7 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 				carRef = r.Ref
 				return r.Ref, nil
 			},
-			Compensate: func(h durable.HostCalls) error {
+			Compensate: func(h cleat.HostCalls) error {
 				if carRef == "" {
 					return nil
 				}
@@ -155,7 +155,7 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 		})
 	}
 
-	s := durable.NewSaga()
+	s := cleat.NewSaga()
 	s.AddParallel(parallelSteps...)
 
 	if err := s.Run(h); err != nil {
@@ -204,7 +204,7 @@ func validateInput(input BookingInput) error {
 	return nil
 }
 
-func cancelAll(h durable.HostCalls, flightRef, hotelRef, carRef string) {
+func cancelAll(h cleat.HostCalls, flightRef, hotelRef, carRef string) {
 	if flightRef != "" {
 		h.DurableCall("flights", "Cancel", toJSON(map[string]string{"ref": flightRef}))
 	}

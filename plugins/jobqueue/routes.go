@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/auth"
+	"github.com/rcownie/cleat/internal/auth"
 )
 
 // RegisterRoutes registers the job queue HTTP handlers on the given mux.

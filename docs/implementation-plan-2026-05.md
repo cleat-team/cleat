@@ -33,7 +33,7 @@ The existing `implementation-plan-2026-05.md` defined these as Feature 1 and Fea
 
 4. **No HostFunctions for workflows.** Workflows can't await domain events from within workflow code. `HasHostFunctions` is not implemented.
 
-5. **Plugins don't load in sharded mode.** `cmd/durable-worker/main.go` only initializes plugins when `--api-addr` is set. `--shards-file` mode gets no event triggers.
+5. **Plugins don't load in sharded mode.** `cmd/cleat-worker/main.go` only initializes plugins when `--api-addr` is set. `--shards-file` mode gets no event triggers.
 
 6. **`webhookingest` plugin** has the same missing retry worker. Webhook signal delivery is synchronous-only — if `SignalWorkflow` fails, the signal is lost.
 

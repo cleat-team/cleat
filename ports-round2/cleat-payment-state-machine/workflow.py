@@ -17,11 +17,11 @@ Original Restate patterns used:
 - ctx.clear_all() for state cleanup
 
 Cleat equivalents:
-- @durable_entry for workflow entry points
+- @cleat_entry for workflow entry points
 - ctx.key() returning workflow_id (aliased for compatibility)
 - ctx.get_state()/ctx.set_state() for state
-- ctx.durable_call() for service invocation
-- ctx.durable_sleep() + ctx.durable_call() for delayed operations
+- ctx.cleat_call() for service invocation
+- ctx.cleat_sleep() + ctx.cleat_call() for delayed operations
 - ctx.clear_all_state() for state cleanup
 """
 
@@ -37,7 +37,7 @@ from accounts import (
     Result,
     dataclass_to_dict,
 )
-from cleat_sdk import HostCalls, TerminalError, Saga, durable_entry
+from cleat_sdk import HostCalls, TerminalError, Saga, cleat_entry
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -136,7 +136,7 @@ def _set_payment(ctx: HostCalls, payment_id: str, payment: Payment) -> None:
 # ---------------------------------------------------------------------------
 
 
-@durable_entry(name="PaymentProcessor.makePayment")
+@cleat_entry(name="PaymentProcessor.makePayment")
 async def make_payment(ctx: HostCalls, request: PaymentRequest) -> str:
     """Process a payment through the state machine.
 
@@ -181,7 +181,7 @@ async def make_payment(ctx: HostCalls, request: PaymentRequest) -> str:
     saga = Saga()
 
     saga.add_step(
-        action=lambda: ctx.durable_call(
+        action=lambda: ctx.cleat_call(
             "account",
             "withdraw",
             dataclass_to_dict(
@@ -191,7 +191,7 @@ async def make_payment(ctx: HostCalls, request: PaymentRequest) -> str:
                 )
             ),
         ),
-        compensate=lambda: ctx.durable_call(
+        compensate=lambda: ctx.cleat_call(
             "account",
             "deposit",
             dataclass_to_dict(
@@ -216,7 +216,7 @@ async def make_payment(ctx: HostCalls, request: PaymentRequest) -> str:
         raise
 
     # Check withdrawal result
-    # NOTE: In production, durable_call returns the deserialized response.
+    # NOTE: In production, cleat_call returns the deserialized response.
     # Here result might be a dict or Result object depending on runtime.
     if isinstance(result, dict):
         withdrawal_ok = result.get("success", False)
@@ -247,7 +247,7 @@ async def make_payment(ctx: HostCalls, request: PaymentRequest) -> str:
     return message
 
 
-@durable_entry(name="PaymentProcessor.cancelPayment")
+@cleat_entry(name="PaymentProcessor.cancelPayment")
 async def cancel_payment(ctx: HostCalls, request: CancelRequest) -> None:
     """Cancel a payment.
 
@@ -288,9 +288,9 @@ async def cancel_payment(ctx: HostCalls, request: CancelRequest) -> None:
 
         # Refund the account by depositing the amount back
         # ISSUE #5: Cleat lacks Restate's object_send fire-and-forget.
-        # We use durable_call which waits for a response. For a refund
+        # We use cleat_call which waits for a response. For a refund
         # this is acceptable, but it changes the semantics from fire-and-forget.
-        await ctx.durable_call(
+        await ctx.cleat_call(
             "account",
             "deposit",
             dataclass_to_dict(
@@ -310,7 +310,7 @@ async def cancel_payment(ctx: HostCalls, request: CancelRequest) -> None:
         _set_status(ctx, payment_id, STATE_CANCELLED)
 
 
-@durable_entry(name="PaymentProcessor.expire")
+@cleat_entry(name="PaymentProcessor.expire")
 async def expire(ctx: HostCalls, request: Optional[dict] = None) -> None:
     """Clean up all state for a payment after expiry.
 
@@ -356,7 +356,7 @@ def _schedule_expiry(ctx: HostCalls, payment_id: str) -> None:
 
     async def _delayed_expiry():
         try:
-            await ctx.durable_sleep(EXPIRY_TIMEOUT_MS)
+            await ctx.cleat_sleep(EXPIRY_TIMEOUT_MS)
             # After sleep, clean up state
             for field in ["status", "payment"]:
                 ctx.clear_state(_payment_state_key(payment_id, field))

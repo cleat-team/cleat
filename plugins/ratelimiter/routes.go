@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/auth"
+	"github.com/rcownie/cleat/internal/auth"
 )
 
 // rateLimitPut is the JSON body for PUT /rate-limits/{key}.

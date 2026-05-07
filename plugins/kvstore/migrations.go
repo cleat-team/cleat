@@ -1,6 +1,6 @@
 package kvstore
 
-import "github.com/rcownie/durable/internal/plugin"
+import "github.com/rcownie/cleat/internal/plugin"
 
 // Migrations returns the database schema for the key-value store. Tables are
 // idempotent (IF NOT EXISTS) and safe to run multiple times.

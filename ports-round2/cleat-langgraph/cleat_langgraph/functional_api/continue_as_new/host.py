@@ -30,7 +30,7 @@ async def pipeline_entrypoint(data: int) -> dict:
     """Run the 3-stage pipeline: double → add_50 → triple.
 
     This is the reference implementation. In the Cleat version, each
-    task is called individually via durable_call for per-task caching.
+    task is called individually via cleat_call for per-task caching.
     """
     doubled = await double(data)
     plus_50 = await add_50(doubled)

@@ -19,7 +19,7 @@ Usage pattern::
 import json
 from dataclasses import dataclass
 from typing import Optional
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
 
 @dataclass
@@ -28,10 +28,10 @@ class ApprovalRequest:
     requires_approval: bool = True
 
 
-@durable_entry
+@cleat_entry
 def approval_workflow(h: HostCalls, request: ApprovalRequest) -> str:
     """A workflow that registers an update handler for external approval."""
-    h.durable_log(f"Starting approval workflow for task {request.task_id}")
+    h.cleat_log(f"Starting approval workflow for task {request.task_id}")
 
     # Register an update handler that external clients can call
     def handle_approve(payload: str) -> str:
@@ -49,7 +49,7 @@ def approval_workflow(h: HostCalls, request: ApprovalRequest) -> str:
         """
         data = json.loads(payload)
         approved = data.get("approved", False)
-        h.durable_log(f"Approval decision for {request.task_id}: {approved}")
+        h.cleat_log(f"Approval decision for {request.task_id}: {approved}")
         return json.dumps({
             "task_id": request.task_id,
             "approved": approved,
@@ -81,7 +81,7 @@ def approval_workflow(h: HostCalls, request: ApprovalRequest) -> str:
         validator=validate_approve,
     )
 
-    h.durable_log(f"Update handler registered for task {request.task_id}")
+    h.cleat_log(f"Update handler registered for task {request.task_id}")
     return json.dumps({
         "status": "waiting",
         "task_id": request.task_id,

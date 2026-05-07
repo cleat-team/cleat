@@ -1,9 +1,9 @@
-// Package host provides a wazero-based WASM runtime for executing durable
-// workflow modules produced by the `durable build` command.
+// Package host provides a wazero-based WASM runtime for executing cleat
+// workflow modules produced by the `cleat build` command.
 //
 // Architecture:
 //   Runtime — wraps wazero, registers host function imports, manages modules
-//   Engine  — durable execution with checkpoint/replay on top of Runtime
+//   Engine  — cleat execution with checkpoint/replay on top of Runtime
 //   HostHandler — per-execution session interface (carried in context)
 //
 // The host reads/writes strings in WASM linear memory using (ptr, len) pairs.

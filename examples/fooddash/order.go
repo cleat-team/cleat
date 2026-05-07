@@ -13,13 +13,13 @@
 //   - Deep call chains (3-4 levels) for auto-threading
 //   - Child workflows and ContinueAsNew for long-running orders
 //
-// Entry points take h durable.HostCalls as their first parameter. All
+// Entry points take h cleat.HostCalls as their first parameter. All
 // internal helper functions use the package-level h — the transformer
 // automatically threads h through every function in the durable closure.
 //
 // Build:
 //
-//	durable build -o /tmp/out ./examples/fooddash/
+//	cleat build -o /tmp/out ./examples/fooddash/
 package fooddash
 
 import (
@@ -28,12 +28,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // h is the package-level context object. The transformer auto-threads it
 // into every function in the durable closure that references it.
-var h durable.HostCalls
+var h cleat.HostCalls
 
 // ---- Domain types ----
 
@@ -70,7 +70,7 @@ type OrderStatus struct {
 
 // Version evolution pattern:
 //
-//	func PlaceOrder(h durable.HostCalls, ...) (OrderResult, error) {
+//	func PlaceOrder(h cleat.HostCalls, ...) (OrderResult, error) {
 //	    var validated []validatedItem
 //	    if h.Version() >= 2 {
 //	        validated, err = validateMenuItemsV2(restaurantID, items)
@@ -87,7 +87,7 @@ type OrderStatus struct {
 //	v1: items were []OrderItem with SKU/Name/Quantity
 //	v2: items gained DietaryPreferences field
 //	To evolve: bump MinVersion, gate new behavior on h.Version() >= 2
-func PlaceOrder(h durable.HostCalls, userID string, restaurantID string,
+func PlaceOrder(h cleat.HostCalls, userID string, restaurantID string,
 	items []OrderItem, address DeliveryAddress) (OrderResult, error) {
 
 	_ = h.MinVersion() // declares minimum version this code requires
@@ -116,16 +116,16 @@ func PlaceOrder(h durable.HostCalls, userID string, restaurantID string,
 	var charge chargeResult
 	var driver driverResult
 
-	s := durable.NewSaga()
+	s := cleat.NewSaga()
 
 	// Step 3: Charge the customer. Compensate with refund.
 	s.AddStep("charge_customer",
-		func(h durable.HostCalls) (string, error) {
+		func(h cleat.HostCalls) (string, error) {
 			var err error
 			charge, err = chargeCustomer(userID, total)
 			return "", err
 		},
-		func(h durable.HostCalls) error {
+		func(h cleat.HostCalls) error {
 			refundCharge(charge.ChargeID)
 			return nil
 		},
@@ -133,12 +133,12 @@ func PlaceOrder(h durable.HostCalls, userID string, restaurantID string,
 
 	// Step 4: Assign a driver. Compensate with release.
 	s.AddStep("assign_driver",
-		func(h durable.HostCalls) (string, error) {
+		func(h cleat.HostCalls) (string, error) {
 			var err error
 			driver, err = assignDriver(address)
 			return "", err
 		},
-		func(h durable.HostCalls) error {
+		func(h cleat.HostCalls) error {
 			releaseDriver(driver.DriverID)
 			return nil
 		},
@@ -146,10 +146,10 @@ func PlaceOrder(h durable.HostCalls, userID string, restaurantID string,
 
 	// Step 5: Notify the restaurant. Compensate with cancel.
 	s.AddStep("notify_restaurant",
-		func(h durable.HostCalls) (string, error) {
+		func(h cleat.HostCalls) (string, error) {
 			return "", notifyRestaurant(restaurantID, validated, driver.ETAMinutes)
 		},
-		func(h durable.HostCalls) error {
+		func(h cleat.HostCalls) error {
 			cancelRestaurantOrder(charge.ChargeID)
 			return nil
 		},
@@ -186,23 +186,23 @@ func PlaceOrder(h durable.HostCalls, userID string, restaurantID string,
 }
 
 // CancelOrder cancels an active order using Saga-based compensation.
-func CancelOrder(h durable.HostCalls, orderID string) error {
+func CancelOrder(h cleat.HostCalls, orderID string) error {
 	h.LogKV("cancelling order", "order_id", orderID)
 
-	s := durable.NewSaga()
+	s := cleat.NewSaga()
 
 	s.AddStep("release_driver",
-		func(h durable.HostCalls) (string, error) { return "", releaseDriver(orderID) },
+		func(h cleat.HostCalls) (string, error) { return "", releaseDriver(orderID) },
 		nil, // best-effort, no compensation needed
 	)
 
 	s.AddStep("refund_payment",
-		func(h durable.HostCalls) (string, error) { return "", refundCharge(orderID) },
+		func(h cleat.HostCalls) (string, error) { return "", refundCharge(orderID) },
 		nil,
 	)
 
 	s.AddStep("cancel_restaurant",
-		func(h durable.HostCalls) (string, error) { return "", cancelRestaurantOrder(orderID) },
+		func(h cleat.HostCalls) (string, error) { return "", cancelRestaurantOrder(orderID) },
 		nil,
 	)
 
@@ -211,7 +211,7 @@ func CancelOrder(h durable.HostCalls, orderID string) error {
 
 // GetOrderStatus is a query handler. It reads state set by PlaceOrder
 // via SetQueryState during workflow execution.
-func GetOrderStatus(h durable.HostCalls, orderID string) (OrderStatus, error) {
+func GetOrderStatus(h cleat.HostCalls, orderID string) (OrderStatus, error) {
 	status, err := lookupOrderState(orderID)
 	if err != nil {
 		return OrderStatus{}, err
@@ -221,7 +221,7 @@ func GetOrderStatus(h durable.HostCalls, orderID string) (OrderStatus, error) {
 
 // PlaceLargeOrder demonstrates ContinueAsNew for long-running orders
 // with many items that would bloat the event history.
-func PlaceLargeOrder(h durable.HostCalls, userID string, items []OrderItem) (string, error) {
+func PlaceLargeOrder(h cleat.HostCalls, userID string, items []OrderItem) (string, error) {
 	if len(items) <= 10 {
 		return processOrderSmall(h, userID, items)
 	}
@@ -245,7 +245,7 @@ func PlaceLargeOrder(h durable.HostCalls, userID string, items []OrderItem) (str
 }
 
 // processOrderSmall handles up to 10 items (the normal path).
-func processOrderSmall(h durable.HostCalls, userID string, items []OrderItem) (string, error) {
+func processOrderSmall(h cleat.HostCalls, userID string, items []OrderItem) (string, error) {
 	// Use a dummy restaurant and address for simplicity — in production these
 	// would be stored in workflow state and passed through ContinueAsNew.
 	return "order_processed", nil

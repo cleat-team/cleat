@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/rcownie/durable/internal/host"
+	host "github.com/rcownie/cleat/internal/host"
 )
 
 // TestLatencyP50 measures the median (P50) latency for a single event append

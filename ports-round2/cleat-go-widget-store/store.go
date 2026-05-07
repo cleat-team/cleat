@@ -7,7 +7,7 @@ import (
 
 // StoreClient provides database access through the Cleat HostCalls interface.
 // In a real deployment these would invoke backing services; in tests they
-// are stubbed via durabletest.TestEnv.OnCall.
+// are stubbed via cleattest.TestEnv.OnCall.
 type StoreClient struct {
 	ctx context.Context
 }

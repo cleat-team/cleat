@@ -116,7 +116,7 @@ func setupFullTestSchema(t *testing.T, db *sql.DB) {
 // recording + event loading + replay with zero real service calls.
 // ---------------------------------------------------------------------------
 
-// TestIntegrationFullPipeline exercises the complete durable execution path:
+// TestIntegrationFullPipeline exercises the complete cleat execution path:
 // real PostgreSQL, WASM compilation, Engine execution, event persistence via
 // AppendEventHistoryBatch, event loading via LoadEventHistory, and replay
 // with verified zero real service calls.

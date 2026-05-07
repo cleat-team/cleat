@@ -125,7 +125,7 @@ class CleatClient:
         Parameters
         ----------
         name : str
-            The workflow definition name (matches ``@durable_entry``).
+            The workflow definition name (matches ``@cleat_entry``).
         input : Any
             Input payload (JSON-serialisable).
         idempotency_key : str or None

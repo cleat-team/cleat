@@ -5,13 +5,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/durable/durable/durabletest"
+	"github.com/rcownie/cleat/cleat/cleattest"
 )
 
 // Test_Sleep verifies that the workflow sleeps for the configured duration and
 // the timer fires at the expected time.
 func Test_Sleep(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	start := env.Now()
 
 	wakeUpTime := start.Add(30 * time.Minute)
@@ -62,7 +62,7 @@ func Test_Sleep(t *testing.T) {
 // Test_UpdateWakeUpTime verifies that signals can update the wake-up time
 // while the timer is running, and the workflow sleeps for the updated duration.
 func Test_UpdateWakeUpTime(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	start := env.Now()
 
 	initialWakeUpTime := start.Add(30 * time.Minute)
@@ -119,7 +119,7 @@ func Test_UpdateWakeUpTime(t *testing.T) {
 
 // Test_MultipleUpdates verifies multiple successive updates before the timer fires.
 func Test_MultipleUpdates(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	start := env.Now()
 
 	initialWakeUpTime := start.Add(60 * time.Minute)
@@ -166,7 +166,7 @@ func Test_MultipleUpdates(t *testing.T) {
 // Test_QueryHandler verifies that the query handler returns the correct
 // wake-up time during the workflow's sleep.
 func Test_QueryHandler(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	start := env.Now()
 
 	wakeUpTime := start.Add(30 * time.Minute)
@@ -221,7 +221,7 @@ func Test_QueryHandler(t *testing.T) {
 // Test_QueryAfterUpdate verifies that after a signal update, the query handler
 // returns the updated wake-up time, not the initial one.
 func Test_QueryAfterUpdate(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	start := env.Now()
 
 	initialWakeUpTime := start.Add(60 * time.Minute)
@@ -291,7 +291,7 @@ func Test_UpdateHandlerRegistered(t *testing.T) {
 	// The update handler is registered during Workflow initialization.
 	// A successful test run (via Test_Sleep etc.) proves registration
 	// did not panic.
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	start := env.Now()
 
 	wakeUpTime := start.Add(1 * time.Minute)

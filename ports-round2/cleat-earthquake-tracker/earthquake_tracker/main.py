@@ -11,7 +11,7 @@ Key differences from the DBOS version:
     - No Postgres database: uses Cleat's key-value state service for persistence
     - No cron decorator: the host runtime schedules workflow invocations
     - No SQLAlchemy ORM: earthquake data stored as JSON in Cleat state
-    - HTTP fetch via HostCalls.durable_fetch() (deterministic/replayable)
+    - HTTP fetch via HostCalls.cleat_fetch() (deterministic/replayable)
     - Notifications via a custom host "notification" service
 """
 
@@ -22,7 +22,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -58,7 +58,7 @@ class EarthquakeData(dict):
 # State helpers
 #
 # We interact with Cleat's key-value state service directly via
-# durable_call rather than relying on HostCalls.get_state() because
+# cleat_call rather than relying on HostCalls.get_state() because
 # get_state()'s type coercion logic may not round-trip complex JSON
 # types correctly (see ISSUES.md).
 # ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ def _state_get(h: HostCalls, key: str) -> Any:
     Returns ``None`` if the key does not exist.
     """
     try:
-        result = h.durable_call("state", "get", {"key": key})
+        result = h.cleat_call("state", "get", {"key": key})
         return json.loads(result)
     except RuntimeError:
         return None
@@ -81,7 +81,7 @@ def _state_set(h: HostCalls, key: str, value: Any) -> None:
 
     The value is JSON-serialised automatically.
     """
-    h.durable_call("state", "set", {"key": key, "value": value})
+    h.cleat_call("state", "set", {"key": key, "value": value})
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ def get_earthquake_data(
         If the USGS API returns a non-200 status.
     """
     url = _build_usgs_url(start_time, end_time)
-    body, status = h.durable_fetch(url, "GET")
+    body, status = h.cleat_fetch(url, "GET")
 
     if status != 200:
         raise RuntimeError(
@@ -223,7 +223,7 @@ def track_earthquakes_impl(h: HostCalls, scheduled_time: str) -> dict:
     """Check for new earthquakes and record them (implementation).
 
     This is the raw implementation function, separated from the
-    ``@durable_entry`` wrapper so it can be tested directly with
+    ``@cleat_entry`` wrapper so it can be tested directly with
     ``CleatTestHarness`` without going through the WASM ABI wrapper.
 
     Designed to be invoked on a schedule by the Cleat host runtime.
@@ -256,7 +256,7 @@ def track_earthquakes_impl(h: HostCalls, scheduled_time: str) -> dict:
 
     start_time = end_time - timedelta(hours=LOOKBACK_HOURS)
 
-    h.durable_log(
+    h.cleat_log(
         f"track_earthquakes: checking {start_time.isoformat()} to "
         f"{end_time.isoformat()}"
     )
@@ -265,7 +265,7 @@ def track_earthquakes_impl(h: HostCalls, scheduled_time: str) -> dict:
     earthquakes = get_earthquake_data(h, start_time, end_time)
 
     if not earthquakes:
-        h.durable_log("No earthquakes found in time window")
+        h.cleat_log("No earthquakes found in time window")
         return {
             "new_count": 0,
             "total_seen": 0,
@@ -275,7 +275,7 @@ def track_earthquakes_impl(h: HostCalls, scheduled_time: str) -> dict:
 
     # Step 2: Get previously seen IDs for idempotency
     seen_ids = _get_seen_ids(h)
-    h.durable_log(f"Previously seen {len(seen_ids)} earthquake IDs")
+    h.cleat_log(f"Previously seen {len(seen_ids)} earthquake IDs")
 
     # Step 3: Process each earthquake
     new_count = 0
@@ -286,12 +286,12 @@ def track_earthquakes_impl(h: HostCalls, scheduled_time: str) -> dict:
 
         if eq_id in seen_ids:
             # Already known - update record, no notification
-            h.durable_log(f"Updating existing earthquake: {eq_id}")
+            h.cleat_log(f"Updating existing earthquake: {eq_id}")
             record_earthquake_data(h, eq)
             continue
 
         # New earthquake
-        h.durable_log(
+        h.cleat_log(
             f"New earthquake: {eq_id} place={eq['place']} "
             f"mag={eq['magnitude']}"
         )
@@ -308,7 +308,7 @@ def track_earthquakes_impl(h: HostCalls, scheduled_time: str) -> dict:
                 "magnitude": eq["magnitude"],
                 "timestamp": eq["timestamp"],
             }
-            h.durable_call("notification", "send", notification_payload)
+            h.cleat_call("notification", "send", notification_payload)
 
             # Track as seen
             seen_ids.append(eq_id)
@@ -316,7 +316,7 @@ def track_earthquakes_impl(h: HostCalls, scheduled_time: str) -> dict:
 
         except RuntimeError as exc:
             error_msg = f"Failed to process earthquake {eq_id}: {exc}"
-            h.durable_log(error_msg)
+            h.cleat_log(error_msg)
             errors.append(error_msg)
 
     # Step 4: Persist updated seen IDs
@@ -329,13 +329,13 @@ def track_earthquakes_impl(h: HostCalls, scheduled_time: str) -> dict:
         "scheduled_time": scheduled_time,
     }
 
-    h.durable_log(f"track_earthquakes complete: {json.dumps(summary)}")
+    h.cleat_log(f"track_earthquakes complete: {json.dumps(summary)}")
     return summary
 
 
-@durable_entry(name="track_earthquakes")
+@cleat_entry(name="track_earthquakes")
 def track_earthquakes(h: HostCalls, scheduled_time: str) -> dict:
-    """@durable_entry wrapper around :func:`track_earthquakes_impl`.
+    """@cleat_entry wrapper around :func:`track_earthquakes_impl`.
 
     This function is the WASM-exportable entry point for the Cleat host.
     It delegates to ``track_earthquakes_impl`` for the actual logic.

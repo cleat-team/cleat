@@ -3,7 +3,7 @@ package workflows
 import (
 	"fmt"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // SagaInput configures the saga compensation workflow.
@@ -26,17 +26,17 @@ type SagaOutput struct {
 //
 // Equivalent Temporal: a workflow using a Saga helper with N steps.
 // Equivalent DBOS: a workflow using a transaction array with compensation.
-func SagaWorkflow(h durable.HostCalls, input SagaInput) (SagaOutput, error) {
-	s := durable.NewSaga()
+func SagaWorkflow(h cleat.HostCalls, input SagaInput) (SagaOutput, error) {
+	s := cleat.NewSaga()
 	for i := 0; i < input.Steps; i++ {
 		idx := i // capture for closure
 		s.AddStep(fmt.Sprintf("step_%d", idx),
 			// Forward action
-			func(h durable.HostCalls) (string, error) {
+			func(h cleat.HostCalls) (string, error) {
 				return h.DurableCall("bench", "forward", `{}`)
 			},
 			// Compensation action
-			func(h durable.HostCalls) error {
+			func(h cleat.HostCalls) error {
 				_, err := h.DurableCall("bench", "compensate", `{}`)
 				return err
 			},
@@ -67,20 +67,20 @@ type SagaWithCompensationOutput struct {
 // compensation of all previously completed steps. This benchmarks the cost
 // of the compensation loop: reverse-order iteration, LogKV calls, and
 // compensate function execution.
-func SagaWithCompensationWorkflow(h durable.HostCalls, input SagaWithCompensationInput) (SagaWithCompensationOutput, error) {
-	s := durable.NewSaga()
+func SagaWithCompensationWorkflow(h cleat.HostCalls, input SagaWithCompensationInput) (SagaWithCompensationOutput, error) {
+	s := cleat.NewSaga()
 	for i := 0; i < input.Steps; i++ {
 		idx := i // capture for closure
 		s.AddStep(fmt.Sprintf("step_%d", idx),
-			func(h durable.HostCalls) (string, error) {
+			func(h cleat.HostCalls) (string, error) {
 				if idx == input.FailAtStep {
-					return "", durable.NewTerminalError(
+					return "", cleat.NewTerminalError(
 						fmt.Errorf("simulated failure at step %d", idx),
 					)
 				}
 				return h.DurableCall("bench", "forward", `{}`)
 			},
-			func(h durable.HostCalls) error {
+			func(h cleat.HostCalls) error {
 				_, err := h.DurableCall("bench", "compensate", `{}`)
 				return err
 			},

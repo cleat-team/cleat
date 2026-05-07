@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/rcownie/durable/durable"
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func TestInfo(t *testing.T) {
@@ -240,12 +240,12 @@ func levelNames(tasks []*Task) []string {
 // when ChildWorkflow is called. It parses task input JSON, builds a proper
 // TaskContext with parent outputs, runs each task's Fn, and stores results
 // for AwaitAllChildren to return.
-func dagTestHost(d *DAG) durable.HostCalls {
+func dagTestHost(d *DAG) cleat.HostCalls {
 	var mu sync.Mutex
-	childResults := make(map[string]durable.ChildResult)
-	var taskHC durable.HostCalls
+	childResults := make(map[string]cleat.ChildResult)
+	var taskHC cleat.HostCalls
 
-	opts := durable.HostCallsOptions{
+	opts := cleat.HostCallsOptions{
 		ChildWorkflow: func(name, inputJSON string) (string, error) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -266,7 +266,7 @@ func dagTestHost(d *DAG) durable.HostCalls {
 
 			if task.Fn == nil {
 				runID := "run-" + taskInput.Task
-				childResults[runID] = durable.ChildResult{RunID: runID, Result: "{}"}
+				childResults[runID] = cleat.ChildResult{RunID: runID, Result: "{}"}
 				return runID, nil
 			}
 
@@ -285,16 +285,16 @@ func dagTestHost(d *DAG) durable.HostCalls {
 			result, err := task.Fn(ctx)
 			runID := "run-" + taskInput.Task
 			if err != nil {
-				childResults[runID] = durable.ChildResult{RunID: runID, Error: err.Error()}
+				childResults[runID] = cleat.ChildResult{RunID: runID, Error: err.Error()}
 				return "", err
 			}
-			childResults[runID] = durable.ChildResult{RunID: runID, Result: result}
+			childResults[runID] = cleat.ChildResult{RunID: runID, Result: result}
 			return runID, nil
 		},
-		AwaitAllChildren: func(runIDs []string) ([]durable.ChildResult, error) {
+		AwaitAllChildren: func(runIDs []string) ([]cleat.ChildResult, error) {
 			mu.Lock()
 			defer mu.Unlock()
-			results := make([]durable.ChildResult, len(runIDs))
+			results := make([]cleat.ChildResult, len(runIDs))
 			for i, runID := range runIDs {
 				cr, ok := childResults[runID]
 				if !ok {
@@ -308,7 +308,7 @@ func dagTestHost(d *DAG) durable.HostCalls {
 		Now:        func() int64 { return 1000 },
 		Random:     func() int64 { return 42 },
 	}
-	taskHC = durable.NewHostCalls(opts)
+	taskHC = cleat.NewHostCalls(opts)
 
 	return taskHC
 }

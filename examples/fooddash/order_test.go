@@ -6,13 +6,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/durable/durable/durabletest"
+	"github.com/rcownie/cleat/cleat/cleattest"
 )
 
 // setupEnv creates a test environment and wires it into the package-level h
 // so both entry-point parameters and helper-function references work.
-func setupEnv() *durabletest.TestEnv {
-	env := durabletest.NewTestEnv()
+func setupEnv() *cleattest.TestEnv {
+	env := cleattest.NewTestEnv()
 	h = env.H()
 	return env
 }

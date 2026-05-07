@@ -80,7 +80,7 @@ class CallRecord:
 
 @dataclass
 class _CallStub:
-    """Internal stub record for a durable_call."""
+    """Internal stub record for a cleat_call."""
 
     service: str
     operation: str
@@ -172,7 +172,7 @@ class CleatTestHarness(HostCalls):
         response: str = "",
         error: Optional[str] = None,
     ) -> None:
-        """Register a stub response for a ``durable_call``.
+        """Register a stub response for a ``cleat_call``.
 
         Stubs are consumed in FIFO order. If multiple stubs are registered
         for the same (service, operation), they are used in sequence.
@@ -419,7 +419,7 @@ class CleatTestHarness(HostCalls):
     def current_run_id(self) -> str:
         return self._run_id
 
-    def durable_log(self, message: str) -> None:
+    def cleat_log(self, message: str) -> None:
         # Best-effort: no-op in test harness
         pass
 
@@ -436,10 +436,10 @@ class CleatTestHarness(HostCalls):
         return result_type(data)
 
     # ------------------------------------------------------------------
-    # durable_call
+    # cleat_call
     # ------------------------------------------------------------------
 
-    def durable_call(self, service: str, operation: str, request: Any) -> str:
+    def cleat_call(self, service: str, operation: str, request: Any) -> str:
         req_str = self._marshal(request)
 
         # Find first matching stub
@@ -457,7 +457,7 @@ class CleatTestHarness(HostCalls):
                 self.call_history.append(rec)
                 if stub.error:
                     raise RuntimeError(
-                        f"durable_call failed: {stub.error}"
+                        f"cleat_call failed: {stub.error}"
                     )
                 return stub.response
 
@@ -475,13 +475,13 @@ class CleatTestHarness(HostCalls):
             f"(request: {req_str})"
         )
 
-    def durable_call_with_retry(
+    def cleat_call_with_retry(
         self, service: str, operation: str, request: Any, retry: RetryPolicy
     ) -> str:
-        # Delegate to durable_call (simplified; no actual retry in harness)
-        return self.durable_call(service, operation, request)
+        # Delegate to cleat_call (simplified; no actual retry in harness)
+        return self.cleat_call(service, operation, request)
 
-    def durable_call_with_heartbeat(
+    def cleat_call_with_heartbeat(
         self,
         service: str,
         operation: str,
@@ -489,27 +489,27 @@ class CleatTestHarness(HostCalls):
         heartbeat_interval_ms: int,
         progress: Callable[[str], None],
     ) -> str:
-        # Delegate to durable_call (no heartbeat simulation)
-        return self.durable_call(service, operation, request)
+        # Delegate to cleat_call (no heartbeat simulation)
+        return self.cleat_call(service, operation, request)
 
-    def durable_fetch(
+    def cleat_fetch(
         self,
         url: str,
         method: str = "GET",
         headers: Optional[dict] = None,
         body: str = "",
     ) -> tuple:
-        # Delegate to durable_call("http", "fetch", ...)
+        # Delegate to cleat_call("http", "fetch", ...)
         request = {"url": url, "method": method, "headers": headers or {}, "body": body}
-        result = self.durable_call("http", "fetch", request)
+        result = self.cleat_call("http", "fetch", request)
         data = json.loads(result)
         return data.get("body", ""), data.get("status", 200)
 
     # ------------------------------------------------------------------
-    # durable_sleep
+    # cleat_sleep
     # ------------------------------------------------------------------
 
-    def durable_sleep(self, duration_ms: int) -> bool:
+    def cleat_sleep(self, duration_ms: int) -> bool:
         # In the test harness, sleep advances the clock immediately
         self.now_ms += duration_ms
         return False
@@ -598,10 +598,10 @@ class CleatTestHarness(HostCalls):
     # ------------------------------------------------------------------
 
     def set_state(self, key: str, value: Any) -> None:
-        self.durable_call("state", "set", {"key": key, "value": value})
+        self.cleat_call("state", "set", {"key": key, "value": value})
 
     def get_state(self, key: str, result_type: type = str) -> Any:
-        result = self.durable_call("state", "get", {"key": key})
+        result = self.cleat_call("state", "get", {"key": key})
         data = json.loads(result)
         if isinstance(data, dict):
             if result_type is str:
@@ -612,10 +612,10 @@ class CleatTestHarness(HostCalls):
         return result_type(data)
 
     def delete_state(self, key: str) -> None:
-        self.durable_call("state", "delete", {"key": key})
+        self.cleat_call("state", "delete", {"key": key})
 
     def incr_state(self, key: str, delta: int = 1) -> int:
-        result = self.durable_call("state", "incr", {"key": key, "delta": delta})
+        result = self.cleat_call("state", "incr", {"key": key, "delta": delta})
         return int(json.loads(result))
 
     # ------------------------------------------------------------------
@@ -656,7 +656,7 @@ class CleatTestHarness(HostCalls):
     # Defer, continue_as_new, send, schedule, plugin
     # ------------------------------------------------------------------
 
-    def durable_defer(self, description: str) -> str:
+    def cleat_defer(self, description: str) -> str:
         return f"test-defer-{len(self.call_history)}"
 
     def continue_as_new(self, input: Any) -> None:
@@ -666,7 +666,7 @@ class CleatTestHarness(HostCalls):
         """Extend the workflow's execution timeout (no-op in test harness)."""
         pass
 
-    def durable_send(self, service: str, operation: str, request: Any) -> None:
+    def cleat_send(self, service: str, operation: str, request: Any) -> None:
         req_str = self._marshal(request)
         self.call_history.append(
             CallRecord(service=service, operation=operation, request=req_str)

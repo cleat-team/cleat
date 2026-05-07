@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/durable/internal/analyzer"
-	"github.com/rcownie/durable/internal/callgraph"
-	"github.com/rcownie/durable/internal/closure"
+	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/rcownie/cleat/internal/callgraph"
+	"github.com/rcownie/cleat/internal/closure"
 )
 
 func tfShortName(fqname string) string {
@@ -21,11 +21,11 @@ func tfShortName(fqname string) string {
 }
 
 func tfAutothreadFQ(name string) string {
-	return "github.com/rcownie/durable/testdata/autothread." + name
+	return "github.com/rcownie/cleat/testdata/autothread." + name
 }
 
 func tfBasicFQ(name string) string {
-	return "github.com/rcownie/durable/testdata/basic." + name
+	return "github.com/rcownie/cleat/testdata/basic." + name
 }
 
 func tfBuildConfig(t *testing.T, pattern string) *Config {
@@ -54,7 +54,7 @@ func tfSyntaxCheck(t *testing.T, name, source string) {
 // ---- Transform: autothread testdata ----
 
 func TestTransformAutothreadAddsH(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/autothread")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/autothread")
 	tr, err := Transform(cfg)
 	if err != nil {
 		t.Fatalf("Transform: %v", err)
@@ -84,7 +84,7 @@ func TestTransformAutothreadAddsH(t *testing.T) {
 }
 
 func TestTransformAutothreadEntryPointsNotModified(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/autothread")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/autothread")
 	tr, _ := Transform(cfg)
 	for _, name := range []string{tfAutothreadFQ("PlaceOrder"), tfAutothreadFQ("CancelOrder")} {
 		for _, a := range tr.AddedH {
@@ -96,7 +96,7 @@ func TestTransformAutothreadEntryPointsNotModified(t *testing.T) {
 }
 
 func TestTransformAutothreadOutputSyntaxValid(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/autothread")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/autothread")
 	tr, err := Transform(cfg)
 	if err != nil {
 		t.Fatalf("Transform: %v", err)
@@ -110,7 +110,7 @@ func TestTransformAutothreadOutputSyntaxValid(t *testing.T) {
 }
 
 func TestTransformAutothreadAllFilesContainHostCalls(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/autothread")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/autothread")
 	tr, _ := Transform(cfg)
 	for _, content := range tr.Files {
 		if !strings.Contains(string(content), "HostCalls") {
@@ -120,7 +120,7 @@ func TestTransformAutothreadAllFilesContainHostCalls(t *testing.T) {
 }
 
 func TestTransformBasicNoChanges(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/basic")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/basic")
 	tr, err := Transform(cfg)
 	if err != nil {
 		t.Fatalf("Transform: %v", err)
@@ -131,7 +131,7 @@ func TestTransformBasicNoChanges(t *testing.T) {
 }
 
 func TestTransformEmptyClosure(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/basic")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/basic")
 	cfg.Closure = &closure.Result{
 		DurableLeaves:  make(map[string]bool),
 		DurableClosure: make(map[string]bool),
@@ -151,10 +151,10 @@ func TestTransformEmptyClosure(t *testing.T) {
 // ---- findGlobalH ----
 
 func TestFindGlobalHAutothread(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/autothread")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/autothread")
 	gh, users, file := findGlobalH(cfg.Result)
 	if gh == nil {
-		t.Fatal("expected global h in autothread — var h durable.HostCalls should be detected")
+		t.Fatal("expected global h in autothread — var h cleat.HostCalls should be detected")
 	}
 	if file == nil {
 		t.Fatal("expected file containing global h")
@@ -172,7 +172,7 @@ func TestFindGlobalHAutothread(t *testing.T) {
 }
 
 func TestFindGlobalHBasicNil(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/basic")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/basic")
 	gh, users, file := findGlobalH(cfg.Result)
 	if gh != nil || users != nil || file != nil {
 		t.Error("expected nil for basic (no global h)")
@@ -182,7 +182,7 @@ func TestFindGlobalHBasicNil(t *testing.T) {
 // ---- hasHostCallsParam ----
 
 func TestHasHostCallsParamEntryPoint(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/basic")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/basic")
 	fd := cfg.Result.Funcs[tfBasicFQ("PlaceOrder")]
 	if !hasHostCallsParam(fd) {
 		t.Error("PlaceOrder should have HostCalls param")
@@ -190,7 +190,7 @@ func TestHasHostCallsParamEntryPoint(t *testing.T) {
 }
 
 func TestHasHostCallsParamAutothreadLeaf(t *testing.T) {
-	cfg := tfBuildConfig(t, "github.com/rcownie/durable/testdata/autothread")
+	cfg := tfBuildConfig(t, "github.com/rcownie/cleat/testdata/autothread")
 	fd := cfg.Result.Funcs[tfAutothreadFQ("checkItemAvailability")]
 	if hasHostCallsParam(fd) {
 		t.Error("autothread leaf should NOT have HostCalls param (uses global h)")

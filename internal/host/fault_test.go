@@ -10,15 +10,15 @@ import (
 	"time"
 )
 
-// These tests require a real PostgreSQL database. Set DURABLE_TEST_DB to run.
-// Example: DURABLE_TEST_DB="postgres://localhost:5432/cleat?sslmode=disable" go test -v -run TestFault
+// These tests require a real PostgreSQL database. Set CLEAT_TEST_DB to run.
+// Example: CLEAT_TEST_DB="postgres://localhost:5432/cleat?sslmode=disable" go test -v -run TestFault
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("Skipping fault test in short mode")
 	}
-	dsn := os.Getenv("DURABLE_TEST_DB")
+	dsn := os.Getenv("CLEAT_TEST_DB")
 	if dsn == "" {
 		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
 	}

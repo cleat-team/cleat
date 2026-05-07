@@ -1,7 +1,7 @@
 """
 Local in-process runtime for developing and testing Cleat workflows without WASM.
 
-The :class:`LocalRuntime` routes ``HostCalls.durable_call()`` invocations
+The :class:`LocalRuntime` routes ``HostCalls.cleat_call()`` invocations
 to actual Python service implementations, stores query state in memory,
 and manages workflow lifecycle.  This is a **development-only** stand-in
 for the Cleat WASM host runtime.
@@ -23,7 +23,7 @@ Usage::
     order_id = rt.get_query_state(run_id, "order_id")
 
 Implementation note:
-    The ``@durable_entry`` decorator wraps the original function in a WASM
+    The ``@cleat_entry`` decorator wraps the original function in a WASM
     export wrapper.  The local runtime accesses the original function via
     the ``__wrapped__`` attribute that ``functools.wraps`` sets on the
     wrapper.  See ISSUES.md Issue #1 for details.
@@ -41,7 +41,7 @@ from cleat_sdk.test_harness import CleatTestHarness
 
 
 class _LocalHostCalls(CleatTestHarness):
-    """A HostCalls surrogate that routes ``durable_call`` to local services.
+    """A HostCalls surrogate that routes ``cleat_call`` to local services.
 
     Extends :class:`CleatTestHarness` so that test assertions
     (``call_count``, ``call_history``) remain available while still
@@ -57,14 +57,14 @@ class _LocalHostCalls(CleatTestHarness):
     def register_service(self, name: str, instance: Any) -> None:
         """Register a host service instance for dispatching.
 
-        ``durable_call(name, op, req)`` will call
+        ``cleat_call(name, op, req)`` will call
         ``getattr(instance, op)(**req)``.
         """
         self._local_services[name] = instance
 
     # --- overrides ------------------------------------------------------
 
-    def durable_call(
+    def cleat_call(
         self, service: str, operation: str, request: Any
     ) -> str:
         """Route to a registered local service instead of using stubs."""
@@ -113,7 +113,7 @@ class _LocalHostCalls(CleatTestHarness):
 class LocalRuntime:
     """In-process runtime for developing Cleat workflows locally.
 
-    Routes ``durable_call("service", "op", {...})`` from the workflow to
+    Routes ``cleat_call("service", "op", {...})`` from the workflow to
     actual Python services.  Manages query state, workflow lifecycle, and
     result tracking.
 
@@ -142,7 +142,7 @@ class LocalRuntime:
         Parameters
         ----------
         workflow_fn:
-            A function decorated with ``@durable_entry``.  The original
+            A function decorated with ``@cleat_entry``.  The original
             function is accessed via ``__wrapped__``.
         **kwargs:
             Workflow parameters (must match the function signature,
@@ -159,7 +159,7 @@ class LocalRuntime:
             If the workflow raises an exception (other than
             ``SuspendSentinel``).
         """
-        # Access the original function unwrapped from @durable_entry.
+        # Access the original function unwrapped from @cleat_entry.
         original_fn = getattr(workflow_fn, "__wrapped__", workflow_fn)
 
         run_id = str(uuid.uuid4())

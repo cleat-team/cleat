@@ -3,12 +3,12 @@ Account management service for the payment state machine.
 
 This is a cleat durable entry point that manages account balances.
 In the original Restate example, this was a Virtual Object with key-scoped
-state. In Cleat, we use durable_entry and manually prefix state keys with
+state. In Cleat, we use cleat_entry and manually prefix state keys with
 the account_id since Cleat does not have Virtual Object semantics.
 
 Migration notes from Restate:
 - Original: VirtualObject("account") with @handler() decorator
-- Cleat: @durable_entry(name="...") with explicit key handling
+- Cleat: @cleat_entry(name="...") with explicit key handling
 - Original: ctx.get("balance", type_hint=int) [key-scoped to object instance]
 - Cleat: ctx.get_state(account_state_key("balance", account_id)) [manually prefixed]
 - Original: ctx.set("balance", value) [key-scoped]
@@ -21,7 +21,7 @@ import random
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from cleat_sdk import HostCalls, TerminalError, durable_entry
+from cleat_sdk import HostCalls, TerminalError, cleat_entry
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -93,7 +93,7 @@ def dataclass_to_dict(obj) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@durable_entry(name="account.deposit")
+@cleat_entry(name="account.deposit")
 async def deposit(ctx: HostCalls, request: DepositRequest) -> None:
     """Deposit funds into an account.
 
@@ -102,7 +102,7 @@ async def deposit(ctx: HostCalls, request: DepositRequest) -> None:
         async def deposit(ctx: restate.ObjectContext, amount_cents: int):
 
     Original used positional arg; cleat uses a request object for
-    compatibility with durable_call's serialization.
+    compatibility with cleat_call's serialization.
 
     Raises:
         TerminalError: If amount_cents <= 0.
@@ -115,7 +115,7 @@ async def deposit(ctx: HostCalls, request: DepositRequest) -> None:
     ctx.set_state(balance_key, balance_cents + request.amount_cents)
 
 
-@durable_entry(name="account.withdraw")
+@cleat_entry(name="account.withdraw")
 async def withdraw(ctx: HostCalls, request: WithdrawRequest) -> Result:
     """Withdraw funds from an account if sufficient balance exists.
 

@@ -51,10 +51,10 @@ It verifies the agent logic end-to-end and prints the recorded call history.
 
 ```bash
 # Build the WASM component
-durable build --target python --entry research_agent.py:langchain_research_agent
+cleat build --target python --entry research_agent.py:langchain_research_agent
 
 # Run it
-durable run langchain_research_agent \
+cleat run langchain_research_agent \
     '{"topic": "Compare Temporal, DBOS, and Cleat"}'
 ```
 
@@ -68,7 +68,7 @@ python research_agent.py --costs
 
 ```bash
 # Terminal 1: Start the agent
-durable run langchain_research_agent \
+cleat run langchain_research_agent \
     '{"topic": "Latest developments in fusion energy"}'
 
 # During execution — after a few steps — kill the worker

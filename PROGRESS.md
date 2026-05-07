@@ -1,4 +1,4 @@
-# Durable Execution Project — Progress
+# Cleat Execution Project — Progress
 
 ## Status: All phases delivered; production runtime operational
 
@@ -12,9 +12,9 @@
 - Auto-threading transform (context object to param injection)
 - WASM import/export/adapter code generation
 - Build directory assembly and WASM compilation
-- CLI: `durable build` and `durable vet`
+- CLI: `cleat build` and `cleat vet`
 
-### SDK runtime (durable package)
+### SDK runtime (cleat package)
 - `HostCalls` interface with 23 methods + concrete `hostCallsImpl` with WASM adapter hooks
 - `Saga` structured compensation (nil-safe)
 - `PollUntil` generic sleep-based polling
@@ -24,14 +24,14 @@
 - `DurableCallTyped` eliminating manual JSON marshaling
 - `LogKV` structured key-value logging
 
-### Testing framework (durabletest)
+### Testing framework (cleattest)
 - Mock `HostCalls` with stub registration (string, nil, func matchers)
 - Simulated clock with AdvanceTime/SetTime
 - Signal delivery (immediate and scheduled)
 - Call history recording with AssertCalled/AssertNotCalled
 - Thread-safe for concurrent test execution
 
-### Code generator (durable-gen)
+### Code generator (cleat-gen)
 - Parses spec directories with `Client` interface definitions
 - Generates typed client wrappers using `DurableCallTyped`
 - Eliminates magic strings from service/operation calls
@@ -43,23 +43,23 @@
 - Signal delivery: SignalStore interface, PostgresStore, signals table
 - Cancellation: PollCancellation checks DB flag, RequestCancellation API
 
-### PostgreSQL worker daemon (cmd/durable-worker)
+### PostgreSQL worker daemon (cmd/cleat-worker)
 - SKIP LOCKED poll loop, WASM loading, event replay, heartbeat, failover handling
 - Schema versioning: h.Version()/MinVersion() return real values, deploy auto-increments
 - History compaction via ContinueAsNew
 - Database schema (schema.sql): workflow_defs, workflow_instances (extended), event_history (extended), workflow_signals
 
 ### CLI
-- `durable build` — compile workflows to WASM
-- `durable vet` — validate workflow code
-- `durable deploy` — deploy workflow definitions
-- `durable versions` — list deployed versions
-- `durable rollback` — roll back to previous version
+- `cleat build` — compile workflows to WASM
+- `cleat vet` — validate workflow code
+- `cleat deploy` — deploy workflow definitions
+- `cleat versions` — list deployed versions
+- `cleat rollback` — roll back to previous version
 
 ### Phase 10: tinygo compilation target
 - Tinygo support for smaller WASM binaries and broader target compatibility
 
-### Phase 11: durable deploy CLI command
+### Phase 11: cleat deploy CLI command
 - Deploy driver with schema versioning and DB migrations
 
 ### Phase 13: Defer execution engine
@@ -74,4 +74,4 @@
 - `examples/fooddash/spec/` — service spec interfaces for code generation
 
 ## Key design decisions
-[See durable_context.md for architectural rationale]
+[See cleat_context.md for architectural rationale]

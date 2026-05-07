@@ -263,7 +263,7 @@ func (a *Analyzer) emitTransformedFunc(buf *bytes.Buffer, fn *ast.FuncDecl) {
 
 	// --- Prologue: restore state if resuming ---
 	buf.WriteString(`	// --- Durable prologue (injected) ---
-	state, isReplay := durable.LoadCheckpoint(ctx, "` + fn.Name.Name + `")
+	state, isReplay := cleat.LoadCheckpoint(ctx, "` + fn.Name.Name + `")
 	if isReplay {
 		// Rebuild local state from the checkpoint.
 		// In a real implementation this deserializes all live variables.
@@ -301,13 +301,13 @@ func (a *Analyzer) emitStmt(buf *bytes.Buffer, stmt ast.Stmt, funcName string) {
 	// --- Durable call to %s (injected) ---
 	var __result interface{}
 	var __err error
-	if cached, ok := durable.GetCached(ctx, "%s"); ok {
+	if cached, ok := cleat.GetCached(ctx, "%s"); ok {
 		// Replay: use the cached result, skip the real API call.
 		__result = cached.Result
 		__err = cached.Err
 	} else {
 		// First execution: make the real call and cache the result.
-		__result, __err = durable.CallAndCache(ctx, "%s", func() (interface{}, error) {
+		__result, __err = cleat.CallAndCache(ctx, "%s", func() (interface{}, error) {
 `, funcNameStr, cacheKey, cacheKey))
 
 			// The actual call (wrapped in a closure)
@@ -326,7 +326,7 @@ func (a *Analyzer) emitStmt(buf *bytes.Buffer, stmt ast.Stmt, funcName string) {
 			// --- Checkpoint after the call ---
 			buf.WriteString(fmt.Sprintf(`
 	// --- Checkpoint (injected) ---
-	if err := durable.SaveCheckpoint(ctx, "%s", map[string]interface{}{
+	if err := cleat.SaveCheckpoint(ctx, "%s", map[string]interface{}{
 		// In production this serializes every live local variable.
 		"last_result": __result,
 	}); err != nil {
@@ -343,7 +343,7 @@ func (a *Analyzer) emitStmt(buf *bytes.Buffer, stmt ast.Stmt, funcName string) {
 		}
 		buf.WriteString(fmt.Sprintf(`
 	// --- Durable fire-and-forget call to %s (injected) ---
-	durable.CallBestEffort(ctx, "%s", func() error {
+	cleat.CallBestEffort(ctx, "%s", func() error {
 		return %s(%s)
 	})
 `, exprToString(call.Fun), exprToString(call.Fun), exprToString(call.Fun), argsStr(call.Args)))
@@ -361,7 +361,7 @@ func (a *Analyzer) emitStmt(buf *bytes.Buffer, stmt ast.Stmt, funcName string) {
 	case *ast.ReturnStmt:
 		buf.WriteString(fmt.Sprintf(`
 	// --- Final checkpoint before return (injected) ---
-	durable.MarkComplete(ctx, "%s")
+	cleat.MarkComplete(ctx, "%s")
 	return nil, nil // transformed
 `, funcName))
 

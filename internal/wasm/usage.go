@@ -1,5 +1,5 @@
 // Package wasm generates WASM import/export stubs and host adapter code
-// for the durable workflow transformer.
+// for the cleat workflow transformer.
 //
 // Supported wasm compilation targets:
 //   - "go" (default) — standard Go wasip1/wasm
@@ -13,8 +13,8 @@ package wasm
 import (
 	"go/ast"
 
-	"github.com/rcownie/durable/internal/analyzer"
-	"github.com/rcownie/durable/internal/closure"
+	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/rcownie/cleat/internal/closure"
 )
 
 // PythonTarget identifies the Python WASM compilation target.
@@ -22,7 +22,7 @@ import (
 const PythonTarget = "python"
 
 // HostFunction identifies a host function that can be imported from the
-// WASM host environment (e.g., "durable_call", "durable_sleep").
+// WASM host environment (e.g., "cleat_call", "cleat_sleep").
 type HostFunction struct {
 	ImportName string // snake_case name used in //go:wasmimport
 	FieldName  string // the HostCallsOptions field name (e.g., "DurableCall")
@@ -33,37 +33,37 @@ type HostFunction struct {
 // map to the same import as their underlying low-level method.
 var hostFunctions = []HostFunction{
 	// Core call methods
-	{"durable_call", "DurableCall"},
-	{"durable_call", "DurableCallTyped"},
-	{"durable_call", "DurableCallJSON"},
-	{"durable_call", "DurableCallWithOptions"},
-	{"durable_call", "DurableCallJSONWithOptions"},
-	{"durable_call_heartbeat", "DurableCallWithHeartbeat"},
+	{"cleat_call", "DurableCall"},
+	{"cleat_call", "DurableCallTyped"},
+	{"cleat_call", "DurableCallJSON"},
+	{"cleat_call", "DurableCallWithOptions"},
+	{"cleat_call", "DurableCallJSONWithOptions"},
+	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
 	// Sleep
-	{"durable_sleep", "DurableSleep"},
-	{"durable_sleep", "DurableSleepMs"},
+	{"cleat_sleep", "DurableSleep"},
+	{"cleat_sleep", "DurableSleepMs"},
 	// Signals
-	{"durable_await_signals", "DurableAwaitSignals"},
-	{"durable_await_signals", "AwaitSignals"},
+	{"cleat_await_signals", "DurableAwaitSignals"},
+	{"cleat_await_signals", "AwaitSignals"},
 	// Defer
-	{"durable_defer", "DurableDefer"},
+	{"cleat_defer", "DurableDefer"},
 	// Logging
-	{"durable_log", "DurableLog"},
-	{"durable_log", "LogKV"},
+	{"cleat_log", "DurableLog"},
+	{"cleat_log", "LogKV"},
 	// Cancellation / signals
-	{"durable_poll_cancellation", "PollCancellation"},
-	{"durable_poll_signal", "PollSignal"},
+	{"cleat_poll_cancellation", "PollCancellation"},
+	{"cleat_poll_signal", "PollSignal"},
 	// Lifecycle
-	{"durable_continue_as_new", "ContinueAsNew"},
-	{"durable_child_workflow", "ChildWorkflow"},
-	{"durable_child_workflow", "ChildWorkflowTyped"},
-	{"durable_await_child", "AwaitChild"},
-	{"durable_await_all_children", "AwaitAllChildren"},
-	{"durable_await_child", "AwaitChildTyped"},
-	{"durable_call_retry", "DurableCallWithRetry"},
+	{"cleat_continue_as_new", "ContinueAsNew"},
+	{"cleat_child_workflow", "ChildWorkflow"},
+	{"cleat_child_workflow", "ChildWorkflowTyped"},
+	{"cleat_await_child", "AwaitChild"},
+	{"cleat_await_all_children", "AwaitAllChildren"},
+	{"cleat_await_child", "AwaitChildTyped"},
+	{"cleat_call_retry", "DurableCallWithRetry"},
 	// Versioning
-	{"durable_version", "Version"},
-	{"durable_min_version", "MinVersion"},
+	{"cleat_version", "Version"},
+	{"cleat_min_version", "MinVersion"},
 	// State
 	{"set_query_state", "SetQueryState"},
 	// State mutation methods (all map to set_query_state import)
@@ -71,30 +71,30 @@ var hostFunctions = []HostFunction{
 	{"set_query_state", "DeleteState"},
 	{"set_query_state", "IncrState"},
 	// Promises
-	{"durable_create_promise", "CreatePromise"},
-	{"durable_await_promise", "AwaitPromise"},
+	{"cleat_create_promise", "CreatePromise"},
+	{"cleat_await_promise", "AwaitPromise"},
 	// Update handlers
-	{"durable_register_update_handler", "RegisterUpdateHandler"},
+	{"cleat_register_update_handler", "RegisterUpdateHandler"},
 	{"plugin_call", "PluginCall"},
 	{"plugin_call_streaming", "PluginCallStreaming"},
 	// Fetch / HTTP methods (all map to durable_call import)
-	{"durable_call", "DurableFetch"},
-	{"durable_call", "DurableFetchJSON"},
-	{"durable_call", "FetchGet"},
-	{"durable_call", "FetchGetJSON"},
+	{"cleat_call", "DurableFetch"},
+	{"cleat_call", "DurableFetchJSON"},
+	{"cleat_call", "FetchGet"},
+	{"cleat_call", "FetchGetJSON"},
 	// Detached execution (no WASM import needed, but tracked so it's not silently ignored)
 	{"", "RunDetached"},
 	// Heartbeat variants
-	{"durable_call_heartbeat", "DurableCallTypedWithHeartbeat"},
+	{"cleat_call_heartbeat", "DurableCallTypedWithHeartbeat"},
 	// Time
-	{"durable_now", "Now"},
-	{"durable_now", "NowMs"},
+	{"cleat_now", "Now"},
+	{"cleat_now", "NowMs"},
 	// Random
-	{"durable_random", "Random"},
+	{"cleat_random", "Random"},
 }
 
 // UsageInfo records which host functions are actually called by the
-// durable closure and provides lookup helpers for code generation.
+// cleat closure and provides lookup helpers for code generation.
 type UsageInfo struct {
 	Used map[string]bool // keyed by ImportName
 
@@ -103,14 +103,14 @@ type UsageInfo struct {
 	Funcs []HostFunction
 }
 
-// AnalyzeUsage scans every function in the durable closure and returns
+// AnalyzeUsage scans every function in the cleat closure and returns
 // which HostCalls methods are called.
 func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInfo {
 	info := &UsageInfo{
 		Used: make(map[string]bool),
 	}
 
-	// Build the set of functions in the durable closure.
+	// Build the set of functions in the cleat closure.
 	durableSet := make(map[string]bool)
 	for name := range cr.DurableLeaves {
 		durableSet[name] = true

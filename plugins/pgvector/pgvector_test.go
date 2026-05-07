@@ -14,7 +14,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // fakeConnector implements driver.Connector for testing pgvector SQL operations.

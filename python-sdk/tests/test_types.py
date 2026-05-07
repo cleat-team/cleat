@@ -1,4 +1,4 @@
-"""Tests for the Cleat type sugar wrappers (ChildWorkflow, Saga, DurableDefer).
+"""Tests for the Cleat type sugar wrappers (ChildWorkflow, Saga, CleatDefer).
 
 Verifies the Saga class-based API works correctly with class-based step
 definitions (SagaStep subclasses), avoiding lambda closures that could
@@ -19,7 +19,7 @@ try:
         SagaResultT,
         TerminalError,
         ChildWorkflow,
-        DurableDefer,
+        CleatDefer,
     )
 except ImportError as e:
     pytest.skip(
@@ -45,21 +45,21 @@ class TestSagaClassBasedSteps:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("inventory", "Reserve", {"item": "widget"})
+                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("inventory", "Release", {"item": "widget"})
+                h.cleat_call("inventory", "Release", {"item": "widget"})
 
         class ChargeStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("payment", "Charge", {"amount": 100})
+                return h.cleat_call("payment", "Charge", {"amount": 100})
 
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("payment", "Refund", {"amount": 100})
+                h.cleat_call("payment", "Refund", {"amount": 100})
 
         class NotifyStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("notification", "Send", {"message": "Order placed"})
+                return h.cleat_call("notification", "Send", {"message": "Order placed"})
 
             def compensate(self, h: HostCalls) -> None:
                 pass  # No compensation needed for notifications
@@ -102,17 +102,17 @@ class TestSagaClassBasedSteps:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("inventory", "Reserve", {"item": "widget"})
+                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("inventory", "Release", {"item": "widget"})
+                h.cleat_call("inventory", "Release", {"item": "widget"})
 
         class ChargeStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("payment", "Charge", {"amount": 100})
+                return h.cleat_call("payment", "Charge", {"amount": 100})
 
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("payment", "Refund", {"amount": 100})
+                h.cleat_call("payment", "Refund", {"amount": 100})
 
         class FailStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
@@ -144,17 +144,17 @@ class TestSagaClassBasedSteps:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("inventory", "Reserve", {"item": "widget"})
+                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("inventory", "Release", {"item": "widget"})
+                h.cleat_call("inventory", "Release", {"item": "widget"})
 
         class ChargeStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("payment", "Charge", {"amount": 100})
+                return h.cleat_call("payment", "Charge", {"amount": 100})
 
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("payment", "Refund", {"amount": 100})
+                h.cleat_call("payment", "Refund", {"amount": 100})
 
         class FailStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
@@ -182,7 +182,7 @@ class TestSagaClassBasedSteps:
 
         class GreetStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("greeter", "Greet", {"name": "World"})
+                return h.cleat_call("greeter", "Greet", {"name": "World"})
 
             def compensate(self, h: HostCalls) -> None:
                 pass
@@ -224,17 +224,17 @@ class TestSagaTerminalExceptions:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("inventory", "Reserve", {"item": "widget"})
+                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("inventory", "Release", {"item": "widget"})
+                h.cleat_call("inventory", "Release", {"item": "widget"})
 
         class ChargeStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
                 raise MyAppError("non-retryable business error")
 
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("payment", "Refund", {"amount": 100})
+                h.cleat_call("payment", "Refund", {"amount": 100})
 
         saga = Saga[str](h, terminal_exceptions=(MyAppError,))
         saga.add_step(ReserveStep("reserve_inventory"))
@@ -257,10 +257,10 @@ class TestSagaTerminalExceptions:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.durable_call("inventory", "Reserve", {"item": "widget"})
+                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.durable_call("inventory", "Release", {"item": "widget"})
+                h.cleat_call("inventory", "Release", {"item": "widget"})
 
         class FailStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
@@ -322,21 +322,21 @@ class TestChildWorkflowTyped:
 
 
 # ======================================================================
-# DurableDefer tests
+# CleatDefer tests
 # ======================================================================
 
 
-class TestDurableDefer:
-    """Tests for the DurableDefer context manager."""
+class TestCleatDefer:
+    """Tests for the CleatDefer context manager."""
 
     def test_defer_context_manager(self):
         h = CleatTestHarness()
-        with DurableDefer("cleanup temp files", h) as defer:
+        with CleatDefer("cleanup temp files", h) as defer:
             assert defer is not None
             # Note: defer_id is None in the test harness since
-            # we haven't set up a stub for durable_defer
+            # we haven't set up a stub for cleat_defer
 
     def test_defer_context_manager_no_host(self):
-        """DurableDefer without a host is a no-op."""
-        with DurableDefer("cleanup") as defer:
+        """CleatDefer without a host is a no-op."""
+        with CleatDefer("cleanup") as defer:
             assert defer._defer_id is None

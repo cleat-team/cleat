@@ -85,7 +85,7 @@ def test_get_earthquake_data_fetch():
     """Verify that get_earthquake_data parses USGS GeoJSON correctly."""
     h = CleatTestHarness()
 
-    # Stub the http.fetch call that durable_fetch delegates to
+    # Stub the http.fetch call that cleat_fetch delegates to
     h.stub_call(
         "http", "fetch",
         response=json.dumps({"body": SAMPLE_USGS_RESPONSE, "status": 200}),

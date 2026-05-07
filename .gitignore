@@ -9,8 +9,8 @@
 *.dylib
 ast_demo
 ast_demo_v2
-durable-gen
-/durable-worker
+/cleat-gen
+/cleat-worker
 
 # Node/Svelte
 web/node_modules/
@@ -54,7 +54,7 @@ go.work.sum
 # macOS
 .DS_Store
 
-durable-bench
+/cleat-bench
 
 # Python cache
 __pycache__/

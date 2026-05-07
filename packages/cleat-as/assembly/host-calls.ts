@@ -4,7 +4,7 @@
  * Provides raw `@external` import declarations and the `HostCalls` class
  * that wraps each import with idiomatic AssemblyScript methods.
  *
- * Matches the Rust SDK at crates/durable-sdk/src/host_calls.rs and
+ * Matches the Rust SDK at crates/cleat-sdk/src/host_calls.rs and
  * the ABI specification in ABI.md.
  */
 
@@ -30,53 +30,53 @@ import { jsonStrArray, jsonExtractString, jsonExtractNumber } from "./json";
 // ═══════════════════════════════════════════════
 
 /**
- * 1. durable_sleep: Suspend workflow execution for a duration.
- * (import "env" "durable_sleep") (param i64) (result i64)
+ * 1. cleat_sleep: Suspend workflow execution for a duration.
+ * (import "env" "cleat_sleep") (param i64) (result i64)
  */
-@external("env", "durable_sleep")
-export declare function import_durable_sleep(durationMs: i64): i64;
+@external("env", "cleat_sleep")
+export declare function import_cleat_sleep(durationMs: i64): i64;
 
 /**
- * 2. durable_now: Get current wall-clock time.
- * (import "env" "durable_now") (result i64)
+ * 2. cleat_now: Get current wall-clock time.
+ * (import "env" "cleat_now") (result i64)
  */
-@external("env", "durable_now")
-export declare function import_durable_now(): i64;
+@external("env", "cleat_now")
+export declare function import_cleat_now(): i64;
 
 /**
- * 3. durable_random: Get a deterministic random value.
- * (import "env" "durable_random") (result i64)
+ * 3. cleat_random: Get a deterministic random value.
+ * (import "env" "cleat_random") (result i64)
  */
-@external("env", "durable_random")
-export declare function import_durable_random(): i64;
+@external("env", "cleat_random")
+export declare function import_cleat_random(): i64;
 
 /**
- * 4. durable_log: Log a message to the host.
- * (import "env" "durable_log") (param i32 i32) (result i64)
+ * 4. cleat_log: Log a message to the host.
+ * (import "env" "cleat_log") (param i32 i32) (result i64)
  */
-@external("env", "durable_log")
-export declare function import_durable_log(msgPtr: i32, msgLen: i32): i64;
+@external("env", "cleat_log")
+export declare function import_cleat_log(msgPtr: i32, msgLen: i32): i64;
 
 /**
- * 5. durable_version: Get the workflow definition version.
- * (import "env" "durable_version") (result i64)
+ * 5. cleat_version: Get the workflow definition version.
+ * (import "env" "cleat_version") (result i64)
  */
-@external("env", "durable_version")
-export declare function import_durable_version(): i64;
+@external("env", "cleat_version")
+export declare function import_cleat_version(): i64;
 
 /**
- * 6. durable_min_version: Get the minimum supported version.
- * (import "env" "durable_min_version") (result i64)
+ * 6. cleat_min_version: Get the minimum supported version.
+ * (import "env" "cleat_min_version") (result i64)
  */
-@external("env", "durable_min_version")
-export declare function import_durable_min_version(): i64;
+@external("env", "cleat_min_version")
+export declare function import_cleat_min_version(): i64;
 
 /**
- * 7. durable_defer: Register cleanup to run on workflow exit.
- * (import "env" "durable_defer") (param i32 i32 i32 i32) (result i64)
+ * 7. cleat_defer: Register cleanup to run on workflow exit.
+ * (import "env" "cleat_defer") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_defer")
-export declare function import_durable_defer(
+@external("env", "cleat_defer")
+export declare function import_cleat_defer(
   descPtr: i32,
   descLen: i32,
   deferIdPtr: i32,
@@ -84,21 +84,21 @@ export declare function import_durable_defer(
 ): i64;
 
 /**
- * 8. durable_poll_cancellation: Check for cancellation request.
- * (import "env" "durable_poll_cancellation") (param i32 i32) (result i64)
+ * 8. cleat_poll_cancellation: Check for cancellation request.
+ * (import "env" "cleat_poll_cancellation") (param i32 i32) (result i64)
  */
-@external("env", "durable_poll_cancellation")
-export declare function import_durable_poll_cancellation(
+@external("env", "cleat_poll_cancellation")
+export declare function import_cleat_poll_cancellation(
   reasonPtr: i32,
   reasonMaxLen: i32,
 ): i64;
 
 /**
- * 9. durable_poll_signal: Poll for a specific pending signal.
- * (import "env" "durable_poll_signal") (param i32 i32 i32 i32) (result i64)
+ * 9. cleat_poll_signal: Poll for a specific pending signal.
+ * (import "env" "cleat_poll_signal") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_poll_signal")
-export declare function import_durable_poll_signal(
+@external("env", "cleat_poll_signal")
+export declare function import_cleat_poll_signal(
   namePtr: i32,
   nameLen: i32,
   payloadPtr: i32,
@@ -106,21 +106,21 @@ export declare function import_durable_poll_signal(
 ): i64;
 
 /**
- * 10. durable_continue_as_new: Start a new workflow run with fresh input.
- * (import "env" "durable_continue_as_new") (param i32 i32) (result i64)
+ * 10. cleat_continue_as_new: Start a new workflow run with fresh input.
+ * (import "env" "cleat_continue_as_new") (param i32 i32) (result i64)
  */
-@external("env", "durable_continue_as_new")
-export declare function import_durable_continue_as_new(
+@external("env", "cleat_continue_as_new")
+export declare function import_cleat_continue_as_new(
   inputPtr: i32,
   inputLen: i32,
 ): i64;
 
 /**
- * 11. durable_child_workflow: Start a child workflow instance.
- * (import "env" "durable_child_workflow") (param i32 i32 i32 i32 i32 i32) (result i64)
+ * 11. cleat_child_workflow: Start a child workflow instance.
+ * (import "env" "cleat_child_workflow") (param i32 i32 i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_child_workflow")
-export declare function import_durable_child_workflow(
+@external("env", "cleat_child_workflow")
+export declare function import_cleat_child_workflow(
   namePtr: i32,
   nameLen: i32,
   inputPtr: i32,
@@ -130,11 +130,11 @@ export declare function import_durable_child_workflow(
 ): i64;
 
 /**
- * 12. durable_await_child: Wait for a child workflow to complete.
- * (import "env" "durable_await_child") (param i32 i32 i32 i32) (result i64)
+ * 12. cleat_await_child: Wait for a child workflow to complete.
+ * (import "env" "cleat_await_child") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_await_child")
-export declare function import_durable_await_child(
+@external("env", "cleat_await_child")
+export declare function import_cleat_await_child(
   runIdPtr: i32,
   runIdLen: i32,
   resultPtr: i32,
@@ -142,11 +142,11 @@ export declare function import_durable_await_child(
 ): i64;
 
 /**
- * 13. durable_await_signals: Wait for external signals with timeout.
- * (import "env" "durable_await_signals") (param i32 i32 i64 i32 i32 i32 i32) (result i64)
+ * 13. cleat_await_signals: Wait for external signals with timeout.
+ * (import "env" "cleat_await_signals") (param i32 i32 i64 i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_await_signals")
-export declare function import_durable_await_signals(
+@external("env", "cleat_await_signals")
+export declare function import_cleat_await_signals(
   namesPtr: i32,
   namesLen: i32,
   timeoutMs: i64,
@@ -169,11 +169,11 @@ export declare function import_set_query_state(
 ): i64;
 
 /**
- * 15. durable_call: Make a recorded API call to an external service.
- * (import "env" "durable_call") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
+ * 15. cleat_call: Make a recorded API call to an external service.
+ * (import "env" "cleat_call") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_call")
-export declare function import_durable_call(
+@external("env", "cleat_call")
+export declare function import_cleat_call(
   svcPtr: i32,
   svcLen: i32,
   opPtr: i32,
@@ -185,15 +185,15 @@ export declare function import_durable_call(
 ): i64;
 
 /**
- * 15b. durable_call_with_timeout: Make a recorded API call with per-call deadline.
- * (import "env" "durable_call_with_timeout") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
+ * 15b. cleat_call_with_timeout: Make a recorded API call with per-call deadline.
+ * (import "env" "cleat_call_with_timeout") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
  *
  * NOTE: This import requires host-side ABI support. If the host does not expose
  * this import, the call will fail at module instantiation. Use timeoutMs=0 to
- * fall back to the standard durable_call import.
+ * fall back to the standard cleat_call import.
  */
-@external("env", "durable_call_with_timeout")
-export declare function import_durable_call_with_timeout(
+@external("env", "cleat_call_with_timeout")
+export declare function import_cleat_call_with_timeout(
   svcPtr: i32,
   svcLen: i32,
   opPtr: i32,
@@ -206,11 +206,11 @@ export declare function import_durable_call_with_timeout(
 ): i64;
 
 /**
- * 16. durable_create_promise: Create a new durable promise.
- * (import "env" "durable_create_promise") (param i32 i32 i32 i32) (result i64)
+ * 16. cleat_create_promise: Create a new durable promise.
+ * (import "env" "cleat_create_promise") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_create_promise")
-export declare function import_durable_create_promise(
+@external("env", "cleat_create_promise")
+export declare function import_cleat_create_promise(
   namePtr: i32,
   nameLen: i32,
   idOutPtr: i32,
@@ -218,11 +218,11 @@ export declare function import_durable_create_promise(
 ): i64;
 
 /**
- * 17. durable_await_promise: Wait for a durable promise to resolve.
- * (import "env" "durable_await_promise") (param i32 i32 i64 i32 i32) (result i64)
+ * 17. cleat_await_promise: Wait for a durable promise to resolve.
+ * (import "env" "cleat_await_promise") (param i32 i32 i64 i32 i32) (result i64)
  */
-@external("env", "durable_await_promise")
-export declare function import_durable_await_promise(
+@external("env", "cleat_await_promise")
+export declare function import_cleat_await_promise(
   idPtr: i32,
   idLen: i32,
   timeoutMs: i64,
@@ -231,11 +231,11 @@ export declare function import_durable_await_promise(
 ): i64;
 
 /**
- * 18. durable_register_update_handler: Register a handler for update calls.
- * (import "env" "durable_register_update_handler") (param i32 i32) (result i64)
+ * 18. cleat_register_update_handler: Register a handler for update calls.
+ * (import "env" "cleat_register_update_handler") (param i32 i32) (result i64)
  */
-@external("env", "durable_register_update_handler")
-export declare function import_durable_register_update_handler(
+@external("env", "cleat_register_update_handler")
+export declare function import_cleat_register_update_handler(
   namePtr: i32,
   nameLen: i32,
 ): i64;
@@ -257,31 +257,31 @@ export declare function import_plugin_call(
 ): i64;
 
 /**
- * 20. durable_workflow_id: Get the current workflow ID.
- * (import "env" "durable_workflow_id") (param i32 i32) (result i64)
+ * 20. cleat_workflow_id: Get the current workflow ID.
+ * (import "env" "cleat_workflow_id") (param i32 i32) (result i64)
  */
-@external("env", "durable_workflow_id")
-export declare function import_durable_workflow_id(
+@external("env", "cleat_workflow_id")
+export declare function import_cleat_workflow_id(
   idPtr: i32,
   idMaxLen: i32,
 ): i64;
 
 /**
- * 21. durable_run_id: Get the current run ID.
- * (import "env" "durable_run_id") (param i32 i32) (result i64)
+ * 21. cleat_run_id: Get the current run ID.
+ * (import "env" "cleat_run_id") (param i32 i32) (result i64)
  */
-@external("env", "durable_run_id")
-export declare function import_durable_run_id(
+@external("env", "cleat_run_id")
+export declare function import_cleat_run_id(
   idPtr: i32,
   idMaxLen: i32,
 ): i64;
 
 /**
- * 22. durable_send_signal_and_wait: Send a signal and wait for a response.
- * (import "env" "durable_send_signal_and_wait") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
+ * 22. cleat_send_signal_and_wait: Send a signal and wait for a response.
+ * (import "env" "cleat_send_signal_and_wait") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
  */
-@external("env", "durable_send_signal_and_wait")
-export declare function import_durable_send_signal_and_wait(
+@external("env", "cleat_send_signal_and_wait")
+export declare function import_cleat_send_signal_and_wait(
   targetRunIdPtr: i32,
   targetRunIdLen: i32,
   signalNamePtr: i32,
@@ -294,11 +294,11 @@ export declare function import_durable_send_signal_and_wait(
 ): i64;
 
 /**
- * 23. durable_reply_to_signal: Respond to a signal from within a handler.
- * (import "env" "durable_reply_to_signal") (param i32 i32 i32 i32) (result i64)
+ * 23. cleat_reply_to_signal: Respond to a signal from within a handler.
+ * (import "env" "cleat_reply_to_signal") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_reply_to_signal")
-export declare function import_durable_reply_to_signal(
+@external("env", "cleat_reply_to_signal")
+export declare function import_cleat_reply_to_signal(
   correlationIdPtr: i32,
   correlationIdLen: i32,
   responsePtr: i32,
@@ -306,11 +306,11 @@ export declare function import_durable_reply_to_signal(
 ): i64;
 
 /**
- * 24. durable_signal_workflow: Send a signal to another workflow.
- * (import "env" "durable_signal_workflow") (param i32 i32 i32 i32 i32 i32) (result i64)
+ * 24. cleat_signal_workflow: Send a signal to another workflow.
+ * (import "env" "cleat_signal_workflow") (param i32 i32 i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_signal_workflow")
-export declare function import_durable_signal_workflow(
+@external("env", "cleat_signal_workflow")
+export declare function import_cleat_signal_workflow(
   targetRunIdPtr: i32,
   targetRunIdLen: i32,
   signalNamePtr: i32,
@@ -320,11 +320,11 @@ export declare function import_durable_signal_workflow(
 ): i64;
 
 /**
- * 25. durable_resolve_promise: Resolve a durable promise with a value.
- * (import "env" "durable_resolve_promise") (param i32 i32 i32 i32) (result i64)
+ * 25. cleat_resolve_promise: Resolve a durable promise with a value.
+ * (import "env" "cleat_resolve_promise") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_resolve_promise")
-export declare function import_durable_resolve_promise(
+@external("env", "cleat_resolve_promise")
+export declare function import_cleat_resolve_promise(
   idPtr: i32,
   idLen: i32,
   valuePtr: i32,
@@ -332,11 +332,11 @@ export declare function import_durable_resolve_promise(
 ): i64;
 
 /**
- * 26. durable_reject_promise: Reject a durable promise with an error.
- * (import "env" "durable_reject_promise") (param i32 i32 i32 i32) (result i64)
+ * 26. cleat_reject_promise: Reject a durable promise with an error.
+ * (import "env" "cleat_reject_promise") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_reject_promise")
-export declare function import_durable_reject_promise(
+@external("env", "cleat_reject_promise")
+export declare function import_cleat_reject_promise(
   idPtr: i32,
   idLen: i32,
   errorPtr: i32,
@@ -344,11 +344,11 @@ export declare function import_durable_reject_promise(
 ): i64;
 
 /**
- * 27. durable_send: Fire-and-forget durable call to a service.
- * (import "env" "durable_send") (param i32 i32 i32 i32 i32 i32) (result i64)
+ * 27. cleat_send: Fire-and-forget durable call to a service.
+ * (import "env" "cleat_send") (param i32 i32 i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_send")
-export declare function import_durable_send(
+@external("env", "cleat_send")
+export declare function import_cleat_send(
   svcPtr: i32,
   svcLen: i32,
   opPtr: i32,
@@ -373,21 +373,21 @@ export declare function import_schedule_invoke(
 ): i64;
 
 /**
- * 29. durable_register_query_handler: Register a query handler.
- * (import "env" "durable_register_query_handler") (param i32 i32) (result i64)
+ * 29. cleat_register_query_handler: Register a query handler.
+ * (import "env" "cleat_register_query_handler") (param i32 i32) (result i64)
  */
-@external("env", "durable_register_query_handler")
-export declare function import_durable_register_query_handler(
+@external("env", "cleat_register_query_handler")
+export declare function import_cleat_register_query_handler(
   namePtr: i32,
   nameLen: i32,
 ): i64;
 
 /**
- * 30. durable_run_detached: Run a function in a detached child workflow.
- * (import "env" "durable_run_detached") (param i32 i32 i32 i32) (result i64)
+ * 30. cleat_run_detached: Run a function in a detached child workflow.
+ * (import "env" "cleat_run_detached") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_run_detached")
-export declare function import_durable_run_detached(
+@external("env", "cleat_run_detached")
+export declare function import_cleat_run_detached(
   namePtr: i32,
   nameLen: i32,
   inputPtr: i32,
@@ -395,11 +395,11 @@ export declare function import_durable_run_detached(
 ): i64;
 
 /**
- * 31. durable_set_state: Set a key-value pair in workflow state.
- * (import "env" "durable_set_state") (param i32 i32 i32 i32) (result i64)
+ * 31. cleat_set_state: Set a key-value pair in workflow state.
+ * (import "env" "cleat_set_state") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_set_state")
-export declare function import_durable_set_state(
+@external("env", "cleat_set_state")
+export declare function import_cleat_set_state(
   keyPtr: i32,
   keyLen: i32,
   valPtr: i32,
@@ -407,11 +407,11 @@ export declare function import_durable_set_state(
 ): i64;
 
 /**
- * 32. durable_get_state: Get a value from workflow state by key.
- * (import "env" "durable_get_state") (param i32 i32 i32 i32) (result i64)
+ * 32. cleat_get_state: Get a value from workflow state by key.
+ * (import "env" "cleat_get_state") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_get_state")
-export declare function import_durable_get_state(
+@external("env", "cleat_get_state")
+export declare function import_cleat_get_state(
   keyPtr: i32,
   keyLen: i32,
   outPtr: i32,
@@ -419,42 +419,42 @@ export declare function import_durable_get_state(
 ): i64;
 
 /**
- * 33. durable_delete_state: Delete a key from workflow state.
- * (import "env" "durable_delete_state") (param i32 i32) (result i64)
+ * 33. cleat_delete_state: Delete a key from workflow state.
+ * (import "env" "cleat_delete_state") (param i32 i32) (result i64)
  */
-@external("env", "durable_delete_state")
-export declare function import_durable_delete_state(
+@external("env", "cleat_delete_state")
+export declare function import_cleat_delete_state(
   keyPtr: i32,
   keyLen: i32,
 ): i64;
 
 /**
- * 34. durable_incr_state: Atomically increment a numeric state value.
- * (import "env" "durable_incr_state") (param i32 i32 i64) (result i64)
+ * 34. cleat_incr_state: Atomically increment a numeric state value.
+ * (import "env" "cleat_incr_state") (param i32 i32 i64) (result i64)
  */
-@external("env", "durable_incr_state")
-export declare function import_durable_incr_state(
+@external("env", "cleat_incr_state")
+export declare function import_cleat_incr_state(
   keyPtr: i32,
   keyLen: i32,
   delta: i64,
 ): i64;
 
 /**
- * 35. durable_has_state: Check if a key exists in workflow state.
- * (import "env" "durable_has_state") (param i32 i32) (result i64)
+ * 35. cleat_has_state: Check if a key exists in workflow state.
+ * (import "env" "cleat_has_state") (param i32 i32) (result i64)
  */
-@external("env", "durable_has_state")
-export declare function import_durable_has_state(
+@external("env", "cleat_has_state")
+export declare function import_cleat_has_state(
   keyPtr: i32,
   keyLen: i32,
 ): i64;
 
 /**
- * 36. durable_list_state: List state keys matching a prefix.
- * (import "env" "durable_list_state") (param i32 i32 i32 i32) (result i64)
+ * 36. cleat_list_state: List state keys matching a prefix.
+ * (import "env" "cleat_list_state") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_list_state")
-export declare function import_durable_list_state(
+@external("env", "cleat_list_state")
+export declare function import_cleat_list_state(
   prefixPtr: i32,
   prefixLen: i32,
   outPtr: i32,
@@ -462,11 +462,11 @@ export declare function import_durable_list_state(
 ): i64;
 
 /**
- * 37. durable_await_all_children: Wait for multiple child workflows.
- * (import "env" "durable_await_all_children") (param i32 i32 i32 i32) (result i64)
+ * 37. cleat_await_all_children: Wait for multiple child workflows.
+ * (import "env" "cleat_await_all_children") (param i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_await_all_children")
-export declare function import_durable_await_all_children(
+@external("env", "cleat_await_all_children")
+export declare function import_cleat_await_all_children(
   runIdsJsonPtr: i32,
   runIdsJsonLen: i32,
   outPtr: i32,
@@ -474,11 +474,11 @@ export declare function import_durable_await_all_children(
 ): i64;
 
 /**
- * 38. durable_fetch: Make an HTTP request via the host runtime.
- * (import "env" "durable_fetch") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
+ * 38. cleat_fetch: Make an HTTP request via the host runtime.
+ * (import "env" "cleat_fetch") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
  */
-@external("env", "durable_fetch")
-export declare function import_durable_fetch(
+@external("env", "cleat_fetch")
+export declare function import_cleat_fetch(
   methodPtr: i32,
   methodLen: i32,
   urlPtr: i32,
@@ -552,8 +552,8 @@ export class DurableResult<T> {
   }
 }
 
-/** Outcome of a `durableCall` operation. */
-export class DurableCallOutcome {
+/** Outcome of a `cleatCall` operation. */
+export class CleatCallOutcome {
   constructor(
     /** Response JSON from the service call. Empty on error. */
     public readonly response: string,
@@ -660,7 +660,7 @@ export class AwaitPromiseOutcome {
   }
 }
 
-/** Result of a durableFetch HTTP request. */
+/** Result of a cleatFetch HTTP request. */
 export class FetchResult {
   constructor(
     /** HTTP status code (200, 404, etc.). 0 on error. */
@@ -694,13 +694,13 @@ export class FetchResult {
  * Usage:
  * ```ts
  * let host = new HostCalls();
- * let outcome = host.durableCall("payment", "charge", `{"amount": 100}`);
+ * let outcome = host.cleatCall("payment", "charge", `{"amount": 100}`);
  * if (outcome.isError) {
  *   host.log("payment failed: " + outcome.error);
  * }
  * ```
  *
- * Mirrors Rust SDK `crates/durable-sdk/src/host_calls.rs` and
+ * Mirrors Rust SDK `crates/cleat-sdk/src/host_calls.rs` and
  * Go `durable.HostCalls` interface.
  */
 export class HostCalls {
@@ -752,7 +752,7 @@ export class HostCalls {
   }
 
   // ────────────────────────────────────────────
-  // 1. durable_call
+  // 1. cleat_call
   // ────────────────────────────────────────────
 
   /**
@@ -762,7 +762,7 @@ export class HostCalls {
    * the host call is made, and the response is read from the output buffer.
    *
    * When timeoutMs > 0, the host enforces a per-call deadline. If the host
-   * does not expose the `durable_call_with_timeout` import, pass 0 to use
+   * does not expose the `cleat_call_with_timeout` import, pass 0 to use
    * the standard (non-timeout) import.
    *
    * @param service      - Service name (e.g., "payment", "email").
@@ -771,7 +771,7 @@ export class HostCalls {
    * @param timeoutMs    - Optional per-call timeout in milliseconds (0 = no timeout).
    * @returns The call outcome containing response JSON or error details.
    */
-  durableCall(service: string, operation: string, requestJson: string, timeoutMs: i64 = 0): DurableCallOutcome {
+  cleatCall(service: string, operation: string, requestJson: string, timeoutMs: i64 = 0): CleatCallOutcome {
     // Encode input strings sequentially into the scratch buffer
     let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
     let opOffset: usize = SCRATCH_BASE + svcLen;
@@ -784,7 +784,7 @@ export class HostCalls {
     // Call the host import — use the timeout variant when timeoutMs > 0
     let result: i64;
     if (timeoutMs > 0) {
-      result = import_durable_call_with_timeout(
+      result = import_cleat_call_with_timeout(
         SCRATCH_BASE as i32,
         svcLen,
         opOffset as i32,
@@ -796,7 +796,7 @@ export class HostCalls {
         OUT_BUF_SIZE,
       );
     } else {
-      result = import_durable_call(
+      result = import_cleat_call(
         SCRATCH_BASE as i32,
         svcLen,
         opOffset as i32,
@@ -816,17 +816,17 @@ export class HostCalls {
     if (decoded.errCode !== 0) {
       let errMsg: string =
         responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "unknown error";
-      return new DurableCallOutcome("", errMsg, decoded.callErrorCode);
+      return new CleatCallOutcome("", errMsg, decoded.callErrorCode);
     }
 
     // Success: read the response
     let resp: string =
       responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "";
-    return new DurableCallOutcome(resp, null, 0);
+    return new CleatCallOutcome(resp, null, 0);
   }
 
   // ────────────────────────────────────────────
-  // 2. durable_sleep
+  // 2. cleat_sleep
   // ────────────────────────────────────────────
 
   /**
@@ -838,8 +838,8 @@ export class HostCalls {
    * @param durationMs - Sleep duration in milliseconds.
    * @returns `true` if the workflow should suspend, `false` if completed.
    */
-  durableSleep(durationMs: i64): bool {
-    let result: i64 = import_durable_sleep(durationMs);
+  cleatSleep(durationMs: i64): bool {
+    let result: i64 = import_cleat_sleep(durationMs);
     let decoded = decodeSleepResult(result);
     let shouldSuspend: bool = decoded.status === 1;
     if (shouldSuspend) {
@@ -858,7 +858,7 @@ export class HostCalls {
    * @returns Current time in milliseconds since Unix epoch.
    */
   now(): i64 {
-    return import_durable_now();
+    return import_cleat_now();
   }
 
   // ────────────────────────────────────────────
@@ -873,7 +873,7 @@ export class HostCalls {
    * @returns A deterministic i64 value.
    */
   random(): i64 {
-    return import_durable_random();
+    return import_cleat_random();
   }
 
   // ────────────────────────────────────────────
@@ -887,7 +887,7 @@ export class HostCalls {
    */
   log(message: string): void {
     let msgLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, message);
-    import_durable_log(SCRATCH_BASE as i32, msgLen);
+    import_cleat_log(SCRATCH_BASE as i32, msgLen);
   }
 
   // ────────────────────────────────────────────
@@ -900,7 +900,7 @@ export class HostCalls {
    * @returns The current workflow version as a 32-bit integer.
    */
   version(): i32 {
-    return import_durable_version() as i32;
+    return import_cleat_version() as i32;
   }
 
   // ────────────────────────────────────────────
@@ -913,7 +913,7 @@ export class HostCalls {
    * @returns The minimum version as a 32-bit integer.
    */
   minVersion(): i32 {
-    return import_durable_min_version() as i32;
+    return import_cleat_min_version() as i32;
   }
 
   // ────────────────────────────────────────────
@@ -929,7 +929,7 @@ export class HostCalls {
   defer(description: string): DurableResult<string> {
     let descLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, description);
 
-    let result: i64 = import_durable_defer(
+    let result: i64 = import_cleat_defer(
       SCRATCH_BASE as i32,
       descLen,
       OUTPUT_OFFSET as i32,
@@ -959,7 +959,7 @@ export class HostCalls {
    * @returns The cancellation status, including any reason string.
    */
   pollCancellation(): CancellationStatus {
-    let result: i64 = import_durable_poll_cancellation(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
+    let result: i64 = import_cleat_poll_cancellation(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
     let decoded = decodePollCancellationResult(result);
 
     let reason: string =
@@ -983,7 +983,7 @@ export class HostCalls {
   pollSignal(name: string): PollSignalOutcome {
     let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
 
-    let result: i64 = import_durable_poll_signal(
+    let result: i64 = import_cleat_poll_signal(
       SCRATCH_BASE as i32,
       nameLen,
       OUTPUT_OFFSET as i32,
@@ -1024,7 +1024,7 @@ export class HostCalls {
   continueAsNew(inputJson: string): string | null {
     let inputLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, inputJson);
 
-    let result: i64 = import_durable_continue_as_new(SCRATCH_BASE as i32, inputLen);
+    let result: i64 = import_cleat_continue_as_new(SCRATCH_BASE as i32, inputLen);
     let decoded = decodeSimpleResult(result);
 
     if (decoded.errCode !== 0) {
@@ -1051,7 +1051,7 @@ export class HostCalls {
     let remaining: i32 = OUT_BUF_SIZE - nameLen;
     let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
 
-    let result: i64 = import_durable_child_workflow(
+    let result: i64 = import_cleat_child_workflow(
       SCRATCH_BASE as i32,
       nameLen,
       inputOffset as i32,
@@ -1089,7 +1089,7 @@ export class HostCalls {
   awaitChild(runId: string): DurableResult<string> {
     let runIdLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, runId);
 
-    let result: i64 = import_durable_await_child(
+    let result: i64 = import_cleat_await_child(
       SCRATCH_BASE as i32,
       runIdLen,
       OUTPUT_OFFSET as i32,
@@ -1142,7 +1142,7 @@ export class HostCalls {
     let payloadOffset: usize = SCRATCH_BASE + OUT_BUF_SIZE / 2;
     let payloadMaxLen: i32 = OUT_BUF_SIZE / 2;
 
-    let result: i64 = import_durable_await_signals(
+    let result: i64 = import_cleat_await_signals(
       SCRATCH_BASE as i32,
       namesLen,
       timeoutMs,
@@ -1213,7 +1213,7 @@ export class HostCalls {
   createPromise(name: string): PromiseResult {
     let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
 
-    let result: i64 = import_durable_create_promise(
+    let result: i64 = import_cleat_create_promise(
       SCRATCH_BASE as i32,
       nameLen,
       OUTPUT_OFFSET as i32,
@@ -1250,7 +1250,7 @@ export class HostCalls {
   awaitPromise(id: string, timeoutMs: i64): AwaitPromiseOutcome {
     let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, id);
 
-    let result: i64 = import_durable_await_promise(
+    let result: i64 = import_cleat_await_promise(
       SCRATCH_BASE as i32,
       idLen,
       timeoutMs,
@@ -1290,7 +1290,7 @@ export class HostCalls {
    */
   registerUpdateHandler(name: string): void {
     let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
-    import_durable_register_update_handler(SCRATCH_BASE as i32, nameLen);
+    import_cleat_register_update_handler(SCRATCH_BASE as i32, nameLen);
   }
 
   // ────────────────────────────────────────────
@@ -1331,7 +1331,7 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
-    // Decode the packed result (same bit layout as durable_call)
+    // Decode the packed result (same bit layout as cleat_call)
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
 
@@ -1358,7 +1358,7 @@ export class HostCalls {
    * @returns The workflow ID string.
    */
   currentWorkflowId(): string {
-    let result: i64 = import_durable_workflow_id(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
+    let result: i64 = import_cleat_workflow_id(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0 || decoded.extra === 0) {
       return "";
@@ -1531,7 +1531,7 @@ export class HostCalls {
     remaining -= sigLen;
     let payloadLen: i32 = this.writeScratch(payloadOffset, remaining, payload, "payload");
 
-    let result: i64 = import_durable_send_signal_and_wait(
+    let result: i64 = import_cleat_send_signal_and_wait(
       SCRATCH_BASE as i32,
       targetLen,
       sigOffset as i32,
@@ -1574,7 +1574,7 @@ export class HostCalls {
     let remaining: i32 = OUT_BUF_SIZE - cidLen;
     let respLen: i32 = this.writeScratch(respOffset, remaining, response, "response");
 
-    let result: i64 = import_durable_reply_to_signal(
+    let result: i64 = import_cleat_reply_to_signal(
       SCRATCH_BASE as i32,
       cidLen,
       respOffset as i32,
@@ -1675,7 +1675,7 @@ export class HostCalls {
     remaining -= sigLen;
     let payloadLen: i32 = this.writeScratch(payloadOffset, remaining, payload, "payload");
 
-    let result: i64 = import_durable_signal_workflow(
+    let result: i64 = import_cleat_signal_workflow(
       SCRATCH_BASE as i32,
       targetLen,
       sigOffset as i32,
@@ -1711,7 +1711,7 @@ export class HostCalls {
     let remaining: i32 = OUT_BUF_SIZE - idLen;
     let valLen: i32 = this.writeScratch(valOffset, remaining, value, "value");
 
-    let result: i64 = import_durable_resolve_promise(
+    let result: i64 = import_cleat_resolve_promise(
       SCRATCH_BASE as i32,
       idLen,
       valOffset as i32,
@@ -1742,7 +1742,7 @@ export class HostCalls {
     let remaining: i32 = OUT_BUF_SIZE - idLen;
     let errLen: i32 = this.writeScratch(errOffset, remaining, error, "error");
 
-    let result: i64 = import_durable_reject_promise(
+    let result: i64 = import_cleat_reject_promise(
       SCRATCH_BASE as i32,
       idLen,
       errOffset as i32,
@@ -1757,13 +1757,13 @@ export class HostCalls {
   }
 
   // ────────────────────────────────────────────
-  // 31. durableSend — fire-and-forget durable call
+  // 31. cleatSend — fire-and-forget durable call
   // ────────────────────────────────────────────
 
   /**
    * Make a fire-and-forget durable call to an external service.
    *
-   * Unlike `durableCall`, this does NOT wait for a response. The call is
+   * Unlike `cleatCall`, this does NOT wait for a response. The call is
    * recorded for replay but the workflow continues immediately.
    *
    * @param service      - Service name (e.g., "payment", "email").
@@ -1771,7 +1771,7 @@ export class HostCalls {
    * @param requestJson  - Request payload as a JSON string.
    * @returns An error message on failure, or null on success.
    */
-  durableSend(service: string, operation: string, requestJson: string): string | null {
+  cleatSend(service: string, operation: string, requestJson: string): string | null {
     let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
     let opOffset: usize = SCRATCH_BASE + svcLen;
     let remaining: i32 = OUT_BUF_SIZE - svcLen;
@@ -1780,7 +1780,7 @@ export class HostCalls {
     remaining -= opLen;
     let reqLen: i32 = this.writeScratch(reqOffset, remaining, requestJson, "requestJson");
 
-    let result: i64 = import_durable_send(
+    let result: i64 = import_cleat_send(
       SCRATCH_BASE as i32,
       svcLen,
       opOffset as i32,
@@ -1791,7 +1791,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "durable_send error code: " + decoded.errCode.toString();
+      return "cleat_send error code: " + decoded.errCode.toString();
     }
     return null;
   }
@@ -1855,7 +1855,7 @@ export class HostCalls {
   registerQueryHandler(name: string): string | null {
     let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
 
-    let result: i64 = import_durable_register_query_handler(
+    let result: i64 = import_cleat_register_query_handler(
       SCRATCH_BASE as i32,
       nameLen,
     );
@@ -1887,7 +1887,7 @@ export class HostCalls {
     let remaining: i32 = OUT_BUF_SIZE - nameLen;
     let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
 
-    let result: i64 = import_durable_run_detached(
+    let result: i64 = import_cleat_run_detached(
       SCRATCH_BASE as i32,
       nameLen,
       inputOffset as i32,
@@ -1939,7 +1939,7 @@ export class HostCalls {
     let remaining: i32 = OUT_BUF_SIZE - keyLen;
     let valLen: i32 = this.writeScratch(valOffset, remaining, value, "value");
 
-    let result: i64 = import_durable_set_state(
+    let result: i64 = import_cleat_set_state(
       SCRATCH_BASE as i32,
       keyLen,
       valOffset as i32,
@@ -1970,7 +1970,7 @@ export class HostCalls {
     let fullKey: string = this.scopedKey(key);
     let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
 
-    let result: i64 = import_durable_get_state(
+    let result: i64 = import_cleat_get_state(
       SCRATCH_BASE as i32,
       keyLen,
       OUTPUT_OFFSET as i32,
@@ -1998,7 +1998,7 @@ export class HostCalls {
     let fullKey: string = this.scopedKey(key);
     let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
 
-    let result: i64 = import_durable_delete_state(
+    let result: i64 = import_cleat_delete_state(
       SCRATCH_BASE as i32,
       keyLen,
     );
@@ -2027,7 +2027,7 @@ export class HostCalls {
     let fullKey: string = this.scopedKey(key);
     let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
 
-    let result: i64 = import_durable_incr_state(
+    let result: i64 = import_cleat_incr_state(
       SCRATCH_BASE as i32,
       keyLen,
       delta,
@@ -2050,7 +2050,7 @@ export class HostCalls {
     let fullKey: string = this.scopedKey(key);
     let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
 
-    let result: i64 = import_durable_has_state(
+    let result: i64 = import_cleat_has_state(
       SCRATCH_BASE as i32,
       keyLen,
     );
@@ -2075,7 +2075,7 @@ export class HostCalls {
     let fullPrefix: string = this.scopedKey(prefix);
     let prefixLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullPrefix);
 
-    let result: i64 = import_durable_list_state(
+    let result: i64 = import_cleat_list_state(
       SCRATCH_BASE as i32,
       prefixLen,
       OUTPUT_OFFSET as i32,
@@ -2106,7 +2106,7 @@ export class HostCalls {
   awaitAllChildren(runIdsJson: string): string | null {
     let runIdsLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, runIdsJson);
 
-    let result: i64 = import_durable_await_all_children(
+    let result: i64 = import_cleat_await_all_children(
       SCRATCH_BASE as i32,
       runIdsLen,
       OUTPUT_OFFSET as i32,
@@ -2127,28 +2127,28 @@ export class HostCalls {
   /**
    * Check whether the current workflow execution is replaying.
    *
-   * **IMPORTANT:** There is no direct `durable_is_replaying` host import
+   * **IMPORTANT:** There is no direct `cleat_is_replaying` host import
    * in the current ABI. This method ALWAYS returns `false`.
    *
-   * To detect replay at runtime, use the `durableSleep` return-value pattern:
+   * To detect replay at runtime, use the `cleatSleep` return-value pattern:
    *
    * ```ts
-   * // durableSleep returns `true` on fresh execution (should suspend).
+   * // cleatSleep returns `true` on fresh execution (should suspend).
    * // On replay it returns `false` immediately (sleep already completed).
-   * let isReplay = !host.durableSleep(1); // 1ms sleep, non-zero
+   * let isReplay = !host.cleatSleep(1); // 1ms sleep, non-zero
    * ```
    *
    * **Caveat:** A 1ms sleep is recorded in the event history. Use this
    * pattern sparingly and only for diagnostics/debugging.
    *
    * This method is a placeholder for future host-side support. When a
-   * `durable_is_replaying` import is added to the ABI, this method will
+   * `cleat_is_replaying` import is added to the ABI, this method will
    * delegate to it.
    *
    * @returns `false` (always — requires future host-side support).
    */
   isReplaying(): bool {
-    // TODO: Replace with import_durable_is_replaying() when available.
+    // TODO: Replace with import_cleat_is_replaying() when available.
     return false;
   }
 
@@ -2164,7 +2164,7 @@ export class HostCalls {
    * @returns The run ID string, or empty string on error.
    */
   currentRunId(): string {
-    let result: i64 = import_durable_run_id(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
+    let result: i64 = import_cleat_run_id(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0 || decoded.extra === 0) {
       return "";
@@ -2173,7 +2173,7 @@ export class HostCalls {
   }
 
   // ────────────────────────────────────────────
-  // 43. durableFetch — make HTTP request
+  // 43. cleatFetch — make HTTP request
   // ────────────────────────────────────────────
 
   /**
@@ -2188,7 +2188,7 @@ export class HostCalls {
    * @param body        - Request body string (empty string for GET/HEAD).
    * @returns The fetch result with status code, headers, body, and optional error.
    */
-  durableFetch(method: string, url: string, headersJson: string, body: string): FetchResult {
+  cleatFetch(method: string, url: string, headersJson: string, body: string): FetchResult {
     let methodLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, method);
     let urlOffset: usize = SCRATCH_BASE + methodLen;
     let remaining: i32 = OUT_BUF_SIZE - methodLen;
@@ -2200,7 +2200,7 @@ export class HostCalls {
     remaining -= headersLen;
     let bodyLen: i32 = this.writeScratch(bodyOffset, remaining, body, "body");
 
-    let result: i64 = import_durable_fetch(
+    let result: i64 = import_cleat_fetch(
       SCRATCH_BASE as i32,
       methodLen,
       urlOffset as i32,
@@ -2241,7 +2241,7 @@ export class HostCalls {
    * @returns The fetch result.
    */
   fetchGet(url: string): FetchResult {
-    return this.durableFetch("GET", url, "{}", "");
+    return this.cleatFetch("GET", url, "{}", "");
   }
 
   // ────────────────────────────────────────────

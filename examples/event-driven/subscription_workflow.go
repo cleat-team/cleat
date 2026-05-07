@@ -9,11 +9,11 @@
 //
 // Build:
 //
-//	durable build -o /tmp/out ./examples/event-driven/
+//	cleat build -o /tmp/out ./examples/event-driven/
 //
 // Run worker with event triggers:
 //
-//	durable-worker --db "postgres://..." --api-addr :8080
+//	cleat-worker --db "postgres://..." --api-addr :8080
 //
 // Create a subscription:
 //
@@ -56,10 +56,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
-var h durable.HostCalls
+var h cleat.HostCalls
 
 // ---- Domain types ----
 
@@ -88,7 +88,7 @@ type WelcomeEmailResponse struct {
 
 // ---- Entry point ----
 
-func HandleSignup(h durable.HostCalls, input SignupInput) (*SignupResult, error) {
+func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
 	if input.UserID == "" || input.Email == "" {
 		return nil, fmt.Errorf("user_id and email are required")
 	}

@@ -11,10 +11,10 @@ result back to JSON, and returns the packed i64 result code.
 
 Usage::
 
-    from cleat_sdk.entry import durable_entry
+    from cleat_sdk.entry import cleat_entry
     from cleat_sdk.host_calls import HostCalls
 
-    @durable_entry("PlaceOrder")
+    @cleat_entry("PlaceOrder")
     def place_order(h: HostCalls, user_id: str, cart: list[dict]) -> str:
         ...
 """
@@ -169,7 +169,7 @@ def _from_dict(
 # Decorator
 # ---------------------------------------------------------------------------
 
-def durable_entry(name: Optional[str] = None) -> Callable:
+def cleat_entry(name: Optional[str] = None) -> Callable:
     """Mark a function as a Cleat workflow entry point.
 
     The decorated function **must** accept a :class:`HostCalls` instance as
@@ -193,7 +193,7 @@ def durable_entry(name: Optional[str] = None) -> Callable:
     Example::
 
         from dataclasses import dataclass
-        from cleat_sdk.entry import durable_entry
+        from cleat_sdk.entry import cleat_entry
         from cleat_sdk.host_calls import HostCalls
 
         @dataclass
@@ -207,7 +207,7 @@ def durable_entry(name: Optional[str] = None) -> Callable:
             amount: float
             shipping_address: Address
 
-        @durable_entry
+        @cleat_entry
         def place_order(h: HostCalls, input: OrderInput) -> str:
             # ``input`` is an ``OrderInput`` instance, not a raw dict.
             # ``input.shipping_address`` is an ``Address`` instance.
@@ -228,7 +228,7 @@ def durable_entry(name: Optional[str] = None) -> Callable:
                         out_ptr: int, max_out_len: int) -> int: ...
 
     The returned wrapper carries the attribute
-    ``wrapper._is_durable_entry = True`` for introspection.
+    ``wrapper._is_cleat_entry = True`` for introspection.
     """
 
     def _make_entry(func: Callable) -> Callable:
@@ -313,7 +313,7 @@ def durable_entry(name: Optional[str] = None) -> Callable:
                 return encode_export_result(0, bytes_written)
 
             except SuspendSentinel:
-                # The workflow signalled suspension (e.g. durable_sleep on a
+                # The workflow signalled suspension (e.g. cleat_sleep on a
                 # fresh execution).  Propagate the sentinel to the host.
                 return SUSPEND_SENTINEL
 
@@ -324,13 +324,13 @@ def durable_entry(name: Optional[str] = None) -> Callable:
                 return encode_export_result(1, bytes_written)
 
         # Mark the wrapper for introspection tooling.
-        export_wrapper._is_durable_entry = True  # type: ignore[attr-defined]
+        export_wrapper._is_cleat_entry = True  # type: ignore[attr-defined]
 
         return export_wrapper
 
     # ------------------------------------------------------------------
-    # Support both ``@durable_entry`` (without parentheses, legacy) and
-    # ``@durable_entry(...)`` (with parentheses, preferred).
+    # Support both ``@cleat_entry`` (without parentheses, legacy) and
+    # ``@cleat_entry(...)`` (with parentheses, preferred).
     # ------------------------------------------------------------------
     if callable(name):
         # ``name`` is actually the decorated function.
@@ -342,7 +342,7 @@ def durable_entry(name: Optional[str] = None) -> Callable:
 def virtual_object(name: Optional[str] = None) -> Callable:
     """Register a function as a virtual object entry point.
 
-    This decorator wraps :func:`durable_entry` and marks the function as
+    This decorator wraps :func:`cleat_entry` and marks the function as
     a virtual object handler for key-scoped stateful services.
 
     Usage::
@@ -367,13 +367,13 @@ def virtual_object(name: Optional[str] = None) -> Callable:
     -------
     Callable
         A wrapper function with the WASM-export ABI signature, identical
-        to :func:`durable_entry` but additionally marked as a virtual object
+        to :func:`cleat_entry` but additionally marked as a virtual object
         handler.
     """
 
     def _make_entry(func: Callable) -> Callable:
         entry_name = name if name is not None else func.__name__
-        decorated = durable_entry(entry_name)(func)
+        decorated = cleat_entry(entry_name)(func)
         decorated._is_virtual_object = True  # type: ignore[attr-defined]
         return decorated
 
@@ -386,8 +386,8 @@ def virtual_object(name: Optional[str] = None) -> Callable:
 def query_handler(name: Optional[str] = None) -> Callable:
     """Mark a function as a read-only query handler (no journaling).
 
-    Unlike :func:`durable_entry`, which marks a workflow entry point that
-    journalises all durable operations, this decorator marks a function as a
+    Unlike :func:`cleat_entry`, which marks a workflow entry point that
+    journalises all cleat operations, this decorator marks a function as a
     read-only query handler.  Query handlers are invoked on-demand by external
     callers without recording events in the workflow history.
 
@@ -401,12 +401,12 @@ def query_handler(name: Optional[str] = None) -> Callable:
 
         @query_handler("get_status")
         def get_status(h: HostCalls, order_id: str) -> str:
-            # Read-only — no durable_call, durable_sleep, etc.
+            # Read-only — no cleat_call, cleat_sleep, etc.
             state = h.get_state(order_id, dict)
             return json.dumps({"status": state.get("status", "unknown")})
 
     The decorated function carries ``wrapper._is_query_handler = True``
-    and ``wrapper._is_durable_entry = False`` for introspection.
+    and ``wrapper._is_cleat_entry = False`` for introspection.
 
     Parameters
     ----------
@@ -416,14 +416,14 @@ def query_handler(name: Optional[str] = None) -> Callable:
     Returns
     -------
     Callable
-        A wrapper function that behaves like :func:`durable_entry` but is
+        A wrapper function that behaves like :func:`cleat_entry` but is
         marked as a query handler.  The actual WASM export is identical; the
         host runtime distinguishes queries by the ``_is_query_handler`` flag.
     """
 
     def _make_entry(func: Callable) -> Callable:
         entry_name = name if name is not None else func.__name__
-        decorated = durable_entry(entry_name)(func)
+        decorated = cleat_entry(entry_name)(func)
         decorated._is_query_handler = True  # type: ignore[attr-defined]
         return decorated
 

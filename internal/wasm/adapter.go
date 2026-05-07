@@ -31,14 +31,14 @@ var adapterDefs = map[string]adapterDef{
 		},
 		ResultStmts: []string{
 			"responseLen := uint32(uint64(result) >> 40)",
-			"callErrorCode := durable.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
+			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`	return "", &durable.CallError{`,
+			`	return "", &cleat.CallError{`,
 			`		Service:   service,`,
 			`		Operation: operation,`,
 			`		Code:      callErrorCode,`,
-			`		Message:   fmt.Sprintf("durable_call: error code %d", errCode),`,
+			`		Message:   fmt.Sprintf("cleat_call: error code %d", errCode),`,
 			`	}`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
@@ -52,7 +52,7 @@ var adapterDefs = map[string]adapterDef{
 		ResultStmts: []string{
 			"sleepStatus := byte(uint64(result) >> 56)",
 			"if sleepStatus == 1 {",
-			"	panic(durable.ErrSuspend)",
+			"	panic(cleat.ErrSuspend)",
 			"}",
 		},
 	},
@@ -64,7 +64,7 @@ var adapterDefs = map[string]adapterDef{
 		ResultStmts: []string{
 			"sleepStatus := byte(uint64(result) >> 56)",
 			"if sleepStatus == 1 {",
-			"	panic(durable.ErrSuspend)",
+			"	panic(cleat.ErrSuspend)",
 			"}",
 		},
 	},
@@ -81,7 +81,7 @@ var adapterDefs = map[string]adapterDef{
 			"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
 			"errCode := uint32(result & 0xFFFF)",
 			"if errCode != 0 {",
-			`	return "", "", false, fmt.Errorf("durable_await_signals: error code %d", errCode)`,
+			`	return "", "", false, fmt.Errorf("cleat_await_signals: error code %d", errCode)`,
 			"}",
 			"return unsafe.String(&signalNameBuf[0], int(signalNameLen)), unsafe.String(&payloadBuf[0], int(payloadLen)), timedOut, nil",
 		},
@@ -96,7 +96,7 @@ var adapterDefs = map[string]adapterDef{
 			"deferIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return "", fmt.Errorf("durable_defer: error code %d", errCode)`,
+			`	return "", fmt.Errorf("cleat_defer: error code %d", errCode)`,
 			"}",
 			"return unsafe.String(&deferIDBuf[0], int(deferIDLen)), nil",
 		},
@@ -131,7 +131,7 @@ var adapterDefs = map[string]adapterDef{
 			"errCode := flags & 0xFF",
 			"found := (flags >> 8) != 0",
 			"if errCode != 0 {",
-			`	return "", false, fmt.Errorf("durable_poll_signal: error code %d", errCode)`,
+			`	return "", false, fmt.Errorf("cleat_poll_signal: error code %d", errCode)`,
 			"}",
 			"return unsafe.String(&payloadBuf[0], int(payloadLen)), found, nil",
 		},
@@ -145,7 +145,7 @@ var adapterDefs = map[string]adapterDef{
 		ResultStmts: []string{
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return fmt.Errorf("durable_continue_as_new: error code %d", errCode)`,
+			`	return fmt.Errorf("cleat_continue_as_new: error code %d", errCode)`,
 			"}",
 			"return nil",
 		},
@@ -161,7 +161,7 @@ var adapterDefs = map[string]adapterDef{
 			"runIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return "", fmt.Errorf("durable_child_workflow: error code %d", errCode)`,
+			`	return "", fmt.Errorf("cleat_child_workflow: error code %d", errCode)`,
 			"}",
 			"return unsafe.String(&runIDBuf[0], int(runIDLen)), nil",
 		},
@@ -175,12 +175,12 @@ var adapterDefs = map[string]adapterDef{
 		ResultStmts: []string{
 			"suspendSentinel := uint64(result)&(1<<62) != 0",
 			"if suspendSentinel {",
-			"	panic(durable.ErrSuspend)",
+			"	panic(cleat.ErrSuspend)",
 			"}",
 			"resultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return "", fmt.Errorf("durable_await_child: error code %d", errCode)`,
+			`	return "", fmt.Errorf("cleat_await_child: error code %d", errCode)`,
 			"}",
 			"return unsafe.String(&resultBuf[0], int(resultLen)), nil",
 		},
@@ -195,11 +195,11 @@ var adapterDefs = map[string]adapterDef{
 			"resultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`    return nil, fmt.Errorf("durable_await_all_children: error code %d", errCode)`,
+			`    return nil, fmt.Errorf("cleat_await_all_children: error code %d", errCode)`,
 			"}",
 			"var outcomes []ChildResult",
 			`if err := json.Unmarshal(resultsBuf[:resultLen], &outcomes); err != nil {`,
-			`    return nil, fmt.Errorf("durable_await_all_children: bad result: %w", err)`,
+			`    return nil, fmt.Errorf("cleat_await_all_children: bad result: %w", err)`,
 			"}",
 			"return outcomes, nil",
 		},
@@ -219,14 +219,14 @@ var adapterDefs = map[string]adapterDef{
 		},
 		ResultStmts: []string{
 			"responseLen := uint32(uint64(result) >> 40)",
-			"callErrorCode := durable.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
+			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`	return "", &durable.CallError{`,
+			`	return "", &cleat.CallError{`,
 			`		Service:   service,`,
 			`		Operation: operation,`,
 			`		Code:      callErrorCode,`,
-			`		Message:   fmt.Sprintf("durable_call_retry: error code %d", errCode),`,
+			`		Message:   fmt.Sprintf("cleat_call_retry: error code %d", errCode),`,
 			`	}`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
@@ -244,14 +244,14 @@ var adapterDefs = map[string]adapterDef{
 		},
 		ResultStmts: []string{
 			"responseLen := uint32(uint64(result) >> 40)",
-			"callErrorCode := durable.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
+			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`	return "", &durable.CallError{`,
+			`	return "", &cleat.CallError{`,
 			`		Service:   service,`,
 			`		Operation: operation,`,
 			`		Code:      callErrorCode,`,
-			`		Message:   fmt.Sprintf("durable_call_heartbeat: error code %d", errCode),`,
+			`		Message:   fmt.Sprintf("cleat_call_heartbeat: error code %d", errCode),`,
 			`	}`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
@@ -312,7 +312,7 @@ var adapterDefs = map[string]adapterDef{
 				"promiseIDLen := uint32(uint64(result) >> 32)",
 				"errCode := uint32(result)",
 				"if errCode != 0 {",
-				"return \"\", fmt.Errorf(\"durable_create_promise: error code %d\", errCode)",
+				"return \"\", fmt.Errorf(\"cleat_create_promise: error code %d\", errCode)",
 				"}",
 				"return unsafe.String(&promiseIDOutBuf[0], int(promiseIDLen)), nil",
 			},
@@ -329,7 +329,7 @@ var adapterDefs = map[string]adapterDef{
 				"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
 				"errCode := uint32(result & 0xFFFF)",
 				"if errCode != 0 {",
-				"return \"\", false, fmt.Errorf(\"durable_await_promise: error code %d\", errCode)",
+				"return \"\", false, fmt.Errorf(\"cleat_await_promise: error code %d\", errCode)",
 				"}",
 				"return unsafe.String(&resultOutBuf[0], int(resultLen)), timedOut, nil",
 			},
@@ -362,7 +362,7 @@ var adapterDefs = map[string]adapterDef{
 		},
 		"PluginCallStreaming": {
 			FieldName:  "PluginCallStreaming",
-			ReturnType: "(<-chan durable.StreamEvent, error)",
+			ReturnType: "(<-chan cleat.StreamEvent, error)",
 			Params: []adapterParam{
 				{"pluginName", "string"},
 				{"functionName", "string"},
@@ -374,11 +374,11 @@ var adapterDefs = map[string]adapterDef{
 				"if errCode != 0 {",
 				`		return nil, fmt.Errorf("plugin_call_streaming: error code %d", errCode)`,
 				"}",
-				"var events []durable.StreamEvent",
+				"var events []cleat.StreamEvent",
 				`if err := json.Unmarshal(responseBuf[:responseLen], &events); err != nil {`,
 				`		return nil, fmt.Errorf("plugin_call_streaming: bad chunk data: %w", err)`,
 				"}",
-				"ch := make(chan durable.StreamEvent, len(events))",
+				"ch := make(chan cleat.StreamEvent, len(events))",
 				"for _, ev := range events {",
 				"		ch <- ev",
 				"}",
@@ -488,13 +488,13 @@ func outBufNames(importName string) []string {
 }
 
 // GenerateHostAdapter produces the content of gen_host_adapter.go.
-// The generated code creates a durable.HostCalls interface value backed by
-// WASM host imports via durable.NewHostCalls.
+// The generated code creates a cleat.HostCalls interface value backed by
+// WASM host imports via cleat.NewHostCalls.
 func GenerateHostAdapter(pkgName string, usage *UsageInfo) []byte {
 	var buf bytes.Buffer
 
 	buf.WriteString("//go:build wasip1\n\n")
-	buf.WriteString("// Code generated by durable build. DO NOT EDIT.\n\n")
+	buf.WriteString("// Code generated by cleat build. DO NOT EDIT.\n\n")
 	fmt.Fprintf(&buf, "package %s\n\n", pkgName)
 
 	buf.WriteString("import (\n")
@@ -511,14 +511,14 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo) []byte {
 		buf.WriteString("\t\"time\"\n")
 	}
 	buf.WriteString("\n")
-	buf.WriteString("\t\"github.com/rcownie/durable/durable\"\n")
+	buf.WriteString("\t\"github.com/rcownie/cleat/cleat\"\n")
 	buf.WriteString(")\n\n")
 
-	buf.WriteString(`const _durableOutBufSize = 65536
+	buf.WriteString(`const _cleatOutBufSize = 65536
 
-// makeHostCalls creates a durable.HostCalls backed by WASM host imports.
-func makeHostCalls() durable.HostCalls {
-	return durable.NewHostCalls(durable.HostCallsOptions{
+// makeHostCalls creates a cleat.HostCalls backed by WASM host imports.
+func makeHostCalls() cleat.HostCalls {
+	return cleat.NewHostCalls(cleat.HostCallsOptions{
 `)
 
 	for _, hf := range usage.Funcs {
@@ -570,7 +570,7 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 
 	// Allocate output buffers.
 	for _, name := range outBufNames(importName) {
-		fmt.Fprintf(buf, "\t\t\t%s := make([]byte, _durableOutBufSize)\n", name)
+		fmt.Fprintf(buf, "\t\t\t%s := make([]byte, _cleatOutBufSize)\n", name)
 	}
 
 	// Argument setup (stringPtr for input strings, json.Marshal for []string).

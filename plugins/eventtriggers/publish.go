@@ -8,7 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // PublishEvent stores an event, dispatches it to matching subscriptions,

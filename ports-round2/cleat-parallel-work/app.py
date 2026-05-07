@@ -31,7 +31,7 @@ Cleat equivalent pattern::
 import json
 from typing import Optional
 
-from cleat_sdk import HostCalls, durable_entry, ChildResult
+from cleat_sdk import HostCalls, cleat_entry, ChildResult
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ from cleat_sdk import HostCalls, durable_entry, ChildResult
 # ---------------------------------------------------------------------------
 
 
-@durable_entry
+@cleat_entry
 def execute_subtask(h: HostCalls, subtask: str) -> str:
     """Execute a single subtask as an independent child workflow.
 
@@ -48,20 +48,20 @@ def execute_subtask(h: HostCalls, subtask: str) -> str:
 
     On first execution:
       1. Logs the start.
-      2. Calls ``durable_sleep`` to simulate work (triggers suspension).
+      2. Calls ``cleat_sleep`` to simulate work (triggers suspension).
       3. On resume, logs completion and returns the result.
 
     On replay:
       The recorded sleep and result are replayed deterministically.
     """
-    h.durable_log(f"[execute_subtask] Started: {subtask}")
+    h.cleat_log(f"[execute_subtask] Started: {subtask}")
 
     # Simulate variable-duration work with a deterministic sleep.
     # In a real application this would be a call to an external service
-    # via ``h.durable_call("myservice", "DoWork", {"subtask": subtask})``.
-    h.durable_sleep(5000)
+    # via ``h.cleat_call("myservice", "DoWork", {"subtask": subtask})``.
+    h.cleat_sleep(5000)
 
-    h.durable_log(f"[execute_subtask] Completed: {subtask}")
+    h.cleat_log(f"[execute_subtask] Completed: {subtask}")
     return f"{subtask}: DONE"
 
 
@@ -79,7 +79,7 @@ def _aggregate_results(results: list[str]) -> str:
     return ", ".join(results)
 
 
-@durable_entry
+@cleat_entry
 def fan_out_worker(h: HostCalls, task: str) -> str:
     """Fan-out/fan-in worker: split, fan out, fan in, aggregate.
 
@@ -96,33 +96,33 @@ def fan_out_worker(h: HostCalls, task: str) -> str:
     str
         A comma-separated string of aggregated subtask results.
     """
-    h.durable_log(f"[fan_out_worker] Starting with task: {task}")
+    h.cleat_log(f"[fan_out_worker] Starting with task: {task}")
 
     # --- Split (pure, runs locally, no journaling needed) ------------------
     subtasks = [s.strip() for s in task.split(",") if s.strip()]
-    h.durable_log(f"[fan_out_worker] Split into {len(subtasks)} subtask(s)")
+    h.cleat_log(f"[fan_out_worker] Split into {len(subtasks)} subtask(s)")
 
     if not subtasks:
-        h.durable_log("[fan_out_worker] No subtasks to process")
+        h.cleat_log("[fan_out_worker] No subtasks to process")
         return ""
 
     # --- Fan out: start a child workflow for each subtask ------------------
     run_ids: list[str] = []
     for i, subtask in enumerate(subtasks):
-        # The child workflow's ``@durable_entry`` expects a "subtask" key in
+        # The child workflow's ``@cleat_entry`` expects a "subtask" key in
         # the JSON input.  Passing a dict ensures the child workflow function
         # receives ``subtask=<str>`` as a keyword argument.
         run_id = h.child_workflow("execute_subtask", {"subtask": subtask})
         run_ids.append(run_id)
-        h.durable_log(f"[fan_out_worker] Started child[{i}]: {run_id} -> {subtask}")
+        h.cleat_log(f"[fan_out_worker] Started child[{i}]: {run_id} -> {subtask}")
 
     # --- Fan in: wait for ALL child workflows to complete ------------------
     # ``await_all_children`` is the Cleat equivalent of ``restate.gather()``.
     # It blocks until every child in the list has finished, then returns a
     # list of ``ChildResult`` in the same order as *run_ids*.
-    h.durable_log(f"[fan_out_worker] Awaiting {len(run_ids)} children...")
+    h.cleat_log(f"[fan_out_worker] Awaiting {len(run_ids)} children...")
     child_results: list[ChildResult] = h.await_all_children(run_ids)
-    h.durable_log(f"[fan_out_worker] All {len(child_results)} children completed")
+    h.cleat_log(f"[fan_out_worker] All {len(child_results)} children completed")
 
     # --- Collect results, handling errors from individual children ---------
     # ``ChildResult.error`` is ``None`` for successful children and a
@@ -130,7 +130,7 @@ def fan_out_worker(h: HostCalls, task: str) -> str:
     result_strings: list[str] = []
     for i, cr in enumerate(child_results):
         if cr.error:
-            h.durable_log(f"[fan_out_worker] Child[{i}] FAILED: {cr.error}")
+            h.cleat_log(f"[fan_out_worker] Child[{i}] FAILED: {cr.error}")
             result_strings.append(f"ERROR(subtask[{i}]): {cr.error}")
         else:
             # ``cr.result`` is the JSON-encoded return value from the child
@@ -144,7 +144,7 @@ def fan_out_worker(h: HostCalls, task: str) -> str:
 
     # --- Aggregate (pure, runs locally) -----------------------------------
     aggregated = _aggregate_results(result_strings)
-    h.durable_log(f"[fan_out_worker] Aggregated: {aggregated}")
+    h.cleat_log(f"[fan_out_worker] Aggregated: {aggregated}")
     return aggregated
 
 
@@ -153,7 +153,7 @@ def fan_out_worker(h: HostCalls, task: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@durable_entry
+@cleat_entry
 def fan_out_worker_stop_on_error(h: HostCalls, task: str) -> str:
     """Variant that raises on first child failure instead of collecting errors.
 
@@ -165,7 +165,7 @@ def fan_out_worker_stop_on_error(h: HostCalls, task: str) -> str:
     error; it does not cancel the other children (Cleat does not currently
     support child cancellation).
     """
-    h.durable_log(f"[stop_on_error] Starting with task: {task}")
+    h.cleat_log(f"[stop_on_error] Starting with task: {task}")
 
     subtasks = [s.strip() for s in task.split(",") if s.strip()]
     if not subtasks:

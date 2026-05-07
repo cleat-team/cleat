@@ -85,11 +85,11 @@ class HostCalls:
     All operations are durably persisted and replayed on recovery.
 
     Usage:
-        @durable_entry(name="MyWorkflow")
+        @cleat_entry(name="MyWorkflow")
         async def my_workflow(ctx: HostCalls, request: dict):
-            await ctx.durable_log("Starting workflow")
+            await ctx.cleat_log("Starting workflow")
             ctx.set_state("status", "running")
-            result = await ctx.durable_call("other_service", "op", request)
+            result = await ctx.cleat_call("other_service", "op", request)
             return {"result": result}
     """
 
@@ -192,7 +192,7 @@ class HostCalls:
     # Durable service calls
     # ------------------------------------------------------------------
 
-    async def durable_call(
+    async def cleat_call(
         self,
         service: str,
         operation: str,
@@ -219,7 +219,7 @@ class HostCalls:
         # In production, this would call the Cleat runtime to perform
         # the durable invocation.
         logger.info(
-            "durable_call: service=%s, operation=%s, request=%s",
+            "cleat_call: service=%s, operation=%s, request=%s",
             service,
             operation,
             request,
@@ -241,7 +241,7 @@ class HostCalls:
     # Durable timers
     # ------------------------------------------------------------------
 
-    async def durable_sleep(self, ms: int) -> None:
+    async def cleat_sleep(self, ms: int) -> None:
         """Durably sleep for the specified duration.
 
         The sleep is durably recorded. On workflow recovery, the remaining
@@ -250,7 +250,7 @@ class HostCalls:
         Args:
             ms: Sleep duration in milliseconds.
         """
-        logger.info("durable_sleep: %d ms", ms)
+        logger.info("cleat_sleep: %d ms", ms)
         await asyncio.sleep(ms / 1000.0)
 
     # ------------------------------------------------------------------
@@ -371,7 +371,7 @@ class HostCalls:
     # Logging
     # ------------------------------------------------------------------
 
-    def durable_log(self, msg: str) -> None:
+    def cleat_log(self, msg: str) -> None:
         """Persistently log a message that survives workflow recovery.
 
         Args:

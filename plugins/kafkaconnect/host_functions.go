@@ -9,7 +9,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped

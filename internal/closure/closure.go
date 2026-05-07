@@ -1,4 +1,4 @@
-// Package closure computes the transitive closure of durable functions,
+// Package closure computes the transitive closure of cleat functions,
 // validates supported Go constructs, and verifies HostCalls threading.
 package closure
 
@@ -8,14 +8,14 @@ import (
 	"go/types"
 	"strings"
 
-	"github.com/rcownie/durable/internal/analyzer"
-	"github.com/rcownie/durable/internal/callgraph"
+	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/rcownie/cleat/internal/callgraph"
 )
 
-// Compute computes the durable closure: the set of all functions that
-// transitively reach a durable leaf. It annotates each function with
+// Compute computes the cleat closure: the set of all functions that
+// transitively reach a cleat leaf. It annotates each function with
 // its durability tag (DurableLeaf, DurableClosure, or Pure) and
-// validates that durable functions don't use unsupported Go constructs.
+// validates that cleat functions don't use unsupported Go constructs.
 func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 	cr := &Result{
 		DurableLeaves:  make(map[string]bool),
@@ -25,13 +25,13 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 		Warnings:       make(map[string][]ValidationWarning),
 	}
 
-	// Start with durable leaves.
+	// Start with cleat leaves.
 	for name := range cg.DurableLeaves {
 		cr.DurableLeaves[name] = true
 	}
 
 	// Compute transitive closure: any function that calls a function
-	// in the durable closure is itself in the durable closure.
+	// in the cleat closure is itself in the cleat closure.
 	changed := true
 	for changed {
 		changed = false
@@ -83,7 +83,7 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 	result.NumDurableClosure = len(cr.DurableClosure)
 	result.NumPure = len(cr.Pure)
 
-	// Validate supported constructs in all durable functions.
+	// Validate supported constructs in all cleat functions.
 	for _, fd := range result.Funcs {
 		if fd.DurabilityTag == "DurableLeaf" || fd.DurabilityTag == "DurableClosure" {
 			validateConstructs(fd, cr)
@@ -159,7 +159,7 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 			cr.Errors[name] = append(cr.Errors[name], ValidationError{
 				Code:       "E001",
 				FuncName:   name,
-				Message:    "goroutines are not allowed in durable functions",
+				Message:    "goroutines are not allowed in cleat functions",
 				Suggestion: "Use child workflows (h.ChildWorkflow) for parallelism.",
 				Line:       line,
 			})
@@ -172,7 +172,7 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 			cr.Errors[name] = append(cr.Errors[name], ValidationError{
 				Code:       "E002",
 				FuncName:   name,
-				Message:    "channel send operations are not allowed in durable functions",
+				Message:    "channel send operations are not allowed in cleat functions",
 				Suggestion: "Use signals (h.AwaitSignals) instead of channels.",
 				Line:       line,
 			})
@@ -186,7 +186,7 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 				cr.Errors[name] = append(cr.Errors[name], ValidationError{
 					Code:       "E002",
 					FuncName:   name,
-					Message:    "channel receive operations are not allowed in durable functions",
+					Message:    "channel receive operations are not allowed in cleat functions",
 					Suggestion: "Use signals (h.PollSignal) instead of channels.",
 					Line:       line,
 				})
@@ -246,7 +246,7 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 		cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
 			Code:       "E012",
 			FuncName:   funcName,
-			Message:    "close() is not allowed in durable functions",
+			Message:    "close() is not allowed in cleat functions",
 			Suggestion: "Channel operations are non-deterministic; use signals instead.",
 			Line:       line,
 		})
@@ -271,27 +271,27 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 	switch {
 	case pkgPath == "time" && selName == "Now":
 		code, msg, suggestion = "E003",
-			"time.Now() is not allowed in durable functions",
+			"time.Now() is not allowed in cleat functions",
 			"Use h.Now() for deterministic time."
 
 	case pkgPath == "time" && selName == "Sleep":
 		code, msg, suggestion = "E004",
-			"time.Sleep() is not allowed in durable functions",
+			"time.Sleep() is not allowed in cleat functions",
 			"Use h.DurableSleep() instead."
 
 	case pkgPath == "net/http" || strings.HasPrefix(pkgPath, "net/http/"):
 		code, msg, suggestion = "E005",
-			"direct net/http calls are not allowed in durable functions",
+			"direct net/http calls are not allowed in cleat functions",
 			"Use h.DurableCall() with a service name instead."
 
 	case pkgPath == "database/sql":
 		code, msg, suggestion = "E006",
-			"direct database/sql calls are not allowed in durable functions",
+			"direct database/sql calls are not allowed in cleat functions",
 			"Use h.DurableCall() with a service name instead."
 
 	case pkgPath == "math/rand":
 		code, msg, suggestion = "E007",
-			"math/rand calls are not allowed in durable functions",
+			"math/rand calls are not allowed in cleat functions",
 			"Use h.Random() for deterministic randomness."
 	}
 
@@ -328,7 +328,7 @@ func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName 
 	if !ok {
 		return
 	}
-	// Only flag interface types that are NOT durable.HostCalls.
+	// Only flag interface types that are NOT cleat.HostCalls.
 	_, isInterface := tv.Type.Underlying().(*types.Interface)
 	if !isInterface {
 		return
@@ -344,7 +344,7 @@ func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName 
 		Code:       "E008",
 		FuncName:   funcName,
 		Message:    "unresolvable function call through interface dispatch",
-		Suggestion: "Use concrete types or refactor to avoid interface dispatch in durable functions.",
+		Suggestion: "Use concrete types or refactor to avoid interface dispatch in cleat functions.",
 		Line:       line,
 	})
 }
@@ -385,7 +385,7 @@ func checkFuncValueCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 }
 
 // checkForbiddenPackageRef detects references to packages that are forbidden
-// in durable functions (os, reflect).
+// in cleat functions (os, reflect).
 func checkForbiddenPackageRef(sel *ast.SelectorExpr, fd *analyzer.FuncDecl, funcName string, cr *Result, fset *token.FileSet) {
 	pkgIdent, ok := sel.X.(*ast.Ident)
 	if !ok {
@@ -402,11 +402,11 @@ func checkForbiddenPackageRef(sel *ast.SelectorExpr, fd *analyzer.FuncDecl, func
 	switch {
 	case pkgPath == "os":
 		code, msg, suggestion = "E010",
-			"direct os package usage is not allowed in durable functions",
+			"direct os package usage is not allowed in cleat functions",
 			"Use h.DurableCall() with a service name instead of direct OS operations."
 	case pkgPath == "reflect":
 		code, msg, suggestion = "E011",
-			"direct reflect package usage is not allowed in durable functions",
+			"direct reflect package usage is not allowed in cleat functions",
 			"Avoid runtime type introspection; use compile-time generics where possible."
 	}
 

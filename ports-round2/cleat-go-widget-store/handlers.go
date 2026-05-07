@@ -8,7 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // NOTE: handlers.go is provided as a reference for how the original HTTP handlers
@@ -19,7 +19,7 @@ import (
 // The complete port of handlers.go requires the Cleat runtime's
 // workflow-management API (start workflow, send signal, query state),
 // which is available through the host runtime but not through the
-// durabletest.TestEnv. The workflow functions and tests below are
+// cleattest.TestEnv. The workflow functions and tests below are
 // the primary deliverable of this port.
 
 var (
@@ -87,7 +87,7 @@ func restock(c *gin.Context, db *pgxpool.Pool, logger *slog.Logger) {
 // checkoutEndpoint starts the checkout workflow.
 // In the Cleat model, workflows are started via the runtime API.
 // This placeholder shows the intended integration point.
-func checkoutEndpoint(c *gin.Context, h durable.HostCalls, logger *slog.Logger) {
+func checkoutEndpoint(c *gin.Context, h cleat.HostCalls, logger *slog.Logger) {
 	// In production, start the workflow via the Cleat runtime API:
 	//   runID, err := runtime.StartWorkflow("checkoutWorkflow", "")
 	// Then poll for the PAYMENT_ID query state to return to the caller.

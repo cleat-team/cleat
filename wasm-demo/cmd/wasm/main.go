@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"unsafe"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 	"durable-wasm-demo/workflow"
 )
 
@@ -24,7 +24,7 @@ func placeOrder(argsPtr unsafe.Pointer, argsLen uint32) (resultPtr unsafe.Pointe
 		return writeError(err)
 	}
 
-	h := durable.NewHostCalls(durable.HostCallsOptions{
+	h := cleat.NewHostCalls(cleat.HostCallsOptions{
 		DurableCall: func(service, op, request string) (string, error) {
 			return durableCallHost(service, op, request)
 		},

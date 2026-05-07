@@ -9,7 +9,7 @@
 //
 // Build:
 //
-//	durable build -o /tmp/out ./examples/onboarding/
+//	cleat build -o /tmp/out ./examples/onboarding/
 package onboarding
 
 import (
@@ -17,10 +17,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
-var h durable.HostCalls
+var h cleat.HostCalls
 
 // ---- Domain types ----
 
@@ -39,7 +39,7 @@ type Profile struct {
 
 // ---- Entry point ----
 
-func RegisterUser(h durable.HostCalls, input SignupInput) (*Profile, error) {
+func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
 	if input.Email == "" || input.Name == "" {
 		return nil, fmt.Errorf("email and name are required")
 	}
@@ -111,7 +111,7 @@ func RegisterUser(h durable.HostCalls, input SignupInput) (*Profile, error) {
 	return &profile, nil
 }
 
-func handleVerificationTimeout(h durable.HostCalls, userID string, input SignupInput) (*Profile, error) {
+func handleVerificationTimeout(h cleat.HostCalls, userID string, input SignupInput) (*Profile, error) {
 	h.SetQueryState("stage", "timed_out")
 	h.DurableLog(fmt.Sprintf("Verification timed out: user=%s", userID))
 

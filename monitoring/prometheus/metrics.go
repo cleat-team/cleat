@@ -94,7 +94,7 @@ func New(cfg Config) (*Metrics, error) {
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
 	meter := mp.Meter(
-		"github.com/rcownie/durable/monitoring/prometheus",
+		"github.com/rcownie/cleat/monitoring/prometheus",
 		metric.WithInstrumentationVersion("1.0.0"),
 	)
 

@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/durable/internal/auth"
-	"github.com/rcownie/durable/plugins/eventtriggers"
+	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/plugins/eventtriggers"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {

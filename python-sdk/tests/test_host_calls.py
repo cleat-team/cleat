@@ -22,10 +22,10 @@ try:
         SignalResult,
         ChildResult,
         PromiseResult,
-        DurableCallError,
-        DurableCallTransientError,
-        DurableCallPermanentError,
-        DurableCallTimeoutError,
+        CleatCallError,
+        CleatCallTransientError,
+        CleatCallPermanentError,
+        CleatCallTimeoutError,
         INFINITE_TIMEOUT_MS,
     )
     from cleat_sdk.plugins import (
@@ -91,34 +91,34 @@ class TestHostCallsMethodExistence:
     def test_min_version(self, host):
         assert callable(host.min_version)
 
-    def test_durable_log(self, host):
-        assert callable(host.durable_log)
+    def test_cleat_log(self, host):
+        assert callable(host.cleat_log)
 
     def test_log_kv(self, host):
         """log_kv is a structured logging helper."""
         assert callable(host.log_kv)
 
-    def test_durable_sleep(self, host):
-        assert callable(host.durable_sleep)
+    def test_cleat_sleep(self, host):
+        assert callable(host.cleat_sleep)
 
-    def test_durable_call(self, host):
-        assert callable(host.durable_call)
+    def test_cleat_call(self, host):
+        assert callable(host.cleat_call)
 
-    def test_durable_call_typed(self, host):
-        assert callable(host.durable_call_typed)
+    def test_cleat_call_typed(self, host):
+        assert callable(host.cleat_call_typed)
 
-    def test_durable_call_with_retry(self, host):
-        assert callable(host.durable_call_with_retry)
+    def test_cleat_call_with_retry(self, host):
+        assert callable(host.cleat_call_with_retry)
 
-    def test_durable_call_with_heartbeat(self, host):
-        assert callable(host.durable_call_with_heartbeat)
+    def test_cleat_call_with_heartbeat(self, host):
+        assert callable(host.cleat_call_with_heartbeat)
 
-    def test_durable_fetch(self, host):
-        assert callable(host.durable_fetch)
+    def test_cleat_fetch(self, host):
+        assert callable(host.cleat_fetch)
 
-    def test_durable_fetch_json(self, host):
-        """durable_fetch_json is a deserializing fetch wrapper."""
-        assert callable(host.durable_fetch_json)
+    def test_cleat_fetch_json(self, host):
+        """cleat_fetch_json is a deserializing fetch wrapper."""
+        assert callable(host.cleat_fetch_json)
 
     def test_fetch_get(self, host):
         """fetch_get is a GET shorthand."""
@@ -199,8 +199,8 @@ class TestHostCallsMethodExistence:
 
     # --- Lifecycle ---
 
-    def test_durable_defer(self, host):
-        assert callable(host.durable_defer)
+    def test_cleat_defer(self, host):
+        assert callable(host.cleat_defer)
 
     def test_continue_as_new(self, host):
         assert callable(host.continue_as_new)
@@ -214,8 +214,8 @@ class TestHostCallsMethodExistence:
 
     # --- Fire-and-forget / scheduling ---
 
-    def test_durable_send(self, host):
-        assert callable(host.durable_send)
+    def test_cleat_send(self, host):
+        assert callable(host.cleat_send)
 
     def test_schedule_invoke(self, host):
         assert callable(host.schedule_invoke)
@@ -276,14 +276,14 @@ class TestHostCallsNewMethods:
     # --- log_kv ---
 
     def test_log_kv_basic(self, host):
-        """log_kv without kvs just passes through to durable_log."""
-        with mock.patch.object(host, "durable_log") as mock_log:
+        """log_kv without kvs just passes through to cleat_log."""
+        with mock.patch.object(host, "cleat_log") as mock_log:
             host.log_kv("hello")
             mock_log.assert_called_once_with("hello")
 
     def test_log_kv_with_pairs(self, host):
         """log_kv formats key-value pairs."""
-        with mock.patch.object(host, "durable_log") as mock_log:
+        with mock.patch.object(host, "cleat_log") as mock_log:
             host.log_kv("processing order", "order_id", "ord-42", "status", "active")
             mock_log.assert_called_once()
             msg = mock_log.call_args[0][0]
@@ -293,7 +293,7 @@ class TestHostCallsNewMethods:
 
     def test_log_kv_odd_count(self, host):
         """log_kv with odd kvs pairs handles trailing key gracefully."""
-        with mock.patch.object(host, "durable_log") as mock_log:
+        with mock.patch.object(host, "cleat_log") as mock_log:
             host.log_kv("test", "key_only")
             msg = mock_log.call_args[0][0]
             assert "key_only=" in msg  # empty value
@@ -301,8 +301,8 @@ class TestHostCallsNewMethods:
     # --- has_state ---
 
     def test_has_state_delegates(self, host):
-        """has_state delegates to durable_call('state', 'has', ...)."""
-        with mock.patch.object(host, "durable_call", return_value="true") as mock_call:
+        """has_state delegates to cleat_call('state', 'has', ...)."""
+        with mock.patch.object(host, "cleat_call", return_value="true") as mock_call:
             result = host.has_state("my_key")
             mock_call.assert_called_once_with(
                 "state", "has", {"key": "my_key"}
@@ -311,15 +311,15 @@ class TestHostCallsNewMethods:
 
     def test_has_state_false(self, host):
         """has_state returns False when the key does not exist."""
-        with mock.patch.object(host, "durable_call", return_value="false"):
+        with mock.patch.object(host, "cleat_call", return_value="false"):
             assert host.has_state("missing") is False
 
     # --- list_state ---
 
     def test_list_state_delegates(self, host):
-        """list_state delegates to durable_call('state', 'list', ...)."""
+        """list_state delegates to cleat_call('state', 'list', ...)."""
         with mock.patch.object(
-            host, "durable_call", return_value='["k1", "k2"]'
+            host, "cleat_call", return_value='["k1", "k2"]'
         ) as mock_call:
             result = host.list_state("prefix_")
             mock_call.assert_called_once_with("state", "list", {"prefix": "prefix_"})
@@ -328,28 +328,28 @@ class TestHostCallsNewMethods:
     def test_list_state_empty_prefix(self, host):
         """list_state with empty prefix passes an empty filter."""
         with mock.patch.object(
-            host, "durable_call", return_value="[]"
+            host, "cleat_call", return_value="[]"
         ) as mock_call:
             result = host.list_state()
             mock_call.assert_called_once_with("state", "list", {"prefix": ""})
             assert result == []
 
-    # --- durable_fetch_json ---
+    # --- cleat_fetch_json ---
 
-    def test_durable_fetch_json_delegates(self, host):
-        """durable_fetch_json deserializes the response from durable_fetch."""
+    def test_cleat_fetch_json_delegates(self, host):
+        """cleat_fetch_json deserializes the response from cleat_fetch."""
         with mock.patch.object(
-            host, "durable_fetch", return_value=('{"key": "val"}', 200)
+            host, "cleat_fetch", return_value=('{"key": "val"}', 200)
         ):
-            result = host.durable_fetch_json("http://example.com")
+            result = host.cleat_fetch_json("http://example.com")
             assert result == {"key": "val"}
 
     # --- fetch_get ---
 
     def test_fetch_get_delegates(self, host):
-        """fetch_get delegates to durable_fetch with GET."""
+        """fetch_get delegates to cleat_fetch with GET."""
         with mock.patch.object(
-            host, "durable_fetch", return_value=('{"ok": true}', 200)
+            host, "cleat_fetch", return_value=('{"ok": true}', 200)
         ) as mock_fetch:
             result = host.fetch_get("http://example.com")
             mock_fetch.assert_called_once_with("http://example.com", "GET")
@@ -360,7 +360,7 @@ class TestHostCallsNewMethods:
     def test_fetch_get_json_delegates(self, host):
         """fetch_get_json delegates through fetch_get with JSON parsing."""
         with mock.patch.object(
-            host, "durable_fetch", return_value=('{"x": 1}', 200)
+            host, "cleat_fetch", return_value=('{"x": 1}', 200)
         ):
             result = host.fetch_get_json("http://example.com")
             assert result == {"x": 1}
@@ -659,17 +659,17 @@ class TestHostCallsErrorHandling:
             except NotImplementedError as e:
                 raise RuntimeError(str(e)) from e
 
-    def test_durable_log_raises_without_wasm(self, host):
+    def test_cleat_log_raises_without_wasm(self, host):
         with pytest.raises(RuntimeError):
             try:
-                host.durable_log("test")
+                host.cleat_log("test")
             except NotImplementedError as e:
                 raise RuntimeError(str(e)) from e
 
-    def test_durable_sleep_raises(self, host):
+    def test_cleat_sleep_raises(self, host):
         with pytest.raises(RuntimeError):
             try:
-                host.durable_sleep(100)
+                host.cleat_sleep(100)
             except NotImplementedError as e:
                 raise RuntimeError(str(e)) from e
 
@@ -746,54 +746,54 @@ class TestPluginMethodExistence:
 
 
 # ========================================================================
-# DurableCall exception hierarchy (Task 6)
+# CleatCall exception hierarchy (Task 6)
 # ========================================================================
 
 
-class TestDurableCallErrorHierarchy:
-    """Tests for the DurableCall exception hierarchy."""
+class TestCleatCallErrorHierarchy:
+    """Tests for the CleatCall exception hierarchy."""
 
-    def test_durable_call_error_is_runtime_error(self):
-        """DurableCallError inherits from RuntimeError for backward compat."""
-        assert issubclass(DurableCallError, RuntimeError)
-        assert issubclass(DurableCallTransientError, DurableCallError)
-        assert issubclass(DurableCallPermanentError, DurableCallError)
-        assert issubclass(DurableCallTimeoutError, DurableCallTransientError)
+    def test_cleat_call_error_is_runtime_error(self):
+        """CleatCallError inherits from RuntimeError for backward compat."""
+        assert issubclass(CleatCallError, RuntimeError)
+        assert issubclass(CleatCallTransientError, CleatCallError)
+        assert issubclass(CleatCallPermanentError, CleatCallError)
+        assert issubclass(CleatCallTimeoutError, CleatCallTransientError)
 
-    def test_durable_call_error_has_fields(self):
-        """DurableCallError carries service, operation, and call_error_code."""
-        err = DurableCallError("svc", "op", "something broke", call_error_code=3)
+    def test_cleat_call_error_has_fields(self):
+        """CleatCallError carries service, operation, and call_error_code."""
+        err = CleatCallError("svc", "op", "something broke", call_error_code=3)
         assert err.service == "svc"
         assert err.operation == "op"
         assert err.call_error_code == 3
         assert "svc.op" in str(err)
         assert "[3]" in str(err)
 
-    def test_durable_call_transient_error(self):
-        err = DurableCallTransientError("svc", "op", "unavailable", call_error_code=2)
-        assert isinstance(err, DurableCallError)
+    def test_cleat_call_transient_error(self):
+        err = CleatCallTransientError("svc", "op", "unavailable", call_error_code=2)
+        assert isinstance(err, CleatCallError)
         assert isinstance(err, RuntimeError)
 
-    def test_durable_call_permanent_error(self):
-        err = DurableCallPermanentError("svc", "op", "invalid", call_error_code=4)
-        assert isinstance(err, DurableCallError)
+    def test_cleat_call_permanent_error(self):
+        err = CleatCallPermanentError("svc", "op", "invalid", call_error_code=4)
+        assert isinstance(err, CleatCallError)
 
-    def test_durable_call_timeout_error(self):
-        err = DurableCallTimeoutError("svc", "op", "timed out", call_error_code=1)
-        assert isinstance(err, DurableCallError)
-        assert isinstance(err, DurableCallTransientError)
+    def test_cleat_call_timeout_error(self):
+        err = CleatCallTimeoutError("svc", "op", "timed out", call_error_code=1)
+        assert isinstance(err, CleatCallError)
+        assert isinstance(err, CleatCallTransientError)
 
 
 # ========================================================================
-# durable_call timeout parameter (Task 7)
+# cleat_call timeout parameter (Task 7)
 # ========================================================================
 
 
-class TestDurableCallTimeoutParam:
-    """Tests for the timeout_ms parameter on durable_call."""
+class TestCleatCallTimeoutParam:
+    """Tests for the timeout_ms parameter on cleat_call."""
 
-    def test_durable_call_accepts_timeout_ms(self):
-        """durable_call accepts an optional timeout_ms parameter."""
+    def test_cleat_call_accepts_timeout_ms(self):
+        """cleat_call accepts an optional timeout_ms parameter."""
         with mock.patch.object(
             HostCalls, "_marshal", return_value="{}"
         ):
@@ -801,28 +801,28 @@ class TestDurableCallTimeoutParam:
             # verify the method signature accepts the parameter.
             h = HostCalls()
             with pytest.raises(RuntimeError):
-                h.durable_call("svc", "op", {}, timeout_ms=5000)
+                h.cleat_call("svc", "op", {}, timeout_ms=5000)
 
-    def test_durable_call_without_timeout_still_works(self):
-        """durable_call works without the timeout_ms parameter."""
+    def test_cleat_call_without_timeout_still_works(self):
+        """cleat_call works without the timeout_ms parameter."""
         with mock.patch.object(
             HostCalls, "_marshal", return_value="{}"
         ):
             h = HostCalls()
             with pytest.raises(RuntimeError):
-                h.durable_call("svc", "op", {})
+                h.cleat_call("svc", "op", {})
 
-    def test_durable_call_timeout_via_mock(self):
-        """When mocked, durable_call with timeout_ms processes correctly."""
+    def test_cleat_call_timeout_via_mock(self):
+        """When mocked, cleat_call with timeout_ms processes correctly."""
         h = HostCalls()
         h._marshal = mock.Mock(return_value="{}")
         # Make the call go through the non-WASM path (no retry import)
         with mock.patch("cleat_sdk.host_calls._USING_WASM", False):
             with mock.patch(
-                "cleat_sdk.host_calls._import_durable_call",
+                "cleat_sdk.host_calls._import_cleat_call",
                 return_value=0,  # response_len=0, call_error_code=0, err_code=0
             ) as mock_call:
-                result = h.durable_call("svc", "op", {}, timeout_ms=5000)
+                result = h.cleat_call("svc", "op", {}, timeout_ms=5000)
                 # With _USING_WASM=False, the timeout path is skipped
                 mock_call.assert_called_once()
                 assert result == ""

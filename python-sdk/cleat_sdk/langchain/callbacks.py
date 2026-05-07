@@ -2,12 +2,12 @@
 
 Usage::
 
-    from cleat_sdk import HostCalls, durable_entry
+    from cleat_sdk import HostCalls, cleat_entry
     from cleat_sdk.langchain import CleatCallbackHandler
     from langchain.agents import create_openai_functions_agent
     from langchain_openai import ChatOpenAI
 
-    @durable_entry
+    @cleat_entry
     def research_agent(h: HostCalls, topic: str) -> str:
         callback = CleatCallbackHandler(h)
         llm = ChatOpenAI(model="gpt-4o", callbacks=[callback])
@@ -38,7 +38,7 @@ class CleatCallbackHandler:
     h : HostCalls
         The HostCalls instance for the current workflow execution.
     verbose : bool
-        If True, each event is also logged via durable_log for debugging.
+        If True, each event is also logged via cleat_log for debugging.
     """
 
     def __init__(self, h: HostCalls, verbose: bool = False) -> None:
@@ -86,7 +86,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.durable_log(
+            self.h.cleat_log(
                 f"[Cleat] LLM start step={self.step_counter} model={serialized.get('name', '?')}"
             )
 
@@ -116,7 +116,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.durable_log(
+            self.h.cleat_log(
                 f"[Cleat] LLM end step={self.step_counter} elapsed={elapsed:.2f}s"
             )
 
@@ -136,7 +136,7 @@ class CleatCallbackHandler:
             {"run_id": rid, "error": str(error)},
         )
         if self.verbose:
-            self.h.durable_log(f"[Cleat] LLM error step={self.step_counter}: {error}")
+            self.h.cleat_log(f"[Cleat] LLM error step={self.step_counter}: {error}")
 
     def on_llm_new_token(
         self,
@@ -183,7 +183,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.durable_log(
+            self.h.cleat_log(
                 f"[Cleat] Tool start step={self.step_counter} tool={tool_name}"
             )
 
@@ -211,7 +211,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.durable_log(
+            self.h.cleat_log(
                 f"[Cleat] Tool end step={self.step_counter} elapsed={elapsed:.2f}s"
             )
 
@@ -231,7 +231,7 @@ class CleatCallbackHandler:
             {"run_id": rid, "error": str(error)},
         )
         if self.verbose:
-            self.h.durable_log(f"[Cleat] Tool error step={self.step_counter}: {error}")
+            self.h.cleat_log(f"[Cleat] Tool error step={self.step_counter}: {error}")
 
     # ------------------------------------------------------------------
     # Chain callbacks
@@ -262,7 +262,7 @@ class CleatCallbackHandler:
         )
 
         if self.verbose:
-            self.h.durable_log(f"[Cleat] Chain start: {chain_name}")
+            self.h.cleat_log(f"[Cleat] Chain start: {chain_name}")
 
     def on_chain_end(
         self,
@@ -278,7 +278,7 @@ class CleatCallbackHandler:
             elapsed = time.time() - self._chain_starts.pop(rid)
 
         if self.verbose:
-            self.h.durable_log(f"[Cleat] Chain end elapsed={elapsed:.2f}s")
+            self.h.cleat_log(f"[Cleat] Chain end elapsed={elapsed:.2f}s")
 
     def on_chain_error(
         self,
@@ -292,7 +292,7 @@ class CleatCallbackHandler:
         self._chain_starts.pop(rid, None)
 
         if self.verbose:
-            self.h.durable_log(f"[Cleat] Chain error: {error}")
+            self.h.cleat_log(f"[Cleat] Chain error: {error}")
 
     # ------------------------------------------------------------------
     # Agent callbacks
@@ -323,7 +323,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.durable_log(
+            self.h.cleat_log(
                 f"[Cleat] Agent action step={self.step_counter} tool={tool}"
             )
 
@@ -345,7 +345,7 @@ class CleatCallbackHandler:
             {"output": str(output)[:5000], "step": self.step_counter},
         )
         if self.verbose:
-            self.h.durable_log(f"[Cleat] Agent finished step={self.step_counter}")
+            self.h.cleat_log(f"[Cleat] Agent finished step={self.step_counter}")
 
     # ------------------------------------------------------------------
     # Retriever callbacks

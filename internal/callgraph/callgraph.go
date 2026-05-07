@@ -1,5 +1,5 @@
 // Package callgraph builds a directed graph of function calls within
-// user packages and identifies durable leaves (functions that directly
+// user packages and identifies cleat leaves (functions that directly
 // call HostCalls methods).
 package callgraph
 
@@ -8,7 +8,7 @@ import (
 	"go/ast"
 	"go/types"
 
-	"github.com/rcownie/durable/internal/analyzer"
+	"github.com/rcownie/cleat/internal/analyzer"
 )
 
 // Graph represents the directed call graph of functions.
@@ -66,7 +66,7 @@ func Build(result *analyzer.AnalysisResult) (*Graph, error) {
 		}
 	}
 
-	// Identify durable leaves (functions calling HostCalls methods).
+	// Identify cleat leaves (functions calling HostCalls methods).
 	for _, fd := range result.Funcs {
 		if hasHostCallsCall(fd) {
 			fqname := fd.FullyQualifiedName()
@@ -159,6 +159,6 @@ func (g *Graph) NumEdges() int {
 
 // String returns a human-readable summary.
 func (g *Graph) String() string {
-	return fmt.Sprintf("Call graph: %d functions, %d edges, %d durable leaves",
+	return fmt.Sprintf("Call graph: %d functions, %d edges, %d cleat leaves",
 		len(g.Calls), g.NumEdges(), len(g.DurableLeaves))
 }

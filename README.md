@@ -1,27 +1,27 @@
 # cleat
 
-A durable execution framework for Go and Rust. Workflows are written in near-standard Go (or Rust with `#[durable_entry]`), compiled to WebAssembly, and stored in PostgreSQL. The framework handles replay, checkpointing, failover, and observability with minimal developer overhead. Includes an embedded Svelte web UI for workflow monitoring and schedule management.
+A cleat execution framework for Go and Rust. Workflows are written in near-standard Go (or Rust with `#[cleat_entry]`), compiled to WebAssembly, and stored in PostgreSQL. The framework handles replay, checkpointing, failover, and observability with minimal developer overhead. Includes an embedded Svelte web UI for workflow monitoring and schedule management.
 
 ## Installation
 
 ### From source
 
 ```bash
-git clone https://github.com/rcownie/durable.git
-cd durable
+git clone https://github.com/rcownie/cleat.git
+cd cleat
 
 # CLI tools
-go install ./cmd/durable           # durable build/vet/deploy/versions/rollback
-go install ./cmd/durable-worker/   # production worker daemon
-go install ./cmd/durable-gen/      # typed client code generator
+go install ./cmd/cleat           # cleat build/vet/deploy/versions/rollback
+go install ./cmd/cleat-worker/   # production worker daemon
+go install ./cmd/cleat-gen/      # typed client code generator
 ```
 
 ### go install
 
 ```bash
-go install github.com/rcownie/durable/cmd/durable@latest
-go install github.com/rcownie/durable/cmd/durable-worker@latest
-go install github.com/rcownie/durable/cmd/durable-gen@latest
+go install github.com/rcownie/cleat/cmd/cleat@latest
+go install github.com/rcownie/cleat/cmd/cleat-worker@latest
+go install github.com/rcownie/cleat/cmd/cleat-gen@latest
 ```
 
 ### Dependencies
@@ -34,7 +34,7 @@ go install github.com/rcownie/durable/cmd/durable-gen@latest
 
 ## Quick start
 
-The following is a complete workflow example from `testdata/basic/order.go`. It models an order-processing pipeline with nested durable calls and compensation logic.
+The following is a complete workflow example from `testdata/basic/order.go`. It models an order-processing pipeline with nested cleat calls and compensation logic.
 
 ```go
 package basic
@@ -42,7 +42,7 @@ package basic
 import (
     "encoding/json"
     "fmt"
-    "github.com/rcownie/durable/durable"
+    "github.com/rcownie/cleat/cleat"
 )
 
 type CartItem struct {
@@ -50,7 +50,7 @@ type CartItem struct {
     Quantity int    `json:"quantity"`
 }
 
-func PlaceOrder(h durable.HostCalls, userID string, cart []CartItem) (string, error) {
+func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, error) {
     if len(cart) == 0 {
         return "", fmt.Errorf("cart is empty")
     }
@@ -82,24 +82,24 @@ Build and deploy:
 
 ```bash
 # 1. Compile the workflow package to WASM (Go)
-durable build -o ./out ./testdata/basic/
+cleat build -o ./out ./testdata/basic/
 
 # 2. Compile a Rust workflow
-durable build --target rust -o ./out ./examples/rust-workflow/
+cleat build --target rust -o ./out ./examples/rust-workflow/
 
 # 3. Validate without compiling
-durable vet ./testdata/basic/
+cleat vet ./testdata/basic/
 
 # 4. Deploy to PostgreSQL
-durable deploy --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
+cleat deploy --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
     --name place_order ./out/place_order.wasm
 
 # 5. Run the worker with the web UI
-durable-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
+cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
     --api-addr :8080
 
 # 6. Manage cron schedules
-durable schedule add hourly-report --cron "0 * * * *" --def place_order
+cleat schedule add hourly-report --cron "0 * * * *" --def place_order
 
 # 7. Run SDK and unit tests
 go test ./...
@@ -109,7 +109,7 @@ go test ./...
 
 ```
 +------------------+         +-------------------+         +-----------------+
-|  Workflow Author  |         |  CLI (durable)    |         |  PostgreSQL     |
+|  Workflow Author  |         |  CLI (cleat)    |         |  PostgreSQL     |
 |  (Go / Rust)      | ------> |  build / vet /    | ------> |  workflow_defs  |
 |                   |         |  deploy / schedule|         |  (WASM blobs)   |
 +------------------+         +-------------------+         +-----------------+
@@ -141,7 +141,7 @@ The CLI's `build` command runs a five-stage pipeline:
 
 1. **analyzer.Load** -- loads Go packages via `go/packages`, parses AST, resolves types, identifies exported functions as entry points.
 2. **callgraph.Build** -- builds a static call graph of the target package using the `callgraph` package.
-3. **closure.Compute** -- computes the durable closure: the set of functions reachable from entry points that make `HostCalls`. Validates that every path through the closure passes `HostCalls` correctly.
+3. **closure.Compute** -- computes the cleat closure: the set of functions reachable from entry points that make `HostCalls`. Validates that every path through the closure passes `HostCalls` correctly.
 4. **transform** -- rewrites source files: adds `HostCalls` parameters to functions that need them (auto-threading), inserts import statements, generates WASM export wrappers.
 5. **wasm.Compile** -- generates WASM import declarations, host adapter code, and compiles to `wasip1` binary. Supports both `go` (standard toolchain) and `tinygo` targets.
 
@@ -149,25 +149,25 @@ The CLI's `build` command runs a five-stage pipeline:
 
 The host runtime uses **wazero** (a zero-dependency WebAssembly runtime for Go) to execute compiled WASM modules. Execution follows a checkpoint/replay model:
 
-- WASM modules import 15 host functions from the `env` module (e.g., `durable_call`, `durable_sleep`, `durable_now`, `durable_call_heartbeat`).
+- WASM modules import 15 host functions from the `env` module (e.g., `cleat_call`, `cleat_sleep`, `cleat_now`, `cleat_call_heartbeat`).
 - On first execution, the host runs the entry point, records every `DurableCall` request/response in the event history, and persists state to PostgreSQL.
 - On replay (e.g., after a worker crash or suspension), the host replays the event history. Completed calls return cached responses instead of re-executing. The workflow resumes from the last incomplete step.
 
 ### Worker Daemon
 
-The worker (`durable-worker`) polls PostgreSQL for runnable workflow instances using `SELECT ... FOR UPDATE SKIP LOCKED`. Each claimed instance loads its WASM module and event history, replays or executes the workflow, then persists new events. Workers are stateless and can be horizontally scaled.
+The worker (`cleat-worker`) polls PostgreSQL for runnable workflow instances using `SELECT ... FOR UPDATE SKIP LOCKED`. Each claimed instance loads its WASM module and event history, replays or executes the workflow, then persists new events. Workers are stateless and can be horizontally scaled.
 
 ### WASM Boundary
 
 The WASM boundary is defined by 15 host function imports on the `env` module:
 
-`durable_call`, `durable_call_heartbeat`, `durable_sleep`, `durable_now`, `durable_random`, `durable_log`, `durable_version`, `durable_min_version`, `durable_defer`, `durable_poll_cancellation`, `durable_poll_signal`, `durable_continue_as_new`, `durable_child_workflow`, `durable_await_child`, `durable_await_signals`, `set_query_state`
+`cleat_call`, `cleat_call_heartbeat`, `cleat_sleep`, `cleat_now`, `cleat_random`, `cleat_log`, `cleat_version`, `cleat_min_version`, `cleat_defer`, `cleat_poll_cancellation`, `cleat_poll_signal`, `cleat_continue_as_new`, `cleat_child_workflow`, `cleat_await_child`, `cleat_await_signals`, `set_query_state`
 
 Strings cross the boundary through a pointer+length protocol: the caller writes string data into the module's linear memory at a scratch region (10 MB offset) and passes `(ptr, len)` pairs. Responses are written back to the same region. The output buffer is 64 KB by default.
 
 ## SDK API overview
 
-The SDK provides a single import -- `durable.HostCalls` -- which is passed as the first parameter to entry point functions. All external interactions go through this interface, enabling deterministic replay.
+The SDK provides a single import -- `cleat.HostCalls` -- which is passed as the first parameter to entry point functions. All external interactions go through this interface, enabling deterministic replay.
 
 ### HostCalls interface (key methods)
 
@@ -191,10 +191,10 @@ type HostCalls interface {
 
 `DurableCallTyped` marshals request structs to JSON and unmarshals responses automatically, eliminating magic strings and manual JSON handling. It is the recommended way to call services.
 
-### PlaceOrder (basic durable calls)
+### PlaceOrder (basic cleat calls)
 
 ```go
-func PlaceOrder(h durable.HostCalls, input string) error {
+func PlaceOrder(h cleat.HostCalls, input string) error {
     items, _ := h.DurableCall("inventory", "CheckAvailability", input)
     payment, _ := h.DurableCall("payments", "Charge", items)
     h.DurableCall("notify", "SendConfirmation", payment)
@@ -207,7 +207,7 @@ Each `DurableCall` records the request and response in the event history. On rep
 ### Saga (compensating transactions)
 
 ```go
-func CreateOrder(h durable.HostCalls, input string) error {
+func CreateOrder(h cleat.HostCalls, input string) error {
     defer h.DurableDeferFunc(func() {
         // Compensate on any failure.
         h.DurableCall("inventory", "ReleaseReservation", "order-123")
@@ -221,10 +221,10 @@ func CreateOrder(h durable.HostCalls, input string) error {
 
 `DurableDefer` runs the compensation block if the function returns an error. If the function succeeds, the deferred block is skipped. On replay, the compensation is not re-executed if it already ran.
 
-For structured multi-step compensation, use `durable.NewSaga()`:
+For structured multi-step compensation, use `cleat.NewSaga()`:
 
 ```go
-s := durable.NewSaga()
+s := cleat.NewSaga()
 s.AddStep("charge", chargeFn, refundFn)
 s.AddStep("assign_driver", assignFn, releaseFn)
 if err := s.Run(h); err != nil {
@@ -257,7 +257,7 @@ Usage examples:
 
 ```go
 // Using the field directly:
-policy := durable.RetryPolicy{
+policy := cleat.RetryPolicy{
     MaxAttempts:        5,
     InitialInterval:    1 * time.Second,
     BackoffCoefficient: 2.0,
@@ -265,11 +265,11 @@ policy := durable.RetryPolicy{
 }
 
 // Using DefaultRetryPolicy():
-policy := durable.DefaultRetryPolicy()
+policy := cleat.DefaultRetryPolicy()
 
 // Passing to a call:
 result, err := h.DurableCallWithOptions(
-    durable.CallOptions{Retry: &policy},
+    cleat.CallOptions{Retry: &policy},
     "service", "Op", requestJSON,
 )
 ```
@@ -292,10 +292,10 @@ h.DurableDeferFunc(func() {
 })
 ```
 
-For multi-step compensation, use `durable.NewSaga()` (defined in `durable/runtime.go`) instead of chaining multiple defers:
+For multi-step compensation, use `cleat.NewSaga()` (defined in `cleat/runtime.go`) instead of chaining multiple defers:
 
 ```go
-s := durable.NewSaga()
+s := cleat.NewSaga()
 s.AddStep("charge", chargeFn, refundFn)
 s.AddStep("assign_driver", assignFn, releaseFn)
 if err := s.Run(h); err != nil {
@@ -310,7 +310,7 @@ The Saga provides structured, ordered compensation with typed result collection 
 Per-call timeouts via `CallOptions.Timeout` are defined in the SDK but **not yet enforced on the host side** during WASM execution:
 
 ```go
-opts := durable.CallOptions{
+opts := cleat.CallOptions{
     Timeout: 30 * time.Second,
     Retry:   &policy,
 }
@@ -337,31 +337,31 @@ Host-side timeout enforcement is on the roadmap.
 
 ### Multi-export WASM modules (Go)
 
-A single Go package can export multiple workflow entry points. The transformer pipeline generates a WASM export for each exported (capitalized) function that accepts `durable.HostCalls` as its first parameter:
+A single Go package can export multiple workflow entry points. The transformer pipeline generates a WASM export for each exported (capitalized) function that accepts `cleat.HostCalls` as its first parameter:
 
 ```go
 // assembly/myworkflows.go
 package myworkflows
 
-func PlaceOrder(h durable.HostCalls, input string) error {
+func PlaceOrder(h cleat.HostCalls, input string) error {
     // ...
 }
 
-func CancelOrder(h durable.HostCalls, input string) error {
+func CancelOrder(h cleat.HostCalls, input string) error {
     // ...
 }
 
-func GetOrderStatus(h durable.HostCalls, input string) error {
+func GetOrderStatus(h cleat.HostCalls, input string) error {
     // ...
 }
 ```
 
-Compiled with `durable build`, each function becomes a named WASM export. The host dispatches workflow invocations by matching the called workflow name to the function name. WASM exports are named after the Go function names. There is no decorator required -- any exported function accepting `HostCalls` as its first parameter is automatically treated as an entry point.
+Compiled with `cleat build`, each function becomes a named WASM export. The host dispatches workflow invocations by matching the called workflow name to the function name. WASM exports are named after the Go function names. There is no decorator required -- any exported function accepting `HostCalls` as its first parameter is automatically treated as an entry point.
 
 ### Signals (external events)
 
 ```go
-func WaitForPayment(h durable.HostCalls, input string) error {
+func WaitForPayment(h cleat.HostCalls, input string) error {
     h.DurableCall("payments", "CreateInvoice", input)
     result, _ := h.AwaitSignals("payment_received")
     h.DurableCall("fulfillment", "ShipOrder", result)
@@ -373,16 +373,16 @@ func WaitForPayment(h durable.HostCalls, input string) error {
 
 ### Auto-threading
 
-Helper functions in the call path automatically receive `h durable.HostCalls` through the transformer's auto-threading pass rather than requiring manual propagation:
+Helper functions in the call path automatically receive `h cleat.HostCalls` through the transformer's auto-threading pass rather than requiring manual propagation:
 
 ```go
-func PlaceOrder(h durable.HostCalls, input string) error {
+func PlaceOrder(h cleat.HostCalls, input string) error {
     return processOrder(h, input)  // h is auto-threaded
 }
 
-// The transformer adds h durable.HostCalls as the first parameter
-// and threads it through to called durable leaves.
-func processOrder(h durable.HostCalls, input string) error {
+// The transformer adds h cleat.HostCalls as the first parameter
+// and threads it through to called cleat leaves.
+func processOrder(h cleat.HostCalls, input string) error {
     h.DurableCall("inventory", "Check", input)
     return nil
 }
@@ -393,7 +393,7 @@ func processOrder(h durable.HostCalls, input string) error {
 ```go
 // PollUntil repeatedly checks a condition at the given interval until a
 // deadline is exceeded.
-status, err := durable.PollUntil(h, 30*time.Second, 30*time.Minute,
+status, err := cleat.PollUntil(h, 30*time.Second, 30*time.Minute,
     func() (string, error) {
         return checkPickupStatus(driverID)
     },
@@ -403,93 +403,93 @@ status, err := durable.PollUntil(h, 30*time.Second, 30*time.Minute,
 
 ## CLI Reference
 
-All commands are available through the `durable` binary.
+All commands are available through the `cleat` binary.
 
-### durable build
+### cleat build
 
 Analyze and compile a workflow package to WASM.
 
 ```
-durable build [-o <dir>] [--target <target>] <package>
+cleat build [-o <dir>] [--target <target>] <package>
 
 Flags:
   -o <dir>        Output directory for generated files (default: temp dir)
   --target        Compilation target: "go" (default), "tinygo", or "rust"
 ```
 
-The pipeline loads the package, analyzes call graphs, computes durable closures, verifies HostCalls threading, generates WASM imports/exports and host adapters, and compiles to a `wasip1` binary.
+The pipeline loads the package, analyzes call graphs, computes cleat closures, verifies HostCalls threading, generates WASM imports/exports and host adapters, and compiles to a `wasip1` binary.
 
-### durable vet
+### cleat vet
 
 Validate a workflow package without compiling to WASM.
 
 ```
-durable vet <package>
+cleat vet <package>
 ```
 
-Reports entry points, durable leaf functions, threading errors, closure errors, and warnings. Exits with code 1 if any errors are found.
+Reports entry points, cleat leaf functions, threading errors, closure errors, and warnings. Exits with code 1 if any errors are found.
 
-### durable deploy
+### cleat deploy
 
 Upload a compiled WASM workflow to PostgreSQL.
 
 ```
-durable deploy [--name <name>] [--namespace <ns>] <wasm-file>
+cleat deploy [--name <name>] [--namespace <ns>] <wasm-file>
 
 Flags:
   --name <name>      Workflow name (derived from filename if not set)
   --namespace <ns>   Namespace (default: "default")
 
 Common flags:
-  --db <connstr>     PostgreSQL connection string (or DURABLE_DATABASE_URL env)
+  --db <connstr>     PostgreSQL connection string (or CLEAT_DATABASE_URL env)
 ```
 
-Without `--db` or `DURABLE_DATABASE_URL`, performs a dry run that prints what would be deployed.
+Without `--db` or `CLEAT_DATABASE_URL`, performs a dry run that prints what would be deployed.
 
-### durable versions
+### cleat versions
 
 List all deployed versions of a workflow, latest first.
 
 ```
-durable versions <workflow-name>
+cleat versions <workflow-name>
 
 Requires:
-  --db <connstr>   or DURABLE_DATABASE_URL env
+  --db <connstr>   or CLEAT_DATABASE_URL env
 ```
 
-### durable rollback
+### cleat rollback
 
 Set the active version for new workflow instances.
 
 ```
-durable rollback <workflow-name> <version>
+cleat rollback <workflow-name> <version>
 
 Requires:
-  --db <connstr>   or DURABLE_DATABASE_URL env
+  --db <connstr>   or CLEAT_DATABASE_URL env
 ```
 
 Confirms the version exists and reports that new instances will use the specified version.
 
-### durable-gen
+### cleat-gen
 
-Generate typed client wrappers for durable service calls.
+Generate typed client wrappers for cleat service calls.
 
 ```
-durable-gen client [-o <file>] [-service <name>] [-p <package>] <spec-dir>
+cleat-gen client [-o <file>] [-service <name>] [-p <package>] <spec-dir>
 ```
 
 The spec directory contains Go files with request/response structs and a `Client` interface. The generator produces a concrete implementation using `DurableCallTyped`.
 
 ## Worker deployment
 
-The `durable-worker` daemon polls PostgreSQL for runnable workflow instances and drives execution.
+The `cleat-worker` daemon polls PostgreSQL for runnable workflow instances and drives execution.
 
 ```bash
 # Run with default settings
-durable-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable"
+cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable"
 
 # With explicit concurrency and heartbeat
-durable-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
+cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
     --concurrency 20 \
     --heartbeat 10s \
     --poll 250ms
@@ -519,7 +519,7 @@ durable-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
 
 ### Concurrency and scaling
 
-Workers are stateless and horizontally scalable. Multiple `durable-worker` instances can run concurrently against the same database -- `SKIP LOCKED` ensures each workflow instance is claimed by exactly one worker. Set `--concurrency` based on available CPU and the workload's I/O profile.
+Workers are stateless and horizontally scalable. Multiple `cleat-worker` instances can run concurrently against the same database -- `SKIP LOCKED` ensures each workflow instance is claimed by exactly one worker. Set `--concurrency` based on available CPU and the workload's I/O profile.
 
 ### Heartbeat monitoring
 
@@ -561,7 +561,7 @@ psql -U postgres -d cleat -f schema.sql
 | error_msg | TEXT | Error message (if failed) |
 | cancellation_requested | BOOLEAN | Whether cancellation has been requested |
 
-**event_history** -- ordered list of every durable call, sleep, signal, defer, and child workflow event.
+**event_history** -- ordered list of every cleat call, sleep, signal, defer, and child workflow event.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -594,7 +594,7 @@ psql -U postgres -d cleat -f schema.sql
 
 ## Testing workflows
 
-The `durabletest` package provides a `TestEnv` that simulates the host runtime without compiling to WASM. It replaces all host function calls with configurable stubs and a deterministic simulated clock.
+The `cleattest` package provides a `TestEnv` that simulates the host runtime without compiling to WASM. It replaces all host function calls with configurable stubs and a deterministic simulated clock.
 
 ### Full test example
 
@@ -603,15 +603,15 @@ package myworkflow_test
 
 import (
     "testing"
-    "github.com/rcownie/durable/durable"
-    "github.com/rcownie/durable/durable/durabletest"
+    "github.com/rcownie/cleat/cleat"
+    "github.com/rcownie/cleat/cleat/cleattest"
 )
 
 func TestPlaceOrder_Success(t *testing.T) {
-    env := durabletest.NewTestEnv()
+    env := cleattest.NewTestEnv()
     defer env.Reset()
 
-    // Register stubs for all durable calls the workflow will make.
+    // Register stubs for all cleat calls the workflow will make.
     env.OnCall("inventory", "Reserve", nil).
         ReturnJSON(map[string]interface{}{
             "reservation_id": "resv_abc123",
@@ -647,7 +647,7 @@ func TestPlaceOrder_Success(t *testing.T) {
 }
 
 func TestPlaceOrder_Error_Compensation(t *testing.T) {
-    env := durabletest.NewTestEnv()
+    env := cleattest.NewTestEnv()
     defer env.Reset()
 
     // Payment succeeds but fulfillment fails -- compensation should run.
@@ -703,22 +703,22 @@ Using `TestEnv` avoids the full WASM compilation cycle (seconds, not millisecond
 
 ### Done
 
-- Go transformer pipeline (`durable build`) — analysis, call graph, closure, transform, WASM compile
-- Rust transformer pipeline (`durable build --target rust`) — `durable-sdk` crate + `#[durable_entry]` proc-macro
-- Timers/sleep, retry policies, server-side retry (`durable_call_retry`)
+- Go transformer pipeline (`cleat build`) — analysis, call graph, closure, transform, WASM compile
+- Rust transformer pipeline (`cleat build --target rust`) — `cleat-sdk` crate + `#[cleat_entry]` proc-macro
+- Timers/sleep, retry policies, server-side retry (`cleat_call_retry`)
 - Signals/external events, workflow cancellation
 - DurableDefer, Saga (compensating transactions)
 - Child workflows, ContinueAsNew
-- Testing framework (`durabletest.TestEnv`) — WASM-free, deterministic clock
-- Dev mode (`durable dev`) — WASM-free local execution
+- Testing framework (`cleattest.TestEnv`) — WASM-free, deterministic clock
+- Dev mode (`cleat dev`) — WASM-free local execution
 - Dead letter queue
 - Queries (`SetQueryState` + `GET /api/workflows/:id/query?key=X`)
-- Cron scheduling (`durable schedule` CLI + REST API)
+- Cron scheduling (`cleat schedule` CLI + REST API)
 - Activity heartbeating (`DurableCallWithHeartbeat`)
 - Namespace isolation (`--namespace` flag)
 - Prometheus metrics (`/metrics`)
 - Svelte web UI (dashboard, workflow list/detail, schedule management)
-- Typed client code generator (`durable-gen`)
+- Typed client code generator (`cleat-gen`)
 
 ### Next
 

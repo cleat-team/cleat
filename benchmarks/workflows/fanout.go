@@ -1,7 +1,7 @@
 package workflows
 
 import (
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // FanOutInput configures the fan-out workflow.
@@ -24,7 +24,7 @@ type FanOutOutput struct {
 // Equivalent Temporal workflow: a parent workflow that starts N child
 // workflows and collects results. Equivalent DBOS: a parent workflow that
 // spawns N child workflows and awaits completion.
-func FanOutWorkflow(h durable.HostCalls, input FanOutInput) (FanOutOutput, error) {
+func FanOutWorkflow(h cleat.HostCalls, input FanOutInput) (FanOutOutput, error) {
 	runIDs := make([]string, 0, input.Children)
 	for i := 0; i < input.Children; i++ {
 		runID, err := h.ChildWorkflow("noop_child", `{}`)
@@ -43,7 +43,7 @@ func FanOutWorkflow(h durable.HostCalls, input FanOutInput) (FanOutOutput, error
 
 // NoopChild is a trivial child workflow used by FanOutWorkflow. It performs
 // a single durable call and returns immediately.
-func NoopChild(h durable.HostCalls, inputJSON string) (string, error) {
+func NoopChild(h cleat.HostCalls, inputJSON string) (string, error) {
 	if _, err := h.DurableCall("bench", "noop", `{}`); err != nil {
 		return `{"error":"call_failed"}`, err
 	}

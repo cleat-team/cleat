@@ -9,7 +9,7 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/rcownie/durable/internal/host"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // testStore returns a *sql.DB and a PostgresStore for tests.
@@ -19,7 +19,7 @@ func testStore(t *testing.T, taskQueues ...string) (*sql.DB, *host.PostgresStore
 	if testing.Short() {
 		t.Skip("Skipping cluster test in short mode")
 	}
-	dsn := os.Getenv("DURABLE_TEST_DB")
+	dsn := os.Getenv("CLEAT_TEST_DB")
 	if dsn == "" {
 		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
 	}

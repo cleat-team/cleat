@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/rcownie/durable/durable"
-	"github.com/rcownie/durable/internal/plugin"
+	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // Task represents a single node in the DAG.
@@ -26,7 +26,7 @@ type Task struct {
 
 // TaskContext provides the task with HostCalls and access to parent outputs.
 type TaskContext struct {
-	H            durable.HostCalls
+	H            cleat.HostCalls
 	Input        interface{}
 	ParentOutput func(parentName string) (string, error)
 }
@@ -71,7 +71,7 @@ func (d *DAG) Output(name string) (string, bool) {
 
 // Execute runs the DAG using the provided HostCalls and input.
 // It delegates to ExecuteWithOptions with default options.
-func (d *DAG) Execute(h durable.HostCalls, input interface{}) error {
+func (d *DAG) Execute(h cleat.HostCalls, input interface{}) error {
 	return d.ExecuteWithOptions(h, input, ExecuteOptions{})
 }
 
@@ -84,7 +84,7 @@ func (d *DAG) Execute(h durable.HostCalls, input interface{}) error {
 // are started concurrently, limited by the semaphore to at most MaxParallelism
 // concurrent calls. When MaxParallelism is 0, all ChildWorkflow calls are
 // made sequentially before AwaitAllChildren is called.
-func (d *DAG) ExecuteWithOptions(h durable.HostCalls, input interface{}, opts ExecuteOptions) error {
+func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts ExecuteOptions) error {
 	if err := d.validate(); err != nil {
 		return err
 	}
@@ -121,7 +121,7 @@ func (d *DAG) ExecuteWithOptions(h durable.HostCalls, input interface{}, opts Ex
 }
 
 // startLevel dispatches to sequential or parallel level start based on opts.
-func (d *DAG) startLevel(h durable.HostCalls, input interface{}, level []*Task, opts ExecuteOptions) ([]string, []*Task, error) {
+func (d *DAG) startLevel(h cleat.HostCalls, input interface{}, level []*Task, opts ExecuteOptions) ([]string, []*Task, error) {
 	if opts.MaxParallelism > 0 {
 		return d.startLevelParallel(h, input, level, opts.MaxParallelism)
 	}
@@ -129,7 +129,7 @@ func (d *DAG) startLevel(h durable.HostCalls, input interface{}, level []*Task, 
 }
 
 // startLevelSequential starts all tasks in the level one at a time.
-func (d *DAG) startLevelSequential(h durable.HostCalls, input interface{}, level []*Task) ([]string, []*Task, error) {
+func (d *DAG) startLevelSequential(h cleat.HostCalls, input interface{}, level []*Task) ([]string, []*Task, error) {
 	var runIDs []string
 	var levelTasks []*Task
 
@@ -152,7 +152,7 @@ func (d *DAG) startLevelSequential(h durable.HostCalls, input interface{}, level
 
 // startLevelParallel starts all tasks in the level concurrently, limiting
 // concurrency with a buffered-channel semaphore.
-func (d *DAG) startLevelParallel(h durable.HostCalls, input interface{}, level []*Task, maxParallelism int) ([]string, []*Task, error) {
+func (d *DAG) startLevelParallel(h cleat.HostCalls, input interface{}, level []*Task, maxParallelism int) ([]string, []*Task, error) {
 	sem := make(chan struct{}, maxParallelism)
 
 	type levelItem struct {

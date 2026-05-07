@@ -411,7 +411,7 @@ awaits the child's completion. Children are recovered automatically at
    No compile-time check that the child exists or has the right signature.
    Temporal and DBOS pass actual function/class references. **Fix: Add a
    typed child workflow registry or accept `interface{}` with runtime type
-   checking in `durable-gen`.**
+   checking in `cleat-gen`.**
 
 3. **`AwaitChild` is sequential per-child in the loop.** You can't
    `Promise.all`-style await all children simultaneously. Each `AwaitChild`
@@ -442,7 +442,7 @@ awaits the child's completion. Children are recovered automatically at
    deploys your workflows. Cleat requires a separate worker process.
    This is architecturally cleaner (independent scaling) but adds
    operational complexity for simple use cases. The `--api-addr` web UI
-   partially bridges this gap. **Consider: a `durable run --embedded`
+   partially bridges this gap. **Consider: a `cleat run --embedded`
    mode that runs workflows in-process for single-binary deployments.**
 
 ### Improvements to Action

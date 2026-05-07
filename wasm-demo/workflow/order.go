@@ -1,7 +1,7 @@
 // Package workflow defines the order processing workflow.
 //
 // The developer writes this in near-standard Go. All external interactions
-// go through the durable.HostCalls interface. The code transformer:
+// go through the cleat.HostCalls interface. The code transformer:
 //
 //  1. Parses this file with go/parser
 //  2. Identifies calls that need durability (anything using HostCalls)
@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // Domain types — ordinary Go structs.
@@ -47,7 +47,7 @@ type PaymentMethod struct {
 }
 
 // PlaceOrder is the top-level workflow entry point.
-func PlaceOrder(h durable.HostCalls, userID string, cart []CartItem) (string, error) {
+func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, error) {
 	if len(cart) == 0 {
 		return "", fmt.Errorf("cart is empty")
 	}
@@ -74,7 +74,7 @@ func PlaceOrder(h durable.HostCalls, userID string, cart []CartItem) (string, er
 	return trackingID, nil
 }
 
-func validateAndReserve(h durable.HostCalls, userID string, cart []CartItem) (Reservation, error) {
+func validateAndReserve(h cleat.HostCalls, userID string, cart []CartItem) (Reservation, error) {
 	for _, item := range cart {
 		if err := checkItemAvailability(h, item.SKU); err != nil {
 			return Reservation{}, fmt.Errorf("item %s unavailable: %w", item.SKU, err)
@@ -83,7 +83,7 @@ func validateAndReserve(h durable.HostCalls, userID string, cart []CartItem) (Re
 	return reserveInventory(h, userID, cart)
 }
 
-func checkItemAvailability(h durable.HostCalls, sku string) error {
+func checkItemAvailability(h cleat.HostCalls, sku string) error {
 	type lookupReq struct {
 		SKU string `json:"sku"`
 	}
@@ -99,7 +99,7 @@ func checkItemAvailability(h durable.HostCalls, sku string) error {
 	return nil
 }
 
-func reserveInventory(h durable.HostCalls, userID string, items []CartItem) (Reservation, error) {
+func reserveInventory(h cleat.HostCalls, userID string, items []CartItem) (Reservation, error) {
 	type reserveReq struct {
 		UserID    string     `json:"user_id"`
 		Items     []CartItem `json:"items"`
@@ -115,7 +115,7 @@ func reserveInventory(h durable.HostCalls, userID string, items []CartItem) (Res
 	}, nil
 }
 
-func processPayment(h durable.HostCalls, userID string, amountCents int) (Charge, error) {
+func processPayment(h cleat.HostCalls, userID string, amountCents int) (Charge, error) {
 	pm, err := getDefaultPaymentMethod(h, userID)
 	if err != nil {
 		return Charge{}, err
@@ -132,7 +132,7 @@ func processPayment(h durable.HostCalls, userID string, amountCents int) (Charge
 	return Charge{ChargeID: "chg_xyz789", Amount: amountCents}, nil
 }
 
-func getDefaultPaymentMethod(h durable.HostCalls, userID string) (PaymentMethod, error) {
+func getDefaultPaymentMethod(h cleat.HostCalls, userID string) (PaymentMethod, error) {
 	type pmReq struct {
 		UserID string `json:"user_id"`
 	}
@@ -143,7 +143,7 @@ func getDefaultPaymentMethod(h durable.HostCalls, userID string) (PaymentMethod,
 	return PaymentMethod{Token: "pm_tok_555", Type: "card"}, nil
 }
 
-func fulfillOrder(h durable.HostCalls, r Reservation, c Charge) (string, error) {
+func fulfillOrder(h cleat.HostCalls, r Reservation, c Charge) (string, error) {
 	type shipReq struct {
 		ReservationID string `json:"reservation_id"`
 		Address       string `json:"address"`
@@ -160,7 +160,7 @@ func fulfillOrder(h durable.HostCalls, r Reservation, c Charge) (string, error) 
 	return "TRACK-123456", nil
 }
 
-func releaseReservation(h durable.HostCalls, reservationID string) error {
+func releaseReservation(h cleat.HostCalls, reservationID string) error {
 	type releaseReq struct {
 		ReservationID string `json:"reservation_id"`
 	}
@@ -168,7 +168,7 @@ func releaseReservation(h durable.HostCalls, reservationID string) error {
 	return err
 }
 
-func refundPayment(h durable.HostCalls, chargeID string) error {
+func refundPayment(h cleat.HostCalls, chargeID string) error {
 	type refundReq struct {
 		ChargeID string `json:"charge_id"`
 	}
@@ -176,7 +176,7 @@ func refundPayment(h durable.HostCalls, chargeID string) error {
 	return err
 }
 
-func notifyCustomer(h durable.HostCalls, userID, trackingID string) error {
+func notifyCustomer(h cleat.HostCalls, userID, trackingID string) error {
 	type notifyReq struct {
 		UserID     string `json:"user_id"`
 		TrackingID string `json:"tracking_id"`

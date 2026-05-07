@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# CI/CD Pipeline for cleat/durable
+# CI/CD Pipeline for cleat
 #
 # Workstream 2 — Continuous Integration and Delivery
 #
@@ -78,12 +78,12 @@ jobs:
       - name: ShellCheck
         run: shellcheck scripts/*.sh benchmarks/*.sh
 
-      - name: Clippy (durable-macro)
-        working-directory: crates/durable-macro
+      - name: Clippy (cleat-macro)
+        working-directory: crates/cleat-macro
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Clippy (durable-sdk)
-        working-directory: crates/durable-sdk
+      - name: Clippy (cleat-sdk)
+        working-directory: crates/cleat-sdk
         run: cargo clippy --all-targets -- -D warnings
 
   # -------------------------------------------------------------------------
@@ -163,7 +163,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v3
 
       - name: Run Java tests
-        working-directory: crates/durable-java
+        working-directory: crates/cleat-java
         run: gradle test
 
   # -------------------------------------------------------------------------
@@ -274,8 +274,8 @@ jobs:
 
       - name: Build Rust crates
         run: |
-          cd crates/durable-macro && cargo build --all-targets
-          cd ../durable-sdk && cargo build --all-targets
+          cd crates/cleat-macro && cargo build --all-targets
+          cd ../cleat-sdk && cargo build --all-targets
 
       - name: Build AssemblyScript
         working-directory: packages/cleat-as
@@ -284,7 +284,7 @@ jobs:
           npm run build
 
       - name: Build Java
-        working-directory: crates/durable-java
+        working-directory: crates/cleat-java
         run: gradle build
 
       - name: Install Python SDK
@@ -307,11 +307,11 @@ jobs:
         with:
           go-version: stable
 
-      - name: Build durable-worker binary
-        run: go build -o durable-worker ./cmd/durable-worker
+      - name: Build cleat-worker binary
+        run: go build -o cleat-worker ./cmd/cleat-worker
 
       - name: Build Docker image
-        run: docker build -t durable-worker:latest .
+        run: docker build -t cleat-worker:latest .
 
       - name: Start cluster
         run: docker compose -f docker-compose.cluster.yml up -d

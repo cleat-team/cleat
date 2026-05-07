@@ -1,6 +1,6 @@
 // Package workflows defines benchmark workflow functions for the cleat vs
 // Temporal vs DBOS comparison. Each workflow is a standalone Go function
-// that takes a durable.HostCalls and a typed input, and returns a typed output.
+// that takes a cleat.HostCalls and a typed input, and returns a typed output.
 //
 // These workflows are designed to be framework-agnostic: the same business
 // logic can be adapted for Temporal (via the Go SDK) or DBOS (via its SDK)
@@ -8,7 +8,7 @@
 package workflows
 
 import (
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // SimpleInput configures the simple sequential workflow.
@@ -30,7 +30,7 @@ type SimpleOutput struct {
 // Equivalent Temporal workflow: a stub.ExecuteWorkflow with N sequential
 // Activity.Execute calls. Equivalent DBOS workflow: N sequential function
 // calls in a single transaction.
-func SimpleWorkflow(h durable.HostCalls, input SimpleInput) (SimpleOutput, error) {
+func SimpleWorkflow(h cleat.HostCalls, input SimpleInput) (SimpleOutput, error) {
 	for i := 0; i < input.Steps; i++ {
 		if _, err := h.DurableCall("bench", "noop", `{}`); err != nil {
 			return SimpleOutput{}, err

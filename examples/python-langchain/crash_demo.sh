@@ -60,11 +60,11 @@ fi
 # Step 1 — Build
 # ------------------------------------------------------------------
 echo -e "${GREEN}Step 1:${NC} Building agent to WASM..."
-echo "  $ durable build --target python \\"
+echo "  $ cleat build --target python \\"
 echo "      --entry research_agent.py:langchain_research_agent"
 echo ""
 
-if durable build --target python \
+if cleat build --target python \
     --entry research_agent.py:langchain_research_agent 2>&1; then
     echo -e "${GREEN}  Build successful.${NC}"
 else
@@ -77,12 +77,12 @@ echo ""
 # Step 2 — Start the agent
 # ------------------------------------------------------------------
 echo -e "${GREEN}Step 2:${NC} Starting research agent..."
-echo "  $ durable run langchain_research_agent \\"
+echo "  $ cleat run langchain_research_agent \\"
 echo '      '"'"'{"topic": "Compare Temporal, DBOS, and Cleat"}'"'"' &'
 echo ""
 
 # Start the agent (capture PID for later kill)
-durable run langchain_research_agent \
+cleat run langchain_research_agent \
     '{"topic": "Compare Temporal, DBOS, and Cleat"}' &
 AGENT_PID=$!
 echo -e "  Agent PID: ${AGENT_PID}"

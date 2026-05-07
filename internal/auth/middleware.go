@@ -1,5 +1,5 @@
 // Package auth provides tenant-aware API key authentication for cleat's
-// durable execution framework.
+// cleat execution framework.
 //
 // It implements Bearer token and header-based auth, tenant ID extraction
 // from API keys via PostgreSQL lookup, and context propagation of tenant IDs.

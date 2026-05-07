@@ -546,7 +546,7 @@ func buildTestWasm(t *testing.T) string {
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("durable build failed:\n%s\n%v", string(out), err)
+		t.Fatalf("cleat build failed:\n%s\n%v", string(out), err)
 	}
 
 	entries, err := os.ReadDir(tmpDir)

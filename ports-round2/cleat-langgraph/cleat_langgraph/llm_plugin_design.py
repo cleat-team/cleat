@@ -62,7 +62,7 @@ class LLMHostService:
 
     Registered as a Cleat host service so that Cleat workflows can call::
 
-        h.durable_call("llm", "chat", {
+        h.cleat_call("llm", "chat", {
             "messages": [...],
             "config": {...},
         })
@@ -128,7 +128,7 @@ class CleatLLM:
 
     Usage inside a Cleat workflow::
 
-        @durable_entry(name="my_agent")
+        @cleat_entry(name="my_agent")
         def run(h: HostCalls, query: str) -> str:
             llm = CleatLLM(h)
             response = llm.chat([
@@ -181,7 +181,7 @@ class CleatLLM:
                 safe_msg["tool_call_id"] = msg["tool_call_id"]
             safe_messages.append(safe_msg)
 
-        return self._h.durable_call(
+        return self._h.cleat_call(
             self._service_name,
             "chat",
             {"messages": safe_messages, "config": merged_config},
@@ -260,7 +260,7 @@ The ideal Cleat LLM Plugin would provide:
 
    ::
 
-        @durable_entry(name="research_agent")
+        @cleat_entry(name="research_agent")
         def research(h, topic):
             llm = CleatLLM(h)
             # Each chat() call is individually durable

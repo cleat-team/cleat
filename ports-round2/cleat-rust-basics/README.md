@@ -40,7 +40,7 @@ All 6 entry points are exported as WASM functions:
 | Export | Input | Description |
 |--------|-------|-------------|
 | `subscription_add` | `SubscriptionRequest` | Create payment + subscriptions (durable execution) |
-| `building_blocks_demo` | `EmptyInput` | Reference of all durable building blocks |
+| `building_blocks_demo` | `EmptyInput` | Reference of all cleat building blocks |
 | `greeter_greet` | `GreetInput` | Increment greeting count (virtual object) |
 | `greeter_ungreet` | `GreetInput` | Decrement greeting count (virtual object) |
 | `signup_run` | `User` | User signup with email verification (workflow) |

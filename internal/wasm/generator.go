@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rcownie/durable/internal/analyzer"
+	"github.com/rcownie/cleat/internal/analyzer"
 )
 
 // paramKind describes how a parameter is passed across the WASM boundary.
@@ -19,7 +19,7 @@ const (
 
 // importDef defines the signature of a single //go:wasmimport stub.
 type importDef struct {
-	ImportName string      // e.g. "durable_call"
+	ImportName string      // e.g. "cleat_call"
 	Params     []paramSpec // input params + output buffers
 }
 
@@ -30,8 +30,8 @@ type paramSpec struct {
 
 // importDefs maps each host function to its low-level WASM import signature.
 var importDefs = map[string]importDef{
-	"durable_call": {
-		ImportName: "durable_call",
+	"cleat_call": {
+		ImportName: "cleat_call",
 		Params: []paramSpec{
 			{"service", kindInString},
 			{"operation", kindInString},
@@ -39,14 +39,14 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
-	"durable_sleep": {
-		ImportName: "durable_sleep",
+	"cleat_sleep": {
+		ImportName: "cleat_sleep",
 		Params: []paramSpec{
 			{"durationMs", kindInt64},
 		},
 	},
-	"durable_await_signals": {
-		ImportName: "durable_await_signals",
+	"cleat_await_signals": {
+		ImportName: "cleat_await_signals",
 		Params: []paramSpec{
 			{"signalNames", kindInString},
 			{"timeoutMs", kindInt64},
@@ -54,55 +54,55 @@ var importDefs = map[string]importDef{
 			{"payload", kindOutString},
 		},
 	},
-	"durable_defer": {
-		ImportName: "durable_defer",
+	"cleat_defer": {
+		ImportName: "cleat_defer",
 		Params: []paramSpec{
 			{"description", kindInString},
 			{"deferID", kindOutString},
 		},
 	},
-	"durable_log": {
-		ImportName: "durable_log",
+	"cleat_log": {
+		ImportName: "cleat_log",
 		Params: []paramSpec{
 			{"message", kindInString},
 		},
 	},
-	"durable_poll_cancellation": {
-		ImportName: "durable_poll_cancellation",
+	"cleat_poll_cancellation": {
+		ImportName: "cleat_poll_cancellation",
 		Params: []paramSpec{
 			{"reason", kindOutString},
 		},
 	},
-	"durable_poll_signal": {
-		ImportName: "durable_poll_signal",
+	"cleat_poll_signal": {
+		ImportName: "cleat_poll_signal",
 		Params: []paramSpec{
 			{"signalName", kindInString},
 			{"payload", kindOutString},
 		},
 	},
-	"durable_continue_as_new": {
-		ImportName: "durable_continue_as_new",
+	"cleat_continue_as_new": {
+		ImportName: "cleat_continue_as_new",
 		Params: []paramSpec{
 			{"newInputJSON", kindInString},
 		},
 	},
-	"durable_child_workflow": {
-		ImportName: "durable_child_workflow",
+	"cleat_child_workflow": {
+		ImportName: "cleat_child_workflow",
 		Params: []paramSpec{
 			{"name", kindInString},
 			{"inputJSON", kindInString},
 			{"runID", kindOutString},
 		},
 	},
-	"durable_await_child": {
-		ImportName: "durable_await_child",
+	"cleat_await_child": {
+		ImportName: "cleat_await_child",
 		Params: []paramSpec{
 			{"runID", kindInString},
 			{"result", kindOutString},
 		},
 	},
-	"durable_call_retry": {
-		ImportName: "durable_call_retry",
+	"cleat_call_retry": {
+		ImportName: "cleat_call_retry",
 		Params: []paramSpec{
 			{"service", kindInString},
 			{"operation", kindInString},
@@ -115,15 +115,15 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
-	"durable_await_all_children": {
-		ImportName: "durable_await_all_children",
+	"cleat_await_all_children": {
+		ImportName: "cleat_await_all_children",
 		Params: []paramSpec{
 			{"runIDsJSON", kindInString},
 			{"results", kindOutString},
 		},
 	},
-	"durable_call_heartbeat": {
-		ImportName: "durable_call_heartbeat",
+	"cleat_call_heartbeat": {
+		ImportName: "cleat_call_heartbeat",
 		Params: []paramSpec{
 			{"service", kindInString},
 			{"operation", kindInString},
@@ -132,11 +132,11 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
-	"durable_version": {
-		ImportName: "durable_version",
+	"cleat_version": {
+		ImportName: "cleat_version",
 	},
-	"durable_min_version": {
-		ImportName: "durable_min_version",
+	"cleat_min_version": {
+		ImportName: "cleat_min_version",
 	},
 	"set_query_state": {
 		ImportName: "set_query_state",
@@ -145,29 +145,29 @@ var importDefs = map[string]importDef{
 			{"val", kindInString},
 		},
 	},
-	"durable_create_promise": {
-		ImportName: "durable_create_promise",
+	"cleat_create_promise": {
+		ImportName: "cleat_create_promise",
 		Params: []paramSpec{
 			{"name", kindInString},
 			{"promise_id_out", kindOutString},
 		},
 	},
-	"durable_await_promise": {
-		ImportName: "durable_await_promise",
+	"cleat_await_promise": {
+		ImportName: "cleat_await_promise",
 		Params: []paramSpec{
 			{"promise_id", kindInString},
 			{"timeout_ms", kindInt64},
 			{"result_out", kindOutString},
 		},
 	},
-	"durable_now": {
-		ImportName: "durable_now",
+	"cleat_now": {
+		ImportName: "cleat_now",
 	},
-	"durable_random": {
-		ImportName: "durable_random",
+	"cleat_random": {
+		ImportName: "cleat_random",
 	},
-	"durable_register_update_handler": {
-		ImportName: "durable_register_update_handler",
+	"cleat_register_update_handler": {
+		ImportName: "cleat_register_update_handler",
 		Params: []paramSpec{
 			{"name", kindInString},
 		},
@@ -212,7 +212,7 @@ func GenerateImports(pkgName string, usage *UsageInfo) []byte {
 	var buf bytes.Buffer
 
 	buf.WriteString("//go:build wasip1\n\n")
-	buf.WriteString("// Code generated by durable build. DO NOT EDIT.\n\n")
+	buf.WriteString("// Code generated by cleat build. DO NOT EDIT.\n\n")
 	fmt.Fprintf(&buf, "package %s\n\n", pkgName)
 	buf.WriteString("import \"unsafe\"\n\n")
 
@@ -264,7 +264,7 @@ func GenerateMemory(pkgName string) []byte {
 	var buf bytes.Buffer
 
 	buf.WriteString("//go:build wasip1\n\n")
-	buf.WriteString("// Code generated by durable build. DO NOT EDIT.\n\n")
+	buf.WriteString("// Code generated by cleat build. DO NOT EDIT.\n\n")
 	fmt.Fprintf(&buf, "package %s\n\n", pkgName)
 	buf.WriteString("import \"unsafe\"\n\n")
 

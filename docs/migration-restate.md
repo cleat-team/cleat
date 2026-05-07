@@ -410,7 +410,7 @@ be deployed and registered. Cleat deploys WASM blobs to a database.
 
 - **Gap**: Different deployment model. Cleat deploys workflow code as WASM blobs,
   not as network services.
-- **Workaround**: Use the `durable deploy` CLI command to deploy workflow definitions.
+- **Workaround**: Use the `cleat deploy` CLI command to deploy workflow definitions.
   REST API endpoints are auto-generated from deployed workflow names.
 
 ### 6. No `ctx.backgroundCall()` / `ctx.send()` Distinction

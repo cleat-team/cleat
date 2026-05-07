@@ -6,19 +6,19 @@ Demonstrates the Cleat-LangGraph pattern for a minimal single-node graph.
 Key pattern:
   1. Create ``CleatLangGraph(h, "hello-world")`` using the HostCalls context.
   2. Call ``agent.step(state)`` for each node in the graph.
-  3. Each ``step()`` is a ``durable_call()`` recorded in Cleat's event log.
+  3. Each ``step()`` is a ``cleat_call()`` recorded in Cleat's event log.
 
-On replay, the ``durable_call`` returns the cached result without
+On replay, the ``cleat_call`` returns the cached result without
 re-executing the node function.
 """
 
 from __future__ import annotations
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 from cleat_langgraph import CleatLangGraph
 
 
-@durable_entry(name="hello_world")
+@cleat_entry(name="hello_world")
 def hello_world_workflow(h: HostCalls, query: str) -> str:
     """Process a query string through a single-node LangGraph.
 

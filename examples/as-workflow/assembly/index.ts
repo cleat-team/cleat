@@ -4,7 +4,7 @@
 //   --initialMemory 170 -o dist/workflow.wasm
 //   --transform ./node_modules/@cleat/transform/index.js
 //
-// Uses direct ABI exports (no @durableEntry decorator).  Input/output JSON
+// Uses direct ABI exports (no @cleatEntry decorator).  Input/output JSON
 // is parsed manually via string helpers.
 //
 // NOTE: Scoped imports like `@cleat/sdk` do not resolve correctly in AS 0.27.32
@@ -17,7 +17,7 @@
 import {
   HostCalls, readString, writeString,
   encodeExportResult,
-  DurableCallOutcome,
+  CleatCallOutcome,
 } from "../../../packages/cleat-as/assembly/index";
 
 // ---------------------------------------------------------------------------
@@ -156,7 +156,7 @@ export function place_order(
   // --- Step 1: Reserve inventory -------------------------------------------
 
   let reserveReq: string = '{"user_id":"' + userID + '","items":' + itemsJson + '}';
-  let reserveResult: DurableCallOutcome = h.durableCall("inventory", "Reserve", reserveReq);
+  let reserveResult: CleatCallOutcome = h.cleatCall("inventory", "Reserve", reserveReq);
   if (reserveResult.isError) {
     return writeError(outPtr, maxOutLen, "inventory reserve failed: " + safeStr(reserveResult.error));
   }
@@ -166,10 +166,10 @@ export function place_order(
   // --- Step 2: Charge payment ----------------------------------------------
 
   let chargeReq: string = '{"user_id":"' + userID + '","amount_cents":' + totalCents.toString() + '}';
-  let chargeResult: DurableCallOutcome = h.durableCall("payments", "Charge", chargeReq);
+  let chargeResult: CleatCallOutcome = h.cleatCall("payments", "Charge", chargeReq);
   if (chargeResult.isError) {
     // Compensate: release the reserved inventory.
-    h.durableCall("inventory", "Release", '{"reservation_id":"' + reservationID + '"}');
+    h.cleatCall("inventory", "Release", '{"reservation_id":"' + reservationID + '"}');
     return writeError(outPtr, maxOutLen, "payment failed: " + safeStr(chargeResult.error));
   }
   let chargeID: string = extractStringField(chargeResult.response, "chargeID");
@@ -177,17 +177,17 @@ export function place_order(
   // --- Step 3: Create shipment --------------------------------------------
 
   let shipReq: string = '{"reservation_id":"' + reservationID + '","charge_id":"' + chargeID + '"}';
-  let shipResult: DurableCallOutcome = h.durableCall("shipping", "CreateShipment", shipReq);
+  let shipResult: CleatCallOutcome = h.cleatCall("shipping", "CreateShipment", shipReq);
   if (shipResult.isError) {
     // Compensate: refund the payment and release inventory.
-    h.durableCall("payments", "Refund", '{"charge_id":"' + chargeID + '"}');
-    h.durableCall("inventory", "Release", '{"reservation_id":"' + reservationID + '"}');
+    h.cleatCall("payments", "Refund", '{"charge_id":"' + chargeID + '"}');
+    h.cleatCall("inventory", "Release", '{"reservation_id":"' + reservationID + '"}');
     return writeError(outPtr, maxOutLen, "shipping failed: " + safeStr(shipResult.error));
   }
 
   // --- Step 4: Notify customer (best-effort) -------------------------------
 
-  h.durableCall("notifications", "SendEmail", '{"user_id":"' + userID + '","message":"Order shipped"}');
+  h.cleatCall("notifications", "SendEmail", '{"user_id":"' + userID + '","message":"Order shipped"}');
 
   let result: string = '{"status":"shipped","reservation_id":"' + reservationID + '"}';
   return writeResult(outPtr, maxOutLen, result);
@@ -221,7 +221,7 @@ export function cancel_order(
   }
 
   let reserveReq: string = '{"user_id":"' + userID + '","items":' + itemsJson + '}';
-  let reserveResult: DurableCallOutcome = h.durableCall("inventory", "Reserve", reserveReq);
+  let reserveResult: CleatCallOutcome = h.cleatCall("inventory", "Reserve", reserveReq);
   if (reserveResult.isError) {
     return writeError(outPtr, maxOutLen, "inventory reserve failed: " + safeStr(reserveResult.error));
   }

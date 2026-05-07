@@ -1,5 +1,5 @@
 // Package updatabletimer ports the Temporal updatable-timer sample to the
-// Cleat Go SDK (github.com/rcownie/durable).
+// Cleat Go SDK (github.com/rcownie/cleat).
 //
 // It demonstrates a timer that can be dynamically updated while sleeping.
 // The workflow starts with a long timer, but external signals can change the
@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // ---- Constants ----
@@ -55,7 +55,7 @@ func NewUpdatableTimer(initialWakeUpTime time.Time) *UpdatableTimer {
 // Key difference from Temporal: Cleat doesn't have a unified Selector that
 // races a timer against a channel. Instead, AwaitSignals with a timeout value
 // provides the same semantics: "block until signal OR timeout."
-func (u *UpdatableTimer) SleepUntil(h durable.HostCalls) error {
+func (u *UpdatableTimer) SleepUntil(h cleat.HostCalls) error {
 	for {
 		remaining := u.wakeUpTime.Sub(h.Now())
 		if remaining <= 0 {
@@ -111,7 +111,7 @@ func (u *UpdatableTimer) GetWakeUpTime() time.Time {
 //
 // This function is the main workflow entry point, following the Cleat SDK
 // convention of a function that receives a HostCalls and a JSON input string.
-func Workflow(h durable.HostCalls, initialWakeUpTimeJSON string) (string, error) {
+func Workflow(h cleat.HostCalls, initialWakeUpTimeJSON string) (string, error) {
 	var initialWakeUpTime time.Time
 	if err := json.Unmarshal([]byte(initialWakeUpTimeJSON), &initialWakeUpTime); err != nil {
 		return "", err

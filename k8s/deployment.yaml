@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: durable-worker
+  name: cleat-worker
   labels:
-    app: durable-worker
+    app: cleat-worker
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: durable-worker
+      app: cleat-worker
   template:
     metadata:
       labels:
-        app: durable-worker
+        app: cleat-worker
     spec:
       containers:
         - name: worker
-          image: durable-worker:latest
+          image: cleat-worker:latest
           args:
             - "--db=$(DATABASE_URL)"
             - "--api-addr=:8080"
@@ -26,7 +26,7 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 configMapKeyRef:
-                  name: durable-worker-config
+                  name: cleat-worker-config
                   key: database_url
           ports:
             - name: http
@@ -54,12 +54,12 @@ spec:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: durable-worker-hpa
+  name: cleat-worker-hpa
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: durable-worker
+    name: cleat-worker
   minReplicas: 2
   maxReplicas: 10
   metrics:

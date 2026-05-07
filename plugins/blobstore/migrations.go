@@ -1,6 +1,6 @@
 package blobstore
 
-import "github.com/rcownie/durable/internal/plugin"
+import "github.com/rcownie/cleat/internal/plugin"
 
 // Migrations returns the database schema for blob storage. Tables are
 // idempotent (IF NOT EXISTS) and safe to run multiple times.

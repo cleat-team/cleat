@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/rcownie/durable/internal/host"
+	host "github.com/rcownie/cleat/internal/host"
 )
 
 // TestConcurrentEventAppends verifies that multiple goroutines appending events

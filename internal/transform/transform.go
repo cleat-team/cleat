@@ -1,8 +1,8 @@
 // Package transform implements AST source-to-source transformation that
-// automatically threads durable.HostCalls through the durable closure.
+// automatically threads cleat.HostCalls through the cleat closure.
 //
-// Developers declare a package-level var h *durable.HostCalls (the "context
-// object" pattern). Functions in the durable closure that reference this
+// Developers declare a package-level var h *cleat.HostCalls (the "context
+// object" pattern). Functions in the cleat closure that reference this
 // global get h inserted as a first parameter. Call sites are updated to
 // pass h through. The global is removed when no longer referenced.
 //
@@ -19,9 +19,9 @@ import (
 	"go/types"
 	"strings"
 
-	"github.com/rcownie/durable/internal/analyzer"
-	"github.com/rcownie/durable/internal/callgraph"
-	"github.com/rcownie/durable/internal/closure"
+	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/rcownie/cleat/internal/callgraph"
+	"github.com/rcownie/cleat/internal/closure"
 )
 
 // Result holds the output of the transformation pass.
@@ -37,7 +37,7 @@ type Config struct {
 	Closure   *closure.Result
 }
 
-// Transform modifies ASTs to automatically thread durable.HostCalls.
+// Transform modifies ASTs to automatically thread cleat.HostCalls.
 func Transform(cfg *Config) (*Result, error) {
 	durableSet := make(map[string]bool)
 	for name := range cfg.Closure.DurableLeaves {
@@ -49,7 +49,7 @@ func Transform(cfg *Config) (*Result, error) {
 
 	fset := cfg.Result.TargetPkg.Fset
 
-	// Find the global h (var h *durable.HostCalls) and who references it.
+	// Find the global h (var h *cleat.HostCalls) and who references it.
 	globalH, globalHUsers, globalHFile := findGlobalH(cfg.Result)
 	hasGlobalH := globalH != nil
 	if hasGlobalH {
@@ -162,13 +162,13 @@ func Transform(cfg *Config) (*Result, error) {
 	return tr, nil
 }
 
-// globalHInfo tracks the package-level var h *durable.HostCalls.
+// globalHInfo tracks the package-level var h *cleat.HostCalls.
 type globalHInfo struct {
 	Spec *ast.ValueSpec // the var h spec
 	Obj  types.Object   // the types.Object for the global
 }
 
-// findGlobalH finds var h *durable.HostCalls in the target package and
+// findGlobalH finds var h *cleat.HostCalls in the target package and
 // returns it, plus the set of function FQNames that reference it,
 // and the file containing the declaration.
 func findGlobalH(result *analyzer.AnalysisResult) (*globalHInfo, map[string]bool, *ast.File) {
@@ -229,7 +229,7 @@ func findGlobalH(result *analyzer.AnalysisResult) (*globalHInfo, map[string]bool
 }
 
 // canRemoveGlobalH checks if the global h can be removed (no non-durable
-// functions reference it, and all durable functions that used it are
+// functions reference it, and all cleat functions that used it are
 // getting h added as a param).
 func canRemoveGlobalH(users, needsH map[string]bool, result *analyzer.AnalysisResult) bool {
 	for fqname := range users {
@@ -271,7 +271,7 @@ func hasHostCallsParam(fd *analyzer.FuncDecl) bool {
 	return analyzer.IsHostCallsType(fd.Type.Params().At(0).Type())
 }
 
-// addHostCallsParam inserts h durable.HostCalls as the first parameter.
+// addHostCallsParam inserts h cleat.HostCalls as the first parameter.
 func addHostCallsParam(fn *ast.FuncDecl) {
 	paramName := "h"
 	if fn.Type.Params != nil {
@@ -302,11 +302,11 @@ func addHostCallsParam(fn *ast.FuncDecl) {
 	fn.Type.Params.List = append([]*ast.Field{newParam}, fn.Type.Params.List...)
 }
 
-// isHostCallsField checks if a field is of type durable.HostCalls.
+// isHostCallsField checks if a field is of type cleat.HostCalls.
 func isHostCallsField(field *ast.Field) bool {
 	sel, ok := field.Type.(*ast.SelectorExpr)
 	if !ok {
-		// Also check for *durable.HostCalls (pointer to struct, backward compat).
+		// Also check for *cleat.HostCalls (pointer to struct, backward compat).
 		star, ok := field.Type.(*ast.StarExpr)
 		if !ok {
 			return false
@@ -320,9 +320,9 @@ func isHostCallsField(field *ast.Field) bool {
 	return ok && pkg.Name == "durable" && sel.Sel.Name == "HostCalls"
 }
 
-// ensureHostCallsImport ensures the file imports "github.com/rcownie/durable/durable".
+// ensureHostCallsImport ensures the file imports "github.com/rcownie/cleat/cleat".
 func ensureHostCallsImport(file *ast.File, result *analyzer.AnalysisResult) {
-	importPath := "github.com/rcownie/durable/durable"
+	importPath := "github.com/rcownie/cleat/cleat"
 
 	for _, imp := range file.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)

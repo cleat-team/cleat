@@ -30,7 +30,7 @@ scrape_configs:
     scheme: http
     static_configs:
       - targets:
-          - "durable-worker:8080"
+          - "cleat-worker:8080"
         labels:
           app: "cleat-workflow-engine"
           component: "worker"
@@ -43,14 +43,14 @@ scrape_configs:
 
   # ---- Kubernetes (when deployed on k8s) ----
   # Uncomment the following section when deploying Prometheus inside the
-  # Kubernetes cluster alongside the durable-worker pods.
+  # Kubernetes cluster alongside the cleat-worker pods.
   # - job_name: "kubernetes-pods"
   #   kubernetes_sd_configs:
   #     - role: pod
   #   relabel_configs:
   #     - source_labels: [__meta_kubernetes_pod_label_app]
   #       action: keep
-  #       regex: durable-worker
+  #       regex: cleat-worker
   #     - source_labels: [__address__]
   #       action: replace
   #       regex: ([^:]+)(?::\d+)?

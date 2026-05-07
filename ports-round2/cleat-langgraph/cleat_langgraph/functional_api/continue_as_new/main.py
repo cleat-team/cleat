@@ -34,7 +34,7 @@ class MockCleatRuntime:
                 self._runtime = runtime
                 self._step_cache: dict = {}
 
-            def durable_call(
+            def cleat_call(
                 self, service: str, operation: str, request: dict
             ) -> dict | int:
                 cache_key = f"{service}:{operation}:{str(request)}"
@@ -57,7 +57,7 @@ class MockCleatRuntime:
 
                 raise RuntimeError(f"Unknown: {service}/{operation}")
 
-            def durable_log(self, msg: str) -> None:
+            def cleat_log(self, msg: str) -> None:
                 logger.info("[workflow] %s", msg)
 
             def set_query_state(self, key: str, value: str) -> None:
@@ -69,7 +69,7 @@ class MockCleatRuntime:
             def set_state(self, key: str, value: str) -> None:
                 self._runtime._state_store[key] = value
 
-            def durable_sleep(self, ms: int) -> None:
+            def cleat_sleep(self, ms: int) -> None:
                 pass
 
             def await_signals(

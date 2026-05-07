@@ -2,7 +2,7 @@
 Type serialization for the Cleat-LangGraph bridge.
 
 LangGraph uses TypedDict, dataclasses, and Pydantic models for state.
-Cleat's ``durable_call(request)`` requires JSON-serializable dicts.
+Cleat's ``cleat_call(request)`` requires JSON-serializable dicts.
 This module handles the bidirectional conversion.
 
 Key challenges addressed:
@@ -40,10 +40,10 @@ except ImportError:
 
 
 class CleatSerializer:
-    """Serialize workflow state for durable_call transport.
+    """Serialize workflow state for cleat_call transport.
 
     Converts complex Python types to JSON-safe dicts so they can
-    be passed through ``HostCalls.durable_call()``.
+    be passed through ``HostCalls.cleat_call()``.
     """
 
     @staticmethod
@@ -80,7 +80,7 @@ class CleatSerializer:
 
     @staticmethod
     def pack(state: Dict[str, Any]) -> Dict[str, Any]:
-        """Pack workflow state for transport through durable_call.
+        """Pack workflow state for transport through cleat_call.
 
         Wraps complex types with type annotations for the host-side
         deserializer to reconstruct them.
@@ -93,7 +93,7 @@ class CleatSerializer:
 
     @staticmethod
     def unpack(payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Unpack a durable_call response into workflow state."""
+        """Unpack a cleat_call response into workflow state."""
         if payload.get("__cleat_langgraph_state__"):
             return payload.get("data", {})
         return payload
@@ -120,7 +120,7 @@ class LangGraphSerializer:
         """Convert a Cleat-packed state dict back to a LangGraph state dict.
 
         Args:
-            packed: The state dict received from durable_call (via CleatSerializer).
+            packed: The state dict received from cleat_call (via CleatSerializer).
             state_type: Optional TypedDict/Pydantic/dataclass type to reconstruct.
 
         Returns:
@@ -138,7 +138,7 @@ class LangGraphSerializer:
         """Convert a LangGraph state dict to Cleat's JSON-safe format.
 
         This runs on the host side before returning results to the
-        Cleat workflow via durable_call.
+        Cleat workflow via cleat_call.
         """
         return {
             "__cleat_langgraph_state__": True,

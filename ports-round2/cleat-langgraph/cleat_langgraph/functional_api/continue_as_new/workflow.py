@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import json
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
 CACHE_PREFIX = "pipeline:cache:"
 
 
-@durable_entry(name="pipeline_functional")
+@cleat_entry(name="pipeline_functional")
 def pipeline_functional_workflow(h: HostCalls, input_data: int) -> int:
     """Run a 3-stage pipeline with per-task result caching.
 
@@ -47,15 +47,15 @@ def pipeline_functional_workflow(h: HostCalls, input_data: int) -> int:
         cached = h.get_state(cache_key)
 
         if cached is not None:
-            h.durable_log(f"{task_name}: restored from cache")
+            h.cleat_log(f"{task_name}: restored from cache")
             try:
                 current_value = int(json.loads(cached))
             except (json.JSONDecodeError, TypeError, ValueError):
                 current_value = int(cached)
             continue
 
-        h.durable_log(f"{task_name}: executing with input {current_value}")
-        result = h.durable_call(
+        h.cleat_log(f"{task_name}: executing with input {current_value}")
+        result = h.cleat_call(
             "langgraph",
             "execute_task",
             {
@@ -66,5 +66,5 @@ def pipeline_functional_workflow(h: HostCalls, input_data: int) -> int:
         current_value = result if isinstance(result, int) else result.get("result", current_value)
         h.set_state(cache_key, json.dumps(current_value))
 
-    h.durable_log(f"Pipeline complete: {input_data} → {current_value}")
+    h.cleat_log(f"Pipeline complete: {input_data} → {current_value}")
     return current_value

@@ -1,14 +1,14 @@
 """
 Control Flow — Functional API host-side definitions.
 
-Demonstrates parallel task execution (via concurrent durable_calls),
+Demonstrates parallel task execution (via concurrent cleat_calls),
 sequential for-loop processing, and conditional branching — all
 orchestrated in the Cleat workflow.
 
 Note: In the Temporal Functional API version, parallelism is achieved
 by creating task futures without immediately awaiting them. In Cleat,
-parallelism is approximated by issuing multiple ``durable_call``
-invocations — but since Cleat's ``durable_call`` is synchronous,
+parallelism is approximated by issuing multiple ``cleat_call``
+invocations — but since Cleat's ``cleat_call`` is synchronous,
 true parallelism requires the host runtime to support it.
 """
 

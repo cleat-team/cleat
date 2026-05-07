@@ -4,7 +4,7 @@ ReAct Agent — Cleat durable workflow (WASM-side).
 Demonstrates the Cleat-LangGraph pattern for a tool-calling agent loop.
 
 The workflow calls ``agent.step(state)`` which combines routing + node
-execution into a single durable_call. Each step records one node execution
+execution into a single cleat_call. Each step records one node execution
 in Cleat's event log, enabling replay at per-node granularity.
 
 Key difference from the Temporal version:
@@ -18,11 +18,11 @@ Key difference from the Temporal version:
 
 from __future__ import annotations
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 from cleat_langgraph import CleatLangGraph
 
 
-@durable_entry(name="react_agent")
+@cleat_entry(name="react_agent")
 def react_agent_workflow(h: HostCalls, query: str) -> str:
     """Run a tool-calling ReAct agent with per-node durability.
 
@@ -30,7 +30,7 @@ def react_agent_workflow(h: HostCalls, query: str) -> str:
 
         state = {input: query}
         while not done:
-            state = agent.step(state)   # ← durable_call per node
+            state = agent.step(state)   # ← cleat_call per node
 
     Each call to ``agent.step()`` is recorded in Cleat's event log.
     On replay, the cached result is returned without re-executing the node.
@@ -59,13 +59,13 @@ def react_agent_workflow(h: HostCalls, query: str) -> str:
     step_count = 0
 
     while not CleatLangGraph.is_done(state) and step_count < max_steps:
-        h.durable_log(f"React agent: step {step_count + 1}")
+        h.cleat_log(f"React agent: step {step_count + 1}")
         state = agent.step(state)
         step_count += 1
 
     if step_count >= max_steps:
-        h.durable_log("React agent: reached max steps without final answer")
+        h.cleat_log("React agent: reached max steps without final answer")
         return "Max steps reached. Agent did not produce a final answer."
 
-    h.durable_log(f"React agent: completed in {step_count} steps")
+    h.cleat_log(f"React agent: completed in {step_count} steps")
     return state.get("final_answer", "No final answer produced.")

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/durable/durable/durabletest"
+	"github.com/rcownie/cleat/cleat/cleattest"
 )
 
 // ---------------------------------------------------------------------------
@@ -70,7 +70,7 @@ func TestGetRecords(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecordProcessorWorkflow_SendsSignal(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	// Deterministic random: minimum sleep (100ms).
@@ -121,7 +121,7 @@ func TestRecordProcessorWorkflow_SendsSignal(t *testing.T) {
 // all records when the sliding window size is large enough to accommodate
 // all children without blocking on waitForSlot.
 func TestSlidingWindowWorkflow_AllInOneRun(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	input := SlidingWindowWorkflowInput{
@@ -155,7 +155,7 @@ func TestSlidingWindowWorkflow_AllInOneRun(t *testing.T) {
 // concurrency limit: children are started in parallel but no more than
 // SlidingWindowSize at a time.
 func TestSlidingWindowWorkflow_WithSlidingWindow(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	input := SlidingWindowWorkflowInput{
@@ -189,7 +189,7 @@ func TestSlidingWindowWorkflow_WithSlidingWindow(t *testing.T) {
 // is a no-op in the test environment, this test confirms the signal drain
 // and progress tracking work correctly for the boundary case.
 func TestSlidingWindowWorkflow_ContinueAsNewBoundary(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	input := SlidingWindowWorkflowInput{
@@ -222,7 +222,7 @@ func TestSlidingWindowWorkflow_ContinueAsNewBoundary(t *testing.T) {
 // TestSlidingWindowWorkflow_ResumesFromPreviousRun verifies that the workflow
 // correctly picks up where a previous ContinueAsNew run left off.
 func TestSlidingWindowWorkflow_ResumesFromPreviousRun(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	// Simulate the state after the first run of a ContinueAsNew chain.
@@ -255,7 +255,7 @@ func TestSlidingWindowWorkflow_ResumesFromPreviousRun(t *testing.T) {
 // TestSlidingWindowWorkflow_QueryState verifies that SetQueryState is called
 // to expose the sliding window state for external queries.
 func TestSlidingWindowWorkflow_QueryState(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	input := SlidingWindowWorkflowInput{
@@ -298,7 +298,7 @@ func TestSlidingWindowWorkflow_QueryState(t *testing.T) {
 // TestProcessBatchWorkflow verifies that the top-level workflow partitions
 // records and aggregates results from child sliding window workflows.
 func TestProcessBatchWorkflow(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	// Register a handler for SlidingWindowWorkflow children that computes the
@@ -333,7 +333,7 @@ func TestProcessBatchWorkflow(t *testing.T) {
 // TestProcessBatchWorkflow_InvalidInput verifies that ProcessBatchWorkflow
 // rejects invalid configurations (SlidingWindowSize < Partitions).
 func TestProcessBatchWorkflow_InvalidInput(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	input := ProcessBatchWorkflowInput{
@@ -351,7 +351,7 @@ func TestProcessBatchWorkflow_InvalidInput(t *testing.T) {
 
 // TestProcessBatchWorkflow_NoRecords verifies the edge case of zero records.
 func TestProcessBatchWorkflow_NoRecords(t *testing.T) {
-	env := durabletest.NewTestEnv()
+	env := cleattest.NewTestEnv()
 	h := env.H()
 
 	input := ProcessBatchWorkflowInput{

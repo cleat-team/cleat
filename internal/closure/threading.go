@@ -7,11 +7,11 @@ import (
 	"go/types"
 	"strings"
 
-	"github.com/rcownie/durable/internal/analyzer"
-	"github.com/rcownie/durable/internal/callgraph"
+	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/rcownie/cleat/internal/callgraph"
 )
 
-// ThreadingError records a function in the durable closure that lacks
+// ThreadingError records a function in the cleat closure that lacks
 // access to HostCalls with the call chain that leads to it.
 type ThreadingError struct {
 	FuncName string
@@ -20,11 +20,11 @@ type ThreadingError struct {
 	Message  string
 }
 
-// VerifyThreading checks that every function in the durable closure has
-// access to durable.HostCalls through its parameter list, through a
+// VerifyThreading checks that every function in the cleat closure has
+// access to cleat.HostCalls through its parameter list, through a
 // package-level global var h, or through a caller that passes it.
 func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *Result) []ThreadingError {
-	// Build the set of functions in the durable closure.
+	// Build the set of functions in the cleat closure.
 	durableSet := make(map[string]bool)
 	for name := range cr.DurableLeaves {
 		durableSet[name] = true
@@ -36,7 +36,7 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 	// Track which functions have HostCalls access and how.
 	threaded := make(map[string]bool)
 
-	// Phase 0: Detect package-level var h *durable.HostCalls.
+	// Phase 0: Detect package-level var h *cleat.HostCalls.
 	// Functions that reference this global have implicit access.
 	globalHObj := findGlobalHostCalls(result)
 	usesGlobalH := make(map[string]bool)
@@ -119,8 +119,8 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 			Chain:    chain,
 			Line:     line,
 			Message: fmt.Sprintf(
-				"%s is in the durable closure but has no access to durable.HostCalls. "+
-					"Add 'h durable.HostCalls' as the first parameter.",
+				"%s is in the cleat closure but has no access to cleat.HostCalls. "+
+					"Add 'h cleat.HostCalls' as the first parameter.",
 				analyzer.ShortName(name)),
 		})
 	}
@@ -203,7 +203,7 @@ func isCallerHostCallsParam(paramName string, fd *analyzer.FuncDecl) bool {
 }
 
 // structHasHostCallsField checks if a type (pointer to struct) has a
-// field of type *durable.HostCalls or durable.HostCalls.
+// field of type *cleat.HostCalls or cleat.HostCalls.
 func structHasHostCallsField(t types.Type, pkg *analyzer.Package) bool {
 	// Unwrap pointer.
 	named := t
@@ -264,7 +264,7 @@ func dfsChain(current, target string, cg *callgraph.Graph, visited map[string]bo
 	return nil
 }
 
-// findGlobalHostCalls looks for var h *durable.HostCalls in the target
+// findGlobalHostCalls looks for var h *cleat.HostCalls in the target
 // package and returns the types.Object for it, or nil if not found.
 // Starts from the AST to avoid matching function parameters named h.
 func findGlobalHostCalls(result *analyzer.AnalysisResult) types.Object {

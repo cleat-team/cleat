@@ -380,7 +380,7 @@ func (a *AnalyzerV2) Resynthesize() string {
 //   - ` + fmt.Sprintf("%d", len(a.WorkflowTraces)) + ` workflow entry points discovered
 //
 // Every function in the durable closure has been rewritten to:
-//   1. Accept a *durable.Context as its first parameter
+//   1. Accept a *cleat.Context as its first parameter
 //   2. Check the durable cache before making leaf calls
 //   3. Save a checkpoint after each leaf call with a stack-aware checkpoint ID
 //
@@ -441,7 +441,7 @@ func (a *AnalyzerV2) emitFunc(buf *bytes.Buffer, fn *ast.FuncDecl) {
 		return
 	}
 
-	// --- Rewrite signature: inject *durable.Context as first param ---
+	// --- Rewrite signature: inject *cleat.Context as first param ---
 	params := a.rewriteParams(fn)
 	returnType := a.rewriteReturnType(fn)
 	buf.WriteString(fmt.Sprintf("func %s(%s) %s {\n", name, params, returnType))
@@ -451,7 +451,7 @@ func (a *AnalyzerV2) emitFunc(buf *bytes.Buffer, fn *ast.FuncDecl) {
 	// On replay, if this function's activation has already completed, we
 	// skip the body entirely and return the cached result.
 	buf.WriteString(fmt.Sprintf(`	// --- Durable replay gate for %s (injected) ---
-	dc := durable.GetContext(ctx)
+	dc := cleat.GetContext(ctx)
 	if dc.IsReplay {
 		if result, complete := dc.GetActivation("%s"); complete {
 			// This entire function call was cached from a prior execution.
@@ -591,7 +591,7 @@ func (a *AnalyzerV2) emitDurableLeafCall(buf *bytes.Buffer, call *ast.CallExpr, 
 	buf.WriteString(fmt.Sprintf(`	// --- Durable leaf call: %s (injected) ---
 	// This is a network boundary. On first execution we make the real call
 	// and cache the result. On replay we return the cached result.
-	__result, __err := durable.CallLeaf(ctx, "%s", func() (interface{}, error) {
+	__result, __err := cleat.CallLeaf(ctx, "%s", func() (interface{}, error) {
 		// The real network call:
 		return %s(%s)
 	})
@@ -626,7 +626,7 @@ func (a *AnalyzerV2) emitDurableAssignCall(buf *bytes.Buffer, s *ast.AssignStmt,
 		if a.Leaves[cname] {
 			cacheKey := cname + "_" + argsKey(call.Args)
 			buf.WriteString(fmt.Sprintf(`	// --- Durable leaf call: %s → %s (injected) ---
-	__result, __err := durable.CallLeaf(ctx, "%s", func() (interface{}, error) {
+	__result, __err := cleat.CallLeaf(ctx, "%s", func() (interface{}, error) {
 		return %s(%s)
 	})
 	%s := __result.(%s)  // type asserted from the durable cache
@@ -645,7 +645,7 @@ func (a *AnalyzerV2) emitDurableAssignCall(buf *bytes.Buffer, s *ast.AssignStmt,
 			buf.WriteString(fmt.Sprintf(`	// --- Durable nested call: %s → (%s) (injected) ---
 	// The helper is in the durable closure; its leaf calls are checkpointed
 	// internally, and its return value is cached at the activation level.
-	%s, __err := durable.CallDurable(ctx, "%s", func() (interface{}, error) {
+	%s, __err := cleat.CallDurable(ctx, "%s", func() (interface{}, error) {
 		return %s(%s)
 	})
 	_ = __err

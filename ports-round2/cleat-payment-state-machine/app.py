@@ -13,7 +13,7 @@ the execution environment. This file serves as both documentation and
 a development harness.
 
 Services contract:
-    The following durable_entry points are registered and need to be
+    The following cleat_entry points are registered and need to be
     exposed by the Cleat runtime:
       - account.deposit
       - account.withdraw
@@ -29,14 +29,14 @@ from typing import Optional
 
 from cleat_sdk import (
     HostCalls,
-    durable_entry,
+    cleat_entry,
     register_local_handler,
     clear_local_handlers,
 )
 from cleat_sdk._decorators import get_registry
 
 # Import the workflow modules to ensure their
-# @durable_entry decorators are executed
+# @cleat_entry decorators are executed
 import accounts  # noqa: F401
 import workflow  # noqa: F401
 
@@ -55,20 +55,20 @@ def list_entry_points() -> list[str]:
 # ---------------------------------------------------------------------------
 # Local handler registration for development/testing
 # ---------------------------------------------------------------------------
-# In production, durable_call dispatches through the Cleat runtime.
+# In production, cleat_call dispatches through the Cleat runtime.
 # For development, we register local handlers so the example can run
 # without a runtime connection.
 # See ISSUES.md #4 for details on this workaround.
 
 
 def _register_local_service_handlers() -> None:
-    """Register local handlers so durable_call works without a runtime.
+    """Register local handlers so cleat_call works without a runtime.
 
-    This wraps the @durable_entry functions as handlers compatible
-    with the HostCalls.durable_call dispatch path.
+    This wraps the @cleat_entry functions as handlers compatible
+    with the HostCalls.cleat_call dispatch path.
 
     The account service handlers (deposit/withdraw) accept typed request
-    objects (DepositRequest/WithdrawRequest) but durable_call passes raw
+    objects (DepositRequest/WithdrawRequest) but cleat_call passes raw
     dicts. We deserialize them here.
     """
     from accounts import deposit, withdraw, DepositRequest, WithdrawRequest, Result
@@ -108,12 +108,12 @@ async def simulate_payment_workflow(
     """Simulate the payment state machine workflow for testing.
 
     This bypasses the Cleat runtime and directly calls the
-    durable_entry functions with a HostCalls context.
+    cleat_entry functions with a HostCalls context.
 
     In production, the Cleat runtime would:
     1. Receive an HTTP request
     2. Create a HostCalls context
-    3. Invoke the registered durable_entry function
+    3. Invoke the registered cleat_entry function
     4. Manage state persistence and recovery
     """
     from workflow import make_payment, cancel_payment, PaymentRequest, CancelRequest
@@ -141,7 +141,7 @@ async def simulate_payment_workflow(
 
 async def main() -> None:
     """Development harness - demonstrates the workflow."""
-    # Register local handlers so durable_call works in dev mode
+    # Register local handlers so cleat_call works in dev mode
     _register_local_service_handlers()
 
     logger.info("Cleat Payment State Machine")

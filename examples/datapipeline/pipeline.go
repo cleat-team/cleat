@@ -8,7 +8,7 @@
 //
 // Build:
 //
-//	durable build -o /tmp/out ./examples/datapipeline/
+//	cleat build -o /tmp/out ./examples/datapipeline/
 package datapipeline
 
 import (
@@ -16,10 +16,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
-var h durable.HostCalls
+var h cleat.HostCalls
 
 // ---- Domain types ----
 
@@ -34,12 +34,12 @@ type PipelineResult struct {
 	TotalItems int                 `json:"total_items"`
 	Succeeded  int                 `json:"succeeded"`
 	Failed     int                 `json:"failed"`
-	Results    []durable.ChildResult `json:"results,omitempty"`
+	Results    []cleat.ChildResult `json:"results,omitempty"`
 }
 
 // ---- Parent workflow: fan-out/fan-in ----
 
-func RunPipeline(h durable.HostCalls, input PipelineInput) (*PipelineResult, error) {
+func RunPipeline(h cleat.HostCalls, input PipelineInput) (*PipelineResult, error) {
 	if len(input.Items) == 0 {
 		return nil, fmt.Errorf("no items to process")
 	}
@@ -117,7 +117,7 @@ type ChildResult struct {
 }
 
 // ProcessItem is the child workflow entry point.
-func ProcessItem(h durable.HostCalls, input ChildInput) (*ChildResult, error) {
+func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
 	h.DurableLog(fmt.Sprintf("Processing item %d/%s: %s", input.Index, input.BatchID, input.Item))
 
 	// Step 1: Fetch data (with heartbeat for long downloads).

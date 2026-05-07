@@ -25,7 +25,7 @@ func (r *Runtime) Stdout() string { return r.stdout.String() }
 // Stderr returns captured stderr output from the most recent module.
 func (r *Runtime) Stderr() string { return r.stderr.String() }
 
-// NewRuntime creates a Runtime with all durable_* host functions and the plugin_call
+// NewRuntime creates a Runtime with all cleat_* host functions and the plugin_call
 // host function registered on the "env" module. WASI preview1 is also instantiated
 // for Go wasip1 support. Plugin host functions are registered via the Engine's
 // PluginRegistry — not through NewRuntime.
@@ -35,7 +35,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	// WASI is required by Go wasip1 modules for goroutine/stack management.
 	wasi_snapshot_preview1.MustInstantiate(ctx, rt)
 
-	// Build the "env" host module that provides durable_* imports.
+	// Build the "env" host module that provides cleat_* imports.
 	envBuilder := rt.NewHostModuleBuilder("env")
 	registerHostFunctions(envBuilder)
 

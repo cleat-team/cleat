@@ -57,9 +57,9 @@ type HostHandler interface {
 	UUID(ctx context.Context, m api.Module, seed string, uuidPtr, uuidMaxLen uint32) int64
 }
 
-// registerHostFunctions registers all 15 durable_* imports on the "env" host module.
+// registerHostFunctions registers all 26 cleat_* imports on the "env" host module.
 func registerHostFunctions(builder wazero.HostModuleBuilder) {
-	// durable_call: (ptr,len x3, ptr,maxLen) -> i64
+	// cleat_call: (ptr,len x3, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
@@ -68,88 +68,88 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		op := readWasmString(mem, opPtr, opLen)
 		req := readWasmString(mem, reqPtr, reqLen)
 		return uint64(h.DurableCall(ctx, m, service, op, req, respPtr, respMaxLen))
-	}).Export("durable_call")
+	}).Export("cleat_call")
 
-	// durable_sleep: (i64) -> i64
+	// cleat_sleep: (i64) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module, durationMs int64) uint64 {
 		return uint64(handlerFromContext(ctx).DurableSleep(ctx, m, durationMs))
-	}).Export("durable_sleep")
+	}).Export("cleat_sleep")
 
-	// durable_now: () -> i64
+	// cleat_now: () -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context) uint64 {
 		return uint64(handlerFromContext(ctx).Now(ctx))
-	}).Export("durable_now")
+	}).Export("cleat_now")
 
-	// durable_random: () -> i64
+	// cleat_random: () -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context) uint64 {
 		return uint64(handlerFromContext(ctx).Random(ctx))
-	}).Export("durable_random")
+	}).Export("cleat_random")
 
-	// durable_log: (ptr,len) -> i64
+	// cleat_log: (ptr,len) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module, msgPtr, msgLen uint32) uint64 {
 		mem := m.Memory()
 		msg := readWasmString(mem, msgPtr, msgLen)
 		return uint64(handlerFromContext(ctx).DurableLog(ctx, m, msg))
-	}).Export("durable_log")
+	}).Export("cleat_log")
 
-	// durable_version: () -> i64
+	// cleat_version: () -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context) uint64 {
 		return uint64(handlerFromContext(ctx).Version(ctx))
-	}).Export("durable_version")
+	}).Export("cleat_version")
 
-	// durable_min_version: () -> i64
+	// cleat_min_version: () -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context) uint64 {
 		return uint64(handlerFromContext(ctx).MinVersion(ctx))
-	}).Export("durable_min_version")
+	}).Export("cleat_min_version")
 
-	// durable_defer: (ptr,len x2) -> i64
+	// cleat_defer: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		descPtr, descLen, deferIDPtr, deferIDMaxLen uint32) uint64 {
 		mem := m.Memory()
 		desc := readWasmString(mem, descPtr, descLen)
 		return uint64(handlerFromContext(ctx).DurableDefer(ctx, m, desc, deferIDPtr, deferIDMaxLen))
-	}).Export("durable_defer")
+	}).Export("cleat_defer")
 
-	// durable_poll_cancellation: (ptr,maxLen) -> i64
+	// cleat_poll_cancellation: (ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		reasonPtr, reasonMaxLen uint32) uint64 {
 		return uint64(handlerFromContext(ctx).PollCancellation(ctx, m, reasonPtr, reasonMaxLen))
-	}).Export("durable_poll_cancellation")
+	}).Export("cleat_poll_cancellation")
 
-	// durable_poll_signal: (ptr,len x2) -> i64
+	// cleat_poll_signal: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen, payloadPtr, payloadMaxLen uint32) uint64 {
 		mem := m.Memory()
 		name := readWasmString(mem, namePtr, nameLen)
 		return uint64(handlerFromContext(ctx).PollSignal(ctx, m, name, payloadPtr, payloadMaxLen))
-	}).Export("durable_poll_signal")
+	}).Export("cleat_poll_signal")
 
-	// durable_continue_as_new: (ptr,len) -> i64
+	// cleat_continue_as_new: (ptr,len) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		inputPtr, inputLen uint32) uint64 {
 		mem := m.Memory()
 		newInput := readWasmString(mem, inputPtr, inputLen)
 		return uint64(handlerFromContext(ctx).ContinueAsNew(ctx, m, newInput))
-	}).Export("durable_continue_as_new")
+	}).Export("cleat_continue_as_new")
 
-	// durable_child_workflow: (ptr,len x3) -> i64
+	// cleat_child_workflow: (ptr,len x3) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen uint32) uint64 {
 		mem := m.Memory()
 		wfName := readWasmString(mem, namePtr, nameLen)
 		wfInput := readWasmString(mem, inputPtr, inputLen)
 		return uint64(handlerFromContext(ctx).ChildWorkflow(ctx, m, wfName, wfInput, runIDPtr, runIDMaxLen))
-	}).Export("durable_child_workflow")
+	}).Export("cleat_child_workflow")
 
-	// durable_await_child: (ptr,len x2) -> i64
+	// cleat_await_child: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		runIDPtr, runIDLen, resultPtr, resultMaxLen uint32) uint64 {
 		mem := m.Memory()
 		runID := readWasmString(mem, runIDPtr, runIDLen)
 		return uint64(handlerFromContext(ctx).AwaitChild(ctx, m, runID, resultPtr, resultMaxLen))
-	}).Export("durable_await_child")
+	}).Export("cleat_await_child")
 
-	// durable_call_retry: (ptr,len x3, i64 x4, ptr,len, ptr,maxLen) -> i64
+	// cleat_call_retry: (ptr,len x3, i64 x4, ptr,len, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32,
 		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
@@ -164,9 +164,9 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		return uint64(h.DurableCallWithRetry(ctx, m, service, op, req,
 			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
 			nonRetryableErrorsJSON, respPtr, respMaxLen))
-	}).Export("durable_call_retry")
+	}).Export("cleat_call_retry")
 
-	// durable_await_signals: (ptr,len, i64, ptr,maxLen x2) -> i64
+	// cleat_await_signals: (ptr,len, i64, ptr,maxLen x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namesPtr, namesLen uint32, timeoutMs int64,
 		sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen uint32) uint64 {
@@ -174,7 +174,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		names := readWasmString(mem, namesPtr, namesLen)
 		return uint64(handlerFromContext(ctx).DurableAwaitSignals(ctx, m, names, timeoutMs,
 			sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen))
-	}).Export("durable_await_signals")
+	}).Export("cleat_await_signals")
 
 	// set_query_state: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -185,7 +185,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		return uint64(handlerFromContext(ctx).SetQueryState(ctx, m, key, val))
 	}).Export("set_query_state")
 
-	// durable_call_heartbeat: (ptr,len x3, i64, ptr,maxLen) -> i64
+	// cleat_call_heartbeat: (ptr,len x3, i64, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32,
 		heartbeatIntervalMs int64,
@@ -196,9 +196,9 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		op := readWasmString(mem, opPtr, opLen)
 		req := readWasmString(mem, reqPtr, reqLen)
 		return uint64(h.DurableCallWithHeartbeat(ctx, m, service, op, req, heartbeatIntervalMs, respPtr, respMaxLen))
-	}).Export("durable_call_heartbeat")
+	}).Export("cleat_call_heartbeat")
 
-	// durable_await_all_children: (ptr,len, ptr,maxLen) -> i64
+	// cleat_await_all_children: (ptr,len, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		idsPtr, idsLen uint32,
 		resultsPtr, resultsMaxLen uint32) uint64 {
@@ -206,7 +206,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		mem := m.Memory()
 		runIDsJSON := readWasmString(mem, idsPtr, idsLen)
 		return uint64(h.AwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen))
-	}).Export("durable_await_all_children")
+	}).Export("cleat_await_all_children")
 
 	// plugin_call_streaming: (ptr,len x5) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -236,31 +236,31 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		return uint64(h.PluginCall(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
 	}).Export("plugin_call")
 
-	// durable_register_update_handler: (ptr,len) -> i64
+	// cleat_register_update_handler: (ptr,len) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen uint32) uint64 {
 		mem := m.Memory()
 		name := readWasmString(mem, namePtr, nameLen)
 		return uint64(handlerFromContext(ctx).RegisterUpdateHandler(ctx, m, name))
-	}).Export("durable_register_update_handler")
-	// durable_create_promise: (ptr,len x2) -> i64
+	}).Export("cleat_register_update_handler")
+	// cleat_create_promise: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen uint32) uint64 {
 		mem := m.Memory()
 		name := readWasmString(mem, namePtr, nameLen)
 		return uint64(handlerFromContext(ctx).CreatePromise(ctx, m, name, promiseIDPtr, promiseIDMaxLen))
-	}).Export("durable_create_promise")
+	}).Export("cleat_create_promise")
 
-	// durable_await_promise: (ptr,len, i64, ptr,maxLen) -> i64
+	// cleat_await_promise: (ptr,len, i64, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		promiseIDPtr, promiseIDLen uint32, timeoutMs int64,
 		resultPtr, resultMaxLen uint32) uint64 {
 		mem := m.Memory()
 		promiseID := readWasmString(mem, promiseIDPtr, promiseIDLen)
 		return uint64(handlerFromContext(ctx).AwaitPromise(ctx, m, promiseID, timeoutMs, resultPtr, resultMaxLen))
-	}).Export("durable_await_promise")
+	}).Export("cleat_await_promise")
 
-	// durable_send_signal_and_wait: (ptr,len x3, i64, ptr,maxLen) -> i64
+	// cleat_send_signal_and_wait: (ptr,len x3, i64, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen uint32,
 		timeoutMs int64,
@@ -271,9 +271,9 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		signalName := readWasmString(mem, sigPtr, sigLen)
 		payload := readWasmString(mem, payloadPtr, payloadLen)
 		return uint64(h.SendSignalAndWait(ctx, m, targetRunID, signalName, payload, timeoutMs, respPtr, respMaxLen))
-	}).Export("durable_send_signal_and_wait")
+	}).Export("cleat_send_signal_and_wait")
 
-	// durable_reply_to_signal: (ptr,len x2) -> i64
+	// cleat_reply_to_signal: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		correlationPtr, correlationLen, respPtr, respLen uint32) uint64 {
 		h := handlerFromContext(ctx)
@@ -281,9 +281,9 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		correlationID := readWasmString(mem, correlationPtr, correlationLen)
 		response := readWasmString(mem, respPtr, respLen)
 		return uint64(h.ReplyToSignal(ctx, m, correlationID, response))
-	}).Export("durable_reply_to_signal")
+	}).Export("cleat_reply_to_signal")
 
-	// durable_signal_workflow: (ptr,len x3) -> i64
+	// cleat_signal_workflow: (ptr,len x3) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen uint32) uint64 {
 		h := handlerFromContext(ctx)
@@ -292,9 +292,9 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		signalName := readWasmString(mem, sigPtr, sigLen)
 		payload := readWasmString(mem, payloadPtr, payloadLen)
 		return uint64(h.SignalWorkflow(ctx, m, targetRunID, signalName, payload))
-	}).Export("durable_signal_workflow")
+	}).Export("cleat_signal_workflow")
 
-	// durable_set_scope: (ptr,len x2, ptr,maxLen) -> i64
+	// cleat_set_scope: (ptr,len x2, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		objTypePtr, objTypeLen, instKeyPtr, instKeyLen uint32,
 		prevScopePtr, prevScopeMaxLen uint32) uint64 {
@@ -303,23 +303,23 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		objType := readWasmString(mem, objTypePtr, objTypeLen)
 		instKey := readWasmString(mem, instKeyPtr, instKeyLen)
 		return uint64(h.SetScope(ctx, m, objType, instKey, prevScopePtr, prevScopeMaxLen))
-	}).Export("durable_set_scope")
+	}).Export("cleat_set_scope")
 
-	// durable_get_scope: (ptr,maxLen x2) -> i64
+	// cleat_get_scope: (ptr,maxLen x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		return uint64(h.GetScope(ctx, m, objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen))
-	}).Export("durable_get_scope")
+	}).Export("cleat_get_scope")
 
-	// durable_uuid: (ptr,len, ptr,maxLen) -> i64
+	// cleat_uuid: (ptr,len, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		seedPtr, seedLen, uuidPtr, uuidMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
 		seed := readWasmString(mem, seedPtr, seedLen)
 		return uint64(h.UUID(ctx, m, seed, uuidPtr, uuidMaxLen))
-	}).Export("durable_uuid")
+	}).Export("cleat_uuid")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

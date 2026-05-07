@@ -24,7 +24,7 @@ services:
     restart: unless-stopped
 
   worker-1:
-    image: durable-worker:latest
+    image: cleat-worker:latest
     container_name: cleat-worker-1
     build:
       context: .
@@ -51,7 +51,7 @@ services:
     restart: unless-stopped
 
   worker-2:
-    image: durable-worker:latest
+    image: cleat-worker:latest
     container_name: cleat-worker-2
     build:
       context: .
@@ -78,7 +78,7 @@ services:
     restart: unless-stopped
 
   worker-3:
-    image: durable-worker:latest
+    image: cleat-worker:latest
     container_name: cleat-worker-3
     build:
       context: .
@@ -105,7 +105,7 @@ services:
     restart: unless-stopped
 
   dashboard:
-    image: durable-worker:latest
+    image: cleat-worker:latest
     container_name: cleat-dashboard
     build:
       context: .

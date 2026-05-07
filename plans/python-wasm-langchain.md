@@ -157,10 +157,10 @@ Binary size: 15-25 MB (CPython WASM + stdlib). Acceptable for server-side.
 
 **b) CLI integration**
 
-Add `--language python` to `durable build`:
+Add `--language python` to `cleat build`:
 
 ```bash
-durable build --target python --entry my_workflow.py:research_agent
+cleat build --target python --entry my_workflow.py:research_agent
 ```
 
 This wraps the componentize-py invocation and produces a `.wasm` file.
@@ -193,7 +193,7 @@ The WIT interface definition work (Step 1) is needed for both paths.
 
 **Files touched:**
 - `python-sdk/pyproject.toml` — new file
-- `cmd/durable-build/` — add Python target
+- `cmd/cleat-build/` — add Python target
 - `internal/wasm/build.go` — Python WASM build support
 
 ### Step 4: End-to-End Validation (~3 days)
@@ -210,7 +210,7 @@ Prove the pipeline works end to end:
        return greeting
    ```
 
-2. Compile: `durable build --target python --entry hello_workflow.py:hello`
+2. Compile: `cleat build --target python --entry hello_workflow.py:hello`
 3. Load in cleat worker
 4. Execute fresh
 5. Kill worker mid-execution, restart, verify replay
@@ -314,7 +314,7 @@ def research_agent(h: HostCalls, topic: str) -> str:
 ```
 
 **Files touched:**
-- `cmd/durable/templates/agent-python/` — new directory (~5 files)
+- `cmd/cleat/templates/agent-python/` — new directory (~5 files)
 - `python-sdk/cleat_sdk/host_calls.py` — add streaming support
 - `python-sdk/cleat_sdk/memory.py` — add streaming decoder
 
@@ -576,7 +576,7 @@ D2: Feature gaps ──┤                      │
 
 ## Success Criteria
 
-**Week 3:** `durable build --target python` compiles a Python workflow to WASM.
+**Week 3:** `cleat build --target python` compiles a Python workflow to WASM.
 The workflow executes on a cleat worker. Kill/restart replays correctly.
 
 **Week 5:** LangChain agent survives a worker crash and resumes from the last

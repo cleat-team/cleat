@@ -11,7 +11,7 @@ Host Side (``LangGraphRuntime``)
 
 Workflow Side (``CleatLangGraph``)
     Runs inside the WASM sandbox (Cleat workflow). Wraps
-    ``HostCalls.durable_call()`` into a convenient API for stepping
+    ``HostCalls.cleat_call()`` into a convenient API for stepping
     through LangGraph graphs with per-node durability.
 
 Usage
@@ -24,16 +24,16 @@ Host side setup::
     runtime = LangGraphRuntime()
     runtime.register_graph("react-agent", make_agent_graph)
 
-    # Later, process incoming durable_calls:
+    # Later, process incoming cleat_calls:
     #   runtime.handle_route(graph_name, state) → {"next_node": ...}
     #   runtime.handle_execute(graph_name, node, state) → {"state": ...}
 
 Cleat workflow::
 
-    from cleat_sdk import HostCalls, durable_entry
+    from cleat_sdk import HostCalls, cleat_entry
     from cleat_langgraph import CleatLanggraph
 
-    @durable_entry(name="react_agent")
+    @cleat_entry(name="react_agent")
     def run(h: HostCalls, query: str) -> str:
         agent = CleatLangGraph(h, "react-agent")
         state = {"input": query, "messages": [], "final_answer": ""}
@@ -70,7 +70,7 @@ class LangGraphRuntime:
 
     Compiles and caches LangGraph graphs, executes individual nodes,
     and handles routing between nodes. Called from Cleat workflows
-    via durable_call (which goes through handle_request()).
+    via cleat_call (which goes through handle_request()).
 
     This class runs OUTSIDE the WASM sandbox, so it has full access
     to Python, async, and third-party libraries.
@@ -96,7 +96,7 @@ class LangGraphRuntime:
         """Register a LangGraph StateGraph for use from Cleat workflows.
 
         Args:
-            name: Unique name for this graph (used in durable_call).
+            name: Unique name for this graph (used in cleat_call).
             graph_builder: A callable that returns a ``StateGraph`` instance
                 (or compiled graph). The builder is invoked immediately
                 to compile and cache the graph.
@@ -143,9 +143,9 @@ class LangGraphRuntime:
     # ------------------------------------------------------------------
 
     def handle_request(self, operation: str, request: Dict[str, Any]) -> Any:
-        """Dispatch a durable_call request to the appropriate handler.
+        """Dispatch a cleat_call request to the appropriate handler.
 
-        This is the single entry point for all ``durable_call("langgraph", …)``
+        This is the single entry point for all ``cleat_call("langgraph", …)``
         invocations from Cleat workflows.
 
         Supported operations:
@@ -577,7 +577,7 @@ class LangGraphRuntime:
 class CleatLangGraph:
     """Cleat workflow client for LangGraph graph execution.
 
-    Wraps ``HostCalls.durable_call()`` into a convenient API for
+    Wraps ``HostCalls.cleat_call()`` into a convenient API for
     stepping through LangGraph graphs with per-node durability.
 
     Each call to ``step()`` or ``execute_node()`` is recorded as a
@@ -589,7 +589,7 @@ class CleatLangGraph:
         from cleat_sdk import HostCalls
         from cleat_langgraph import CleatLangGraph
 
-        @durable_entry(name="my_workflow")
+        @cleat_entry(name="my_workflow")
         def run(h: HostCalls, input_data: str) -> str:
             agent = CleatLangGraph(h, "my-graph")
             state = {"input": input_data}
@@ -604,7 +604,7 @@ class CleatLangGraph:
         """Initialize the Cleat-LangGraph client.
 
         Args:
-            h: The ``HostCalls`` instance from the ``@durable_entry`` context.
+            h: The ``HostCalls`` instance from the ``@cleat_entry`` context.
             graph_name: Name of the registered LangGraph graph.
             service_name: Cleat host service name (default: ``"langgraph"``).
         """
@@ -617,7 +617,7 @@ class CleatLangGraph:
     def step(self, state: dict) -> dict:
         """Execute the next node in the graph.
 
-        Combines routing + node execution into a single durable_call.
+        Combines routing + node execution into a single cleat_call.
         The current state is packed and sent to the host, which determines
         the next node, executes it, and returns the updated state.
 
@@ -633,7 +633,7 @@ class CleatLangGraph:
         """
         packed = CleatSerializer.pack(state)
         try:
-            result = self._h.durable_call(
+            result = self._h.cleat_call(
                 self._service_name,
                 "step",
                 {"graph_name": self._graph_name, "state": packed},
@@ -666,7 +666,7 @@ class CleatLangGraph:
             Updated state after node execution.
         """
         try:
-            result = self._h.durable_call(
+            result = self._h.cleat_call(
                 self._service_name,
                 "execute_node",
                 {
@@ -694,7 +694,7 @@ class CleatLangGraph:
             Name of the next node, or ``"__end__"`` if the graph is done.
         """
         try:
-            result = self._h.durable_call(
+            result = self._h.cleat_call(
                 self._service_name,
                 "route",
                 {
@@ -723,7 +723,7 @@ class CleatLangGraph:
             Final state after full graph execution.
         """
         try:
-            result = self._h.durable_call(
+            result = self._h.cleat_call(
                 self._service_name,
                 "invoke_graph",
                 {
@@ -744,7 +744,7 @@ class CleatLangGraph:
         Useful for dynamic workflows that need to introspect the graph.
         """
         try:
-            result = self._h.durable_call(
+            result = self._h.cleat_call(
                 self._service_name,
                 "list_nodes",
                 {"graph_name": self._graph_name},
@@ -759,7 +759,7 @@ class CleatLangGraph:
     def get_metadata(self) -> dict:
         """Return metadata about the registered graph."""
         try:
-            result = self._h.durable_call(
+            result = self._h.cleat_call(
                 self._service_name,
                 "graph_info",
                 {"graph_name": self._graph_name},

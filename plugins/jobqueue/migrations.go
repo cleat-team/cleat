@@ -1,6 +1,6 @@
 package jobqueue
 
-import "github.com/rcownie/durable/internal/plugin"
+import "github.com/rcownie/cleat/internal/plugin"
 
 // Migrations returns the database schema for the job queue. Tables are
 // idempotent (IF NOT EXISTS) and safe to run multiple times.

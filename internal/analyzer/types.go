@@ -31,19 +31,19 @@ type FuncDecl struct {
 	IsExported bool
 
 	// IsEntryPoint is true if this function is a workflow entry point
-	// (exported, first param is durable.HostCalls, in root of target package).
+	// (exported, first param is cleat.HostCalls, in root of target package).
 	IsEntryPoint bool
 
 	// IsDurableLeaf is true if this function directly calls a HostCalls method.
 	IsDurableLeaf bool
 
-	// InDurableClosure is true if this function transitively calls a durable leaf.
+	// InDurableClosure is true if this function transitively calls a cleat leaf.
 	InDurableClosure bool
 
 	// DurabilityTag is one of "DurableLeaf", "DurableClosure", or "Pure".
 	DurabilityTag string
 
-	// AutoThreaded is true if the transform added h durable.HostCalls as
+	// AutoThreaded is true if the transform added h cleat.HostCalls as
 	// the first parameter to this function.
 	AutoThreaded bool
 }
@@ -56,7 +56,7 @@ type AnalysisResult struct {
 	EntryPoints []string             // fully-qualified names of entry points
 
 	// Module information.
-	ModulePath  string // e.g., "github.com/rcownie/durable"
+	ModulePath  string // e.g., "github.com/rcownie/cleat"
 	ModuleDir   string // absolute path to module root (where go.mod lives)
 	GoVersion   string // e.g., "1.26" from go.mod
 
@@ -88,17 +88,17 @@ func qualifier(pkg *Package) types.Qualifier {
 
 // ---- HostCalls type helpers ----
 
-// IsHostCallsType reports whether t is durable.HostCalls (interface) or
-// *durable.HostCalls (pointer to struct, for backward compatibility).
+// IsHostCallsType reports whether t is cleat.HostCalls (interface) or
+// *cleat.HostCalls (pointer to struct, for backward compatibility).
 func IsHostCallsType(t types.Type) bool {
-	// durable.HostCalls as interface (passed by value).
+	// cleat.HostCalls as interface (passed by value).
 	if named, ok := t.(*types.Named); ok {
 		obj := named.Obj()
 		if obj.Name() == "HostCalls" && obj.Pkg() != nil && obj.Pkg().Name() == "durable" {
 			return true
 		}
 	}
-	// *durable.HostCalls as pointer to struct (backward compatibility).
+	// *cleat.HostCalls as pointer to struct (backward compatibility).
 	if ptr, ok := t.(*types.Pointer); ok {
 		if named, ok := ptr.Elem().(*types.Named); ok {
 			obj := named.Obj()

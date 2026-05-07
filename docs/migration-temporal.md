@@ -52,7 +52,7 @@ func MyWorkflow(ctx workflow.Context, input MyInput) (MyOutput, error) {
 // workflow.go
 package workflow
 
-import "github.com/rcownie/durable/durable"
+import "github.com/rcownie/cleat/durable"
 
 var h durable.HostCalls // auto-threaded by transformer
 

@@ -13,7 +13,7 @@
 
 | Issue | Status | Resolution |
 |-------|--------|------------|
-| No end-to-end test exercises real DB + WASM compile + execute + replay | **Fixed** | `internal/host/integration_test.go` — 589 lines, 4 tests: full pipeline, multi-step, signals, replay divergence. Guarded by `DURABLE_TEST_DB` env var |
+| No end-to-end test exercises real DB + WASM compile + execute + replay | **Fixed** | `internal/host/integration_test.go` — 589 lines, 4 tests: full pipeline, multi-step, signals, replay divergence. Guarded by `CLEAT_TEST_DB` env var |
 
 ### P2 — Schema Anti-pattern
 
@@ -26,7 +26,7 @@
 | Issue | Status | Resolution |
 |-------|--------|------------|
 | FoodDash hardcodes `DriverName: "Alex"`, `ETAMinutes: 15` | **Fixed** | Extended `findDriverResponse` and dispatch client types. `findDriver` now returns full `driverResult`. 5 files updated |
-| `durable dev` child workflows are stubs (`awaitChild` always returns `{"status":"completed"}`) | **Fixed** | Added `ChildWorkflowRunner` interface and `WithChildWorkflowRunner` option to `durable/localdev/localdev.go`. Child workflows execute synchronously when a runner is configured. Falls back to stub when none provided |
+| `cleat dev` child workflows are stubs (`awaitChild` always returns `{"status":"completed"}`) | **Fixed** | Added `ChildWorkflowRunner` interface and `WithChildWorkflowRunner` option to `durable/localdev/localdev.go`. Child workflows execute synchronously when a runner is configured. Falls back to stub when none provided |
 
 ---
 
@@ -87,7 +87,7 @@ The initial review incorrectly described plugins as "skeletons." A thorough audi
 | Go 1.26+ lock-in | WASM support (`//go:wasmimport` / `//go:wasmexport`) requires Go 1.24+. TinyGo fallback exists but is a language subset |
 | SDK panics on nil core primitives | Documented contract: these indicate programmer error. The production WASM adapter always populates all fields |
 | JSON as sole serialization format | Design tradeoff. Protobuf/msgpack could be added as optional without breaking the ABI |
-| Transformer pipeline complexity | Integration tests now exercise the full pipeline. Differential `durable dev` vs WASM testing is a future enhancement |
+| Transformer pipeline complexity | Integration tests now exercise the full pipeline. Differential `cleat dev` vs WASM testing is a future enhancement |
 | Single PostgreSQL bottleneck | Addressed by sharding (`docs/sharding.md`) and `ShardedStore` |
 | Ratelimiter ephemeral token state | Standard practice (API gateways do this). Adding persistence would require a Redis dependency or DB-backed counters |
 | `examples/subscription/billing.go` pre-existing build errors | Separate from this review; the broken example predates all changes made here |

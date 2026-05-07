@@ -3,13 +3,13 @@ Cleat-LangGraph Host Integration
 
 This module provides the integration point between the Cleat Runtime and
 the LangGraph host service. It registers the LangGraphRuntime as a Cleat
-host service that can handle ``durable_call("langgraph", ...)`` invocations
+host service that can handle ``cleat_call("langgraph", ...)`` invocations
 from Cleat workflows running inside the WASM sandbox.
 
 Architecture
 ------------
 The Cleat Runtime has a service registry that maps service name → handler.
-When a Cleat workflow calls ``h.durable_call("langgraph", "step", {"graph_name": "...", ...})``,
+When a Cleat workflow calls ``h.cleat_call("langgraph", "step", {"graph_name": "...", ...})``,
 the runtime dispatches to the handler registered under ``"langgraph"``.
 
 This module provides:
@@ -60,7 +60,7 @@ class LangGraphServiceHandler:
     """Wraps ``LangGraphRuntime`` as a Cleat host service handler.
 
     The handler is invoked by the Cleat runtime when a workflow calls
-    ``durable_call("langgraph", operation, request)``.
+    ``cleat_call("langgraph", operation, request)``.
 
     The handler:
     1. Receives the operation name and request dict from the Cleat runtime.
@@ -74,7 +74,7 @@ class LangGraphServiceHandler:
     def handle_call(
         self, operation: str, request: Dict[str, Any]
     ) -> Any:
-        """Handle a durable_call invocation from a Cleat workflow.
+        """Handle a cleat_call invocation from a Cleat workflow.
 
         Args:
             operation: The operation name (e.g., ``"step"``, ``"route"``,
@@ -116,7 +116,7 @@ def register_langgraph_service(
 
     After registration, Cleat workflows can call::
 
-        h.durable_call("langgraph", "step", {
+        h.cleat_call("langgraph", "step", {
             "graph_name": "my-graph",
             "state": {...},
         })
@@ -128,7 +128,7 @@ def register_langgraph_service(
             registered graphs.
         service_name: The service name to register (default:
             ``"langgraph"``). This is the first argument to
-            ``durable_call()``.
+            ``cleat_call()``.
     """
     handler = LangGraphServiceHandler(langgraph_runtime)
 
@@ -197,7 +197,7 @@ def setup_langgraph_service(
         graphs: Optional dict of ``{name: graph_builder}`` for StateGraphs.
         entrypoints: Optional dict of ``{name: entrypoint_fn}``.
         tasks: Optional dict of ``{entrypoint_name: [task_fns]}``.
-        service_name: Service name for ``durable_call()``.
+        service_name: Service name for ``cleat_call()``.
 
     Returns:
         The ``LangGraphRuntime`` instance for advanced configuration.

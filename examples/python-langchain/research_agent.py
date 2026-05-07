@@ -30,7 +30,7 @@ from typing import Any
 sys.path.insert(0,
     os.path.join(os.path.dirname(__file__), "..", "..", "python-sdk"))
 
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 from cleat_sdk.plugins import Plugins
 from cleat_sdk.langchain.callbacks import CleatCallbackHandler
 
@@ -120,11 +120,11 @@ def _execute_web_search(h: HostCalls, query: str) -> str:
     The search is recorded as a deterministic event — on crash recovery the
     same result is returned without re-executing the search.
     """
-    h.durable_log(f"  Web search: {query[:120]}")
+    h.cleat_log(f"  Web search: {query[:120]}")
     try:
         return h.plugin_call("websearch", "search", {"query": query})
     except Exception as e:
-        h.durable_log(f"  Web search failed: {e}")
+        h.cleat_log(f"  Web search failed: {e}")
         return json.dumps({"error": str(e), "results": []})
 
 
@@ -134,7 +134,7 @@ def _execute_calculator(h: HostCalls, expression: str) -> str:
     Uses Python's ``eval`` in a restricted namespace (demo-safe).
     In production, use a proper expression parser instead.
     """
-    h.durable_log(f"  Calculator: {expression}")
+    h.cleat_log(f"  Calculator: {expression}")
     try:
         allowed = {"__builtins__": {}}
         result = eval(expression, allowed, {})
@@ -187,7 +187,7 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
     str
         JSON result containing the final answer, step count, and cost.
     """
-    h.durable_log(f"Starting research agent for topic: {topic}")
+    h.cleat_log(f"Starting research agent for topic: {topic}")
 
     # --- Initialise Cleat integration helpers ----------------------------
     #
@@ -223,7 +223,7 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
         # Check for external cancellation (e.g. from the dashboard).
         cancelled, reason = h.poll_cancellation()
         if cancelled:
-            h.durable_log(f"Agent cancelled at step {step + 1}: {reason}")
+            h.cleat_log(f"Agent cancelled at step {step + 1}: {reason}")
             h.set_state("agent_status", {
                 "status": "cancelled",
                 "reason": reason,
@@ -235,7 +235,7 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
                 "steps": step,
             })
 
-        h.durable_log(f"Step {step + 1}/{MAX_RESEARCH_STEPS}")
+        h.cleat_log(f"Step {step + 1}/{MAX_RESEARCH_STEPS}")
 
         # Call the LLM through Cleat's plugin system.
         # This is deterministically recorded — on replay the same cached
@@ -260,7 +260,7 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
 
         # Handle empty response.
         if not llm_result.choices:
-            h.durable_log(f"No choices returned at step {step + 1}")
+            h.cleat_log(f"No choices returned at step {step + 1}")
             return json.dumps({
                 "error": "No response from LLM",
                 "steps": step + 1,
@@ -282,7 +282,7 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
                 "llm_calls": llm_calls,
                 "total_cost": round(total_cost, 6),
             })
-            h.durable_log(
+            h.cleat_log(
                 f"Research complete: {step + 1} steps, "
                 f"{llm_calls} LLM calls, ${total_cost:.4f}"
             )
@@ -310,7 +310,7 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
             except json.JSONDecodeError:
                 tool_args = {}
 
-            h.durable_log(f"  Tool: {tool_name}")
+            h.cleat_log(f"  Tool: {tool_name}")
             tool_result = _execute_tool(h, tool_name, tool_args)
 
             messages.append({
@@ -320,7 +320,7 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
             })
 
     # --- Max steps reached ----------------------------------------------
-    h.durable_log("Max research steps reached")
+    h.cleat_log("Max research steps reached")
     h.set_state("agent_status", {
         "status": "max_steps_reached",
         "steps": MAX_RESEARCH_STEPS,
@@ -340,11 +340,11 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
 # ========================================================================
 
 
-@durable_entry("LangChainResearchAgent")
+@cleat_entry("LangChainResearchAgent")
 def langchain_research_agent(h: HostCalls, topic: str) -> str:
     """WASM entry point for the Cleat runtime.
 
-    The ``@durable_entry`` decorator generates a WASM-export-compatible
+    The ``@cleat_entry`` decorator generates a WASM-export-compatible
     wrapper following the Cleat ABI.  It reads input JSON from linear
     memory, creates a ``HostCalls`` instance, calls the function, and
     serialises the result back.
@@ -384,7 +384,7 @@ def run_test() -> None:
 
         # -- HostCalls interface ---------------------------------------
 
-        def durable_log(self, message: str) -> None:
+        def cleat_log(self, message: str) -> None:
             self.logs.append(message)
             print(f"  [LOG] {message}")
 

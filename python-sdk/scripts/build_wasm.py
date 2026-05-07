@@ -5,7 +5,7 @@ Usage:
     python build_wasm.py --entry my_workflow.py:function_name [--output my_workflow.wasm]
 
 This script wraps the componentize-py tool to compile a Python workflow
-function (decorated with @durable_entry) into a WASM component that can
+function (decorated with @cleat_entry) into a WASM component that can
 be loaded by the cleat worker runtime.
 """
 
@@ -45,7 +45,7 @@ def parse_entry(entry: str) -> tuple[str, str]:
 
 
 def validate_entry(entry_file: str, func_name: str) -> dict:
-    """Validate that the entry file contains a @durable_entry function."""
+    """Validate that the entry file contains a @cleat_entry function."""
     entry_path = Path(entry_file)
     if not entry_path.exists():
         raise FileNotFoundError(f"Entry file not found: {entry_file}")
@@ -53,10 +53,10 @@ def validate_entry(entry_file: str, func_name: str) -> dict:
     with open(entry_path) as f:
         source = f.read()
 
-    # Simple AST-free check for @durable_entry decorated function
-    if "@durable_entry" not in source:
+    # Simple AST-free check for @cleat_entry decorated function
+    if "@cleat_entry" not in source:
         raise ValueError(
-            f"No @durable_entry decorator found in {entry_file}"
+            f"No @cleat_entry decorator found in {entry_file}"
         )
 
     if f"def {func_name}" not in source:

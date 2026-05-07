@@ -15,16 +15,16 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/rcownie/durable/internal/host"
+	"github.com/rcownie/cleat/internal/host"
 )
 
-// requireDB is like testStore but skips if DURABLE_TEST_DB is unavailable.
+// requireDB is like testStore but skips if CLEAT_TEST_DB is unavailable.
 func requireDB(t *testing.T) (*sql.DB, *host.PostgresStore) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("Skipping in short mode")
 	}
-	dsn := os.Getenv("DURABLE_TEST_DB")
+	dsn := os.Getenv("CLEAT_TEST_DB")
 	if dsn == "" {
 		dsn = "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
 	}

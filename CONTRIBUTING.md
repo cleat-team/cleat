@@ -76,8 +76,8 @@ that's what the CLA is for.
 
 ```bash
 # Clone the repo
-git clone https://github.com/rcownie/durable.git
-cd durable
+git clone https://github.com/rcownie/cleat.git
+cd cleat
 
 # Build
 go build ./...

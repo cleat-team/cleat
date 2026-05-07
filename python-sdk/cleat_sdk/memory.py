@@ -8,7 +8,7 @@ memory. This can be replaced with actual WASM memory access when running
 in a real WASM runtime.
 
 Bit-packing conventions match the Rust SDK at
-``crates/durable-sdk/src/memory.rs`` and the ABI specification in
+``crates/cleat-sdk/src/memory.rs`` and the ABI specification in
 ``ABI.md``.
 """
 
@@ -148,12 +148,12 @@ def decode_export_result(result: int) -> Tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# durable_call result decoding
+# cleat_call result decoding
 # ---------------------------------------------------------------------------
 
 
-def decode_durable_call_result(result: int) -> Tuple[int, int, int]:
-    """Decode a ``durable_call`` result.
+def decode_cleat_call_result(result: int) -> Tuple[int, int, int]:
+    """Decode a ``cleat_call`` result.
 
     Bit layout:
         bits  0-7  = errCode (8 bits)
@@ -198,7 +198,7 @@ def decode_simple_result(result: int) -> Tuple[int, int]:
 
 
 def decode_sleep_result(result: int) -> Tuple[int, int]:
-    """Decode a ``durable_sleep`` result.
+    """Decode a ``cleat_sleep`` result.
 
     Bit layout:
         bits  0-55 = durationMs (56 bits)
@@ -219,7 +219,7 @@ def decode_sleep_result(result: int) -> Tuple[int, int]:
 
 
 def decode_await_signals_result(result: int) -> Tuple[int, int, bool, int]:
-    """Decode a ``durable_await_signals`` result.
+    """Decode a ``cleat_await_signals`` result.
 
     Bit layout:
         bits  0-15 = errCode (16 bits)
@@ -244,7 +244,7 @@ def decode_await_signals_result(result: int) -> Tuple[int, int, bool, int]:
 
 
 def decode_await_promise_result(result: int) -> Tuple[int, bool, bool, int]:
-    """Decode a ``durable_await_promise`` result.
+    """Decode a ``cleat_await_promise`` result.
 
     Bit layout:
         bits  0-15 = errCode (16 bits)
@@ -269,7 +269,7 @@ def decode_await_promise_result(result: int) -> Tuple[int, bool, bool, int]:
 
 
 def decode_poll_signal_result(result: int) -> Tuple[int, bool, int]:
-    """Decode a ``durable_poll_signal`` result.
+    """Decode a ``cleat_poll_signal`` result.
 
     Bit layout:
         bits  0-7  = errCode (8 bits)
@@ -293,7 +293,7 @@ def decode_poll_signal_result(result: int) -> Tuple[int, bool, int]:
 
 
 def decode_poll_cancellation_result(result: int) -> Tuple[int, bool]:
-    """Decode a ``durable_poll_cancellation`` result.
+    """Decode a ``cleat_poll_cancellation`` result.
 
     Bit layout:
         bits  0-31 = cancelled flag (non-zero = cancelled)

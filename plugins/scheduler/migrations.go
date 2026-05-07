@@ -1,6 +1,6 @@
 package scheduler
 
-import "github.com/rcownie/durable/internal/plugin"
+import "github.com/rcownie/cleat/internal/plugin"
 
 // Migrations returns the database schema for the schedules table.
 // Tables are idempotent (IF NOT EXISTS) and safe to run multiple times.

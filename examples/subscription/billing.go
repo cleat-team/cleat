@@ -9,7 +9,7 @@
 //
 // Build:
 //
-//	durable build -o /tmp/out ./examples/subscription/
+//	cleat build -o /tmp/out ./examples/subscription/
 package subscription
 
 import (
@@ -17,10 +17,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/durable/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
-var h durable.HostCalls
+var h cleat.HostCalls
 
 // ---- Domain types ----
 
@@ -38,7 +38,7 @@ type ChargeResult struct {
 
 // ---- Entry point ----
 
-func ManageSubscription(h durable.HostCalls, input SubscriptionInput) (string, error) {
+func ManageSubscription(h cleat.HostCalls, input SubscriptionInput) (string, error) {
 	if input.UserID == "" || input.PlanID == "" {
 		return "", fmt.Errorf("user_id and plan_id are required")
 	}
@@ -66,15 +66,15 @@ func ManageSubscription(h durable.HostCalls, input SubscriptionInput) (string, e
 }
 
 // chargeWithRetry attempts payment with server-side retry.
-func chargeWithRetry(h durable.HostCalls, input SubscriptionInput) error {
+func chargeWithRetry(h cleat.HostCalls, input SubscriptionInput) error {
 	req := toJSON(map[string]interface{}{
 		"user_id":    input.UserID,
 		"plan_id":    input.PlanID,
 		"amount_usd": input.AmountUSD,
 	})
 
-	resp, err := h.DurableCallWithOptions(durable.CallOptions{
-		Retry: &durable.RetryPolicy{
+	resp, err := h.DurableCallWithOptions(cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
 			MaxAttempts:        4,
 			InitialInterval:    1 * time.Second,
 			BackoffCoefficient: 2.0,
@@ -106,7 +106,7 @@ func chargeWithRetry(h durable.HostCalls, input SubscriptionInput) error {
 }
 
 // enterGracePeriod gives the user time to fix payment before canceling.
-func enterGracePeriod(h durable.HostCalls, input SubscriptionInput) (string, error) {
+func enterGracePeriod(h cleat.HostCalls, input SubscriptionInput) (string, error) {
 	h.DurableLog(fmt.Sprintf("Entering grace period: user=%s", input.UserID))
 	h.SetQueryState("status", "past_due")
 

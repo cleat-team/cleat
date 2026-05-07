@@ -1,4 +1,4 @@
-module github.com/rcownie/durable
+module github.com/rcownie/cleat
 
 go 1.26
 

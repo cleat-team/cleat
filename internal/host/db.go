@@ -39,7 +39,7 @@ type Schedule struct {
 	LastRunAt      *time.Time      `json:"last_run_at,omitempty"`
 }
 
-// PromiseInfo holds the state of a durable promise.
+// PromiseInfo holds the state of a cleat promise.
 type PromiseInfo struct {
 	PromiseID   string     `json:"promise_id"`
 	PromiseName string     `json:"promise_name"`

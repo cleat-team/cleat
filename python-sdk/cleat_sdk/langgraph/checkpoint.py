@@ -1,12 +1,12 @@
-"""CleatCheckpointer: Uses cleat durable state as LangGraph's checkpoint backend.
+"""CleatCheckpointer: Uses cleat cleat state as LangGraph's checkpoint backend.
 
 Usage::
 
-    from cleat_sdk import HostCalls, durable_entry
+    from cleat_sdk import HostCalls, cleat_entry
     from cleat_sdk.langgraph import CleatCheckpointer
     from langgraph.graph import StateGraph
 
-    @durable_entry
+    @cleat_entry
     def my_agent(h: HostCalls, input: str) -> str:
         checkpointer = CleatCheckpointer(h)
         graph = StateGraph(MyState)
@@ -32,10 +32,10 @@ from typing import Any, Optional
 
 
 class CleatCheckpointer:
-    """LangGraph checkpointer backed by cleat durable state.
+    """LangGraph checkpointer backed by cleat cleat state.
 
     Stores LangGraph checkpoints, intermediate writes, and metadata
-    in cleat's durable state.  When the workflow resumes from a crash,
+    in cleat's cleat state.  When the workflow resumes from a crash,
     the last checkpoint is restored and execution continues.
 
     Implements the LangGraph ``BaseCheckpointSaver`` interface (duck-typed).
@@ -56,7 +56,7 @@ class CleatCheckpointer:
     # ------------------------------------------------------------------
 
     def get_tuple(self, config: dict[str, Any]) -> Optional[Any]:
-        """Get a checkpoint tuple from durable state.
+        """Get a checkpoint tuple from cleat state.
 
         Parameters
         ----------
@@ -95,7 +95,7 @@ class CleatCheckpointer:
         metadata: dict[str, Any],
         new_versions: dict[str, Any],
     ) -> dict[str, Any]:
-        """Save a checkpoint to durable state.
+        """Save a checkpoint to cleat state.
 
         Parameters
         ----------

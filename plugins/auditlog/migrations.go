@@ -1,6 +1,6 @@
 package auditlog
 
-import "github.com/rcownie/durable/internal/plugin"
+import "github.com/rcownie/cleat/internal/plugin"
 
 // Migrations returns the database schema for audit events.
 func (p *Plugin) Migrations() []plugin.Migration {
