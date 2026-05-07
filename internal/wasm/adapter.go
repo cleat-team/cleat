@@ -360,6 +360,32 @@ var adapterDefs = map[string]adapterDef{
 				"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
 			},
 		},
+		"PluginCallStreaming": {
+			FieldName:  "PluginCallStreaming",
+			ReturnType: "(<-chan durable.StreamEvent, error)",
+			Params: []adapterParam{
+				{"pluginName", "string"},
+				{"functionName", "string"},
+				{"inputJSON", "string"},
+			},
+			ResultStmts: []string{
+				"responseLen := uint32(uint64(result) >> 40)",
+				"errCode := uint32(result & 0xFF)",
+				"if errCode != 0 {",
+				`		return nil, fmt.Errorf("plugin_call_streaming: error code %d", errCode)`,
+				"}",
+				"var events []durable.StreamEvent",
+				`if err := json.Unmarshal(responseBuf[:responseLen], &events); err != nil {`,
+				`		return nil, fmt.Errorf("plugin_call_streaming: bad chunk data: %w", err)`,
+				"}",
+				"ch := make(chan durable.StreamEvent, len(events))",
+				"for _, ev := range events {",
+				"		ch <- ev",
+				"}",
+				"close(ch)",
+				"return ch, nil",
+			},
+		},
 		}
 
 // needsFmt returns true if any of the used adapter defs use fmt.Errorf or fmt.Sprintf.
@@ -387,6 +413,11 @@ func needsJSON(usage *UsageInfo) bool {
 		}
 		for _, p := range adef.Params {
 			if p.Type == "[]string" {
+				return true
+			}
+		}
+		for _, stmt := range adef.ResultStmts {
+			if strings.Contains(stmt, "json.Unmarshal") || strings.Contains(stmt, "json.Marshal") {
 				return true
 			}
 		}

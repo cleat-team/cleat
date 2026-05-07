@@ -1,6 +1,6 @@
 """High-level Python wrapper around the cleat WASM host function imports.
 
-Provides the :class:`HostCalls` class that wraps all 22 WASM host function
+Provides the :class:`HostCalls` class that wraps all 29 WASM host function
 imports in Pythonic methods matching the patterns from:
 
 * Rust: ``crates/durable-sdk/src/host_calls.rs``
@@ -27,7 +27,7 @@ Usage::
     run_id = host.child_workflow("order_processor", {"order_id": "ord-42"})
     result = host.await_child(run_id)
 
-**MVP note:** The 22 module-level ``_import_*`` functions are stubs that raise
+**MVP note:** The 29 module-level ``_import_*`` functions are stubs that raise
 :exc:`NotImplementedError`.  They are replaced by actual WASM FFI functions
 when the SDK runs inside a cleat WASM runtime.  The stubs allow the SDK to be
 imported and tested without WASM.
@@ -630,7 +630,7 @@ def _import_durable_signal_workflow(
 
 
 class HostCalls:
-    """High-level Python wrapper around all 22 cleat WASM host function imports.
+    """High-level Python wrapper around all 29 cleat WASM host function imports.
 
     Each method handles string I/O (encoding input strings to the scratch
     buffer, decoding output strings from the output buffer), calls the
@@ -890,6 +890,37 @@ class HostCalls:
         """
         msg_len = write_string(SCRATCH_BASE, message, OUT_BUF_SIZE)
         _import_durable_log(SCRATCH_BASE, msg_len)
+
+    # --------------------------------------------------------------------
+    # 5b. log_kv — structured key-value log
+    # --------------------------------------------------------------------
+
+    def log_kv(self, message: str, *kvs: Any) -> None:
+        """Log a structured key-value message to the event history.
+
+        Key-value pairs are formatted as alternating key=value entries
+        appended to the message, separated by newlines.  Intended for
+        structured observability data that aids debugging during replay.
+
+        Parameters
+        ----------
+        message : str
+            The main log message.
+        *kvs : Any
+            Alternating key-value pairs for structured logging (e.g.
+            ``"user_id", "u-42", "status", "active"``).  An odd count
+            results in the trailing key having an empty value.
+        """
+        if kvs:
+            parts = [message]
+            for i in range(0, len(kvs), 2):
+                key = kvs[i]
+                val = kvs[i + 1] if i + 1 < len(kvs) else ""
+                parts.append(f"  {key}={val}")
+            formatted = "\n".join(parts)
+        else:
+            formatted = message
+        self.durable_log(formatted)
 
     # --------------------------------------------------------------------
     # 6. durable_call — recorded API call
@@ -1207,6 +1238,92 @@ class HostCalls:
         result = self.durable_call("http", "fetch", request)
         data = json.loads(result)
         return data.get("body", ""), data.get("status", 200)
+
+    # --------------------------------------------------------------------
+    # 11b. durable_fetch_json — fetch with JSON deserialization
+    # --------------------------------------------------------------------
+
+    def durable_fetch_json(
+        self,
+        url: str,
+        method: str = "GET",
+        headers: Optional[dict] = None,
+        body: str = "",
+        result_type: type[T] = dict,
+    ) -> T:
+        """Perform a durable HTTP fetch and deserialize the JSON response.
+
+        Like :meth:`durable_fetch` but deserializes the response body into
+        the specified result type.
+
+        Parameters
+        ----------
+        url : str
+            The URL to fetch.
+        method : str
+            HTTP method (``"GET"``, ``"POST"``, etc.).  Default ``"GET"``.
+        headers : dict or None
+            Optional HTTP headers.
+        body : str
+            Request body for POST/PUT requests.  Default ``""``.
+        result_type : type[T]
+            Target type for deserialisation.  If the response JSON is an
+            object, ``result_type(**data)`` is used.
+
+        Returns
+        -------
+        T
+            An instance of *result_type* constructed from the response.
+        """
+        resp_body, status = self.durable_fetch(url, method, headers, body)
+        data = json.loads(resp_body)
+        if isinstance(data, dict) and result_type is not dict:
+            return result_type(**data)
+        return data  # type: ignore[return-value]
+
+    # --------------------------------------------------------------------
+    # 11c. fetch_get — shorthand GET
+    # --------------------------------------------------------------------
+
+    def fetch_get(self, url: str) -> tuple:
+        """Shorthand for a durable GET request via :meth:`durable_fetch`.
+
+        Parameters
+        ----------
+        url : str
+            The URL to fetch.
+
+        Returns
+        -------
+        tuple[str, int]
+            ``(response_body, status_code)``.
+        """
+        return self.durable_fetch(url, "GET")
+
+    # --------------------------------------------------------------------
+    # 11d. fetch_get_json — shorthand GET with JSON deserialization
+    # --------------------------------------------------------------------
+
+    def fetch_get_json(
+        self,
+        url: str,
+        result_type: type[T] = dict,
+    ) -> T:
+        """Shorthand for a durable GET request with JSON deserialization.
+
+        Parameters
+        ----------
+        url : str
+            The URL to fetch.
+        result_type : type[T]
+            Target type for deserialisation.
+
+        Returns
+        -------
+        T
+            An instance of *result_type* constructed from the response.
+        """
+        return self.durable_fetch_json(url, "GET", result_type=result_type)
 
     # --------------------------------------------------------------------
     # 12. await_signals — wait for signals
@@ -1617,7 +1734,57 @@ class HostCalls:
         return int(json.loads(result))
 
     # --------------------------------------------------------------------
-    # 23. create_promise — create a durable promise
+    # 23. has_state — check if a state key exists
+    # --------------------------------------------------------------------
+
+    def has_state(self, key: str) -> bool:
+        """Check if a durable state key exists.
+
+        Internally delegates to the ``"state"`` service via
+        :meth:`durable_call`.
+
+        Parameters
+        ----------
+        key : str
+            State key to check.
+
+        Returns
+        -------
+        bool
+            ``True`` if the key exists in durable state.
+        """
+        result = self.durable_call(
+            "state", "has", {"key": self._scoped_key(key)}
+        )
+        return bool(json.loads(result))
+
+    # --------------------------------------------------------------------
+    # 24. list_state — list state keys by prefix
+    # --------------------------------------------------------------------
+
+    def list_state(self, prefix: str = "") -> list[str]:
+        """List all durable state keys matching the given prefix.
+
+        Internally delegates to the ``"state"`` service via
+        :meth:`durable_call`.
+
+        Parameters
+        ----------
+        prefix : str
+            Optional prefix to filter keys by.  Empty string lists all
+            keys in the current scope.
+
+        Returns
+        -------
+        list[str]
+            List of matching state keys.
+        """
+        inp: dict = {"prefix": prefix}
+        result = self.durable_call("state", "list", inp)
+        return json.loads(result)
+
+    # --------------------------------------------------------------------
+    # 25. create_promise — create a durable promise
     # --------------------------------------------------------------------
 
     def create_promise(self, name: str, ttl_ms: Optional[int] = None) -> str:

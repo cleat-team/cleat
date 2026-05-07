@@ -76,6 +76,12 @@ type HostCalls interface {
 	// PluginCall invokes a named function on a registered plugin.
 	PluginCall(pluginName, functionName, inputJSON string) (string, error)
 
+	// PluginCallStreaming calls a plugin function that returns a stream of events.
+	// On first execution, calls the plugin and records each stream event in history.
+	// On replay, replays events from history.
+	// Returns a channel that receives StreamEvent chunks.
+	PluginCallStreaming(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
+
 	// DurableSleep suspends the workflow for the given duration.
 	DurableSleep(d time.Duration)
 
@@ -267,6 +273,23 @@ type HostCalls interface {
 	// this workflow instance. Useful for generating predictable IDs
 	// (e.g. entity IDs, correlation IDs) that are stable across replays.
 	UUID(seed string) string
+}
+
+// ---- Streaming types ----
+
+// StreamEvent represents a single chunk of a streaming response.
+// Index is 0-based, Content holds the delta or accumulated text, and Finish
+// is true for the last chunk.
+type StreamEvent struct {
+	Index   int    `json:"i"`
+	Content string `json:"c"`
+	Finish  bool   `json:"f"`
+}
+
+// StreamResult holds the complete stream result after all chunks are consumed.
+type StreamResult struct {
+	Events []StreamEvent `json:"events"`
+	Final  string        `json:"final"` // reconstructed full response
 }
 
 // ---- Result types ----
@@ -598,6 +621,7 @@ type hostCallsImpl struct {
 	random                    func() int64
 
 	pluginCall                func(pluginName, functionName, inputJSON string) (string, error)
+	pluginCallStreaming       func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
 	durableSend               func(service, operation, requestJSON string) error
 	scheduleInvoke            func(service, operation, requestJSON string, delayMs int64) error
 	sendSignalAndWait         func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
@@ -658,6 +682,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		now:                       opts.Now,
 		random:                    opts.Random,
 		pluginCall:                opts.PluginCall,
+		pluginCallStreaming:       opts.PluginCallStreaming,
 		durableSend:               opts.DurableSend,
 		scheduleInvoke:            opts.ScheduleInvoke,
 		sendSignalAndWait:         opts.SendSignalAndWait,
@@ -730,6 +755,7 @@ type HostCallsOptions struct {
 	Now                       func() int64
 	Random                    func() int64
 	PluginCall                func(pluginName, functionName, inputJSON string) (string, error)
+	PluginCallStreaming       func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
 	DurableSend               func(service, operation, requestJSON string) error
 	ScheduleInvoke            func(service, operation, requestJSON string, delayMs int64) error
 	SendSignalAndWait         func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
@@ -918,6 +944,13 @@ func (h *hostCallsImpl) PluginCall(pluginName, functionName, inputJSON string) (
 		return h.pluginCall(pluginName, functionName, inputJSON)
 	}
 	return "", fmt.Errorf("durable: PluginCall not initialized")
+}
+
+func (h *hostCallsImpl) PluginCallStreaming(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error) {
+	if h.pluginCallStreaming != nil {
+		return h.pluginCallStreaming(pluginName, functionName, inputJSON)
+	}
+	return nil, fmt.Errorf("durable: PluginCallStreaming not initialized")
 }
 
 func (h *hostCallsImpl) DurableSend(service, operation, requestJSON string) error {

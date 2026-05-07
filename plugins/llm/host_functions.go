@@ -18,6 +18,11 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if err := scope.Register(plugin.FuncOptions{Name: "chat"}, p.chat); err != nil {
 		return err
 	}
+	if streamScope, ok := scope.(plugin.StreamFuncRegistry); ok {
+		if err := streamScope.RegisterStream(plugin.FuncOptions{Name: "chat_stream"}, p.chatStream); err != nil {
+			return err
+		}
+	}
 	if err := scope.Register(plugin.FuncOptions{Name: "embed", Idempotent: true}, p.embed); err != nil {
 		return err
 	}
@@ -89,6 +94,10 @@ func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 		output, err = providers.GroqChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
 	case "ollama":
 		output, err = providers.OllamaChat(ctx, p.httpClient, cfg.BaseURL, input)
+	case "gemini":
+		output, err = providers.GeminiChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+	case "mistral":
+		output, err = providers.MistralChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
 	default:
 		return "", fmt.Errorf("llm: unknown provider: %s", req.Provider)
 	}
@@ -183,6 +192,18 @@ func (p *Plugin) listModels(ctx context.Context, inputJSON string) (string, erro
 			{"mistral", 0},
 			{"codellama", 0},
 		},
+		"gemini": {
+			{"gemini-2.5-flash", 0.00075},
+			{"gemini-2.5-pro", 0.00625},
+			{"gemini-2.0-flash", 0.00050},
+			{"gemini-2.0-flash-lite", 0.000375},
+		},
+		"mistral": {
+			{"mistral-large-latest", 0.008},
+			{"mistral-medium-latest", 0.005},
+			{"mistral-small-latest", 0.004},
+			{"open-mistral-nemo", 0.0006},
+		},
 	}
 
 	if req.Provider != "" {
@@ -195,7 +216,7 @@ func (p *Plugin) listModels(ctx context.Context, inputJSON string) (string, erro
 	}
 
 	all := map[string][]modelInfo{}
-	for _, provider := range []string{"openai", "anthropic", "groq", "ollama"} {
+	for _, provider := range []string{"openai", "anthropic", "groq", "ollama", "gemini", "mistral"} {
 		if cfg, ok := p.config.Providers[provider]; ok && cfg.Enabled {
 			all[provider] = models[provider]
 		}
@@ -203,3 +224,71 @@ func (p *Plugin) listModels(ctx context.Context, inputJSON string) (string, erro
 	outJSON, _ := json.Marshal(map[string]any{"providers": all})
 	return string(outJSON), nil
 }
+
+func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+	cc := plugin.CallContextFromContext(ctx)
+	if cc == nil || cc.TenantID == uuid.Nil {
+		return nil, fmt.Errorf("llm: no tenant context")
+	}
+
+	var req chatRequest
+	if err := json.Unmarshal([]byte(inputJSON), &req); err != nil {
+		return nil, fmt.Errorf("llm: invalid input: %w", err)
+	}
+	if req.Provider == "" {
+		return nil, fmt.Errorf("llm: provider is required")
+	}
+
+	cfg, ok := p.config.Providers[req.Provider]
+	if !ok || !cfg.Enabled {
+		return nil, fmt.Errorf("llm: provider %q not configured or disabled", req.Provider)
+	}
+
+	if req.Model == "" {
+		req.Model = cfg.DefaultModel
+	}
+
+	input := providers.ChatInput{
+		Model:       req.Model,
+		Messages:    req.Messages,
+		Temperature: req.Temperature,
+		MaxTokens:   req.MaxTokens,
+		Tools:       req.Tools,
+		ToolChoice:  req.ToolChoice,
+		System:      req.System,
+	}
+
+	var chunkCh <-chan providers.StreamChunk
+	var err error
+
+	switch req.Provider {
+	case "openai":
+		chunkCh, err = providers.OpenAIChatStream(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+	case "anthropic":
+		chunkCh, err = providers.AnthropicChatStream(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+	case "groq":
+		chunkCh, err = providers.GroqChatStream(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+	case "ollama":
+		chunkCh, err = providers.OllamaChatStream(ctx, p.httpClient, cfg.BaseURL, input)
+	default:
+		return nil, fmt.Errorf("llm: unknown provider: %s", req.Provider)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(chan plugin.StreamEvent)
+	go func() {
+		defer close(out)
+		for chunk := range chunkCh {
+			out <- plugin.StreamEvent{
+				Index:   chunk.Index,
+				Content: chunk.Content,
+				Finish:  chunk.Done,
+			}
+		}
+	}()
+
+	return out, nil
+}
+

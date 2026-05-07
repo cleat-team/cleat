@@ -76,6 +76,13 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+// StreamChunk represents a single chunk of content from a streaming LLM response.
+type StreamChunk struct {
+	Content string `json:"content"`
+	Index   int    `json:"index"`
+	Done    bool   `json:"done"`
+}
+
 // EmbedInput is the JSON input for an embedding request.
 type EmbedInput struct {
 	Model string   `json:"model"`

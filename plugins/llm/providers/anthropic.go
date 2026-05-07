@@ -1,12 +1,14 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 type anthropicRequest struct {
@@ -201,4 +203,96 @@ func AnthropicChat(ctx context.Context, client *http.Client, apiKey, baseURL str
 		Cost:    cost,
 		Model:   result.Model,
 	}, nil
+}
+
+// AnthropicChatStream calls the Anthropic Messages API in streaming mode.
+// Returns a channel of StreamChunk that is closed when the stream is complete.
+func AnthropicChatStream(ctx context.Context, client *http.Client, apiKey, baseURL string, input ChatInput) (<-chan StreamChunk, error) {
+	if baseURL == "" {
+		baseURL = "https://api.anthropic.com/v1"
+	}
+
+	// Build the streaming request body.
+	bodyMap := map[string]interface{}{}
+	data, _ := json.Marshal(input)
+	json.Unmarshal(data, &bodyMap)
+	bodyMap["stream"] = true
+
+	bodyJSON, err := json.Marshal(bodyMap)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: marshal stream request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/messages", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: create stream request: %w", err)
+	}
+	req.Header.Set("x-api-key", apiKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("anthropic: stream request failed: %w", err)
+	}
+
+	ch := make(chan StreamChunk, 64)
+	go func() {
+		defer resp.Body.Close()
+		defer close(ch)
+
+		scanner := bufio.NewScanner(resp.Body)
+		index := 0
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ")
+			if payload == "[DONE]" {
+				return
+			}
+
+			var sseData struct {
+				Type string `json:"type"`
+				Delta *struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"delta,omitempty"`
+				ContentBlock *struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content_block,omitempty"`
+			}
+			if err := json.Unmarshal([]byte(payload), &sseData); err != nil {
+				continue
+			}
+
+			var text string
+			switch sseData.Type {
+			case "content_block_delta":
+				if sseData.Delta != nil {
+					text = sseData.Delta.Text
+				}
+			case "content_block_start":
+				if sseData.ContentBlock != nil {
+					text = sseData.ContentBlock.Text
+				}
+			case "message_stop":
+				ch <- StreamChunk{Index: index, Done: true}
+				return
+			}
+
+			if text != "" {
+				ch <- StreamChunk{
+					Content: text,
+					Index:   index,
+				}
+				index++
+			}
+		}
+	}()
+
+	return ch, nil
 }

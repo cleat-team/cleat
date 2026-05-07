@@ -2,6 +2,7 @@
   import StatusBadge from '../components/StatusBadge.svelte';
   import EventTimeline from '../components/EventTimeline.svelte';
   import DAGGraph from '../components/DAGGraph.svelte';
+  import CostPanel from '../components/CostPanel.svelte';
   import { getWorkflow, getWorkflowHistory, getWorkflowDAG, signalWorkflow, cancelWorkflow } from '../lib/api';
   import type { WorkflowInstance, EventRecord, DAGSpec } from '../lib/types';
 
@@ -125,6 +126,8 @@
     <h3>Event Timeline ({events.length} events)</h3>
     <EventTimeline {events} />
   </div>
+
+  <CostPanel {events} workflowName={wf.def_name} />
 {:else}
   <p style="color: var(--color-text-muted);">Workflow not found.</p>
 {/if}

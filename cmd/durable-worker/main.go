@@ -85,8 +85,9 @@ func main() {
 
 	// Plugin state (populated in both sharded and non-sharded paths).
 	var (
-		pluginRegistry = host.NewPluginRegistry()
-		plugList       []*plugin.LoadedPlugin
+		pluginRegistry       = host.NewPluginRegistry()
+		pluginStreamRegistry = host.NewPluginStreamRegistry()
+		plugList             []*plugin.LoadedPlugin
 		plugHandler    http.Handler
 		plugMux        *http.ServeMux
 		bgWg          sync.WaitGroup
@@ -224,8 +225,9 @@ func main() {
 		}
 		if p, ok := lp.Plugin.(plugin.HasHostFunctions); ok {
 			adapter := &hostPluginRegistryAdapter{
-				registry:   pluginRegistry,
-				pluginName: lp.Plugin.Info().Name,
+				registry:       pluginRegistry,
+				streamRegistry: pluginStreamRegistry,
+				pluginName:     lp.Plugin.Info().Name,
 			}
 			if rerr := p.RegisterHostFunctions(adapter); rerr != nil {
 				log.Printf("[worker %s] plugin %s: host functions failed: %v",
@@ -374,7 +376,8 @@ type Worker struct {
 	heartbeatInterval time.Duration
 	pollInterval      time.Duration
 	namespace         string
-	pluginRegistry    *host.PluginRegistry
+	pluginRegistry       *host.PluginRegistry
+	pluginStreamRegistry *host.PluginStreamRegistry
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -929,10 +932,12 @@ type dbWorkflowState struct {
 func (s *dbWorkflowState) Version() int    { return s.version }
 func (s *dbWorkflowState) MinVersion() int { return s.minVersion }
 
-// hostPluginRegistryAdapter bridges plugin.FuncRegistry to host.PluginRegistry.
+// hostPluginRegistryAdapter bridges plugin.FuncRegistry and plugin.StreamFuncRegistry
+// to host.PluginRegistry and host.PluginStreamRegistry.
 type hostPluginRegistryAdapter struct {
-	registry   *host.PluginRegistry
-	pluginName string
+	registry       *host.PluginRegistry
+	streamRegistry *host.PluginStreamRegistry
+	pluginName     string
 }
 
 func (a *hostPluginRegistryAdapter) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
@@ -949,6 +954,22 @@ func (a *hostPluginRegistryAdapter) Register(opts plugin.FuncOptions, fn plugin.
 		return a.registry.RegisterIdempotent(a.pluginName, opts.Name, host.PluginFunc(fn))
 	}
 	return a.registry.Register(a.pluginName, opts.Name, host.PluginFunc(fn))
+}
+
+func (a *hostPluginRegistryAdapter) RegisterStream(opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
+	if opts.Name == "" {
+		return fmt.Errorf("function name must not be empty")
+	}
+	if strings.Contains(opts.Name, "/") || strings.Contains(opts.Name, "\x00") {
+		return fmt.Errorf("function name %q contains invalid characters", opts.Name)
+	}
+	if a.streamRegistry == nil {
+		return fmt.Errorf("stream function registry not initialized")
+	}
+	if a.streamRegistry.Has(a.pluginName, opts.Name) {
+		return fmt.Errorf("stream function %q already registered for plugin %q", opts.Name, a.pluginName)
+	}
+	return a.streamRegistry.RegisterStream(a.pluginName, opts, fn)
 }
 
 // determineEntryPoint extracts the entry point name from workflow input.

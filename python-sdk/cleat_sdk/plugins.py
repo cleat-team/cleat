@@ -231,6 +231,88 @@ class AwaitWebhookResult:
     """ISO-8601 timestamp of when the webhook was received."""
 
 
+# -- llm ----------------------------------------------------------------
+
+@dataclass
+class LLMChatResult:
+    """Result of a :meth:`Plugins.llm_chat` call."""
+
+    choices: list = field(default_factory=list)
+    """List of completion choice dicts, each containing message and
+    finish_reason."""
+
+    usage: dict = field(default_factory=dict)
+    """Token usage info with ``prompt_tokens``, ``completion_tokens``,
+    and ``total_tokens``."""
+
+    cost: float = 0.0
+    """Estimated cost of the LLM call in USD."""
+
+    model: str = ""
+    """Model identifier used for completion."""
+
+    error: str = ""
+    """Error message if the call failed (empty on success)."""
+
+
+@dataclass
+class LLMEmbedResult:
+    """Result of a :meth:`Plugins.llm_embed` call."""
+
+    data: list = field(default_factory=list)
+    """List of embedding data dicts, each with ``embedding`` (list of
+    floats) and ``index`` (int)."""
+
+    usage: dict = field(default_factory=dict)
+    """Token usage info."""
+
+    cost: float = 0.0
+    """Estimated cost of the embedding call in USD."""
+
+    error: str = ""
+    """Error message if the call failed (empty on success)."""
+
+
+@dataclass
+class LLMListModelsResult:
+    """Result of a :meth:`Plugins.llm_list_models` call."""
+
+    models: list = field(default_factory=list)
+    """List of model info dicts, each with ``name`` and
+    ``cost_per_1k_tokens`` (when a single provider is queried)."""
+
+    providers: dict = field(default_factory=dict)
+    """Map of provider name to model list (when no specific provider is
+    queried)."""
+
+
+# -- pgvector -----------------------------------------------------------
+
+@dataclass
+class PgVectorSearchResult:
+    """Result of a :meth:`Plugins.pgvector_search` call."""
+
+    results: list = field(default_factory=list)
+    """List of result dicts, each with ``id``, ``external_id``,
+    ``content``, ``metadata``, and ``score``."""
+
+
+@dataclass
+class PgVectorUpsertResult:
+    """Result of a :meth:`Plugins.pgvector_upsert` call."""
+
+    id: str = ""
+    """The ID of the upserted embedding row."""
+
+
+@dataclass
+class PgVectorDeleteResult:
+    """Result of a :meth:`Plugins.pgvector_delete` call."""
+
+    deleted: int = 0
+    """Number of rows deleted."""
+
+
 # ========================================================================
 # Plugins -- typed convenience wrapper
 # ========================================================================
@@ -694,3 +776,226 @@ class Plugins:
             inp,
             AwaitWebhookResult,
         )
+
+    # --------------------------------------------------------------------
+    # llm — AI / LLM plugin wrappers
+    # --------------------------------------------------------------------
+
+    def llm_chat(
+        self,
+        provider: str,
+        model: str,
+        messages: list[dict],
+        tools: Any = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        system_prompt: str = "",
+        tool_choice: str = "",
+    ) -> LLMChatResult:
+        """Send a chat completion request to an LLM provider.
+
+        Parameters
+        ----------
+        provider : str
+            Provider name (e.g. ``"openai"``, ``"anthropic"``, ``"groq"``,
+            ``"ollama"``).
+        model : str
+            Model identifier (e.g. ``"gpt-4o"``, ``"claude-sonnet-4-6"``).
+        messages : list[dict]
+            Chat messages, each with ``role`` and ``content`` keys, and
+            optionally ``tool_calls`` or ``tool_call_id``.
+        tools : list[dict] or None
+            Optional list of tool definitions the model may call.
+        max_tokens : int or None
+            Optional maximum number of tokens to generate.
+        temperature : float or None
+            Optional sampling temperature (0.0 to 2.0).
+        system_prompt : str
+            Optional system prompt (applied via the ``system`` field).
+        tool_choice : str
+            Optional tool choice directive (e.g. ``"auto"``, ``"any"``,
+            ``"none"``).
+
+        Returns
+        -------
+        LLMChatResult
+            The chat completion result with choices, usage, and cost.
+        """
+        inp: dict = {"provider": provider, "model": model, "messages": messages}
+        if tools is not None:
+            inp["tools"] = tools
+        if max_tokens is not None:
+            inp["max_tokens"] = max_tokens
+        if temperature is not None:
+            inp["temperature"] = temperature
+        if system_prompt:
+            inp["system"] = system_prompt
+        if tool_choice:
+            inp["tool_choice"] = tool_choice
+        return self._call(self._h, "llm", "chat", inp, LLMChatResult)
+
+    def llm_embed(
+        self,
+        provider: str,
+        model: str,
+        input_texts: list[str],
+    ) -> LLMEmbedResult:
+        """Generate embeddings for a list of input texts.
+
+        Parameters
+        ----------
+        provider : str
+            Provider name (e.g. ``"openai"``).
+        model : str
+            Embedding model identifier.
+        input_texts : list[str]
+            List of input texts to embed.
+
+        Returns
+        -------
+        LLMEmbedResult
+            The embedding result with data, usage, and cost.
+        """
+        inp: dict = {
+            "provider": provider,
+            "model": model,
+            "input": input_texts,
+        }
+        return self._call(self._h, "llm", "embed", inp, LLMEmbedResult)
+
+    def llm_list_models(
+        self,
+        provider: str = "",
+    ) -> LLMListModelsResult:
+        """List available models from one or all LLM providers.
+
+        Parameters
+        ----------
+        provider : str
+            Optional provider name to filter by.  If empty, models from
+            all configured providers are returned.
+
+        Returns
+        -------
+        LLMListModelsResult
+            Available models, either by provider or all providers.
+        """
+        inp: dict = {}
+        if provider:
+            inp["provider"] = provider
+        response = self._h.plugin_call("llm", "list_models", inp)
+        data = json.loads(response)
+        return LLMListModelsResult(
+            models=data.get("models", []),
+            providers=data.get("providers", {}),
+        )
+
+    # --------------------------------------------------------------------
+    # pgvector — vector database plugin wrappers
+    # --------------------------------------------------------------------
+
+    def pgvector_search(
+        self,
+        table: str,
+        vector: list[float],
+        limit: int = 10,
+        filter: Optional[dict] = None,
+        min_score: Optional[float] = None,
+    ) -> list[dict]:
+        """Search for similar vectors in a pgvector collection.
+
+        Parameters
+        ----------
+        table : str
+            The collection name to search in.
+        vector : list[float]
+            The query vector for similarity search.
+        limit : int
+            Maximum number of results to return (default 10).
+        filter : dict or None
+            Optional metadata filter (applied server-side where supported).
+        min_score : float or None
+            Optional minimum similarity score threshold.  Results below
+            this threshold are filtered out client-side.
+
+        Returns
+        -------
+        list[dict]
+            List of result dicts, each with ``id``, ``external_id``,
+            ``content``, ``metadata``, and ``score`` keys.
+        """
+        inp: dict = {
+            "collection": table,
+            "query_vector": vector,
+            "top_k": limit,
+            "include_meta": True,
+        }
+        if filter is not None:
+            inp["filter"] = filter
+        result = self._call(
+            self._h, "pgvector", "search", inp, PgVectorSearchResult
+        )
+        items = result.results
+        if min_score is not None:
+            items = [r for r in items if r.get("score", 0) >= min_score]
+        return items
+
+    def pgvector_upsert(
+        self,
+        table: str,
+        id: str,
+        vector: list[float],
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """Insert or update an embedding vector in a pgvector collection.
+
+        Parameters
+        ----------
+        table : str
+            The collection name.
+        id : str
+            The external ID for the embedding (used for deduplication).
+        vector : list[float]
+            The embedding vector.
+        metadata : dict or None
+            Optional metadata to store with the embedding.
+
+        Raises
+        ------
+        RuntimeError
+            If the plugin call fails.
+        """
+        inp: dict = {
+            "collection": table,
+            "external_id": id,
+            "embedding": vector,
+        }
+        if metadata is not None:
+            inp["metadata"] = metadata
+        # Call plugin directly; ignore the response ID on success.
+        self._h.plugin_call("pgvector", "upsert", inp)
+
+    def pgvector_delete(
+        self,
+        table: str,
+        id: str,
+    ) -> None:
+        """Delete an embedding vector from a pgvector collection.
+
+        Parameters
+        ----------
+        table : str
+            The collection name.
+        id : str
+            The external ID of the embedding to delete.
+
+        Raises
+        ------
+        RuntimeError
+            If the plugin call fails.
+        """
+        inp: dict = {
+            "collection": table,
+            "external_id": id,
+        }
+        self._h.plugin_call("pgvector", "delete", inp)

@@ -1,12 +1,14 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // OpenAIChat calls the OpenAI chat completions API.
@@ -79,6 +81,84 @@ func OpenAIChat(ctx context.Context, client *http.Client, apiKey, baseURL string
 	}, nil
 }
 
+// OpenAIChatStream calls the OpenAI chat completions API in streaming mode.
+// Returns a channel of StreamChunk that is closed when the stream is complete.
+func OpenAIChatStream(ctx context.Context, client *http.Client, apiKey, baseURL string, input ChatInput) (<-chan StreamChunk, error) {
+	if baseURL == "" {
+		baseURL = "https://api.openai.com/v1"
+	}
+
+	// Clone input and enable streaming.
+	bodyMap := map[string]interface{}{}
+	data, _ := json.Marshal(input)
+	json.Unmarshal(data, &bodyMap)
+	bodyMap["stream"] = true
+
+	bodyJSON, err := json.Marshal(bodyMap)
+	if err != nil {
+		return nil, fmt.Errorf("openai: marshal stream request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/chat/completions", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, fmt.Errorf("openai: create stream request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("openai: stream request failed: %w", err)
+	}
+
+	ch := make(chan StreamChunk, 64)
+	go func() {
+		defer resp.Body.Close()
+		defer close(ch)
+
+		scanner := bufio.NewScanner(resp.Body)
+		index := 0
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			payload := strings.TrimPrefix(line, "data: ")
+			if payload == "[DONE]" {
+				return
+			}
+
+			var sseData struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+					FinishReason *string `json:"finish_reason"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal([]byte(payload), &sseData); err != nil {
+				continue
+			}
+			if len(sseData.Choices) == 0 {
+				continue
+			}
+			content := sseData.Choices[0].Delta.Content
+			chunk := StreamChunk{
+				Content: content,
+				Index:   index,
+			}
+			index++
+			if sseData.Choices[0].FinishReason != nil {
+				chunk.Done = true
+			}
+			ch <- chunk
+		}
+	}()
+
+	return ch, nil
+}
+
 // OpenAIEmbed calls the OpenAI embeddings API.
 func OpenAIEmbed(ctx context.Context, client *http.Client, apiKey, baseURL string, input EmbedInput) (EmbedOutput, error) {
 	if baseURL == "" {
@@ -128,3 +208,5 @@ func OpenAIEmbed(ctx context.Context, client *http.Client, apiKey, baseURL strin
 		Cost:  cost,
 	}, nil
 }
+
+// OpenAIChatStream calls the OpenAI chat completions API in streaming mode.

@@ -43,6 +43,7 @@ type HostHandler interface {
 	CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64
 	AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64
 	PluginCall(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
+	PluginCallStreaming(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
 	RegisterUpdateHandler(ctx context.Context, m api.Module, name string) int64
 }
 
@@ -196,6 +197,20 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		runIDsJSON := readWasmString(mem, idsPtr, idsLen)
 		return uint64(h.AwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen))
 	}).Export("durable_await_all_children")
+
+	// plugin_call_streaming: (ptr,len x5) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		pluginNamePtr, pluginNameLen,
+		funcNamePtr, funcNameLen,
+		inputPtr, inputLen,
+		responsePtr, responseMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		pluginName := readWasmString(mem, pluginNamePtr, pluginNameLen)
+		funcName := readWasmString(mem, funcNamePtr, funcNameLen)
+		inputJSON := readWasmString(mem, inputPtr, inputLen)
+		return uint64(h.PluginCallStreaming(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
+	}).Export("plugin_call_streaming")
 
 	// plugin_call: (ptr,len x5) -> i64 — routes through PluginRegistry for event history recording.
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

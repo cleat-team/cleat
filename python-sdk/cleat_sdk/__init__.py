@@ -33,6 +33,12 @@ from .plugins import (
     ResolveIncidentResult,
     SendMessageResult,
     AwaitWebhookResult,
+    LLMChatResult,
+    LLMEmbedResult,
+    LLMListModelsResult,
+    PgVectorSearchResult,
+    PgVectorUpsertResult,
+    PgVectorDeleteResult,
 )
 
 __all__ = [
@@ -63,4 +69,10 @@ __all__ = [
     "ResolveIncidentResult",
     "SendMessageResult",
     "AwaitWebhookResult",
+    "LLMChatResult",
+    "LLMEmbedResult",
+    "LLMListModelsResult",
+    "PgVectorSearchResult",
+    "PgVectorUpsertResult",
+    "PgVectorDeleteResult",
 ]

@@ -181,6 +181,15 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
+	"plugin_call_streaming": {
+		ImportName: "plugin_call_streaming",
+		Params: []paramSpec{
+			{"pluginName", kindInString},
+			{"functionName", kindInString},
+			{"inputJSON", kindInString},
+			{"response", kindOutString},
+		},
+	},
 }
 
 const outBufSize = 65536

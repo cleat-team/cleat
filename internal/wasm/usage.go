@@ -64,6 +64,7 @@ var hostFunctions = []HostFunction{
 	// Update handlers
 	{"durable_register_update_handler", "RegisterUpdateHandler"},
 	{"plugin_call", "PluginCall"},
+	{"plugin_call_streaming", "PluginCallStreaming"},
 	// Fetch / HTTP methods (all map to durable_call import)
 	{"durable_call", "DurableFetch"},
 	{"durable_call", "DurableFetchJSON"},

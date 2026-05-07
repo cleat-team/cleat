@@ -135,6 +135,22 @@ type FuncRegistry interface {
 // Takes JSON input, returns JSON output.
 type PluginFunc func(ctx context.Context, inputJSON string) (outputJSON string, err error)
 
+// StreamEvent represents a single chunk of a streaming response.
+type StreamEvent struct {
+	Index   int    `json:"i"`
+	Content string `json:"c"`
+	Finish  bool   `json:"f"`
+}
+
+// PluginStreamFunc is a plugin host function that returns a stream of events.
+// Takes JSON input and returns a channel that receives stream events.
+type PluginStreamFunc func(ctx context.Context, inputJSON string) (<-chan StreamEvent, error)
+
+// StreamFuncRegistry lets plugins register streaming host functions.
+type StreamFuncRegistry interface {
+	RegisterStream(opts FuncOptions, fn PluginStreamFunc) error
+}
+
 // HasHealth: plugin reports its health status.
 type HasHealth interface {
 	Plugin

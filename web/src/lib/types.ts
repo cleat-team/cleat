@@ -60,3 +60,38 @@ export interface Schedule {
   created_at: string;
   updated_at: string;
 }
+
+// ── Cost observability types ──────────────────
+
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface LlmCallInfo {
+  step: number;
+  model: string;
+  provider: string;
+  function_name: string;
+  usage: TokenUsage;
+  cost: number;
+}
+
+export interface CostBreakdown {
+  byModel: Record<string, { tokens: TokenUsage; cost: number; calls: number }>;
+  byProvider: Record<string, { tokens: TokenUsage; cost: number; calls: number }>;
+  totalCost: number;
+  totalTokens: TokenUsage;
+  llmCalls: number;
+}
+
+export interface WorkflowCost {
+  workflowId: string;
+  workflowType: string;
+  status: string;
+  totalCost: number;
+  totalTokens: TokenUsage;
+  llmCalls: number;
+  startedAt: string;
+}

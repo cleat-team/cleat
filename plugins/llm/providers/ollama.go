@@ -1,12 +1,14 @@
 package providers
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 type ollamaRequest struct {
@@ -108,4 +110,76 @@ func OllamaChat(ctx context.Context, client *http.Client, baseURL string, input 
 		Cost:  0,
 		Model: input.Model,
 	}, nil
+}
+
+// OllamaChatStream calls the Ollama API in streaming mode.
+// Returns a channel of StreamChunk that is closed when the stream is complete.
+func OllamaChatStream(ctx context.Context, client *http.Client, baseURL string, input ChatInput) (<-chan StreamChunk, error) {
+	if baseURL == "" {
+		baseURL = "http://localhost:11434"
+	}
+
+	bodyMap := map[string]interface{}{}
+	data, _ := json.Marshal(input)
+	json.Unmarshal(data, &bodyMap)
+	bodyMap["stream"] = true
+
+	bodyJSON, err := json.Marshal(bodyMap)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: marshal stream request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", baseURL+"/api/chat", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, fmt.Errorf("ollama: create stream request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: stream request failed: %w", err)
+	}
+
+	ch := make(chan StreamChunk, 64)
+	go func() {
+		defer resp.Body.Close()
+		defer close(ch)
+
+		scanner := bufio.NewScanner(resp.Body)
+		index := 0
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+
+			var sseData struct {
+				Message *struct {
+					Content string `json:"content"`
+				} `json:"message,omitempty"`
+				Done bool `json:"done"`
+			}
+			if err := json.Unmarshal([]byte(line), &sseData); err != nil {
+				continue
+			}
+
+			var text string
+			if sseData.Message != nil {
+				text = sseData.Message.Content
+			}
+
+			ch <- StreamChunk{
+				Content: text,
+				Index:   index,
+				Done:    sseData.Done,
+			}
+			index++
+
+			if sseData.Done {
+				return
+			}
+		}
+	}()
+
+	return ch, nil
 }

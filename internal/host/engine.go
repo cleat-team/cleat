@@ -38,6 +38,7 @@ const (
 	EventTypeUpdateHandler    EventType = "update_handler"
 	EventTypeStateMutation    EventType = "state_mutation"
 	EventTypeRunDetached      EventType = "run_detached"
+	EventTypePluginCallStreamChunk EventType = "plugin_call_stream_chunk"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -88,6 +89,10 @@ type EventRecord struct {
 	PluginOutput string `json:"plugin_output,omitempty"`
 	PluginError  string `json:"plugin_error,omitempty"`
 	Idempotent   bool   `json:"idempotent,omitempty"`
+
+	// Stream chunk fields.
+	StreamChunkIndex int  `json:"stream_chunk_index,omitempty"`
+	StreamFinish     bool `json:"stream_finish,omitempty"`
 
 	// Update handler fields.
 	UpdateHandlerName string `json:"update_handler_name,omitempty"`
@@ -178,6 +183,10 @@ type ChildWorkflowStore interface {
 // Takes JSON input, returns JSON output. The engine handles WASM I/O.
 type PluginFunc func(ctx context.Context, inputJSON string) (outputJSON string, err error)
 
+// PluginStreamFunc is a plugin host function that returns a stream of events.
+// Takes JSON input, returns a channel of stream events.
+type PluginStreamFunc func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error)
+
 // pluginFuncEntry stores a registered plugin function along with its
 // idempotent flag. Idempotent functions are safe to re-invoke during replay.
 type pluginFuncEntry struct {
@@ -234,6 +243,40 @@ func (pr *PluginRegistry) Lookup(pluginName, funcName string) (PluginFunc, bool,
 	return entry.fn, entry.idempotent, ok
 }
 
+// PluginStreamRegistry maps plugin function names to streaming implementations.
+type PluginStreamRegistry struct {
+	funcs map[string]PluginStreamFunc
+}
+
+func NewPluginStreamRegistry() *PluginStreamRegistry {
+	return &PluginStreamRegistry{funcs: make(map[string]PluginStreamFunc)}
+}
+
+func (psr *PluginStreamRegistry) Register(pluginName, funcName string, fn PluginStreamFunc) error {
+	key := lookupKey(pluginName, funcName)
+	if _, exists := psr.funcs[key]; exists {
+		return fmt.Errorf("plugin stream function %q already registered", key)
+	}
+	psr.funcs[key] = fn
+	return nil
+}
+
+func (psr *PluginStreamRegistry) Lookup(pluginName, funcName string) (PluginStreamFunc, bool) {
+	fn, ok := psr.funcs[lookupKey(pluginName, funcName)]
+	return fn, ok
+}
+
+// Has reports whether a streaming plugin function is registered.
+func (psr *PluginStreamRegistry) Has(pluginName, funcName string) bool {
+	_, ok := psr.funcs[lookupKey(pluginName, funcName)]
+	return ok
+}
+
+// RegisterStream implements plugin.StreamFuncRegistry.
+func (psr *PluginStreamRegistry) RegisterStream(pluginName string, opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
+	return psr.Register(pluginName, opts.Name, PluginStreamFunc(fn))
+}
+
 // RetryableError is optionally implemented by errors to indicate retryability.
 type RetryableError interface {
 	Retryable() bool
@@ -252,8 +295,9 @@ type Engine struct {
 	workflowID      string
 	childWfStore    ChildWorkflowStore
 	compactionState *CompactionState
-	pluginRegistry  *PluginRegistry
-	tenantID        string
+	pluginRegistry    *PluginRegistry
+	pluginStreamRegistry *PluginStreamRegistry
+	tenantID          string
 }
 
 // EngineOption configures an Engine.
@@ -292,6 +336,12 @@ func WithCompactionState(cs *CompactionState) EngineOption {
 // WithPluginRegistry sets the plugin registry for plugin host function dispatch.
 func WithPluginRegistry(pr *PluginRegistry) EngineOption {
 	return func(e *Engine) { e.pluginRegistry = pr }
+}
+
+// WithPluginStreamRegistry sets the plugin stream registry for streaming
+// plugin host function dispatch.
+func WithPluginStreamRegistry(psr *PluginStreamRegistry) EngineOption {
+	return func(e *Engine) { e.pluginStreamRegistry = psr }
 }
 
 // WithTenantID sets the tenant ID for the engine, which is injected into
@@ -664,6 +714,132 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 	written := writeWasmString(mem, responsePtr, outputJSON, responseMaxLen)
 	return packDurableCallResult(int(written), 0, 0)
 }
+
+func (s *execSession) PluginCallStreaming(ctx context.Context, m api.Module,
+	pluginName, functionName, inputJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+	if s.isReplay {
+		return s.replayPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+	}
+	return s.freshPluginCallStreaming(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+}
+
+func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module,
+	pluginName, functionName, inputJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	// Look up the streaming plugin function.
+	if s.engine.pluginStreamRegistry == nil {
+		errMsg := "plugin_call_streaming: no plugin stream registry configured"
+		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		return packDurableCallResult(int(written), 0, 1)
+	}
+
+	fn, ok := s.engine.pluginStreamRegistry.Lookup(pluginName, functionName)
+	if !ok {
+		errMsg := fmt.Sprintf("plugin stream function %s/%s not registered", pluginName, functionName)
+		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		return packDurableCallResult(int(written), 0, 1)
+	}
+
+	// Inject call context.
+	callCtx := ctx
+	cc := &plugin.CallContext{}
+	if s.tenantID != "" {
+		tid, err := uuid.Parse(s.tenantID)
+		if err == nil {
+			cc.TenantID = tid
+		}
+	}
+	if s.workflowID != "" {
+		cc.WorkflowID = s.workflowID
+	}
+	callCtx = plugin.WithCallContext(callCtx, cc)
+
+	// Call the streaming plugin function and collect chunks.
+	chunkCh, err := fn(callCtx, inputJSON)
+	if err != nil {
+		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: %v", pluginName, functionName, err)
+		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		return packDurableCallResult(int(written), 0, 1)
+	}
+
+	var collected []plugin.StreamEvent
+	index := 0
+	for chunk := range chunkCh {
+		collected = append(collected, chunk)
+
+		// Record each chunk as an event.
+		rec := EventRecord{
+			Step:             s.stepCount,
+			EventType:        EventTypePluginCallStreamChunk,
+			PluginName:       pluginName,
+			PluginFunc:       functionName,
+			PluginInput:      inputJSON,
+			PluginOutput:     chunk.Content,
+			StreamChunkIndex: index,
+			StreamFinish:     chunk.Finish,
+		}
+		s.history = append(s.history, rec)
+		s.stepCount++
+		index++
+	}
+
+	// Return collected chunks as JSON.
+	outJSON, err := json.Marshal(collected)
+	if err != nil {
+		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: marshal chunks: %v", pluginName, functionName, err)
+		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		return packDurableCallResult(int(written), 0, 1)
+	}
+
+	written := writeWasmString(mem, responsePtr, string(outJSON), responseMaxLen)
+	return packDurableCallResult(int(written), 0, 0)
+}
+
+func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Module,
+	pluginName, functionName, inputJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	var collected []plugin.StreamEvent
+	index := 0
+
+	// Read consecutive stream chunk events from history.
+	for s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		if rec.EventType != EventTypePluginCallStreamChunk {
+			break
+		}
+		s.stepCount++
+
+		chunk := plugin.StreamEvent{
+			Index:   rec.StreamChunkIndex,
+			Content: rec.PluginOutput,
+			Finish:  rec.StreamFinish,
+		}
+		if rec.StreamChunkIndex > 0 || (rec.StreamChunkIndex == 0 && rec.StreamFinish) {
+			chunk.Index = rec.StreamChunkIndex
+		} else {
+			chunk.Index = index
+		}
+		collected = append(collected, chunk)
+		index++
+	}
+
+	// Return collected chunks as JSON.
+	outJSON, err := json.Marshal(collected)
+	if err != nil {
+		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: marshal chunks: %v", pluginName, functionName, err)
+		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		return packDurableCallResult(int(written), 0, 1)
+	}
+
+	written := writeWasmString(mem, responsePtr, string(outJSON), responseMaxLen)
+	return packDurableCallResult(int(written), 0, 0)
+}
+
 func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
 	if s.isReplay {
 		return s.replayCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
