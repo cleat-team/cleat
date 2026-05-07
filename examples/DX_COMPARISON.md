@@ -8,17 +8,17 @@ readability and developer friction compared side-by-side.
 ### Cleat (Go)
 
 ```go
-func ManageSubscription(h durable.HostCalls, input SubscriptionInput) (string, error) {
+func ManageSubscription(h cleat.HostCalls, input SubscriptionInput) (string, error) {
     if err := chargeWithRetry(h, input); err != nil {
         return enterGracePeriod(h, input)
     }
-    h.DurableSleep(30 * 24 * time.Hour)
+    h.Sleep(30 * 24 * time.Hour)
     return h.ContinueAsNew(toJSON(input))
 }
 
-func chargeWithRetry(h durable.HostCalls, input SubscriptionInput) error {
-    resp, err := h.DurableCallWithRetry(durable.CallOptions{
-        RetryPolicy: &durable.RetryPolicy{
+func chargeWithRetry(h cleat.HostCalls, input SubscriptionInput) error {
+    resp, err := h.CallWithRetry(cleat.CallOptions{
+        RetryPolicy: &cleat.RetryPolicy{
             MaxAttempts: 4, InitialInterval: 1 * time.Second,
             BackoffCoefficient: 2.0, MaxInterval: 30 * time.Second,
         },
@@ -110,16 +110,16 @@ explicit `DBOS.launch()` + `DBOS.setConfig()` lifecycle in `main()`.
 ### Cleat (Go)
 
 ```go
-func RegisterUser(h durable.HostCalls, input SignupInput) (*Profile, error) {
-    h.DurableCall("email", "SendVerification", ...)
+func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
+    h.Call("email", "SendVerification", ...)
 
     result := h.AwaitSignals([]string{"email_verified"}, 24*time.Hour)
     if result.TimedOut {
         return handleVerificationTimeout(h, userID, input)
     }
     // Signal received — extract payload and continue.
-    h.DurableCall("users", "CreateProfile", ...)
-    h.DurableCall("email", "SendWelcome", ...)
+    h.Call("users", "CreateProfile", ...)
+    h.Call("email", "SendWelcome", ...)
 }
 ```
 
@@ -189,14 +189,14 @@ beyond the generic `<string>`.
 ### Cleat (Go)
 
 ```go
-s := durable.NewSaga()
+s := cleat.NewSaga()
 
 s.AddStep("book_flight",
-    func(h durable.HostCalls) (string, error) {
-        return h.DurableCall("flights", "Book", ...)
+    func(h cleat.HostCalls) (string, error) {
+        return h.Call("flights", "Book", ...)
     },
-    func(h durable.HostCalls) error {
-        return h.DurableCall("flights", "Cancel", ...)
+    func(h cleat.HostCalls) error {
+        return h.Call("flights", "Cancel", ...)
     },
 )
 s.AddStep("book_hotel", bookHotelFn, cancelHotelFn)
@@ -277,7 +277,7 @@ it becomes unwieldy and error-prone.
 
 | Concern | Cleat | Temporal | DBOS |
 |---------|-------|----------|------|
-| Saga construct | Built-in `durable.NewSaga()` | Manual (no built-in) | Manual (no built-in) |
+| Saga construct | Built-in `cleat.NewSaga()` | Manual (no built-in) | Manual (no built-in) |
 | Compensation | Automatic LIFO | Manual try/catch block | Manual Promise.allSettled inspection |
 | Parallel + Saga | Sequential only (gap) | Manual with Promise.all | Manual with Promise.allSettled |
 | Declarative intent | Yes (AddStep pairs) | No | No |
@@ -292,7 +292,7 @@ booking gap. See implementation sketch in the "Improvements" section below.
 ### Cleat (Go)
 
 ```go
-func RunPipeline(h durable.HostCalls, input PipelineInput) (*PipelineResult, error) {
+func RunPipeline(h cleat.HostCalls, input PipelineInput) (*PipelineResult, error) {
     var runIDs []string
     for _, item := range input.Items {
         runID, _ := h.ChildWorkflow("process_item", toJSON(ChildInput{
@@ -389,11 +389,11 @@ awaits the child's completion. Children are recovered automatically at
    both the wait and the timeout in one call. Temporal requires `defineSignal`
    + `setHandler` + `condition()`. DBOS requires `recv()` + `Promise.race`.
 
-3. **Retry is inline.** `DurableCallWithRetry` puts retry policy at the call
+3. **Retry is inline.** `CallWithRetry` puts retry policy at the call
    site. Temporal puts it on the activity proxy (separate file). DBOS puts
    it in config YAML (even further away).
 
-4. **Saga is built in.** `durable.NewSaga()` with forward/compensate pairs
+4. **Saga is built in.** `cleat.NewSaga()` with forward/compensate pairs
    and automatic LIFO compensation. Temporal and DBOS require manual
    compensation logic.
 
@@ -418,10 +418,10 @@ awaits the child's completion. Children are recovered automatically at
    blocks until that child completes. **Fix: Add `AwaitAllChildren(runIDs)`
    that returns results when all complete, in completion order.**
 
-4. **`DurableCallWithHeartbeat` doesn't compose with `DurableCallTyped` or
-   `DurableCallWithRetry`.** For heartbeated calls with retry, you must use
+4. **`CallWithHeartbeat` doesn't compose with `CallTyped` or
+   `CallWithRetry`.** For heartbeated calls with retry, you must use
    the raw string-based API and implement retry manually. **Fix: Add
-   `DurableCallTypedWithHeartbeat` and `DurableCallWithHeartbeatAndRetry`.**
+   `CallTypedWithHeartbeat` and `CallWithHeartbeatAndRetry`.**
 
 5. **No `AwaitSignals` variant that returns immediately if a signal is
    already pending.** The current API always blocks until timeout, even
@@ -430,7 +430,7 @@ awaits the child's completion. Children are recovered automatically at
    store before blocking), or add `PollSignal` equivalents that work
    pre-AwaitSignals.**
 
-6. **Can't cancel a running `DurableCall` mid-execution.** Temporal's
+6. **Can't cancel a running `Call` mid-execution.** Temporal's
    `CancellationScope` can cancel in-flight activities. DBOS checks
    cancellation at step boundaries. Cleat has no mechanism to abort a
    long-running service call once started. **Fix: pass context
@@ -451,8 +451,8 @@ awaits the child's completion. Children are recovered automatically at
 |-----|-------------|--------|-----|
 | P0 | `Saga.AddParallel()` | ~1 day | Parallel booking is a top-3 use case; manual compensation at scale is error-prone |
 | P0 | `AwaitAllChildren(runIDs)` | ~1 day | Fan-in should be concurrent, not sequential per-child |
-| P1 | `DurableCallTypedWithHeartbeat` | ~half day | Remove the typed/untyped mismatch in heartbeat API |
-| P1 | `Saga.AddStep` from typed clients | ~half day | Saga steps currently require raw `DurableCall`; typed calls would eliminate boilerplate |
+| P1 | `CallTypedWithHeartbeat` | ~half day | Remove the typed/untyped mismatch in heartbeat API |
+| P1 | `Saga.AddStep` from typed clients | ~half day | Saga steps currently require raw `Call`; typed calls would eliminate boilerplate |
 | P2 | `ChildWorkflow` with function references | ~2 days | Compile-time safety for child workflow dispatch |
 | P2 | Ensure pending signals honored before `AwaitSignals` blocks | ~1 day | Fix signal ordering edge case |
 

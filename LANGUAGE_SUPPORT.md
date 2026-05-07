@@ -141,7 +141,7 @@ as a stepping stone.
 **Status (May 2026):** The Python SDK exists at 4,508 lines with full ABI
 conformance — all 22 host imports are defined, the `@cleat_entry` decorator
 generates WASM export wrappers, and typed wrappers (Saga, ChildWorkflow,
-DurableDefer, Plugins) are built. 80 tests pass (61 memory/encoding, 19 entry
+Defer, Plugins) are built. 80 tests pass (61 memory/encoding, 19 entry
 decorator). `cleat build --target python` is wired via `componentize-py` in
 `cmd/cleat/build_python.go`. Three example workflows exist (hello, saga,
 child fan-out).
@@ -164,14 +164,14 @@ cleat worker loading and executing a Python-compiled WASM module.
    mechanism. The Go SDK uses `//go:wasmimport` directives; Python needs the
    equivalent.
 3. Validate SuspendSentinel propagation through the actual WASM ABI (the
-   `@durable_entry` decorator already has the logic but it's untested at the
+   `@cleat_entry` decorator already has the logic but it's untested at the
    WASM boundary).
 4. Fix whatever breaks. The AS SDK had 11 issues, Java had 11. Python will
    have its own set.
 
 *Phase 2: Feature Parity with Go SDK (P1, ~2 weeks)*
 5. Add missing HostCalls methods: `HasState`, `ListState`, `LogKV`,
-   `DurableFetchJSON`, typed `Promise[T]`, typed update handlers.
+   `FetchJSON`, typed `Promise[T]`, typed update handlers.
 6. Add AI plugin wrappers to `plugins.py`: `llm_chat`, `llm_embed`,
    `pgvector_search`, `pgvector_upsert`.
 7. Add `cleat init --template agent --language python`.
@@ -229,7 +229,7 @@ code across 5 packages.
 | **Java/Kotlin** | TeaVM (mature) | ~2-3 weeks | ~2-5 weeks | 200-500 KB | TeaVM classlib subset | 2nd |
 | **AssemblyScript** | asc (mature) | ~1-2 weeks | ~1-3 weeks | 10-50 KB | Not actually TypeScript | 3rd |
 | **TypeScript** | Javy/QuickJS (mature) | ~2-3 weeks | ~3-6 weeks | 1-5 MB | Binary size, debugging | 4th |
-| **Python** | componentize-py | ✅ Done (4.5K lines, 80 tests) | ✅ Done (@durable_entry) | 5-20 MB | WASM FFI wiring (2-3 wks) | 5th |
+| **Python** | componentize-py | ✅ Done (4.5K lines, 80 tests) | ✅ Done (@cleat_entry) | 5-20 MB | WASM FFI wiring (2-3 wks) | 5th |
 | **C#/.NET** | NativeAOT-LLVM (exp.) | ~3-5 weeks | ~4-8 weeks | 1-5 MB | Immature toolchain | 6th |
 | **Go** | go build (built-in) | ✅ Done | ✅ Done | ~1-5 MB (go) / ~100-500 KB (tinygo) | None | Done |
 | **Rust** | cargo build (built-in) | ✅ Done | ✅ Done | ~50-200 KB | None | Done |

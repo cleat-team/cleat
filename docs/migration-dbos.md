@@ -9,21 +9,21 @@ covers conceptual mapping, API differences, code examples, and known gaps.
 
 | DBOS Concept | Cleat Equivalent | Notes |
 |---|---|---|
-| `@DBOS.workflow` / `@Workflow` | `@durable_entry` | Both use decorator-based entry points |
-| `@DBOS.step` / `@Step` | `durable_call()` | No step/activity annotation needed |
-| `DBOS.sleepSeconds(n)` | `durable_sleep(n * 1000)` | **Milliseconds** in Cleat |
+| `@DBOS.workflow` / `@Workflow` | `@cleat_entry` | Both use decorator-based entry points |
+| `@DBOS.step` / `@Step` | `call()` | No step/activity annotation needed |
+| `DBOS.sleepSeconds(n)` | `sleep(n * 1000)` | **Milliseconds** in Cleat |
 | `DBOS.recv(signalName, timeout)` | `await_signals()` | Similar semantics |
-| `DBOS.send(workflowID, signalName, ...)` | `durable_send()` / REST signal API | Similar |
+| `DBOS.send(workflowID, signalName, ...)` | `send()` / REST signal API | Similar |
 | `DBOS.setEvent(key, value)` | `set_query_state()` | Similar key-value query state |
 | `DBOS.getEvent(workflowID, key)` | REST: `GET /api/workflows/:id/query?key=X` | External query |
 | `DBOS.startWorkflow` | `child_workflow()` | Similar |
 | `DBOS.getWorkflowInput` | Input parameter of entry function | Declared as function parameter |
 | `WorkflowContext` | `HostCalls` first parameter | Injected by decorator |
 | `ConfiguredInstance` / classes | Stateless functions + `HostCalls` | No class-based configuration |
-| `@DBOS.transaction` / `@DBOSStep` | `durable_call("database", "query", ...)` | Externalize DB access via service |
-| `DBOS.logger` | `durable_log()` | Similar deterministic logging |
+| `@DBOS.transaction` / `@DBOSStep` | `call("database", "query", ...)` | Externalize DB access via service |
+| `DBOS.logger` | `log()` | Similar deterministic logging |
 | Authentication / `@DBAuth` | Host-level middleware | API key auth on REST endpoints |
-| `DBOS.retry` | `durable_call_with_retry()` | Server-side retry built-in |
+| `DBOS.retry` | `call_with_retry()` | Server-side retry built-in |
 
 ---
 
@@ -46,17 +46,17 @@ export class MyWorkflow {
 
 **Cleat (Python):**
 ```python
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
-@durable_entry
+@cleat_entry
 def my_workflow(h: HostCalls, input: MyInput) -> str:
     pass
 ```
 
 **Cleat (Go):**
 ```go
-//go:durable_entry
-func MyWorkflow(h durable.HostCalls, input MyInput) (MyOutput, error) {
+//go:cleat_entry
+func MyWorkflow(h cleat.HostCalls, input MyInput) (MyOutput, error) {
     // ...
 }
 ```
@@ -80,12 +80,12 @@ const result = await MyWorkflow.chargeCard(100);
 
 **Cleat (Python) — durable call:**
 ```python
-resp = h.durable_call("payment", "charge", {"amount": 100})
+resp = h.call("payment", "charge", {"amount": 100})
 ```
 
 **Cleat (Go):**
 ```go
-resp, err := h.DurableCall("payment", "charge", requestJSON)
+resp, err := h.Call("payment", "charge", requestJSON)
 ```
 
 ### Timer / Sleep
@@ -97,12 +97,12 @@ await DBOS.sleepSeconds(5);  // 5 seconds
 
 **Cleat (Python) — note milliseconds:**
 ```python
-h.durable_sleep(5000)  # 5 seconds
+h.sleep(5000)  # 5 seconds
 ```
 
 **Cleat (Go):**
 ```go
-h.DurableSleep(5 * time.Second)
+h.Sleep(5 * time.Second)
 ```
 
 ### Signal Communication
@@ -124,7 +124,7 @@ client = CleatClient("http://localhost:8080")
 client.send_signal(run_id, "approval", '{"approved": true}')
 
 # Or fire-and-forget from within another workflow
-h.durable_send("workflows", "signal", {
+h.send("workflows", "signal", {
     "run_id": target_run_id,
     "signal": "approval",
     "payload": '{"approved": true}',
@@ -164,7 +164,7 @@ static async myWorkflow(input: MyInput): Promise<void> {
 
 **Cleat (Python):**
 ```python
-@durable_entry
+@cleat_entry
 def my_workflow(h: HostCalls, input: MyInput) -> str:
     wfid = h.current_workflow_id()
     run_id = h.current_run_id()
@@ -233,37 +233,37 @@ export class OrderWorkflow {
 
 **Cleat (Python) — after:**
 ```python
-from cleat_sdk import HostCalls, durable_entry, Saga
+from cleat_sdk import HostCalls, cleat_entry, Saga
 import json
 
-@durable_entry
+@cleat_entry
 def process_order(h: HostCalls, input: dict) -> str:
     saga = Saga(h)
     order_id = input["orderId"]
 
     saga.add_step_fn(
         "reserve_inventory",
-        action=lambda h: h.durable_call(
+        action=lambda h: h.call(
             "inventory", "Reserve", {"items": input["items"]}
         ),
-        compensate=lambda h: h.durable_call(
+        compensate=lambda h: h.call(
             "inventory", "Release", json.dumps({"order_id": order_id})
         ),
     )
 
     saga.add_step_fn(
         "charge_payment",
-        action=lambda h: h.durable_call(
+        action=lambda h: h.call(
             "payment", "Charge", {"amount": input["total"]}
         ),
-        compensate=lambda h: h.durable_call(
+        compensate=lambda h: h.call(
             "payment", "Refund", json.dumps({"order_id": order_id})
         ),
     )
 
     saga.add_step_fn(
         "create_shipment",
-        action=lambda h: h.durable_call(
+        action=lambda h: h.call(
             "shipping", "CreateShipment", {"order_id": order_id}
         ),
         compensate=None,  # best-effort
@@ -291,7 +291,7 @@ await DBOS.step(
 
 **Cleat (Python):**
 ```python
-h.durable_call_with_retry(
+h.call_with_retry(
     "service", "call", {},
     RetryPolicy(
         max_attempts=3,
@@ -304,8 +304,8 @@ h.durable_call_with_retry(
 
 **Cleat (Go):**
 ```go
-h.DurableCallWithOptions(durable.CallOptions{
-    Retry: &durable.RetryPolicy{
+h.CallWithOptions(cleat.CallOptions{
+    Retry: &cleat.RetryPolicy{
         MaxAttempts:        3,
         InitialInterval:    1 * time.Second,
         BackoffCoefficient: 2.0,
@@ -321,10 +321,10 @@ h.DurableCallWithOptions(durable.CallOptions{
 ### 1. No Class-Based Configuration
 
 DBOS uses classes with decorators for workflow definitions, step configuration,
-and authentication. Cleat uses plain functions with `@durable_entry`.
+and authentication. Cleat uses plain functions with `@cleat_entry`.
 
 - **Gap**: No declarative per-step retry configuration or authentication roles.
-- **Workaround**: Configure retry at the call site with `durable_call_with_retry()`.
+- **Workaround**: Configure retry at the call site with `call_with_retry()`.
   Authentication is handled at the host level (API keys, middleware), not in
   workflow code.
 
@@ -335,15 +335,15 @@ run in WASM and cannot access databases directly.
 
 - **Gap**: Cannot embed SQL or ORM calls directly in workflow code.
 - **Workaround**: Externalize database access through a "database" service and
-  call it via `h.durable_call("database", "query", ...)`. The database service
+  call it via `h.call("database", "query", ...)`. The database service
   runs outside WASM and can use full SQL/ORM capabilities.
 
 ### 3. Unit Differences
 
-- **Gap**: `DBOS.sleepSeconds(n)` takes seconds; Cleat `durable_sleep(ms)` takes
+- **Gap**: `DBOS.sleepSeconds(n)` takes seconds; Cleat `sleep(ms)` takes
   milliseconds.
-- **Workaround**: Multiply by 1000: `h.durable_sleep(dbos_seconds * 1000)`.
-  In Go, use `h.DurableSleep(n * time.Second)`.
+- **Workaround**: Multiply by 1000: `h.sleep(dbos_seconds * 1000)`.
+  In Go, use `h.Sleep(n * time.Second)`.
 
 ### 4. No `DBOS.getWorkflowInput` Equivalent
 
@@ -364,19 +364,19 @@ each host call is recorded as an event.
   the entire workflow function; Cleat guarantees exactly-once for each recorded
   event (host call) with deterministic replay.
 - **Workaround**: Design workflows to be idempotent. Use Cleat's idempotency key
-  support for workflow start. The `durable_call` event sourcing model provides
+  support for workflow start. The `call` event sourcing model provides
   equivalent durability guarantees through replay.
 
 ### 6. No Decorator-Based Step Configuration
 
 DBOS configures retries, roles, and timeouts on step decorators. Cleat configures
-these at the `durable_call` call site.
+these at the `call` call site.
 
 - **Workaround**: Create wrapper functions for common call patterns:
 
 ```python
 def db_call(service, op, request, h, retries=3):
-    return h.durable_call_with_retry(
+    return h.call_with_retry(
         service, op, request,
         RetryPolicy(max_attempts=retries)
     )
@@ -387,7 +387,7 @@ def db_call(service, op, request, h, retries=3):
 DBOS workflows can use `fetch()` directly since they run in Node.js. Cleat workflows
 run in WASM and cannot use `urllib`, `requests`, or `fetch`.
 
-- **Workaround**: Use `h.durable_fetch()` or `h.durable_call("http", "fetch", ...)`
+- **Workaround**: Use `h.fetch()` or `h.call("http", "fetch", ...)`
   for all HTTP requests. The host handles the actual network call.
 
 ### 8. No Application-Level Versioning

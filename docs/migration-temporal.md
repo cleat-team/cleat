@@ -9,19 +9,19 @@ covers conceptual mapping, API differences, code examples, and known gaps.
 
 | Temporal Concept | Cleat Equivalent | Notes |
 |---|---|---|
-| Workflow | `@durable_entry` function | No workflow/activity distinction in Cleat |
-| Activity | `durable_call()` | Both service calls and activities use the same API |
+| Workflow | `@cleat_entry` function | No workflow/activity distinction in Cleat |
+| Activity | `call()` | Both service calls and activities use the same API |
 | Signal | `await_signals()` / `poll_signal()` | Same semantics, different method name |
 | Query | `set_query_state()` / query handlers | Cleat uses explicit key-value state |
 | Child Workflow | `child_workflow()` + `await_child()` | Similar API, no `ChildWorkflowOptions` |
 | Continue-As-New | `continue_as_new()` | Identical concept |
-| Timer / Sleep | `durable_sleep(ms)` | **Milliseconds** in Cleat vs. `time.Duration` in Temporal Go |
-| Saga / Compensation | `Saga` class + `durable_defer()` | Cleat has a built-in Saga helper |
+| Timer / Sleep | `sleep(ms)` | **Milliseconds** in Cleat vs. `time.Duration` in Temporal Go |
+| Saga / Compensation | `Saga` class + `defer()` | Cleat has a built-in Saga helper |
 | Workflow ID | `current_workflow_id()` | Available as a host call |
 | Run ID | `current_run_id()` | Available as a host call |
-| Memo / Search Attributes | Set via `durable_call("state", "set", ...)` | Use Cleat's state API |
+| Memo / Search Attributes | Set via `call("state", "set", ...)` | Use Cleat's state API |
 | Side Effect | `random()` | Deterministic random is built-in |
-| `Workflow.sleep` / `Thread.sleep` | `durable_sleep(ms)` | Single API for all suspension |
+| `Workflow.sleep` / `Thread.sleep` | `sleep(ms)` | Single API for all suspension |
 | `Workflow.newRandom` | `random()` | Built-in deterministic random |
 | `Workflow.getVersion` / `getCurrentBuildId` | `version()` / `min_version()` | Simpler versioning via WASM blob pointer |
 | Dynamic workflow (stub) | `child_workflow(name, input)` | Name-based, no stub typing needed |
@@ -52,26 +52,26 @@ func MyWorkflow(ctx workflow.Context, input MyInput) (MyOutput, error) {
 // workflow.go
 package workflow
 
-import "github.com/rcownie/cleat/durable"
+import "github.com/rcownie/cleat"
 
-var h durable.HostCalls // auto-threaded by transformer
+var h cleat.HostCalls // auto-threaded by transformer
 
-//go:durable_entry
-func MyWorkflow(ctx *durable.HostCalls, input MyInput) (MyOutput, error) {
+//go:cleat_entry
+func MyWorkflow(ctx *cleat.HostCalls, input MyInput) (MyOutput, error) {
     // ...
 }
 ```
 
 **Cleat (Python):**
 ```python
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
-@durable_entry
+@cleat_entry
 def my_workflow(h: HostCalls, input: MyInput) -> str:
     pass
 ```
 
-### Activity vs. Durable Call
+### Activity vs. Call
 
 **Temporal (Go) — activity:**
 ```go
@@ -88,12 +88,12 @@ err := workflow.ExecuteActivity(ctx, ChargeCard, request).Get(ctx, &resp)
 **Cleat (Go) — durable call:**
 ```go
 // No activity definition needed — call directly
-resp, err := h.DurableCall("payment", "charge", requestJSON)
+resp, err := h.Call("payment", "charge", requestJSON)
 ```
 
 **Cleat (Python):**
 ```python
-resp = h.durable_call("payment", "charge", {"amount": 100})
+resp = h.call("payment", "charge", {"amount": 100})
 ```
 
 ### Signal Handling
@@ -124,12 +124,12 @@ workflow.Sleep(ctx, 5*time.Second)
 
 **Cleat (Go):**
 ```go
-h.DurableSleep(5 * time.Second)
+h.Sleep(5 * time.Second)
 ```
 
 **Cleat (Python) — note milliseconds:**
 ```python
-h.durable_sleep(5000)  # 5 seconds
+h.sleep(5000)  # 5 seconds
 ```
 
 ### Child Workflow
@@ -203,20 +203,20 @@ func PaymentWorkflow(ctx workflow.Context, order Order) error {
 
 **Cleat (Go):**
 ```go
-//go:durable_entry
-func PaymentWorkflow(h durable.HostCalls, order Order) error {
-    h.DurableLog("Payment workflow started")
+//go:cleat_entry
+func PaymentWorkflow(h cleat.HostCalls, order Order) error {
+    h.Log("Payment workflow started")
 
-    // Durable call: Reserve inventory
-    reserveResp, err := h.DurableCall("inventory", "Reserve", marshal(order.Items))
+    // Call: Reserve inventory
+    reserveResp, err := h.Call("inventory", "Reserve", marshal(order.Items))
     if err != nil {
         return err
     }
 
-    // Durable call: Charge payment
-    chargeResp, err := h.DurableCall("payment", "Charge", marshal(order.Total))
+    // Call: Charge payment
+    chargeResp, err := h.Call("payment", "Charge", marshal(order.Total))
     if err != nil {
-        h.DurableCall("inventory", "Release", reserveResp) // compensate
+        h.Call("inventory", "Release", reserveResp) // compensate
         return err
     }
 
@@ -226,37 +226,37 @@ func PaymentWorkflow(h durable.HostCalls, order Order) error {
         return errors.New("approval timed out")
     }
 
-    // Durable call: Create shipment
-    _, err = h.DurableCall("shipping", "CreateShipment", marshal(order.ID))
+    // Call: Create shipment
+    _, err = h.Call("shipping", "CreateShipment", marshal(order.ID))
     if err != nil {
         return err
     }
 
-    h.DurableLog("Order completed")
+    h.Log("Order completed")
     return nil
 }
 ```
 
 **Cleat (Python):**
 ```python
-@durable_entry
+@cleat_entry
 def payment_workflow(h: HostCalls, order: dict) -> str:
     # Reserve inventory
-    reserve_resp = h.durable_call("inventory", "Reserve", order.get("items"))
+    reserve_resp = h.call("inventory", "Reserve", order.get("items"))
 
     # Charge payment
     try:
-        charge_resp = h.durable_call("payment", "Charge", order.get("total"))
+        charge_resp = h.call("payment", "Charge", order.get("total"))
     except Exception:
         # Compensate: release inventory
-        h.durable_call("inventory", "Release", reserve_resp)
+        h.call("inventory", "Release", reserve_resp)
         raise
 
     # Wait for approval signal
     sig = h.await_signals(["order_approved"], 300000)
 
     # Create shipment
-    h.durable_call("shipping", "CreateShipment", order["id"])
+    h.call("shipping", "CreateShipment", order["id"])
 
     return json.dumps({"status": "completed"})
 ```
@@ -269,13 +269,13 @@ def payment_workflow(h: HostCalls, order: dict) -> str:
 
 Temporal enforces a split between deterministic workflow code and non-deterministic
 activity code. Cleat has a single `HostCalls` interface — every external interaction
-goes through `durable_call()`. This is simpler but means:
+goes through `call()`. This is simpler but means:
 
 - **Gap**: No built-in activity retry isolation. A retryable activity in Temporal retries
-  independently; in Cleat, `durable_call_with_retry()` provides server-side retry but
+  independently; in Cleat, `call_with_retry()` provides server-side retry but
   the whole workflow step is re-executed on replay.
-- **Workaround**: Use `durable_call_with_retry()` for operations that need automatic
-  retry. Use `durable_call_with_heartbeat()` for long-running operations with progress
+- **Workaround**: Use `call_with_retry()` for operations that need automatic
+  retry. Use `call_with_heartbeat()` for long-running operations with progress
   reporting.
 
 ### 2. No Context Propagation
@@ -290,11 +290,11 @@ deadlines, and child workflow options. Cleat passes `HostCalls` directly.
 
 ### 3. Unit Differences
 
-- **Gap**: Cleat uses milliseconds for sleep (`durable_sleep(5000)` = 5s), while
+- **Gap**: Cleat uses milliseconds for sleep (`sleep(5000)` = 5s), while
   Temporal Go uses `time.Duration` (nanosecond precision) and Temporal Python uses
   `timedelta` / seconds.
-- **Workaround**: Use constants: `h.durable_sleep(5000)` for 5 seconds in Python;
-  `h.DurableSleep(5 * time.Second)` in Go.
+- **Workaround**: Use constants: `h.sleep(5000)` for 5 seconds in Python;
+  `h.Sleep(5 * time.Second)` in Go.
 
 ### 4. No Namespace/Visibility
 
@@ -318,7 +318,7 @@ REST endpoints at `/api/workflows` for listing and filtering.
 Temporal has `Workflow.SideEffect` for non-deterministic code that runs once and is
 recorded. Cleat does not have an equivalent.
 
-- **Workaround**: Use `durable_call("side_effect", "compute", {data: ...})` with a
+- **Workaround**: Use `call("side_effect", "compute", {data: ...})` with a
   stub service that runs the non-deterministic computation and records the result.
   Or use `random()` for deterministic randomness.
 

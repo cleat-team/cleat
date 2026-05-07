@@ -9,16 +9,16 @@ This guide covers conceptual mapping, API differences, code examples, and known 
 
 | Restate Concept | Cleat Equivalent | Notes |
 |---|---|---|
-| Service / Handler | `@durable_entry` function | Both use function-as-entry-point model |
-| `ctx.call()` | `durable_call()` | Similar: calls another service with replay |
-| `ctx.sleep(duration)` | `durable_sleep(ms)` | Unit difference (see below) |
-| `ctx.oneWayCall()` | `durable_send()` | Fire-and-forget semantics |
-| `ctx.sideEffect()` | `durable_call("side_effect", ...)` | No direct equivalent; use service call |
+| Service / Handler | `@cleat_entry` function | Both use function-as-entry-point model |
+| `ctx.call()` | `call()` | Similar: calls another service with replay |
+| `ctx.sleep(duration)` | `sleep(ms)` | Unit difference (see below) |
+| `ctx.oneWayCall()` | `send()` | Fire-and-forget semantics |
+| `ctx.sideEffect()` | `call("side_effect", ...)` | No direct equivalent; use service call |
 | `ctx.awakeable()` / `ctx.awakeableWithId()` | `create_promise()` + `await_promise()` | Similar: external resolution |
 | `ctx.resolveAwakeable(id, value)` | `resolve_promise()` | Same pattern |
 | `ctx.rejectAwakeable(id, reason)` | `reject_promise()` | Same pattern |
-| `ctx.run()` | `durable_call()` | Non-deterministic code wrapped in host call |
-| Journal / Log | `durable_log()` | Similar deterministic logging |
+| `ctx.run()` | `call()` | Non-deterministic code wrapped in host call |
+| Journal / Log | `log()` | Similar deterministic logging |
 | `ctx.serviceClient()` | `child_workflow()` | Starting another workflow |
 | State keys (`ctx.get`/`ctx.set`/`ctx.clear`) | `get_state()` / `set_state()` / `delete_state()` | Similar key-value state |
 | `ctx.endpointContext()` | `current_workflow_id()` / `current_run_id()` | Identity info as host calls |
@@ -26,8 +26,8 @@ This guide covers conceptual mapping, API differences, code examples, and known 
 | Idempotency / deduplication | Idempotency-Key header | REST-level idempotency |
 | `ctx.requestId()` | `current_run_id()` | Similar run identity |
 | Ingress (HTTP → handler) | REST API (`POST /api/workflows/:name/start`) | Both have HTTP endpoints |
-| `ctx.backgroundCall()` / `ctx.send()` | `durable_send()` | Fire-and-forget async execution |
-| `ctx.rpc()` | `durable_call()` | Blocking service call with reply |
+| `ctx.backgroundCall()` / `ctx.send()` | `send()` | Fire-and-forget async execution |
+| `ctx.rpc()` | `call()` | Blocking service call with reply |
 | `ctx.consumeEvent()` | `await_signals()` | Event-driven triggers |
 
 ---
@@ -65,17 +65,17 @@ public class MyService {
 
 **Cleat (Python):**
 ```python
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
-@durable_entry
+@cleat_entry
 def my_workflow(h: HostCalls, input: MyInput) -> str:
     pass
 ```
 
 **Cleat (Go):**
 ```go
-//go:durable_entry
-func MyWorkflow(h durable.HostCalls, input MyInput) (MyOutput, error) {
+//go:cleat_entry
+func MyWorkflow(h cleat.HostCalls, input MyInput) (MyOutput, error) {
     // ...
 }
 ```
@@ -92,10 +92,10 @@ const result = await ctx.call(PaymentService, "charge", {
 
 **Cleat (Python):**
 ```python
-result = h.durable_call("payment", "charge", {"amount": 100, "currency": "USD"})
+result = h.call("payment", "charge", {"amount": 100, "currency": "USD"})
 ```
 
-### Durable Sleep
+### Sleep / Timer
 
 **Restate:**
 ```typescript
@@ -104,12 +104,12 @@ await ctx.sleep(java.time.Duration.ofSeconds(5));
 
 **Cleat (Python) — note milliseconds:**
 ```python
-h.durable_sleep(5000)  # 5 seconds
+h.sleep(5000)  # 5 seconds
 ```
 
 **Cleat (Go):**
 ```go
-h.DurableSleep(5 * time.Second)
+h.Sleep(5 * time.Second)
 ```
 
 ### Side Effect
@@ -253,12 +253,12 @@ const orderService = restate.service({
 
 **Cleat (Go) — after:**
 ```go
-//go:durable_entry
-func PlaceOrder(h durable.HostCalls, order OrderInput) (OrderResult, error) {
-    h.DurableLog("Placing order " + order.OrderID)
+//go:cleat_entry
+func PlaceOrder(h cleat.HostCalls, order OrderInput) (OrderResult, error) {
+    h.Log("Placing order " + order.OrderID)
 
     // Step 1: Reserve inventory
-    reserveResp, err := h.DurableCall("inventory", "Reserve",
+    reserveResp, err := h.Call("inventory", "Reserve",
         marshal(map[string]interface{}{"items": order.Items}))
     if err != nil {
         return OrderResult{}, err
@@ -267,11 +267,11 @@ func PlaceOrder(h durable.HostCalls, order OrderInput) (OrderResult, error) {
     json.Unmarshal([]byte(reserveResp), &reserveResult)
 
     // Step 2: Charge payment
-    chargeResp, err := h.DurableCall("payment", "charge",
+    chargeResp, err := h.Call("payment", "charge",
         marshal(map[string]interface{}{"total": order.Total}))
     if err != nil {
         // Compensate: release inventory
-        h.DurableCall("inventory", "release",
+        h.Call("inventory", "release",
             marshal(map[string]interface{}{"reservationId": reserveResult.ReservationID}))
         return OrderResult{}, err
     }
@@ -286,14 +286,14 @@ func PlaceOrder(h durable.HostCalls, order OrderInput) (OrderResult, error) {
     approvalResult, timedOut, err := h.AwaitPromise(promiseID, 5*time.Minute)
     if timedOut || err != nil {
         // Compensate
-        h.DurableCall("payment", "refund", chargeResp)
-        h.DurableCall("inventory", "release",
+        h.Call("payment", "refund", chargeResp)
+        h.Call("inventory", "release",
             marshal(map[string]interface{}{"reservationId": reserveResult.ReservationID}))
         return OrderResult{}, fmt.Errorf("approval timed out")
     }
 
     // Step 4: Create shipment
-    shipResp, err := h.DurableCall("shipping", "createShipment",
+    shipResp, err := h.Call("shipping", "createShipment",
         marshal(map[string]interface{}{"orderId": order.OrderID}))
     if err != nil {
         return OrderResult{}, err
@@ -311,19 +311,19 @@ func PlaceOrder(h durable.HostCalls, order OrderInput) (OrderResult, error) {
 
 **Cleat (Python) — after:**
 ```python
-@durable_entry
+@cleat_entry
 def place_order(h: HostCalls, order: dict) -> str:
-    h.durable_log(f"Placing order {order['orderId']}")
+    h.log(f"Placing order {order['orderId']}")
 
     # Step 1: Reserve inventory
-    reserve_resp = h.durable_call("inventory", "Reserve", {"items": order["items"]})
+    reserve_resp = h.call("inventory", "Reserve", {"items": order["items"]})
     reserve_data = json.loads(reserve_resp)
 
     # Step 2: Charge payment
     try:
-        charge_resp = h.durable_call("payment", "charge", {"total": order["total"]})
+        charge_resp = h.call("payment", "charge", {"total": order["total"]})
     except Exception:
-        h.durable_call("inventory", "release", {"reservationId": reserve_data["reservationId"]})
+        h.call("inventory", "release", {"reservationId": reserve_data["reservationId"]})
         raise
 
     # Step 3: Wait for approval
@@ -331,12 +331,12 @@ def place_order(h: HostCalls, order: dict) -> str:
     approval_result = h.await_promise(promise_id, 300000)
     if approval_result.timed_out:
         # Compensate
-        h.durable_call("payment", "refund", json.loads(charge_resp))
-        h.durable_call("inventory", "release", {"reservationId": reserve_data["reservationId"]})
+        h.call("payment", "refund", json.loads(charge_resp))
+        h.call("inventory", "release", {"reservationId": reserve_data["reservationId"]})
         return json.dumps({"error": "approval timed out"})
 
     # Step 4: Create shipment
-    ship_resp = h.durable_call("shipping", "createShipment", {"orderId": order["orderId"]})
+    ship_resp = h.call("shipping", "createShipment", {"orderId": order["orderId"]})
     ship_data = json.loads(ship_resp)
 
     h.set_state("status", "confirmed")
@@ -358,14 +358,14 @@ service and operation names.
 
 ```python
 def call_payment_charge(h: HostCalls, amount: int) -> PaymentResult:
-    resp = h.durable_call("payment", "charge", {"amount": amount})
+    resp = h.call("payment", "charge", {"amount": amount})
     return PaymentResult(**json.loads(resp))
 ```
 
-In Go, use `DurableCallTyped()` for type-safe calls:
+In Go, use `CallTyped()` for type-safe calls:
 ```go
 var result ChargeResult
-err := h.DurableCallTyped("payment", "charge", request, &result)
+err := h.CallTyped("payment", "charge", request, &result)
 ```
 
 ### 2. No Virtual Object Keyed State (Automatic)
@@ -390,9 +390,9 @@ def cart_handler(h: HostCalls, input: str) -> str:
 ### 3. Unit Differences
 
 - **Gap**: Restate uses `Duration` objects (Java) or `ctx.sleep(Duration.ofSeconds(n))`;
-  Cleat uses milliseconds (`durable_sleep(ms)`).
-- **Workaround**: Multiply by 1000: `h.durable_sleep(restate_seconds * 1000)`.
-  In Go, use `h.DurableSleep(n * time.Second)`.
+  Cleat uses milliseconds (`sleep(ms)`).
+- **Workaround**: Multiply by 1000: `h.sleep(restate_seconds * 1000)`.
+  In Go, use `h.Sleep(n * time.Second)`.
 
 ### 4. No Direct `ctx.sideEffect()` Equivalent
 
@@ -401,7 +401,7 @@ number generation) once and records the result. Cleat's host calls are always
 replayed deterministically.
 
 - **Workaround**: Use `h.uuid(seed)` for deterministic UUIDs. For other non-deterministic
-  code, wrap it in a service call via `durable_call()`.
+  code, wrap it in a service call via `call()`.
 
 ### 5. No Service Discovery / Registration
 
@@ -417,12 +417,12 @@ be deployed and registered. Cleat deploys WASM blobs to a database.
 
 Restate distinguishes between `ctx.oneWayCall()` (fire-and-forget, not awaiting
 the result), `ctx.send()` (delayed invocation), and `ctx.rpc()` (blocking call).
-Cleat has `durable_send()` (fire-and-forget), `schedule_invoke()` (delayed), and
-`durable_call()` (blocking).
+Cleat has `send()` (fire-and-forget), `schedule_invoke()` (delayed), and
+`call()` (blocking).
 
 - **Workaround**: Map directly:
-  - `ctx.call()` / `ctx.rpc()` -> `durable_call()`
-  - `ctx.oneWayCall()` -> `durable_send()`
+  - `ctx.call()` / `ctx.rpc()` -> `call()`
+  - `ctx.oneWayCall()` -> `send()`
   - `ctx.send()` with delay -> `schedule_invoke()`
 
 ### 7. No Awakeable ID Generation
@@ -440,6 +440,6 @@ IDs from the host.
 Restate provides exactly-once execution for service calls. Cleat provides idempotency
 key support for workflow start (REST layer), but not for individual durable calls.
 
-- **Workaround**: Use `durable_call_with_retry()` with idempotent service operations.
+- **Workaround**: Use `call_with_retry()` with idempotent service operations.
   The event-sourced model ensures each durable call is recorded once and replayed
   deterministically, which provides effectively-once semantics.
