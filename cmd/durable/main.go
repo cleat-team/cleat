@@ -79,9 +79,11 @@ func main() {
 		var outDir string
 		fs := flag.NewFlagSet("build", flag.ExitOnError)
 		var target string
+		var entry string
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, rust, java, assemblyscript, or python")
+		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
 		fs.Parse(os.Args[2:])
 		if !isValidTarget(target) {
 			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript, python\n", target)
@@ -91,7 +93,12 @@ func main() {
 		if len(remainder) > 0 {
 			pattern = remainder[0]
 		}
-		runBuild(pattern, outDir, target)
+		if entry != "" {
+			// Use --entry as the pattern for Python builds.
+			runBuild(entry, outDir, target)
+		} else {
+			runBuild(pattern, outDir, target)
+		}
 	case "vet":
 		runVet(pattern)
 	case "deploy":
@@ -146,7 +153,7 @@ func runBuild(pattern, outDir, target string) {
 		runBuildRust(pattern, outDir)
 		return
 	}
-	if target == "python" {
+	if target == wasm.PythonTarget {
 		if outDir == "" {
 			outDir = "."
 		}

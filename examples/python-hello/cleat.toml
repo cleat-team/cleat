@@ -1,0 +1,11 @@
+[project]
+name = "python-hello"
+language = "python"
+version = "0.1.0"
+
+[workflow]
+entry = "hello_workflow.py:hello"
+
+[services.greeter]
+type = "http"
+url = "http://localhost:8081/greet"

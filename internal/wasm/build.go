@@ -3,6 +3,7 @@ package wasm
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -210,6 +211,58 @@ replace %s => %s
 	}
 
 	return nil
+}
+
+// FindRepoRoot walks up from the given directory looking for go.mod to
+// locate the repository root. Returns the absolute path to the directory
+// containing go.mod, or an error if not found.
+func FindRepoRoot(from string) (string, error) {
+	abs, err := filepath.Abs(from)
+	if err != nil {
+		return "", fmt.Errorf("resolving path %s: %w", from, err)
+	}
+	dir := abs
+	for {
+		if fi, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil && !fi.IsDir() {
+			return dir, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", fmt.Errorf("go.mod not found from %s", from)
+		}
+		dir = parent
+	}
+}
+
+// BuildPythonWasm compiles a Python workflow to a WASM component using
+// componentize-py via the python-sdk/scripts/build_wasm.py helper script.
+//
+// entry should be in "file.py:func_name" format. output is the path to the
+// resulting .wasm file. If verbose is true, componentize-py output is shown.
+func BuildPythonWasm(entry, output string, verbose bool) error {
+	repoRoot, err := FindRepoRoot(".")
+	if err != nil {
+		return fmt.Errorf("finding repo root: %w", err)
+	}
+
+	sdkRoot := filepath.Join(repoRoot, "python-sdk")
+	buildScript := filepath.Join(sdkRoot, "scripts", "build_wasm.py")
+
+	if _, err := os.Stat(buildScript); err != nil {
+		return fmt.Errorf("build script not found at %s: %w", buildScript, err)
+	}
+
+	args := []string{buildScript, "--entry", entry, "--output", output}
+	if verbose {
+		args = append(args, "--verbose")
+	}
+
+	cmd := exec.Command("python3", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Dir = sdkRoot
+
+	return cmd.Run()
 }
 
 // rewritePackageToMain replaces the first "package <name>" declaration with

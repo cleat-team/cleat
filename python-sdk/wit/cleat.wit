@@ -1,0 +1,327 @@
+/// Cleat Durable Execution WASM host-call interfaces.
+///
+/// This file defines the WIT (Wasm Interface Types) package for the cleat
+/// durable execution framework. Each interface groups related host functions
+/// that the WASM runtime provides to guest modules.
+package cleat:host-calls;
+
+/// Service call operations: recorded, retried, or heartbeated.
+interface durable-call {
+    /// Make a durable (deterministically replayed) call to an external service.
+    durable-call: func(
+        service-ptr: u32,
+        service-len: u32,
+        operation-ptr: u32,
+        operation-len: u32,
+        request-ptr: u32,
+        request-len: u32,
+        response-ptr: u32,
+        response-max-len: u32,
+    ) -> u64;
+
+    /// Make a durable call with server-side retry policy.
+    durable-call-retry: func(
+        service-ptr: u32,
+        service-len: u32,
+        operation-ptr: u32,
+        operation-len: u32,
+        request-ptr: u32,
+        request-len: u32,
+        max-attempts: u64,
+        initial-interval-ms: u64,
+        backoff-coefficient-100x: u64,
+        max-interval-ms: u64,
+        non-retryable-errors-ptr: u32,
+        non-retryable-errors-len: u32,
+        response-ptr: u32,
+        response-max-len: u32,
+    ) -> u64;
+
+    /// Make a durable call with periodic heartbeat/progress updates.
+    durable-call-heartbeat: func(
+        service-ptr: u32,
+        service-len: u32,
+        operation-ptr: u32,
+        operation-len: u32,
+        request-ptr: u32,
+        request-len: u32,
+        heartbeat-interval-ms: u64,
+        response-ptr: u32,
+        response-max-len: u32,
+    ) -> u64;
+}
+
+/// Timer, clock, random, and log operations.
+interface durable-sleep {
+    /// Suspend workflow execution for a duration (in milliseconds).
+    durable-sleep: func(duration-ms: u64) -> u64;
+
+    /// Get current wall-clock time in milliseconds since Unix epoch.
+    durable-now: func() -> u64;
+
+    /// Get a deterministic random 64-bit value.
+    durable-random: func() -> u64;
+
+    /// Log a message to the workflow event history.
+    durable-log: func(msg-ptr: u32, msg-len: u32) -> u64;
+}
+
+/// Workflow version introspection.
+interface durable-version {
+    /// Get the current workflow definition version.
+    durable-version: func() -> u64;
+
+    /// Get the minimum supported version for this workflow definition.
+    durable-min-version: func() -> u64;
+}
+
+/// Workflow lifecycle operations (defer, compaction, cancellation).
+interface durable-lifecycle {
+    /// Register a deferred cleanup action to run on workflow exit.
+    durable-defer: func(
+        desc-ptr: u32,
+        desc-len: u32,
+        defer-id-ptr: u32,
+        defer-id-max-len: u32,
+    ) -> u64;
+
+    /// Replace workflow input and restart execution (history compaction).
+    durable-continue-as-new: func(input-ptr: u32, input-len: u32) -> u64;
+
+    /// Check if workflow cancellation has been requested.
+    durable-poll-cancellation: func(
+        reason-ptr: u32,
+        reason-max-len: u32,
+    ) -> u64;
+}
+
+/// Signal send, receive, and correlation operations.
+interface durable-signals {
+    /// Wait for one or more external signals, with a timeout.
+    durable-await-signals: func(
+        names-ptr: u32,
+        names-len: u32,
+        timeout-ms: u64,
+        sig-name-ptr: u32,
+        sig-name-max-len: u32,
+        payload-ptr: u32,
+        payload-max-len: u32,
+    ) -> u64;
+
+    /// Poll for a specific pending signal (non-blocking).
+    durable-poll-signal: func(
+        name-ptr: u32,
+        name-len: u32,
+        payload-ptr: u32,
+        payload-max-len: u32,
+    ) -> u64;
+
+    /// Send a signal with correlation and wait for a reply.
+    durable-send-signal-and-wait: func(
+        target-run-id-ptr: u32,
+        target-run-id-len: u32,
+        signal-name-ptr: u32,
+        signal-name-len: u32,
+        payload-ptr: u32,
+        payload-len: u32,
+        timeout-ms: u64,
+        response-ptr: u32,
+        response-max-len: u32,
+    ) -> u64;
+
+    /// Reply to a correlated signal from within a handler.
+    durable-reply-to-signal: func(
+        correlation-id-ptr: u32,
+        correlation-id-len: u32,
+        response-ptr: u32,
+        response-len: u32,
+    ) -> u64;
+
+    /// Send a signal to a target workflow (fire-and-forget, recorded).
+    durable-signal-workflow: func(
+        target-run-id-ptr: u32,
+        target-run-id-len: u32,
+        signal-name-ptr: u32,
+        signal-name-len: u32,
+        payload-ptr: u32,
+        payload-len: u32,
+    ) -> u64;
+}
+
+/// Child workflow spawn and await operations.
+interface durable-children {
+    /// Start a child workflow instance (async).
+    durable-child-workflow: func(
+        name-ptr: u32,
+        name-len: u32,
+        input-ptr: u32,
+        input-len: u32,
+        run-id-ptr: u32,
+        run-id-max-len: u32,
+    ) -> u64;
+
+    /// Wait for a single child workflow to complete.
+    durable-await-child: func(
+        run-id-ptr: u32,
+        run-id-len: u32,
+        result-ptr: u32,
+        result-max-len: u32,
+    ) -> u64;
+
+    /// Wait for multiple child workflows to complete (batch).
+    durable-await-all-children: func(
+        run-ids-json-ptr: u32,
+        run-ids-json-len: u32,
+        results-ptr: u32,
+        results-max-len: u32,
+    ) -> u64;
+}
+
+/// Durable promise create, await, resolve, and reject operations.
+interface durable-promises {
+    /// Create a durable promise with the given name.
+    durable-create-promise: func(
+        name-ptr: u32,
+        name-len: u32,
+        id-out-ptr: u32,
+        id-out-max: u32,
+        ttl-ms: u64,
+    ) -> u64;
+
+    /// Wait for a durable promise to resolve, with a timeout.
+    durable-await-promise: func(
+        id-ptr: u32,
+        id-len: u32,
+        timeout-ms: u64,
+        result-out-ptr: u32,
+        result-out-max: u32,
+    ) -> u64;
+
+    /// Resolve a durable promise with a value.
+    durable-resolve-promise: func(
+        id-ptr: u32,
+        id-len: u32,
+        value-ptr: u32,
+        value-len: u32,
+    ) -> u64;
+
+    /// Reject a durable promise with an error.
+    durable-reject-promise: func(
+        id-ptr: u32,
+        id-len: u32,
+        error-ptr: u32,
+        error-len: u32,
+    ) -> u64;
+}
+
+/// Queryable state management.
+interface durable-state {
+    /// Set a key-value pair in the workflow's queryable state.
+    set-query-state: func(
+        key-ptr: u32,
+        key-len: u32,
+        val-ptr: u32,
+        val-len: u32,
+    ) -> u64;
+}
+
+/// Update and query handler registration.
+interface durable-handlers {
+    /// Register an update handler for external update calls.
+    durable-register-update-handler: func(name-ptr: u32, name-len: u32) -> u64;
+
+    /// Register a read-only query handler for external queries.
+    durable-register-query-handler: func(name-ptr: u32, name-len: u32) -> u64;
+}
+
+/// Fire-and-forget and scheduled messaging.
+interface durable-messaging {
+    /// Send a fire-and-forget request to an external service.
+    durable-send: func(
+        svc-ptr: u32,
+        svc-len: u32,
+        op-ptr: u32,
+        op-len: u32,
+        req-ptr: u32,
+        req-len: u32,
+    ) -> u64;
+
+    /// Schedule a delayed one-shot invocation.
+    durable-schedule-invoke: func(
+        svc-ptr: u32,
+        svc-len: u32,
+        op-ptr: u32,
+        op-len: u32,
+        req-ptr: u32,
+        req-len: u32,
+        delay-ms: u64,
+    ) -> u64;
+}
+
+/// Workflow and run identity introspection.
+interface durable-identity {
+    /// Get the current workflow's unique identifier.
+    durable-workflow-id: func(id-ptr: u32, id-max-len: u32) -> u64;
+
+    /// Get the current workflow run's unique identifier.
+    durable-run-id: func(id-ptr: u32, id-max-len: u32) -> u64;
+}
+
+/// Plugin host function extension interface.
+interface plugin {
+    /// Call a plugin host function.
+    plugin-call: func(
+        plugin-name-ptr: u32,
+        plugin-name-len: u32,
+        function-name-ptr: u32,
+        function-name-len: u32,
+        input-ptr: u32,
+        input-len: u32,
+        response-ptr: u32,
+        response-max-len: u32,
+    ) -> u64;
+
+    /// Call a streaming plugin host function (for workstream D2b).
+    plugin-call-streaming: func(
+        plugin-name-ptr: u32,
+        plugin-name-len: u32,
+        function-name-ptr: u32,
+        function-name-len: u32,
+        input-ptr: u32,
+        input-len: u32,
+        event-ptr: u32,
+        event-max-len: u32,
+    ) -> u64;
+}
+
+/// World definition for a cleat workflow WASM component.
+///
+/// A cleat workflow component imports all host-call interfaces and
+/// exports a single ``run`` entry point.
+world cleat-workflow {
+    import durable-call;
+    import durable-sleep;
+    import durable-version;
+    import durable-lifecycle;
+    import durable-signals;
+    import durable-children;
+    import durable-promises;
+    import durable-state;
+    import durable-handlers;
+    import durable-messaging;
+    import durable-identity;
+    import plugin;
+
+    /// Main workflow entry point.
+    ///
+    /// ``args-ptr`` / ``args-len`` point to the serialised input in linear
+    /// memory.  ``out-ptr`` / ``max-out-len`` describe the output buffer.
+    /// Returns a packed i64: bits 0-31 = error code, bits 32-63 = output
+    /// length written.
+    export run: func(
+        args-ptr: u32,
+        args-len: u32,
+        out-ptr: u32,
+        max-out-len: u32,
+    ) -> u64;
+}
