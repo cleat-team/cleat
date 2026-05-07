@@ -46,7 +46,7 @@ func TestTopologicalSortLinear(t *testing.T) {
 	d.AddTask("a", nil, nil)
 	d.AddTask("b", []string{"a"}, nil)
 	d.AddTask("c", []string{"b"}, nil)
-	levels, err := d.topologicalSort()
+	levels, err := d.TopologicalSort()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestTopologicalSortDiamond(t *testing.T) {
 	d.AddTask("b", []string{"a"}, nil)
 	d.AddTask("c", []string{"a"}, nil)
 	d.AddTask("d", []string{"b", "c"}, nil)
-	levels, err := d.topologicalSort()
+	levels, err := d.TopologicalSort()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestCycleDetection(t *testing.T) {
 	d := NewDAG()
 	d.AddTask("a", []string{"b"}, nil)
 	d.AddTask("b", []string{"a"}, nil)
-	_, err := d.topologicalSort()
+	_, err := d.TopologicalSort()
 	if err == nil {
 		t.Fatal("expected cycle detection error")
 	}
@@ -102,7 +102,7 @@ func TestCycleDetection(t *testing.T) {
 func TestSelfCycleDetection(t *testing.T) {
 	d := NewDAG()
 	d.AddTask("a", []string{"a"}, nil)
-	_, err := d.topologicalSort()
+	_, err := d.TopologicalSort()
 	if err == nil {
 		t.Fatal("expected cycle detection error for self-referencing task")
 	}
@@ -122,7 +122,7 @@ func TestRootTasksOnly(t *testing.T) {
 	d.AddTask("a", nil, nil)
 	d.AddTask("b", nil, nil)
 	d.AddTask("c", nil, nil)
-	levels, err := d.topologicalSort()
+	levels, err := d.TopologicalSort()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +139,7 @@ func TestFanOutFanIn(t *testing.T) {
 		d.AddTask(fmt.Sprintf("worker-%d", i), []string{"root"}, nil)
 	}
 	d.AddTask("collector", []string{"worker-0", "worker-1", "worker-2", "worker-3", "worker-4"}, nil)
-	levels, err := d.topologicalSort()
+	levels, err := d.TopologicalSort()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestFanOutFanIn(t *testing.T) {
 
 func TestEmptyDAG(t *testing.T) {
 	d := NewDAG()
-	levels, err := d.topologicalSort()
+	levels, err := d.TopologicalSort()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestDisconnectedGraphs(t *testing.T) {
 	d.AddTask("b", nil, nil)
 	d.AddTask("c", []string{"a"}, nil)
 	d.AddTask("d", []string{"b"}, nil)
-	levels, err := d.topologicalSort()
+	levels, err := d.TopologicalSort()
 	if err != nil {
 		t.Fatal(err)
 	}

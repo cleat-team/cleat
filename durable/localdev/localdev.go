@@ -182,27 +182,32 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		o(r)
 	}
 	r.h = durable.NewHostCalls(durable.HostCallsOptions{
-		DurableCall:            r.durableCall,
-		DurableCallTypedWithOptions: r.durableCallTypedWithOptions,
-		DurableCallWithOptions: r.durableCallWithOptions,
-		DurableSleep:           r.durableSleepMs,
-		DurableAwaitSignals:    r.durableAwaitSignals,
-		DurableDefer:           r.durableDefer,
-		DurableLog:             r.durableLog,
-		PollCancellation:       r.pollCancellation,
-		PollSignal:             r.pollSignal,
-		ContinueAsNew:          r.continueAsNew,
-		ChildWorkflow:          r.childWorkflow,
-		AwaitChild:             r.awaitChild,
-		Version:                r.version,
-		MinVersion:             r.minVersion,
-		SetQueryState:          r.setQueryState,
-		Now:                    r.nowMs,
-		Random:                 r.random,
-		CreatePromise:          r.createPromiseImpl,
-		AwaitPromise:           r.awaitPromiseImpl,
-		RegisterUpdateHandler:  r.registerUpdateHandler,
-		RunDetached:            r.runDetached,
+		DurableCall:                   r.durableCall,
+		DurableCallTypedWithOptions:   r.durableCallTypedWithOptions,
+		DurableCallWithOptions:        r.durableCallWithOptions,
+		DurableCallWithHeartbeat:      r.durableCallWithHeartbeat,
+		DurableSleep:                  r.durableSleepMs,
+		DurableAwaitSignals:           r.durableAwaitSignals,
+		DurableDefer:                  r.durableDefer,
+		DurableLog:                    r.durableLog,
+		PollCancellation:              r.pollCancellation,
+		PollSignal:                    r.pollSignal,
+		ContinueAsNew:                 r.continueAsNew,
+		ChildWorkflow:                 r.childWorkflow,
+		AwaitChild:                    r.awaitChild,
+		AwaitAllChildren:              r.awaitAllChildren,
+		ChildWorkflowTyped:            r.childWorkflowTyped,
+		AwaitChildTyped:               r.awaitChildTyped,
+		DurableCallTypedWithHeartbeat: r.durableCallTypedWithHeartbeat,
+		Version:                       r.version,
+		MinVersion:                    r.minVersion,
+		SetQueryState:                 r.setQueryState,
+		Now:                           r.nowMs,
+		Random:                        r.random,
+		CreatePromise:                 r.createPromiseImpl,
+		AwaitPromise:                  r.awaitPromiseImpl,
+		RegisterUpdateHandler:         r.registerUpdateHandler,
+		RunDetached:                   r.runDetached,
 	})
 	return r
 }
@@ -519,6 +524,55 @@ func (r *LocalRunner) awaitChild(runID string) (string, error) {
 	r.logEvent("[%.3fs] await_child %s", r.elapsed().Seconds(), runID)
 	return `{"status":"completed"}`, nil
 }
+
+func (r *LocalRunner) awaitAllChildren(runIDs []string) ([]durable.ChildResult, error) {
+	results := make([]durable.ChildResult, len(runIDs))
+	for i, runID := range runIDs {
+		result, err := r.awaitChild(runID)
+		if err != nil {
+			results[i] = durable.ChildResult{RunID: runID, Error: err.Error()}
+		} else {
+			results[i] = durable.ChildResult{RunID: runID, Result: result}
+		}
+	}
+	return results, nil
+}
+
+func (r *LocalRunner) childWorkflowTyped(name string, request interface{}) (string, error) {
+	reqJSON, err := json.Marshal(request)
+	if err != nil {
+		return "", fmt.Errorf("localdev: marshaling child workflow input for %s: %w", name, err)
+	}
+	return r.childWorkflow(name, string(reqJSON))
+}
+
+func (r *LocalRunner) awaitChildTyped(runID string, result interface{}) error {
+	resp, err := r.awaitChild(runID)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(resp), result)
+}
+
+func (r *LocalRunner) durableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+	return r.durableCall(service, operation, requestJSON)
+}
+
+func (r *LocalRunner) durableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
+	reqJSON, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("localdev: marshaling request for %s.%s: %w", service, operation, err)
+	}
+	resp, err := r.durableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval, onProgress)
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+	return json.Unmarshal([]byte(resp), result)
+}
+
 
 func (r *LocalRunner) version() int {
 	r.mu.Lock()

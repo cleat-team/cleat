@@ -981,6 +981,150 @@ func TestRetryMaxIntervalSmallerThanInitial(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// ChildWorkflowTyped
+// ---------------------------------------------------------------------------
+
+func TestChildWorkflowTypedMarshalsInput(t *testing.T) {
+	var capturedName, capturedInput string
+	h := NewHostCalls(HostCallsOptions{
+		ChildWorkflow: func(name, inputJSON string) (string, error) {
+			capturedName = name
+			capturedInput = inputJSON
+			return "run_123", nil
+		},
+	})
+
+	type MyInput struct {
+		Key string `json:"key"`
+		Val int    `json:"val"`
+	}
+	runID, err := h.ChildWorkflowTyped("my_child", MyInput{Key: "foo", Val: 42})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if runID != "run_123" {
+		t.Errorf("expected run_123, got %q", runID)
+	}
+	if capturedName != "my_child" {
+		t.Errorf("expected name 'my_child', got %q", capturedName)
+	}
+	if capturedInput != `{"key":"foo","val":42}` {
+		t.Errorf("expected JSON input %q, got %q", `{"key":"foo","val":42}`, capturedInput)
+	}
+}
+
+func TestChildWorkflowTypedMarshalingError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	// An un-marshalable channel type should produce a marshaling error.
+	_, err := h.ChildWorkflowTyped("bad", make(chan int))
+	if err == nil {
+		t.Fatal("expected marshaling error, got nil")
+	}
+}
+
+func TestChildWorkflowTypedFallsBackToChildWorkflow(t *testing.T) {
+	var capturedInput string
+	h := NewHostCalls(HostCallsOptions{
+		ChildWorkflow: func(name, inputJSON string) (string, error) {
+			capturedInput = inputJSON
+			return "run_fallback", nil
+		},
+	})
+	runID, err := h.ChildWorkflowTyped("wf", map[string]string{"k": "v"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if runID != "run_fallback" {
+		t.Errorf("expected run_fallback, got %q", runID)
+	}
+	if capturedInput != `{"k":"v"}` {
+		t.Errorf("expected JSON input, got %q", capturedInput)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableCallTypedWithHeartbeat
+// ---------------------------------------------------------------------------
+
+func TestDurableCallTypedWithHeartbeatMarshalsAndUnmarshals(t *testing.T) {
+	progressCalled := false
+	h := NewHostCalls(HostCallsOptions{
+		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+			if service != "svc" || operation != "op" {
+				t.Errorf("unexpected service/operation: %s.%s", service, operation)
+			}
+			if requestJSON != `{"data":"hello"}` {
+				t.Errorf("unexpected requestJSON: %s", requestJSON)
+			}
+			if heartbeatInterval != time.Second {
+				t.Errorf("unexpected heartbeatInterval: %v", heartbeatInterval)
+			}
+			if onProgress != nil {
+				onProgress(`{"pct":50}`)
+				progressCalled = true
+			}
+			return `{"result":"ok"}`, nil
+		},
+	})
+
+	type MyReq struct {
+		Data string `json:"data"`
+	}
+	type MyResp struct {
+		Result string `json:"result"`
+	}
+	var resp MyResp
+	err := h.DurableCallTypedWithHeartbeat("svc", "op", MyReq{Data: "hello"}, &resp, time.Second, func(s string) {
+		progressCalled = true
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Result != "ok" {
+		t.Errorf("expected result 'ok', got %q", resp.Result)
+	}
+	if !progressCalled {
+		t.Error("expected onProgress to be called")
+	}
+}
+
+func TestDurableCallTypedWithHeartbeatNilResult(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+			return `{"result":"ok"}`, nil
+		},
+	})
+	// Passing nil result should not panic or error.
+	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{"key": "val"}, nil, time.Second, nil)
+	if err != nil {
+		t.Fatalf("unexpected error with nil result: %v", err)
+	}
+}
+
+func TestDurableCallTypedWithHeartbeatFallsBackToDurableCall(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(service, operation, requestJSON string) (string, error) {
+			return `{"result":"fallback"}`, nil
+		},
+	})
+	type MyResp struct {
+		Result string `json:"result"`
+	}
+	var resp MyResp
+	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{}, &resp, time.Second, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Result != "fallback" {
+		t.Errorf("expected result 'fallback', got %q", resp.Result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Retry
+// ---------------------------------------------------------------------------
+
 func TestRetrySuccessOnFirstAttempt(t *testing.T) {
 	var callCount int
 	var sleepCount int

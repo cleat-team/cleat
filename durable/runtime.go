@@ -652,6 +652,9 @@ func (h *hostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string,
 	if err != nil {
 		return err
 	}
+	if result == nil {
+		return nil
+	}
 	if err := json.Unmarshal([]byte(resp), result); err != nil {
 		return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
 	}

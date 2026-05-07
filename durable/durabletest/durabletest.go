@@ -169,26 +169,30 @@ func NewTestEnv() *TestEnv {
 		ConcurrencyKeys: make(map[string]string),
 	}
 	e.h = durable.NewHostCalls(durable.HostCallsOptions{
-		DurableCall:               e.durableCallImpl,
-		DurableCallWithOptions:    e.durableCallWithOptionsImpl,
-		DurableSleep:              e.durableSleepImpl,
-		DurableAwaitSignals:       e.durableAwaitSignalsImpl,
-		DurableDefer:              e.durableDeferImpl,
-		DurableLog:                e.durableLogImpl,
-		PollCancellation:          e.pollCancellationImpl,
-		PollSignal:                e.pollSignalImpl,
-		ContinueAsNew:             e.continueAsNewImpl,
-		ChildWorkflow:             e.childWorkflowImpl,
-		AwaitChild:                e.awaitChildImpl,
-		Version:                   e.versionImpl,
-		MinVersion:                e.minVersionImpl,
-		SetQueryState:             e.setQueryStateImpl,
-		Now:                       e.nowImpl,
-		Random:                    e.randomImpl,
-		CreatePromise:             e.createPromiseImpl,
-		AwaitPromise:              e.awaitPromiseImpl,
-		RegisterUpdateHandler:     e.registerUpdateHandlerImpl,
-		RunDetached:               e.runDetachedImpl,
+		DurableCall:                  e.durableCallImpl,
+		DurableCallWithOptions:       e.durableCallWithOptionsImpl,
+		DurableSleep:                 e.durableSleepImpl,
+		DurableAwaitSignals:          e.durableAwaitSignalsImpl,
+		DurableDefer:                 e.durableDeferImpl,
+		DurableLog:                   e.durableLogImpl,
+		PollCancellation:             e.pollCancellationImpl,
+		PollSignal:                   e.pollSignalImpl,
+		ContinueAsNew:                e.continueAsNewImpl,
+		ChildWorkflow:                e.childWorkflowImpl,
+		AwaitChild:                   e.awaitChildImpl,
+		AwaitAllChildren:             e.awaitAllChildrenImpl,
+		ChildWorkflowTyped:           e.childWorkflowTypedImpl,
+		AwaitChildTyped:              e.awaitChildTypedImpl,
+		DurableCallTypedWithHeartbeat: e.durableCallTypedWithHeartbeatImpl,
+		Version:                      e.versionImpl,
+		MinVersion:                   e.minVersionImpl,
+		SetQueryState:                e.setQueryStateImpl,
+		Now:                          e.nowImpl,
+		Random:                       e.randomImpl,
+		CreatePromise:                e.createPromiseImpl,
+		AwaitPromise:                 e.awaitPromiseImpl,
+		RegisterUpdateHandler:        e.registerUpdateHandlerImpl,
+		RunDetached:                  e.runDetachedImpl,
 	})
 	return e
 }
@@ -536,6 +540,50 @@ func (e *TestEnv) awaitChildImpl(runID string) (string, error) {
 		return result.result, nil
 	}
 	return `{"status":"completed"}`, nil
+}
+
+func (e *TestEnv) awaitAllChildrenImpl(runIDs []string) ([]durable.ChildResult, error) {
+	results := make([]durable.ChildResult, len(runIDs))
+	for i, runID := range runIDs {
+		result, err := e.awaitChildImpl(runID)
+		if err != nil {
+			results[i] = durable.ChildResult{RunID: runID, Error: err.Error()}
+		} else {
+			results[i] = durable.ChildResult{RunID: runID, Result: result}
+		}
+	}
+	return results, nil
+}
+
+func (e *TestEnv) childWorkflowTypedImpl(name string, request interface{}) (string, error) {
+	reqJSON, err := json.Marshal(request)
+	if err != nil {
+		return "", fmt.Errorf("durabletest: marshaling child workflow input for %s: %w", name, err)
+	}
+	return e.childWorkflowImpl(name, string(reqJSON))
+}
+
+func (e *TestEnv) awaitChildTypedImpl(runID string, result interface{}) error {
+	resp, err := e.awaitChildImpl(runID)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(resp), result)
+}
+
+func (e *TestEnv) durableCallTypedWithHeartbeatImpl(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
+	reqJSON, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("durabletest: marshaling request for %s.%s: %w", service, operation, err)
+	}
+	resp, err := e.durableCallImpl(service, operation, string(reqJSON))
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+	return json.Unmarshal([]byte(resp), result)
 }
 
 func (e *TestEnv) versionImpl() int {

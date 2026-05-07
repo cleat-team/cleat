@@ -89,7 +89,7 @@ func (d *DAG) ExecuteWithOptions(h durable.HostCalls, input interface{}, opts Ex
 		return err
 	}
 
-	levels, err := d.topologicalSort()
+	levels, err := d.TopologicalSort()
 	if err != nil {
 		return err
 	}
@@ -239,8 +239,8 @@ func (d *DAG) validate() error {
 	return nil
 }
 
-// topologicalSort returns tasks grouped by level (Kahn's algorithm).
-func (d *DAG) topologicalSort() ([][]*Task, error) {
+// TopologicalSort returns tasks grouped by level (Kahn's algorithm).
+func (d *DAG) TopologicalSort() ([][]*Task, error) {
 	inDegree := make(map[string]int)
 	children := make(map[string][]string)
 
