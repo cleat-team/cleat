@@ -74,15 +74,15 @@ export function writeString(ptr: usize, maxLen: i32, s: string): i32 {
   if (maxLen <= 0) return 0;
   if (s.length === 0) return 0;
 
-  let byteLen: usize = String.UTF8.byteLength(s);
-  let writeLen: usize = byteLen;
+  let byteLen: i32 = String.UTF8.byteLength(s) as i32;
+  let writeLen: i32 = byteLen;
 
-  if (writeLen > maxLen as usize) {
-    writeLen = maxLen as usize;
+  if (writeLen > maxLen) {
+    writeLen = maxLen;
   }
 
   if (writeLen > 0) {
-    String.UTF8.encodeUnsafe(s, ptr, writeLen);
+    String.UTF8.encodeUnsafe(changetype<usize>(s), writeLen, ptr);
   }
 
   return writeLen as i32;
@@ -379,4 +379,42 @@ export class Memory {
   writeString(ptr: usize, maxLen: i32, s: string): i32 {
     return Memory.writeString(ptr, maxLen, s);
   }
+}
+
+// ──────────────────────────────────────────────
+// JSON escaping utilities
+// ──────────────────────────────────────────────
+
+/**
+ * Escape a string for JSON embedding.
+ * Replaces control characters and reserved characters with standard JSON
+ * escape sequences.
+ *
+ * @param s - String to escape.
+ * @returns The escaped string safe for embedding in JSON.
+ */
+export function escapeJson(s: string): string {
+    let result = "";
+    for (let i: i32 = 0; i < s.length; i++) {
+        let c = s.charCodeAt(i);
+        if (c == 0x22) { result += "\\\""; }
+        else if (c == 0x5c) { result += "\\\\"; }
+        else if (c == 0x08) { result += "\\b"; }
+        else if (c == 0x0c) { result += "\\f"; }
+        else if (c == 0x0a) { result += "\\n"; }
+        else if (c == 0x0d) { result += "\\r"; }
+        else if (c == 0x09) { result += "\\t"; }
+        else if (c < 0x20) {
+            result += "\\u00";
+            result += hexDigit((c >> 4) & 0xf);
+            result += hexDigit(c & 0xf);
+        }
+        else { result += String.fromCharCode(c); }
+    }
+    return result;
+}
+
+function hexDigit(n: i32): string {
+    if (n < 10) return String.fromCharCode(0x30 + n);
+    return String.fromCharCode(0x61 + n - 10);
 }

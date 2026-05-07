@@ -125,8 +125,9 @@ func PlaceOrder(h durable.HostCalls, userID string, restaurantID string,
 			charge, err = chargeCustomer(userID, total)
 			return "", err
 		},
-		func(h durable.HostCalls) {
+		func(h durable.HostCalls) error {
 			refundCharge(charge.ChargeID)
+			return nil
 		},
 	)
 
@@ -137,8 +138,9 @@ func PlaceOrder(h durable.HostCalls, userID string, restaurantID string,
 			driver, err = assignDriver(address)
 			return "", err
 		},
-		func(h durable.HostCalls) {
+		func(h durable.HostCalls) error {
 			releaseDriver(driver.DriverID)
+			return nil
 		},
 	)
 
@@ -147,8 +149,9 @@ func PlaceOrder(h durable.HostCalls, userID string, restaurantID string,
 		func(h durable.HostCalls) (string, error) {
 			return "", notifyRestaurant(restaurantID, validated, driver.ETAMinutes)
 		},
-		func(h durable.HostCalls) {
+		func(h durable.HostCalls) error {
 			cancelRestaurantOrder(charge.ChargeID)
+			return nil
 		},
 	)
 

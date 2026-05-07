@@ -48,6 +48,10 @@ type HostCalls interface {
 	// call sites entirely.
 	DurableCallTyped(service, operation string, request, result interface{}) error
 
+	// DurableCallTypedWithOptions marshals request to JSON, makes a durable API call
+	// with call-level options, and unmarshals the response into result.
+	DurableCallTypedWithOptions(opts CallOptions, service, operation string, request, result interface{}) error
+
 	// DurableCallWithOptions makes a durable API call with call-level options
 	// such as retry policy.
 	DurableCallWithOptions(opts CallOptions, service, operation, requestJSON string) (string, error)
@@ -356,6 +360,7 @@ func DefaultRetryPolicy() RetryPolicy {
 type hostCallsImpl struct {
 	durableCall               func(service, operation, requestJSON string) (string, error)
 	durableCallTyped          func(service, operation string, request, result interface{}) error
+	durableCallTypedWithOptions func(opts CallOptions, service, operation string, request, result interface{}) error
 	durableCallWithOptions    func(opts CallOptions, service, operation, requestJSON string) (string, error)
 	durableCallJSONWithOptions func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 	durableCallWithHeartbeat   func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
@@ -394,6 +399,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 	return &hostCallsImpl{
 		durableCall:               opts.DurableCall,
 		durableCallTyped:          opts.DurableCallTyped,
+		durableCallTypedWithOptions: opts.DurableCallTypedWithOptions,
 		durableCallWithOptions:    opts.DurableCallWithOptions,
 		durableCallJSONWithOptions: opts.DurableCallJSONWithOptions,
 		durableCallWithHeartbeat:   opts.DurableCallWithHeartbeat,
@@ -451,6 +457,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 type HostCallsOptions struct {
 	DurableCall               func(service, operation, requestJSON string) (string, error)
 	DurableCallTyped          func(service, operation string, request, result interface{}) error
+	DurableCallTypedWithOptions func(opts CallOptions, service, operation string, request, result interface{}) error
 	DurableCallWithOptions    func(opts CallOptions, service, operation, requestJSON string) (string, error)
 	DurableCallJSONWithOptions func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 	DurableCallWithHeartbeat   func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
@@ -501,6 +508,9 @@ func (h *hostCallsImpl) DurableCallJSON(service, operation, requestJSON string, 
 	resp, err := h.DurableCall(service, operation, requestJSON)
 	if err != nil {
 		return err
+	}
+	if result == nil {
+		return nil
 	}
 	if err := json.Unmarshal([]byte(resp), result); err != nil {
 		return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
@@ -588,10 +598,36 @@ func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 		service, operation, rp.MaxAttempts, lastErr)
 }
 
+func (h *hostCallsImpl) DurableCallTypedWithOptions(opts CallOptions, service, operation string, request, result interface{}) error {
+	if h.durableCallTypedWithOptions != nil {
+		return h.durableCallTypedWithOptions(opts, service, operation, request, result)
+	}
+
+	reqBytes, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("durable: marshaling request for %s.%s: %w", service, operation, err)
+	}
+
+	resp, err := h.DurableCallWithOptions(opts, service, operation, string(reqBytes))
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(resp), result); err != nil {
+		return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
+	}
+	return nil
+}
+
 func (h *hostCallsImpl) DurableCallJSONWithOptions(opts CallOptions, service, operation, requestJSON string, result interface{}) error {
 	resp, err := h.DurableCallWithOptions(opts, service, operation, requestJSON)
 	if err != nil {
 		return err
+	}
+	if result == nil {
+		return nil
 	}
 	if err := json.Unmarshal([]byte(resp), result); err != nil {
 		return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
@@ -1028,7 +1064,7 @@ func (h *hostCallsImpl) Random() int64 {
 type SagaStep struct {
 	Description string
 	Forward     func(HostCalls) (string, error)
-	Compensate  func(HostCalls)
+	Compensate  func(HostCalls) error
 }
 
 // Saga provides structured compensation for multi-step operations.
@@ -1083,7 +1119,7 @@ func NewSaga() *Saga {
 //	        h.DurableCall("flights", "Cancel", cancelJSON)
 //	    },
 //	)
-func (s *Saga) AddStep(description string, forward func(HostCalls) (string, error), compensate func(HostCalls)) *Saga {
+func (s *Saga) AddStep(description string, forward func(HostCalls) (string, error), compensate func(HostCalls) error) *Saga {
 	s.steps = append(s.steps, SagaStep{
 		Description: description,
 		Forward:     forward,
@@ -1106,15 +1142,21 @@ func (s *Saga) Run(h HostCalls) error {
 				"description", step.Description,
 				"error", err.Error(),
 				"completed_count", completed)
+			var compErr error
 			for j := completed - 1; j >= 0; j-- {
 				cs := s.steps[j]
 				if cs.Compensate == nil {
 					continue
 				}
 				h.LogKV("saga: compensating", "step", j, "description", cs.Description)
-				cs.Compensate(h)
+				if cerr := cs.Compensate(h); cerr != nil {
+					compErr = errors.Join(compErr, cerr)
+				}
 			}
-			return fmt.Errorf("saga step %q failed: %w", step.Description, err)
+			if compErr != nil {
+				return fmt.Errorf("saga: %w", errors.Join(err, compErr))
+			}
+			return fmt.Errorf("saga: %w", err)
 		}
 		completed++
 	}
@@ -1161,10 +1203,16 @@ func (s *Saga) AddParallel(steps ...SagaStep) *Saga {
 
 			if firstErr != nil {
 				// Compensate successful steps in LIFO order.
+				var compErr error
 				for i := len(results) - 1; i >= 0; i-- {
 					if results[i].err == nil && steps[i].Compensate != nil {
-						steps[i].Compensate(h)
+						if cerr := steps[i].Compensate(h); cerr != nil {
+							compErr = errors.Join(compErr, cerr)
+						}
 					}
+				}
+				if compErr != nil {
+					return "", fmt.Errorf("%w (compensation failures: %v)", firstErr, compErr)
 				}
 				return "", firstErr
 			}

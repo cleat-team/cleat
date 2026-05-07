@@ -118,6 +118,9 @@ public class HostCalls {
     private static native long setQueryStateRaw(
         int keyPtr, int keyLen, int valPtr, int valLen);
 
+    @Import(module = "env", name = "get_query_state")
+    private static native long getQueryStateRaw(int keyPtr, int keyLen, int outPtr, int outMaxLen);
+
     @Import(module = "env", name = "plugin_call")
     private static native long importPluginCall(
         int pluginNamePtr, int pluginNameLen,
@@ -623,6 +626,36 @@ public class HostCalls {
         int keyOff = p[0], valOff = p[1];
         int keyLen = p[2], valLen = p[3];
         setQueryStateRaw(keyOff, keyLen, valOff, valLen);
+    }
+
+    /**
+     * Get a key-value pair from the workflow's queryable state.
+     * <p>
+     * Retrieves the state value previously set via
+     * {@link #setQueryState(String, String)}.
+     *
+     * @param key the state key
+     * @return a result containing the state value on success, or an error
+     *         description on failure
+     */
+    public DurableResult<String> getQueryState(String key) {
+        int[] p = packStrings(key);
+        int keyOff = p[0], keyLen = p[1];
+
+        long result = getQueryStateRaw(
+            keyOff, keyLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return DurableResult.err(errMsg);
+        }
+
+        String response = readOutput(responseLen);
+        return DurableResult.ok(response);
     }
 
     // ========================================================================

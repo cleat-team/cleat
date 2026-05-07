@@ -1,36 +1,129 @@
 // AssemblyScript workflow example for cleat durable execution.
-// Uses the @cleat/sdk module and @durableEntry decorator.
 //
-// Compiled to WASM with: npx asc assembly/index.ts --runtime stub --optimize --initialMemory 170 -o dist/workflow.wasm
+// Compiled to WASM with: npx asc assembly/index.ts --runtime stub --optimize
+//   --initialMemory 170 -o dist/workflow.wasm
+//   --transform ./node_modules/@cleat/transform/index.js
+//
+// Uses direct ABI exports (no @durableEntry decorator) because --runtime stub
+// does not support JSON.parse<T>() or try/catch which the transformed wrappers
+// would require.  Input/output JSON is parsed manually via string helpers.
+//
+// ABI export signature:
+//   (argsPtr: usize, argsLen: i32, outPtr: usize, maxOutLen: i32) -> i64
 
-import { HostCalls, durableEntry } from "@cleat/sdk";
+import {
+  HostCalls, readString, writeString,
+  encodeExportResult,
+  DurableCallOutcome,
+} from "../../../packages/cleat-as/assembly/index";
 
 // ---------------------------------------------------------------------------
-// Types
+// Manual JSON helpers
+//
+// AS 0.27.32 with --runtime stub has no JSON.parse<T>().  We implement minimal
+// field extraction for our known flat JSON objects.
 // ---------------------------------------------------------------------------
 
-@json
-class CartItem {
-  sku: string = "";
-  quantity: i32 = 0;
+/** Extract a string field value from a flat JSON object. */
+function extractStringField(json: string, field: string): string {
+  let searchKey: string = '"' + field + '":"';
+  let keyIdx: i32 = indexOf(json, searchKey);
+  if (keyIdx < 0) return "";
+  let start: i32 = keyIdx + searchKey.length;
+  let end: i32 = indexOf(json, '"', start);
+  if (end < 0) return "";
+  return json.substring(start, end);
 }
 
-@json
-class Reservation {
-  reservationID: string = "";
-  totalCents: i64 = 0;
+/** Extract an i64 integer field value from a flat JSON object. */
+function extractI64Field(json: string, field: string): i64 {
+  let searchKey: string = '"' + field + '":';
+  let keyIdx: i32 = indexOf(json, searchKey);
+  if (keyIdx < 0) return 0;
+  let start: i32 = keyIdx + searchKey.length;
+  while (start < json.length && json.charAt(start) == ' ') start++;
+  let end: i32 = start;
+  while (end < json.length && isDigit(json.charAt(end))) end++;
+  if (end <= start) return 0;
+  let numStr: string = json.substring(start, end);
+  return parseI64(numStr);
 }
 
-@json
-class Charge {
-  chargeID: string = "";
-  amountCents: i64 = 0;
+/** Extract a raw JSON array value for a field (preserving array structure). */
+function extractRawArray(json: string, field: string): string {
+  let searchKey: string = '"' + field + '":[';
+  let keyIdx: i32 = indexOf(json, searchKey);
+  if (keyIdx < 0) return "";
+  let start: i32 = keyIdx + searchKey.length - 1; // include '['
+  let depth: i32 = 1;
+  let pos: i32 = start + 1;
+  while (pos < json.length && depth > 0) {
+    if (json.charAt(pos) == '[') depth++;
+    if (json.charAt(pos) == ']') depth--;
+    pos++;
+  }
+  return json.substring(start, pos);
 }
 
-@json
-class PlaceOrderInput {
-  userID: string = "";
-  items: CartItem[] = [];
+/** Simple indexOf for strings with optional start position. */
+function indexOf(s: string, search: string, start: i32 = 0): i32 {
+  if (search.length === 0) return start;
+  if (s.length < search.length) return -1;
+  let max: i32 = s.length - search.length;
+  for (let i: i32 = start; i <= max; i++) {
+    let found: bool = true;
+    for (let j: i32 = 0; j < search.length; j++) {
+      if (s.charAt(i + j) !== search.charAt(j)) {
+        found = false;
+        break;
+      }
+    }
+    if (found) return i;
+  }
+  return -1;
+}
+
+function isDigit(c: string): bool {
+  return c >= "0" && c <= "9";
+}
+
+/** Parse a decimal string into an i64 (ASCII digits only). */
+function parseI64(s: string): i64 {
+  let result: i64 = 0;
+  let negative: bool = false;
+  let i: i32 = 0;
+  if (s.length > 0 && s.charAt(0) == "-") {
+    negative = true;
+    i = 1;
+  }
+  while (i < s.length) {
+    let c: string = s.charAt(i);
+    if (c < "0" || c > "9") break;
+    result = result * 10 + (c.charCodeAt(0) - 48);
+    i++;
+  }
+  if (negative) result = -result;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Output helpers
+// ---------------------------------------------------------------------------
+
+function writeResult(outPtr: usize, maxOutLen: i32, json: string): i64 {
+  let written: i32 = writeString(outPtr, maxOutLen, json);
+  return encodeExportResult(0, written);
+}
+
+function writeError(outPtr: usize, maxOutLen: i32, message: string): i64 {
+  let errBody: string = '{"error":"' + message + '"}';
+  let written: i32 = writeString(outPtr, maxOutLen, errBody);
+  return encodeExportResult(1, written);
+}
+
+function safeStr(s: string | null): string {
+  if (s === null) return "unknown error";
+  return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -43,60 +136,58 @@ class PlaceOrderInput {
 //   4. Notify customer (best-effort, no compensation needed)
 // ---------------------------------------------------------------------------
 
-@durableEntry
-function place_order(h: HostCalls, input: PlaceOrderInput): string {
-  if (input.items.length == 0) {
-    return `{"error":"cart is empty"}`;
+export function place_order(
+  argsPtr: usize, argsLen: i32, outPtr: usize, maxOutLen: i32
+): i64 {
+  let h: HostCalls = new HostCalls();
+
+  // ---- Read and parse input ----
+  let argsJson: string = argsLen > 0 ? readString(argsPtr, argsLen) : "";
+  let userID: string = extractStringField(argsJson, "userID");
+  let itemsJson: string = extractRawArray(argsJson, "items");
+
+  if (itemsJson.length <= 2) { // "[]" or empty
+    return writeError(outPtr, maxOutLen, "cart is empty");
   }
 
   // --- Step 1: Reserve inventory -------------------------------------------
 
-  let reserveReq = `{"user_id":"${input.userID}","items":${serializeItems(input.items)}}`;
-  let reserveResult = h.durableCall("inventory", "Reserve", reserveReq);
-  if (!reserveResult.ok) {
-    return `{"error":"inventory reserve failed: ${reserveResult.error}"}`;
+  let reserveReq: string = '{"user_id":"' + userID + '","items":' + itemsJson + '}';
+  let reserveResult: DurableCallOutcome = h.durableCall("inventory", "Reserve", reserveReq);
+  if (reserveResult.isError) {
+    return writeError(outPtr, maxOutLen, "inventory reserve failed: " + safeStr(reserveResult.error));
   }
-  let reservation = JSON.parse<Reservation>(reserveResult.value);
+  let reservationID: string = extractStringField(reserveResult.response, "reservationID");
+  let totalCents: i64 = extractI64Field(reserveResult.response, "totalCents");
 
   // --- Step 2: Charge payment ----------------------------------------------
 
-  let chargeReq = `{"user_id":"${input.userID}","amount_cents":${reservation.totalCents}}`;
-  let chargeResult = h.durableCall("payments", "Charge", chargeReq);
-  if (!chargeResult.ok) {
+  let chargeReq: string = '{"user_id":"' + userID + '","amount_cents":' + totalCents.toString() + '}';
+  let chargeResult: DurableCallOutcome = h.durableCall("payments", "Charge", chargeReq);
+  if (chargeResult.isError) {
     // Compensate: release the reserved inventory.
-    h.durableCall("inventory", "Release", `{"reservation_id":"${reservation.reservationID}"}`);
-    return `{"error":"payment failed: ${chargeResult.error}"}`;
+    h.durableCall("inventory", "Release", '{"reservation_id":"' + reservationID + '"}');
+    return writeError(outPtr, maxOutLen, "payment failed: " + safeStr(chargeResult.error));
   }
-  let charge = JSON.parse<Charge>(chargeResult.value);
+  let chargeID: string = extractStringField(chargeResult.response, "chargeID");
 
   // --- Step 3: Create shipment --------------------------------------------
 
-  let shipReq = `{"reservation_id":"${reservation.reservationID}","charge_id":"${charge.chargeID}"}`;
-  let shipResult = h.durableCall("shipping", "CreateShipment", shipReq);
-  if (!shipResult.ok) {
+  let shipReq: string = '{"reservation_id":"' + reservationID + '","charge_id":"' + chargeID + '"}';
+  let shipResult: DurableCallOutcome = h.durableCall("shipping", "CreateShipment", shipReq);
+  if (shipResult.isError) {
     // Compensate: refund the payment and release inventory.
-    h.durableCall("payments", "Refund", `{"charge_id":"${charge.chargeID}"}`);
-    h.durableCall("inventory", "Release", `{"reservation_id":"${reservation.reservationID}"}`);
-    return `{"error":"shipping failed: ${shipResult.error}"}`;
+    h.durableCall("payments", "Refund", '{"charge_id":"' + chargeID + '"}');
+    h.durableCall("inventory", "Release", '{"reservation_id":"' + reservationID + '"}');
+    return writeError(outPtr, maxOutLen, "shipping failed: " + safeStr(shipResult.error));
   }
 
   // --- Step 4: Notify customer (best-effort) -------------------------------
 
-  h.durableCall("notifications", "SendEmail", `{"user_id":"${input.userID}","message":"Order shipped"}`);
+  h.durableCall("notifications", "SendEmail", '{"user_id":"' + userID + '","message":"Order shipped"}');
 
-  return `{"status":"shipped","reservation_id":"${reservation.reservationID}"}`;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function serializeItems(items: CartItem[]): string {
-  let parts: string[] = [];
-  for (let i = 0; i < items.length; i++) {
-    parts.push(`{"sku":"${items[i].sku}","quantity":${items[i].quantity}}`);
-  }
-  return "[" + parts.join(",") + "]";
+  let result: string = '{"status":"shipped","reservation_id":"' + reservationID + '"}';
+  return writeResult(outPtr, maxOutLen, result);
 }
 
 // ---------------------------------------------------------------------------
@@ -105,22 +196,32 @@ function serializeItems(items: CartItem[]): string {
 // A cancellation-aware entry point that checks cancellation before proceeding.
 // ---------------------------------------------------------------------------
 
-@durableEntry
-function cancel_order(h: HostCalls, input: PlaceOrderInput): string {
-  let cancelled = h.pollCancellation();
-  if (cancelled) {
-    return `{"status":"cancelled","reason":"cancelled before processing"}`;
+export function cancel_order(
+  argsPtr: usize, argsLen: i32, outPtr: usize, maxOutLen: i32
+): i64 {
+  let h: HostCalls = new HostCalls();
+
+  // ---- Read and parse input ----
+  let argsJson: string = argsLen > 0 ? readString(argsPtr, argsLen) : "";
+  let userID: string = extractStringField(argsJson, "userID");
+  let itemsJson: string = extractRawArray(argsJson, "items");
+
+  // ---- Check cancellation ----
+  let cancelledStatus = h.pollCancellation();
+  if (cancelledStatus.cancelled) {
+    return writeResult(outPtr, maxOutLen,
+      '{"status":"cancelled","reason":"cancelled before processing"}');
   }
 
-  if (input.items.length == 0) {
-    return `{"error":"cart is empty"}`;
+  if (itemsJson.length <= 2) {
+    return writeError(outPtr, maxOutLen, "cart is empty");
   }
 
-  let reserveReq = `{"user_id":"${input.userID}","items":${serializeItems(input.items)}}`;
-  let reserveResult = h.durableCall("inventory", "Reserve", reserveReq);
-  if (!reserveResult.ok) {
-    return `{"error":"inventory reserve failed: ${reserveResult.error}"}`;
+  let reserveReq: string = '{"user_id":"' + userID + '","items":' + itemsJson + '}';
+  let reserveResult: DurableCallOutcome = h.durableCall("inventory", "Reserve", reserveReq);
+  if (reserveResult.isError) {
+    return writeError(outPtr, maxOutLen, "inventory reserve failed: " + safeStr(reserveResult.error));
   }
 
-  return `{"status":"reserved"}`;
+  return writeResult(outPtr, maxOutLen, '{"status":"reserved"}');
 }

@@ -95,12 +95,13 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 				flightRef = r.Ref
 				return r.Ref, nil
 			},
-			Compensate: func(h durable.HostCalls) {
+			Compensate: func(h durable.HostCalls) error {
 				if flightRef == "" {
-					return
+					return nil
 				}
 				h.DurableLog(fmt.Sprintf("Compensating flight: %s", flightRef))
 				h.DurableCall("flights", "Cancel", toJSON(map[string]string{"ref": flightRef}))
+				return nil
 			},
 		},
 		{
@@ -117,12 +118,13 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 				hotelRef = r.Ref
 				return r.Ref, nil
 			},
-			Compensate: func(h durable.HostCalls) {
+			Compensate: func(h durable.HostCalls) error {
 				if hotelRef == "" {
-					return
+					return nil
 				}
 				h.DurableLog(fmt.Sprintf("Compensating hotel: %s", hotelRef))
 				h.DurableCall("hotels", "Cancel", toJSON(map[string]string{"ref": hotelRef}))
+				return nil
 			},
 		},
 	}
@@ -142,12 +144,13 @@ func BookTravel(h durable.HostCalls, input BookingInput) (*BookingResult, error)
 				carRef = r.Ref
 				return r.Ref, nil
 			},
-			Compensate: func(h durable.HostCalls) {
+			Compensate: func(h durable.HostCalls) error {
 				if carRef == "" {
-					return
+					return nil
 				}
 				h.DurableLog(fmt.Sprintf("Compensating car: %s", carRef))
 				h.DurableCall("cars", "Cancel", toJSON(map[string]string{"ref": carRef}))
+				return nil
 			},
 		})
 	}

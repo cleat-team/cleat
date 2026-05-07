@@ -73,10 +73,11 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 			}{ChargeID: resp.ChargeID, Amount: total}
 			return "", nil
 		},
-		func(h durable.HostCalls) {
+		func(h durable.HostCalls) error {
 			paymentsClient.Refund(payments.RefundRequest{
 				ChargeID: chargeResult.ChargeID,
 			})
+			return nil
 		},
 	)
 
@@ -116,10 +117,11 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 			}
 			return "", nil
 		},
-		func(h durable.HostCalls) {
+		func(h durable.HostCalls) error {
 			dispatchClient.ReleaseDriver(dispatch.ReleaseDriverRequest{
 				DriverID: driverInfo.DriverID,
 			})
+			return nil
 		},
 	)
 
@@ -139,10 +141,11 @@ func PlaceOrderTyped(h durable.HostCalls, userID string, restaurantID string,
 				ETAMinutes:   driverInfo.ETAMinutes,
 			})
 		},
-		func(h durable.HostCalls) {
+		func(h durable.HostCalls) error {
 			restaurantClient.CancelOrder(restaurant.CancelOrderRequest{
 				OrderID: chargeResult.ChargeID,
 			})
+			return nil
 		},
 	)
 

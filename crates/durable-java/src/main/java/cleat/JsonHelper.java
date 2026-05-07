@@ -126,7 +126,7 @@ public final class JsonHelper {
                     break;
                 default:
                     if (c < 0x20) {
-                        // Control characters: encode as \uXXXX.
+                        // Control characters: encode as \\uXXXX.
                         sb.append("\\u");
                         sb.append(String.format("%04x", (int) c));
                     } else {

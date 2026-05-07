@@ -417,8 +417,8 @@ export class HostCalls {
         "scratch buffer overflow: no space remaining for '" + label + "'",
       );
     }
-    let byteLen: usize = String.UTF8.byteLength(s);
-    if (byteLen > remaining as usize) {
+    let byteLen: i32 = String.UTF8.byteLength(s) as i32;
+    if (byteLen > remaining) {
       throw new Error(
         "scratch buffer overflow: '" +
           label +

@@ -1,7 +1,14 @@
-plugins {
-    java
-    id("org.teavm") version "0.10.2"
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath("org.teavm:teavm-gradle-plugin:0.10.2")
+    }
 }
+
+apply(plugin = "java")
+apply(plugin = "org.teavm")
 
 group = "com.cleat"
 version = "0.1.0"
@@ -11,12 +18,8 @@ repositories {
 }
 
 dependencies {
-    // TeaVM runtime
     implementation("org.teavm:teavm-classlib:0.10.2")
-
-    // JSON processing (minimal)
     implementation("org.teavm:teavm-jso-apis:0.10.2")
-
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.0")
 }
 
@@ -26,35 +29,14 @@ java {
 }
 
 teavm {
-    // TeaVM configuration for WASM target
-    mainClass = "cleat.WorkflowEntry"
-    targetFileName = "workflow.wasm"
-    targetDirectory = file("build/wasm")
-
-    // WASM target with linear memory support for cleat ABI
-    targetType = "WASM"
-
-    // Optimize
-    optimizationLevel = "FULL"
-
-    // No runtime checks in release
-    debugInformationGenerated = false
-    sourceMapsGenerated = false
-
-    // Minify (reduces WASM binary size)
-    minifying = true
+    wasm {
+        mainClass = "cleat.HostCalls"
+        targetFileName = "workflow.wasm"
+        outputDir = file("build/wasm")
+        optimization = org.teavm.gradle.api.OptimizationLevel.BALANCED
+    }
 }
 
 tasks.test {
     useJUnitPlatform()
-}
-
-// Ensure generated sources from annotation processing are included
-sourceSets {
-    main {
-        java {
-            // Include annotation processor generated sources
-            srcDir(layout.buildDirectory.dir("generated/source/apt/main"))
-        }
-    }
 }

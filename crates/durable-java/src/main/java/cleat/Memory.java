@@ -76,7 +76,7 @@ public final class Memory {
      * @param value   the byte value to write
      */
     private static void writeByte(int address, byte value) {
-        org.teavm.interop.Address.fromInt(address).setByte(value);
+        org.teavm.interop.Address.fromInt(address).putByte(value);
     }
 
     // ---- String I/O ----

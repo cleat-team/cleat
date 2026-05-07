@@ -181,7 +181,7 @@ class CleatEntryTransformer {
         if (needsImport) {
           const importSrc = parser.parseFile(
             "~lib/generated/cleat-import.ts",
-            'import { HostCalls, Memory } from "@cleat/sdk";\n',
+            'import { HostCalls, Memory, SUSPEND_SENTINEL } from "@cleat/sdk";\n',
             false
           );
           if (importSrc && importSrc.statements) {
@@ -322,22 +322,12 @@ class CleatEntryTransformer {
       const pname = paramNames[0];
       const ptype = paramTypes[0];
       code += `  // ---- Step 2: Deserialize JSON into ${ptype} ----\n`;
-      code += `  let ${pname}: ${ptype};\n`;
-      code += `  try {\n`;
-      code += `    ${pname} = JSON.parse<${ptype}>(argsJson);\n`;
-      code += `  } catch (_e) {\n`;
-      code += this._makeErrorReturn("invalid input");
-      code += `  }\n\n`;
+      code += `  let ${pname}: ${ptype} = JSON.parse<${ptype}>(argsJson);\n\n`;
     } else {
       // Multiple input parameters: parse the JSON as an object and extract
       // each field individually. Each field name must match a JSON key.
       code += `  // ---- Step 2: Deserialize multiple parameters from JSON ----\n`;
-      code += `  let _parsed: JSON.Obj = new JSON.Obj();\n`;
-      code += `  try {\n`;
-      code += `    _parsed = <JSON.Obj>JSON.parse(argsJson);\n`;
-      code += `  } catch (_e) {\n`;
-      code += this._makeErrorReturn("invalid input");
-      code += `  }\n`;
+      code += `  let _parsed: JSON.Obj = <JSON.Obj>JSON.parse(argsJson);\n`;
       for (let i = 0; i < paramNames.length; i++) {
         const pname = paramNames[i];
         const ptype = paramTypes[i];
@@ -351,7 +341,6 @@ class CleatEntryTransformer {
     // ------------------------------------------------------------------
     code += `  // ---- Step 3: Invoke the workflow function ----\n`;
     code += `  const h = new HostCalls();\n\n`;
-    code += `  try {\n`;
 
     const callExpr = `${innerName}(${callArgs.join(", ")})`;
 
@@ -367,6 +356,11 @@ class CleatEntryTransformer {
       // The output is a valid JSON string value: "the_result".
       code += `    const _result: string = ${callExpr};\n`;
       code += `\n`;
+      code += `    // Check for suspend sentinel ----\n`;
+      code += `    if (changetype<u64>(_result) == SUSPEND_SENTINEL) {\n`;
+      code += `        return SUSPEND_SENTINEL;\n`;
+      code += `    }\n`;
+      code += `\n`;
       code += `    // ---- Step 4: Write result to output buffer ----\n`;
       code += `    const _out = JSON.stringify(_result);\n`;
       code += `    const _written = Memory.writeString(outPtr, maxOutLen, _out);\n`;
@@ -377,23 +371,17 @@ class CleatEntryTransformer {
       // uses @serializable).
       code += `    const _result = ${callExpr};\n`;
       code += `\n`;
+      code += `    // Check for suspend sentinel ----\n`;
+      code += `    if (changetype<u64>(_result) == SUSPEND_SENTINEL) {\n`;
+      code += `        return SUSPEND_SENTINEL;\n`;
+      code += `    }\n`;
+      code += `\n`;
       code += `    // ---- Step 4: Serialize result to JSON and write to memory ----\n`;
       code += `    const _out = JSON.stringify(_result);\n`;
       code += `    const _written = Memory.writeString(outPtr, maxOutLen, _out);\n`;
       code += `    return Memory.encodeExportResult(0, _written);\n`;
     }
 
-    // ------------------------------------------------------------------
-    // Step 5: Catch errors, format as error JSON, return errCode=1
-    // ------------------------------------------------------------------
-    code += `  } catch (_e) {\n`;
-    code += `    // ---- Step 5: Handle error ----\n`;
-    code += `    // Write {"error":"<message>"} to output buffer, return errCode=1\n`;
-    code += `    const _errMsg = "workflow execution failed";\n`;
-    code += "    const _errBody = '{\"error\":\"' + _errMsg + '\"}';\n";
-    code += `    const _errWritten = Memory.writeString(outPtr, maxOutLen, _errBody);\n`;
-    code += `    return Memory.encodeExportResult(1, _errWritten);\n`;
-    code += `  }\n`;
 
     code += `}\n\n`;
     return code;

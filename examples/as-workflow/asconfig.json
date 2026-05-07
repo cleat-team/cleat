@@ -8,6 +8,9 @@
     }
   },
   "options": {
-    "bindings": "raw"
+    "bindings": "raw",
+    "paths": {
+      "@cleat/sdk": ["../../packages/cleat-as/assembly"]
+    }
   }
 }

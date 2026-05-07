@@ -1,0 +1,39 @@
+// The TeaVM plugin is provided by the root project's buildscript.
+// This subproject applies it without a version to avoid classpath conflict.
+
+apply plugin: "java"
+apply plugin: "org.teavm"
+
+group = "com.cleat"
+version = "0.1.0"
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // TeaVM runtime
+    implementation "org.teavm:teavm-classlib:0.10.2"
+    implementation "org.teavm:teavm-jso-apis:0.10.2"
+
+    testImplementation "org.junit.jupiter:junit-jupiter:5.10.0"
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+teavm {
+    // The SDK is a library, not a WASM binary. But TeaVM needs a mainClass
+    // for code inclusion analysis. HostCalls is used as the analysis root.
+    wasm {
+        mainClass = "cleat.HostCalls"
+        targetFileName = "workflow.wasm"
+        outputDir = file("build/wasm")
+    }
+}
+
+tasks.named("test") {
+    useJUnitPlatform()
+}

@@ -1,0 +1,8 @@
+{
+  "entries": ["./assembly/index.ts"],
+  "options": {
+    "paths": {
+      "@cleat/sdk": "./assembly"
+    }
+  }
+}

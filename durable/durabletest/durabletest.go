@@ -67,6 +67,38 @@ type callStub struct {
 	err       error
 }
 
+// childStubResult holds the resolved result of a child workflow stub.
+type childStubResult struct {
+	result string
+	err    error
+}
+
+// childWorkflowStub stores a registered stub for a child workflow.
+type childWorkflowStub struct {
+	name   string
+	result string
+	err    error
+}
+
+// ChildWorkflowStubBuilder builds and registers a child workflow stub.
+// Created by TestEnv.OnChildWorkflow.
+type ChildWorkflowStubBuilder struct {
+	env  *TestEnv
+	name string
+}
+
+// Return registers a stub that returns the given result and error for a child workflow.
+func (b *ChildWorkflowStubBuilder) Return(result string, err error) *ChildWorkflowStubBuilder {
+	b.env.mu.Lock()
+	defer b.env.mu.Unlock()
+	b.env.childWorkflowStubs[b.name] = &childWorkflowStub{
+		name:   b.name,
+		result: result,
+		err:    err,
+	}
+	return b
+}
+
 // scheduledSignal is a signal waiting to be delivered at a specific time.
 type scheduledSignal struct {
 	name    string
@@ -115,6 +147,9 @@ type TestEnv struct {
 	deferCounter   int
 	promises       map[string]promiseState // keyed by promiseID
 
+	childWorkflowStubs map[string]*childWorkflowStub
+	childResults       map[string]*childStubResult
+
 	ConcurrencyKeys           map[string]string
 	AcquireConcurrencyKeyFn   func(key, workflowID string) (bool, error)
 	ReleaseConcurrencyKeysFn  func(workflowID string)
@@ -129,6 +164,8 @@ func NewTestEnv() *TestEnv {
 		minVersionVal: 1,
 		queryState:    make(map[string]string),
 		promises:      make(map[string]promiseState),
+		childWorkflowStubs: make(map[string]*childWorkflowStub),
+		childResults:       make(map[string]*childStubResult),
 		ConcurrencyKeys: make(map[string]string),
 	}
 	e.h = durable.NewHostCalls(durable.HostCallsOptions{
@@ -342,6 +379,8 @@ func (e *TestEnv) Reset() {
 	e.randomSeq = nil
 	e.randomIdx = 0
 	e.deferCounter = 0
+	e.childWorkflowStubs = make(map[string]*childWorkflowStub)
+	e.childResults = make(map[string]*childStubResult)
 	e.ConcurrencyKeys = make(map[string]string)
 }
 
@@ -466,13 +505,36 @@ func (e *TestEnv) continueAsNewImpl(newInputJSON string) error {
 	return nil
 }
 
+// OnChildWorkflow registers a stub builder for a child workflow with the given name.
+func (e *TestEnv) OnChildWorkflow(name string) *ChildWorkflowStubBuilder {
+	return &ChildWorkflowStubBuilder{
+		env:  e,
+		name: name,
+	}
+}
+
 func (e *TestEnv) childWorkflowImpl(name, inputJSON string) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return fmt.Sprintf("child-%s-%d", name, e.deferCounter), nil
+	e.deferCounter++
+	runID := fmt.Sprintf("child-%s-%d", name, e.deferCounter)
+	if stub, ok := e.childWorkflowStubs[name]; ok {
+		e.childResults[runID] = &childStubResult{result: stub.result, err: stub.err}
+	} else {
+		e.childResults[runID] = &childStubResult{result: `{"status":"completed"}`, err: nil}
+	}
+	return runID, nil
 }
 
 func (e *TestEnv) awaitChildImpl(runID string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if result, ok := e.childResults[runID]; ok {
+		if result.err != nil {
+			return "", result.err
+		}
+		return result.result, nil
+	}
 	return `{"status":"completed"}`, nil
 }
 

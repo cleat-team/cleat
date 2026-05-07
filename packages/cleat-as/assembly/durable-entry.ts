@@ -17,13 +17,11 @@
  * @param name - Optional workflow name. Defaults to the function name.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function durableEntry(name?: string): (target: any, propertyKey?: string, descriptor?: any) => void {
+export function durableEntry(name: string = ""): (target: usize, propertyKey: string, descriptor: usize) => void {
   return function (
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    _target: any,
-    _propertyKey?: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    _descriptor?: any,
+    _target: usize,
+    _propertyKey: string,
+    _descriptor: usize,
   ): void {
     // Marker decorator — no runtime behavior.
     // The transformer plugin reads this decorator metadata at compile time

@@ -10,6 +10,7 @@ package localdev
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
@@ -182,6 +183,7 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 	}
 	r.h = durable.NewHostCalls(durable.HostCallsOptions{
 		DurableCall:            r.durableCall,
+		DurableCallTypedWithOptions: r.durableCallTypedWithOptions,
 		DurableCallWithOptions: r.durableCallWithOptions,
 		DurableSleep:           r.durableSleepMs,
 		DurableAwaitSignals:    r.durableAwaitSignals,
@@ -326,6 +328,24 @@ func (r *LocalRunner) durableCallWithOptions(opts durable.CallOptions, service, 
 	}
 	return "", fmt.Errorf("durable dev: call %s.%s retry exhausted after %d attempts: %w",
 		service, operation, rp.MaxAttempts, lastErr)
+}
+
+func (r *LocalRunner) durableCallTypedWithOptions(opts durable.CallOptions, service, operation string, request, result interface{}) error {
+	reqBytes, err := json.Marshal(request)
+	if err != nil {
+		return fmt.Errorf("durable dev: marshaling request for %s.%s: %w", service, operation, err)
+	}
+	resp, err := r.durableCallWithOptions(opts, service, operation, string(reqBytes))
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+	if err := json.Unmarshal([]byte(resp), result); err != nil {
+		return fmt.Errorf("durable dev: unmarshaling response from %s.%s: %w", service, operation, err)
+	}
+	return nil
 }
 
 func (r *LocalRunner) durableSleepMs(ms int64) {
