@@ -136,41 +136,76 @@ option but is only "TypeScript-flavored." Real TypeScript via Javy is possible b
 carries significant binary size and debugging overhead. Recommend AssemblyScript
 as a stepping stone.
 
-### Python — Cost: ~8-16 weeks, Value: Medium-High
+### Python — SDK exists, WASM FFI incomplete. Remaining: ~4-5 weeks to MVP
 
-**How:** No production-quality Python→WASM AOT compiler exists. Three approaches:
+**Status (May 2026):** The Python SDK exists at 4,508 lines with full ABI
+conformance — all 22 host imports are defined, the `@durable_entry` decorator
+generates WASM export wrappers, and typed wrappers (Saga, ChildWorkflow,
+DurableDefer, Plugins) are built. 80 tests pass (61 memory/encoding, 19 entry
+decorator). `durable build --target python` is wired via `componentize-py` in
+`cmd/durable/build_python.go`. Three example workflows exist (hello, saga,
+child fan-out).
 
-**A) CPython compiled to WASM** (Pyodide approach):
-- Embeds the CPython interpreter as a WASM module
-- SDK: `durable-py` package with `HostCalls` class and `@durable_entry` decorator
-- Transformer: AST transform (via Python's `ast` module or a decorator that
-  dynamically generates the export wrapper at import time)
-- **Binary size:** 5-20 MB (full CPython interpreter + standard library subset)
-- **Showstopper:** Binary size. Storing 20 MB blobs in `workflow_defs` per version
-  is impractical. A single deploy with 5 versions = 100 MB of WASM in Postgres.
+**The critical gap:** The 22 `_import_*` functions in `host_calls.py` are
+implementation stubs that raise `NotImplementedError`. They define the correct
+interface but aren't wired to actual WASM imports. The `componentize-py`
+pipeline exists on disk but has never been validated end-to-end with a real
+cleat worker loading and executing a Python-compiled WASM module.
 
-**B) RustPython** (Python interpreter written in Rust, compiles to WASM):
-- Smaller than CPython (~2-5 MB)
-- Slower, less compatible with CPython libraries
-- **Showstopper:** Same binary size concerns, plus compatibility gaps.
+**What remains (4 phases):**
 
-**C) MicroPython** (embedded Python, compiles to WASM):
-- Very small (~200-500 KB)
-- Highly restricted standard library (no `asyncio`, limited `json`, no type hints)
-- **Showstopper:** Too restricted for real workflow code. Can't use most Python
-  libraries.
+*Phase 1: End-to-End WASM Compilation (P0, ~2-3 weeks)*
+1. Verify `componentize-py` produces valid cleat WASM — run hello_workflow.py
+   through the pipeline, load in a cleat worker, execute. Almost certainly
+   something will break on first attempt.
+2. Wire the 22 host imports. `componentize-py` uses WIT (WASM Interface Types)
+   to define imports. Either write a WIT file describing cleat's host imports
+   and generate Python bindings, or use `componentize-py`'s raw import
+   mechanism. The Go SDK uses `//go:wasmimport` directives; Python needs the
+   equivalent.
+3. Validate SuspendSentinel propagation through the actual WASM ABI (the
+   `@durable_entry` decorator already has the logic but it's untested at the
+   WASM boundary).
+4. Fix whatever breaks. The AS SDK had 11 issues, Java had 11. Python will
+   have its own set.
 
-**D) Mojo** (Modular's Python-superset, compiles to native/WASM):
-- Python-compatible syntax, AOT-compiled
-- WASM target exists but is early-stage
-- **Showstopper:** Not mature enough to bet on.
+*Phase 2: Feature Parity with Go SDK (P1, ~2 weeks)*
+5. Add missing HostCalls methods: `HasState`, `ListState`, `LogKV`,
+   `DurableFetchJSON`, typed `Promise[T]`, typed update handlers.
+6. Add AI plugin wrappers to `plugins.py`: `llm_chat`, `llm_embed`,
+   `pgvector_search`, `pgvector_upsert`.
+7. Add `durable init --template agent --language python`.
 
-**Verdict:** Python has no clean WASM story. The binary size problem is a genuine
-showstopper for the database-stored-workflow model. If Python is essential,
-MicroPython is the least-bad option, but it's a heavily restricted subset.
-Recommend deferring until the WASM ecosystem matures (or relaxing the "store
-WASM in Postgres" constraint for Python — e.g., store a reference to a container
-image instead).
+*Phase 3: Ecosystem Integration (P2, ~3-4 weeks)*
+8. LangChain integration — a `CleatCallbackHandler` that records LangChain
+   steps as cleat events.
+9. LangGraph checkpointer — a `CleatCheckpointer` using cleat's event
+   history as the checkpoint backend.
+10. PyPI publishing — package `cleat-sdk` with versioning, docs, quickstart.
+
+*Phase 4: Production Hardening (P3, ongoing)*
+11. Binary size: CPython WASM is 5-20 MB. Options: accept it for server
+    deployment, investigate RustPython (2-5 MB) or MicroPython (200-500 KB)
+    as lighter alternatives, or use object storage with a `wasm_url` column
+    for large blobs rather than storing directly in PostgreSQL.
+12. Fork/port a Python OSS project (Temporal or DBOS example) to find
+    real-world issues, as was done for AS and Java.
+13. Async/await support — investigate whether `componentize-py` supports
+    async functions via WASI async or a polling mechanism.
+
+**Showstoppers (all fixable):**
+- `componentize-py` is emerging tech with rough edges. Mitigation: the Go SDK
+  proves the ABI works; if `componentize-py` fights back, fall back to a
+  Python→Rust FFI bridge or a gRPC proxy to Go workers.
+- Binary size (5-20 MB). Mitigation: server-side deployment tolerates larger
+  binaries. `durable deploy` can use S3 URLs for WASM blobs over a size
+  threshold rather than storing in PostgreSQL `BYTEA`.
+
+**Verdict:** The Python SDK is much further along than the original analysis
+assumed. The remaining work is the WASM FFI wiring (~2-3 weeks) plus feature
+parity and ecosystem integration (~5-6 weeks). Total: ~7-9 weeks to an
+AI-ready Python SDK with LangChain integration. The Go-native AI plugins
+(already shipped) provide the proving ground while Python/WASM is completed.
 
 ### Go — Already Done
 
@@ -194,7 +229,7 @@ code across 5 packages.
 | **Java/Kotlin** | TeaVM (mature) | ~2-3 weeks | ~2-5 weeks | 200-500 KB | TeaVM classlib subset | 2nd |
 | **AssemblyScript** | asc (mature) | ~1-2 weeks | ~1-3 weeks | 10-50 KB | Not actually TypeScript | 3rd |
 | **TypeScript** | Javy/QuickJS (mature) | ~2-3 weeks | ~3-6 weeks | 1-5 MB | Binary size, debugging | 4th |
-| **Python** | CPython-wasm (mature) | ~2-3 weeks | ~3-6 weeks | 5-20 MB | Binary size, compat | 5th |
+| **Python** | componentize-py | ✅ Done (4.5K lines, 80 tests) | ✅ Done (@durable_entry) | 5-20 MB | WASM FFI wiring (2-3 wks) | 5th |
 | **C#/.NET** | NativeAOT-LLVM (exp.) | ~3-5 weeks | ~4-8 weeks | 1-5 MB | Immature toolchain | 6th |
 | **Go** | go build (built-in) | ✅ Done | ✅ Done | ~1-5 MB (go) / ~100-500 KB (tinygo) | None | Done |
 | **Rust** | cargo build (built-in) | ✅ Done | ✅ Done | ~50-200 KB | None | Done |
@@ -225,14 +260,19 @@ If Python/TypeScript via embedded interpreters is essential, consider:
    header is < 200 lines and validates that no host changes are needed.
 2. **Java** (weeks 3-8): Highest value for enterprise adoption. TeaVM is mature.
    The annotation processor pattern is well-understood from Lombok/Dagger.
+   Note: 11 issues already identified via fork/port; fixing these is the first step.
 3. **AssemblyScript** (weeks 6-10): Gives a "TypeScript-like" option without the
    embedded-interpreter overhead. Real TypeScript can follow once Javy or Static
-   Hermes stabilizes.
-4. **TypeScript via Javy** (months 3-4): After AssemblyScript proves demand. Focus
+   Hermes stabilizes. Note: 11 issues already identified; fixing SDK compilation on
+   AS 0.27.32 is the first step.
+4. **Python WASM FFI** (weeks 8-11): The SDK is already built (4,508 lines, 80 tests,
+   full ABI conformance). The remaining work is wiring the 22 host imports via
+   `componentize-py`'s WIT bindings (~2-3 weeks), adding feature parity with Go SDK
+   (~2 weeks), and LangChain/LangGraph integration (~3-4 weeks). Total: ~7-9 weeks
+   to an AI-ready Python SDK.
+5. **TypeScript via Javy** (months 3-4): After AssemblyScript proves demand. Focus
    on reducing binary size (tree-shaking the JS runtime) and improving debugging.
-5. **Python** (months 6+): Wait for the WASM ecosystem to produce a Python AOT
-   compiler. Mojo is the most promising candidate. MicroPython is a fallback for
-   simple workflows.
 
-No language has a hard showstopper — even Python via CPython-wasm works, just with
-impractical binary sizes. The WASM boundary design holds up.
+No language has a hard showstopper — even Python via CPython-wasm works, with the
+binary size mitigated by object storage for large blobs. The WASM boundary design
+holds up.
