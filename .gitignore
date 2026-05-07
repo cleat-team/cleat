@@ -44,9 +44,16 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
 .claude/scheduled_tasks.lock
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
 durable-bench
 
 # Python cache
@@ -75,3 +82,6 @@ ports-round2/*/go.sum
 ports-round2/*/gradle/wrapper/gradle-wrapper.jar
 ports-round2/*/.gradle/
 ports-round2/*/build/
+
+# Benchmark baseline files (CI artifacts, not committed)
+.benchmarks/

@@ -1,0 +1,58 @@
+# Prometheus scrape configuration for the cleat workflow engine.
+# This config is mounted into the Prometheus container via Docker Compose.
+
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+
+# Alertmanager configuration (optional, uncomment when deploying)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Load rules once and periodically evaluate them according to the global
+# 'evaluation_interval'.
+rule_files:
+  # - "alerts.yml"
+
+# Scrape configurations for each target.
+scrape_configs:
+  # ---- Cleat worker metrics ----
+  # Workers expose Prometheus-format metrics on the HTTP API port (8080)
+  # at the /metrics endpoint.
+  - job_name: "cleat-workers"
+    honor_timestamps: true
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets:
+          - "durable-worker:8080"
+        labels:
+          app: "cleat-workflow-engine"
+          component: "worker"
+
+  # ---- Docker daemon (when running locally via Docker Compose) ----
+  - job_name: "docker"
+    static_configs:
+      - targets:
+          - "host.docker.internal:9323"
+
+  # ---- Kubernetes (when deployed on k8s) ----
+  # Uncomment the following section when deploying Prometheus inside the
+  # Kubernetes cluster alongside the durable-worker pods.
+  # - job_name: "kubernetes-pods"
+  #   kubernetes_sd_configs:
+  #     - role: pod
+  #   relabel_configs:
+  #     - source_labels: [__meta_kubernetes_pod_label_app]
+  #       action: keep
+  #       regex: durable-worker
+  #     - source_labels: [__address__]
+  #       action: replace
+  #       regex: ([^:]+)(?::\d+)?
+  #       replacement: "${1}:8080"
+  #       target_label: __address__

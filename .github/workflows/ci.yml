@@ -1,0 +1,341 @@
+# ---------------------------------------------------------------------------
+# CI/CD Pipeline for cleat/durable
+#
+# Workstream 2 — Continuous Integration and Delivery
+#
+# Jobs:
+#   lint              — go vet, ruff, shellcheck, clippy
+#   test-go           — matrix (go version x package group), race detector
+#   test-python       — matrix (python 3.10 / 3.11 / 3.12)
+#   test-java         — gradle test (TeaVM + JUnit 5)
+#   test-assemblyscript — npm test (as-pect)
+#   benchmarks        — push to main only; stores result + trend artifact
+#   cluster-tests     — docker-compose cluster, integration tests, tear-down
+#   build             — Go bin, Python SDK, Java, AssemblyScript, examples
+# ---------------------------------------------------------------------------
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION_STABLE: "1.24"
+
+# ---------------------------------------------------------------------------
+# Permissions
+# ---------------------------------------------------------------------------
+permissions:
+  contents: read
+  pull-requests: write
+
+# ===========================================================================
+# JOBS
+# ===========================================================================
+jobs:
+  # -------------------------------------------------------------------------
+  # Lint
+  # -------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install lint tools
+        run: |
+          pip install ruff
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Ruff check
+        run: ruff check python-sdk/
+
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh benchmarks/*.sh
+
+      - name: Clippy (durable-macro)
+        working-directory: crates/durable-macro
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (durable-sdk)
+        working-directory: crates/durable-sdk
+        run: cargo clippy --all-targets -- -D warnings
+
+  # -------------------------------------------------------------------------
+  # Test Go (matrix: Go version x package group)
+  # -------------------------------------------------------------------------
+  test-go:
+    name: Test Go (${{ matrix.package.name }}) on ${{ matrix.go-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ["1.22", "1.23", "1.24"]
+        package:
+          - name: core
+            path: ./durable/...
+          - name: internal
+            path: ./internal/...
+          - name: plugins
+            path: ./plugins/...
+          - name: commands
+            path: ./cmd/...
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Run tests
+        run: go test -race -count=1 "${{ matrix.package.path }}"
+
+  # -------------------------------------------------------------------------
+  # Test Python (matrix: 3.10 / 3.11 / 3.12)
+  # -------------------------------------------------------------------------
+  test-python:
+    name: Test Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python SDK
+        working-directory: python-sdk
+        run: |
+          pip install --upgrade pip
+          pip install ".[dev]"
+
+      - name: Run tests
+        working-directory: python-sdk
+        run: python -m pytest -v
+
+  # -------------------------------------------------------------------------
+  # Test Java
+  # -------------------------------------------------------------------------
+  test-java:
+    name: Java Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Run Java tests
+        working-directory: crates/durable-java
+        run: gradle test
+
+  # -------------------------------------------------------------------------
+  # Test AssemblyScript
+  # -------------------------------------------------------------------------
+  test-assemblyscript:
+    name: AssemblyScript Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: packages/cleat-as
+        run: npm ci
+
+      - name: Run tests
+        working-directory: packages/cleat-as
+        run: npm test
+
+  # -------------------------------------------------------------------------
+  # Benchmarks (push to main only)
+  # -------------------------------------------------------------------------
+  benchmarks:
+    name: Benchmarks
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch enough history for benchmark comparison
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Run benchmarks
+        run: go test -bench=. -benchmem -benchtime=30s ./benchmarks/ | tee bench-output.txt
+
+      - name: Upload benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: bench-output.txt
+          retention-days: 90
+
+      - name: Store benchmark result (trend tracking)
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: go
+          output-file-path: bench-output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: false
+          alert-threshold: "120%"
+          comment-on-alert: true
+          fail-on-alert: true
+
+  # -------------------------------------------------------------------------
+  # Build all targets
+  # -------------------------------------------------------------------------
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build Go binaries
+        run: |
+          go build ./cmd/...
+          echo "[+] Go binaries built successfully"
+
+      - name: Build Go examples (wasm-demo)
+        working-directory: wasm-demo
+        run: go build ./...
+
+      - name: Build Rust crates
+        run: |
+          cd crates/durable-macro && cargo build --all-targets
+          cd ../durable-sdk && cargo build --all-targets
+
+      - name: Build AssemblyScript
+        working-directory: packages/cleat-as
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Java
+        working-directory: crates/durable-java
+        run: gradle build
+
+      - name: Install Python SDK
+        working-directory: python-sdk
+        run: |
+          pip install --upgrade pip
+          pip install .
+
+  # -------------------------------------------------------------------------
+  # Cluster integration tests (requires Docker)
+  # -------------------------------------------------------------------------
+  cluster-tests:
+    name: Cluster Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Build durable-worker binary
+        run: go build -o durable-worker ./cmd/durable-worker
+
+      - name: Build Docker image
+        run: docker build -t durable-worker:latest .
+
+      - name: Start cluster
+        run: docker compose -f docker-compose.cluster.yml up -d
+
+      - name: Wait for cluster readiness
+        run: |
+          echo "Waiting for Postgres to be healthy..."
+          for i in $(seq 1 30); do
+            if docker exec cleat-postgres pg_isready -U cleat -d cleat &>/dev/null; then
+              echo "Postgres is ready."
+              break
+            fi
+            sleep 2
+          done
+          echo "Waiting for workers to register..."
+          sleep 10
+
+      - name: Run integration tests
+        run: go test -count=1 -timeout=120s ./internal/host/...
+
+      - name: Cluster logs (on failure)
+        if: failure()
+        run: docker compose -f docker-compose.cluster.yml logs --tail=100
+
+      - name: Tear down cluster
+        if: always()
+        run: docker compose -f docker-compose.cluster.yml down -v

@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# Pre-commit hook configuration for cleat/durable
+#
+# Install:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Run on all files:
+#   pre-commit run --all-files
+# ---------------------------------------------------------------------------
+repos:
+  # ---- Local (system-installed) hooks -------------------------------------
+  - repo: local
+    hooks:
+      # Go vet — project-wide static analysis
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Go format — check for unformatted .go files
+      - id: go-fmt
+        name: go fmt
+        entry: bash -c 'go fmt ./... && git diff --exit-code --name-only || (echo "[!] Please run: go fmt ./..."; exit 1)'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Ruff — Python linter (python-sdk only)
+      - id: ruff
+        name: ruff
+        entry: ruff check python-sdk/
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Ruff format — Python formatter check (python-sdk only)
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format --check python-sdk/
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # ShellCheck — lint all shell scripts in the repo
+      - id: shellcheck
+        name: shellcheck
+        entry: shellcheck
+        language: system
+        types: [shell]
+        exclude: "node_modules/|target/"
