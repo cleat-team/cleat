@@ -167,6 +167,9 @@ type WorkflowStore interface {
 	// LoadWorkflowConfig returns the max_history_length for a workflow definition.
 	LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error)
 
+	// LoadDAGSpec returns the dag_spec JSON for a workflow definition, or nil if none.
+	LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error)
+
 	// TraceWorkflow sets the W3C trace_id on a workflow instance.
 	TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error)
 
@@ -461,6 +464,21 @@ func (s *PostgresStore) LoadWorkflowConfig(ctx context.Context, defName string, 
 		return 0, fmt.Errorf("load workflow config: %w", err)
 	}
 	return maxHistoryLength, nil
+}
+
+// LoadDAGSpec returns the dag_spec JSON for a workflow definition, or nil if none.
+func (s *PostgresStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+	var spec json.RawMessage
+	err := s.db.QueryRowContext(ctx, `
+		SELECT dag_spec FROM workflow_defs WHERE name = $1 AND version = $2
+	`, defName, defVersion).Scan(&spec)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load dag_spec: %w", err)
+	}
+	return spec, nil
 }
 
 // ListVersions returns all deployed versions of a workflow.

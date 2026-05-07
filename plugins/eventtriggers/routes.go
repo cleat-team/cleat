@@ -1,6 +1,8 @@
 package eventtriggers
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +22,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 	mux.HandleFunc("POST /api/events/subscriptions", p.handleCreateSubscription)
 	mux.HandleFunc("GET /api/events/subscriptions", p.handleListSubscriptions)
 	mux.HandleFunc("DELETE /api/events/subscriptions/{id}", p.handleDeleteSubscription)
+	mux.HandleFunc("POST /api/events/{event_id}/retry", p.handleRetryEvent)
 	return nil
 }
 
@@ -42,6 +45,7 @@ type createSubscriptionRequest struct {
 	EntryPoint    string          `json:"entry_point"`
 	InputTemplate json.RawMessage `json:"input_template"`
 	FilterExpr    string          `json:"filter_expr"`
+	MaxRetries    *int            `json:"max_retries,omitempty"`
 }
 
 type subscriptionJSON struct {
@@ -52,6 +56,7 @@ type subscriptionJSON struct {
 	EntryPoint    string          `json:"entry_point"`
 	InputTemplate json.RawMessage `json:"input_template"`
 	FilterExpr    string          `json:"filter_expr"`
+	MaxRetries    int             `json:"max_retries"`
 	Enabled       bool            `json:"enabled"`
 	CreatedAt     time.Time       `json:"created_at"`
 }
@@ -150,30 +155,48 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 		"event_type", req.EventType,
 	)
 
-	// Query matching subscriptions.
-	rows2, err := p.db.QueryContext(r.Context(), `
-		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, enabled, created_at
-		FROM event_subscriptions
-		WHERE tenant_id = $1 AND event_type = $2 AND enabled = true
-	`, tid, req.EventType)
+	// Query matching subscriptions and dispatch workflows.
+	matched, err := p.triggerMatchingWorkflows(r.Context(), eventID, tid, req.EventType, req.Data)
 	if err != nil {
 		p.logger.Error("event-triggers: query subscriptions", "error", err)
-		// Event is stored but we failed to match — mark it for dead-letter.
 		p.db.ExecContext(r.Context(), `UPDATE ingested_events SET error_msg = $1 WHERE id = $2`,
 			"failed to query subscriptions: "+err.Error(), eventID)
-		p.writeJSON(w, 200, publishEventResponse{Status: "published", Matched: 0})
-		return
 	}
-	defer rows2.Close()
+
+	// Broadcast a signal to any workflows awaiting this event type so they
+	// wake up promptly instead of waiting for their next poll cycle.
+	eventDataJSONStr := string(eventDataJSON)
+	p.signalAwaiters(r.Context(), tid, req.EventType, eventDataJSONStr)
+
+	p.writeJSON(w, 200, publishEventResponse{
+		Status:  "published",
+		Matched: matched,
+	})
+}
+
+// triggerMatchingWorkflows queries subscriptions matching the event and starts
+// a workflow for each one whose filter passes. Returns the number of workflows
+// started and any error from the subscription query itself (individual dispatch
+// errors are logged but do not halt processing).
+func (p *Plugin) triggerMatchingWorkflows(ctx context.Context, eventID uuid.UUID, tenantID uuid.UUID, eventType string, eventData map[string]interface{}) (int, error) {
+	rows, err := p.db.QueryContext(ctx, `
+		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, enabled, created_at, max_retries
+		FROM event_subscriptions
+		WHERE tenant_id = $1 AND event_type = $2 AND enabled = true
+	`, tenantID, eventType)
+	if err != nil {
+		return 0, fmt.Errorf("query subscriptions: %w", err)
+	}
+	defer rows.Close()
 
 	matched := 0
-	for rows2.Next() {
+	for rows.Next() {
 		var (
 			sub              subscriptionJSON
 			inputTemplateRaw []byte
 		)
-		if err := rows2.Scan(&sub.ID, &sub.TenantID, &sub.EventType, &sub.DefName,
-			&sub.EntryPoint, &inputTemplateRaw, &sub.FilterExpr, &sub.Enabled, &sub.CreatedAt); err != nil {
+		if err := rows.Scan(&sub.ID, &sub.TenantID, &sub.EventType, &sub.DefName,
+			&sub.EntryPoint, &inputTemplateRaw, &sub.FilterExpr, &sub.Enabled, &sub.CreatedAt, &sub.MaxRetries); err != nil {
 			p.logger.Error("event-triggers: scan subscription", "error", err)
 			continue
 		}
@@ -181,7 +204,7 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 
 		// Evaluate filter expression.
 		if sub.FilterExpr != "" && sub.FilterExpr != "true" {
-			ok, err := EvaluateFilter(sub.FilterExpr, req.Data)
+			ok, err := EvaluateFilter(sub.FilterExpr, eventData)
 			if err != nil {
 				p.logger.Error("event-triggers: filter evaluation error",
 					"subscription_id", sub.ID,
@@ -200,14 +223,14 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Build workflow input from input_template merged with event data.
-		inputJSON, err := mergeInputAndTemplate(sub.InputTemplate, req.Data)
+		inputJSON, err := mergeInputAndTemplate(sub.InputTemplate, eventData)
 		if err != nil {
 			p.logger.Error("event-triggers: build workflow input", "error", err)
 			continue
 		}
 
 		if p.env != nil && p.env.StartWorkflow != nil {
-			runID, err := p.env.StartWorkflow(r.Context(), sub.DefName, inputJSON)
+			runID, err := p.env.StartWorkflow(ctx, sub.DefName, inputJSON)
 			if err != nil {
 				p.logger.Error("event-triggers: start workflow failed",
 					"def_name", sub.DefName,
@@ -224,11 +247,11 @@ func (p *Plugin) handlePublishEvent(w http.ResponseWriter, r *http.Request) {
 			)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return matched, err
+	}
 
-	p.writeJSON(w, 200, publishEventResponse{
-		Status:  "published",
-		Matched: matched,
-	})
+	return matched, nil
 }
 
 // mergeInputAndTemplate builds the workflow input JSON by starting with the
@@ -292,14 +315,19 @@ func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 
 	var subID uuid.UUID
 	err = p.db.QueryRowContext(r.Context(), `
-		INSERT INTO event_subscriptions (tenant_id, event_type, def_name, entry_point, input_template, filter_expr, enabled, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, true, $7)
+		INSERT INTO event_subscriptions (tenant_id, event_type, def_name, entry_point, input_template, filter_expr, max_retries, enabled, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 3), true, $8)
 		RETURNING id
-	`, tid, req.EventType, req.DefName, req.EntryPoint, inputTemplateStr, req.FilterExpr, now).Scan(&subID)
+	`, tid, req.EventType, req.DefName, req.EntryPoint, inputTemplateStr, req.FilterExpr, req.MaxRetries, now).Scan(&subID)
 	if err != nil {
 		p.logger.Error("event-triggers: create subscription", "error", err)
 		p.writeError(w, 500, "failed to create subscription")
 		return
+	}
+
+	maxRetries := 3
+	if req.MaxRetries != nil {
+		maxRetries = *req.MaxRetries
 	}
 
 	p.logger.Info("event-triggers: subscription created",
@@ -317,6 +345,7 @@ func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 		EntryPoint:    req.EntryPoint,
 		InputTemplate: req.InputTemplate,
 		FilterExpr:    req.FilterExpr,
+		MaxRetries:    maxRetries,
 		Enabled:       true,
 		CreatedAt:     now,
 	})
@@ -332,7 +361,7 @@ func (p *Plugin) handleListSubscriptions(w http.ResponseWriter, r *http.Request)
 	}
 
 	rows, err := p.db.QueryContext(r.Context(), `
-		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, enabled, created_at
+		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, max_retries, enabled, created_at
 		FROM event_subscriptions
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
@@ -351,7 +380,7 @@ func (p *Plugin) handleListSubscriptions(w http.ResponseWriter, r *http.Request)
 			inputTemplateRaw []byte
 		)
 		if err := rows.Scan(&s.ID, &s.TenantID, &s.EventType, &s.DefName,
-			&s.EntryPoint, &inputTemplateRaw, &s.FilterExpr, &s.Enabled, &s.CreatedAt); err != nil {
+			&s.EntryPoint, &inputTemplateRaw, &s.FilterExpr, &s.MaxRetries, &s.Enabled, &s.CreatedAt); err != nil {
 			p.logger.Error("event-triggers: scan subscription", "error", err)
 			continue
 		}
@@ -399,4 +428,112 @@ func (p *Plugin) handleDeleteSubscription(w http.ResponseWriter, r *http.Request
 
 	p.logger.Info("event-triggers: subscription deleted", "id", id, "tenant", tid)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- POST /api/events/{event_id}/retry ----
+
+type retryEventResponse struct {
+	Status      string `json:"status"`
+	EventID     string `json:"event_id"`
+	WorkflowsStarted int `json:"workflows_started"`
+}
+
+// handleRetryEvent replays a dead-lettered or failed event by resetting its
+// processing state and immediately re-attempting dispatch to subscriptions.
+func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
+	tid := p.tenantID(r)
+	if tid == uuid.Nil {
+		p.writeError(w, 401, "tenant required")
+		return
+	}
+
+	eventIDStr := r.PathValue("event_id")
+	eventID, err := uuid.Parse(eventIDStr)
+	if err != nil {
+		p.writeError(w, 400, "invalid event id")
+		return
+	}
+
+	// Look up the event to verify it exists and is eligible for retry.
+	var (
+		currentStatus string
+		eventType     string
+		eventDataRaw  []byte
+	)
+	err = p.db.QueryRowContext(r.Context(), `
+		SELECT COALESCE(status, 'pending'), event_type, event_data
+		FROM ingested_events
+		WHERE id = $1 AND tenant_id = $2
+	`, eventID, tid).Scan(&currentStatus, &eventType, &eventDataRaw)
+	if err == sql.ErrNoRows {
+		p.writeError(w, 404, "event not found")
+		return
+	}
+	if err != nil {
+		p.logger.Error("event-triggers: query event for retry", "error", err)
+		p.writeError(w, 500, "failed to query event")
+		return
+	}
+
+	// Only retry if the event is dead-lettered or has an error.
+	if currentStatus != "dead_letter" && currentStatus != "error" {
+		p.writeError(w, 400, fmt.Sprintf("event status is %q, must be %q or %q", currentStatus, "dead_letter", "error"))
+		return
+	}
+
+	// Reset processing state.
+	_, err = p.db.ExecContext(r.Context(), `
+		UPDATE ingested_events
+		SET processed = false, status = 'pending', retry_count = 0, error_msg = NULL, last_retry_at = NULL
+		WHERE id = $1 AND tenant_id = $2
+	`, eventID, tid)
+	if err != nil {
+		p.logger.Error("event-triggers: reset event for retry", "error", err)
+		p.writeError(w, 500, "failed to reset event")
+		return
+	}
+
+	// Parse event data back into map for dispatch.
+	var eventData map[string]interface{}
+	if err := json.Unmarshal(eventDataRaw, &eventData); err != nil {
+		eventData = make(map[string]interface{})
+	}
+
+	// Re-dispatch to matching subscriptions.
+	matched, err := p.triggerMatchingWorkflows(r.Context(), eventID, tid, eventType, eventData)
+	if err != nil {
+		p.logger.Error("event-triggers: retry dispatch", "error", err)
+		p.db.ExecContext(r.Context(), `
+			UPDATE ingested_events SET error_msg = $1 WHERE id = $2
+		`, "retry dispatch failed: "+err.Error(), eventID)
+		p.writeError(w, 500, "retry dispatch failed")
+		return
+	}
+
+	// Also signal any awaiting workflows so they wake up promptly.
+	if len(eventDataRaw) > 0 {
+		p.signalAwaiters(r.Context(), tid, eventType, string(eventDataRaw))
+	}
+
+	if matched > 0 {
+		// Mark as completed since at least one workflow was started.
+		p.db.ExecContext(r.Context(), `
+			UPDATE ingested_events
+			SET processed = true, status = 'completed', error_msg = NULL
+			WHERE id = $1
+		`, eventID)
+	}
+
+	p.logger.Info("event-triggers: event retried",
+		"event_id", eventID,
+		"tenant", tid,
+		"event_type", eventType,
+		"workflows_started", matched,
+	)
+
+	p.writeJSON(w, 200, retryEventResponse{
+		Status:           "retried",
+		EventID:          eventID.String(),
+		WorkflowsStarted: matched,
+	})
 }

@@ -33,6 +33,22 @@ export interface EventRecord {
   new_input?: string;
 }
 
+export interface DAGTask {
+  name: string;
+  fn?: string;
+  parents: string[];
+}
+
+export interface DAGSpec {
+  name: string;
+  tasks: DAGTask[];
+}
+
+export interface DAGResponse {
+  workflow_id: string;
+  dag: DAGSpec;
+}
+
 export interface Schedule {
   name: string;
   cron_expression: string;

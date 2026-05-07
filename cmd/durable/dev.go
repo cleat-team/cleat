@@ -111,7 +111,7 @@ func toExported(name string) string {
 // ---------------------------------------------------------------------------
 // Generate the temp Go file
 
-func generateDevMain(result *analyzer.AnalysisResult, funcName string, params []paramInfo, kind returnKind) ([]byte, error) {
+func generateDevMain(result *analyzer.AnalysisResult, funcName string, params []paramInfo, kind returnKind, concurrencyKey string) ([]byte, error) {
 	pkgPath := result.TargetPkg.Path
 	pkgName := result.TargetPkg.Name
 
@@ -131,6 +131,9 @@ func generateDevMain(result *analyzer.AnalysisResult, funcName string, params []
 	buf.WriteString("\t\"net/http\"\n")
 	buf.WriteString("\t\"os\"\n")
 	buf.WriteString("\t\"strings\"\n")
+	if concurrencyKey != "" {
+		buf.WriteString("\t\"time\"\n")
+	}
 	buf.WriteString("\n")
 	buf.WriteString("\t\"github.com/rcownie/durable/durable/localdev\"\n")
 	fmt.Fprintf(&buf, "\t%q\n", pkgPath)
@@ -171,11 +174,38 @@ func generateDevMain(result *analyzer.AnalysisResult, funcName string, params []
 	buf.WriteString("\t\t}\n")
 	buf.WriteString("\t}\n\n")
 
+	if concurrencyKey != "" {
+		buf.WriteString("\t// Generate a unique workflow ID for concurrency key ownership.\n")
+		buf.WriteString("\tworkflowID := fmt.Sprintf(\"dev-%d\", time.Now().UnixNano())\n\n")
+	}
+
 	buf.WriteString("\tcaller := &httpCaller{}\n")
 	buf.WriteString("\trunner := localdev.NewLocalRunner(\n")
 	buf.WriteString("\t\tlocaldev.WithServiceCaller(caller),\n")
 	buf.WriteString("\t\tlocaldev.WithLogWriter(os.Stderr),\n")
+	if concurrencyKey != "" {
+		buf.WriteString("\t\tlocaldev.WithWorkflowID(workflowID),\n")
+		fmt.Fprintf(&buf, "\t\tlocaldev.WithConcurrencyKey(%q),\n", concurrencyKey)
+	}
 	buf.WriteString("\t)\n")
+
+	if concurrencyKey != "" {
+		buf.WriteString("\n")
+		buf.WriteString("\t// Acquire the concurrency key before executing the workflow.\n")
+		buf.WriteString("\tacquired, err := runner.AcquireConcurrencyKey(")
+		fmt.Fprintf(&buf, "%q, workflowID, localdev.ConcurrencyKeyTTL)\n", concurrencyKey)
+		buf.WriteString("\tif err != nil {\n")
+		buf.WriteString("\t\tfmt.Fprintf(os.Stderr, \"error acquiring concurrency key: %v\\n\", err)\n")
+		buf.WriteString("\t\tos.Exit(1)\n")
+		buf.WriteString("\t}\n")
+		buf.WriteString("\tif !acquired {\n")
+		buf.WriteString("\t\tfmt.Fprintf(os.Stderr, \"concurrency key ")
+		fmt.Fprintf(&buf, "%s already held by another workflow\\n\")\n", concurrencyKey)
+		buf.WriteString("\t\tos.Exit(1)\n")
+		buf.WriteString("\t}\n")
+		buf.WriteString("\tdefer runner.ReleaseConcurrencyKeys(workflowID)\n")
+	}
+
 	buf.WriteString("\th := runner.H()\n\n")
 
 	// If there are params, generate parsing code
@@ -251,6 +281,7 @@ func generateDevMain(result *analyzer.AnalysisResult, funcName string, params []
 func runDev(args []string) {
 	var entryPointName string
 	var inputJSON string
+	var concurrencyKey string
 
 	// Parse --flags before the package path.
 	for i := 0; i < len(args); i++ {
@@ -275,11 +306,21 @@ func runDev(args []string) {
 			entryPointName = strings.TrimPrefix(args[i], "--entry-point=")
 			args = append(args[:i], args[i+1:]...)
 			i--
+		case args[i] == "--concurrency-key" || args[i] == "-c":
+			if i+1 < len(args) {
+				concurrencyKey = args[i+1]
+				args = append(args[:i], args[i+2:]...)
+				i--
+			}
+		case strings.HasPrefix(args[i], "--concurrency-key="):
+			concurrencyKey = strings.TrimPrefix(args[i], "--concurrency-key=")
+			args = append(args[:i], args[i+1:]...)
+			i--
 		}
 	}
 
 	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: durable dev [--input <json>] [--entry-point <name>] <package>\n")
+		fmt.Fprintf(os.Stderr, "Usage: durable dev [--input <json>] [--entry-point <name>] [--concurrency-key <key>] <package>\n")
 		fmt.Fprintf(os.Stderr, "Example: durable dev --input '{\"userID\":\"u1\",\"cart\":[]}' ./testdata/basic/\n")
 		os.Exit(1)
 	}
@@ -362,10 +403,13 @@ func runDev(args []string) {
 		}
 		fmt.Fprintf(os.Stderr, "\n")
 	}
+	if concurrencyKey != "" {
+		fmt.Fprintf(os.Stderr, "Concurrency: key=%s\n", concurrencyKey)
+	}
 	fmt.Fprintf(os.Stderr, "\n")
 
 	// Generate the main.go source.
-	src, err := generateDevMain(result, shortName, params, kind)
+	src, err := generateDevMain(result, shortName, params, kind, concurrencyKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error generating dev code: %v\n", err)
 		os.Exit(1)

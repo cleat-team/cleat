@@ -49,5 +49,20 @@ ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS signal_name TEXT NOT NULL D
 			Down: `ALTER TABLE webhook_sources DROP COLUMN IF EXISTS signal_workflow_id;
 ALTER TABLE webhook_sources DROP COLUMN IF EXISTS signal_name;`,
 		},
+		{
+			Version: 4,
+			Up: `
+				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
+				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS last_retry_at TIMESTAMPTZ;
+				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
+				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS error_msg TEXT;
+			`,
+			Down: `
+				ALTER TABLE webhook_events DROP COLUMN IF EXISTS error_msg;
+				ALTER TABLE webhook_events DROP COLUMN IF EXISTS status;
+				ALTER TABLE webhook_events DROP COLUMN IF EXISTS last_retry_at;
+				ALTER TABLE webhook_events DROP COLUMN IF EXISTS retry_count;
+			`,
+		},
 	}
 }

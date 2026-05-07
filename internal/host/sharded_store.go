@@ -490,6 +490,22 @@ func (s *ShardedStore) LoadWorkflowConfig(ctx context.Context, defName string, d
 	return 0, lastErr
 }
 
+// LoadDAGSpec tries each shard (defs are replicated across shards).
+func (s *ShardedStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+	var lastErr error
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		spec, err := shard.Store.LoadDAGSpec(ctx, defName, defVersion)
+		if err == nil {
+			return spec, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
 // TraceWorkflow routes by workflow ID.
 func (s *ShardedStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
 	shard := s.getShard(workflowID)

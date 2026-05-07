@@ -1,0 +1,9 @@
+{
+    "name": "pipeline",
+    "tasks": [
+        {"name": "extract", "fn": "extractText"},
+        {"name": "classify", "fn": "classifyDocument", "parents": ["extract"]},
+        {"name": "translate", "fn": "translateDocument", "parents": ["extract"]},
+        {"name": "summarize", "fn": "summarizeDocument", "parents": ["classify", "translate"]}
+    ]
+}

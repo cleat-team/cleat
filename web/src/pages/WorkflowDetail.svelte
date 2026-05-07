@@ -1,13 +1,15 @@
 <script lang="ts">
   import StatusBadge from '../components/StatusBadge.svelte';
   import EventTimeline from '../components/EventTimeline.svelte';
-  import { getWorkflow, getWorkflowHistory, signalWorkflow, cancelWorkflow } from '../lib/api';
-  import type { WorkflowInstance, EventRecord } from '../lib/types';
+  import DAGGraph from '../components/DAGGraph.svelte';
+  import { getWorkflow, getWorkflowHistory, getWorkflowDAG, signalWorkflow, cancelWorkflow } from '../lib/api';
+  import type { WorkflowInstance, EventRecord, DAGSpec } from '../lib/types';
 
   let { workflowId, onNavigate }: { workflowId: string; onNavigate: (path: string) => void } = $props();
 
   let wf = $state<WorkflowInstance | null>(null);
   let events = $state<EventRecord[]>([]);
+  let dagData = $state<DAGSpec | null>(null);
   let loading = $state(true);
   let error = $state('');
 
@@ -21,8 +23,16 @@
   async function load() {
     loading = true;
     error = '';
+    dagData = null;
     try {
       [wf, events] = await Promise.all([getWorkflow(workflowId), getWorkflowHistory(workflowId)]);
+      // Fetch DAG data; silently ignore if not available.
+      try {
+        const dagResp = await getWorkflowDAG(workflowId);
+        dagData = dagResp.dag;
+      } catch (_) {
+        // No DAG spec — this is fine.
+      }
     } catch (e: any) {
       error = e.message;
     } finally {
@@ -102,6 +112,12 @@
     <div class="card">
       <h3>Result</h3>
       <pre style="font-size:0.8rem; overflow-x:auto; white-space:pre-wrap;">{wf.result}</pre>
+    </div>
+  {/if}
+
+  {#if dagData}
+    <div class="card">
+      <DAGGraph dag={dagData} />
     </div>
   {/if}
 

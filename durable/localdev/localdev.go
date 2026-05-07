@@ -21,6 +21,10 @@ import (
 	"github.com/rcownie/durable/durable"
 )
 
+// ConcurrencyKeyTTL is the default TTL for concurrency key acquisitions in localdev.
+// This is used by generated dev code when --concurrency-key is specified.
+const ConcurrencyKeyTTL = 30 * time.Minute
+
 // ServiceCaller makes external API calls on behalf of durable workflows.
 // This mirrors host.ServiceCaller so that users of the localdev package
 // do not need to import internal packages.
@@ -100,6 +104,12 @@ func WithChildWorkflowRunner(runner ChildWorkflowRunner) Option {
 	}
 }
 
+// WithConcurrencyKey sets a concurrency key to be acquired before workflow execution.
+// The key ensures only one workflow with this key runs at a time.
+func WithConcurrencyKey(key string) Option {
+	return func(r *LocalRunner) { r.concurrencyKey = key }
+}
+
 // localPromise holds the in-memory state of a durable promise.
 type localPromise struct {
 	name     string
@@ -149,6 +159,9 @@ type LocalRunner struct {
 	startTime   time.Time
 	pendingSigs []Signal // signals buffered while no one is listening
 	promises    map[string]*localPromise // durable promises keyed by promiseID
+
+	concurrencyKey  string
+	concurrencyKeys map[string]string // key -> workflowID
 }
 
 // NewLocalRunner creates a new LocalRunner with the given options.
@@ -162,6 +175,7 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		queryState:    make(map[string]string),
 		childResults:  make(map[string]childResult),
 		promises:      make(map[string]*localPromise),
+		concurrencyKeys: make(map[string]string),
 	}
 	for _, o := range opts {
 		o(r)
@@ -593,6 +607,37 @@ func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) 
 		return lp.errorMsg, false, fmt.Errorf("promise rejected: %s", lp.errorMsg)
 	case <-timer.C:
 		return "", true, nil
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency Key methods
+// ---------------------------------------------------------------------------
+
+// AcquireConcurrencyKey attempts to acquire a concurrency key for a workflow.
+// Returns true if acquired, false if already held by a different workflow.
+// The ttl parameter is accepted for API compatibility but not enforced in memory.
+func (r *LocalRunner) AcquireConcurrencyKey(key, workflowID string, ttl time.Duration) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if existingWFID, ok := r.concurrencyKeys[key]; ok {
+		if existingWFID == workflowID {
+			return true, nil // re-acquire by same workflow is OK
+		}
+		return false, nil // held by different workflow
+	}
+	r.concurrencyKeys[key] = workflowID
+	return true, nil
+}
+
+// ReleaseConcurrencyKeys releases all concurrency keys held by a workflow.
+func (r *LocalRunner) ReleaseConcurrencyKeys(workflowID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, v := range r.concurrencyKeys {
+		if v == workflowID {
+			delete(r.concurrencyKeys, k)
+		}
 	}
 }
 

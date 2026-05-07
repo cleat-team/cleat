@@ -2,9 +2,13 @@ package dag
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 
+	"github.com/rcownie/durable/durable"
 	"github.com/rcownie/durable/internal/plugin"
 )
 
@@ -226,4 +230,376 @@ func levelNames(tasks []*Task) []string {
 		names[i] = t.Name
 	}
 	return names
+}
+
+// ---------------------------------------------------------------------------
+// Mock HostCalls helper for e2e Execute tests
+// ---------------------------------------------------------------------------
+
+// dagTestHost creates a mock HostCalls that executes DAG task functions
+// when ChildWorkflow is called. It parses task input JSON, builds a proper
+// TaskContext with parent outputs, runs each task's Fn, and stores results
+// for AwaitAllChildren to return.
+func dagTestHost(d *DAG) durable.HostCalls {
+	var mu sync.Mutex
+	childResults := make(map[string]durable.ChildResult)
+	var taskHC durable.HostCalls
+
+	opts := durable.HostCallsOptions{
+		ChildWorkflow: func(name, inputJSON string) (string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			var taskInput struct {
+				Task          string            `json:"task"`
+				Input         json.RawMessage   `json:"input"`
+				ParentOutputs map[string]string `json:"parent_outputs"`
+			}
+			if err := json.Unmarshal([]byte(inputJSON), &taskInput); err != nil {
+				return "", err
+			}
+
+			task, ok := d.tasks[taskInput.Task]
+			if !ok {
+				return "", fmt.Errorf("unknown task: %s", taskInput.Task)
+			}
+
+			if task.Fn == nil {
+				runID := "run-" + taskInput.Task
+				childResults[runID] = durable.ChildResult{RunID: runID, Result: "{}"}
+				return runID, nil
+			}
+
+			ctx := &TaskContext{
+				H:     taskHC,
+				Input: taskInput.Input,
+				ParentOutput: func(parentName string) (string, error) {
+					val, ok := taskInput.ParentOutputs[parentName]
+					if !ok {
+						return "", fmt.Errorf("dag: parent %s not found", parentName)
+					}
+					return val, nil
+				},
+			}
+
+			result, err := task.Fn(ctx)
+			runID := "run-" + taskInput.Task
+			if err != nil {
+				childResults[runID] = durable.ChildResult{RunID: runID, Error: err.Error()}
+				return "", err
+			}
+			childResults[runID] = durable.ChildResult{RunID: runID, Result: result}
+			return runID, nil
+		},
+		AwaitAllChildren: func(runIDs []string) ([]durable.ChildResult, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			results := make([]durable.ChildResult, len(runIDs))
+			for i, runID := range runIDs {
+				cr, ok := childResults[runID]
+				if !ok {
+					return nil, fmt.Errorf("unknown child: %s", runID)
+				}
+				results[i] = cr
+			}
+			return results, nil
+		},
+		DurableLog: func(msg string) {},
+		Now:        func() int64 { return 1000 },
+		Random:     func() int64 { return 42 },
+	}
+	taskHC = durable.NewHostCalls(opts)
+
+	return taskHC
+}
+
+// ---------------------------------------------------------------------------
+// Execute e2e tests
+// ---------------------------------------------------------------------------
+
+func TestExecuteEmptyDAG(t *testing.T) {
+	d := NewDAG()
+	h := dagTestHost(d)
+	if err := d.Execute(h, nil); err != nil {
+		t.Fatalf("expected no error for empty DAG, got: %v", err)
+	}
+}
+
+func TestOutputBeforeExecute(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("a", nil, func(ctx *TaskContext) (string, error) { return "result", nil })
+
+	_, ok := d.Output("a")
+	if ok {
+		t.Error("Output should return false before Execute is called")
+	}
+}
+
+func TestExecuteCycleDetection(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("a", []string{"b"}, nil)
+	d.AddTask("b", []string{"a"}, nil)
+
+	h := dagTestHost(d)
+	err := d.Execute(h, nil)
+	if err == nil {
+		t.Fatal("expected cycle detection error")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("expected error mentioning cycle, got: %v", err)
+	}
+}
+
+func TestExecuteUnknownParent(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("a", []string{"nonexistent"}, nil)
+
+	h := dagTestHost(d)
+	err := d.Execute(h, nil)
+	if err == nil {
+		t.Fatal("expected unknown parent error")
+	}
+	if !strings.Contains(err.Error(), "nonexistent") {
+		t.Errorf("expected error mentioning nonexistent parent, got: %v", err)
+	}
+}
+
+func TestExecuteSingleNode(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("greet", nil, func(ctx *TaskContext) (string, error) {
+		return `{"message":"hello"}`, nil
+	})
+
+	h := dagTestHost(d)
+	if err := d.Execute(h, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	out, ok := d.Output("greet")
+	if !ok {
+		t.Fatal("expected output for greet task")
+	}
+	if !strings.Contains(out, "hello") {
+		t.Errorf("expected greet output to contain 'hello', got: %s", out)
+	}
+}
+
+func TestExecuteDiamondDAG(t *testing.T) {
+	d := NewDAG()
+
+	// Diamond: extract -> classify+translate -> summarize
+	d.AddTask("extract", nil, func(ctx *TaskContext) (string, error) {
+		return `{"data":"extracted"}`, nil
+	})
+	d.AddTask("classify", []string{"extract"}, func(ctx *TaskContext) (string, error) {
+		parentOut, err := ctx.ParentOutput("extract")
+		if err != nil {
+			return "", err
+		}
+		return `{"category":"tech","parent":` + parentOut + `}`, nil
+	})
+	d.AddTask("translate", []string{"extract"}, func(ctx *TaskContext) (string, error) {
+		parentOut, err := ctx.ParentOutput("extract")
+		if err != nil {
+			return "", err
+		}
+		return `{"language":"es","parent":` + parentOut + `}`, nil
+	})
+	d.AddTask("summarize", []string{"classify", "translate"}, func(ctx *TaskContext) (string, error) {
+		classOut, err := ctx.ParentOutput("classify")
+		if err != nil {
+			return "", err
+		}
+		transOut, err := ctx.ParentOutput("translate")
+		if err != nil {
+			return "", err
+		}
+		return `{"summary":{"classification":` + classOut + `,"translation":` + transOut + `}}`, nil
+	})
+
+	h := dagTestHost(d)
+	if err := d.Execute(h, `{"doc":"test"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify all tasks produced output.
+	extractOut, ok := d.Output("extract")
+	if !ok {
+		t.Fatal("expected output for extract")
+	}
+	if !strings.Contains(extractOut, "extracted") {
+		t.Errorf("extract output missing 'extracted': %s", extractOut)
+	}
+
+	classifyOut, ok := d.Output("classify")
+	if !ok {
+		t.Fatal("expected output for classify")
+	}
+	if !strings.Contains(classifyOut, "tech") {
+		t.Errorf("classify output missing 'tech': %s", classifyOut)
+	}
+	if !strings.Contains(classifyOut, "extracted") {
+		t.Errorf("classify output should contain parent result: %s", classifyOut)
+	}
+
+	translateOut, ok := d.Output("translate")
+	if !ok {
+		t.Fatal("expected output for translate")
+	}
+	if !strings.Contains(translateOut, "es") {
+		t.Errorf("translate output missing 'es': %s", translateOut)
+	}
+	if !strings.Contains(translateOut, "extracted") {
+		t.Errorf("translate output should contain parent result: %s", translateOut)
+	}
+
+	summarizeOut, ok := d.Output("summarize")
+	if !ok {
+		t.Fatal("expected output for summarize")
+	}
+	if !strings.Contains(summarizeOut, "tech") || !strings.Contains(summarizeOut, "es") {
+		t.Errorf("summarize output should contain both parent outputs: %s", summarizeOut)
+	}
+}
+
+func TestExecuteDiamondDAGParentOutputErrors(t *testing.T) {
+	t.Run("missing parent", func(t *testing.T) {
+		d := NewDAG()
+		d.AddTask("child", []string{"missing"}, func(ctx *TaskContext) (string, error) {
+			_, err := ctx.ParentOutput("missing")
+			return "", err
+		})
+
+		h := dagTestHost(d)
+		err := d.Execute(h, nil)
+		if err == nil {
+			t.Fatal("expected error for missing parent")
+		}
+	})
+}
+
+func TestExecuteMaxParallelism(t *testing.T) {
+	d := NewDAG()
+
+	// Three independent root tasks (all in level 0).
+	d.AddTask("a", nil, func(ctx *TaskContext) (string, error) {
+		return `"result-a"`, nil
+	})
+	d.AddTask("b", nil, func(ctx *TaskContext) (string, error) {
+		return `"result-b"`, nil
+	})
+	d.AddTask("c", nil, func(ctx *TaskContext) (string, error) {
+		return `"result-c"`, nil
+	})
+
+	h := dagTestHost(d)
+	if err := d.ExecuteWithOptions(h, nil, ExecuteOptions{MaxParallelism: 2}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"a", "b", "c"} {
+		out, ok := d.Output(name)
+		if !ok {
+			t.Fatalf("expected output for %s", name)
+		}
+		if !strings.Contains(out, name) {
+			t.Errorf("output for %s should contain its result: %s", name, out)
+		}
+	}
+}
+
+func TestExecuteTaskError(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("failing", nil, func(ctx *TaskContext) (string, error) {
+		return "", fmt.Errorf("simulated task failure")
+	})
+
+	h := dagTestHost(d)
+	err := d.Execute(h, nil)
+	if err == nil {
+		t.Fatal("expected task error")
+	}
+	if !strings.Contains(err.Error(), "failing") {
+		t.Errorf("expected error mentioning failing task, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "simulated task failure") {
+		t.Errorf("expected error containing original failure message, got: %v", err)
+	}
+}
+
+func TestExecuteWithOptionsZeroParallelism(t *testing.T) {
+	// Verify that ExecuteWithOptions with MaxParallelism=0 behaves the same
+	// as Execute (sequential start per level).
+	d := NewDAG()
+	d.AddTask("a", nil, func(ctx *TaskContext) (string, error) {
+		return `"ok"`, nil
+	})
+
+	h := dagTestHost(d)
+	if err := d.ExecuteWithOptions(h, nil, ExecuteOptions{MaxParallelism: 0}); err != nil {
+		t.Fatal(err)
+	}
+	out, ok := d.Output("a")
+	if !ok || !strings.Contains(out, "ok") {
+		t.Errorf("unexpected output: %s, %v", out, ok)
+	}
+}
+
+func TestOutputAfterExecute(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("greet", nil, func(ctx *TaskContext) (string, error) {
+		return `"hello world"`, nil
+	})
+
+	h := dagTestHost(d)
+	if err := d.Execute(h, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	out, ok := d.Output("greet")
+	if !ok {
+		t.Fatal("Output should return true for completed task")
+	}
+	if out != `"hello world"` {
+		t.Errorf("expected 'hello world', got: %s", out)
+	}
+
+	// Unknown task name.
+	_, ok = d.Output("nonexistent")
+	if ok {
+		t.Error("Output should return false for unknown task name")
+	}
+}
+
+func TestExecuteMultipleLevels(t *testing.T) {
+	// Linear chain: a -> b -> c -> d
+	d := NewDAG()
+	d.AddTask("a", nil, func(ctx *TaskContext) (string, error) {
+		return `"level0"`, nil
+	})
+	d.AddTask("b", []string{"a"}, func(ctx *TaskContext) (string, error) {
+		p, _ := ctx.ParentOutput("a")
+		return `"level1:" + ` + p, nil
+	})
+	d.AddTask("c", []string{"b"}, func(ctx *TaskContext) (string, error) {
+		p1, _ := ctx.ParentOutput("b")
+		return `"level2:" + ` + p1, nil
+	})
+	d.AddTask("d", []string{"c"}, func(ctx *TaskContext) (string, error) {
+		p2, _ := ctx.ParentOutput("c")
+		return `"level3:" + ` + p2, nil
+	})
+
+	h := dagTestHost(d)
+	if err := d.Execute(h, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	out, ok := d.Output("d")
+	if !ok {
+		t.Fatal("expected output for d")
+	}
+	if !strings.Contains(out, "level0") {
+		t.Errorf("d output should transitively contain level0: %s", out)
+	}
 }

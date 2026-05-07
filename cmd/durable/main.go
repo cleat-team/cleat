@@ -41,7 +41,7 @@ var dbConnStr string
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set DURABLE_DATABASE_URL)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback|dev|schedule|run> [flags] <args>\n")
+		fmt.Fprintf(os.Stderr, "Usage: durable <build|vet|deploy|versions|rollback|dev|schedule|run|dag> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  durable build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable vet <package>\n")
 		fmt.Fprintf(os.Stderr, "  durable deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>\n")
@@ -110,6 +110,8 @@ func main() {
 		runSchedule(flag.Args()[1:])
 	case "run":
 		runEmbedded(flag.Args()[1:])
+	case "dag":
+		runDag(flag.Args()[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		flag.Usage()

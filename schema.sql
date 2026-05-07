@@ -146,6 +146,9 @@ CREATE TABLE IF NOT EXISTS concurrency_keys (
 CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id);
 
 -- ---------------------------------------------------------------------------
+-- Migration: add dag_spec JSONB to workflow_defs for DAG visualization (Wave 3)
+ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS dag_spec JSONB DEFAULT NULL;
+
 -- Migration: add sticky_worker_id for sticky sessions (Feature 10)
 -- ---------------------------------------------------------------------------
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS sticky_worker_id TEXT;

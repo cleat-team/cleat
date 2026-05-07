@@ -114,6 +114,10 @@ type TestEnv struct {
 	randomIdx      int
 	deferCounter   int
 	promises       map[string]promiseState // keyed by promiseID
+
+	ConcurrencyKeys           map[string]string
+	AcquireConcurrencyKeyFn   func(key, workflowID string) (bool, error)
+	ReleaseConcurrencyKeysFn  func(workflowID string)
 }
 
 // NewTestEnv creates a new TestEnv with a clean initial state.
@@ -125,6 +129,7 @@ func NewTestEnv() *TestEnv {
 		minVersionVal: 1,
 		queryState:    make(map[string]string),
 		promises:      make(map[string]promiseState),
+		ConcurrencyKeys: make(map[string]string),
 	}
 	e.h = durable.NewHostCalls(durable.HostCallsOptions{
 		DurableCall:               e.durableCallImpl,
@@ -337,6 +342,7 @@ func (e *TestEnv) Reset() {
 	e.randomSeq = nil
 	e.randomIdx = 0
 	e.deferCounter = 0
+	e.ConcurrencyKeys = make(map[string]string)
 }
 
 // ---------------------------------------------------------------------------
@@ -569,6 +575,44 @@ func (e *TestEnv) RejectPromise(promiseID, errMsg string) {
 		ps.status = "rejected"
 		ps.errorMsg = errMsg
 		e.promises[promiseID] = ps
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency Key methods
+// ---------------------------------------------------------------------------
+
+// AcquireConcurrencyKey attempts to acquire a concurrency key for a workflow.
+// Uses the mock function if set, otherwise uses the default in-memory map behavior.
+func (e *TestEnv) AcquireConcurrencyKey(key, workflowID string) (bool, error) {
+	if e.AcquireConcurrencyKeyFn != nil {
+		return e.AcquireConcurrencyKeyFn(key, workflowID)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if existingWFID, ok := e.ConcurrencyKeys[key]; ok {
+		if existingWFID == workflowID {
+			return true, nil
+		}
+		return false, nil
+	}
+	e.ConcurrencyKeys[key] = workflowID
+	return true, nil
+}
+
+// ReleaseConcurrencyKeys releases all concurrency keys held by a workflow.
+// Uses the mock function if set, otherwise uses the default in-memory map behavior.
+func (e *TestEnv) ReleaseConcurrencyKeys(workflowID string) {
+	if e.ReleaseConcurrencyKeysFn != nil {
+		e.ReleaseConcurrencyKeysFn(workflowID)
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for k, v := range e.ConcurrencyKeys {
+		if v == workflowID {
+			delete(e.ConcurrencyKeys, k)
+		}
 	}
 }
 

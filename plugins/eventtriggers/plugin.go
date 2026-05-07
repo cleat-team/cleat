@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/rcownie/durable/internal/plugin"
 )
@@ -29,6 +30,10 @@ type Plugin struct {
 	mux    *http.ServeMux
 	logger *slog.Logger
 	env    *plugin.Environment
+
+	// Background retry metrics.
+	eventsProcessed  atomic.Int64
+	eventsDeadLetter atomic.Int64
 }
 
 // Info returns plugin metadata for discovery and documentation.

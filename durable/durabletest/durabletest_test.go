@@ -901,3 +901,149 @@ func TestZeroDurationAwaitSignals(t *testing.T) {
 		t.Fatalf("expected empty Payload, got %q", result.Payload)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Concurrency Key tests
+// ---------------------------------------------------------------------------
+
+func TestAcquireConcurrencyKeyAcquireRelease(t *testing.T) {
+	env := NewTestEnv()
+
+	// First acquire should succeed.
+	acquired, err := env.AcquireConcurrencyKey("my-key", "wf-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected first acquire to succeed")
+	}
+
+	// Second acquire with same key, different workflow should fail.
+	acquired, err = env.AcquireConcurrencyKey("my-key", "wf-2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if acquired {
+		t.Fatal("expected second acquire to fail")
+	}
+
+	// Release by first workflow.
+	env.ReleaseConcurrencyKeys("wf-1")
+
+	// Now re-acquire should succeed.
+	acquired, err = env.AcquireConcurrencyKey("my-key", "wf-2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected re-acquire after release to succeed")
+	}
+}
+
+func TestAcquireConcurrencyKeySameWorkflow(t *testing.T) {
+	env := NewTestEnv()
+
+	acquired, err := env.AcquireConcurrencyKey("my-key", "wf-1")
+	if err != nil || !acquired {
+		t.Fatalf("first acquire: acquired=%v err=%v", acquired, err)
+	}
+
+	// Same workflow re-acquiring should succeed (idempotent).
+	acquired, err = env.AcquireConcurrencyKey("my-key", "wf-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("same workflow should be able to re-acquire its key")
+	}
+}
+
+func TestAcquireConcurrencyKeyFnOverride(t *testing.T) {
+	env := NewTestEnv()
+	env.AcquireConcurrencyKeyFn = func(key, workflowID string) (bool, error) {
+		return key == "allowed-key", nil
+	}
+
+	acquired, err := env.AcquireConcurrencyKey("allowed-key", "wf-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected acquire with allowed key to succeed")
+	}
+
+	acquired, err = env.AcquireConcurrencyKey("denied-key", "wf-2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if acquired {
+		t.Fatal("expected acquire with denied key to fail")
+	}
+}
+
+func TestReleaseConcurrencyKeysFnOverride(t *testing.T) {
+	env := NewTestEnv()
+	releaseCalled := false
+	env.ReleaseConcurrencyKeysFn = func(workflowID string) {
+		releaseCalled = true
+	}
+
+	env.ReleaseConcurrencyKeys("wf-1")
+	if !releaseCalled {
+		t.Fatal("expected ReleaseConcurrencyKeysFn to be called")
+	}
+}
+
+func TestAcquireConcurrencyKeyMultipleKeys(t *testing.T) {
+	env := NewTestEnv()
+
+	// Acquire two different keys for the same workflow.
+	acquired, err := env.AcquireConcurrencyKey("key-1", "wf-1")
+	if err != nil || !acquired {
+		t.Fatalf("acquire key-1: acquired=%v err=%v", acquired, err)
+	}
+	acquired, err = env.AcquireConcurrencyKey("key-2", "wf-1")
+	if err != nil || !acquired {
+		t.Fatalf("acquire key-2: acquired=%v err=%v", acquired, err)
+	}
+
+	// A different workflow should not be able to acquire either key.
+	acquired, err = env.AcquireConcurrencyKey("key-1", "wf-2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if acquired {
+		t.Fatal("wf-2 should not be able to acquire key-1")
+	}
+
+	// Release all keys for wf-1.
+	env.ReleaseConcurrencyKeys("wf-1")
+
+	// Now wf-2 can acquire both keys.
+	acquired, err = env.AcquireConcurrencyKey("key-1", "wf-2")
+	if err != nil || !acquired {
+		t.Fatalf("re-acquire key-1: acquired=%v err=%v", acquired, err)
+	}
+	acquired, err = env.AcquireConcurrencyKey("key-2", "wf-2")
+	if err != nil || !acquired {
+		t.Fatalf("re-acquire key-2: acquired=%v err=%v", acquired, err)
+	}
+}
+
+func TestAcquireConcurrencyKeyReset(t *testing.T) {
+	env := NewTestEnv()
+
+	env.AcquireConcurrencyKey("key-1", "wf-1")
+	env.AcquireConcurrencyKey("key-2", "wf-1")
+
+	env.Reset()
+
+	// After reset, should be able to acquire keys again.
+	acquired, err := env.AcquireConcurrencyKey("key-1", "wf-2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected acquire after reset to succeed")
+	}
+}

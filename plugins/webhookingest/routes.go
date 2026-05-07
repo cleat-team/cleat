@@ -219,6 +219,9 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 					"error", serr,
 				)
 			} else {
+				p.db.ExecContext(r.Context(), `
+					UPDATE webhook_events SET processed = true, status = 'completed' WHERE id = $1
+				`, eventID)
 				p.logger.Info("webhook-ingest: signal delivered",
 					"workflow_id", source.SignalWorkflowID,
 					"event_id", eventID,

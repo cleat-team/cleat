@@ -79,7 +79,7 @@ func main() {
 
 	taskQueues := strings.Split(*taskQueuesStr, ",")
 
-	// Plugin state (populated in the non-sharded path).
+	// Plugin state (populated in both sharded and non-sharded paths).
 	var (
 		pluginRegistry = host.NewPluginRegistry()
 		plugList       []*plugin.LoadedPlugin
@@ -89,6 +89,7 @@ func main() {
 	)
 
 	var store host.WorkflowStore
+	var db *sql.DB
 	if *shardsFile != "" {
 		configs, err := loadShardConfigs(*shardsFile)
 		if err != nil {
@@ -100,6 +101,13 @@ func main() {
 		}
 		store = shardedStore
 		defer shardedStore.Close()
+
+		// Use the first shard's database for plugin migrations and
+		// administration. Plugin tables (event_subscriptions,
+		// webhook_sources, etc.) live on this shard.
+		if len(shardedStore.Shards()) > 0 {
+			db = shardedStore.Shards()[0].DB
+		}
 
 		// Start idempotency key cleanup on each shard.
 		for _, shard := range shardedStore.Shards() {
@@ -114,7 +122,8 @@ func main() {
 			os.Exit(1)
 		}
 
-		db, err := sql.Open("postgres", *dbURL)
+		var err error
+		db, err = sql.Open("postgres", *dbURL)
 		if err != nil {
 			log.Fatalf("[worker %s] Failed to connect to database: %v", workerID, err)
 		}
@@ -128,110 +137,112 @@ func main() {
 		// Start periodic cleanup of expired idempotency keys.
 		go idempotencyCleanupLoop(ctx, db, 1*time.Hour)
 
-		// ---- Plugin loading ----
-		if *apiAddr != "" {
-			plugMux = http.NewServeMux()
-		}
+	}
 
-		var rawPluginConfig []byte
-		if *pluginConfigFile != "" {
-			data, ferr := os.ReadFile(*pluginConfigFile)
-			if ferr != nil {
-				log.Fatalf("[worker %s] plugin config: %v", workerID, ferr)
+	// ---- Plugin loading (always, regardless of --api-addr) ----
+	if *apiAddr != "" {
+		plugMux = http.NewServeMux()
+	}
+
+	var rawPluginConfig []byte
+	if *pluginConfigFile != "" {
+		data, ferr := os.ReadFile(*pluginConfigFile)
+		if ferr != nil {
+			log.Fatalf("[worker %s] plugin config: %v", workerID, ferr)
+		}
+		if json.Valid(data) {
+			rawPluginConfig = data
+		} else {
+			log.Fatalf("[worker %s] plugin config: must be valid JSON", workerID)
+		}
+	}
+
+	pluginEnv := &plugin.Environment{
+		DB:     db,
+		Mux:    plugMux,
+		Config: rawPluginConfig,
+		Logger: slog.Default(),
+		Done:   ctx.Done(),
+		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+			versions, err := store.ListVersions(ctx, defName)
+			if err != nil {
+				return "", fmt.Errorf("start workflow %s: %w", defName, err)
 			}
-			if json.Valid(data) {
-				rawPluginConfig = data
-			} else {
-				log.Fatalf("[worker %s] plugin config: must be valid JSON", workerID)
+			if len(versions) == 0 {
+				return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
+			}
+			runID, _, err := store.StartNewRun(ctx, defName, versions[0], input, "")
+			return runID, err
+		},
+
+		SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
+			return store.DeliverSignal(ctx, workflowID, signalName, payload)
+		},
+	}
+
+	var err error
+	plugList, err = plugin.LoadAll(ctx, pluginEnv)
+	if err != nil {
+		log.Fatalf("[worker %s] plugin: %v", workerID, err)
+	}
+
+	if err := plugin.RunMigrations(ctx, db, nil, plugList); err != nil {
+		log.Fatalf("[worker %s] plugin migrations: %v", workerID, err)
+	}
+
+	for _, lp := range plugList {
+		if !lp.Healthy {
+			continue
+		}
+		if p, ok := lp.Plugin.(plugin.HasRoutes); ok && plugMux != nil {
+			if rerr := p.RegisterRoutes(plugMux); rerr != nil {
+				log.Printf("[worker %s] plugin %s: route registration failed: %v",
+					workerID, lp.Plugin.Info().Name, rerr)
 			}
 		}
+	}
 
-		pluginEnv := &plugin.Environment{
-			DB:     db,
-			Mux:    plugMux,
-			Config: rawPluginConfig,
-			Logger: slog.Default(),
-			Done:   ctx.Done(),
-			StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
-				versions, err := store.ListVersions(ctx, defName)
-				if err != nil {
-					return "", fmt.Errorf("start workflow %s: %w", defName, err)
-				}
-				if len(versions) == 0 {
-					return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
-				}
-				runID, _, err := store.StartNewRun(ctx, defName, versions[0], input, "")
-				return runID, err
-			},
-
-			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
-				return store.DeliverSignal(ctx, workflowID, signalName, payload)
-			},
-		}
-
-		plugList, err = plugin.LoadAll(ctx, pluginEnv)
-		if err != nil {
-			log.Fatalf("[worker %s] plugin: %v", workerID, err)
-		}
-
-		if err := plugin.RunMigrations(ctx, db, nil, plugList); err != nil {
-			log.Fatalf("[worker %s] plugin migrations: %v", workerID, err)
-		}
-
+	if plugMux != nil {
+		plugHandler = plugMux
 		for _, lp := range plugList {
 			if !lp.Healthy {
 				continue
 			}
-			if p, ok := lp.Plugin.(plugin.HasRoutes); ok && plugMux != nil {
-				if rerr := p.RegisterRoutes(plugMux); rerr != nil {
-					log.Printf("[worker %s] plugin %s: route registration failed: %v",
-						workerID, lp.Plugin.Info().Name, rerr)
-				}
+			if p, ok := lp.Plugin.(plugin.HasMiddleware); ok {
+				plugHandler = p.Middleware(plugHandler)
 			}
 		}
+	}
 
-		if plugMux != nil {
-			plugHandler = plugMux
-			for _, lp := range plugList {
-				if !lp.Healthy {
-					continue
-				}
-				if p, ok := lp.Plugin.(plugin.HasMiddleware); ok {
-					plugHandler = p.Middleware(plugHandler)
-				}
+	for _, lp := range plugList {
+		if !lp.Healthy {
+			continue
+		}
+		if p, ok := lp.Plugin.(plugin.HasHostFunctions); ok {
+			adapter := &hostPluginRegistryAdapter{
+				registry:   pluginRegistry,
+				pluginName: lp.Plugin.Info().Name,
+			}
+			if rerr := p.RegisterHostFunctions(adapter); rerr != nil {
+				log.Printf("[worker %s] plugin %s: host functions failed: %v",
+					workerID, lp.Plugin.Info().Name, rerr)
 			}
 		}
+	}
 
-		for _, lp := range plugList {
-			if !lp.Healthy {
-				continue
-			}
-			if p, ok := lp.Plugin.(plugin.HasHostFunctions); ok {
-				adapter := &hostPluginRegistryAdapter{
-					registry:   pluginRegistry,
-					pluginName: lp.Plugin.Info().Name,
-				}
-				if rerr := p.RegisterHostFunctions(adapter); rerr != nil {
-					log.Printf("[worker %s] plugin %s: host functions failed: %v",
-						workerID, lp.Plugin.Info().Name, rerr)
-				}
-			}
+	for _, lp := range plugList {
+		if !lp.Healthy {
+			continue
 		}
-
-		for _, lp := range plugList {
-			if !lp.Healthy {
-				continue
-			}
-			if p, ok := lp.Plugin.(plugin.HasBackground); ok {
-				bgWg.Add(1)
-				go func(bg plugin.HasBackground) {
-					defer bgWg.Done()
-					if berr := bg.Run(ctx); berr != nil {
-						log.Printf("[worker %s] plugin %s: background worker exited: %v",
-							workerID, bg.Info().Name, berr)
-					}
-				}(p)
-			}
+		if p, ok := lp.Plugin.(plugin.HasBackground); ok {
+			bgWg.Add(1)
+			go func(bg plugin.HasBackground) {
+				defer bgWg.Done()
+				if berr := bg.Run(ctx); berr != nil {
+					log.Printf("[worker %s] plugin %s: background worker exited: %v",
+						workerID, bg.Info().Name, berr)
+				}
+			}(p)
 		}
 	}
 
@@ -1071,6 +1082,9 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[1] == "query" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/query?key=X
 		s.handleGetQueryState(w, r, id)
+	case len(parts) == 2 && parts[1] == "dag" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/dag
+		s.handleGetDAG(w, r, id)
 	default:
 		s.writeError(w, 404, "not found")
 	}
@@ -1228,6 +1242,43 @@ func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"key": key, "value": value})
+}
+
+func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id string) {
+	// Look up the workflow instance to get def_name and def_version.
+	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if wf == nil {
+		s.writeError(w, 404, "workflow not found")
+		return
+	}
+
+	// Load the dag_spec from workflow_defs.
+	spec, err := s.store.LoadDAGSpec(r.Context(), wf.DefName, wf.DefVersion)
+	if err != nil {
+		s.writeError(w, 404, err.Error())
+		return
+	}
+	if spec == nil {
+		s.writeError(w, 404, "no DAG spec for this workflow definition")
+		return
+	}
+
+	// Parse the spec so we can add workflow_id metadata.
+	var dagData map[string]interface{}
+	if err := json.Unmarshal(spec, &dagData); err != nil {
+		s.writeError(w, 500, "invalid dag_spec JSON: "+err.Error())
+		return
+	}
+
+	response := map[string]interface{}{
+		"workflow_id": wf.ID,
+		"dag":         dagData,
+	}
+	s.writeJSON(w, 200, response)
 }
 
 // ---- Schedule API handlers ----

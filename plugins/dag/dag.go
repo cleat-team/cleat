@@ -33,7 +33,16 @@ type TaskContext struct {
 
 // DAG is a directed acyclic graph of tasks.
 type DAG struct {
-	tasks map[string]*Task
+	tasks   map[string]*Task
+	outputs map[string]string // results from the last Execute call
+}
+
+// ExecuteOptions controls DAG execution behavior.
+type ExecuteOptions struct {
+	// MaxParallelism limits concurrent ChildWorkflow calls within each
+	// topological level. 0 means unlimited (all tasks in a level are
+	// started sequentially, then awaited concurrently via AwaitAllChildren).
+	MaxParallelism int
 }
 
 // NewDAG creates a new empty DAG.
@@ -48,10 +57,34 @@ func (d *DAG) AddTask(name string, parents []string, fn func(ctx *TaskContext) (
 	return d
 }
 
+// Output returns the output of the named task after Execute completes.
+// Returns the task output and true, or empty string and false if the task
+// has no output (either because Execute has not been called or the task
+// name is unknown).
+func (d *DAG) Output(name string) (string, bool) {
+	if d.outputs == nil {
+		return "", false
+	}
+	val, ok := d.outputs[name]
+	return val, ok
+}
+
 // Execute runs the DAG using the provided HostCalls and input.
-// It topologically sorts tasks, detects cycles, then executes tasks level by level.
-// Each task runs as a child workflow. Parent outputs are available via the input JSON.
+// It delegates to ExecuteWithOptions with default options.
 func (d *DAG) Execute(h durable.HostCalls, input interface{}) error {
+	return d.ExecuteWithOptions(h, input, ExecuteOptions{})
+}
+
+// ExecuteWithOptions runs the DAG with the given options.
+// It topologically sorts tasks, detects cycles, then executes tasks level by
+// level. Each task runs as a child workflow. Parent outputs are available via
+// the input JSON.
+//
+// When MaxParallelism > 0, ChildWorkflow calls within each topological level
+// are started concurrently, limited by the semaphore to at most MaxParallelism
+// concurrent calls. When MaxParallelism is 0, all ChildWorkflow calls are
+// made sequentially before AwaitAllChildren is called.
+func (d *DAG) ExecuteWithOptions(h durable.HostCalls, input interface{}, opts ExecuteOptions) error {
 	if err := d.validate(); err != nil {
 		return err
 	}
@@ -61,50 +94,127 @@ func (d *DAG) Execute(h durable.HostCalls, input interface{}) error {
 		return err
 	}
 
-	// Parent outputs are tracked in-memory during Execute.
-	// Map: taskName -> output
-	outputs := make(map[string]string)
+	d.outputs = make(map[string]string)
 
 	for _, level := range levels {
-		var runIDs []string
-		var levelTasks []*Task
-
-		for _, task := range level {
-			// Build task input with parent outputs.
-			taskInput := map[string]interface{}{
-				"task":           task.Name,
-				"input":          input,
-				"parent_outputs": d.buildParentOutputs(task, outputs),
-			}
-			inputJSON, err := json.Marshal(taskInput)
-			if err != nil {
-				return fmt.Errorf("dag: failed to marshal input for %s: %w", task.Name, err)
-			}
-
-			runID, err := h.ChildWorkflow(task.Name, string(inputJSON))
-			if err != nil {
-				return fmt.Errorf("dag: failed to start child workflow %s: %w", task.Name, err)
-			}
-			runIDs = append(runIDs, runID)
-			levelTasks = append(levelTasks, task)
+		runIDs, levelTasks, startErr := d.startLevel(h, input, level, opts)
+		if startErr != nil {
+			return startErr
 		}
 
 		// Wait for all tasks at this level to complete.
 		if len(runIDs) > 0 {
-			results, err := h.AwaitAllChildren(runIDs)
-			if err != nil {
-				return fmt.Errorf("dag: failed to await children: %w", err)
+			results, awaitErr := h.AwaitAllChildren(runIDs)
+			if awaitErr != nil {
+				return fmt.Errorf("dag: failed to await children: %w", awaitErr)
 			}
 			for i, result := range results {
 				if result.Error != "" {
 					return fmt.Errorf("dag: task %s failed: %s", levelTasks[i].Name, result.Error)
 				}
-				outputs[levelTasks[i].Name] = result.Result
+				d.outputs[levelTasks[i].Name] = result.Result
 			}
 		}
 	}
 
 	return nil
+}
+
+// startLevel dispatches to sequential or parallel level start based on opts.
+func (d *DAG) startLevel(h durable.HostCalls, input interface{}, level []*Task, opts ExecuteOptions) ([]string, []*Task, error) {
+	if opts.MaxParallelism > 0 {
+		return d.startLevelParallel(h, input, level, opts.MaxParallelism)
+	}
+	return d.startLevelSequential(h, input, level)
+}
+
+// startLevelSequential starts all tasks in the level one at a time.
+func (d *DAG) startLevelSequential(h durable.HostCalls, input interface{}, level []*Task) ([]string, []*Task, error) {
+	var runIDs []string
+	var levelTasks []*Task
+
+	for _, task := range level {
+		inputJSON, err := d.buildTaskInput(task, input)
+		if err != nil {
+			return nil, nil, err
+		}
+
+		runID, err := h.ChildWorkflow(task.Name, string(inputJSON))
+		if err != nil {
+			return nil, nil, fmt.Errorf("dag: failed to start child workflow %s: %w", task.Name, err)
+		}
+		runIDs = append(runIDs, runID)
+		levelTasks = append(levelTasks, task)
+	}
+
+	return runIDs, levelTasks, nil
+}
+
+// startLevelParallel starts all tasks in the level concurrently, limiting
+// concurrency with a buffered-channel semaphore.
+func (d *DAG) startLevelParallel(h durable.HostCalls, input interface{}, level []*Task, maxParallelism int) ([]string, []*Task, error) {
+	sem := make(chan struct{}, maxParallelism)
+
+	type levelItem struct {
+		index int
+		runID string
+		task  *Task
+		err   error
+	}
+	ch := make(chan levelItem, len(level))
+
+	for i, task := range level {
+		sem <- struct{}{}
+		go func(idx int, t *Task) {
+			defer func() { <-sem }()
+
+			inputJSON, err := d.buildTaskInput(t, input)
+			if err != nil {
+				ch <- levelItem{idx, "", t, err}
+				return
+			}
+
+			runID, err := h.ChildWorkflow(t.Name, string(inputJSON))
+			if err != nil {
+				ch <- levelItem{idx, "", t, fmt.Errorf("dag: failed to start child workflow %s: %w", t.Name, err)}
+				return
+			}
+			ch <- levelItem{idx, runID, t, nil}
+		}(i, task)
+	}
+
+	// Collect all results (channel acts as barrier for all goroutines).
+	results := make([]levelItem, len(level))
+	for i := 0; i < len(level); i++ {
+		results[i] = <-ch
+	}
+
+	// Check for errors.
+	for _, r := range results {
+		if r.err != nil {
+			return nil, nil, r.err
+		}
+	}
+
+	// Build ordered slices by index.
+	runIDs := make([]string, len(level))
+	tasks := make([]*Task, len(level))
+	for _, r := range results {
+		runIDs[r.index] = r.runID
+		tasks[r.index] = r.task
+	}
+
+	return runIDs, tasks, nil
+}
+
+// buildTaskInput constructs the JSON input for a child workflow task.
+func (d *DAG) buildTaskInput(task *Task, input interface{}) ([]byte, error) {
+	taskInput := map[string]interface{}{
+		"task":           task.Name,
+		"input":          input,
+		"parent_outputs": d.buildParentOutputs(task, d.outputs),
+	}
+	return json.Marshal(taskInput)
 }
 
 func (d *DAG) buildParentOutputs(task *Task, outputs map[string]string) map[string]string {
