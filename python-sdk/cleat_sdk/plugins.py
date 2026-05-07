@@ -61,7 +61,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator, Optional
 
 from .host_calls import HostCalls
 
@@ -311,6 +311,17 @@ class PgVectorDeleteResult:
 
     deleted: int = 0
     """Number of rows deleted."""
+
+
+@dataclass
+class StreamEvent:
+    """A single event from a streaming plugin call."""
+
+    event: str = ""
+    """Event type (e.g., 'chunk', 'done', 'error')."""
+
+    data: Any = None
+    """Event payload."""
 
 
 # ========================================================================
@@ -889,6 +900,72 @@ class Plugins:
             models=data.get("models", []),
             providers=data.get("providers", {}),
         )
+
+    # --------------------------------------------------------------------
+    # llm — streaming wrappers
+    # --------------------------------------------------------------------
+
+    def plugin_call_streaming(
+        self,
+        plugin_name: str,
+        function_name: str,
+        input: Any,
+    ) -> Iterator[dict]:
+        """Call a plugin function that returns a stream of events.
+
+        Yields each event as a parsed dict.
+
+        Parameters
+        ----------
+        plugin_name : str
+            Plugin name.
+        function_name : str
+            Function name within the plugin.
+        input : Any
+            Input for the plugin function (JSON-serialised automatically).
+
+        Yields
+        ------
+        dict
+            Stream events.
+        """
+        return self._h.plugin_call_streaming(plugin_name, function_name, input)
+
+    def llm_chat_streaming(
+        self,
+        provider: str,
+        model: str,
+        messages: list[dict],
+        tools: Any = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        system_prompt: str = "",
+        tool_choice: str = "",
+    ) -> Iterator[dict]:
+        """Streaming version of llm_chat.
+
+        Yields each chunk as a dict with 'choices' containing delta content.
+        The final chunk has finish_reason='stop'.
+
+        Parameters match llm_chat.
+
+        Yields
+        ------
+        dict
+            Streaming chat completion chunks.
+        """
+        inp: dict = {"provider": provider, "model": model, "messages": messages}
+        if tools is not None:
+            inp["tools"] = tools
+        if max_tokens is not None:
+            inp["max_tokens"] = max_tokens
+        if temperature is not None:
+            inp["temperature"] = temperature
+        if system_prompt:
+            inp["system"] = system_prompt
+        if tool_choice:
+            inp["tool_choice"] = tool_choice
+        return self._h.plugin_call_streaming("llm", "chat_stream", inp)
 
     # --------------------------------------------------------------------
     # pgvector — vector database plugin wrappers

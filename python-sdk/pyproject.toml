@@ -4,28 +4,38 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "cleat-sdk"
-version = "0.1.0"
-description = "Python SDK for the Cleat durable execution framework"
+version = "0.2.0"
+description = "Python SDK for cleat — durable execution framework for AI agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 authors = [
     {name = "Cleat Team"}
 ]
-keywords = ["durable-execution", "workflow", "wasm", "cleat"]
+keywords = ["durable-execution", "workflow", "wasm", "cleat", "langchain", "langgraph", "ai-agent"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+
+dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.1"]
+langchain = ["langchain>=0.3.0", "langchain-openai>=0.2.0"]
+langgraph = ["langgraph>=0.2.0"]
+all = ["cleat-sdk[langchain,langgraph,dev]"]
+
+[project.urls]
+Repository = "https://github.com/rcownie/cleat"
+Issues = "https://github.com/rcownie/cleat/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -36,3 +46,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.componentize-py]
+wit_path = "wit/"
+world = "cleat-workflow"

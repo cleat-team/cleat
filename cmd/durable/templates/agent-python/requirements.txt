@@ -1,0 +1,14 @@
+# Cleat SDK
+cleat-sdk>=0.2.0
+
+# LangChain integration
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langgraph>=0.2.0
+
+# Additional providers (optional)
+# langchain-anthropic>=0.2.0
+# langchain-google-genai>=1.0.0
+
+# Tools
+duckduckgo-search>=5.0

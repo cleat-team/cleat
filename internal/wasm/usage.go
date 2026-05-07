@@ -1,5 +1,13 @@
 // Package wasm generates WASM import/export stubs and host adapter code
 // for the durable workflow transformer.
+//
+// Supported wasm compilation targets:
+//   - "go" (default) — standard Go wasip1/wasm
+//   - "tinygo"       — TinyGo wasip1 (for smaller binary size)
+//   - "rust"         — Rust via cargo + wasm32-wasip1
+//   - "java"         — Java via Gradle + TeaVM
+//   - "assemblyscript" — AssemblyScript via asc
+//   - "python"       — Python via componentize-py
 package wasm
 
 import (
@@ -8,6 +16,10 @@ import (
 	"github.com/rcownie/durable/internal/analyzer"
 	"github.com/rcownie/durable/internal/closure"
 )
+
+// PythonTarget identifies the Python WASM compilation target.
+// Used by the Go build system to dispatch to the componentize-py pipeline.
+const PythonTarget = "python"
 
 // HostFunction identifies a host function that can be imported from the
 // WASM host environment (e.g., "durable_call", "durable_sleep").

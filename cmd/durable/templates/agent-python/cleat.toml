@@ -1,0 +1,20 @@
+[project]
+name = "my-python-agent"
+language = "python"
+version = "0.1.0"
+
+[workflow]
+entry = "agent.py:research_agent"
+target = "wasm"
+
+[plugins]
+# Configure your LLM providers and other plugins here
+[plugins.llm]
+provider = "openai"
+model = "gpt-4o"
+
+[plugins.websearch]
+enabled = true
+
+[plugins.calculator]
+enabled = true

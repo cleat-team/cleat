@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.wasm
+.env
+dist/
+*.egg-info/

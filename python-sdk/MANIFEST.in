@@ -1,0 +1,6 @@
+include README.md
+include pyproject.toml
+recursive-include cleat_sdk *.py
+recursive-include wit *.wit
+prune tests
+prune examples
