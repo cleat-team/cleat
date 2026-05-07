@@ -136,3 +136,11 @@ pub fn decode_poll_cancellation_result(result: i64) -> (u32, bool) {
     let cancelled = (r & 0xFFFF_FFFF) != 0;
     (reason_len, cancelled)
 }
+
+/// Decode get_scope result: upper 32 bits = objTypeLen, lower 32 bits = instKeyLen.
+pub fn decode_get_scope_result(result: i64) -> (u32, u32) {
+    let r = result as u64;
+    let obj_type_len = (r >> 32) as u32;
+    let inst_key_len = (r & 0xFFFF_FFFF) as u32;
+    (obj_type_len, inst_key_len)
+}

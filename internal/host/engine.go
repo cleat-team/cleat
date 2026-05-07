@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -484,6 +485,12 @@ type execSession struct {
 	workflowID string            // parent workflow instance ID (for child workflows)
 	queryState map[string]string // key-value state set via SetQueryState
 	tenantID   string            // tenant ID injected into plugin function context
+
+	// Scope management for virtual object instances.
+	scopePrefix  string // "vo:<type>:<key>:" prefix, empty if no scope
+	scopeObjType string // current object type in scope
+	scopeInstKey string // current instance key in scope
+	scopeSet     bool   // true when scope is active
 }
 
 var _ HostHandler = (*execSession)(nil)
@@ -1619,6 +1626,169 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 	}
 
 	return packAwaitPromiseResult(0, true, 0)
+}
+
+func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targetRunID, signalName, payload string, timeoutMs int64, responsePtr, responseMaxLen uint32) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeSignalReceived {
+				s.stepCount++
+				mem := m.Memory()
+				written := writeWasmString(mem, responsePtr, rec.SignalPayload, responseMaxLen)
+				return packSimpleResult(0, written)
+			}
+		}
+		s.isReplay = false
+	}
+
+	// Fresh execution: check if target has responded via signal store.
+	if s.engine.signalStore != nil {
+		payload, found, err := s.engine.signalStore.PollSignal(ctx, targetRunID, signalName)
+		if err == nil && found {
+			rec := EventRecord{
+				Step:          s.stepCount,
+				EventType:     EventTypeSignalReceived,
+				SignalName:    signalName,
+				SignalPayload: payload,
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+
+			mem := m.Memory()
+			written := writeWasmString(mem, responsePtr, payload, responseMaxLen)
+			return packSimpleResult(0, written)
+		}
+	}
+
+	// No response yet — record event and suspend.
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeAwaitSignals,
+		SignalNames: signalName,
+		TimeoutMs: timeoutMs,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	s.suspendErr = &SuspendError{
+		Reason: fmt.Sprintf("send_signal_and_wait(%s, %s)", targetRunID, signalName),
+		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(timeoutMs) * time.Millisecond),
+	}
+
+	return packSimpleResult(1, 0)
+}
+
+func (s *execSession) ReplyToSignal(ctx context.Context, m api.Module, correlationID, response string) int64 {
+	// Record the reply event for replay fidelity.
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeSignalReceived {
+				s.stepCount++
+				return 0
+			}
+		}
+		s.isReplay = false
+	}
+
+	rec := EventRecord{
+		Step:          s.stepCount,
+		EventType:     EventTypeSignalReceived,
+		SignalName:    correlationID,
+		SignalPayload: response,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	return 0
+}
+
+func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRunID, signalName, payload string) int64 {
+	// Fire-and-forget: record the signal event.
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeSignalReceived {
+				s.stepCount++
+				return 0
+			}
+		}
+		s.isReplay = false
+	}
+
+	rec := EventRecord{
+		Step:          s.stepCount,
+		EventType:     EventTypeSignalReceived,
+		SignalName:    signalName,
+		SignalPayload: payload,
+		RunID:         targetRunID,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	// Deliver to target via signal store if available.
+	if s.engine.signalStore != nil {
+		_ = s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload)
+	}
+
+	return 0
+}
+
+func (s *execSession) SetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	// Save previous scope prefix to output buffer.
+	prevScope := ""
+	if s.scopeSet && s.scopePrefix != "" {
+		prevScope = s.scopePrefix
+		_ = writeWasmString(mem, prevScopePtr, prevScope, prevScopeMaxLen)
+	}
+
+	if objectType == "" && instanceKey == "" {
+		s.scopeSet = false
+		s.scopePrefix = ""
+		s.scopeObjType = ""
+		s.scopeInstKey = ""
+	} else {
+		s.scopeSet = true
+		s.scopeObjType = objectType
+		s.scopeInstKey = instanceKey
+		s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
+	}
+
+	return 0
+}
+
+func (s *execSession) GetScope(ctx context.Context, m api.Module, objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	var objTypeLen, instKeyLen uint32
+	if s.scopeSet {
+		objTypeLen = writeWasmString(mem, objTypePtr, s.scopeObjType, objTypeMaxLen)
+		instKeyLen = writeWasmString(mem, instKeyPtr, s.scopeInstKey, instKeyMaxLen)
+	}
+
+	return int64(uint64(objTypeLen)<<32 | uint64(instKeyLen))
+}
+
+func (s *execSession) UUID(ctx context.Context, m api.Module, seed string, uuidPtr, uuidMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	wfID := s.workflowID
+	if wfID == "" {
+		wfID = "unknown"
+	}
+	data := wfID + ":" + seed
+	hash := sha256.Sum256([]byte(data))
+	// Format as UUIDv5-like value (first 16 bytes of SHA-256, version bits set).
+	hash[6] = (hash[6] & 0x0f) | 0x50 // Version 5
+	hash[8] = (hash[8] & 0x3f) | 0x80 // Variant 1
+	uuidStr := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
+
+	written := writeWasmString(mem, uuidPtr, uuidStr, uuidMaxLen)
+	return packSimpleResult(0, written)
 }
 
 // ---- Result packing helpers ----

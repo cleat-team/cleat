@@ -185,6 +185,131 @@ public class Saga {
         run(h);
     }
 
+    // ========================================================================
+    // Typed Saga (generic)
+    // ========================================================================
+
+    /**
+     * A typed saga step where the forward action returns a value of type {@code T}.
+     *
+     * @param <T> the result type of the forward action
+     */
+    public static class StepTyped<T> {
+        /** Human-readable description of this step. */
+        public final String description;
+
+        /** The forward action returning a value of type T. */
+        public final java.util.function.Function<HostCalls, T> forward;
+
+        /** The compensating action to run on rollback. */
+        public final SagaCompensator compensate;
+
+        /**
+         * Construct a new typed saga step.
+         *
+         * @param description human-readable description
+         * @param forward     the forward action returning T
+         * @param compensate  the compensating action
+         */
+        public StepTyped(String description, java.util.function.Function<HostCalls, T> forward, SagaCompensator compensate) {
+            this.description = description;
+            this.forward = forward;
+            this.compensate = compensate;
+        }
+    }
+
+    /**
+     * A saga with typed result collection.
+     *
+     * Generic parameter {@code T} is the return type of each step's forward action.
+     * {@code execute()} returns {@code List<T>}.
+     *
+     * Usage:
+     * <pre>{@code
+     * Saga.SagaTyped<String> saga = new Saga.SagaTyped<>();
+     * saga.addStep("reserve",
+     *     h -> h.durableCall("inv", "Reserve", input).getValue(),
+     *     h -> h.durableCall("inv", "Release", input));
+     * List<String> results = saga.execute(h);
+     * }</pre>
+     *
+     * @param <T> the result type of each step's forward action
+     */
+    public static class SagaTyped<T> {
+        private final List<StepTyped<T>> steps;
+
+        /** Create a new typed saga with no steps. */
+        public SagaTyped() {
+            this.steps = new ArrayList<>();
+        }
+
+        /**
+         * Add a typed step to the saga.
+         *
+         * @param description human-readable description
+         * @param forward     the forward action returning T
+         * @param compensate  the compensating action (may be null)
+         * @return {@code this} for chaining
+         */
+        public SagaTyped<T> addStep(String description, java.util.function.Function<HostCalls, T> forward, SagaCompensator compensate) {
+            steps.add(new StepTyped<>(description, forward, compensate));
+            return this;
+        }
+
+        /**
+         * Execute all forward steps in order, collecting results.
+         *
+         * If any step throws an exception, all previously completed steps are
+         * compensated in reverse order (skipping null compensations).
+         *
+         * @param h the HostCalls instance for this workflow execution
+         * @return the collected results of all forward steps, in order
+         * @throws Exception if a forward step fails and compensation completes
+         * @throws RuntimeException if compensation itself fails (the original
+         *         forward exception is added as a suppressed exception)
+         */
+        public List<T> execute(HostCalls h) throws Exception {
+            List<StepTyped<T>> completed = new ArrayList<>();
+            List<T> results = new ArrayList<>();
+
+            try {
+                for (StepTyped<T> step : steps) {
+                    T result = step.forward.apply(h);
+                    results.add(result);
+                    completed.add(step);
+                }
+            } catch (Exception e) {
+                // Compensate completed steps in reverse order.
+                Exception compensateFailure = null;
+                for (int i = completed.size() - 1; i >= 0; i--) {
+                    StepTyped<T> failed = completed.get(i);
+                    if (failed.compensate == null) continue;
+                    try {
+                        failed.compensate.accept(h);
+                    } catch (Exception ce) {
+                        if (compensateFailure == null) {
+                            compensateFailure = ce;
+                        } else {
+                            compensateFailure.addSuppressed(ce);
+                        }
+                    }
+                }
+
+                if (compensateFailure != null) {
+                    RuntimeException rte = new RuntimeException(
+                        "saga compensation failed for step '" + completed.get(completed.size() - 1).description
+                            + "'; original forward error: " + e.getMessage(), e);
+                    rte.addSuppressed(compensateFailure);
+                    throw rte;
+                }
+
+                throw e;
+            }
+
+            return results;
+        }
+    }
+
     /**
      * Execute all forward steps in order.  If any step throws an exception,
      * all previously completed steps are compensated in reverse order.

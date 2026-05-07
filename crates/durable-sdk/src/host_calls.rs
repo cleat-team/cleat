@@ -101,6 +101,47 @@ mod imports {
             name_ptr: *const u8, name_len: u32,
         ) -> i64;
 
+        // durable_send_signal_and_wait - 3 strings in, i64 timeout, 1 string out (ABI 2.23)
+        pub fn durable_send_signal_and_wait(
+            target_ptr: *const u8, target_len: u32,
+            signal_ptr: *const u8, signal_len: u32,
+            payload_ptr: *const u8, payload_len: u32,
+            timeout_ms: i64,
+            response_ptr: *mut u8, response_max_len: u32,
+        ) -> i64;
+
+        // durable_reply_to_signal - 2 strings in (ABI 2.24)
+        pub fn durable_reply_to_signal(
+            correlation_ptr: *const u8, correlation_len: u32,
+            response_ptr: *const u8, response_len: u32,
+        ) -> i64;
+
+        // durable_signal_workflow - 3 strings in (ABI 2.25)
+        pub fn durable_signal_workflow(
+            target_ptr: *const u8, target_len: u32,
+            signal_ptr: *const u8, signal_len: u32,
+            payload_ptr: *const u8, payload_len: u32,
+        ) -> i64;
+
+        // durable_set_scope - 2 strings in, 1 string out (ABI 2.26)
+        pub fn durable_set_scope(
+            obj_type_ptr: *const u8, obj_type_len: u32,
+            inst_key_ptr: *const u8, inst_key_len: u32,
+            prev_scope_ptr: *mut u8, prev_scope_max_len: u32,
+        ) -> i64;
+
+        // durable_get_scope - 2 string buffers out (ABI 2.27)
+        pub fn durable_get_scope(
+            obj_type_ptr: *mut u8, obj_type_max_len: u32,
+            inst_key_ptr: *mut u8, inst_key_max_len: u32,
+        ) -> i64;
+
+        // durable_uuid - 1 string in, 1 string out (ABI 2.28)
+        pub fn durable_uuid(
+            seed_ptr: *const u8, seed_len: u32,
+            uuid_ptr: *mut u8, uuid_max_len: u32,
+        ) -> i64;
+
         // plugin_call - ABI 2.19 (WASM import name is "plugin_call")
         #[link_name = "plugin_call"]
         pub fn durable_plugin_call(
@@ -407,4 +448,201 @@ impl HostCalls {
         let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
         (resp, None)
     }
+
+    /// Send a signal to a target workflow and wait for a response.
+    /// Mirrors Go's SendSignalAndWait.
+    pub fn send_signal_and_wait(&self, target_run_id: &str, signal_name: &str, payload: &str, timeout_ms: i64) -> Result<String, String> {
+        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_send_signal_and_wait(
+                target_run_id.as_ptr(), target_run_id.len() as u32,
+                signal_name.as_ptr(), signal_name.len() as u32,
+                payload.as_ptr(), payload.len() as u32,
+                timeout_ms,
+                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        // The host may return SUSPEND_SENTINEL when the target has not responded yet.
+        if result == memory::SUSPEND_SENTINEL {
+            std::panic::panic_any(crate::SuspendSentinel);
+        }
+        let (response_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            return Err(err_msg);
+        }
+        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        Ok(resp)
+    }
+
+    /// Reply to a signal, sending a response back to the sender.
+    /// Mirrors Go's ReplyToSignal.
+    pub fn reply_to_signal(&self, correlation_id: &str, response: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::durable_reply_to_signal(
+                correlation_id.as_ptr(), correlation_id.len() as u32,
+                response.as_ptr(), response.len() as u32,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("reply_to_signal error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Wait for at least min_count signals from the named set, with rejection tracking.
+    /// Mirrors Go's AwaitSignalsWithQuorum.
+    /// Returns Ok(Vec<SignalResult>) on success, or Err(String) on error.
+    pub fn await_signals_with_quorum(&self, signal_names: &[String], min_count: i32, max_rejections: i32, timeout_ms: i64) -> Result<Vec<SignalResult>, String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+        let mut results: Vec<SignalResult> = Vec::new();
+        let mut rejection_count = 0;
+
+        while (results.len() as i32) < min_count {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.as_millis() == 0 {
+                return Err(format!("quorum timeout after {}ms: got {}/{} signals", timeout_ms, results.len(), min_count));
+            }
+
+            // Gather signal names not yet received as a &[&str].
+            let remaining_names: Vec<&str> = signal_names.iter().map(|s| s.as_str()).collect();
+            let (name, payload, timed_out, err) = self.await_signals(&remaining_names, remaining.as_millis() as i64);
+            if let Some(e) = err {
+                return Err(format!("quorum signal error: {}", e));
+            }
+            if timed_out {
+                return Err(format!("quorum timeout after {}ms: got {}/{} signals", timeout_ms, results.len(), min_count));
+            }
+
+            results.push(SignalResult {
+                name,
+                payload: payload.clone(),
+                timed_out: false,
+            });
+
+            // Check for rejection if max_rejections >= 0.
+            if max_rejections >= 0 && !payload.is_empty() {
+                if let Ok(payload_map) = serde_json::from_str::<serde_json::Value>(&payload) {
+                    if let Some(rejected) = payload_map.get("rejected").and_then(|v| v.as_bool()) {
+                        if rejected {
+                            rejection_count += 1;
+                            if rejection_count > max_rejections {
+                                return Err(format!("quorum exceeded max rejections ({})", max_rejections));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Send a signal to a target workflow (fire-and-forget).
+    /// Mirrors Go's SignalWorkflow.
+    pub fn signal_workflow(&self, target_run_id: &str, signal_name: &str, payload: &str) -> Result<(), String> {
+        let result = unsafe {
+            imports::durable_signal_workflow(
+                target_run_id.as_ptr(), target_run_id.len() as u32,
+                signal_name.as_ptr(), signal_name.len() as u32,
+                payload.as_ptr(), payload.len() as u32,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("signal_workflow error code: {}", err_code));
+        }
+        Ok(())
+    }
+
+    /// Set the virtual object scope. Returns the previous scope.
+    /// Mirrors Go's SetScope.
+    pub fn set_scope(&self, object_type: &str, instance_key: &str) -> String {
+        let mut prev_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_set_scope(
+                object_type.as_ptr(), object_type.len() as u32,
+                instance_key.as_ptr(), instance_key.len() as u32,
+                prev_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (prev_len, _err_code) = memory::decode_simple_result(result);
+        if prev_len > 0 {
+            unsafe { memory::read_string(prev_buf.as_ptr(), prev_len) }
+        } else {
+            String::new()
+        }
+    }
+
+    /// Get the current virtual object scope.
+    /// Mirrors Go's GetScope.
+    pub fn get_scope(&self) -> (String, String) {
+        let mut obj_type_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let mut inst_key_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_get_scope(
+                obj_type_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+                inst_key_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (obj_type_len, inst_key_len) = memory::decode_get_scope_result(result);
+        let obj_type = if obj_type_len > 0 {
+            unsafe { memory::read_string(obj_type_buf.as_ptr(), obj_type_len) }
+        } else {
+            String::new()
+        };
+        let inst_key = if inst_key_len > 0 {
+            unsafe { memory::read_string(inst_key_buf.as_ptr(), inst_key_len) }
+        } else {
+            String::new()
+        };
+        (obj_type, inst_key)
+    }
+
+    /// Clear the virtual object scope. Returns the previous scope.
+    /// Mirrors Go's ClearScope.
+    pub fn clear_scope(&self) -> String {
+        // Clear scope by setting it to empty strings.
+        let mut prev_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_set_scope(
+                std::ptr::null(), 0u32,
+                std::ptr::null(), 0u32,
+                prev_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (prev_len, _err_code) = memory::decode_simple_result(result);
+        if prev_len > 0 {
+            unsafe { memory::read_string(prev_buf.as_ptr(), prev_len) }
+        } else {
+            String::new()
+        }
+    }
+
+    /// Generate a deterministic UUID from a seed.
+    /// Mirrors Go's UUID.
+    pub fn uuid(&self, seed: &str) -> String {
+        let mut uuid_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::durable_uuid(
+                seed.as_ptr(), seed.len() as u32,
+                uuid_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (uuid_len, _err_code) = memory::decode_simple_result(result);
+        if uuid_len > 0 {
+            unsafe { memory::read_string(uuid_buf.as_ptr(), uuid_len) }
+        } else {
+            String::new()
+        }
+    }
+}
+
+/// Result of an await_signals call.
+#[derive(Debug, Clone)]
+pub struct SignalResult {
+    pub name: String,
+    pub payload: String,
+    pub timed_out: bool,
 }

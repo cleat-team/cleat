@@ -45,6 +45,16 @@ type HostHandler interface {
 	PluginCall(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
 	PluginCallStreaming(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
 	RegisterUpdateHandler(ctx context.Context, m api.Module, name string) int64
+
+	// Signal correlation (ABI 2.23-2.25)
+	SendSignalAndWait(ctx context.Context, m api.Module, targetRunID, signalName, payload string, timeoutMs int64, responsePtr, responseMaxLen uint32) int64
+	ReplyToSignal(ctx context.Context, m api.Module, correlationID, response string) int64
+	SignalWorkflow(ctx context.Context, m api.Module, targetRunID, signalName, payload string) int64
+
+	// Scoped state / virtual objects (ABI 2.26-2.28)
+	SetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64
+	GetScope(ctx context.Context, m api.Module, objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen uint32) int64
+	UUID(ctx context.Context, m api.Module, seed string, uuidPtr, uuidMaxLen uint32) int64
 }
 
 // registerHostFunctions registers all 15 durable_* imports on the "env" host module.
@@ -250,6 +260,66 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		return uint64(handlerFromContext(ctx).AwaitPromise(ctx, m, promiseID, timeoutMs, resultPtr, resultMaxLen))
 	}).Export("durable_await_promise")
 
+	// durable_send_signal_and_wait: (ptr,len x3, i64, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen uint32,
+		timeoutMs int64,
+		respPtr, respMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		targetRunID := readWasmString(mem, targetPtr, targetLen)
+		signalName := readWasmString(mem, sigPtr, sigLen)
+		payload := readWasmString(mem, payloadPtr, payloadLen)
+		return uint64(h.SendSignalAndWait(ctx, m, targetRunID, signalName, payload, timeoutMs, respPtr, respMaxLen))
+	}).Export("durable_send_signal_and_wait")
+
+	// durable_reply_to_signal: (ptr,len x2) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		correlationPtr, correlationLen, respPtr, respLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		correlationID := readWasmString(mem, correlationPtr, correlationLen)
+		response := readWasmString(mem, respPtr, respLen)
+		return uint64(h.ReplyToSignal(ctx, m, correlationID, response))
+	}).Export("durable_reply_to_signal")
+
+	// durable_signal_workflow: (ptr,len x3) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		targetRunID := readWasmString(mem, targetPtr, targetLen)
+		signalName := readWasmString(mem, sigPtr, sigLen)
+		payload := readWasmString(mem, payloadPtr, payloadLen)
+		return uint64(h.SignalWorkflow(ctx, m, targetRunID, signalName, payload))
+	}).Export("durable_signal_workflow")
+
+	// durable_set_scope: (ptr,len x2, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		objTypePtr, objTypeLen, instKeyPtr, instKeyLen uint32,
+		prevScopePtr, prevScopeMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		objType := readWasmString(mem, objTypePtr, objTypeLen)
+		instKey := readWasmString(mem, instKeyPtr, instKeyLen)
+		return uint64(h.SetScope(ctx, m, objType, instKey, prevScopePtr, prevScopeMaxLen))
+	}).Export("durable_set_scope")
+
+	// durable_get_scope: (ptr,maxLen x2) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		return uint64(h.GetScope(ctx, m, objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen))
+	}).Export("durable_get_scope")
+
+	// durable_uuid: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		seedPtr, seedLen, uuidPtr, uuidMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		seed := readWasmString(mem, seedPtr, seedLen)
+		return uint64(h.UUID(ctx, m, seed, uuidPtr, uuidMaxLen))
+	}).Export("durable_uuid")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

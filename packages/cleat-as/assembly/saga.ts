@@ -38,6 +38,11 @@
  * - `--runtime stub` compatible (no exceptions or try/catch used).
  * - Uses function references, not closures. All action and compensation
  *   functions must be named top-level functions.
+ * - Generics are NOT supported for saga result collection. AssemblyScript's
+ *   generics system (especially when targeting WASM with `--runtime stub`)
+ *   does not support the type-level patterns needed for `Saga<T>` with typed
+ *   result collection. Use the Go `SagaTyped[T]` or Java `Saga.SagaTyped<T>`
+ *   when typed results are needed.
  *
  * @packageDocumentation
  */

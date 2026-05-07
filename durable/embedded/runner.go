@@ -14,6 +14,7 @@ package embedded
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -143,6 +144,12 @@ type execution struct {
 
 	// cleanup functions (LIFO)
 	deferFuncs []func()
+
+	// scope management for virtual object instances
+	scopePrefix  string // "vo:<type>:<key>:" prefix, empty if no scope
+	scopeObjType string // current object type in scope
+	scopeInstKey string // current instance key in scope
+	scopeSet     bool   // true when scope is active
 }
 
 type signalEvent struct {
@@ -197,7 +204,10 @@ func (e *execution) hostCalls() durable.HostCalls {
 		AwaitChild:             e.awaitChild,
 		WorkflowID:             e.workflowID,
 		RunID:                  e.runID,
-	})
+		SendSignalAndWait:      e.sendSignalAndWait,
+		ReplyToSignal:          e.replyToSignal,
+		SignalWorkflow:         e.signalWorkflow,
+		})
 }
 
 func (e *execution) workflowID() string {
@@ -403,6 +413,82 @@ func (e *execution) awaitChild(runID string) (string, error) {
 		return result.result, nil
 	}
 	return `{"status":"completed"}`, nil
+}
+
+func (e *execution) sendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
+	// Store the outgoing signal for test inspection.
+	e.mu.Lock()
+	e.signals = append(e.signals, signalEvent{name: signalName, payload: payload})
+	e.mu.Unlock()
+
+	// In the embedded runner, simulate an immediate response.
+	// A full implementation would route the signal to the target execution
+	// and wait for a reply.
+	return `{"status":"delivered"}`, nil
+}
+
+func (e *execution) replyToSignal(correlationID, response string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// Store the reply as a signal for the caller to poll.
+	e.signals = append(e.signals, signalEvent{name: correlationID, payload: response})
+	return nil
+}
+
+func (e *execution) signalWorkflow(targetRunID, signalName, payload string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.signals = append(e.signals, signalEvent{name: signalName, payload: payload})
+	return nil
+}
+
+func (e *execution) setScope(objectType, instanceKey string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	prev := e.scopePrefix
+	if objectType == "" && instanceKey == "" {
+		e.scopeSet = false
+		e.scopePrefix = ""
+		e.scopeObjType = ""
+		e.scopeInstKey = ""
+	} else {
+		e.scopeSet = true
+		e.scopeObjType = objectType
+		e.scopeInstKey = instanceKey
+		e.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
+	}
+	return prev
+}
+
+func (e *execution) getScope() (string, string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.scopeSet {
+		return "", ""
+	}
+	return e.scopeObjType, e.scopeInstKey
+}
+
+func (e *execution) clearScope() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	prev := e.scopePrefix
+	e.scopeSet = false
+	e.scopePrefix = ""
+	e.scopeObjType = ""
+	e.scopeInstKey = ""
+	return prev
+}
+
+func (e *execution) uuid(seed string) string {
+	// Deterministic UUID based on workflow ID and seed.
+	wfID := e.wfID
+	data := wfID + ":" + seed
+	h := sha256.Sum256([]byte(data))
+	h[6] = (h[6] & 0x0f) | 0x50 // Version 5
+	h[8] = (h[8] & 0x3f) | 0x80 // Variant 1
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		h[0:4], h[4:6], h[6:8], h[8:10], h[10:16])
 }
 
 // Signal delivers a signal to a workflow execution in the runner.
