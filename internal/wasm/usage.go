@@ -92,6 +92,10 @@ var hostFunctions = []HostFunction{
 	{"cleat_now", "NowMs"},
 	// Random
 	{"cleat_random", "Random"},
+	// Lock/concurrency key operations
+	{"cleat_acquire_lock", "AcquireLock"},
+	{"cleat_acquire_lock", "AcquireLockMs"},
+	{"cleat_release_lock", "ReleaseLock"},
 }
 
 // UsageInfo records which host functions are actually called by the

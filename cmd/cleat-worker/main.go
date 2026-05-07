@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"log/slog"
@@ -319,7 +320,7 @@ func main() {
 				f, ferr := webFS.Open(path)
 				if ferr != nil {
 					r.URL.Path = "/"
-				} else {
+			} else {
 					f.Close()
 				}
 				fileServer.ServeHTTP(w, r)
@@ -383,8 +384,9 @@ type Worker struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	inflight  sync.Map // map[workflowID]*host.WorkflowInstance
-	wasmCache map[string][]byte
+	inflight    sync.Map // map[workflowID]*host.WorkflowInstance
+	execEngines sync.Map // map[workflowID]*host.Engine
+	wasmCache   map[string][]byte
 	wasmMu    sync.RWMutex
 
 	scheduleMu       sync.Mutex
@@ -727,7 +729,7 @@ func (w *Worker) reaperLoop() {
 			if err != nil {
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Reaper: DB appears down", w.id)
-				} else {
+			} else {
 					log.Printf("[worker %s] Reaper: %v", w.id, err)
 				}
 				continue
@@ -754,7 +756,7 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 			if err != nil {
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Concurrency key reaper: DB appears down", w.id)
-				} else {
+			} else {
 					log.Printf("[worker %s] Concurrency key reaper: %v", w.id, err)
 				}
 				continue
@@ -782,7 +784,7 @@ func (w *Worker) scheduleLoop() {
 				w.scheduleMu.Unlock()
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Scheduler: DB appears down", w.id)
-				} else {
+			} else {
 					log.Printf("[worker %s] Scheduler: %v", w.id, err)
 				}
 				continue
@@ -856,6 +858,82 @@ func (w *Worker) compactionLoop() {
 			}
 		}
 	}
+}
+
+func (w *Worker) updateDispatchLoop() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			w.dispatchPendingUpdates()
+		}
+	}
+}
+
+func (w *Worker) dispatchPendingUpdates() {
+	ctx := context.Background()
+
+	// Iterate over all claimed workflows.
+	w.inflight.Range(func(key, value interface{}) bool {
+		wfID := key.(string)
+
+		// Get pending update requests for this workflow.
+		updates, err := w.store.GetPendingUpdateRequests(ctx, wfID)
+		if err != nil {
+			log.Printf("[worker %s] %s: error fetching pending updates: %v", w.id, wfID, err)
+			return true
+		}
+		if len(updates) == 0 {
+			return true
+		}
+
+		// Find the running engine for this workflow.
+		envVal, ok := w.execEngines.Load(wfID)
+		if !ok {
+			// Engine not found (maybe not running on this worker right now).
+			// Leave the updates pending for the next claim cycle.
+			return true
+		}
+		env := envVal.(*host.Engine)
+
+		for _, upd := range updates {
+			// Dispatch the update via the engine.
+			result, dErr := env.DispatchUpdate(ctx, upd.UpdateName, upd.Payload)
+
+			var resultStr, errStr string
+			if dErr != nil {
+				errStr = dErr.Error()
+				log.Printf("[worker %s] %s: update %q failed: %v", w.id, wfID, upd.UpdateName, dErr)
+			} else {
+				resultStr = result
+				log.Printf("[worker %s] %s: update %q completed", w.id, wfID, upd.UpdateName)
+			}
+
+			// Store the result in the workflow_update_requests table.
+			if cErr := w.store.CompleteUpdateRequest(ctx, wfID, upd.UpdateName, resultStr, errStr); cErr != nil {
+				log.Printf("[worker %s] %s: error completing update %q: %v", w.id, wfID, upd.UpdateName, cErr)
+			}
+
+			// If the update request has an associated promise, resolve or reject it.
+			if upd.PromiseID != "" {
+				if dErr != nil {
+					if rErr := w.store.RejectPromise(ctx, wfID, upd.PromiseID, errStr); rErr != nil {
+						log.Printf("[worker %s] %s: error rejecting promise %s: %v", w.id, wfID, upd.PromiseID, rErr)
+					}
+				} else {
+					if rErr := w.store.ResolvePromise(ctx, wfID, upd.PromiseID, resultStr); rErr != nil {
+						log.Printf("[worker %s] %s: error resolving promise %s: %v", w.id, wfID, upd.PromiseID, rErr)
+					}
+				}
+			}
+		}
+		return true
+	})
 }
 
 func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
@@ -1171,6 +1249,27 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[1] == "dag" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/dag
 		s.handleGetDAG(w, r, id)
+	case len(parts) == 2 && parts[1] == "promises" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/promises
+		s.handleListPromises(w, r, id)
+	case len(parts) >= 4 && parts[1] == "promises":
+		// /api/workflows/:id/promises/:promiseId/resolve|reject
+		if len(parts) == 4 {
+			promiseID := parts[2]
+			switch {
+			case parts[3] == "resolve" && r.Method == http.MethodPost:
+				s.handleResolvePromise(w, r, id, promiseID)
+			case parts[3] == "reject" && r.Method == http.MethodPost:
+				s.handleRejectPromise(w, r, id, promiseID)
+			default:
+			s.writeError(w, 404, "not found")
+			}
+		} else {
+			s.writeError(w, 404, "not found")
+		}
+	case len(parts) == 3 && parts[1] == "update" && r.Method == http.MethodPost:
+		// POST /api/workflows/:id/update/:name
+		s.handleWorkflowUpdate(w, r, id, parts[2])
 	default:
 		s.writeError(w, 404, "not found")
 	}
@@ -1365,6 +1464,125 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 		"dag":         dagData,
 	}
 	s.writeJSON(w, 200, response)
+}
+
+// ---- Promise API handlers ----
+
+// handleListPromises handles GET /api/workflows/:id/promises
+func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, id string) {
+	promises, err := s.store.ListPromises(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if promises == nil {
+		promises = []host.PromiseInfo{}
+	}
+	s.writeJSON(w, 200, promises)
+}
+
+// handleResolvePromise handles POST /api/workflows/:id/promises/:promiseId/resolve
+func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request, id, promiseID string) {
+	var req struct {
+		Result string `json:"result"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	if err := s.store.ResolvePromise(r.Context(), id, promiseID, req.Result); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "resolved"})
+}
+
+// handleRejectPromise handles POST /api/workflows/:id/promises/:promiseId/reject
+func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, id, promiseID string) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, 400, "invalid JSON: "+err.Error())
+		return
+	}
+	if err := s.store.RejectPromise(r.Context(), id, promiseID, req.Reason); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "rejected"})
+}
+
+// handleWorkflowUpdate handles POST /api/workflows/:id/update/:name
+func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id, updateName string) {
+	// Verify the workflow exists.
+	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if wf == nil {
+		s.writeError(w, 404, "workflow not found")
+		return
+	}
+
+	// Parse the request body as the update payload.
+	var payload string
+	if r.Body != nil {
+		body, rErr := io.ReadAll(r.Body)
+		if rErr != nil {
+			s.writeError(w, 400, "failed to read request body")
+			return
+		}
+		payload = string(body)
+	} else {
+		payload = "{}"
+	}
+
+	// Check if there's already a pending update with the same name.
+	pending, pErr := s.store.GetPendingUpdateRequests(r.Context(), id)
+	if pErr != nil {
+		s.writeError(w, 500, pErr.Error())
+		return
+	}
+	for _, p := range pending {
+		if p.UpdateName == updateName {
+			s.writeError(w, 409, "update already pending with name: "+updateName)
+			return
+		}
+	}
+
+	// Generate a promise ID so the caller can track the update outcome.
+	promiseID, err := generateUpdatePromiseID()
+	if err != nil {
+		s.writeError(w, 500, "failed to generate promise ID: "+err.Error())
+		return
+	}
+
+	// Create the update request in the database.
+	if err := s.store.CreateUpdateRequest(r.Context(), id, updateName, payload, promiseID); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+
+	// Create an associated promise record so the caller can poll for the result.
+	if ps, ok := s.store.(host.PromiseStore); ok {
+		if pErr := ps.CreatePromise(r.Context(), id, "update:"+updateName, promiseID); pErr != nil {
+			log.Printf("[api] %s: warning: failed to create promise for update %q: %v", id, updateName, pErr)
+		}
+	}
+
+	s.writeJSON(w, 202, map[string]string{"promise_id": promiseID})
+}
+
+// generateUpdatePromiseID creates a unique ID for tracking an update's outcome.
+func generateUpdatePromiseID() (string, error) {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
+	}
+	return "upd-" + hex.EncodeToString(b), nil
 }
 
 // ---- Schedule API handlers ----

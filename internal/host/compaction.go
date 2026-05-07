@@ -33,6 +33,8 @@ const (
 	EventCodeUpdateHandler  = 15
 	EventCodeStateMutation  = 16
 	EventCodeRunDetached    = 17
+	EventCodeAcquireLock    = 18
+	EventCodeReleaseLock    = 19
 )
 
 var eventTypeToCode = map[EventType]int{
@@ -54,6 +56,8 @@ var eventTypeToCode = map[EventType]int{
 	EventTypeUpdateHandler:    EventCodeUpdateHandler,
 	EventTypeStateMutation:    EventCodeStateMutation,
 	EventTypeRunDetached:      EventCodeRunDetached,
+	EventTypeAcquireLock:      EventCodeAcquireLock,
+	EventTypeReleaseLock:      EventCodeReleaseLock,
 }
 
 var codeToEventType = map[int]EventType{
@@ -75,6 +79,8 @@ var codeToEventType = map[int]EventType{
 	EventCodeUpdateHandler:    EventTypeUpdateHandler,
 	EventCodeStateMutation:    EventTypeStateMutation,
 	EventCodeRunDetached:      EventTypeRunDetached,
+	EventCodeAcquireLock:      EventTypeAcquireLock,
+	EventCodeReleaseLock:      EventTypeReleaseLock,
 }
 
 // CompactionState holds the minimal state needed to reconstruct the compacted
@@ -261,6 +267,12 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.PromiseName = ev.StateOp
 		case EventTypeRunDetached:
 			// No extra fields to store.
+		case EventTypeAcquireLock:
+			ce.ChildName = ev.LockKey
+			ce.DurationMs = ev.LockTTLMs
+			ce.Response = fmt.Sprintf("%d", ev.LockAcquired)
+		case EventTypeReleaseLock:
+			ce.ChildName = ev.LockKey
 		}
 		cs.Events = append(cs.Events, ce)
 	}
@@ -364,6 +376,12 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			// No extra fields to restore.
 			rec.PromiseID = ce.PromiseID
 			rec.PromiseError = ce.PromiseError
+		case EventCodeAcquireLock:
+			rec.LockKey = ce.ChildName
+			rec.LockTTLMs = ce.DurationMs
+			fmt.Sscanf(ce.Response, "%d", &rec.LockAcquired)
+		case EventCodeReleaseLock:
+			rec.LockKey = ce.ChildName
 		}
 		full = append(full, rec)
 	}

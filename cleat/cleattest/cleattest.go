@@ -326,6 +326,8 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 			SendSignalAndWait:            e.sendSignalAndWaitImpl,
 			ReplyToSignal:                e.replyToSignalImpl,
 			SignalWorkflow:               e.signalWorkflowImpl,
+			AcquireLock:                   e.acquireLockImpl,
+			ReleaseLock:                   e.releaseLockImpl,
 	})
 	return e
 }
@@ -864,6 +866,14 @@ func (e *TestEnv) HandleQuery(name, payload string) (string, error) {
 	return "", fmt.Errorf("cleattest: HandleQuery not available")
 }
 
+// HandleUpdate invokes a registered update handler by name with the given payload.
+func (e *TestEnv) HandleUpdate(name, payload string) (string, error) {
+	if h, ok := e.h.(interface{ HandleUpdate(string, string) (string, error) }); ok {
+		return h.HandleUpdate(name, payload)
+	}
+	return "", fmt.Errorf("cleattest: HandleUpdate not available")
+}
+
 func (e *TestEnv) runDetachedImpl(fn func(h cleat.HostCalls) error) error {
 	// Run the function directly. In test mode there is no cancellation anyway.
 	return fn(e.h)
@@ -996,6 +1006,17 @@ func (e *TestEnv) RejectPromise(promiseID, errMsg string) {
 
 // AcquireConcurrencyKey attempts to acquire a concurrency key for a workflow.
 // Uses the mock function if set, otherwise uses the default in-memory map behavior.
+func (e *TestEnv) acquireLockImpl(key string, ttlMs int64) (bool, error) {
+	return e.AcquireConcurrencyKey(key, "")
+}
+
+func (e *TestEnv) releaseLockImpl(key string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.ConcurrencyKeys, key)
+	return nil
+}
+
 func (e *TestEnv) AcquireConcurrencyKey(key, workflowID string) (bool, error) {
 	if e.AcquireConcurrencyKeyFn != nil {
 		return e.AcquireConcurrencyKeyFn(key, workflowID)

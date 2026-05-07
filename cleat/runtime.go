@@ -305,6 +305,17 @@ type HostCalls interface {
 	// this workflow instance. Useful for generating predictable IDs
 	// (e.g. entity IDs, correlation IDs) that are stable across replays.
 	UUID(seed string) string
+
+	// AcquireLock attempts to acquire a concurrency lock for the given key.
+	// Returns true if the lock was acquired, false if already held.
+	// The ttl controls how long the lock is held before auto-release.
+	AcquireLock(key string, ttl time.Duration) (acquired bool, err error)
+
+	// ReleaseLock releases a concurrency lock previously acquired by this workflow.
+	ReleaseLock(key string) error
+
+	// AcquireLockMs is like AcquireLock but takes TTL in milliseconds.
+	AcquireLockMs(key string, ttlMs int64) (acquired bool, err error)
 }
 
 // ---- Streaming types ----
@@ -694,6 +705,7 @@ type hostCallsImpl struct {
 	registerUpdateHandler     func(name string)
 	registerQueryHandler     func(name string)
 	handleQuery              func(name, payload string) (string, error)
+	handleUpdate             func(name, payload string) (string, error)
 	runDetached               func(fn func(h HostCalls) error) error
 	now                       func() int64
 	random                    func() int64
@@ -709,6 +721,9 @@ type hostCallsImpl struct {
 	scheduleCron              func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
 	deleteCron                func(scheduleID string) error
 	listCrons                 func() (string, error)
+
+	acquireLock    func(key string, ttlMs int64) (bool, error)
+	releaseLock    func(key string) error
 
 	// State map for typed K/V operations.
 	stateMap       map[string]interface{}
@@ -761,6 +776,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		registerUpdateHandler:     opts.RegisterUpdateHandler,
 		registerQueryHandler:     opts.RegisterQueryHandler,
 		handleQuery:              opts.HandleQuery,
+		handleUpdate:             opts.HandleUpdate,
 		runDetached:               opts.RunDetached,
 		now:                       opts.Now,
 		random:                    opts.Random,
@@ -775,6 +791,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		scheduleCron:              opts.ScheduleCron,
 		deleteCron:                opts.DeleteCron,
 		listCrons:                 opts.ListCrons,
+		acquireLock:               opts.AcquireLock,
+		releaseLock:               opts.ReleaseLock,
 	}
 }
 
@@ -839,6 +857,7 @@ type HostCallsOptions struct {
 	RegisterUpdateHandler     func(name string)
 	RegisterQueryHandler     func(name string)
 	HandleQuery              func(name, payload string) (string, error)
+	HandleUpdate             func(name, payload string) (string, error)
 	RunDetached               func(fn func(h HostCalls) error) error
 	Now                       func() int64
 	Random                    func() int64
@@ -853,6 +872,9 @@ type HostCallsOptions struct {
 	ScheduleCron              func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
 	DeleteCron                func(scheduleID string) error
 	ListCrons                 func() (string, error)
+
+	AcquireLock func(key string, ttlMs int64) (acquired bool, err error)
+	ReleaseLock func(key string) error
 }
 
 // ---- Interface method implementations ----
@@ -1138,6 +1160,24 @@ func (h *hostCallsImpl) ListCrons() (string, error) {
 		return "", errors.New("durable: ListCrons not initialized")
 	}
 	return h.listCrons()
+}
+
+func (h *hostCallsImpl) AcquireLock(key string, ttl time.Duration) (bool, error) {
+	return h.AcquireLockMs(key, ttl.Milliseconds())
+}
+
+func (h *hostCallsImpl) AcquireLockMs(key string, ttlMs int64) (bool, error) {
+	if h.acquireLock == nil {
+		return false, errors.New("durable: AcquireLock not initialized")
+	}
+	return h.acquireLock(key, ttlMs)
+}
+
+func (h *hostCallsImpl) ReleaseLock(key string) error {
+	if h.releaseLock == nil {
+		return errors.New("durable: ReleaseLock not initialized")
+	}
+	return h.releaseLock(key)
 }
 
 func (h *hostCallsImpl) DurableSleep(d time.Duration) {
@@ -1612,6 +1652,17 @@ func (h *hostCallsImpl) HandleQuery(name, payload string) (string, error) {
 		return "", fmt.Errorf("durable: no query handler registered for %q", name)
 	}
 	return handler(payload)
+}
+
+func (h *hostCallsImpl) HandleUpdate(name, payload string) (string, error) {
+	if h.handleUpdate != nil {
+		return h.handleUpdate(name, payload)
+	}
+	entry, ok := h.updateHandlers[name]
+	if !ok {
+		return "", fmt.Errorf("cleat: no update handler registered for %q", name)
+	}
+	return entry.handler(payload)
 }
 
 func (h *hostCallsImpl) RunDetached(fn func(h HostCalls) error) error {

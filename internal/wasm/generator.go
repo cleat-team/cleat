@@ -197,6 +197,19 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
+	"cleat_acquire_lock": {
+		ImportName: "cleat_acquire_lock",
+		Params: []paramSpec{
+			{"key", kindInString},
+			{"ttl_ms", kindInt64},
+		},
+	},
+	"cleat_release_lock": {
+		ImportName: "cleat_release_lock",
+		Params: []paramSpec{
+			{"key", kindInString},
+		},
+	},
 }
 
 const outBufSize = 65536

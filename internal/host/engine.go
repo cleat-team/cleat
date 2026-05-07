@@ -41,6 +41,8 @@ const (
 	EventTypeStateMutation    EventType = "state_mutation"
 	EventTypeRunDetached      EventType = "run_detached"
 	EventTypePluginCallStreamChunk EventType = "plugin_call_stream_chunk"
+	EventTypeAcquireLock      EventType = "acquire_lock"
+	EventTypeReleaseLock      EventType = "release_lock"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -108,6 +110,11 @@ type EventRecord struct {
 	StateValue string `json:"state_value,omitempty"`
 	StateDelta int64  `json:"state_delta,omitempty"`
 	StateOp    string `json:"state_op,omitempty"`
+
+	// Lock fields.
+	LockKey      string `json:"lock_key,omitempty"`
+	LockTTLMs    int64  `json:"lock_ttl_ms,omitempty"`
+	LockAcquired int    `json:"lock_acquired,omitempty"`
 }
 
 // CallRecord is kept for backward compatibility in tests.
@@ -179,6 +186,16 @@ type ExecutionResult struct {
 }
 
 // ChildWorkflowStore provides child workflow creation and polling for the engine.
+type ConcurrencyKeyStore interface {
+	// AcquireConcurrencyKey tries to acquire a concurrency key for a workflow.
+	// Returns true if acquired, false if already held by another workflow.
+	// Automatically releases expired keys during acquisition.
+	AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error)
+
+	// ReleaseConcurrencyKey releases a specific concurrency key.
+	ReleaseConcurrencyKey(ctx context.Context, key string) error
+}
+
 type ChildWorkflowStore interface {
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
 	// defVersion is the explicit workflow definition version to use, or 0 to use
@@ -302,9 +319,11 @@ type Engine struct {
 	state           WorkflowState
 	workflowID      string
 	childWfStore    ChildWorkflowStore
+	concurrencyKeyStore ConcurrencyKeyStore
 	compactionState *CompactionState
 	pluginRegistry    *PluginRegistry
 	pluginStreamRegistry *PluginStreamRegistry
+	updateHandler         func(name, payload string) (string, error)
 	tenantID          string
 }
 
@@ -336,6 +355,10 @@ func WithChildWorkflowStore(cws ChildWorkflowStore) EngineOption {
 	return func(e *Engine) { e.childWfStore = cws }
 }
 
+func WithConcurrencyKeyStore(cks ConcurrencyKeyStore) EngineOption {
+	return func(e *Engine) { e.concurrencyKeyStore = cks }
+}
+
 // WithCompactionState sets the compaction state for replaying a compacted workflow.
 func WithCompactionState(cs *CompactionState) EngineOption {
 	return func(e *Engine) { e.compactionState = cs }
@@ -350,6 +373,11 @@ func WithPluginRegistry(pr *PluginRegistry) EngineOption {
 // plugin host function dispatch.
 func WithPluginStreamRegistry(psr *PluginStreamRegistry) EngineOption {
 	return func(e *Engine) { e.pluginStreamRegistry = psr }
+}
+
+// WithUpdateHandler sets the update handler function for processing workflow updates.
+func WithUpdateHandler(fn func(name, payload string) (string, error)) EngineOption {
+	return func(e *Engine) { e.updateHandler = fn }
 }
 
 // WithTenantID sets the tenant ID for the engine, which is injected into
@@ -495,6 +523,16 @@ func (e *Engine) RunDeferCompiled(ctx context.Context, compiled wazero.CompiledM
 
 	// Defer functions don't need history replay — they're always fresh.
 	return e.rt.CallExport(ctx, mod, deferName, input)
+}
+
+// DispatchUpdate dispatches an update to a workflow by invoking its registered handler.
+// The handler receives the update name and payload JSON, and returns the result JSON.
+// Returns an error if no update handler is configured on the engine.
+func (e *Engine) DispatchUpdate(ctx context.Context, name, payload string) (string, error) {
+	if e.updateHandler == nil {
+		return "", fmt.Errorf("host: no update handler configured for this engine")
+	}
+	return e.updateHandler(name, payload)
 }
 
 // Deferrals returns the defers registered during the execution that produced
@@ -1889,6 +1927,118 @@ func (s *execSession) UUID(ctx context.Context, m api.Module, seed string, uuidP
 	return packSimpleResult(0, written)
 }
 
+func (s *execSession) AcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64 {
+	if s.isReplay {
+		return s.replayAcquireLock(ctx, m, key, ttlMs)
+	}
+	return s.freshAcquireLock(ctx, m, key, ttlMs)
+}
+
+func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64 {
+	var acquired bool
+	if s.engine.concurrencyKeyStore != nil {
+		var err error
+		acquired, err = s.engine.concurrencyKeyStore.AcquireConcurrencyKey(ctx, key, s.workflowID, time.Duration(ttlMs)*time.Millisecond)
+		if err != nil {
+			rec := EventRecord{
+				Step:         s.stepCount,
+				EventType:    EventTypeAcquireLock,
+				LockKey:      key,
+				LockTTLMs:    ttlMs,
+				LockAcquired: 0,
+				Err:          err.Error(),
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+			return packAcquireLockResult(false, 1)
+		}
+	}
+
+	a := 0
+	if acquired {
+		a = 1
+	}
+	rec := EventRecord{
+		Step:         s.stepCount,
+		EventType:    EventTypeAcquireLock,
+		LockKey:      key,
+		LockTTLMs:    ttlMs,
+		LockAcquired: a,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	return packAcquireLockResult(acquired, 0)
+}
+
+func (s *execSession) replayAcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64 {
+	if s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		s.stepCount++
+
+		if rec.EventType != EventTypeAcquireLock {
+			return packAcquireLockResult(false, 1)
+		}
+		if rec.Err != "" {
+			return packAcquireLockResult(false, 1)
+		}
+		return packAcquireLockResult(rec.LockAcquired != 0, 0)
+	}
+	s.isReplay = false
+	return s.freshAcquireLock(ctx, m, key, ttlMs)
+}
+
+func (s *execSession) ReleaseLock(ctx context.Context, m api.Module, key string) int64 {
+	if s.isReplay {
+		return s.replayReleaseLock(ctx, m, key)
+	}
+	return s.freshReleaseLock(ctx, m, key)
+}
+
+func (s *execSession) freshReleaseLock(ctx context.Context, m api.Module, key string) int64 {
+	if s.engine.concurrencyKeyStore != nil {
+		err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, key)
+		if err != nil {
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeReleaseLock,
+				LockKey:   key,
+				Err:       err.Error(),
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+			return int64(1)
+		}
+	}
+
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeReleaseLock,
+		LockKey:   key,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	return 0
+}
+
+func (s *execSession) replayReleaseLock(ctx context.Context, m api.Module, key string) int64 {
+	if s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		s.stepCount++
+
+		if rec.EventType != EventTypeReleaseLock {
+			return int64(1)
+		}
+		if rec.Err != "" {
+			return int64(1)
+		}
+		return 0
+	}
+	s.isReplay = false
+	return s.freshReleaseLock(ctx, m, key)
+}
+
 // ---- Result packing helpers ----
 
 func packSleepResult(status byte, durationMs int64) int64 {
@@ -1917,6 +2067,14 @@ func packAwaitPromiseResult(resultLen uint32, timedOut bool, errCode uint16) int
 		toFlag = 1
 	}
 	return int64(uint64(resultLen)<<32 | uint64(toFlag)<<16 | uint64(errCode))
+}
+
+func packAcquireLockResult(acquired bool, errCode uint32) int64 {
+	a := uint32(0)
+	if acquired {
+		a = 1
+	}
+	return int64(uint64(a)<<8 | uint64(errCode))
 }
 
 // isDefinitelyNonRetryable checks if an error should not be retried.

@@ -209,6 +209,8 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		RegisterUpdateHandler:         r.registerUpdateHandler,
 		RunDetached:                   r.runDetached,
 		PluginCall:                   r.pluginCallImpl,
+		AcquireLock:                   r.acquireLockImpl,
+		ReleaseLock:                   r.releaseLockImpl,
 	})
 	return r
 }
@@ -710,6 +712,27 @@ func (r *LocalRunner) AcquireConcurrencyKey(key, workflowID string, ttl time.Dur
 }
 
 // ReleaseConcurrencyKeys releases all concurrency keys held by a workflow.
+func (r *LocalRunner) acquireLockImpl(key string, ttlMs int64) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	workflowID := r.workflowID
+	if existingWFID, ok := r.concurrencyKeys[key]; ok {
+		if existingWFID == workflowID {
+			return true, nil
+		}
+		return false, nil
+	}
+	r.concurrencyKeys[key] = workflowID
+	return true, nil
+}
+
+func (r *LocalRunner) releaseLockImpl(key string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.concurrencyKeys, key)
+	return nil
+}
+
 func (r *LocalRunner) ReleaseConcurrencyKeys(workflowID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

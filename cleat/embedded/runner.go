@@ -212,6 +212,9 @@ type execution struct {
 	// child workflow results
 	childResults map[string]*childResult
 
+		// lock state (in-memory concurrency keys)
+		locks map[string]string
+
 	// cleanup functions (LIFO)
 	deferFuncs []func()
 
@@ -253,6 +256,7 @@ func newExecution(r *Runner, workflowID, inputJSON string) *execution {
 		startTime:    r.now,
 		promises:     make(map[string]*promiseState),
 		childResults: make(map[string]*childResult),
+		locks:        make(map[string]string),
 	}
 }
 
@@ -277,7 +281,30 @@ func (e *execution) hostCalls() cleat.HostCalls {
 		SendSignalAndWait:      e.sendSignalAndWait,
 		ReplyToSignal:          e.replyToSignal,
 		SignalWorkflow:         e.signalWorkflow,
+		AcquireLock:             e.acquireLock,
+		ReleaseLock:            e.releaseLock,
 		})
+}
+
+func (e *execution) acquireLock(key string, ttlMs int64) (bool, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	workflowID := e.wfID
+	if existingWFID, ok := e.locks[key]; ok {
+		if existingWFID == workflowID {
+			return true, nil
+		}
+		return false, nil
+	}
+	e.locks[key] = workflowID
+	return true, nil
+}
+
+func (e *execution) releaseLock(key string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.locks, key)
+	return nil
 }
 
 func (e *execution) workflowID() string {

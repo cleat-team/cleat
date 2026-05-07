@@ -375,6 +375,52 @@ var adapterDefs = map[string]adapterDef{
 				"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
 			},
 		},
+		"AcquireLock": {
+			FieldName:  "AcquireLock",
+			ReturnType: "(bool, error)",
+			Params: []adapterParam{
+				{"key", "string"},
+				{"ttlMs", "int64"},
+			},
+			ResultStmts: []string{
+				"errCode := uint32(result & 0xFF)",
+				"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
+				"if errCode != 0 {",
+				`    return false, fmt.Errorf("cleat_acquire_lock: error code %d", errCode)`,
+				"}",
+				"return acquired, nil",
+			},
+		},
+		"AcquireLockMs": {
+			FieldName:  "AcquireLockMs",
+			ReturnType: "(bool, error)",
+			Params: []adapterParam{
+				{"key", "string"},
+				{"ttlMs", "int64"},
+			},
+			ResultStmts: []string{
+				"errCode := uint32(result & 0xFF)",
+				"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
+				"if errCode != 0 {",
+				`    return false, fmt.Errorf("cleat_acquire_lock: error code %d", errCode)`,
+				"}",
+				"return acquired, nil",
+			},
+		},
+		"ReleaseLock": {
+			FieldName:  "ReleaseLock",
+			ReturnType: "error",
+			Params: []adapterParam{
+				{"key", "string"},
+			},
+			ResultStmts: []string{
+				"errCode := uint32(result & 0xFF)",
+				"if errCode != 0 {",
+				`    return fmt.Errorf("cleat_release_lock: error code %d", errCode)`,
+				"}",
+				"return nil",
+			},
+		},
 		"PluginCallStreaming": {
 			FieldName:  "PluginCallStreaming",
 			ReturnType: "(<-chan cleat.StreamEvent, error)",

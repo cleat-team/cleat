@@ -57,9 +57,13 @@ type HostHandler interface {
 	SetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64
 	GetScope(ctx context.Context, m api.Module, objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen uint32) int64
 	UUID(ctx context.Context, m api.Module, seed string, uuidPtr, uuidMaxLen uint32) int64
+
+	// Lock/concurrency key operations.
+	AcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64
+	ReleaseLock(ctx context.Context, m api.Module, key string) int64
 }
 
-// registerHostFunctions registers all 26 cleat_* imports on the "env" host module.
+// registerHostFunctions registers all cleat_* imports on the "env" host module.
 func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	// cleat_call: (ptr,len x3, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -330,6 +334,24 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		seed := readWasmString(mem, seedPtr, seedLen)
 		return uint64(h.UUID(ctx, m, seed, uuidPtr, uuidMaxLen))
 	}).Export("cleat_uuid")
+
+	// cleat_acquire_lock: (ptr,len, i64) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		keyPtr, keyLen uint32, ttlMs int64) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		key := readWasmString(mem, keyPtr, keyLen)
+		return uint64(h.AcquireLock(ctx, m, key, ttlMs))
+	}).Export("cleat_acquire_lock")
+
+	// cleat_release_lock: (ptr,len) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		keyPtr, keyLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		key := readWasmString(mem, keyPtr, keyLen)
+		return uint64(h.ReleaseLock(ctx, m, key))
+	}).Export("cleat_release_lock")
 }
 
 // nowMs is the global time provider, atomically settable for tests.
