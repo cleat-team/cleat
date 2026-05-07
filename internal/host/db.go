@@ -78,6 +78,16 @@ type WorkflowStore interface {
 	// Uses SELECT ... FOR UPDATE SKIP LOCKED. Filters by namespace.
 	ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error)
 
+	// ClaimWorkflows atomically claims up to limit runnable workflow instances.
+	// Like ClaimWorkflow but batches multiple claims into one query.
+	ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error)
+
+	// ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
+	// that are sticky to this worker. Uses idx_instances_sticky for low-contention
+	// claiming. Returns fewer than limit if not enough sticky workflows are ready.
+	// Callers should fall back to ClaimWorkflows for remaining capacity.
+	ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error)
+
 	// LoadEventHistory returns the full event history for a workflow.
 	LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error)
 
@@ -270,39 +280,116 @@ func (s *PostgresStore) ClaimWorkflow(ctx context.Context, workerID, namespace s
 }
 
 func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
-	var wf WorkflowInstance
-	var nextWakeAt sql.NullTime
+	wfs, err := s.ClaimWorkflows(ctx, workerID, namespace, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(wfs) == 0 {
+		return nil, nil
+	}
+	return wfs[0], nil
+}
 
-	err := s.db.QueryRowContext(ctx, `
+// ClaimWorkflows atomically claims up to limit runnable workflow instances.
+// Like ClaimWorkflow but batches multiple claims into one query.
+func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+	rows, err := s.db.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running',
 		    assigned_to = $1,
 		    heartbeat_at = now()
-		WHERE id = (
+		WHERE id IN (
 			SELECT id FROM workflow_instances
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
 			  AND namespace = $2
 			  AND task_queue = ANY($3)
 			ORDER BY CASE WHEN sticky_worker_id = $1 THEN 0 ELSE 1 END, created_at
-			LIMIT 1
+			LIMIT $4
 			FOR UPDATE SKIP LOCKED
 		)
 		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id
-	`, workerID, namespace, pq.Array(s.taskQueues)).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &wf.TenantID)
+	`, workerID, namespace, pq.Array(s.taskQueues), limit)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows: %w", err)
+	}
+	defer rows.Close()
 
-	if err == sql.ErrNoRows {
+	var wfs []*WorkflowInstance
+	for rows.Next() {
+		var wf WorkflowInstance
+		var nextWakeAt sql.NullTime
+
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+			&wf.AssignedTo, &nextWakeAt, &wf.TenantID); err != nil {
+			return nil, fmt.Errorf("claim workflows scan: %w", err)
+		}
+
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		wfs = append(wfs, &wf)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim workflows rows: %w", err)
+	}
+
+	if len(wfs) == 0 {
 		return nil, nil
 	}
+	return wfs, nil
+}
+
+// ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
+// that are sticky to this worker. Filters on sticky_worker_id to use the
+// idx_instances_sticky partial index for low-contention claiming.
+func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'running',
+		    assigned_to = $1,
+		    heartbeat_at = now()
+		WHERE id IN (
+			SELECT id FROM workflow_instances
+			WHERE status = 'ready'
+			  AND next_wake_at <= now()
+			  AND sticky_worker_id = $1
+			  AND namespace = $2
+			  AND task_queue = ANY($3)
+			ORDER BY created_at
+			LIMIT $4
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id
+	`, workerID, namespace, pq.Array(s.taskQueues), limit)
 	if err != nil {
-		return nil, fmt.Errorf("claim workflow: %w", err)
+		return nil, fmt.Errorf("claim sticky workflows: %w", err)
+	}
+	defer rows.Close()
+
+	var wfs []*WorkflowInstance
+	for rows.Next() {
+		var wf WorkflowInstance
+		var nextWakeAt sql.NullTime
+
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+			&wf.AssignedTo, &nextWakeAt, &wf.TenantID); err != nil {
+			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
+		}
+
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		wfs = append(wfs, &wf)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim sticky workflows rows: %w", err)
 	}
 
-	if nextWakeAt.Valid {
-		wf.NextWakeAt = nextWakeAt.Time
+	if len(wfs) == 0 {
+		return nil, nil
 	}
-	return &wf, nil
+	return wfs, nil
 }
 
 // LoadEventHistory returns all event records for a workflow, ordered by step.

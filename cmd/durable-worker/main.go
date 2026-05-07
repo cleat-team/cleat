@@ -430,6 +430,10 @@ func (w *Worker) Run() {
 func (w *Worker) dispatchLoop() {
 	defer w.wg.Done()
 
+	const maxBatchSize = 20 // cap claims per query to avoid oversized batches
+	idleTicks := 0
+	const maxIdleTicks = 6 // progressive backoff caps at 6 * pollInterval
+
 	for {
 		select {
 		case <-w.ctx.Done():
@@ -437,18 +441,26 @@ func (w *Worker) dispatchLoop() {
 		default:
 		}
 
-		// Limit concurrency.
+		// Count in-flight workflows.
 		count := 0
 		w.inflight.Range(func(_, _ interface{}) bool {
 			count++
 			return true
 		})
-		if count >= w.concurrency {
+
+		free := w.concurrency - count
+		if free <= 0 {
 			time.Sleep(w.pollInterval)
 			continue
 		}
 
-		wf, err := w.store.ClaimWorkflow(w.ctx, w.id, w.namespace)
+		batchSize := free
+		if batchSize > maxBatchSize {
+			batchSize = maxBatchSize
+		}
+
+		// Improvement 2: Try sticky fast-path first (low contention).
+		stickyWfs, err := w.store.ClaimStickyWorkflows(w.ctx, w.id, w.namespace, batchSize)
 		if err != nil {
 			if isConnectionError(err) {
 				w.consecutiveDBErrors++
@@ -456,7 +468,7 @@ func (w *Worker) dispatchLoop() {
 				if backoff > 30*time.Second {
 					backoff = 30 * time.Second
 				}
-				log.Printf("[worker %s] DB unreachable during claim, backing off %v", w.id, backoff)
+				log.Printf("[worker %s] DB unreachable during sticky claim, backing off %v", w.id, backoff)
 				select {
 				case <-w.ctx.Done():
 					return
@@ -464,22 +476,71 @@ func (w *Worker) dispatchLoop() {
 				}
 				continue
 			}
-			log.Printf("[worker %s] claim error: %v", w.id, err)
+			log.Printf("[worker %s] sticky claim error: %v", w.id, err)
 			time.Sleep(time.Second)
 			continue
 		}
 
-		if wf == nil {
-			time.Sleep(w.pollInterval)
+		// Improvement 1: Fill remaining capacity with general batch claim.
+		remaining := batchSize - len(stickyWfs)
+		var generalWfs []*host.WorkflowInstance
+		if remaining > 0 {
+			var err error
+			generalWfs, err = w.store.ClaimWorkflows(w.ctx, w.id, w.namespace, remaining)
+			if err != nil {
+				if isConnectionError(err) {
+					w.consecutiveDBErrors++
+					backoff := time.Duration(w.consecutiveDBErrors) * time.Second
+					if backoff > 30*time.Second {
+						backoff = 30 * time.Second
+					}
+					log.Printf("[worker %s] DB unreachable during claim, backing off %v", w.id, backoff)
+					select {
+					case <-w.ctx.Done():
+						return
+					case <-time.After(backoff):
+					}
+					continue
+				}
+				log.Printf("[worker %s] claim error: %v", w.id, err)
+				time.Sleep(time.Second)
+				continue
+			}
+		}
+
+		// Combine results.
+		wfs := append(stickyWfs, generalWfs...)
+
+		if len(wfs) == 0 {
+			// No work found — progressive backoff.
+			idleTicks++
+			sleep := time.Duration(idleTicks) * w.pollInterval
+			if idleTicks > maxIdleTicks {
+				sleep = maxIdleTicks * w.pollInterval
+			}
+			select {
+			case <-w.ctx.Done():
+				return
+			case <-time.After(sleep):
+			}
 			continue
 		}
 
-		log.Printf("[worker %s] Claimed workflow %s (%s v%d)",
-			w.id, wf.ID, wf.DefName, wf.DefVersion)
+		// Improvement 3: Found work — reset idle counter (coalesced polling).
+		// Don't sleep before the next poll; there may be more work ready.
+		idleTicks = 0
+		w.consecutiveDBErrors = 0 // reset circuit breaker on success
 
-		w.inflight.Store(wf.ID, wf)
-		w.wg.Add(1)
-		go w.executeWorkflow(wf)
+		atomic.AddInt64(&metricsWorkflowsClaimed, int64(len(wfs)))
+
+		for _, wf := range wfs {
+			log.Printf("[worker %s] Claimed workflow %s (%s v%d)",
+				w.id, wf.ID, wf.DefName, wf.DefVersion)
+
+			w.inflight.Store(wf.ID, wf)
+			w.wg.Add(1)
+			go w.executeWorkflow(wf)
+		}
 	}
 }
 

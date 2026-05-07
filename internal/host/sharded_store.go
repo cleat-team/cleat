@@ -141,19 +141,67 @@ func (s *ShardedStore) forEachShard(fn func(*PostgresStore) error) error {
 // ClaimWorkflow polls every shard and returns the first runnable workflow
 // found.  This is the primary dispatch path so we fan-out across all shards.
 func (s *ShardedStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
+	wfs, err := s.ClaimWorkflows(ctx, workerID, namespace, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(wfs) == 0 {
+		return nil, nil
+	}
+	return wfs[0], nil
+}
+
+// ClaimWorkflows claims up to limit runnable workflows across all shards.
+// Iterates through shards collecting workflows until limit is reached or shards exhausted.
+func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
+
+	var all []*WorkflowInstance
+	remaining := limit
 	for _, shard := range shards {
-		wf, err := shard.Store.ClaimWorkflow(ctx, workerID, namespace)
+		wfs, err := shard.Store.ClaimWorkflows(ctx, workerID, namespace, remaining)
 		if err != nil {
 			return nil, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
 		}
-		if wf != nil {
-			return wf, nil
+		all = append(all, wfs...)
+		remaining = limit - len(all)
+		if remaining <= 0 {
+			break
 		}
 	}
-	return nil, nil
+	if len(all) == 0 {
+		return nil, nil
+	}
+	return all, nil
+}
+
+// ClaimStickyWorkflows claims up to limit sticky workflow instances across all shards.
+// Sticky workflows use idx_instances_sticky for low-contention claiming.
+// Iterates through shards collecting workflows until limit is reached or shards exhausted.
+func (s *ShardedStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+
+	var all []*WorkflowInstance
+	remaining := limit
+	for _, shard := range shards {
+		wfs, err := shard.Store.ClaimStickyWorkflows(ctx, workerID, namespace, remaining)
+		if err != nil {
+			return nil, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		all = append(all, wfs...)
+		remaining = limit - len(all)
+		if remaining <= 0 {
+			break
+		}
+	}
+	if len(all) == 0 {
+		return nil, nil
+	}
+	return all, nil
 }
 
 // LoadEventHistory routes by workflow ID.
