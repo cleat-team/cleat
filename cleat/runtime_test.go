@@ -128,13 +128,8 @@ func TestDurableSleepCallsDurableSleepMs(t *testing.T) {
 	}
 }
 
-func TestDurableSleepMsPanicsWhenNotInitialized(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic, got none")
-		}
-	}()
-
+func TestDurableSleepMsReturnsWhenNotInitialized(t *testing.T) {
+	// Should not panic — logs a warning and returns instead.
 	h := NewHostCalls(HostCallsOptions{})
 	h.DurableSleepMs(100)
 }
@@ -297,15 +292,13 @@ func TestNowReturnsTimeFromMilliseconds(t *testing.T) {
 	}
 }
 
-func TestNowMsPanicsWhenNotInitialized(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic, got none")
-		}
-	}()
-
+func TestNowMsReturnsWhenNotInitialized(t *testing.T) {
+	// Should not panic — logs a warning and returns 0 instead.
 	h := NewHostCalls(HostCallsOptions{})
-	h.NowMs()
+	got := h.NowMs()
+	if got != 0 {
+		t.Errorf("expected 0 when not initialized, got %d", got)
+	}
 }
 
 // ---------------------------------------------------------------------------

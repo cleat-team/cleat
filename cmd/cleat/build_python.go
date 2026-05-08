@@ -158,6 +158,11 @@ func detectEntryFunction(pyFile string) (string, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := strings.TrimSpace(stderrBuf.String())
+		// If the Python vet module is not installed, fall back to simple
+		// string scanning so the build still works without the SDK.
+		if strings.Contains(stderr, "No module named") || strings.Contains(stderr, "ModuleNotFoundError") {
+			return detectEntryFunctionFallback(pyFile)
+		}
 		if stderr != "" {
 			return "", fmt.Errorf("in %s: %s", pyFile, stderr)
 		}
@@ -170,6 +175,60 @@ func detectEntryFunction(pyFile string) (string, error) {
 	}
 
 	return name, nil
+}
+
+// detectEntryFunctionFallback scans a .py file for a @cleat_entry decorated
+// function using simple string scanning. Used when the Python SDK vet module
+// is not available.
+func detectEntryFunctionFallback(pyFile string) (string, error) {
+	data, err := os.ReadFile(pyFile)
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", pyFile, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip commented-out decorators.
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "@cleat_entry") {
+			for j := i + 1; j < len(lines); j++ {
+				next := strings.TrimSpace(lines[j])
+				if next == "" || strings.HasPrefix(next, "#") {
+					continue
+				}
+				// Skip continuation lines (decorator args spanning multiple lines).
+				if strings.HasPrefix(next, "(") || strings.HasPrefix(next, "\"") || strings.HasPrefix(next, "'") {
+					continue
+				}
+				if strings.HasPrefix(next, "def ") {
+					defPart := strings.TrimPrefix(next, "def ")
+					parenIdx := strings.Index(defPart, "(")
+					if parenIdx > 0 {
+						return defPart[:parenIdx], nil
+					}
+					return "", fmt.Errorf("malformed function definition at line %d: %s", j+1, next)
+				}
+				if strings.HasPrefix(next, "async def ") {
+					defPart := strings.TrimPrefix(next, "async def ")
+					parenIdx := strings.Index(defPart, "(")
+					name := defPart
+					if parenIdx > 0 {
+						name = defPart[:parenIdx]
+					}
+					return "", fmt.Errorf("'%s' in %s is an async function (line %d). Async functions cannot be compiled to WASM. Use cleat's synchronous durable execution model instead.", name, pyFile, j+1)
+				}
+				// Not a function definition — keep looking past decorator args.
+				if !strings.HasPrefix(next, "@") {
+					break
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no @cleat_entry decorated function found in %s", pyFile)
 }
 
 // findPythonSDKDir locates the python-sdk directory for invoking Python

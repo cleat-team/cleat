@@ -1,0 +1,15 @@
+{
+  "name": "widget-store-as",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "npx asc assembly/workflows.ts --runtime stub --optimize --initialMemory 170 -o dist/workflow.wasm --transform ./node_modules/@cleat/transform/index.js",
+    "build:direct": "npx asc assembly/workflows.ts --runtime stub --optimize --initialMemory 170 -o dist/workflow.wasm --transform json-as/transform"
+  },
+  "devDependencies": {
+    "@cleat/sdk": "file:../../packages/cleat-as",
+    "@cleat/transform": "file:../../packages/cleat-as/transform",
+    "assemblyscript": "^0.27.0",
+    "json-as": "^1.3.4"
+  }
+}

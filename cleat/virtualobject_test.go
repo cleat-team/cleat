@@ -28,34 +28,31 @@ func TestRegisterVirtualObject_Valid(t *testing.T) {
 	}
 }
 
-func TestRegisterVirtualObject_EmptyNamePanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for empty name, got nil")
-		}
-	}()
-
-	RegisterVirtualObject(VirtualObjectDef{Name: ""})
+func TestRegisterVirtualObject_EmptyNameError(t *testing.T) {
+	err := RegisterVirtualObject(VirtualObjectDef{Name: ""})
+	if err == nil {
+		t.Fatal("expected error for empty name, got nil")
+	}
 }
 
-func TestRegisterVirtualObject_DuplicateNamePanics(t *testing.T) {
+func TestRegisterVirtualObject_DuplicateNameError(t *testing.T) {
 	name := "test-vo-duplicate"
 
-	RegisterVirtualObject(VirtualObjectDef{
+	err := RegisterVirtualObject(VirtualObjectDef{
 		Name:        name,
 		EntryPoint:  func(h HostCalls, input string) (string, error) { return "{}", nil },
 	})
+	if err != nil {
+		t.Fatalf("first registration should succeed, got: %v", err)
+	}
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic for duplicate name, got nil")
-		}
-	}()
-
-	RegisterVirtualObject(VirtualObjectDef{
+	err = RegisterVirtualObject(VirtualObjectDef{
 		Name:        name,
 		EntryPoint:  func(h HostCalls, input string) (string, error) { return "{}", nil },
 	})
+	if err == nil {
+		t.Fatal("expected error for duplicate name, got nil")
+	}
 }
 
 func TestGetVirtualObject_NonexistentReturnsFalse(t *testing.T) {
