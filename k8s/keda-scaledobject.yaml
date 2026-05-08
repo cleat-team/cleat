@@ -1,0 +1,32 @@
+# KEDA ScaledObject for memory-pressure-driven auto-scaling.
+#
+# The cleat_scaling_pressure metric only rises when BOTH:
+#   1. The worker is under memory pressure (concurrency throttled).
+#   2. There is a backlog of ready workflows in the task queue.
+#
+# This catches cases that CPU-based auto-scalers miss.
+#
+# Requires: KEDA (keda.sh) installed, Prometheus metrics scraped.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: cleat-worker-scaler
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cleat-worker
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  cooldownPeriod: 300
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local:9090
+        metricName: cleat_scaling_pressure
+        query: |
+          avg(cleat_scaling_pressure{
+            namespace="default"
+          })
+        threshold: "0.3"
+        activationThreshold: "0.1"

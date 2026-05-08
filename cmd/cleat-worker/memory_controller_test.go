@@ -58,15 +58,14 @@ func TestController_SoftPressure(t *testing.T) {
 	}
 }
 
-func TestController_ScalingPressure(t *testing.T) {
+func TestController_ScalingPressure_EmptyQueue(t *testing.T) {
 	mc := newTestController(newTestMonitor(), 10, 0.80, 0.95)
 	mc.monitor.readFn = func() (MemoryInfo, error) {
 		return MemoryInfo{TotalBytes: 1000000, UsedBytes: 875000, AvailableBytes: 125000, Source: "test", CollectedAt: time.Now()}, nil
 	}
 	mc.Tick(context.Background())
-	sp := mc.State().ScalingPressure
-	if sp < 0.4 || sp > 0.6 {
-		t.Errorf("expected ~0.5 scaling pressure, got %f", sp)
+	if mc.State().ScalingPressure != 0.0 {
+		t.Errorf("expected 0 scaling pressure with empty queue, got %f", mc.State().ScalingPressure)
 	}
 }
 
