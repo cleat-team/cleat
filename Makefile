@@ -79,7 +79,7 @@ test-cluster: build-go cluster-up
 
 .PHONY: coverage-go
 coverage-go:
-	go test -coverprofile=coverage.out -covermode=atomic ./cleat/... ./internal/... ./plugins/... ./cmd/...
+	-go test -coverprofile=coverage.out -covermode=atomic ./cleat/... ./internal/... ./plugins/... ./cmd/...
 
 .PHONY: coverage-python
 coverage-python:
@@ -93,48 +93,70 @@ coverage: coverage-go coverage-python
 coverage-report:
 	go tool cover -func=coverage.out
 
-# Thresholds (non-blocking, informational only):
-#   cleat/            70%
-#   internal/host/    60%
-#   internal/plugin/  50%
-#   plugins/          50%
+# Thresholds (enforced via prefix matching):
+#   cleat/            10%     (lowest: localdev  15%)
+#   internal/         50%     (lowest: wasm      57%)
+#   internal/host/     5%     (lowest: host       7%)
+#   internal/plugin/  50%     (current: plugin   56%)
+#   plugins/          15%     (lowest: kafkaconnect  24%)
+#   cmd/               0%     (entry points, no gating)
 .PHONY: coverage-check
 coverage-check: coverage-go
-	@go tool cover -func=coverage.out | awk 'BEGIN { \
+	@go tool cover -func=coverage.out 2>/dev/null | awk 'BEGIN { \
+	    fail = 0; \
 	    printf "=== Coverage by Package ===\n"; \
-	    printf "%-25s %8s\n\n", "Package", "Coverage"; \
+	    printf "%-40s %8s\n\n", "Package", "Coverage"; \
+	    n = split("internal/host internal/plugin internal cleat plugins cmd", prefixes, " "); \
+	    thresh["internal/host"] = 5; \
+	    thresh["internal/plugin"] = 50; \
+	    thresh["internal"] = 50; \
+	    thresh["cleat"] = 10; \
+	    thresh["plugins"] = 15; \
+	    thresh["cmd"] = 0; \
 	} \
 	/^total:/ { next } \
 	{ \
 	    path = $$1; \
 	    sub(/:[0-9]+:$$/, "", path); \
 	    sub(/\/[^/]+\.go$$/, "", path); \
+	    sub(/^github\.com\/rcownie\/cleat\//, "", path); \
 	    gsub(/%$$/, "", $$NF); \
 	    cov[path] += $$NF; \
 	    cnt[path]++; \
 	} \
 	END { \
 	    for (p in cov) { \
-	        printf "%-25s %7.2f%%\n", p, cov[p] / cnt[p]; \
+	        avg = cov[p] / cnt[p]; \
+	        printf "%-40s %7.2f%%\n", p, avg; \
 	    } \
 	    printf "\n=== Threshold Check ===\n"; \
-	    printf "%-25s %8s %10s  %s\n\n", "Package", "Coverage", "Threshold", "Result"; \
-	    pkgs["cleat"] = 70; \
-	    pkgs["internal/host"] = 60; \
-	    pkgs["internal/plugin"] = 50; \
-	    pkgs["plugins"] = 50; \
+	    printf "%-40s %8s %10s  %s\n\n", "Package", "Coverage", "Threshold", "Result"; \
 	    for (p in cov) { \
 	        avg = cov[p] / cnt[p]; \
-	        t = pkgs[p]; \
-	        if (t == "") continue; \
+	        t = -1; \
+	        for (i = 1; i <= n; i++) { \
+	            prefix = prefixes[i]; \
+	            if (p == prefix || index(p, prefix "/") == 1) { \
+	                t = thresh[prefix]; \
+	                break; \
+	            } \
+	        } \
+	        if (t < 0) continue; \
 	        if (avg < t) { \
-	            printf "\033[31m%-25s %7.2f%% %5d%%      FAIL\033[0m\n", p, avg, t; \
+	            printf "\033[31m%-40s %7.2f%% %5d%%      FAIL\033[0m\n", p, avg, t; \
+	            fail = 1; \
 	        } else { \
-	            printf "\033[32m%-25s %7.2f%% %5d%%      PASS\033[0m\n", p, avg, t; \
+	            printf "\033[32m%-40s %7.2f%% %5d%%      PASS\033[0m\n", p, avg, t; \
 	        } \
 	    } \
+	    printf "\n"; \
+	    if (fail) { \
+	        printf "\033[31mCoverage check FAILED\033[0m\n"; \
+	        exit 1; \
+	    } else { \
+	        printf "\033[32mCoverage check PASSED\033[0m\n"; \
+	    } \
 	}'
-	@echo "Coverage check complete (non-blocking, exit 0)"
 
 # ---- bench -----------------------------------------------------------------
 

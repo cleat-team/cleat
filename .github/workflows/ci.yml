@@ -420,8 +420,8 @@ jobs:
           pip install --upgrade pip
           pip install ".[dev]"
 
-      - name: Run Go coverage
-        run: make coverage-go
+      - name: Run Go coverage check
+        run: make coverage-check
 
       - name: Run Python coverage
         run: make coverage-python
