@@ -44,6 +44,9 @@ type fakeDBStore struct {
 	apiKeys   map[string]string                     // key_hash -> tenant_id
 	kafkaCfgs map[string]*fakeKafkaConfigRow        // "tenant:id" -> row
 	now       func() time.Time
+	failNextExec  bool                              // if true, next ExecContext returns error
+	failNextQuery bool                              // if true, next QueryContext returns error
+	querySkip     int                               // number of queries to let succeed before failNextQuery takes effect
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -164,6 +167,11 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
 
+	if c.store.failNextExec {
+		c.store.failNextExec = false
+		return nil, fmt.Errorf("simulated exec error")
+	}
+
 	switch {
 	case strings.Contains(query, "INSERT INTO kafka_config"):
 		return c.execInsertKafkaConfig(args)
@@ -248,12 +256,30 @@ func (c *fakeConn) execDeleteKafkaConfig(args []driver.NamedValue) (driver.Resul
 // ---------------------------------------------------------------------------
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	// Check fail flag briefly under write lock, then proceed with read lock.
+	c.store.mu.Lock()
+	failed := c.store.failNextQuery
+	if failed && c.store.querySkip > 0 {
+		c.store.querySkip--
+		failed = false
+	}
+	if failed {
+		c.store.failNextQuery = false
+	}
+	c.store.mu.Unlock()
+
+	if failed {
+		return nil, fmt.Errorf("simulated query error")
+	}
+
 	c.store.mu.RLock()
 	defer c.store.mu.RUnlock()
 
 	switch {
 	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
 		return c.queryTenantByKeyHash(args)
+	case strings.Contains(query, "COALESCE(event_type"):
+		return c.queryPollConfigs()
 	case strings.Contains(query, "FROM kafka_config") && strings.Contains(query, "enabled = true"):
 		return c.queryKafkaConfigByID(args)
 	case strings.Contains(query, "FROM kafka_config") && strings.Contains(query, "ORDER BY"):
@@ -322,6 +348,36 @@ func (c *fakeConn) queryKafkaConfigList(args []driver.NamedValue) (driver.Rows, 
 		})
 	}
 
+	return &fakeRows{columns: columns, data: data}, nil
+}
+
+// queryPollConfigs handles the pollConfigs query:
+//
+//	SELECT id, tenant_id, name, brokers, topic, consumer_group, COALESCE(event_type, topic)
+//	FROM kafka_config
+//	WHERE enabled = true
+//	ORDER BY tenant_id, created_at DESC
+func (c *fakeConn) queryPollConfigs() (driver.Rows, error) {
+	columns := []string{"id", "tenant_id", "name", "brokers", "topic", "consumer_group", "event_type"}
+	var data [][]driver.Value
+	for _, row := range c.store.kafkaCfgs {
+		if !row.enabled {
+			continue
+		}
+		eventType := row.eventType
+		if eventType == "" {
+			eventType = row.topic
+		}
+		data = append(data, []driver.Value{
+			row.id,
+			row.tenantID,
+			row.name,
+			row.brokers,
+			row.topic,
+			row.consumerGroup,
+			eventType,
+		})
+	}
 	return &fakeRows{columns: columns, data: data}, nil
 }
 
@@ -992,10 +1048,261 @@ func TestKafkaRegisterHostFunctions_NilRegistry(t *testing.T) {
 
 // fakeFuncRegistry is a test stub for plugin.FuncRegistry.
 type fakeFuncRegistry struct {
-	funcs map[string]plugin.PluginFunc
+	funcs       map[string]plugin.PluginFunc
+	registerErr error // if set, Register returns this error
 }
 
 func (r *fakeFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	if r.registerErr != nil {
+		return r.registerErr
+	}
 	r.funcs[opts.Name] = fn
 	return nil
+}
+
+func TestKafkaRegisterHostFunctions_RegistryError(t *testing.T) {
+	p := &Plugin{}
+	reg := &fakeFuncRegistry{
+		funcs:       map[string]plugin.PluginFunc{},
+		registerErr: fmt.Errorf("registry full"),
+	}
+	err := p.RegisterHostFunctions(reg)
+	if err == nil {
+		t.Fatal("expected error from registry, got nil")
+	}
+	if !strings.Contains(err.Error(), "registry full") {
+		t.Errorf("expected error containing 'registry full', got: %v", err)
+	}
+}
+
+// ===========================================================================
+// Init — with Logger preset
+// ===========================================================================
+
+func TestKafkaInitWithLogger(t *testing.T) {
+	p := &Plugin{}
+	customLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	env := &plugin.Environment{
+		Logger: customLogger,
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if p.logger != customLogger {
+		t.Error("expected logger to be preserved from environment")
+	}
+}
+
+// ===========================================================================
+// Background Run — context cancellation
+// ===========================================================================
+
+func TestKafkaRunContextCancelled(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() should return nil on context cancellation, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// pollConfigs with enabled config and no REST proxy
+// ===========================================================================
+
+func TestKafkaPollConfigsNoProxy(t *testing.T) {
+	p, _, store := setupTestPlugin(t)
+
+	// Insert an enabled config.
+	cfgID := uuid.New().String()
+	store.mu.Lock()
+	store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
+		tenantID:      testTenantStr,
+		id:            cfgID,
+		name:          "poll-test-config",
+		brokers:       "broker:9092",
+		topic:         "poll-test-topic",
+		consumerGroup: "cleat-consumer",
+		eventType:     "poll-test-topic",
+		enabled:       true,
+		createdAt:     time.Now(),
+		updatedAt:     time.Now(),
+	}
+	store.mu.Unlock()
+
+	// pollConfigs should query enabled configs and skip consumption since no REST proxy is configured.
+	err := p.pollConfigs(context.Background())
+	if err != nil {
+		t.Fatalf("pollConfigs: %v", err)
+	}
+}
+
+// ===========================================================================
+// consumeViaRestProxy — full chain with mock HTTP
+// ===========================================================================
+
+func TestKafkaConsumeViaRestProxy(t *testing.T) {
+	var proxySrv *httptest.Server
+	proxySrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.Contains(r.URL.Path, "/consumers/"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{
+				"instance_id": "test-instance",
+				"base_uri":    proxySrv.URL + "/consumers/test-instance",
+			})
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/subscription"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/records"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode([]map[string]interface{}{
+				{"topic": "test-topic", "key": nil, "value": "hello", "partition": 0, "offset": int64(1)},
+			})
+		case r.Method == "DELETE":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer proxySrv.Close()
+
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+		config: Config{RestProxyURL: proxySrv.URL},
+	}
+
+	c := configRow{
+		ID:            uuid.New(),
+		TenantID:      testTenantID,
+		Name:          "test-config",
+		Brokers:       "broker:9092",
+		Topic:         "test-topic",
+		ConsumerGroup: "cleat-consumer",
+		EventType:     "test-topic",
+	}
+
+	records, err := p.consumeViaRestProxy(context.Background(), c)
+	if err != nil {
+		t.Fatalf("consumeViaRestProxy: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].Topic != "test-topic" {
+		t.Errorf("expected topic 'test-topic', got %q", records[0].Topic)
+	}
+	if records[0].Value != "hello" {
+		t.Errorf("expected value 'hello', got %v", records[0].Value)
+	}
+}
+
+// ===========================================================================
+// produceViaRestProxy — non-success HTTP response
+// ===========================================================================
+
+func TestKafkaProduceViaRestProxyNonSuccess(t *testing.T) {
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error_code":500,"message":"Internal Server Error"}`))
+	}))
+	defer proxySrv.Close()
+
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	cfgID := uuid.New()
+	store.mu.Lock()
+	store.kafkaCfgs[testTenantStr+":"+cfgID.String()] = &fakeKafkaConfigRow{
+		tenantID:      testTenantStr,
+		id:            cfgID.String(),
+		brokers:       "broker:9092",
+		topic:         "error-topic",
+		consumerGroup: "cleat-consumer",
+		eventType:     "error-topic",
+		enabled:       true,
+	}
+	store.mu.Unlock()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.Default(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+		config: Config{RestProxyURL: proxySrv.URL},
+	}
+
+	input := `{"config_id":"` + cfgID.String() + `","value":"test"}`
+	_, err := p.produce(withCallContext(context.Background()), input)
+	if err == nil {
+		t.Fatal("expected error for REST proxy non-200, got nil")
+	}
+	if !strings.Contains(err.Error(), "rest proxy returned") {
+		t.Errorf("expected error containing 'rest proxy returned', got: %v", err)
+	}
+}
+
+// ===========================================================================
+// Route handler — DB exec error on create
+// ===========================================================================
+
+func TestKafkaCreateConfigExecError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	store.failNextExec = true
+
+	body := `{"name":"test","brokers":"broker:9092","topic":"test-topic"}`
+	req := authedRequest("POST", "/kafka/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB exec error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Route handler — DB query error on list
+// ===========================================================================
+
+func TestKafkaListConfigsQueryError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Auth middleware does one query; skip it, then fail the handler query.
+	store.failNextQuery = true
+	store.querySkip = 1
+
+	req := authedRequest("GET", "/kafka/configs", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB query error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Route handler — DB exec error on delete
+// ===========================================================================
+
+func TestKafkaDeleteConfigExecError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	store.failNextExec = true
+
+	req := authedRequest("DELETE", "/kafka/configs/00000000-0000-0000-0000-000000000001", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB exec error, got %d: %s", rec.Code, rec.Body.String())
+	}
 }

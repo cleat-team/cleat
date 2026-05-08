@@ -876,3 +876,168 @@ func TestCompactWorkflowHistory_DefersInState(t *testing.T) {
 		t.Errorf("expected 2 pending defers in state, got %d", len(cs.PendingDefers))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Compaction edge cases
+// ---------------------------------------------------------------------------
+
+// TestCompactionWithOpenChildrenRoundTrip verifies that a workflow with child
+// workflows still running survives a compaction round-trip correctly. The
+// compaction state should track open children and reconstruct them faithfully.
+func TestCompactionWithOpenChildrenRoundTrip(t *testing.T) {
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeChildWorkflow, ChildName: "child-a", ChildInput: `{"x":1}`, RunID: "run-a"},
+		{Step: 1, EventType: EventTypeChildWorkflow, ChildName: "child-b", ChildInput: `{"y":2}`, RunID: "run-b"},
+		{Step: 2, EventType: EventTypeAwaitChild, RunID: "run-a", Response: `{"ok":true}`},
+		// child-b is still open (no await or await_all for run-b)
+	}
+
+	cs := extractCompactionState(events)
+	if len(cs.OpenChildren) != 1 {
+		t.Fatalf("expected 1 open child (child-b), got %d", len(cs.OpenChildren))
+	}
+	if cs.OpenChildren[0].RunID != "run-b" {
+		t.Errorf("expected open child run-b, got %s", cs.OpenChildren[0].RunID)
+	}
+	if cs.OpenChildren[0].Name != "child-b" {
+		t.Errorf("expected open child name child-b, got %s", cs.OpenChildren[0].Name)
+	}
+
+	// Round-trip through buildFullHistoryFromCompaction.
+	tail := []EventRecord{
+		{Step: 3, EventType: EventTypeCall, Service: "svc", Op: "continue"},
+	}
+	reconstructed := buildFullHistoryFromCompaction(tail, cs)
+	if len(reconstructed) != len(events)+len(tail) {
+		t.Fatalf("expected %d events, got %d", len(events)+len(tail), len(reconstructed))
+	}
+
+	// Verify the child workflow events survived.
+	for i, ev := range events {
+		if !eventFieldsMatch(ev, reconstructed[i]) {
+			t.Errorf("event %d (%s) round-trip mismatch", i, ev.EventType)
+			dumpEventDiff(t, ev, reconstructed[i])
+		}
+	}
+}
+
+// TestCompactionWithPendingSignals verifies that signal_received events in
+// the compacted portion of history are correctly preserved through compaction.
+// Signals delivered before the compaction point should be available on replay.
+func TestCompactionWithPendingSignals(t *testing.T) {
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: "payment,approval", TimeoutMs: 30000},
+		{Step: 1, EventType: EventTypeSignalReceived, SignalName: "payment", SignalPayload: `{"paid":true,"amount":5000}`},
+		{Step: 2, EventType: EventTypeAwaitSignals, SignalNames: "approval", TimeoutMs: 60000},
+	}
+
+	cs := extractCompactionState(events)
+	reconstructed := buildFullHistoryFromCompaction(nil, cs)
+
+	if len(reconstructed) != len(events) {
+		t.Fatalf("expected %d reconstructed events, got %d", len(events), len(reconstructed))
+	}
+
+	// Verify signal events survived round-trip.
+	if reconstructed[0].EventType != EventTypeAwaitSignals {
+		t.Errorf("expected await_signals at [0], got %s", reconstructed[0].EventType)
+	}
+	if reconstructed[0].SignalNames != "payment,approval" {
+		t.Errorf("expected SignalNames='payment,approval', got %q", reconstructed[0].SignalNames)
+	}
+	if reconstructed[1].EventType != EventTypeSignalReceived {
+		t.Errorf("expected signal_received at [1], got %s", reconstructed[1].EventType)
+	}
+	if reconstructed[1].SignalName != "payment" {
+		t.Errorf("expected SignalName='payment', got %q", reconstructed[1].SignalName)
+	}
+	if reconstructed[1].SignalPayload != `{"paid":true,"amount":5000}` {
+		t.Errorf("expected SignalPayload with payment data, got %q", reconstructed[1].SignalPayload)
+	}
+	if reconstructed[2].EventType != EventTypeAwaitSignals {
+		t.Errorf("expected await_signals at [2], got %s", reconstructed[2].EventType)
+	}
+}
+
+// TestCompactionThresholdBoundaryExact verifies that exactly threshold events
+// are NOT compacted, confirming the boundary condition in CompactWorkflowHistory.
+func TestCompactionThresholdBoundaryExact(t *testing.T) {
+	// Exactly 10 events with threshold=10 should NOT compact.
+	threshold := 10
+	events := make([]EventRecord, threshold)
+	for i := 0; i < threshold; i++ {
+		events[i] = EventRecord{
+			Step: i, EventType: EventTypeCall,
+			Service: "svc", Op: fmt.Sprintf("op%d", i),
+			Request: `{}`, Response: fmt.Sprintf(`{"step":%d}`, i),
+		}
+	}
+
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-boundary", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 0 {
+		t.Errorf("expected 0 compactions at exact threshold (%d events, threshold=%d), got %d",
+			len(events), threshold, store.compactCount)
+	}
+}
+
+// TestCompactionThresholdBoundaryPlusOne verifies that threshold+1 events
+// triggers compaction (boundary + 1).
+func TestCompactionThresholdBoundaryPlusOne(t *testing.T) {
+	threshold := 10
+	events := make([]EventRecord, threshold+1)
+	for i := 0; i < threshold+1; i++ {
+		events[i] = EventRecord{
+			Step: i, EventType: EventTypeCall,
+			Service: "svc", Op: fmt.Sprintf("op%d", i),
+		}
+	}
+
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-boundary-plus", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Errorf("expected 1 compaction for threshold+1 events (%d events, threshold=%d), got %d",
+			len(events), threshold, store.compactCount)
+	}
+	// keepStep = (threshold+1) - threshold/2 = 11 - 5 = 6
+	expectedKeepStep := (threshold + 1) - threshold/2
+	if store.keepStep != expectedKeepStep {
+		t.Errorf("expected keepStep=%d, got %d", expectedKeepStep, store.keepStep)
+	}
+}
+
+// TestCompactionThresholdBoundaryLargeThreshold verifies compaction behavior
+// with a large threshold to ensure the threshold/2 computation is correct.
+func TestCompactionThresholdBoundaryLargeThreshold(t *testing.T) {
+	threshold := 1000
+	events := make([]EventRecord, threshold+100) // 1100 > 1000 → should compact
+	for i := 0; i < threshold+100; i++ {
+		events[i] = EventRecord{
+			Step: i, EventType: EventTypeCall,
+			Service: "svc", Op: fmt.Sprintf("op%d", i),
+		}
+	}
+
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-large", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+	// keepStep = 1100 - 500 = 600
+	expectedKeepStep := len(events) - threshold/2
+	if store.keepStep != expectedKeepStep {
+		t.Errorf("expected keepStep=%d, got %d", expectedKeepStep, store.keepStep)
+	}
+	if len(store.compactState) == 0 {
+		t.Fatal("expected non-empty compaction state")
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tetratelabs/wazero/api"
+
 	"github.com/rcownie/cleat/internal/host/testutil"
 )
 
@@ -573,5 +575,285 @@ func TestConcurrencyKeyReleaseOnFail(t *testing.T) {
 	}
 	if !acquired {
 		t.Fatal("expected acquire to succeed after FailWorkflow released keys")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency key edge cases (mock store, no DB)
+// ---------------------------------------------------------------------------
+
+// TestConcurrencyKeyAlreadyHeldBySameWorkflow verifies that a workflow can
+// re-acquire a concurrency key it already holds (idempotent re-acquisition).
+func TestConcurrencyKeyAlreadyHeldBySameWorkflow(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	cks := newMockConcurrencyKeyStore()
+
+	// First acquire should succeed.
+	session := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:    make([]EventRecord, 0),
+		workflowID: "wf-same-key",
+	}
+	result1 := session.freshAcquireLock(ctx, mod, "same-key", 30000)
+	acquired1 := ((result1 >> 8) & 0xFF) != 0
+	if !acquired1 {
+		t.Fatal("first acquire should succeed")
+	}
+
+	// Second acquire with the same workflow and same key should succeed
+	// (re-acquisition by the same workflow is allowed).
+	result2 := session.freshAcquireLock(ctx, mod, "same-key", 30000)
+	acquired2 := ((result2 >> 8) & 0xFF) != 0
+	if !acquired2 {
+		t.Error("re-acquire by same workflow should succeed")
+	}
+	if len(session.history) != 2 {
+		t.Errorf("expected 2 history entries (2 acquires), got %d", len(session.history))
+	}
+	// Both history entries should show acquired.
+	for i, rec := range session.history {
+		if rec.LockAcquired != 1 {
+			t.Errorf("history[%d]: expected LockAcquired=1, got %d", i, rec.LockAcquired)
+		}
+	}
+}
+
+// TestAcquireConcurrencyKeyDifferentWorkflowBlocked verifies that when one
+// workflow holds a key, a different workflow cannot acquire it.
+func TestAcquireConcurrencyKeyDifferentWorkflowBlocked(t *testing.T) {
+	ctx := context.Background()
+
+	cks := newMockConcurrencyKeyStore()
+
+	// Use engine-level AcquireConcurrencyKey on the store directly.
+	key := "test-key-blocked"
+	wf1 := "wf-blocker"
+	wf2 := "wf-blocked"
+
+	// Workflow 1 acquires the key.
+	acquired, err := cks.AcquireConcurrencyKey(ctx, key, wf1, 30*time.Second)
+	if err != nil {
+		t.Fatalf("wf1 acquire: %v", err)
+	}
+	if !acquired {
+		t.Fatal("wf1 should acquire the key")
+	}
+
+	// Workflow 2 tries to acquire the same key — should be blocked.
+	acquired, err = cks.AcquireConcurrencyKey(ctx, key, wf2, 30*time.Second)
+	if err != nil {
+		t.Fatalf("wf2 acquire: %v", err)
+	}
+	if acquired {
+		t.Error("wf2 should NOT acquire the key (wf1 holds it)")
+	}
+}
+
+// TestReleaseConcurrencyKeyNonExistent verifies that releasing a concurrency
+// key that was never acquired does not return an error (idempotent release).
+func TestReleaseConcurrencyKeyNonExistent(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	cks := newMockConcurrencyKeyStore()
+
+	// Releasing a key that was never acquired should not error.
+	session := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history: make([]EventRecord, 0),
+	}
+
+	// Direct store-level call — should succeed.
+	err = cks.ReleaseConcurrencyKey(ctx, "non-existent-key")
+	if err != nil {
+		t.Errorf("releasing non-existent key should succeed, got: %v", err)
+	}
+
+	// execSession-level call — should succeed.
+	result := session.freshReleaseLock(ctx, mod, "non-existent-key")
+	if result != 0 {
+		t.Errorf("freshReleaseLock for non-existent key should return 0, got %d", result)
+	}
+
+	// Verify event was recorded.
+	if len(session.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(session.history))
+	}
+	if session.history[0].EventType != EventTypeReleaseLock {
+		t.Errorf("expected ReleaseLock event, got %s", session.history[0].EventType)
+	}
+}
+
+// TestConcurrencyKeyTimeoutExpiration verifies that a concurrency key with
+// a very short TTL is released automatically after expiry, allowing another
+// workflow to acquire it without manual release.
+func TestConcurrencyKeyTimeoutExpiration(t *testing.T) {
+	ctx := context.Background()
+
+	cks := newMockConcurrencyKeyStore()
+
+	key := "expiry-key"
+	wf1 := "wf-expirer"
+	wf2 := "wf-acquirer"
+
+	// Acquire with a very short TTL (10ms) — expires almost immediately.
+	acquired, err := cks.AcquireConcurrencyKey(ctx, key, wf1, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("wf1 acquire: %v", err)
+	}
+	if !acquired {
+		t.Fatal("wf1 should acquire the key initially")
+	}
+
+	// Wait for TTL to expire.
+	time.Sleep(20 * time.Millisecond)
+
+	// Now wf2 should be able to acquire (AcquireConcurrencyKey cleans expired keys).
+	acquired, err = cks.AcquireConcurrencyKey(ctx, key, wf2, 30*time.Second)
+	if err != nil {
+		t.Fatalf("wf2 acquire after expiry: %v", err)
+	}
+	if !acquired {
+		t.Error("wf2 should acquire the key after TTL expiry")
+	}
+}
+
+// TestConcurrencyKeySessionsReleaseLock verifies that session-level
+// freshReleaseLock releases the key allowing another session to acquire it.
+func TestConcurrencyKeySessionsReleaseLock(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	cks := newMockConcurrencyKeyStore()
+
+	key := "session-key"
+	wf1 := "wf-session-1"
+	wf2 := "wf-session-2"
+
+	session1 := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+			workflowID:         wf1,
+		},
+		history:    make([]EventRecord, 0),
+		workflowID: wf1,
+	}
+
+	// Session 1 acquires the key.
+	result1 := session1.freshAcquireLock(ctx, mod, key, 30000)
+	acquired1 := ((result1 >> 8) & 0xFF) != 0
+	if !acquired1 {
+		t.Fatal("session1 should acquire the key")
+	}
+
+	// Session 2 tries — should be blocked.
+	result2 := session2AcquireLock(ctx, mod, cks, wf2, key)
+	acquired2 := ((result2 >> 8) & 0xFF) != 0
+	if acquired2 {
+		t.Fatal("session2 should be blocked before release")
+	}
+
+	// Session 1 releases the lock.
+	releaseResult := session1.freshReleaseLock(ctx, mod, key)
+	if releaseResult != 0 {
+		t.Errorf("expected successful release (0), got %d", releaseResult)
+	}
+
+	// Session 2 tries again — should now acquire.
+	_ = result2 // re-use variable
+	session2 := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+			workflowID:         wf2,
+		},
+		history:    make([]EventRecord, 0),
+		workflowID: wf2,
+	}
+	result3 := session2.freshAcquireLock(ctx, mod, key, 30000)
+	acquired3 := ((result3 >> 8) & 0xFF) != 0
+	if !acquired3 {
+		t.Error("session2 should acquire after session1 releases")
+	}
+}
+
+// session2AcquireLock is a helper to test concurrency key blocking.
+func session2AcquireLock(ctx context.Context, mod api.Module, cks *mockConcurrencyKeyStore, wfID, key string) int64 {
+	session := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+			workflowID:         wfID,
+		},
+		history:    make([]EventRecord, 0),
+		workflowID: wfID,
+	}
+	return session.freshAcquireLock(ctx, mod, key, 30000)
+}
+
+// TestConcurrencyKeyReplayAcquireAlreadyHeld verifies that replaying an
+// AcquireLock with an already-held key correctly returns the recorded state.
+func TestConcurrencyKeyReplayAcquireAlreadyHeld(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	cks := newMockConcurrencyKeyStore()
+
+	// Session 1 acquires and records a history entry.
+	session1 := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:    make([]EventRecord, 0),
+		workflowID: "wf-replay-acquire",
+	}
+	_ = session1.freshAcquireLock(ctx, mod, "replay-key", 30000)
+
+	// Replay session with the recorded history.
+	// On replay, the lock state from history should be returned.
+	replaySession := &execSession{
+		engine:   &Engine{caller: &mockCaller{}},
+		history:  session1.history,
+		isReplay: true,
+	}
+
+	result := replaySession.replayAcquireLock(ctx, mod, "replay-key", 30000)
+	acquired := ((result >> 8) & 0xFF) != 0
+	errCode := byte(result & 0xFF)
+	if errCode != 0 {
+		t.Fatalf("replay acquire: unexpected errCode=%d", errCode)
+	}
+	if !acquired {
+		t.Error("replay acquire should return acquired=true from history")
 	}
 }

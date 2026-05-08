@@ -50,6 +50,9 @@ type fakeJobQueueStore struct {
 	rows    map[string]*jqRow // "tenantID:queueName:jobID" -> row
 	apiKeys map[string]string // hex(key_hash) -> tenant_id string
 	now     func() time.Time
+	failNextExec  bool // if true, next ExecContext returns error (cleared after use)
+	failNextQuery bool // if true, next QueryContext returns error (cleared after use)
+	querySkip     int  // number of queries to let succeed before failNextQuery takes effect
 }
 
 func newFakeJobQueueStore() *fakeJobQueueStore {
@@ -110,6 +113,11 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
 
+	if c.store.failNextExec {
+		c.store.failNextExec = false
+		return nil, fmt.Errorf("simulated exec error")
+	}
+
 	switch {
 	case strings.Contains(query, "INSERT INTO task_queue"):
 		return c.execInsert(args)
@@ -131,6 +139,22 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 // ---- QueryContext (SELECT) ----
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	// Check fail flag briefly under write lock, then proceed with read lock.
+	c.store.mu.Lock()
+	failed := c.store.failNextQuery
+	if failed && c.store.querySkip > 0 {
+		c.store.querySkip--
+		failed = false
+	}
+	if failed {
+		c.store.failNextQuery = false
+	}
+	c.store.mu.Unlock()
+
+	if failed {
+		return nil, fmt.Errorf("simulated query error")
+	}
+
 	// Determine lock type based on query.
 	// SELECT ... FROM task_queue WHERE status = 'pending' needs read lock.
 	// SELECT ... tenant_api_keys needs read lock.
@@ -1358,5 +1382,283 @@ func TestUnauthenticatedRequest(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 for unauthenticated request, got %d", rec.Code)
+	}
+}
+
+// ===========================================================================
+// Migrations
+// ===========================================================================
+
+func TestJQMigrations(t *testing.T) {
+	p := &Plugin{}
+	migrations := p.Migrations()
+	if len(migrations) == 0 {
+		t.Fatal("expected at least one migration")
+	}
+	for i, m := range migrations {
+		if m.Version == 0 {
+			t.Errorf("migration %d: version must be non-zero", i)
+		}
+		if m.Up == "" {
+			t.Errorf("migration %d: Up SQL is empty", i)
+		}
+		if m.Down == "" {
+			t.Errorf("migration %d: Down SQL is empty", i)
+		}
+	}
+}
+
+// ===========================================================================
+// RegisterCommands
+// ===========================================================================
+
+func TestJQRegisterCommands(t *testing.T) {
+	p := &Plugin{}
+	cmds := p.RegisterCommands()
+	if len(cmds) == 0 {
+		t.Fatal("expected at least one command")
+	}
+	if cmds[0].Name != "jobqueue-enqueue" {
+		t.Errorf("expected Name 'jobqueue-enqueue', got %q", cmds[0].Name)
+	}
+	if cmds[0].Description == "" {
+		t.Error("expected non-empty Description")
+	}
+	if cmds[0].Run == nil {
+		t.Error("expected Run function to be non-nil")
+	}
+}
+
+func TestJQRegisterCommandsRunNoDSN(t *testing.T) {
+	p := &Plugin{}
+	cmds := p.RegisterCommands()
+	if len(cmds) == 0 {
+		t.Fatal("no commands registered")
+	}
+
+	// Valid flags but no DSN should produce a "database URL required" error.
+	err := cmds[0].Run([]string{
+		"--tenant=00000000-0000-0000-0000-000000000001",
+		"--queue=test-queue",
+		"--payload={}",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing DSN, got nil")
+	}
+	if !strings.Contains(err.Error(), "database URL required") {
+		t.Errorf("expected 'database URL required' error, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// RegisterRoutes — nil mux
+// ===========================================================================
+
+func TestJQRegisterRoutesNilMux(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterRoutes(nil)
+	if err == nil {
+		t.Fatal("expected error for nil mux, got nil")
+	}
+	if !strings.Contains(err.Error(), "nil mux") {
+		t.Errorf("expected error containing 'nil mux', got: %v", err)
+	}
+}
+
+// ===========================================================================
+// handleEnqueue — error paths
+// ===========================================================================
+
+func TestJQEnqueueInvalidJSON(t *testing.T) {
+	_, handler, _, _, _ := setupTestPlugin(t)
+
+	req := authedRequest("POST", "/jobqueue/q/jobs", bytes.NewReader([]byte(`not json`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJQEnqueueMissingQueueName(t *testing.T) {
+	p, _, _, _, _ := setupTestPlugin(t)
+
+	body := `{"payload":"test"}`
+	req := httptest.NewRequest("POST", "/jobqueue//jobs", bytes.NewReader([]byte(body)))
+	req = req.WithContext(auth.WithTenantID(req.Context(), testTenantID))
+	rec := httptest.NewRecorder()
+
+	// Call handler directly (bypasses mux, so PathValue("queue_name") returns "").
+	p.handleEnqueue(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing queue_name, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJQEnqueueExecError(t *testing.T) {
+	_, handler, store, _, _ := setupTestPlugin(t)
+
+	store.failNextExec = true
+
+	body := `{"payload":"test"}`
+	req := authedRequest("POST", "/jobqueue/q/jobs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB exec error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// handleListJobs — error paths
+// ===========================================================================
+
+func TestJQListJobsMissingQueueName(t *testing.T) {
+	p, _, _, _, _ := setupTestPlugin(t)
+
+	req := httptest.NewRequest("GET", "/jobqueue//jobs", nil)
+	req = req.WithContext(auth.WithTenantID(req.Context(), testTenantID))
+	rec := httptest.NewRecorder()
+
+	// Call handler directly (bypasses mux, so PathValue("queue_name") returns "").
+	p.handleListJobs(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing queue_name, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJQListJobsQueryError(t *testing.T) {
+	_, handler, store, _, _ := setupTestPlugin(t)
+
+	// Auth middleware does one query; skip it, then fail the handler query.
+	store.failNextQuery = true
+	store.querySkip = 1
+
+	req := authedRequest("GET", "/jobqueue/test-queue/jobs", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB query error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJQListJobsInvalidLimit(t *testing.T) {
+	_, handler, _, _, _ := setupTestPlugin(t)
+
+	// Limit=0 should be ignored (use default 50).
+	req := authedRequest("GET", "/jobqueue/test-queue/jobs?limit=0", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for limit=0, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Limit=-1 should be ignored.
+	req = authedRequest("GET", "/jobqueue/test-queue/jobs?limit=-1", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for limit=-1, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Limit=1001 should be ignored (max is 1000).
+	req = authedRequest("GET", "/jobqueue/test-queue/jobs?limit=1001", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for limit=1001, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Limit=10 should be accepted.
+	req = authedRequest("GET", "/jobqueue/test-queue/jobs?limit=10", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for limit=10, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// handleGetJob — error paths
+// ===========================================================================
+
+func TestJQGetJobInvalidUUID(t *testing.T) {
+	_, handler, _, _, _ := setupTestPlugin(t)
+
+	req := authedRequest("GET", "/jobqueue/q/jobs/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid UUID, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJQGetJobQueryError(t *testing.T) {
+	_, handler, store, _, _ := setupTestPlugin(t)
+
+	// Auth middleware does one query; skip it, then fail the handler query.
+	store.failNextQuery = true
+	store.querySkip = 1
+
+	req := authedRequest("GET", "/jobqueue/q/jobs/00000000-0000-0000-0000-000000000001", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB query error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// handleCancelJob — error paths
+// ===========================================================================
+
+func TestJQCancelJobInvalidUUID(t *testing.T) {
+	_, handler, _, _, _ := setupTestPlugin(t)
+
+	req := authedRequest("DELETE", "/jobqueue/q/jobs/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid UUID, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJQCancelJobExecError(t *testing.T) {
+	_, handler, store, _, _ := setupTestPlugin(t)
+
+	store.failNextExec = true
+
+	req := authedRequest("DELETE", "/jobqueue/q/jobs/00000000-0000-0000-0000-000000000001", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB exec error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Run — nil database
+// ===========================================================================
+
+func TestJQRunWithNoDB(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() with nil db should return nil, got: %v", err)
 	}
 }

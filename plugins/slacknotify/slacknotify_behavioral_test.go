@@ -39,9 +39,10 @@ type slackConfigRow struct {
 }
 
 type fakeDBStore struct {
-	mu      sync.RWMutex
-	configs []slackConfigRow
-	apiKeys map[string]string // key_hash_hex -> tenant_id
+	mu          sync.RWMutex
+	configs     []slackConfigRow
+	apiKeys     map[string]string // key_hash_hex -> tenant_id
+	simulateErr bool
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -89,6 +90,9 @@ func (*fakeTx) Rollback() error { return nil }
 func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
+	if c.store.simulateErr {
+		return nil, fmt.Errorf("simulated db error")
+	}
 
 	switch {
 	case strings.Contains(query, "INSERT INTO slack_config"):
@@ -105,6 +109,9 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 // --- QueryContext ---
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if c.store.simulateErr {
+		return nil, fmt.Errorf("simulated db error")
+	}
 	switch {
 	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
 		c.store.mu.RLock()
@@ -798,5 +805,562 @@ func TestSendMessage(t *testing.T) {
 	json.Unmarshal(capturedPayload, &slackPayload)
 	if slackPayload["text"] != "Hello from test!" {
 		t.Errorf("expected text 'Hello from test!', got %s", slackPayload["text"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Direct request helper (no auth middleware, adds tenant to context)
+// ---------------------------------------------------------------------------
+
+func slackRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	ctx := auth.WithTenantID(req.Context(), testTenantID)
+	return req.WithContext(ctx)
+}
+
+// ---------------------------------------------------------------------------
+// Fake FuncRegistry for RegisterHostFunctions tests
+// ---------------------------------------------------------------------------
+
+type fakeFuncRegistry struct {
+	funcs map[string]plugin.PluginFunc
+}
+
+func newFakeFuncRegistry() *fakeFuncRegistry {
+	return &fakeFuncRegistry{funcs: make(map[string]plugin.PluginFunc)}
+}
+
+func (r *fakeFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	r.funcs[opts.Name] = fn
+	return nil
+}
+
+func (r *fakeFuncRegistry) Has(name string) bool {
+	_, ok := r.funcs[name]
+	return ok
+}
+
+// ===========================================================================
+// RegisterHostFunctions
+// ===========================================================================
+
+func TestSN_RegisterHostFunctions_NilRegistry(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	err := p.RegisterHostFunctions(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil function registry") {
+		t.Fatalf("expected nil registry error, got: %v", err)
+	}
+}
+
+func TestSN_RegisterHostFunctions_Valid(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	reg := newFakeFuncRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
+	if !reg.Has("send_message") {
+		t.Error("expected send_message to be registered")
+	}
+}
+
+// ===========================================================================
+// Migrations
+// ===========================================================================
+
+func TestSN_Migrations(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	migrations := p.Migrations()
+	if len(migrations) == 0 {
+		t.Fatal("expected at least one migration")
+	}
+	for i, m := range migrations {
+		if m.Version == 0 {
+			t.Errorf("migration %d: version must be non-zero", i)
+		}
+		if m.Up == "" {
+			t.Errorf("migration %d: Up SQL is empty", i)
+		}
+		if m.Down == "" {
+			t.Errorf("migration %d: Down SQL is empty", i)
+		}
+	}
+}
+
+// ===========================================================================
+// Plugin Info
+// ===========================================================================
+
+func TestSN_PluginInfo(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	info := p.Info()
+	if info.Name == "" {
+		t.Error("expected non-empty Name")
+	}
+	if info.Version == "" {
+		t.Error("expected non-empty Version")
+	}
+}
+
+// ===========================================================================
+// RegisterRoutes
+// ===========================================================================
+
+func TestSN_RegisterRoutes_NilMux(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	err := p.RegisterRoutes(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil mux") {
+		t.Fatalf("expected nil mux error, got: %v", err)
+	}
+}
+
+func TestSN_RegisterRoutes_Valid(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/slack/configs", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code == 404 {
+		t.Error("expected /slack/configs to be registered, got 404")
+	}
+}
+
+// ===========================================================================
+// Handler error paths — missing tenant returns 401 for all endpoints
+// ===========================================================================
+
+func TestSN_ErrorPaths_MissingTenant(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	tests := []struct{ method, path, body string }{
+		{"POST", "/slack/configs", `{"name":"t","webhook_url":"https://hook.example.com"}`},
+		{"GET", "/slack/configs", ""},
+		{"GET", "/slack/configs/00000000-0000-0000-0000-000000000001", ""},
+		{"PUT", "/slack/configs/00000000-0000-0000-0000-000000000001", `{"name":"t"}`},
+		{"DELETE", "/slack/configs/00000000-0000-0000-0000-000000000001", ""},
+	}
+
+	for _, tc := range tests {
+		var body io.Reader
+		if tc.body != "" {
+			body = bytes.NewReader([]byte(tc.body))
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, body)
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 401 {
+			t.Errorf("%s %s: want 401, got %d: %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// ===========================================================================
+// Handler error paths — invalid UUID returns 400
+// ===========================================================================
+
+func TestSN_ErrorPaths_InvalidID(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	tests := []struct{ method, path string }{
+		{"GET", "/slack/configs/not-a-uuid"},
+		{"PUT", "/slack/configs/not-a-uuid"},
+		{"DELETE", "/slack/configs/not-a-uuid"},
+	}
+
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := slackRequest(tc.method, tc.path, nil)
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Errorf("%s %s: want 400, got %d: %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+		var body map[string]string
+		json.Unmarshal(rec.Body.Bytes(), &body)
+		if body["error"] == "" {
+			t.Errorf("%s %s: expected error message in response", tc.method, tc.path)
+		}
+	}
+}
+
+// ===========================================================================
+// Handler error paths — invalid JSON body returns 400
+// ===========================================================================
+
+func TestSN_ErrorPaths_InvalidJSON(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	tests := []struct{ method, path string }{
+		{"POST", "/slack/configs"},
+		{"PUT", "/slack/configs/00000000-0000-0000-0000-000000000001"},
+	}
+
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := slackRequest(tc.method, tc.path, bytes.NewReader([]byte("not json")))
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Errorf("%s %s: want 400, got %d: %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// ===========================================================================
+// Handler error path — PUT with no fields returns 400
+// ===========================================================================
+
+func TestSN_ErrorPaths_NoUpdateFields(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	// Create a config first.
+	rec := httptest.NewRecorder()
+	req := slackRequest("POST", "/slack/configs", bytes.NewReader([]byte(`{"name":"test","webhook_url":"https://hook.example.com"}`)))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	id := created["id"]
+
+	// Update with empty JSON — should fail with 400 (no fields to update).
+	rec = httptest.NewRecorder()
+	req = slackRequest("PUT", "/slack/configs/"+id, bytes.NewReader([]byte("{}")))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("PUT with no fields: want 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Handler error paths — simulated DB error returns 500
+// ===========================================================================
+
+func TestSN_ErrorPaths_DBError_Create(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := slackRequest("POST", "/slack/configs", bytes.NewReader([]byte(`{"name":"t","webhook_url":"https://hook.example.com"}`)))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("POST with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSN_ErrorPaths_DBError_List(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	store.simulateErr = false
+	store.configs = append(store.configs, slackConfigRow{
+		id: uuid.New().String(), tenantID: testTenantStr,
+		name: "test", webhookURL: "https://hook.example.com", enabled: true,
+	})
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := slackRequest("GET", "/slack/configs", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("LIST with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSN_ErrorPaths_DBError_Get(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	cfgID := uuid.New().String()
+	store.configs = append(store.configs, slackConfigRow{
+		id: cfgID, tenantID: testTenantStr,
+		name: "test", webhookURL: "https://hook.example.com", enabled: true,
+	})
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := slackRequest("GET", "/slack/configs/"+cfgID, nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("GET with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSN_ErrorPaths_DBError_Update(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	cfgID := uuid.New().String()
+	store.configs = append(store.configs, slackConfigRow{
+		id: cfgID, tenantID: testTenantStr,
+		name: "test", webhookURL: "https://hook.example.com", enabled: true,
+	})
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := slackRequest("PUT", "/slack/configs/"+cfgID, bytes.NewReader([]byte(`{"name":"updated"}`)))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("PUT with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSN_ErrorPaths_DBError_Delete(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	cfgID := uuid.New().String()
+	store.configs = append(store.configs, slackConfigRow{
+		id: cfgID, tenantID: testTenantStr,
+		name: "test", webhookURL: "https://hook.example.com", enabled: true,
+	})
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := slackRequest("DELETE", "/slack/configs/"+cfgID, nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("DELETE with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// sendMessage — error paths
+// ===========================================================================
+
+func TestSN_SendMessage_MissingTenant(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	// No call context in background context -> error.
+	_, err := p.sendMessage(context.Background(), `{"config_id":"00000000-0000-0000-0000-000000000001","text":"hello"}`)
+	if err == nil || !strings.Contains(err.Error(), "no tenant context") {
+		t.Fatalf("expected no tenant context error, got: %v", err)
+	}
+}
+
+func TestSN_SendMessage_InvalidJSON(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	_, err := p.sendMessage(ctx, `not json`)
+	if err == nil || !strings.Contains(err.Error(), "invalid input") {
+		t.Fatalf("expected invalid input error, got: %v", err)
+	}
+}
+
+func TestSN_SendMessage_MissingConfigID(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	_, err := p.sendMessage(ctx, `{"text":"hello"}`)
+	if err == nil || !strings.Contains(err.Error(), "config_id is required") {
+		t.Fatalf("expected config_id required error, got: %v", err)
+	}
+}
+
+func TestSN_SendMessage_MissingText(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	_, err := p.sendMessage(ctx, `{"config_id":"00000000-0000-0000-0000-000000000001","text":""}`)
+	if err == nil || !strings.Contains(err.Error(), "text is required") {
+		t.Fatalf("expected text required error, got: %v", err)
+	}
+}
+
+func TestSN_SendMessage_ConfigNotFound(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	// No config seeded -> config not found.
+	_, err := p.sendMessage(ctx, `{"config_id":"00000000-0000-0000-0000-000000000001","text":"hello"}`)
+	if err == nil || !strings.Contains(err.Error(), "config not found") {
+		t.Fatalf("expected config not found error, got: %v", err)
+	}
+}
+
+func TestSN_SendMessage_WebhookError(t *testing.T) {
+	store := newFakeDBStore()
+
+	cfgID := uuid.New()
+	store.configs = append(store.configs, slackConfigRow{
+		id: cfgID.String(), tenantID: testTenantStr,
+		name: "test", webhookURL: "https://hooks.slack.com/fake", enabled: true,
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	// Test server that returns an error status.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("server error"))
+	}))
+	defer ts.Close()
+
+	store.mu.Lock()
+	store.configs[0].webhookURL = ts.URL
+	store.mu.Unlock()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	_, err := p.sendMessage(ctx, `{"config_id":"`+cfgID.String()+`","text":"hello"}`)
+	if err == nil || !strings.Contains(err.Error(), "webhook returned") {
+		t.Fatalf("expected webhook error, got: %v", err)
+	}
+}
+
+func TestSN_SendMessage_NonJSONResponse(t *testing.T) {
+	store := newFakeDBStore()
+
+	cfgID := uuid.New()
+	store.configs = append(store.configs, slackConfigRow{
+		id: cfgID.String(), tenantID: testTenantStr,
+		name: "test", webhookURL: "https://hooks.slack.com/fake", enabled: true,
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	// Test server that returns plain text (non-JSON) with a 2xx status.
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer ts.Close()
+
+	store.mu.Lock()
+	store.configs[0].webhookURL = ts.URL
+	store.mu.Unlock()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	out, err := p.sendMessage(ctx, `{"config_id":"`+cfgID.String()+`","text":"hello"}`)
+	if err != nil {
+		t.Fatalf("sendMessage: %v", err)
+	}
+	var result map[string]interface{}
+	json.Unmarshal([]byte(out), &result)
+	if result["success"] != true {
+		t.Errorf("expected success=true, got %v", result["success"])
 	}
 }

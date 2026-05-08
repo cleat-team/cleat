@@ -49,6 +49,7 @@ type fakeDBStore struct {
 	configs            []fakeConfigRow
 	workflowInstances  []fakeWorkflowRow
 	apiKeys            map[string]string // key_hash_hex -> tenant_id
+	simulateErr        bool
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -97,6 +98,9 @@ func (*fakeTx) Rollback() error { return nil }
 func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
+	if c.store.simulateErr {
+		return nil, fmt.Errorf("simulated db error")
+	}
 
 	switch {
 	case strings.Contains(query, "INSERT INTO dd_config"):
@@ -113,6 +117,9 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 // --- QueryContext ---
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if c.store.simulateErr {
+		return nil, fmt.Errorf("simulated db error")
+	}
 	switch {
 	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
 		c.store.mu.RLock()
@@ -928,5 +935,426 @@ func TestCreateDefaults(t *testing.T) {
 	}
 	if created["metrics_prefix"] != "cleat" {
 		t.Errorf("expected default metrics_prefix 'cleat', got %s", created["metrics_prefix"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// errorReader for simulating body read failures
+// ---------------------------------------------------------------------------
+
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("simulated read error")
+}
+
+// ---------------------------------------------------------------------------
+// Direct request helper (no auth middleware, adds tenant to context)
+// ---------------------------------------------------------------------------
+
+func ddRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	ctx := auth.WithTenantID(req.Context(), testTenantID)
+	return req.WithContext(ctx)
+}
+
+// ===========================================================================
+// Migrations
+// ===========================================================================
+
+func TestDD_Migrations(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	migrations := p.Migrations()
+	if len(migrations) == 0 {
+		t.Fatal("expected at least one migration")
+	}
+	for i, m := range migrations {
+		if m.Version == 0 {
+			t.Errorf("migration %d: version must be non-zero", i)
+		}
+		if m.Up == "" {
+			t.Errorf("migration %d: Up SQL is empty", i)
+		}
+		if m.Down == "" {
+			t.Errorf("migration %d: Down SQL is empty", i)
+		}
+	}
+}
+
+// ===========================================================================
+// Plugin Info
+// ===========================================================================
+
+func TestDD_PluginInfo(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	info := p.Info()
+	if info.Name == "" {
+		t.Error("expected non-empty Name")
+	}
+	if info.Version == "" {
+		t.Error("expected non-empty Version")
+	}
+}
+
+// ===========================================================================
+// RegisterRoutes
+// ===========================================================================
+
+func TestDD_RegisterRoutes_NilMux(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	err := p.RegisterRoutes(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil mux") {
+		t.Fatalf("expected nil mux error, got: %v", err)
+	}
+}
+
+func TestDD_RegisterRoutes_Valid(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	// Verify at least one route is registered (should not 404).
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/datadog/configs", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code == 404 {
+		t.Error("expected /datadog/configs to be registered, got 404")
+	}
+}
+
+// ===========================================================================
+// Run — nil db and cancellation paths
+// ===========================================================================
+
+func TestDD_Run_NilDB(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := p.Run(ctx)
+	if err != nil {
+		t.Errorf("Run with nil db: expected nil, got %v", err)
+	}
+}
+
+func TestDD_Run_Cancellation(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	err := p.Run(ctx)
+	if err != nil {
+		t.Errorf("Run: expected nil, got %v", err)
+	}
+}
+
+// ===========================================================================
+// Handler error paths — missing tenant returns 401 for all endpoints
+// ===========================================================================
+
+func TestDD_ErrorPaths_MissingTenant(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	tests := []struct{ method, path, body string }{
+		{"POST", "/datadog/configs", `{"name":"t","api_key":"k"}`},
+		{"GET", "/datadog/configs", ""},
+		{"GET", "/datadog/configs/00000000-0000-0000-0000-000000000001", ""},
+		{"PUT", "/datadog/configs/00000000-0000-0000-0000-000000000001", `{"name":"t"}`},
+		{"DELETE", "/datadog/configs/00000000-0000-0000-0000-000000000001", ""},
+	}
+
+	for _, tc := range tests {
+		var body io.Reader
+		if tc.body != "" {
+			body = bytes.NewReader([]byte(tc.body))
+		}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, body)
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 401 {
+			t.Errorf("%s %s: want 401, got %d: %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// ===========================================================================
+// Handler error paths — invalid UUID returns 400
+// ===========================================================================
+
+func TestDD_ErrorPaths_InvalidID(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	tests := []struct{ method, path string }{
+		{"GET", "/datadog/configs/not-a-uuid"},
+		{"PUT", "/datadog/configs/not-a-uuid"},
+		{"DELETE", "/datadog/configs/not-a-uuid"},
+	}
+
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := ddRequest(tc.method, tc.path, nil)
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Errorf("%s %s: want 400, got %d: %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+		var body map[string]string
+		json.Unmarshal(rec.Body.Bytes(), &body)
+		if body["error"] == "" {
+			t.Errorf("%s %s: expected error message in response", tc.method, tc.path)
+		}
+	}
+}
+
+// ===========================================================================
+// Handler error paths — invalid JSON body returns 400
+// ===========================================================================
+
+func TestDD_ErrorPaths_InvalidJSON(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	tests := []struct{ method, path string }{
+		{"POST", "/datadog/configs"},
+		{"PUT", "/datadog/configs/00000000-0000-0000-0000-000000000001"},
+	}
+
+	for _, tc := range tests {
+		rec := httptest.NewRecorder()
+		req := ddRequest(tc.method, tc.path, bytes.NewReader([]byte("not json")))
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Errorf("%s %s: want 400, got %d: %s", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// ===========================================================================
+// Handler error path — PUT with no fields returns 400
+// ===========================================================================
+
+func TestDD_ErrorPaths_NoUpdateFields(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	// Create a config first.
+	rec := httptest.NewRecorder()
+	req := ddRequest("POST", "/datadog/configs", bytes.NewReader([]byte(`{"name":"test","api_key":"k"}`)))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]string
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	id := created["id"]
+
+	// Update with empty JSON — should fail with 400 (no fields to update).
+	rec = httptest.NewRecorder()
+	req = ddRequest("PUT", "/datadog/configs/"+id, bytes.NewReader([]byte("{}")))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("PUT with no fields: want 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Handler error paths — simulated DB error returns 500
+// ===========================================================================
+
+func TestDD_ErrorPaths_DBError_Create(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := ddRequest("POST", "/datadog/configs", bytes.NewReader([]byte(`{"name":"t","api_key":"k"}`)))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("POST with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDD_ErrorPaths_DBError_List(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	store.simulateErr = false
+	store.configs = append(store.configs, fakeConfigRow{
+		id: uuid.New().String(), tenantID: testTenantStr,
+		name: "test", apiKey: "k", enabled: true,
+	})
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := ddRequest("GET", "/datadog/configs", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("LIST with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDD_ErrorPaths_DBError_Get(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	cfgID := uuid.New().String()
+	store.configs = append(store.configs, fakeConfigRow{
+		id: cfgID, tenantID: testTenantStr,
+		name: "test", apiKey: "k", enabled: true,
+	})
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := ddRequest("GET", "/datadog/configs/"+cfgID, nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("GET with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDD_ErrorPaths_DBError_Update(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	cfgID := uuid.New().String()
+	store.configs = append(store.configs, fakeConfigRow{
+		id: cfgID, tenantID: testTenantStr,
+		name: "test", apiKey: "k", enabled: true,
+	})
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := ddRequest("PUT", "/datadog/configs/"+cfgID, bytes.NewReader([]byte(`{"name":"updated"}`)))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("PUT with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDD_ErrorPaths_DBError_Delete(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	cfgID := uuid.New().String()
+	store.configs = append(store.configs, fakeConfigRow{
+		id: cfgID, tenantID: testTenantStr,
+		name: "test", apiKey: "k", enabled: true,
+	})
+	store.simulateErr = true
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	rec := httptest.NewRecorder()
+	req := ddRequest("DELETE", "/datadog/configs/"+cfgID, nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("DELETE with DB error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// exportMetrics error path — DB query error
+// ===========================================================================
+
+func TestDD_ExportMetrics_QueryError(t *testing.T) {
+	store := newFakeDBStore()
+	store.simulateErr = true
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	err := p.exportMetrics(context.Background())
+	if err == nil {
+		t.Error("expected error from exportMetrics with simulated db error")
+	}
+}
+
+// ===========================================================================
+// exportForConfig error path — DB query error
+// ===========================================================================
+
+func TestDD_ExportForConfig_QueryError(t *testing.T) {
+	store := newFakeDBStore()
+	store.simulateErr = true
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	cfg := ddConfigRow{
+		ID:       uuid.New(),
+		TenantID: testTenantID,
+		APIKey:   "test",
+		Site:     "datadoghq.com",
+	}
+	err := p.exportForConfig(context.Background(), cfg)
+	if err == nil {
+		t.Error("expected error from exportForConfig with simulated db error")
 	}
 }
