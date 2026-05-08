@@ -108,10 +108,15 @@ hardening pass added Saga, query state, and a `TestHostCalls` mock harness
 - `TestHostCalls` mock harness with call recording and simulated clock
 
 **Remaining critical issues:**
-- **TeaVM tree-shaking** — `@DurableEntry` generates `*_Export` classes, but
-  TeaVM removes them as unreachable from `mainClass`. Every entry point must be
-  manually listed in `preservedClasses`. This is a TeaVM limitation, not a cleat
-  SDK bug.
+- `JsonHelper.parse()` only supports `String.class` — all inputs must be pre-serialized
+- `String.replace()` compiles to `Pattern.compile()`, unsupported by TeaVM WASM target
+- Multi-project Gradle plugin version conflicts
+- No `fetch_get_json` convenience wrapper
+
+**TeaVM tree-shaking — FIXED:** The `CleatEntryProcessor` generates a `WorkflowEntry` class
+that references all `*_Export` wrappers via `CleatEntryIndex`. When `mainClass` is set to
+`cleat.WorkflowEntry` (the default), TeaVM follows the reference chain and preserves all
+exports automatically. The `preservedClasses` workaround is no longer needed.
 - `JsonHelper.parse()` only supports `String.class` — all inputs must be pre-serialized
 - `String.replace()` compiles to `Pattern.compile()`, unsupported by TeaVM WASM target
 - Multi-project Gradle plugin version conflicts
@@ -334,7 +339,7 @@ The 202 documented issues across 19 ports break down into these categories:
 - **Go**: 2 issues remaining — `DurableDefer` is description-only (Saga is the recommended replacement), no per-call `StartToCloseTimeout`. 6 of 8 original issues closed.
 - **Python**: 1 issue remaining — WASM pipeline never validated end-to-end. WIT gaps, error types, test harness, and all other issues closed.
 - **AS**: 3 issues — AS runtime limitations (no try/catch, no closures, no async/await). These are compiler constraints, not SDK bugs. SUSPEND_SENTINEL fix deferred (AS runtime). 7 of 10 original issues closed.
-- **Java**: 3 issues — TeaVM tree-shaking (TeaVM limitation), `JsonHelper` String.class only (TeaVM limitation), Gradle conflicts. 10 of 13 original issues closed.
+- **Java**: 2 issues — `JsonHelper` String.class only (TeaVM WASM limitation), Gradle conflicts. TeaVM tree-shaking FIXED via `WorkflowEntry` reference chain. 11 of 13 original issues closed.
 - **Rust**: 0 issues remaining. All 4 original gaps closed (K/V state, resolve_promise, test harness, Saga). ContinueAsNew return type fixed.
 
 ### Architecture Gaps — ALL CLOSED
