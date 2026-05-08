@@ -16,10 +16,12 @@ validating cleat's architecture against real-world code.
    rollback via UPDATE" has no equivalent in any competitor. Multiple independent
    analyses reached this conclusion.
 
-3. **Go is the only production-ready SDK.** Rust is clean but missing APIs.
-   Java/TeaVM works with painful build workarounds. AssemblyScript is severely
-   constrained. The Python SDK exists (4,508 lines) but WASM compilation has
-   never been validated end-to-end.
+3. **Go is the only production-ready SDK.** Rust is clean (all core APIs present
+   after SDK hardening). Java/TeaVM works with painful build workarounds.
+   AssemblyScript is severely constrained by its runtime subset. The Python SDK
+   is the most comprehensive (4,508 lines, 34 WIT imports, LangChain/LangGraph
+   integration) but `componentize-py` WASM compilation has never been validated
+   end-to-end.
 
 4. **The WASM sandbox is both cleat's superpower and its main friction point** —
    it enables language-agnostic workflows and deterministic replay, but forces
@@ -76,75 +78,92 @@ and call history assertions. Tests run in milliseconds.
 - `ContinueAsNew` is a no-op in `TestEnv`
 - No `AwaitCondition` / predicate-based blocking mechanism
 
-### Rust (1 port — Clean but Missing APIs)
+### Rust (1 port — Clean, Core APIs Present)
 
-The smallest SDK at 537 lines total (host_calls 290 + memory 126 + proc-macro 121).
-The port produced a 141 KB WASM binary (release, stripped).
+The smallest SDK at 1,090 lines (host_calls expanded from 537 lines after SDK
+hardening pass). The port produced a 141 KB WASM binary (release, stripped).
 
 **Strengths:**
 - `#[cleat_entry]` proc-macro — compile-time code generation, praised as best DX
 - Clean ABI boundary, no unnecessary abstractions
 - Smallest WASM binaries
+- All K/V state operations present (`set_state`/`get_state`/`delete_state`/`incr_state`/`has_state`/`list_state`)
+- Full promise support (`create_promise`/`await_promise`/`resolve_promise`/`reject_promise`)
+- Test harness exists (`test.rs` — WASM-free mock HostCalls with call assertions)
 
-**Critical gaps (4):**
-- No K/V state operations (`get_state`/`set_state`/`delete_state`) — Virtual Object patterns impossible
-- No `resolve_promise` — can create and await promises, but can't resolve externally
-- No `ctx.run()` equivalent for wrapping non-deterministic code
-- No test harness — no way to test workflows without a running host
+**Remaining gaps:**
+- No Saga API (all other SDKs have it)
+- No `ContinueAsNew` high-level wrapper
+- No `ctx.run()` / side-effect wrapper (architectural — shared by all SDKs)
 
 ### Java / TeaVM (2 ports — Works, Painful Build)
 
-The saga example compiles to WASM via TeaVM 0.10.2 (692 KB binary). However,
-6 pre-existing SDK/build blockers were found.
+The saga example compiles to WASM via TeaVM 0.10.2 (692 KB binary). The SDK
+hardening pass added Saga, query state, and a `TestHostCalls` mock harness
+(2,072 lines total).
 
-**Critical issues:**
-- **TeaVM tree-shaking is a fundamental design problem** — `@DurableEntry` generates
-  `*_Export` classes, but TeaVM removes them because they're unreachable from `mainClass`.
-  Every entry point must be manually listed in `preservedClasses`. For large projects,
-  this is "cumbersome and error-prone" — the single most significant SDK issue across
-  all ports.
+**Resolved issues (SDK hardening pass):**
+- Saga API now present (with `SagaTyped<T>` generic variant)
+- `getQueryState()` / `setQueryState()` added
+- `TestHostCalls` mock harness with call recording and simulated clock
+
+**Remaining critical issues:**
+- **TeaVM tree-shaking** — `@DurableEntry` generates `*_Export` classes, but
+  TeaVM removes them as unreachable from `mainClass`. Every entry point must be
+  manually listed in `preservedClasses`. This is a TeaVM limitation, not a cleat
+  SDK bug.
 - `JsonHelper.parse()` only supports `String.class` — all inputs must be pre-serialized
-- No Saga abstraction in Java SDK
-- `String.replace()` compiles to `Pattern.compile()`, which TeaVM's WASM target doesn't support
-- No `getQueryState()` in SDK
+- `String.replace()` compiles to `Pattern.compile()`, unsupported by TeaVM WASM target
 - Multi-project Gradle plugin version conflicts
+- No `fetch_get_json` convenience wrapper
 
 ### AssemblyScript (3 ports — Severely Constrained)
 
 WASM binaries are small (~12-14 KB) but the language subset is restrictive.
+SDK hardening added a `TestEnv` test harness (1,626 lines) and K/V state operations.
 
-**Critical constraints:**
-- **No try/catch** with `--runtime stub` — all error handling must use return-value checks
-- **No closures** — only named top-level functions. Breaks Saga's expected API.
+**Resolved (SDK hardening pass):**
+- Test harness exists (`test_runner/test-harness.ts` — `TestEnv` class with mock HostCalls)
+- K/V state operations present
+
+**Remaining critical constraints:**
+- **No try/catch** with `--runtime stub` — AS runtime limitation, all error handling
+  must use return-value checks
+- **No closures** — AS limitation, only named top-level functions
 - **No async/await** — cleat's sync + suspend model is correct but different from original TS
 - **No `any` type** — all types must be explicit
 - **SUSPEND_SENTINEL bug** — bit 62 overlaps with signal name length field, causing
-  potential out-of-bounds reads on `awaitSignals`
-- No equivalent of DBOS's `setEvent`/`getEvent` for external workflow communication
+  potential out-of-bounds reads on `awaitSignals` (AS runtime issue)
 - `@durableEntry` transform partially fixed but untested end-to-end with `durableSleep`/`awaitSignals`
 
-### Python (5 ports — Exists on Paper, Not Validated)
+### Python (5 ports — Comprehensive SDK, WASM Unvalidated)
 
-The most requested language. The SDK is 4,508 lines with full ABI conformance
-(22 host imports defined, `@cleat_entry` decorator, 80 tests passing, 3 example
-workflows), but the `componentize-py` WASM compilation pipeline has never been
-validated end-to-end.
+The most requested language and the most comprehensive SDK at 4,508 lines.
+34 WIT imports defined, `@cleat_entry` decorator, `virtual_object` decorator,
+80+ tests, 4 example workflows, and LangChain/LangGraph integration. However,
+the `componentize-py` WASM compilation pipeline has never been validated
+end-to-end — no Python workflow has been confirmed running in a cleat worker.
 
-**The critical finding:** All 22 `_import_*` functions in `host_calls.py` raise
-`NotImplementedError`. They define the correct interface but are not wired to
-actual WASM imports. The Python SDK exists on paper but no Python workflow has
-ever run in a cleat worker.
+**Resolved (SDK hardening pass):**
+- `TerminalError` added to core SDK
+- Virtual Object support via `virtual_object` decorator and `set_scope`/`get_scope`
+- External signal API (`signal_workflow`, `send_signal_and_wait`, `reply_to_signal`)
+- K/V state operations via `cleat_call("state", ...)` — `set_state`/`get_state`/`delete_state`/`incr_state`/`has_state`/`list_state`
+- `CleatTestHarness` with call recording and state persistence
+- REST client (`CleatClient`) with `send_update`, `resolve_promise`, `send_signal`
+- Update handler support (`register_update_handler` with WIT import)
+- Promise support (create/await/resolve/reject with WIT imports)
+- `Plugins` class with typed wrappers for LLM, blobstore, webhooks, and other plugins
+- LangChain `CleatCallbackHandler` and LangGraph `CleatCheckpointer`
 
-**Issues found across Python ports:**
-- No `TerminalError` in core SDK
-- No Virtual Object / key-scoped state
-- `@durable_entry` replaces the original function, making direct invocation impossible
-- No blocking `get_event` equivalent — must poll via `set_query_state`
-- No external signal-sending API
-- No in-process `LocalRuntime` for development
+**Remaining gaps:**
+- **WASM compilation never validated end-to-end** — `build_wasm.py` and WIT file exist
+  but `componentize-py` has never produced a binary loaded by a cleat worker
+- `child_workflow_with_options` has no WIT import (stub only)
+- `cleat_fetch` has no dedicated WIT import (works via `cleat_call("http", ...)` but
+  may not work through `componentize-py` without the WIT binding)
 - Saga uses lambda closures — unknown whether `componentize-py` supports closures
   across WASM suspend/resume
-- `CleatTestHarness` is stub-based, doesn't persist state across calls
 
 ---
 
@@ -250,28 +269,40 @@ handler invocations. Cleat workflows are single-shot function invocations.
 Ports requiring entity patterns had to manually implement `continue_as_new`
 cycles with explicit state persistence and rehydration.
 
-### 4. No Virtual Object / Key-Scoped State
+### 4. No Virtual Object / Key-Scoped State (Runtime Level)
 
 Restate's single-writer-per-key is one of its most compelling features.
-Multiple ports called the absence of this in cleat "BLOCKING for stateful
-workflows." Manual key prefixing is the workaround; it's error-prone.
+**SDK-level support now exists** — all SDKs have `set_scope`/`get_scope`/`clear_scope`
+for key-prefixed state, and the Python SDK has a `virtual_object` decorator.
+However, there is no **runtime enforcement** of single-writer semantics per key.
+The prefixing is convention-based (keys get `"vo:<type>:<key>:"` prefix), not
+enforced by the worker or database. Manual key prefixing without the scope
+helpers remains error-prone.
 
-### 5. No `ctx.run()` / Side Effect Wrapper
+### 5. No `ctx.run()` / Side Effect Caching
 
 Both Restate and Temporal let you wrap non-deterministic code once and replay
-the cached result. Cleat has no equivalent. Any pure function that runs during
-replay executes again. Relevant for random number generation, UUID generation,
-and external ID assignment within workflow code.
+the cached result. `RunDetached` exists in all SDKs but solves a different
+problem (escape hatch from cancellation). There is no result-caching wrapper
+that records the output on first execution and returns the cached value on
+replay. Relevant for random number generation, UUID generation, and external
+ID assignment within workflow code. **Architectural** — would require engine
+changes to record side-effect results in event history.
 
-### 6. Testing Varies Wildly by Language
+### 6. Testing Varies by Language (Improved Since Ports)
 
 | Language | Testing | Status |
 |----------|---------|--------|
 | Go | `cleattest.TestEnv` — WASM-free, simulated clock, call assertions | Mature |
-| Python | `CleatTestHarness` — stub-based, no state persistence across calls | Basic |
-| Rust | None | Missing |
-| Java | Standard JUnit, no cleat-specific harness | Basic |
-| AS | None — must compile to WASM and test via Go runner | Missing |
+| Python | `CleatTestHarness` — stub-based, call recording, state persistence | Functional |
+| Rust | `test.rs` — WASM-free mock HostCalls with call assertions | Functional |
+| Java | `TestHostCalls` — mock HostCalls with call recording, simulated clock | Functional |
+| AS | `TestEnv` (1,626 lines) — mock HostCalls class | Functional |
+
+All SDKs now have a test harness (added in SDK hardening pass). Go's
+`cleattest.TestEnv` remains the gold standard — it's the only one with
+a fully simulated deterministic clock and `AdvanceTime` for testing
+sleep/timeout behavior without real waits.
 
 ### 7. Unit Mismatches Across Systems
 
@@ -293,16 +324,16 @@ The 202 documented issues across 19 ports break down into these categories:
 ### SDK Maturity (most common)
 
 - **Go**: 8 issues — mostly API ergonomics (typed heartbeats, `AwaitCondition`, Saga typed steps)
-- **Python**: 16 issues — SDK not wired to WASM, missing primitives, test harness gaps
-- **AS**: 10 issues — no try/catch, no closures, SUSPEND_SENTINEL bug, no test framework
-- **Java**: 13 issues — TeaVM tree-shaking, `JsonHelper` limitations, missing Saga
-- **Rust**: 4 critical gaps — no K/V state, no resolve_promise, no ctx.run, no test harness
+- **Python**: 3 issues remaining — WASM pipeline validation, WIT gaps (`child_workflow_with_options`, `cleat_fetch`), Saga lambda compatibility. 13 of 16 original issues closed by SDK hardening.
+- **AS**: 5 issues — AS runtime limitations (no try/catch, no closures, no async/await, SUSPEND_SENTINEL bug). 5 of 10 original issues closed by SDK hardening (test harness, K/V state, etc.).
+- **Java**: 5 issues — TeaVM tree-shaking, `JsonHelper` String.class only, Gradle conflicts, missing convenience wrappers. 8 of 13 original issues closed (Saga, query state, TestHostCalls).
+- **Rust**: 2 issues remaining — no Saga, no ContinueAsNew wrapper. 2 of 4 original gaps closed by SDK hardening (K/V state, resolve_promise, test harness added).
 
 ### Architecture Gaps
 
-- No `ctx.run()` / side-effect wrapper (6 ports affected)
-- No entity workflow / Virtual Object pattern (4 ports)
-- No `AwaitCondition` / predicate-based blocking (3 ports)
+- No `ctx.run()` / side-effect caching (architectural — requires engine event history changes)
+- No entity workflow / Virtual Object runtime enforcement (SDK-level convention exists, runtime enforcement deferred)
+- No `AwaitCondition` / predicate-based blocking (3 ports affected)
 - Per-call timeouts defined but not enforced (2 ports)
 - `DurableDefer` is description-only, not a closure (3 ports)
 
@@ -310,14 +341,15 @@ The 202 documented issues across 19 ports break down into these categories:
 
 - TeaVM Gradle plugin resolution (Java)
 - `componentize-py` end-to-end untested (Python)
-- `@durableEntry` tree-shaking by TeaVM (Java)
-- WASM export class warnings with `--runtime stub` (AS)
+- `@durableEntry` tree-shaking by TeaVM (Java — TeaVM limitation)
+- WASM export class warnings with `--runtime stub` (AS — AS limitation)
 
 ### Documentation
 
 - Service contracts must be defined explicitly (no auto-discovery)
 - No per-language migration guide from Temporal/DBOS/Restate (Go only)
 - No documented WASM size expectations per language
+- DX_COMPARISON.md was stale (now updated)
 
 ---
 
@@ -335,9 +367,11 @@ tradeoff is clearly positive. For other languages, the SDK maturity gap
 dominates the experience.
 
 The critical path to multi-language viability:
-1. **Validate Python WASM end-to-end** — the SDK exists, the compilation pipeline exists, but they've never been connected
-2. **Fix TeaVM tree-shaking** — the `preservedClasses` requirement is the biggest single SDK issue
-3. **Add K/V state to Rust SDK** — 4 critical gaps, all small
-4. **Add test harnesses for Rust, Java, and AS** — without WASM-free testing, developer velocity suffers
+1. **Validate Python WASM end-to-end** — the SDK exists (4,508 lines, 34 WIT imports), the compilation pipeline exists (`build_wasm.py`), but they've never been connected
+2. **Fix TeaVM tree-shaking** — the `preservedClasses` requirement is the biggest single SDK issue (TeaVM limitation, not cleat bug)
+3. **Add lock API to all SDKs** — AcquireLock/ReleaseLock is implemented in the Go runtime but exposed in zero SDKs
+4. **Add Saga to Rust SDK** — Rust is the only language without compensation (all primitives exist)
 
-The engine is ready. The SDKs need the work.
+Items 3 and 4 from the original critical path (K/V state for Rust, test harnesses for Rust/Java/AS) are now DONE via the SDK hardening pass.
+
+The engine is ready. The remaining SDK work is narrow and well-scoped.
