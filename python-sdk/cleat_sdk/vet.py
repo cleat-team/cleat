@@ -799,9 +799,12 @@ def analyze_file(filepath: str) -> AnalysisResult:
     closure = compute_closure(call_graph, leaf_callers)
     result.durable_closure = closure
 
-    # --- Forbidden API detection in durable closure ---
-    # Check calls inside closure functions
-    checker = ForbiddenAPIChecker(filepath, closure)
+    # --- Forbidden API detection in durable closure + entry points ---
+    # Entry points are always checked even if they don't call SDK methods directly.
+    to_check = set(closure)
+    for name, _ in entries:
+        to_check.add(name)
+    checker = ForbiddenAPIChecker(filepath, to_check)
     checker.visit(tree)
     result.errors.extend(checker.errors)
 
@@ -809,7 +812,7 @@ def analyze_file(filepath: str) -> AnalysisResult:
     # (module-level imports are already caught by the checker visiting the root)
 
     # --- HostCalls threading verification ---
-    threading_checker = ThreadingChecker(filepath, func_defs, closure)
+    threading_checker = ThreadingChecker(filepath, func_defs, to_check)
     threading_errors = threading_checker.check()
     result.errors.extend(threading_errors)
 

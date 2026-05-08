@@ -548,7 +548,7 @@ func TestRunBuild_GoTarget(t *testing.T) {
 
 	// runBuild prints to stdout/stderr which is fine.
 	// It calls analyze(), prepares the build dir, and compiles WASM.
-	runBuild(pattern, outDir, "go")
+	runBuild(pattern, outDir, "go", false)
 
 	// Check that output directory contains expected files.
 	entries, err := os.ReadDir(outDir)
@@ -619,7 +619,7 @@ func TestRunBuild_WithOutputDir(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "custom", "output")
 
 	// Use a specific nested output path to verify -o behavior.
-	runBuild(pattern, outDir, "go")
+	runBuild(pattern, outDir, "go", false)
 
 	// Verify output files exist in the specified directory.
 	genFiles := []string{

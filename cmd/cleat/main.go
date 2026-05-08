@@ -507,7 +507,22 @@ func detectVetLang(dir string) (string, error) {
 		return "as", nil
 	}
 
-	return "", fmt.Errorf("could not auto-detect language in %s", dir)
+		// Fallback: check source file extensions.
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			switch {
+			case strings.HasSuffix(e.Name(), ".go"):
+				return "go", nil
+			case strings.HasSuffix(e.Name(), ".rs"):
+				return "rust", nil
+			case strings.HasSuffix(e.Name(), ".java"):
+				return "java", nil
+			}
+		}
+
+	return "", fmt.Errorf("could not auto-detect language in %s. Use --lang to specify", dir)
 }
 
 // runVetPython runs the Python AST-based vet via subprocess.
@@ -556,15 +571,18 @@ func runVetPython(dir string, jsonOut bool) int {
 		}
 
 		if err := cmd.Run(); err != nil {
-			if stderr.Len() > 0 {
-				fmt.Fprint(os.Stderr, stderr.String())
+			// Exit code 1 = errors found (normal for vet). Only fail on >1.
+			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() > 1 {
+				if stderr.Len() > 0 {
+					fmt.Fprint(os.Stderr, stderr.String())
+				}
+				fmt.Fprintf(os.Stderr, "Python vet failed for %s: %v\n", pyFile, err)
+				exitCode = 1
+				continue
 			}
-			fmt.Fprintf(os.Stderr, "Python vet failed for %s: %v\n", pyFile, err)
-			exitCode = 1
-			continue
 		}
 
-		// Print output.
+		// Print output (always, even when errors found).
 		if jsonOut {
 			fmt.Print(stdout.String())
 		} else {
@@ -573,8 +591,7 @@ func runVetPython(dir string, jsonOut bool) int {
 				fmt.Fprint(os.Stderr, stderr.String())
 			}
 		}
-
-		if stderr.Len() > 0 {
+		if exitCode == 0 && stderr.Len() > 0 {
 			exitCode = 1
 		}
 	}
