@@ -147,6 +147,10 @@ type WorkflowStore interface {
 	// Returns false if the workflow is no longer assigned to this worker.
 	Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error)
 
+	// BatchHeartbeat updates heartbeat_at for all workflows assigned to this
+	// worker with status 'running'. Uses a single UPDATE instead of N calls.
+	BatchHeartbeat(ctx context.Context, workerID string) (int64, error)
+
 	// CompleteWorkflow marks a workflow as completed with a result.
 	CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
 
@@ -938,6 +942,20 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 	}
 	n, _ := result.RowsAffected()
 	return n > 0, tx.Commit()
+}
+
+// BatchHeartbeat updates heartbeat_at for all workflows assigned to this worker.
+func (s *PostgresStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET heartbeat_at = now()
+		WHERE assigned_to = $1 AND status = 'running'
+	`, workerID)
+	if err != nil {
+		return 0, fmt.Errorf("batch heartbeat: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n, nil
 }
 
 // CompleteWorkflow marks a workflow as done.

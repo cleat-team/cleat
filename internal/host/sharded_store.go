@@ -158,21 +158,40 @@ func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID, namespace s
 	shards := s.shards
 	s.mu.RUnlock()
 
-	var all []*WorkflowInstance
-	remaining := limit
-	for _, shard := range shards {
-		wfs, err := shard.Store.ClaimWorkflows(ctx, workerID, namespace, remaining)
-		if err != nil {
-			return nil, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
-		}
-		all = append(all, wfs...)
-		remaining = limit - len(all)
-		if remaining <= 0 {
-			break
-		}
+	type shardResult struct {
+		wfs  []*WorkflowInstance
+		err  error
+		name string
 	}
+
+	resultCh := make(chan shardResult, len(shards))
+	var wg sync.WaitGroup
+
+	for _, shard := range shards {
+		wg.Add(1)
+		go func(sh *Shard) {
+			defer wg.Done()
+			wfs, err := sh.Store.ClaimWorkflows(ctx, workerID, namespace, limit)
+			resultCh <- shardResult{wfs: wfs, err: err, name: sh.Config.Name}
+		}(shard)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	var all []*WorkflowInstance
+	for res := range resultCh {
+		if res.err != nil {
+			return nil, fmt.Errorf("shard %q: %w", res.name, res.err)
+		}
+		all = append(all, res.wfs...)
+	}
+
 	if len(all) == 0 {
 		return nil, nil
+	}
+	if len(all) > limit {
+		all = all[:limit]
 	}
 	return all, nil
 }
@@ -185,21 +204,40 @@ func (s *ShardedStore) ClaimStickyWorkflows(ctx context.Context, workerID, names
 	shards := s.shards
 	s.mu.RUnlock()
 
-	var all []*WorkflowInstance
-	remaining := limit
-	for _, shard := range shards {
-		wfs, err := shard.Store.ClaimStickyWorkflows(ctx, workerID, namespace, remaining)
-		if err != nil {
-			return nil, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
-		}
-		all = append(all, wfs...)
-		remaining = limit - len(all)
-		if remaining <= 0 {
-			break
-		}
+	type shardResult struct {
+		wfs  []*WorkflowInstance
+		err  error
+		name string
 	}
+
+	resultCh := make(chan shardResult, len(shards))
+	var wg sync.WaitGroup
+
+	for _, shard := range shards {
+		wg.Add(1)
+		go func(sh *Shard) {
+			defer wg.Done()
+			wfs, err := sh.Store.ClaimStickyWorkflows(ctx, workerID, namespace, limit)
+			resultCh <- shardResult{wfs: wfs, err: err, name: sh.Config.Name}
+		}(shard)
+	}
+
+	wg.Wait()
+	close(resultCh)
+
+	var all []*WorkflowInstance
+	for res := range resultCh {
+		if res.err != nil {
+			return nil, fmt.Errorf("shard %q: %w", res.name, res.err)
+		}
+		all = append(all, res.wfs...)
+	}
+
 	if len(all) == 0 {
 		return nil, nil
+	}
+	if len(all) > limit {
+		all = all[:limit]
 	}
 	return all, nil
 }
@@ -280,6 +318,23 @@ func (s *ShardedStore) Heartbeat(ctx context.Context, workflowID, workerID strin
 		return false, fmt.Errorf("heartbeat: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.Heartbeat(ctx, workflowID, workerID)
+}
+
+// BatchHeartbeat fans out to all shards, aggregating the total count.
+func (s *ShardedStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+
+	var total int64
+	for _, shard := range shards {
+		n, err := shard.Store.BatchHeartbeat(ctx, workerID)
+		if err != nil {
+			return total, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // CompleteWorkflow routes by workflow ID.

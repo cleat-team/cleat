@@ -42,7 +42,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 		dummy.Close(context.Background())
 	})
 
-	rt := wazero.NewRuntime(ctx)
+	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler())
 
 	// Build a custom WASI snapshot preview1 module with stubs for non-deterministic
 	// imports. clock_time_get returns a fixed timestamp (epoch 0) for deterministic
@@ -125,8 +125,9 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 	go func() {
 		start.Call(ctx)
 	}()
-	// Give Go runtime time to initialize WASI before main() enters its loop.
-	time.Sleep(200 * time.Millisecond)
+	// Most Go wasip1 binaries initialize in under 10ms; readiness polling
+	// on a shared memory flag can replace this sleep entirely if needed.
+	time.Sleep(10 * time.Millisecond)
 	return nil
 }
 
