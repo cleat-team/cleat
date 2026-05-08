@@ -699,3 +699,303 @@ func TestProduceViaRestProxy(t *testing.T) {
 		t.Error("expected success=true")
 	}
 }
+
+// ===========================================================================
+// Config defaults
+// ===========================================================================
+
+func TestKafkaCreateConfigDefaults(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	body := `{"name":"defaults-test","brokers":"broker:9092","topic":"my-topic"}`
+	req := authedRequest("POST", "/kafka/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	// Default consumer_group should be "cleat-consumer".
+	if resp["consumer_group"] != "cleat-consumer" {
+		t.Errorf("expected default consumer_group 'cleat-consumer', got %q", resp["consumer_group"])
+	}
+	// Default event_type should mirror the topic.
+	if resp["event_type"] != "my-topic" {
+		t.Errorf("expected default event_type 'my-topic', got %q", resp["event_type"])
+	}
+}
+
+func TestKafkaCreateConfigCustomValues(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	body := `{"name":"custom-test","brokers":"broker:9092","topic":"ctopic","consumer_group":"my-group","event_type":"my-event"}`
+	req := authedRequest("POST", "/kafka/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if resp["consumer_group"] != "my-group" {
+		t.Errorf("expected consumer_group 'my-group', got %q", resp["consumer_group"])
+	}
+	if resp["event_type"] != "my-event" {
+		t.Errorf("expected event_type 'my-event', got %q", resp["event_type"])
+	}
+}
+
+// ===========================================================================
+// Empty list
+// ===========================================================================
+
+func TestKafkaListConfigsEmpty(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := authedRequest("GET", "/kafka/configs", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	body := strings.TrimSpace(rec.Body.String())
+	if body != "[]" {
+		t.Errorf("empty list: expected [], got %q", body)
+	}
+}
+
+// ===========================================================================
+// Invalid JSON body
+// ===========================================================================
+
+func TestKafkaCreateConfigInvalidJSON(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := authedRequest("POST", "/kafka/configs", bytes.NewReader([]byte(`not json`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Delete nonexistent config
+// ===========================================================================
+
+func TestKafkaDeleteConfigNotFound(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	nonexistentID := "00000000-0000-0000-0000-000000000099"
+	req := authedRequest("DELETE", "/kafka/configs/"+nonexistentID, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for nonexistent config, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestKafkaDeleteConfigInvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := authedRequest("DELETE", "/kafka/configs/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid UUID, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Tenant isolation
+// ===========================================================================
+
+func TestKafkaConfigTenantIsolation(t *testing.T) {
+	// This test verifies that configs created by tenant A are not visible to
+	// tenant B. We use two different API keys that map to different tenants.
+	store := newFakeDBStore()
+
+	// Register two tenants with different API keys.
+	tenantA := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	tenantB := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+
+	keyHashA := sha256.Sum256([]byte("tenant-a-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHashA)] = tenantA.String()
+	keyHashB := sha256.Sum256([]byte("tenant-b-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHashB)] = tenantB.String()
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.Default(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.Middleware(db)(mux)
+
+	// Tenant A creates a config.
+	body := `{"name":"tenant-a-config","brokers":"a:9092","topic":"a-topic"}`
+	req := httptest.NewRequest("POST", "/kafka/configs", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer tenant-a-key")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("tenant A create: expected 201, got %d", rec.Code)
+	}
+
+	// Tenant B lists configs — should be empty.
+	req = httptest.NewRequest("GET", "/kafka/configs", nil)
+	req.Header.Set("Authorization", "Bearer tenant-b-key")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant B list: expected 200, got %d", rec.Code)
+	}
+	bodyStr := strings.TrimSpace(rec.Body.String())
+	if bodyStr != "[]" {
+		t.Errorf("tenant B should see empty list, got %q", bodyStr)
+	}
+}
+
+// ===========================================================================
+// Produce — invalid input JSON
+// ===========================================================================
+
+func TestKafkaProduceInvalidInputJSON(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+
+	_, err := p.produce(withCallContext(context.Background()), `not json`)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON input, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid input") {
+		t.Errorf("expected 'invalid input' error, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// Produce — empty config_id
+// ===========================================================================
+
+func TestKafkaProduceEmptyConfigID(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+
+	_, err := p.produce(withCallContext(context.Background()), `{"value":"hello"}`)
+	if err == nil {
+		t.Fatal("expected error for empty config_id, got nil")
+	}
+	if !strings.Contains(err.Error(), "config_id is required") {
+		t.Errorf("expected 'config_id is required' error, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// Produce — REST proxy unreachable (fast timeout)
+// ===========================================================================
+
+func TestKafkaProduceRestProxyUnreachable(t *testing.T) {
+	p, _, store := setupTestPlugin(t)
+
+	cfgID := uuid.New().String()
+	store.mu.Lock()
+	store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
+		tenantID:      testTenantStr,
+		id:            cfgID,
+		brokers:       "broker:9092",
+		topic:         "timeout-topic",
+		enabled:       true,
+		consumerGroup: "cleat-consumer",
+		eventType:     "timeout-topic",
+		createdAt:     time.Now(),
+		updatedAt:     time.Now(),
+	}
+	store.mu.Unlock()
+
+	// Point REST proxy to an address that will be refused (fast).
+	p.config.RestProxyURL = "http://127.0.0.1:1"
+	p.httpClient = &http.Client{Timeout: 100 * time.Millisecond}
+
+	input := `{"config_id":"` + cfgID + `","value":"test"}`
+	_, err := p.produce(withCallContext(context.Background()), input)
+	if err == nil {
+		t.Fatal("expected error for unreachable REST proxy, got nil")
+	}
+	if !strings.Contains(err.Error(), "rest proxy") {
+		t.Errorf("expected error mentioning rest proxy, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// Migrations — basic validation
+// ===========================================================================
+
+func TestKafkaMigrations(t *testing.T) {
+	p := &Plugin{}
+	migrations := p.Migrations()
+	if len(migrations) == 0 {
+		t.Fatal("expected at least one migration")
+	}
+	for i, m := range migrations {
+		if m.Version == 0 {
+			t.Errorf("migration %d: version must be non-zero", i)
+		}
+		if m.Up == "" {
+			t.Errorf("migration %d: Up SQL is empty", i)
+		}
+		if m.Down == "" {
+			t.Errorf("migration %d: Down SQL is empty", i)
+		}
+	}
+}
+
+// ===========================================================================
+// RegisterHostFunctions — edge cases
+// ===========================================================================
+
+func TestKafkaRegisterHostFunctions_Valid(t *testing.T) {
+	p := &Plugin{}
+	reg := &fakeFuncRegistry{funcs: map[string]plugin.PluginFunc{}}
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
+	if _, ok := reg.funcs["produce"]; !ok {
+		t.Error("expected 'produce' to be registered")
+	}
+}
+
+func TestKafkaRegisterHostFunctions_NilRegistry(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterHostFunctions(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil function registry") {
+		t.Fatalf("expected nil registry error, got: %v", err)
+	}
+}
+
+// fakeFuncRegistry is a test stub for plugin.FuncRegistry.
+type fakeFuncRegistry struct {
+	funcs map[string]plugin.PluginFunc
+}
+
+func (r *fakeFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	r.funcs[opts.Name] = fn
+	return nil
+}

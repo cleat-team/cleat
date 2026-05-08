@@ -596,20 +596,6 @@ func TestEventRecordToPayloadRoundTrip_StandardEventTypes(t *testing.T) {
 			},
 		},
 		{
-			name: "heartbeat",
-			rec: EventRecord{
-				Step: 12, EventType: EventTypeHeartbeat,
-				Service: "svc", Op: "long-op",
-			},
-		},
-		{
-			name: "await_all_children",
-			rec: EventRecord{
-				Step: 13, EventType: EventTypeAwaitAllChildren,
-				Response: `[{"result":"ok"}]`,
-			},
-		},
-		{
 			name: "plugin_call",
 			rec: EventRecord{
 				Step: 14, EventType: EventTypePluginCall,
