@@ -31,6 +31,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -763,7 +764,14 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	result, resultHistory, suspended, deferrals, queryState, err := engine.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
 	if err != nil {
 		log.Printf("[worker %s] %s: execution error: %v", w.id, wf.ID, err)
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), nil)
+		// If the workflow has previously failed (has an error from a prior
+		// attempt), it has exhausted its retry — move to dead letter queue
+		// instead of marking as failed again to prevent infinite retries.
+		if wf.Error != "" {
+			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, err.Error())
+		} else {
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), nil)
+		}
 		return
 	}
 
@@ -1755,7 +1763,14 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id string) {
-	history, err := s.store.LoadEventHistory(r.Context(), id)
+	q := r.URL.Query()
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	limit, err := strconv.Atoi(q.Get("limit"))
+	if err != nil || limit <= 0 {
+		limit = 1000
+	}
+
+	history, err := s.store.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return

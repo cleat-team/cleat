@@ -756,8 +756,6 @@ if err := s.setRLSOnTx(tx); err != nil {
 		if err == nil && len(payload) > 0 {
 			payloadArg = sql.NullString{String: string(payload), Valid: true}
 		}
-		// Compute SHA-256 checksum of the event data for integrity verification.
-		_ = computeEventChecksum(rec) // TODO: Store in checksum column after migration
 		_, err = stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),

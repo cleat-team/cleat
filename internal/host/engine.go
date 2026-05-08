@@ -517,14 +517,14 @@ func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint strin
 		return "", nil, nil, nil, nil, fmt.Errorf("host: compile module: %w", err)
 	}
 	defer compiled.Close(ctx)
-	return e.executeCompiled(ctx, compiled, entryPoint, input, nil)
+	return e.executeCompiled(ctx, compiled, entryPoint, input, nil, wasmBytes)
 }
 
 // ExecuteCompiled is like Execute but takes a pre-compiled module.
 // Use this when the module has already been compiled and cached by a
 // WorkflowLoader, avoiding redundant compilation.
 func (e *Engine) ExecuteCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage) (result string, history []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
-	return e.executeCompiled(ctx, compiled, entryPoint, input, nil)
+	return e.executeCompiled(ctx, compiled, entryPoint, input, nil, nil)
 }
 
 // Replay replays a workflow from existing event history. Cached results are
@@ -536,19 +536,19 @@ func (e *Engine) Replay(ctx context.Context, wasmBytes []byte, entryPoint string
 		return "", nil, nil, nil, nil, fmt.Errorf("host: compile module: %w", err)
 	}
 	defer compiled.Close(ctx)
-	return e.replayCompiled(ctx, compiled, entryPoint, input, history)
+	return e.replayCompiled(ctx, compiled, entryPoint, input, history, wasmBytes)
 }
 
 // ReplayCompiled is like Replay but takes a pre-compiled module.
 // Use this when the module has already been compiled and cached by a
 // WorkflowLoader, avoiding redundant compilation.
 func (e *Engine) ReplayCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord) (result string, resultHistory []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
-	return e.replayCompiled(ctx, compiled, entryPoint, input, history)
+	return e.replayCompiled(ctx, compiled, entryPoint, input, history, nil)
 }
 
 // executeCompiled runs a fresh execution using a pre-compiled module.
 // history is the event history to replay (nil for fresh execution).
-func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
+func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord, wasmBytes []byte) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
 	mod, err := e.rt.InstantiateModule(ctx, compiled)
 	if err != nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: instantiate module: %w", err)
@@ -618,7 +618,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// Workflow failed with a non-suspend error. Invoke registered defers
 		// for cleanup, then release any held scopes.
 		if len(session.deferrals) > 0 {
-			e.runDefers(ctx, nil, session.deferrals)
+			e.runDefers(ctx, wasmBytes, session.deferrals)
 		}
 		session.releaseHeldScopes(ctx)
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, err
@@ -630,8 +630,8 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 }
 
 // replayCompiled runs a replay using a pre-compiled module.
-func (e *Engine) replayCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
-	return e.executeCompiled(ctx, compiled, entryPoint, input, history)
+func (e *Engine) replayCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord, wasmBytes []byte) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
+	return e.executeCompiled(ctx, compiled, entryPoint, input, history, wasmBytes)
 }
 
 // RunDefer invokes a defer cleanup function in the WASM module.
@@ -2746,31 +2746,6 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err))
 	if err != nil {
 		return fmt.Errorf("flush event: exec: %w", err)
-	}
-	return tx.Commit()
-}
-
-// flushEvents writes a batch of events to event_history in a single transaction.
-func (e *Engine) flushEvents(ctx context.Context, workflowID string, recs []EventRecord) error {
-	if e.db == nil || len(recs) == 0 {
-		return nil
-	}
-	tx, err := e.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("flush events: begin tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	for _, rec := range recs {
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (workflow_id, step) DO NOTHING
-		`, workflowID, rec.Step, rec.EventType,
-			nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err))
-		if err != nil {
-			return fmt.Errorf("flush events: exec step %d: %w", rec.Step, err)
-		}
 	}
 	return tx.Commit()
 }
