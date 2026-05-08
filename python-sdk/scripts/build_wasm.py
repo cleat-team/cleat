@@ -151,16 +151,20 @@ def run_componentize_py(
                 print(result.stderr, file=sys.stderr)
 
         if result.returncode != 0:
-            print(f"Error: componentize-py failed with exit code {result.returncode}",
+            stderr = result.stderr.strip() if result.stderr else ""
+            stdout = result.stdout.strip() if result.stdout else ""
+            details = f" (stderr: {stderr})" if stderr else ""
+            details += f" (stdout: {stdout})" if stdout and not stderr else ""
+            print(f"Error: componentize-py failed with exit code {result.returncode}{details}",
                   file=sys.stderr)
-            if result.stderr:
-                print(result.stderr, file=sys.stderr)
             return False
 
         return True
 
     except subprocess.TimeoutExpired:
-        print("Error: componentize-py compilation timed out (5 minutes)", file=sys.stderr)
+        print("Error: componentize-py compilation timed out (5 minutes). "
+              "Try simplifying the workflow or increasing the timeout.",
+              file=sys.stderr)
         return False
     except Exception as e:
         print(f"Error running componentize-py: {e}", file=sys.stderr)
@@ -251,7 +255,9 @@ def main():
     wit_dir = sdk_root / "wit"
 
     if not wit_dir.exists():
-        print(f"Error: WIT directory not found: {wit_dir}", file=sys.stderr)
+        print(f"Error: WIT directory not found: {wit_dir}. "
+              "Run 'componentize-py init' to initialize the WIT directory.",
+              file=sys.stderr)
         sys.exit(1)
 
     # Validate entry
@@ -331,10 +337,14 @@ def main():
             stamp_args.append("--verbose")
 
         try:
-            subprocess.run(stamp_args, check=True)
+            stamp_result = subprocess.run(stamp_args, capture_output=True, text=True, check=True)
             print("  Metadata stamped successfully.")
-        except subprocess.CalledProcessError:
-            print("  Warning: metadata stamping failed (non-fatal)", file=sys.stderr)
+        except subprocess.CalledProcessError as e:
+            err = e.stderr.strip() if e.stderr else ""
+            reason = f": {err}" if err else ""
+            print(f"  Warning: metadata stamping failed (non-fatal){reason}", file=sys.stderr)
+            if args.verbose and e.stdout:
+                print(e.stdout, file=sys.stderr)
 
 
 if __name__ == "__main__":

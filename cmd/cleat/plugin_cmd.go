@@ -72,7 +72,7 @@ func runPluginValidate(args []string) {
 
 	m, err := plugin.LoadManifest(*manifestPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error loading manifest: %v\n", err)
 		os.Exit(1)
 	}
 

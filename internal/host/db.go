@@ -342,11 +342,11 @@ func (s *PostgresStore) setRLSOnTx(tx *sql.Tx) error {
 func (s *PostgresStore) beginTxWithRLS(ctx context.Context) (*sql.Tx, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("beginTxWithRLS: begin tx: %w", err)
 	}
 	if err := s.setRLSOnTx(tx); err != nil {
 		tx.Rollback()
-		return nil, fmt.Errorf("set rls: %w", err)
+		return nil, fmt.Errorf("set row-level security: %w", err)
 	}
 	return tx, nil
 }

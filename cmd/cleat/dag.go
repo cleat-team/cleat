@@ -208,26 +208,30 @@ func readSpec(path string) (*dagplugin.DAGSpec, error) {
 
 	var spec dagplugin.DAGSpec
 	if err := json.NewDecoder(f).Decode(&spec); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
+		return nil, fmt.Errorf("dag: decode spec: %w", err)
 	}
 	return &spec, nil
 }
 
 // validateSpec checks the spec for structural errors without needing a registry.
 func validateSpec(spec *dagplugin.DAGSpec) (*dagplugin.DAG, error) {
+	jsonStr, err := mustMarshalJSON(spec)
+	if err != nil {
+		return nil, err
+	}
 	return dagplugin.LoadFromJSON(
-		strings.NewReader(mustMarshalJSON(spec)),
+		strings.NewReader(jsonStr),
 		nil,
 	)
 }
 
-// mustMarshalJSON marshals v to JSON, panicking on error (safe for known types).
-func mustMarshalJSON(v interface{}) string {
+// mustMarshalJSON marshals v to JSON.
+func mustMarshalJSON(v interface{}) (string, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		panic(err)
+		return "", fmt.Errorf("dag: unexpected type: %w", err)
 	}
-	return string(b)
+	return string(b), nil
 }
 
 // ---------------------------------------------------------------------------

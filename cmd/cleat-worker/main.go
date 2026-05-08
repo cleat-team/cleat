@@ -127,7 +127,7 @@ func main() {
 			*dbURL = os.Getenv("DATABASE_URL")
 		}
 		if *dbURL == "" {
-			fmt.Fprintln(os.Stderr, "error: --db or DATABASE_URL is required")
+			fmt.Fprintln(os.Stderr, "error: the --db flag or DATABASE_URL environment variable must be set to a PostgreSQL connection string")
 			os.Exit(1)
 		}
 

@@ -193,6 +193,7 @@ public class Plugins {
         try {
             return Long.parseLong(raw);
         } catch (NumberFormatException e) {
+            System.err.println("Warning: expected number in plugin response, got: " + raw);
             return 0;
         }
     }

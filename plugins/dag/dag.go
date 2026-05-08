@@ -282,7 +282,7 @@ func (d *DAG) TopologicalSort() ([][]*Task, error) {
 	// Check for cycles.
 	for _, degree := range inDegree {
 		if degree > 0 {
-			return nil, fmt.Errorf("dag: cycle detected")
+			return nil, fmt.Errorf("dag: cycle detected involving tasks: %v", inDegree)
 		}
 	}
 

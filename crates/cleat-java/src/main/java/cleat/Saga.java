@@ -297,8 +297,7 @@ public class Saga {
 
                 if (compensateFailure != null) {
                     RuntimeException rte = new RuntimeException(
-                        "saga compensation failed for step '" + completed.get(completed.size() - 1).description
-                            + "'; original forward error: " + e.getMessage(), e);
+                        "saga compensation failed for one or more steps; original forward error: " + e.getMessage(), e);
                     rte.addSuppressed(compensateFailure);
                     throw rte;
                 }
@@ -344,8 +343,7 @@ public class Saga {
 
             if (compensateFailure != null) {
                 RuntimeException rte = new RuntimeException(
-                    "saga compensation failed for step '" + completed.get(completed.size() - 1).description
-                        + "'; original forward error: " + e.getMessage(), e);
+                    "saga compensation failed for one or more steps; original forward error: " + e.getMessage(), e);
                 rte.addSuppressed(compensateFailure);
                 throw rte;
             }

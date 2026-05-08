@@ -43,5 +43,5 @@ func (g *PluginCallGuard) Check(callerName, targetName string) error {
 	if targets[targetName] {
 		return nil
 	}
-	return fmt.Errorf("plugin %q is not allowed to call plugin %q", callerName, targetName)
+	return fmt.Errorf("plugin %q is not allowed to call plugin %q. Add %q to the caller's call_plugin capability in its manifest.", callerName, targetName, targetName, callerName, targetName)
 }

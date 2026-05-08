@@ -25,6 +25,21 @@ import {
 
 import { jsonStrArray, jsonExtractString, jsonExtractNumber } from "./json";
 
+/**
+ * Map an error code from the host runtime to a human-readable name.
+ */
+function errorCodeName(code: u32): string {
+  switch (code) {
+    case 0: return "unknown";
+    case 1: return "timeout";
+    case 2: return "transient";
+    case 3: return "not_found";
+    case 4: return "invalid_request";
+    case 5: return "permission_denied";
+    default: return "unknown_code";
+  }
+}
+
 // ═══════════════════════════════════════════════
 // 21 raw host function imports from "env" module
 // ═══════════════════════════════════════════════
@@ -871,7 +886,7 @@ export class HostCalls {
     // On error, the output buffer contains an error message
     if (decoded.errCode !== 0) {
       let errMsg: string =
-        responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "unknown error";
+        responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "cleat_call(service='" + service + "', operation='" + operation + "') failed: unknown error (code " + decoded.errCode.toString() + ")";
       return new CleatCallOutcome("", errMsg, decoded.callErrorCode);
     }
 
@@ -1010,7 +1025,7 @@ export class HostCalls {
     if (decoded.errCode !== 0) {
       return new DurableResult<string>(
         "",
-        "defer error code: " + decoded.errCode.toString(),
+        "defer(description='" + description + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 
@@ -1065,7 +1080,7 @@ export class HostCalls {
       return new PollSignalOutcome(
         "",
         false,
-        "signal error code: " + decoded.errCode.toString(),
+        "pollSignal(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 
@@ -1097,7 +1112,7 @@ export class HostCalls {
     let decoded = decodeSimpleResult(result);
 
     if (decoded.errCode !== 0) {
-      return "continue_as_new error code: " + decoded.errCode.toString();
+      return "continueAsNew() failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
 
     return null;
@@ -1134,7 +1149,7 @@ export class HostCalls {
     if (decoded.errCode !== 0) {
       return new DurableResult<string>(
         "",
-        "child_workflow error code: " + decoded.errCode.toString(),
+        "childWorkflow(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 
@@ -1171,7 +1186,7 @@ export class HostCalls {
     if (decoded.errCode !== 0) {
       return new DurableResult<string>(
         "",
-        "childWorkflowWithOptions error code: " + decoded.errCode.toString(),
+        "childWorkflowWithOptions(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 
@@ -1213,7 +1228,7 @@ export class HostCalls {
     if (decoded.errCode !== 0) {
       return new DurableResult<string>(
         "",
-        "await_child error code: " + decoded.errCode.toString(),
+        "awaitChild(runId='" + runId + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 
@@ -1284,7 +1299,7 @@ export class HostCalls {
         "",
         "",
         false,
-        "await_signals error code: " + decoded.errCode.toString(),
+        "awaitSignalsMs() failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 
@@ -1350,7 +1365,7 @@ export class HostCalls {
     if (decoded.errCode !== 0) {
       return new PromiseResult(
         "",
-        "create_promise error code: " + decoded.errCode.toString(),
+        "createPromise(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 
@@ -1403,7 +1418,7 @@ export class HostCalls {
       return new AwaitPromiseOutcome(
         "",
         false,
-        "await_promise error code: " + decoded.errCode.toString(),
+        "awaitPromiseMs(id='" + id + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 
@@ -1477,7 +1492,7 @@ export class HostCalls {
     // On error, the output buffer contains an error message
     if (decoded.errCode !== 0) {
       let errMsg: string =
-        responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "unknown error";
+        responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "pluginCall(" + pluginName + "." + functionName + ") failed: unknown error (code " + decoded.errCode.toString() + ")";
       return new PluginCallOutcome("", errMsg, decoded.callErrorCode);
     }
 
@@ -1707,7 +1722,7 @@ export class HostCalls {
     if (decoded.errCode !== 0) {
       return new DurableResult<string>(
         "",
-        "send_signal_and_wait error code: " + decoded.errCode.toString(),
+        "sendSignalAndWaitMs(targetRunId='" + targetRunId + "', signalName='" + signalName + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
     let response: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
@@ -1743,7 +1758,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "reply_to_signal error code: " + decoded.errCode.toString();
+      return "replyToSignal(correlationId='" + correlationId + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -1867,7 +1882,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "signal_workflow error code: " + decoded.errCode.toString();
+      return "signalWorkflow(targetRunId='" + targetRunId + "', signalName='" + signalName + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -1901,7 +1916,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "resolve_promise error code: " + decoded.errCode.toString();
+      return "resolvePromise(id='" + id + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -1932,7 +1947,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "reject_promise error code: " + decoded.errCode.toString();
+      return "rejectPromise(id='" + id + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -1972,7 +1987,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "cleat_send error code: " + decoded.errCode.toString();
+      return "cleatSend(service='" + service + "', operation='" + operation + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -2030,7 +2045,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "schedule_invoke error code: " + decoded.errCode.toString();
+      return "scheduleInvokeMs(service='" + service + "', operation='" + operation + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -2059,7 +2074,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "register_query_handler error code: " + decoded.errCode.toString();
+      return "registerQueryHandler(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -2093,7 +2108,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "run_detached error code: " + decoded.errCode.toString();
+      return "runDetached(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -2145,7 +2160,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "set_state error code: " + decoded.errCode.toString();
+      return "setState(key='" + key + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -2202,7 +2217,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "delete_state error code: " + decoded.errCode.toString();
+      return "deleteState(key='" + key + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }
@@ -2486,7 +2501,7 @@ export class HostCalls {
     if (errCode !== 0) {
       return new DurableResult<bool>(
         false,
-        "acquire_lock error code: " + errCode.toString(),
+        "acquireLockMs(key='" + key + "') failed: " + errorCodeName(<u32>errCode) + " (code " + errCode.toString() + ")",
       );
     }
 
@@ -2513,7 +2528,7 @@ export class HostCalls {
 
     let errCode: i64 = result & 0xFF;
     if (errCode !== 0) {
-      return "release_lock error code: " + errCode.toString();
+      return "releaseLock(key='" + key + "') failed: " + errorCodeName(<u32>errCode) + " (code " + errCode.toString() + ")";
     }
     return null;
   }
@@ -2569,7 +2584,7 @@ export class HostCalls {
     if (decoded.errCode !== 0) {
       return new DurableResult<string>(
         "",
-        "schedule_cron error code: " + decoded.errCode.toString(),
+        "scheduleCron(workflowName='" + workflowName + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
     let scheduleId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
@@ -2596,7 +2611,7 @@ export class HostCalls {
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
-      return "delete_cron error code: " + decoded.errCode.toString();
+      return "deleteCron(scheduleId='" + scheduleId + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
   }

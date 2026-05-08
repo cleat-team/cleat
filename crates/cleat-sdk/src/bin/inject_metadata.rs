@@ -88,7 +88,13 @@ Options:
     }
 
     let wasm_file = wasm_file.expect("<wasm-file> is required");
-    let wasm_bytes = fs::read(&wasm_file).expect("Failed to read WASM file");
+    let wasm_bytes = match fs::read(&wasm_file) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("Failed to read WASM file {}: {}", wasm_file, e);
+            std::process::exit(1);
+        }
+    };
 
     if read_only {
         match read_metadata(&wasm_bytes) {
@@ -152,7 +158,13 @@ Options:
 
     let modified = inject_metadata(&wasm_bytes, &meta);
     let output_path = output_file.unwrap_or(wasm_file);
-    fs::write(&output_path, modified).expect("Failed to write output");
+    match fs::write(&output_path, modified) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("Failed to write output to {}: {}", output_path, e);
+            std::process::exit(1);
+        }
+    }
 
     eprintln!("Stamped cleat metadata into {}", output_path);
 }

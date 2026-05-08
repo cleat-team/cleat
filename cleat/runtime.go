@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"sync"
@@ -503,18 +504,19 @@ var virtualObjectRegistry = struct {
 }
 
 // RegisterVirtualObject registers a virtual object definition in the
-// global registry. Panics if a definition with the same name already
-// exists or if the name is empty.
-func RegisterVirtualObject(def VirtualObjectDef) {
+// global registry. Returns an error if a definition with the same name
+// already exists or if the name is empty.
+func RegisterVirtualObject(def VirtualObjectDef) error {
 	virtualObjectRegistry.mu.Lock()
 	defer virtualObjectRegistry.mu.Unlock()
 	if def.Name == "" {
-		panic("durable: virtual object name must not be empty")
+		return fmt.Errorf("durable: virtual object name must not be empty")
 	}
 	if _, exists := virtualObjectRegistry.defs[def.Name]; exists {
-		panic(fmt.Sprintf("durable: virtual object %q already registered", def.Name))
+		return fmt.Errorf("durable: virtual object %q already registered", def.Name)
 	}
 	virtualObjectRegistry.defs[def.Name] = def
+	return nil
 }
 
 // GetVirtualObject returns a registered virtual object definition by name.
@@ -947,7 +949,7 @@ type HostCallsOptions struct {
 
 func (h *hostCallsImpl) DurableCall(service, operation, requestJSON string) (string, error) {
 	if h.durableCall == nil {
-		return "", errors.New("durable: DurableCall not initialized")
+		return "", errors.New("durable: DurableCall can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableCall(service, operation, requestJSON)
 }
@@ -1267,40 +1269,40 @@ func (h *hostCallsImpl) PluginCall(pluginName, functionName, inputJSON string) (
 	if h.pluginCall != nil {
 		return h.pluginCall(pluginName, functionName, inputJSON)
 	}
-	return "", fmt.Errorf("durable: PluginCall not initialized")
+	return "", fmt.Errorf("durable: PluginCall can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 }
 
 func (h *hostCallsImpl) PluginCallStreaming(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error) {
 	if h.pluginCallStreaming != nil {
 		return h.pluginCallStreaming(pluginName, functionName, inputJSON)
 	}
-	return nil, fmt.Errorf("durable: PluginCallStreaming not initialized")
+	return nil, fmt.Errorf("durable: PluginCallStreaming can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 }
 
 func (h *hostCallsImpl) DurableSend(service, operation, requestJSON string) error {
 	if h.durableSend == nil {
-		return errors.New("durable: DurableSend not initialized")
+		return errors.New("durable: DurableSend can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableSend(service, operation, requestJSON)
 }
 
 func (h *hostCallsImpl) ScheduleInvoke(service, operation, requestJSON string, delayMs int64) error {
 	if h.scheduleInvoke == nil {
-		return errors.New("durable: ScheduleInvoke not initialized")
+		return errors.New("durable: ScheduleInvoke can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.scheduleInvoke(service, operation, requestJSON, delayMs)
 }
 
 func (h *hostCallsImpl) SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
 	if h.sendSignalAndWait == nil {
-		return "", errors.New("durable: SendSignalAndWait not initialized")
+		return "", errors.New("durable: SendSignalAndWait can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.sendSignalAndWait(targetRunID, signalName, payload, timeout)
 }
 
 func (h *hostCallsImpl) ReplyToSignal(correlationID, response string) error {
 	if h.replyToSignal == nil {
-		return errors.New("durable: ReplyToSignal not initialized")
+		return errors.New("durable: ReplyToSignal can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.replyToSignal(correlationID, response)
 }
@@ -1347,28 +1349,28 @@ func (h *hostCallsImpl) AwaitSignalsWithQuorum(signalNames []string, minCount in
 
 func (h *hostCallsImpl) SignalWorkflow(targetRunID, signalName, payload string) error {
 	if h.signalWorkflow == nil {
-		return errors.New("durable: SignalWorkflow not initialized")
+		return errors.New("durable: SignalWorkflow can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.signalWorkflow(targetRunID, signalName, payload)
 }
 
 func (h *hostCallsImpl) ScheduleCron(workflowName, cronExpr, timezone, inputJSON string) (string, error) {
 	if h.scheduleCron == nil {
-		return "", errors.New("durable: ScheduleCron not initialized")
+		return "", errors.New("durable: ScheduleCron can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.scheduleCron(workflowName, cronExpr, timezone, inputJSON)
 }
 
 func (h *hostCallsImpl) DeleteCron(scheduleID string) error {
 	if h.deleteCron == nil {
-		return errors.New("durable: DeleteCron not initialized")
+		return errors.New("durable: DeleteCron can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.deleteCron(scheduleID)
 }
 
 func (h *hostCallsImpl) ListCrons() (string, error) {
 	if h.listCrons == nil {
-		return "", errors.New("durable: ListCrons not initialized")
+		return "", errors.New("durable: ListCrons can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.listCrons()
 }
@@ -1395,7 +1397,7 @@ func (h *hostCallsImpl) AwaitCondition(predicate func() bool, pollInterval, time
 
 func (h *hostCallsImpl) SideEffect(fn func() (string, error)) (string, error) {
 	if h.sideEffect == nil {
-		return "", errors.New("durable: SideEffect not initialized")
+		return "", errors.New("durable: SideEffect can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	computedResult, err := fn()
 	if err != nil {
@@ -1410,14 +1412,14 @@ func (h *hostCallsImpl) AcquireLock(key string, ttl time.Duration) (bool, error)
 
 func (h *hostCallsImpl) AcquireLockMs(key string, ttlMs int64) (bool, error) {
 	if h.acquireLock == nil {
-		return false, errors.New("durable: AcquireLock not initialized")
+		return false, errors.New("durable: AcquireLock can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.acquireLock(key, ttlMs)
 }
 
 func (h *hostCallsImpl) ReleaseLock(key string) error {
 	if h.releaseLock == nil {
-		return errors.New("durable: ReleaseLock not initialized")
+		return errors.New("durable: ReleaseLock can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.releaseLock(key)
 }
@@ -1428,7 +1430,8 @@ func (h *hostCallsImpl) DurableSleep(d time.Duration) {
 
 func (h *hostCallsImpl) DurableSleepMs(ms int64) {
 	if h.durableSleep == nil {
-		panic("durable: DurableSleep not initialized")
+		log.Printf("durable: DurableSleep can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+		return
 	}
 	h.durableSleep(ms)
 }
@@ -1445,21 +1448,21 @@ func (h *hostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration
 
 func (h *hostCallsImpl) DurableAwaitSignals(signalNames []string, timeoutMs int64) (string, string, bool, error) {
 	if h.durableAwaitSignals == nil {
-		return "", "", false, errors.New("durable: DurableAwaitSignals not initialized")
+		return "", "", false, errors.New("durable: DurableAwaitSignals can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableAwaitSignals(signalNames, timeoutMs)
 }
 
 func (h *hostCallsImpl) CreatePromise(name string) (string, error) {
 	if h.createPromise == nil {
-		return "", errors.New("durable: CreatePromise not initialized")
+		return "", errors.New("durable: CreatePromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.createPromise(name)
 }
 
 func (h *hostCallsImpl) AwaitPromise(promiseID string, timeout time.Duration) (string, bool, error) {
 	if h.awaitPromise == nil {
-		return "", false, errors.New("durable: AwaitPromise not initialized")
+		return "", false, errors.New("durable: AwaitPromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.awaitPromise(promiseID, timeout)
 }
@@ -1470,28 +1473,28 @@ func (h *hostCallsImpl) AwaitPromiseMs(promiseID string, timeoutMs int64) (resul
 
 func (h *hostCallsImpl) ResolvePromise(id, value string) error {
 	if h.resolvePromise == nil {
-		return errors.New("durable: ResolvePromise not initialized")
+		return errors.New("durable: ResolvePromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.resolvePromise(id, value)
 }
 
 func (h *hostCallsImpl) RejectPromise(id, errMsg string) error {
 	if h.rejectPromise == nil {
-		return errors.New("durable: RejectPromise not initialized")
+		return errors.New("durable: RejectPromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.rejectPromise(id, errMsg)
 }
 
 func (h *hostCallsImpl) DurableDefer(description string) (string, error) {
 	if h.durableDefer == nil {
-		return "", errors.New("durable: DurableDefer not initialized")
+		return "", errors.New("durable: DurableDefer can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableDefer(description)
 }
 
 func (h *hostCallsImpl) DurableDeferFunc(fn func()) (string, error) {
 	if h.durableDeferFunc == nil {
-		return "", errors.New("durable: DurableDeferFunc not initialized")
+		return "", errors.New("durable: DurableDeferFunc can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableDeferFunc(fn)
 }
@@ -1547,28 +1550,28 @@ func (h *hostCallsImpl) PollCancellation() (bool, string) {
 
 func (h *hostCallsImpl) PollSignal(signalName string) (string, bool, error) {
 	if h.pollSignal == nil {
-		return "", false, errors.New("durable: PollSignal not initialized")
+		return "", false, errors.New("durable: PollSignal can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.pollSignal(signalName)
 }
 
 func (h *hostCallsImpl) ContinueAsNew(newInputJSON string) error {
 	if h.continueAsNew == nil {
-		return errors.New("durable: ContinueAsNew not initialized")
+		return errors.New("durable: ContinueAsNew can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.continueAsNew(newInputJSON)
 }
 
 func (h *hostCallsImpl) ContinueAsNewWithVersion(newInputJSON string, newVersion int64) error {
 	if h.continueAsNewWithVersion == nil {
-		return errors.New("durable: ContinueAsNewWithVersion not initialized")
+		return errors.New("durable: ContinueAsNewWithVersion can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.continueAsNewWithVersion(newInputJSON, newVersion)
 }
 
 func (h *hostCallsImpl) ChildWorkflow(name, inputJSON string) (string, error) {
 	if h.childWorkflow == nil {
-		return "", errors.New("durable: ChildWorkflow not initialized")
+		return "", errors.New("durable: ChildWorkflow can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.childWorkflow(name, inputJSON)
 }
@@ -1584,14 +1587,14 @@ func (h *hostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts Ch
 
 func (h *hostCallsImpl) AwaitChild(runID string) (string, error) {
 	if h.awaitChild == nil {
-		return "", errors.New("durable: AwaitChild not initialized")
+		return "", errors.New("durable: AwaitChild can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.awaitChild(runID)
 }
 
 func (h *hostCallsImpl) AwaitAllChildren(runIDs []string) ([]ChildResult, error) {
 	if h.awaitAllChildren == nil {
-		return nil, errors.New("durable: AwaitAllChildren not initialized")
+		return nil, errors.New("durable: AwaitAllChildren can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.awaitAllChildren(runIDs)
 }
@@ -2017,7 +2020,8 @@ func (h *hostCallsImpl) Now() time.Time {
 
 func (h *hostCallsImpl) NowMs() int64 {
 	if h.now == nil {
-		panic("durable: Now not initialized")
+		log.Printf("durable: Now can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+		return 0
 	}
 	return h.now()
 }
@@ -2025,7 +2029,8 @@ func (h *hostCallsImpl) NowMs() int64 {
 
 func (h *hostCallsImpl) Random() int64 {
 	if h.random == nil {
-		panic("durable: Random not initialized")
+		log.Printf("durable: Random can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+		return 0
 	}
 	return h.random()
 }

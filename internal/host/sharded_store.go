@@ -208,7 +208,7 @@ func (s *ShardedStore) ClaimStickyWorkflows(ctx context.Context, workerID, names
 func (s *ShardedStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return nil, fmt.Errorf("no shard available")
+		return nil, fmt.Errorf("load_event_history: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.LoadEventHistory(ctx, workflowID)
 }
@@ -217,7 +217,7 @@ func (s *ShardedStore) LoadEventHistory(ctx context.Context, workflowID string) 
 func (s *ShardedStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("append_event_history: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.AppendEventHistory(ctx, workflowID, rec)
 }
@@ -226,7 +226,7 @@ func (s *ShardedStore) AppendEventHistory(ctx context.Context, workflowID string
 func (s *ShardedStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("append_event_history_batch: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.AppendEventHistoryBatch(ctx, workflowID, recs)
 }
@@ -277,7 +277,7 @@ func (s *ShardedStore) ListVersions(ctx context.Context, defName string) ([]int,
 func (s *ShardedStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return false, fmt.Errorf("no shard available")
+		return false, fmt.Errorf("heartbeat: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.Heartbeat(ctx, workflowID, workerID)
 }
@@ -286,7 +286,7 @@ func (s *ShardedStore) Heartbeat(ctx context.Context, workflowID, workerID strin
 func (s *ShardedStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("complete_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.CompleteWorkflow(ctx, workflowID, workerID, result, queryState)
 }
@@ -295,7 +295,7 @@ func (s *ShardedStore) CompleteWorkflow(ctx context.Context, workflowID, workerI
 func (s *ShardedStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("fail_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.FailWorkflow(ctx, workflowID, workerID, errMsg, queryState)
 }
@@ -304,7 +304,7 @@ func (s *ShardedStore) FailWorkflow(ctx context.Context, workflowID, workerID, e
 func (s *ShardedStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("release_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.ReleaseWorkflow(ctx, workflowID, workerID, nextWakeAt)
 }
@@ -313,7 +313,7 @@ func (s *ShardedStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID
 func (s *ShardedStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("request_cancellation: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.RequestCancellation(ctx, workflowID, reason)
 }
@@ -322,7 +322,7 @@ func (s *ShardedStore) RequestCancellation(ctx context.Context, workflowID, reas
 func (s *ShardedStore) CheckCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return false, "", fmt.Errorf("no shard available")
+		return false, "", fmt.Errorf("check_cancellation: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.CheckCancellation(ctx, workflowID)
 }
@@ -331,7 +331,7 @@ func (s *ShardedStore) CheckCancellation(ctx context.Context, workflowID string)
 func (s *ShardedStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("deliver_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.DeliverSignal(ctx, workflowID, signalName, payload)
 }
@@ -340,7 +340,7 @@ func (s *ShardedStore) DeliverSignal(ctx context.Context, workflowID, signalName
 func (s *ShardedStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return "", false, fmt.Errorf("no shard available")
+		return "", false, fmt.Errorf("poll_and_claim_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.PollAndClaimSignal(ctx, workflowID, signalName)
 }
@@ -351,7 +351,7 @@ func (s *ShardedStore) PollAndClaimSignal(ctx context.Context, workflowID, signa
 func (s *ShardedStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
 	shard := s.getShard(defName)
 	if shard == nil {
-		return "", false, fmt.Errorf("no shard available")
+		return "", false, fmt.Errorf("start_new_run: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.StartNewRun(ctx, defName, defVersion, input, idempotencyKey)
 }
@@ -361,7 +361,7 @@ func (s *ShardedStore) StartNewRun(ctx context.Context, defName string, defVersi
 func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
 	shard := s.getShard(parentID)
 	if shard == nil {
-		return "", fmt.Errorf("no shard available")
+		return "", fmt.Errorf("start_child_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy)
 }
@@ -370,7 +370,7 @@ func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName
 func (s *ShardedStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
 	shard := s.getShard(runID)
 	if shard == nil {
-		return "", false, fmt.Errorf("no shard available")
+		return "", false, fmt.Errorf("get_child_result: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.GetChildResult(ctx, runID)
 }
@@ -395,7 +395,7 @@ func (s *ShardedStore) ReapStaleInstances(ctx context.Context, timeout time.Dura
 func (s *ShardedStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return "", fmt.Errorf("no shard available")
+		return "", fmt.Errorf("get_query_state: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.GetQueryState(ctx, workflowID, key)
 }
@@ -559,7 +559,7 @@ func (s *ShardedStore) LoadDAGSpec(ctx context.Context, defName string, defVersi
 func (s *ShardedStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return nil, fmt.Errorf("no shard available")
+		return nil, fmt.Errorf("trace_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.TraceWorkflow(ctx, workflowID, traceID)
 }
@@ -593,7 +593,7 @@ func (s *ShardedStore) GetCompactionCandidates(ctx context.Context, threshold in
 func (s *ShardedStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return nil, fmt.Errorf("no shard available")
+		return nil, fmt.Errorf("load_compaction_state: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.LoadCompactionState(ctx, workflowID)
 }
@@ -602,7 +602,7 @@ func (s *ShardedStore) LoadCompactionState(ctx context.Context, workflowID strin
 func (s *ShardedStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("compact_history: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.CompactHistory(ctx, workflowID, compactionState, compactionStep, keepStep)
 }
@@ -615,7 +615,7 @@ func (s *ShardedStore) CompactHistory(ctx context.Context, workflowID string, co
 func (s *ShardedStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return "", false, fmt.Errorf("no shard available")
+		return "", false, fmt.Errorf("poll_signal: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.PollSignal(ctx, workflowID, signalName)
 }
@@ -624,7 +624,7 @@ func (s *ShardedStore) PollSignal(ctx context.Context, workflowID, signalName st
 func (s *ShardedStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return false, "", fmt.Errorf("no shard available")
+		return false, "", fmt.Errorf("poll_cancellation: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.PollCancellation(ctx, workflowID)
 }
@@ -633,7 +633,7 @@ func (s *ShardedStore) PollCancellation(ctx context.Context, workflowID string) 
 func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("create_promise: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.CreatePromise(ctx, workflowID, promiseName, promiseID)
 }
@@ -642,7 +642,7 @@ func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseNam
 func (s *ShardedStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("resolve_promise: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.ResolvePromise(ctx, workflowID, promiseID, result)
 }
@@ -651,7 +651,7 @@ func (s *ShardedStore) ResolvePromise(ctx context.Context, workflowID, promiseID
 func (s *ShardedStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("reject_promise: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.RejectPromise(ctx, workflowID, promiseID, errMsg)
 }
@@ -660,7 +660,7 @@ func (s *ShardedStore) RejectPromise(ctx context.Context, workflowID, promiseID,
 func (s *ShardedStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return "", "", "", fmt.Errorf("no shard available")
+		return "", "", "", fmt.Errorf("get_promise: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.GetPromise(ctx, workflowID, promiseID)
 }
@@ -669,7 +669,7 @@ func (s *ShardedStore) GetPromise(ctx context.Context, workflowID, promiseID str
 func (s *ShardedStore) ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return nil, fmt.Errorf("no shard available")
+		return nil, fmt.Errorf("list_promises: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.ListPromises(ctx, workflowID)
 }
@@ -682,7 +682,7 @@ func (s *ShardedStore) ListPromises(ctx context.Context, workflowID string) ([]P
 func (s *ShardedStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	shard := s.getShard(key)
 	if shard == nil {
-		return false, fmt.Errorf("no shard available")
+		return false, fmt.Errorf("acquire_concurrency_key: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.AcquireConcurrencyKey(ctx, key, workflowID, ttl)
 }
@@ -691,7 +691,7 @@ func (s *ShardedStore) AcquireConcurrencyKey(ctx context.Context, key, workflowI
 func (s *ShardedStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
 	shard := s.getShard(key)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("release_concurrency_key: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.ReleaseConcurrencyKey(ctx, key)
 }
@@ -700,7 +700,7 @@ func (s *ShardedStore) ReleaseConcurrencyKey(ctx context.Context, key string) er
 func (s *ShardedStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("release_workflow_concurrency_keys: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.ReleaseWorkflowConcurrencyKeys(ctx, workflowID)
 }
@@ -729,7 +729,7 @@ func (s *ShardedStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, e
 func (s *ShardedStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("update_sticky_worker: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.UpdateStickyWorker(ctx, workflowID, workerID)
 }
@@ -738,7 +738,7 @@ func (s *ShardedStore) UpdateStickyWorker(ctx context.Context, workflowID, worke
 func (s *ShardedStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("clear_sticky_worker: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.ClearStickyWorker(ctx, workflowID)
 }
@@ -751,7 +751,7 @@ func (s *ShardedStore) ClearStickyWorker(ctx context.Context, workflowID string)
 func (s *ShardedStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("create_update_request: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.CreateUpdateRequest(ctx, workflowID, updateName, payload, promiseID)
 }
@@ -760,7 +760,7 @@ func (s *ShardedStore) CreateUpdateRequest(ctx context.Context, workflowID, upda
 func (s *ShardedStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return nil, fmt.Errorf("no shard available")
+		return nil, fmt.Errorf("get_pending_update_requests: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.GetPendingUpdateRequests(ctx, workflowID)
 }
@@ -769,7 +769,7 @@ func (s *ShardedStore) GetPendingUpdateRequests(ctx context.Context, workflowID 
 func (s *ShardedStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("complete_update_request: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.CompleteUpdateRequest(ctx, workflowID, updateName, result, errMsg)
 }
@@ -780,7 +780,7 @@ func (s *ShardedStore) CompleteUpdateRequest(ctx context.Context, workflowID, up
 func (s *ShardedStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
 	shard := s.getShard(def.Name)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("deploy_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.DeployWorkflowDef(ctx, def)
 }
@@ -803,7 +803,7 @@ func (s *ShardedStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wor
 func (s *ShardedStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
 	shard := s.getShard(name)
 	if shard == nil {
-		return nil, fmt.Errorf("no shard available")
+		return nil, fmt.Errorf("get_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.GetWorkflowDef(ctx, name, version)
 }
@@ -812,7 +812,7 @@ func (s *ShardedStore) GetWorkflowDef(ctx context.Context, name string, version 
 func (s *ShardedStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
 	shard := s.getShard(name)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("mark_version_deprecated: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.MarkVersionDeprecated(ctx, name, version, deprecated)
 }
@@ -821,7 +821,7 @@ func (s *ShardedStore) MarkVersionDeprecated(ctx context.Context, name string, v
 func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
 	shard := s.getShard(name)
 	if shard == nil {
-		return fmt.Errorf("no shard available")
+		return fmt.Errorf("purge_workflow_def: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.PurgeWorkflowDef(ctx, name, version)
 }
@@ -830,7 +830,7 @@ func (s *ShardedStore) PurgeWorkflowDef(ctx context.Context, name string, versio
 func (s *ShardedStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
 	shard := s.getShard(name)
 	if shard == nil {
-		return 0, fmt.Errorf("no shard available")
+		return 0, fmt.Errorf("count_active_instances: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.CountActiveInstances(ctx, name, version)
 }
@@ -855,7 +855,7 @@ func (s *ShardedStore) GetActiveInstanceCountsByVersion(ctx context.Context) (ma
 func (s *ShardedStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) {
 	shard := s.getShard(defName)
 	if shard == nil {
-		return 0, fmt.Errorf("no shard available")
+		return 0, fmt.Errorf("resolve_latest_version: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.ResolveLatestVersion(ctx, defName)
 }
@@ -864,7 +864,7 @@ func (s *ShardedStore) ResolveLatestVersion(ctx context.Context, defName string)
 func (s *ShardedStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
 	shard := s.getShard(defName)
 	if shard == nil {
-		return false, fmt.Errorf("no shard available")
+		return false, fmt.Errorf("validate_version: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.ValidateVersion(ctx, defName, defVersion)
 }

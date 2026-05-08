@@ -215,6 +215,33 @@ _CALL_ERROR_CODE_MAP: dict[int, type[CleatCallError]] = {
     5: CleatCallPermanentError,  # CallErrorPermissionDenied
 }
 
+# Human-readable names for call error codes, matching _CALL_ERROR_CODE_MAP.
+_CALL_ERROR_NAMES: dict[int, str] = {
+    0: "CallErrorUnknown",
+    1: "CallErrorTimeout",
+    2: "CallErrorUnavailable",
+    3: "CallErrorNotFound",
+    4: "CallErrorInvalidRequest",
+    5: "CallErrorPermissionDenied",
+}
+
+
+def _error_code_name(code: int) -> str:
+    """Return a human-readable name for a call error code.
+
+    Parameters
+    ----------
+    code : int
+        The numeric call error code from the host.
+
+    Returns
+    -------
+    str
+        The human-readable name (e.g. ``"CallErrorTimeout"``), or
+        ``"CallError({code})"`` if the code is unknown.
+    """
+    return _CALL_ERROR_NAMES.get(code, f"CallError({code})")
+
 
 # ========================================================================
 # Constants
@@ -1104,7 +1131,7 @@ class HostCalls:
         id_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"current_workflow_id failed with error code: {err_code}"
+                f"current_workflow_id failed: {_error_code_name(err_code)} (code {err_code})"
             )
         return read_string(OUTPUT_OFFSET, id_len)
 
@@ -1124,7 +1151,7 @@ class HostCalls:
         id_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"current_run_id failed with error code: {err_code}"
+                f"current_run_id failed: {_error_code_name(err_code)} (code {err_code})"
             )
         return read_string(OUTPUT_OFFSET, id_len)
 
@@ -1312,7 +1339,7 @@ class HostCalls:
                 self._raise_for_call_error(
                     service, operation, err_msg, call_error_code
                 )
-            raise RuntimeError(f"cleat_call failed: {err_msg}")
+            raise RuntimeError(f"cleat_call({service}.{operation}) failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
 
@@ -1427,7 +1454,7 @@ class HostCalls:
                 self._raise_for_call_error(
                     service, operation, err_msg, call_error_code
                 )
-            raise RuntimeError(f"cleat_call_with_retry failed: {err_msg}")
+            raise RuntimeError(f"cleat_call_with_retry({service}.{operation}) failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
 
@@ -1502,7 +1529,7 @@ class HostCalls:
                 self._raise_for_call_error(
                     service, operation, err_msg, call_error_code
                 )
-            raise RuntimeError(f"cleat_call_with_heartbeat failed: {err_msg}")
+            raise RuntimeError(f"cleat_call_with_heartbeat({service}.{operation}) failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
 
@@ -1799,7 +1826,7 @@ class HostCalls:
         )
         if err_code != 0:
             raise RuntimeError(
-                f"await_signals failed with error code: {err_code}"
+                f"await_signals(signal_names={signal_names}) failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         sig_name = (
@@ -1851,7 +1878,7 @@ class HostCalls:
 
         payload_len, found, err_code = decode_poll_signal_result(result)
         if err_code != 0:
-            raise RuntimeError(f"poll_signal failed with error code: {err_code}")
+            raise RuntimeError(f"poll_signal(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})")
 
         payload = (
             read_string(OUTPUT_OFFSET, payload_len)
@@ -1934,7 +1961,7 @@ class HostCalls:
         run_id_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"child_workflow failed with error code: {err_code}"
+                f"child_workflow(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         return read_string(OUTPUT_OFFSET, run_id_len)
@@ -1981,7 +2008,7 @@ class HostCalls:
         run_id_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"child_workflow_with_options failed with error code: {err_code}"
+                f"child_workflow_with_options(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         return read_string(OUTPUT_OFFSET, run_id_len)
@@ -2029,7 +2056,7 @@ class HostCalls:
         result_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"await_child failed with error code: {err_code}"
+                f"await_child(run_id='{run_id}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         return read_string(OUTPUT_OFFSET, result_len)
@@ -2069,7 +2096,7 @@ class HostCalls:
         result_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"await_all_children failed with error code: {err_code}"
+                f"await_all_children(run_ids={run_ids}) failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         results_json = read_string(OUTPUT_OFFSET, result_len)
@@ -2288,7 +2315,7 @@ class HostCalls:
         id_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"create_promise failed with error code: {err_code}"
+                f"create_promise(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         return read_string(OUTPUT_OFFSET, id_len)
@@ -2356,7 +2383,7 @@ class HostCalls:
         result_len, timed_out, rejected, err_code = decode_await_promise_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"await_promise failed with error code: {err_code}"
+                f"await_promise(promise_id='{promise_id}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         result_str = (
@@ -2405,7 +2432,7 @@ class HostCalls:
         _, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"resolve_promise failed with error code: {err_code}"
+                f"resolve_promise(promise_id='{promise_id}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
     # --------------------------------------------------------------------
@@ -2446,7 +2473,7 @@ class HostCalls:
         _, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"reject_promise failed with error code: {err_code}"
+                f"reject_promise(promise_id='{promise_id}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
     # --------------------------------------------------------------------
@@ -2624,7 +2651,7 @@ class HostCalls:
 
         id_len, err_code = decode_simple_result(result)
         if err_code != 0:
-            raise RuntimeError(f"cleat_defer failed with error code: {err_code}")
+            raise RuntimeError(f"cleat_defer(description='{description}') failed: {_error_code_name(err_code)} (code {err_code})")
 
         return read_string(OUTPUT_OFFSET, id_len)
 
@@ -2658,7 +2685,7 @@ class HostCalls:
         _, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"continue_as_new failed with error code: {err_code}"
+                f"continue_as_new failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
     # --------------------------------------------------------------------
@@ -2688,7 +2715,7 @@ class HostCalls:
         _, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"extend_timeout failed with error code: {err_code}"
+                f"extend_timeout(additional_ms={additional_ms}) failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
     # --------------------------------------------------------------------
@@ -2857,7 +2884,7 @@ class HostCalls:
                 self._raise_for_call_error(
                     f"plugin:{plugin_name}", function_name, err_msg, call_error_code
                 )
-            raise RuntimeError(f"plugin_call failed: {err_msg}")
+            raise RuntimeError(f"plugin_call(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
 
@@ -2925,7 +2952,7 @@ class HostCalls:
                     self._raise_for_call_error(
                         f"plugin:{plugin_name}", function_name, err_msg, call_error_code
                     )
-                raise RuntimeError(f"plugin_call_streaming failed: {err_msg}")
+                raise RuntimeError(f"plugin_call_streaming(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}")
 
             if response_len == 0:
                 break  # End of stream
@@ -3036,7 +3063,7 @@ class HostCalls:
         response_len, err_code = decode_simple_result(result)
         if err_code != 0:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
-            raise RuntimeError(f"send_signal_and_wait failed: {err_msg}")
+            raise RuntimeError(f"send_signal_and_wait(target_run_id='{target_run_id}', signal_name='{signal_name}') failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
 
@@ -3078,7 +3105,7 @@ class HostCalls:
         _, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"reply_to_signal failed with error code: {err_code}"
+                f"reply_to_signal(correlation_id='{correlation_id}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
     # --------------------------------------------------------------------
@@ -3201,7 +3228,7 @@ class HostCalls:
         _, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"signal_workflow failed with error code: {err_code}"
+                f"signal_workflow(target_run_id='{target_run_id}', signal_name='{signal_name}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
     # --------------------------------------------------------------------
@@ -3272,7 +3299,7 @@ class HostCalls:
         id_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"schedule_cron failed with error code: {err_code}"
+                f"schedule_cron(workflow_name='{workflow_name}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         return read_string(OUTPUT_OFFSET, id_len)
@@ -3301,7 +3328,7 @@ class HostCalls:
         _, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"delete_cron failed with error code: {err_code}"
+                f"delete_cron(schedule_id='{schedule_id}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
     # --------------------------------------------------------------------
@@ -3370,7 +3397,7 @@ class HostCalls:
 
         if err_code != 0:
             raise RuntimeError(
-                f"acquire_lock failed with error code: {err_code}"
+                f"acquire_lock(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         return acquired
@@ -3398,7 +3425,7 @@ class HostCalls:
         err_code = result & 0xFF
         if err_code != 0:
             raise RuntimeError(
-                f"release_lock failed with error code: {err_code}"
+                f"release_lock(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
     # --------------------------------------------------------------------
@@ -3424,7 +3451,7 @@ class HostCalls:
         list_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"list_crons failed with error code: {err_code}"
+                f"list_crons failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         list_json = read_string(OUTPUT_OFFSET, list_len)

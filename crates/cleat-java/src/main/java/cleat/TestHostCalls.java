@@ -460,7 +460,7 @@ public class TestHostCalls {
             if (stub.pluginName.equals(pluginName)
                     && stub.functionName.equals(functionName)) {
                 if (stub.error != null) {
-                    throw new RuntimeException("plugin_call failed: " + stub.error);
+                    throw new RuntimeException("plugin_call(" + pluginName + "." + functionName + ") failed: " + stub.error);
                 }
                 return stub.result;
             }
@@ -605,7 +605,7 @@ public class TestHostCalls {
             try {
                 current = Long.parseLong(existing);
             } catch (NumberFormatException e) {
-                // Treat non-numeric as 0
+                System.err.println("Warning: non-numeric state value for key '" + key + "': " + existing + ". Resetting to 0.");
             }
         }
         current += delta;
@@ -696,7 +696,7 @@ public class TestHostCalls {
 
         // Simulate timeout
         nowMs += timeoutMs;
-        return CleatResult.err("SendSignalAndWait timed out");
+        return CleatResult.err("SendSignalAndWait(target=" + targetRunId + ", signal=" + signalName + ") timed out after " + timeoutMs + "ms");
     }
 
     /**

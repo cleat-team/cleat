@@ -53,13 +53,13 @@ impl Saga {
                     let mut comp_errs: Vec<String> = Vec::new();
                     for &j in completed.iter().rev() {
                         if let Err(ce) = (self.steps[j].compensate)(h) {
-                            comp_errs.push(format!("{}: {}", self.steps[j].name, ce));
+                            comp_errs.push(format!("compensation cleanup failed for step '{}': {}", self.steps[j].name, ce));
                         }
                     }
                     if comp_errs.is_empty() {
                         return Err(e);
                     }
-                    return Err(format!("{} (compensation errors: {})", e, comp_errs.join("; ")));
+                    return Err(format!("{} (forward error; compensation cleanup errors: {})", e, comp_errs.join("; ")));
                 }
             }
         }

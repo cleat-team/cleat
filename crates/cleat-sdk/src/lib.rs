@@ -38,7 +38,7 @@ pub fn format_cleat_result<T: serde::Serialize, E: std::fmt::Display>(
     r: std::result::Result<T, E>,
 ) -> std::result::Result<String, String> {
     match r {
-        Ok(val) => serde_json::to_string(&val).map_err(|e| format!("serialize: {}", e)),
+        Ok(val) => serde_json::to_string(&val).map_err(|e| format!("serialize workflow result: {}", e)),
         Err(e) => Err(e.to_string()),
     }
 }

@@ -105,11 +105,11 @@ func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 		sectionEnd := offset + int(size)
 		nameLen, nn := decodeULEB128(wasmBytes[offset:])
 		if nn <= 0 {
-			return nil, fmt.Errorf("corrupt WASM: failed to decode custom section name length")
+			return nil, fmt.Errorf("corrupt WASM at offset %d: failed to decode custom section name length", offset)
 		}
 		offset += nn
 		if offset+int(nameLen) > sectionEnd {
-			return nil, fmt.Errorf("corrupt WASM: custom section name overflows")
+			return nil, fmt.Errorf("corrupt WASM at offset %d: custom section name overflows section boundary", offset)
 		}
 		sectionName := string(wasmBytes[offset : offset+int(nameLen)])
 		offset += int(nameLen)
@@ -168,7 +168,7 @@ func stripCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 		offset++
 		size, n := decodeULEB128(wasmBytes[offset:])
 		if n <= 0 {
-			return nil, fmt.Errorf("corrupt WASM: failed to decode section size")
+			return nil, fmt.Errorf("corrupt WASM at offset %d: failed to decode section size", offset)
 		}
 		offset += n
 		sectionLen := 1 + n + int(size) // ID byte + size-encoding + body
@@ -181,11 +181,11 @@ func stripCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 		sectionEnd := sectionStart + sectionLen
 		nameLen, nn := decodeULEB128(wasmBytes[offset:])
 		if nn <= 0 {
-			return nil, fmt.Errorf("corrupt WASM: failed to decode custom section name")
+			return nil, fmt.Errorf("corrupt WASM at offset %d: failed to decode custom section name", offset)
 		}
 		offset += nn
 		if offset+int(nameLen) > sectionEnd {
-			return nil, fmt.Errorf("corrupt WASM: custom section name overflows")
+			return nil, fmt.Errorf("corrupt WASM at offset %d: custom section name overflows section boundary", offset)
 		}
 		sectionName := string(wasmBytes[offset : offset+int(nameLen)])
 		if sectionName == name {

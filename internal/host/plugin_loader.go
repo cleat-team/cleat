@@ -424,12 +424,12 @@ func (l *PluginLoader) ListPluginVersions(ctx context.Context, name string) ([]P
 		var p PluginDef
 		if err := rows.Scan(&p.Name, &p.Version, &p.WASMBytes,
 			&p.Config, &p.CreatedAt, &p.Deprecated); err != nil {
-			return nil, fmt.Errorf("scan plugin def: %w", err)
+			return nil, fmt.Errorf("scan plugin def for %s: %w", name, err)
 		}
 		plugins = append(plugins, p)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list plugin versions rows: %w", err)
+		return nil, fmt.Errorf("list plugin versions rows for %s: %w", name, err)
 	}
 
 	// Sort by semver descending.

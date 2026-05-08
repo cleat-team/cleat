@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"sync"
@@ -557,7 +558,7 @@ func (e *Engine) RunDeferCompiled(ctx context.Context, compiled wazero.CompiledM
 // Returns an error if no update handler is configured on the engine.
 func (e *Engine) DispatchUpdate(ctx context.Context, name, payload string) (string, error) {
 	if e.updateHandler == nil {
-		return "", fmt.Errorf("host: no update handler configured for this engine")
+		return "", fmt.Errorf("host: no update handler configured for this engine. Call WithUpdateHandler before DispatchUpdate.")
 	}
 	return e.updateHandler(name, payload)
 }
@@ -658,13 +659,13 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 		s.stepCount++
 
 		if rec.EventType != EventTypeCall {
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
 			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s",
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, service, operation, rec.Service, rec.Op)
 			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
@@ -703,13 +704,13 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 		s.stepCount++
 
 		if rec.EventType != EventTypePluginCall {
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
 			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.PluginName != pluginName || rec.PluginFunc != functionName {
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s",
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc)
 			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
@@ -768,13 +769,13 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 
 	// Look up the plugin function.
 	if s.engine.pluginRegistry == nil {
-		errMsg := fmt.Sprintf("plugin function %s/%s not available: no plugin registry configured", pluginName, functionName)
+		errMsg := fmt.Sprintf("plugin function %s/%s not available: no plugin registry configured. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
 		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 1, 1)
 	}
 	fn, idempotent, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
 	if !ok {
-		errMsg := fmt.Sprintf("plugin function %s/%s not registered", pluginName, functionName)
+		errMsg := fmt.Sprintf("plugin function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
 		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 1, 1)
 	}
@@ -862,7 +863,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 
 	fn, ok := s.engine.pluginStreamRegistry.Lookup(pluginName, functionName)
 	if !ok {
-		errMsg := fmt.Sprintf("plugin stream function %s/%s not registered", pluginName, functionName)
+		errMsg := fmt.Sprintf("plugin stream function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
 		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 0, 1)
 	}
@@ -1072,13 +1073,13 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 		s.stepCount++
 
 		if rec.EventType != EventTypeCall {
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
 			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s",
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, service, operation, rec.Service, rec.Op)
 			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
@@ -1552,7 +1553,7 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 		s.stepCount++
 
 		if rec.EventType != EventTypeAwaitAllChildren {
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
 			written := writeWasmString(mem, resultsPtr, errMsg, resultsMaxLen)
 			return packAwaitChildResult(uint32(written), 1)
 		}
@@ -1745,7 +1746,9 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 
 	// Also persist to promise store if available.
 	if s.engine.promiseStore != nil {
-		s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID)
+		if err := s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID); err != nil {
+			log.Printf("[engine] create_promise: %v", err)
+		}
 	}
 
 	mem := m.Memory()
@@ -1926,7 +1929,9 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 
 	// Deliver to target via signal store if available.
 	if s.engine.signalStore != nil {
-		_ = s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload)
+		if err := s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload); err != nil {
+			log.Printf("[engine] deliver_signal: %v", err)
+		}
 	}
 
 	return 0
@@ -1944,7 +1949,9 @@ func (s *execSession) ClearScope(ctx context.Context) {
 	if s.scopeSet && s.scopePrefix != "" {
 		scopeKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
 		if s.engine.concurrencyKeyStore != nil {
-			_ = s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey)
+			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
+				log.Printf("[engine] release_concurrency_key: %v", err)
+			}
 		}
 		for i, held := range s.heldScopes {
 			if held == scopeKey {
@@ -1978,7 +1985,9 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 	if s.scopeSet && s.scopePrefix != "" {
 		oldKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
 		if s.engine.concurrencyKeyStore != nil {
-			_ = s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, oldKey)
+			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, oldKey); err != nil {
+				log.Printf("[engine] release_concurrency_key: %v", err)
+			}
 		}
 		for i, held := range s.heldScopes {
 			if held == oldKey {
@@ -2089,7 +2098,9 @@ func (s *execSession) releaseHeldScopes(ctx context.Context) {
 		return
 	}
 	for _, scopeKey := range s.heldScopes {
-		_ = s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey)
+		if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
+			log.Printf("[engine] release_concurrency_key: %v", err)
+		}
 	}
 	s.heldScopes = nil
 }

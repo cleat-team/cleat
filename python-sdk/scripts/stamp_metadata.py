@@ -71,9 +71,9 @@ def decode_uleb128(data: bytes, offset: int) -> tuple[int, int]:
             return result, consumed
         shift += 7
         if shift > 63:
-            raise ValueError("LEB128 overflow")
+            raise ValueError(f"invalid WASM binary at offset {offset}: corrupted section length encoding")
 
-    raise ValueError("Incomplete LEB128 encoding")
+    raise ValueError(f"invalid WASM binary at offset {offset}: truncated section length encoding")
 
 
 def build_custom_section(name: str, payload: bytes) -> bytes:
@@ -96,10 +96,10 @@ def find_custom_section(wasm_bytes: bytes, name: str) -> tuple[bytes | None, int
         return None, 0, 0
 
     if wasm_bytes[:4] != WASM_MAGIC:
-        raise ValueError("Invalid WASM magic number")
+        raise ValueError("not a valid WASM file (bad magic number)")
 
     if wasm_bytes[4:8] != WASM_VERSION:
-        raise ValueError("Unsupported WASM version (only v1 supported)")
+        raise ValueError("unsupported WASM version (only v1 supported)")
 
     offset = 8
     name_bytes = name.encode("utf-8")
@@ -236,7 +236,11 @@ def main():
 
     # Read-only mode.
     if args.read:
-        meta = read_metadata(wasm_bytes)
+        try:
+            meta = read_metadata(wasm_bytes)
+        except ValueError as e:
+            print(f"Error reading {args.wasm_file}: {e}", file=sys.stderr)
+            sys.exit(1)
         if meta is None:
             print(f"No '{SECTION_NAME}' section found in {args.wasm_file}")
             sys.exit(1)
@@ -245,7 +249,11 @@ def main():
 
     # Build and inject metadata.
     meta = build_metadata(args)
-    modified = inject_metadata(wasm_bytes, meta)
+    try:
+        modified = inject_metadata(wasm_bytes, meta)
+    except ValueError as e:
+        print(f"Error processing {args.wasm_file}: {e}", file=sys.stderr)
+        sys.exit(1)
 
     output = args.output or args.wasm_file
 

@@ -42,7 +42,7 @@ func main() {
 		*dsn = os.Getenv("CLEAT_DB_URL")
 	}
 	if *dsn == "" {
-		fmt.Fprintln(os.Stderr, "error: --db flag or CLEAT_DB_URL environment variable is required")
+		fmt.Fprintln(os.Stderr, "error: the --db flag or CLEAT_DB_URL environment variable must be set to a PostgreSQL connection string")
 		flag.Usage()
 		osExit(1)
 	}

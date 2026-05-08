@@ -839,7 +839,7 @@ func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closu
 		Closure:   cr,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error in transform: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error in AST transformation: %v\n", err)
 		os.Exit(1)
 	}
 

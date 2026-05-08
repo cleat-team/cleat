@@ -438,7 +438,7 @@ impl<'a> Plugins<'a> {
         }
         match serde_json::from_str::<Vec<Vec<f64>>>(&resp) {
             Ok(r) => (r, None),
-            Err(e) => (Vec::new(), Some(format!("parse error: {}", e))),
+            Err(e) => (Vec::new(), Some(format!("parse error (plugin response): {}", e))),
         }
     }
 }
@@ -454,6 +454,6 @@ where
     }
     match serde_json::from_str::<T>(&resp) {
         Ok(r) => (r, None),
-        Err(e) => (default(), Some(format!("parse error: {}", e))),
+        Err(e) => (default(), Some(format!("parse error (plugin response): {}", e))),
     }
 }

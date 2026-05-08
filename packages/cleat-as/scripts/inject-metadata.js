@@ -65,10 +65,10 @@ function decodeULEB128(buf, offset) {
     }
     shift += 7;
     if (shift > 63) {
-      throw new Error("LEB128 overflow");
+      throw new Error("invalid WASM binary: corrupted section length encoding");
     }
   }
-  throw new Error("Incomplete LEB128 encoding");
+  throw new Error("invalid WASM binary: truncated section length encoding");
 }
 
 /**
@@ -87,15 +87,15 @@ function buildCustomSection(name, payload) {
  * Find a custom section in a WASM binary.
  * Returns { payload, sectionStart, sectionEnd } or null if not found.
  */
-function findCustomSection(wasmBuf, name) {
+function findCustomSection(wasmBuf, name, filePath = "") {
   if (wasmBuf.length < 8) return null;
 
   // Validate magic.
   if (wasmBuf.slice(0, 4).compare(WASM_MAGIC) !== 0) {
-    throw new Error("Invalid WASM magic number");
+    throw new Error("invalid WASM binary: bad magic number in '" + filePath + "'");
   }
   if (wasmBuf.slice(4, 8).compare(WASM_VERSION) !== 0) {
-    throw new Error("Unsupported WASM version (only v1 supported)");
+    throw new Error("invalid WASM binary: unsupported version '" + wasmBuf.slice(4, 8).toString("hex") + "' (only v1 supported) in '" + filePath + "'");
   }
 
   const nameBytes = Buffer.from(name, "utf8");
@@ -144,11 +144,11 @@ function findCustomSection(wasmBuf, name) {
 /**
  * Inject (or replace) the cleat.metadata custom section in a WASM binary.
  */
-function injectMetadata(wasmBytes, meta) {
+function injectMetadata(wasmBytes, meta, filePath = "") {
   const jsonPayload = Buffer.from(JSON.stringify(meta), "utf8");
 
   // Remove existing cleat.metadata section if present.
-  const existing = findCustomSection(wasmBytes, SECTION_NAME);
+  const existing = findCustomSection(wasmBytes, SECTION_NAME, filePath);
   let base = wasmBytes;
   if (existing) {
     base = Buffer.concat([
@@ -164,8 +164,8 @@ function injectMetadata(wasmBytes, meta) {
 /**
  * Read cleat.metadata from a WASM binary.
  */
-function readMetadata(wasmBytes) {
-  const found = findCustomSection(wasmBytes, SECTION_NAME);
+function readMetadata(wasmBytes, filePath = "") {
+  const found = findCustomSection(wasmBytes, SECTION_NAME, filePath);
   if (!found) return null;
   return JSON.parse(found.payload.toString("utf8"));
 }
@@ -222,7 +222,7 @@ Options:
   const wasmBytes = fs.readFileSync(wasmFile);
 
   if (readOnly) {
-    const meta = readMetadata(wasmBytes);
+    const meta = readMetadata(wasmBytes, wasmFile);
     if (!meta) {
       console.error(`No '${SECTION_NAME}' section found in ${wasmFile}`);
       process.exit(1);
@@ -278,7 +278,7 @@ Options:
     created_at: new Date().toISOString(),
   };
 
-  const modified = injectMetadata(wasmBytes, meta);
+  const modified = injectMetadata(wasmBytes, meta, wasmFile);
   const outputPath = options.output || wasmFile;
   fs.writeFileSync(outputPath, modified);
 

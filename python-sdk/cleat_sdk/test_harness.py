@@ -457,7 +457,7 @@ class CleatTestHarness(HostCalls):
                 self.call_history.append(rec)
                 if stub.error:
                     raise RuntimeError(
-                        f"cleat_call failed: {stub.error}"
+                        f"cleat_call({service}.{operation}) failed: {stub.error}"
                     )
                 return stub.response
 

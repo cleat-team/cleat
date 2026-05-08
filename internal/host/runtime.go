@@ -104,17 +104,17 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 func (r *Runtime) InstantiateAndInit(ctx context.Context, wasmBytes []byte) (api.Module, error) {
 	compiled, err := r.CompileModule(ctx, wasmBytes)
 	if err != nil {
-		return nil, fmt.Errorf("compile: %w", err)
+		return nil, fmt.Errorf("host: compile: %w", err)
 	}
 	// Note: compiled.Close is deferred to the caller via mod.Close.
 	mod, err := r.InstantiateModule(ctx, compiled)
 	if err != nil {
 		compiled.Close(ctx)
-		return nil, fmt.Errorf("instantiate: %w", err)
+		return nil, fmt.Errorf("host: instantiate: %w", err)
 	}
 	if err := r.InitModule(ctx, mod); err != nil {
 		mod.Close(ctx)
-		return nil, fmt.Errorf("init: %w", err)
+		return nil, fmt.Errorf("host: init: %w", err)
 	}
 	return mod, nil
 }
@@ -182,7 +182,7 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	}
 
 	if len(results) == 0 {
-		return "", false, fmt.Errorf("host: export %q returned no results", exportName)
+		return "", false, fmt.Errorf("host: export %q returned no results. The WASM module may have panicked or returned void.", exportName)
 	}
 
 	// Check for suspend sentinel: (1 << 62).

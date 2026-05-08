@@ -197,7 +197,7 @@ public final class JsonHelper {
     private static ParseResult parseValue(String json, int start) {
         int i = skipWhitespace(json, start);
         if (i >= json.length()) {
-            throw new RuntimeException("Unexpected end of JSON");
+            throw new RuntimeException("Unexpected end of JSON at position " + start);
         }
         char c = json.charAt(i);
         switch (c) {
@@ -216,7 +216,7 @@ public final class JsonHelper {
                 if (c == '-' || (c >= '0' && c <= '9')) {
                     return parseNumberValue(json, i);
                 }
-                throw new RuntimeException("Unexpected character '" + c + "' at position " + i);
+                throw new RuntimeException("Unexpected character '" + c + "' at position " + i + "; expected '{', '[', '\"', 't', 'f', 'n', or a digit");
         }
     }
 
@@ -233,7 +233,7 @@ public final class JsonHelper {
             i = skipWhitespace(json, i);
             // Expect a string key
             if (json.charAt(i) != '"') {
-                throw new RuntimeException("Expected string key at position " + i);
+                throw new RuntimeException("Expected string key at position " + i + ", got: '" + json.charAt(i) + "'");
             }
             ParseResult keyResult = parseStringValue(json, i);
             String key = (String) keyResult.value;
@@ -374,7 +374,7 @@ public final class JsonHelper {
         if (json.startsWith("false", start)) {
             return new ParseResult(Boolean.FALSE, start + 5);
         }
-        throw new RuntimeException("Expected boolean at position " + start);
+        throw new RuntimeException("Expected boolean at position " + start + ", got: '" + json.substring(start, Math.min(start + 10, json.length())) + "'");
     }
 
     /**
@@ -384,7 +384,7 @@ public final class JsonHelper {
         if (json.startsWith("null", start)) {
             return new ParseResult(null, start + 4);
         }
-        throw new RuntimeException("Expected null at position " + start);
+        throw new RuntimeException("Expected null at position " + start + ", got: '" + json.substring(start, Math.min(start + 10, json.length())) + "'");
     }
 
     /**
@@ -420,7 +420,7 @@ public final class JsonHelper {
             try {
                 return type.getDeclaredConstructor().newInstance();
             } catch (Exception e) {
-                return null;
+                throw new RuntimeException("Failed to instantiate " + type.getName() + ". Ensure the class has a public no-argument constructor.", e);
             }
         }
         try {

@@ -30,6 +30,7 @@
  */
 
 import { HostCalls } from "./host-calls";
+import { jsonEscape } from "./json";
 
 // ──────────────────────────────────────────────
 // JSON field extractors for flat plugin responses
@@ -221,10 +222,10 @@ export class Plugins {
    * @returns The put result with key, sha256 hash, and size.
    */
   blobstorePut(key: string, data: string, content_type: string = "", tags: string = "", ttl: string = ""): BlobPutResult {
-    let input = '{"key":"' + key + '","data":"' + data + '"';
-    if (content_type.length > 0) input += ',"content_type":"' + content_type + '"';
-    if (tags.length > 0) input += ',"tags":"' + tags + '"';
-    if (ttl.length > 0) input += ',"ttl":"' + ttl + '"';
+    let input = '{"key":"' + jsonEscape(key) + '","data":"' + jsonEscape(data) + '"';
+    if (content_type.length > 0) input += ',"content_type":"' + jsonEscape(content_type) + '"';
+    if (tags.length > 0) input += ',"tags":"' + jsonEscape(tags) + '"';
+    if (ttl.length > 0) input += ',"ttl":"' + jsonEscape(ttl) + '"';
     input += "}";
     let outcome = this.host.pluginCall("blobstore", "put", input);
     if (outcome.isError) return new BlobPutResult("", "", 0);
@@ -238,7 +239,7 @@ export class Plugins {
    * @returns The get result with key, sha256, size, content_type, and data.
    */
   blobstoreGet(key: string): BlobGetResult {
-    let input = '{"key":"' + key + '"}';
+    let input = '{"key":"' + jsonEscape(key) + '"}';
     let outcome = this.host.pluginCall("blobstore", "get", input);
     if (outcome.isError) return new BlobGetResult("", "", 0);
     let r = outcome.response;
@@ -255,7 +256,7 @@ export class Plugins {
    * @returns The await result with found status and event details.
    */
   awaitEvent(event_type: string, timeout_ms: i64 = 60000): AwaitEventResult {
-    let input = '{"event_type":"' + event_type + '","timeout_ms":' + timeout_ms.toString() + "}";
+    let input = '{"event_type":"' + jsonEscape(event_type) + '","timeout_ms":' + timeout_ms.toString() + "}";
     let outcome = this.host.pluginCall("eventtriggers", "await_event", input);
     if (outcome.isError) return new AwaitEventResult(false);
     let r = outcome.response;
@@ -272,8 +273,8 @@ export class Plugins {
    * @returns The evaluation result with enabled status and details.
    */
   evaluateFlag(key: string, context: string = ""): EvaluateFlagResult {
-    let input = '{"key":"' + key + '"';
-    if (context.length > 0) input += ',"context":"' + context + '"';
+    let input = '{"key":"' + jsonEscape(key) + '"';
+    if (context.length > 0) input += ',"context":"' + jsonEscape(context) + '"';
     input += "}";
     let outcome = this.host.pluginCall("featureflags", "evaluate_flag", input);
     if (outcome.isError) return new EvaluateFlagResult(false, key);
@@ -293,9 +294,9 @@ export class Plugins {
    * @returns The produce result with success status and optional error.
    */
   produce(config_id: string, value: string, key: string = "", headers: string = ""): ProduceResult {
-    let input = '{"config_id":"' + config_id + '","value":"' + value + '"';
-    if (key.length > 0) input += ',"key":"' + key + '"';
-    if (headers.length > 0) input += ',"headers":"' + headers + '"';
+    let input = '{"config_id":"' + jsonEscape(config_id) + '","value":"' + jsonEscape(value) + '"';
+    if (key.length > 0) input += ',"key":"' + jsonEscape(key) + '"';
+    if (headers.length > 0) input += ',"headers":"' + jsonEscape(headers) + '"';
     input += "}";
     let outcome = this.host.pluginCall("kafkaconnect", "produce", input);
     if (outcome.isError) return new ProduceResult(false);
@@ -314,8 +315,8 @@ export class Plugins {
    * @returns The send result with delivery ID.
    */
   sendWebhook(webhook_id: string, event_type: string, payload: string = ""): SendWebhookResult {
-    let input = '{"webhook_id":"' + webhook_id + '","event_type":"' + event_type + '"';
-    if (payload.length > 0) input += ',"payload":"' + payload + '"';
+    let input = '{"webhook_id":"' + jsonEscape(webhook_id) + '","event_type":"' + jsonEscape(event_type) + '"';
+    if (payload.length > 0) input += ',"payload":"' + jsonEscape(payload) + '"';
     input += "}";
     let outcome = this.host.pluginCall("notifications", "send_webhook", input);
     if (outcome.isError) return new SendWebhookResult("");
@@ -335,8 +336,8 @@ export class Plugins {
    * @returns The trigger result with incident key and status.
    */
   triggerIncident(config_id: string, summary: string, severity: string, source: string, details: string = ""): TriggerIncidentResult {
-    let input = '{"config_id":"' + config_id + '","summary":"' + summary + '","severity":"' + severity + '","source":"' + source + '"';
-    if (details.length > 0) input += ',"details":"' + details + '"';
+    let input = '{"config_id":"' + jsonEscape(config_id) + '","summary":"' + jsonEscape(summary) + '","severity":"' + jsonEscape(severity) + '","source":"' + jsonEscape(source) + '"';
+    if (details.length > 0) input += ',"details":"' + jsonEscape(details) + '"';
     input += "}";
     let outcome = this.host.pluginCall("pagerdutyalert", "trigger_incident", input);
     if (outcome.isError) return new TriggerIncidentResult("", "");
@@ -352,7 +353,7 @@ export class Plugins {
    * @returns The resolve result with status.
    */
   resolveIncident(config_id: string, incident_key: string): ResolveIncidentResult {
-    let input = '{"config_id":"' + config_id + '","incident_key":"' + incident_key + '"}';
+    let input = '{"config_id":"' + jsonEscape(config_id) + '","incident_key":"' + jsonEscape(incident_key) + '"}';
     let outcome = this.host.pluginCall("pagerdutyalert", "resolve_incident", input);
     if (outcome.isError) return new ResolveIncidentResult("");
     return new ResolveIncidentResult(jsonStr(outcome.response, "status"));
@@ -370,9 +371,9 @@ export class Plugins {
    * @returns The send result with success status and optional timestamp.
    */
   sendMessage(config_id: string, text: string, channel: string = "", blocks: string = ""): SendMessageResult {
-    let input = '{"config_id":"' + config_id + '","text":"' + text + '"';
-    if (channel.length > 0) input += ',"channel":"' + channel + '"';
-    if (blocks.length > 0) input += ',"blocks":"' + blocks + '"';
+    let input = '{"config_id":"' + jsonEscape(config_id) + '","text":"' + jsonEscape(text) + '"';
+    if (channel.length > 0) input += ',"channel":"' + jsonEscape(channel) + '"';
+    if (blocks.length > 0) input += ',"blocks":"' + jsonEscape(blocks) + '"';
     input += "}";
     let outcome = this.host.pluginCall("slacknotify", "send_message", input);
     if (outcome.isError) return new SendMessageResult(false);
@@ -390,8 +391,8 @@ export class Plugins {
    * @returns The await result with found status and webhook data.
    */
   awaitWebhook(source_id: string, event_type: string = ""): AwaitWebhookResult {
-    let input = '{"source_id":"' + source_id + '"';
-    if (event_type.length > 0) input += ',"event_type":"' + event_type + '"';
+    let input = '{"source_id":"' + jsonEscape(source_id) + '"';
+    if (event_type.length > 0) input += ',"event_type":"' + jsonEscape(event_type) + '"';
     input += "}";
     let outcome = this.host.pluginCall("webhookingest", "await_webhook", input);
     if (outcome.isError) return new AwaitWebhookResult(false);
@@ -410,7 +411,7 @@ export class Plugins {
    * @returns The chat result with response, tool calls, finish reason, and usage info.
    */
   chat(model: string, messages: string, tools: string = ""): LLMChatResult {
-    let input = '{"model":"' + model + '","messages":' + messages;
+    let input = '{"model":"' + jsonEscape(model) + '","messages":' + messages;
     if (tools.length > 0) input += ',"tools":' + tools;
     input += '}';
     let outcome = this.host.pluginCall("llm", "chat", input);
@@ -434,7 +435,7 @@ export class Plugins {
    * @returns The embedding result with data JSON, model info, and token usage.
    */
   embed(model: string, textsJson: string): EmbeddingsResult {
-    let input = '{"model":"' + model + '","input":' + textsJson + '}';
+    let input = '{"model":"' + jsonEscape(model) + '","input":' + textsJson + '}';
     let outcome = this.host.pluginCall("llm", "embed", input);
     if (outcome.isError) {
       return new EmbeddingsResult("", "", 0, outcome.error);
@@ -459,10 +460,10 @@ export class Plugins {
    */
   listModels(provider: string = ""): string {
     let input = '{';
-    if (provider.length > 0) input += '"provider":"' + provider + '"';
+    if (provider.length > 0) input += '"provider":"' + jsonEscape(provider) + '"';
     input += '}';
     let outcome = this.host.pluginCall("llm", "list_models", input);
-    if (outcome.isError) return '{"error":"' + outcome.error + '"}';
+    if (outcome.isError) return '{"error":"' + jsonEscape(outcome.error) + '"}';
     return outcome.response;
   }
 }

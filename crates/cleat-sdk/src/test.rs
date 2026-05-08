@@ -595,7 +595,7 @@ impl MockHostCalls {
 
         // Simulate timeout
         self.now_ms += timeout_ms;
-        Err("SendSignalAndWait timed out".to_string())
+        Err(format!("SendSignalAndWait(target={}, signal={}) timed out after {}ms", target_run_id, signal_name, timeout_ms))
     }
 
     /// Reply to a signal from within a handler.

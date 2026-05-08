@@ -1065,7 +1065,10 @@ func TestExportedName(t *testing.T) {
 
 func TestMustMarshalJSON(t *testing.T) {
 	v := map[string]string{"key": "value"}
-	got := mustMarshalJSON(v)
+	got, err := mustMarshalJSON(v)
+	if err != nil {
+		t.Fatalf("mustMarshalJSON failed: %v", err)
+	}
 	if !strings.Contains(got, "key") || !strings.Contains(got, "value") {
 		t.Errorf("expected JSON containing key/value, got %q", got)
 	}
