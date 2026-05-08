@@ -601,3 +601,140 @@ func TestTokenRefreshFlow(t *testing.T) {
 		t.Fatalf("new token after refresh: expected 200, got %d", rec.Code)
 	}
 }
+
+// ===========================================================================
+// Middleware skip paths and passthrough (no DB needed)
+// ===========================================================================
+
+func TestOA_Middleware_SkipsOAuthPaths(t *testing.T) {
+	p := &Plugin{}
+	nextCalled := false
+	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+	}))
+	for _, path := range []string{"/oauth/login", "/oauth/callback", "/healthz"} {
+		nextCalled = false
+		req := httptest.NewRequest("GET", path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if !nextCalled {
+			t.Errorf("path %s: expected next handler", path)
+		}
+	}
+}
+
+func TestOA_Middleware_PassthroughNoAuth(t *testing.T) {
+	p := &Plugin{}
+	nextCalled := false
+	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+	}))
+	tests := []struct{ name, auth string }{
+		{"no header", ""},
+		{"Basic auth", "Basic dGVzdDp0ZXN0"},
+	}
+	for _, tc := range tests {
+		nextCalled = false
+		req := httptest.NewRequest("GET", "/api/x", nil)
+		if tc.auth != "" {
+			req.Header.Set("Authorization", tc.auth)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if !nextCalled {
+			t.Errorf("%s: expected passthrough", tc.name)
+		}
+	}
+}
+
+func TestOA_FormatProviderURL_WithSubstitution(t *testing.T) {
+	got := formatProviderURL("https://%s.example.com/auth", "mycompany")
+	if got != "https://mycompany.example.com/auth" {
+		t.Errorf("expected substitution, got: %s", got)
+	}
+}
+
+func TestOA_FormatProviderURL_NoPlaceholder(t *testing.T) {
+	got := formatProviderURL("https://accounts.google.com/o/oauth2/auth", "ignored")
+	if got != "https://accounts.google.com/o/oauth2/auth" {
+		t.Errorf("expected no change, got: %s", got)
+	}
+}
+
+func TestOA_GenerateSessionToken(t *testing.T) {
+	t1, err := generateSessionToken()
+	if err != nil {
+		t.Fatalf("generateSessionToken: %v", err)
+	}
+	if t1 == "" {
+		t.Error("token should not be empty")
+	}
+	t2, err := generateSessionToken()
+	if err != nil {
+		t.Fatalf("second token: %v", err)
+	}
+	if t1 == t2 {
+		t.Error("two tokens should be different")
+	}
+}
+
+func TestOA_TenantID_NotPresent(t *testing.T) {
+	p := &Plugin{}
+	req := httptest.NewRequest("GET", "/", nil)
+	tid := p.tenantID(req)
+	if tid != uuid.Nil {
+		t.Errorf("expected nil UUID, got %s", tid)
+	}
+}
+
+func TestOA_SessionFromContext_Roundtrip(t *testing.T) {
+	info := &SessionInfo{
+		TenantID:  uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		SessionID: uuid.New(),
+		UserEmail: "user@example.com",
+	}
+	ctx := context.WithValue(context.Background(), sessionContextKey{}, info)
+	got, ok := SessionFromContext(ctx)
+	if !ok {
+		t.Fatal("expected session to be present")
+	}
+	if got.UserEmail != info.UserEmail || got.TenantID != info.TenantID {
+		t.Errorf("session info mismatch: %+v", got)
+	}
+}
+
+func TestOA_SessionFromContext_NotPresent(t *testing.T) {
+	_, ok := SessionFromContext(context.Background())
+	if ok {
+		t.Error("expected session to not be present")
+	}
+}
+
+func TestOA_Migrations(t *testing.T) {
+	p := &Plugin{}
+	migrations := p.Migrations()
+	if len(migrations) == 0 {
+		t.Error("expected migrations")
+	}
+	for _, m := range migrations {
+		if m.Version == 0 {
+			t.Error("version must be non-zero")
+		}
+	}
+}
+
+func TestOA_Sha256Hex_Deterministic(t *testing.T) {
+	a := sha256Hex("hello")
+	b := sha256Hex("hello")
+	if a != b || len(a) != 64 {
+		t.Errorf("sha256Hex inconsistent: a=%s len=%d", a, len(a))
+	}
+}
+
+func TestOA_Info(t *testing.T) {
+	p := &Plugin{}
+	info := p.Info()
+	if info.Name != "oauth-provider" {
+		t.Errorf("want oauth-provider, got %s", info.Name)
+	}
+}

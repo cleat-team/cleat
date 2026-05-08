@@ -17,6 +17,11 @@ import (
 
 type tenantIDKey struct{}
 
+// WithTenantID sets the tenant ID in the context. Primarily for testing.
+func WithTenantID(ctx context.Context, tenantID uuid.UUID) context.Context {
+	return context.WithValue(ctx, tenantIDKey{}, tenantID)
+}
+
 // TenantIDFromContext extracts the tenant ID from the request context.
 func TenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	tid, ok := ctx.Value(tenantIDKey{}).(uuid.UUID)
