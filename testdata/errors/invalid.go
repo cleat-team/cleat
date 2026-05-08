@@ -5,7 +5,7 @@ package errors
 import (
 	"io"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // BadWorkflow is an entry point but calls a helper in the durable closure

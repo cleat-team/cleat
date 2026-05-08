@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // =========================================================================

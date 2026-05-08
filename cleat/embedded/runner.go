@@ -94,7 +94,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // WorkflowFunc is a workflow entry point. The context provides HostCalls

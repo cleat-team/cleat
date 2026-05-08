@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // mockT is a TestingT that captures Fatalf calls.

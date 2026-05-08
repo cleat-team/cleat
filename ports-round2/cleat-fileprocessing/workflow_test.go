@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/rcownie/cleat/durable/cleattest"
+	"github.com/rcownie/cleat/cleat/cleattest"
 )
 
 // TestSampleFileProcessingWorkflow_Success verifies the happy path:

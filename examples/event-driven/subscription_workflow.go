@@ -56,7 +56,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 var h cleat.HostCalls

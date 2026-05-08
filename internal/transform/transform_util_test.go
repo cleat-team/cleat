@@ -219,7 +219,7 @@ func TestEnsureHostCallsImportAlreadyHasSuffixMatch(t *testing.T) {
 	// When the file already imports something ending in "/durable",
 	// ensureHostCallsImport should not duplicate it.
 	src := `package mypkg
-import "github.com/rcownie/cleat/durable"
+import "github.com/rcownie/cleat/cleat"
 `
 	file := parseImportFile(t, src)
 	ensureHostCallsImport(file, nil)

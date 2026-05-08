@@ -4,7 +4,7 @@ import (
 	"os"
 	"reflect"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // Workflow triggers E016 by using os.Getenv and reflect.TypeOf.
