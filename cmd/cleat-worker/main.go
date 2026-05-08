@@ -1280,7 +1280,7 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 }
 
 func generateWorkerID() string {
-	b := make([]byte, 4)
+	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
@@ -1348,8 +1348,10 @@ func loadShardConfigs(path string) ([]host.ShardConfig, error) {
 // ---- HTTP API server ----
 
 type apiServer struct {
-	store  host.WorkflowStore
-	worker *Worker
+	store       host.WorkflowStore
+	worker      *Worker
+	maxBodySize int64
+	db          *sql.DB
 }
 
 func (s *apiServer) writeJSON(w http.ResponseWriter, status int, v interface{}) {
@@ -1929,74 +1931,6 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMetrics serves Prometheus-format metrics.
-func handleMetrics(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-
-	active := atomic.LoadInt64(&metricsWorkflowsActive)
-	completed := atomic.LoadInt64(&metricsWorkflowsCompleted)
-	failed := atomic.LoadInt64(&metricsWorkflowsFailed)
-	claimed := atomic.LoadInt64(&metricsWorkflowsClaimed)
-	durableCalls := atomic.LoadInt64(&metricsDurableCallsTotal)
-	replayTotalUs := atomic.LoadInt64(&metricsReplayDurationUs)
-	replayCount := atomic.LoadInt64(&metricsReplayCount)
-	pollWaitCount := atomic.LoadInt64(&metricsPollWaitCount)
-	pollWaitTotalUs := atomic.LoadInt64(&metricsPollWaitTotalUs)
-
-	fmt.Fprintf(w, "# HELP cleat_workflows_active Currently claimed workflow instances\n")
-	fmt.Fprintf(w, "# TYPE cleat_workflows_active gauge\n")
-	fmt.Fprintf(w, "cleat_workflows_active %d\n\n", active)
-
-	fmt.Fprintf(w, "# HELP cleat_workflows_completed_total Workflows completed successfully\n")
-	fmt.Fprintf(w, "# TYPE cleat_workflows_completed_total counter\n")
-	fmt.Fprintf(w, "cleat_workflows_completed_total %d\n\n", completed)
-
-	fmt.Fprintf(w, "# HELP cleat_workflows_failed_total Workflows that failed\n")
-	fmt.Fprintf(w, "# TYPE cleat_workflows_failed_total counter\n")
-	fmt.Fprintf(w, "cleat_workflows_failed_total %d\n\n", failed)
-
-	fmt.Fprintf(w, "# HELP cleat_workflows_claimed_total Workflows claimed from the queue\n")
-	fmt.Fprintf(w, "# TYPE cleat_workflows_claimed_total counter\n")
-	fmt.Fprintf(w, "cleat_workflows_claimed_total %d\n\n", claimed)
-
-	fmt.Fprintf(w, "# HELP cleat_calls_total DurableCall invocations\n")
-	fmt.Fprintf(w, "# TYPE cleat_calls_total counter\n")
-	fmt.Fprintf(w, "cleat_calls_total %d\n\n", durableCalls)
-
-	fmt.Fprintf(w, "# HELP cleat_replay_duration_seconds Replay duration histogram\n")
-	fmt.Fprintf(w, "# TYPE cleat_replay_duration_seconds summary\n")
-	if replayCount > 0 {
-		avgUs := replayTotalUs / replayCount
-		fmt.Fprintf(w, "cleat_replay_duration_seconds_count %d\n", replayCount)
-		fmt.Fprintf(w, "cleat_replay_duration_seconds_sum %.6f\n", float64(replayTotalUs)/1e6)
-		fmt.Fprintf(w, "cleat_replay_duration_seconds{quantile=\"0.5\"} %.6f\n", float64(avgUs)/1e6)
-	} else {
-		fmt.Fprintf(w, "cleat_replay_duration_seconds_count 0\n")
-		fmt.Fprintf(w, "cleat_replay_duration_seconds_sum 0\n")
-	}
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP cleat_poll_wait_seconds Time spent waiting for work\n")
-	fmt.Fprintf(w, "# TYPE cleat_poll_wait_seconds summary\n")
-	if pollWaitCount > 0 {
-		avgWaitUs := pollWaitTotalUs / pollWaitCount
-		fmt.Fprintf(w, "cleat_poll_wait_seconds_count %d\n", pollWaitCount)
-		fmt.Fprintf(w, "cleat_poll_wait_seconds_sum %.6f\n", float64(pollWaitTotalUs)/1e6)
-		fmt.Fprintf(w, "cleat_poll_wait_seconds{quantile=\"0.5\"} %.6f\n", float64(avgWaitUs)/1e6)
-	} else {
-		fmt.Fprintf(w, "cleat_poll_wait_seconds_count 0\n")
-		fmt.Fprintf(w, "cleat_poll_wait_seconds_sum 0\n")
-	}
-
-	// Memory metrics.
-	if globalWorker != nil && globalWorker.memoryController != nil {
-		state := globalWorker.memoryController.State()
-		estimates := globalWorker.memoryController.DefEstimates()
-		emitMemoryMetrics(w, state, estimates)
-	}
-}
-
-// idempotencyCleanupLoop periodically deletes expired idempotency keys
-// from the database. Runs until ctx is cancelled.
 func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
