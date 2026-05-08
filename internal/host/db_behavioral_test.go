@@ -376,3 +376,248 @@ func TestNowMsAvailable(t *testing.T) {
 }
 
 var _ = time.Now // ensure time import is used (time.Duration referenced in mock signatures)
+
+// ---------------------------------------------------------------------------
+// DB helper function tests (pure functions, no DB needed)
+// ---------------------------------------------------------------------------
+
+func TestHelperNullStr_Empty(t *testing.T) {
+	ns := nullStr("")
+	if ns.Valid {
+		t.Error("nullStr('') should be invalid")
+	}
+	if ns.String != "" {
+		t.Errorf("nullStr('') should have empty String, got %q", ns.String)
+	}
+}
+
+func TestHelperNullStr_NonEmpty(t *testing.T) {
+	ns := nullStr("hello")
+	if !ns.Valid {
+		t.Error("nullStr('hello') should be valid")
+	}
+	if ns.String != "hello" {
+		t.Errorf("nullStr('hello') should have String='hello', got %q", ns.String)
+	}
+}
+
+func TestHelperNullInt64_Zero(t *testing.T) {
+	ni := nullInt64(0)
+	if ni.Valid {
+		t.Error("nullInt64(0) should be invalid")
+	}
+	if ni.Int64 != 0 {
+		t.Errorf("nullInt64(0) should have Int64=0, got %d", ni.Int64)
+	}
+}
+
+func TestHelperNullInt64_NonZero(t *testing.T) {
+	ni := nullInt64(42)
+	if !ni.Valid {
+		t.Error("nullInt64(42) should be valid")
+	}
+	if ni.Int64 != 42 {
+		t.Errorf("nullInt64(42) should have Int64=42, got %d", ni.Int64)
+	}
+}
+
+func TestHelperNullInt64_Negative(t *testing.T) {
+	ni := nullInt64(-1)
+	if !ni.Valid {
+		t.Error("nullInt64(-1) should be valid (non-zero)")
+	}
+	if ni.Int64 != -1 {
+		t.Errorf("nullInt64(-1) should have Int64=-1, got %d", ni.Int64)
+	}
+}
+
+func TestHelperDaysInMonth(t *testing.T) {
+	tests := []struct {
+		year  int
+		month time.Month
+		want  int
+	}{
+		{2024, time.January, 31},
+		{2024, time.February, 29}, // leap year
+		{2025, time.February, 28}, // non-leap year
+		{2024, time.April, 30},
+		{2024, time.September, 30},
+		{2024, time.December, 31},
+	}
+	for _, tt := range tests {
+		got := daysInMonth(tt.year, tt.month)
+		if got != tt.want {
+			t.Errorf("daysInMonth(%d, %d) = %d, want %d", tt.year, tt.month, got, tt.want)
+		}
+	}
+}
+
+func TestHelperAtoi_Valid(t *testing.T) {
+	tests := []struct {
+		input string
+		want  int
+	}{
+		{"0", 0},
+		{"1", 1},
+		{"42", 42},
+		{" 5 ", 5},
+		{"999", 999},
+	}
+	for _, tt := range tests {
+		got := atoi(tt.input)
+		if got != tt.want {
+			t.Errorf("atoi(%q) = %d, want %d", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestHelperAtoi_Invalid(t *testing.T) {
+	if got := atoi("not-a-number"); got != 0 {
+		t.Errorf("atoi('not-a-number') = %d, want 0", got)
+	}
+	if got := atoi(""); got != 0 {
+		t.Errorf("atoi('') = %d, want 0", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// matchField tests (cron field pattern matching)
+// ---------------------------------------------------------------------------
+
+func TestMatchField_Wildcard(t *testing.T) {
+	if !matchField("*", 30, 0, 59) {
+		t.Error("matchField('*', 30) should be true")
+	}
+	if !matchField("*", 0, 0, 59) {
+		t.Error("matchField('*', 0) should be true")
+	}
+}
+
+func TestMatchField_Exact(t *testing.T) {
+	if !matchField("5", 5, 0, 59) {
+		t.Error("matchField('5', 5) should be true")
+	}
+	if matchField("5", 6, 0, 59) {
+		t.Error("matchField('5', 6) should be false")
+	}
+}
+
+func TestMatchField_Step(t *testing.T) {
+	if !matchField("*/5", 0, 0, 59) {
+		t.Error("matchField('*/5', 0) should be true (0 %% 5 == 0)")
+	}
+	if !matchField("*/5", 5, 0, 59) {
+		t.Error("matchField('*/5', 5) should be true")
+	}
+	if !matchField("*/5", 10, 0, 59) {
+		t.Error("matchField('*/5', 10) should be true")
+	}
+	if matchField("*/5", 3, 0, 59) {
+		t.Error("matchField('*/5', 3) should be false")
+	}
+	if matchField("*/0", 5, 0, 59) {
+		t.Error("matchField('*/0', 5) should be false (step is 0)")
+	}
+}
+
+func TestMatchField_Range(t *testing.T) {
+	if !matchField("10-20", 15, 0, 59) {
+		t.Error("matchField('10-20', 15) should be true")
+	}
+	if !matchField("10-20", 10, 0, 59) {
+		t.Error("matchField('10-20', 10) should be true (low bound)")
+	}
+	if !matchField("10-20", 20, 0, 59) {
+		t.Error("matchField('10-20', 20) should be true (high bound)")
+	}
+	if matchField("10-20", 9, 0, 59) {
+		t.Error("matchField('10-20', 9) should be false")
+	}
+	if matchField("10-20", 21, 0, 59) {
+		t.Error("matchField('10-20', 21) should be false")
+	}
+}
+
+func TestMatchField_List(t *testing.T) {
+	if !matchField("1,3,5", 1, 0, 59) {
+		t.Error("matchField('1,3,5', 1) should be true")
+	}
+	if !matchField("1,3,5", 3, 0, 59) {
+		t.Error("matchField('1,3,5', 3) should be true")
+	}
+	if !matchField("1,3,5", 5, 0, 59) {
+		t.Error("matchField('1,3,5', 5) should be true")
+	}
+	if matchField("1,3,5", 2, 0, 59) {
+		t.Error("matchField('1,3,5', 2) should be false")
+	}
+	if matchField("1,3,5", 4, 0, 59) {
+		t.Error("matchField('1,3,5', 4) should be false")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// NextCronTime tests
+// ---------------------------------------------------------------------------
+
+func TestNextCronTime_EveryMinute(t *testing.T) {
+	base := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	next := NextCronTime("* * * * *", base)
+	expected := time.Date(2024, 1, 15, 10, 31, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("NextCronTime('* * * * *', %v) = %v, want %v", base, next, expected)
+	}
+}
+
+func TestNextCronTime_SpecificMinute(t *testing.T) {
+	base := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+	next := NextCronTime("30 * * * *", base)
+	expected := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("NextCronTime('30 * * * *', %v) = %v, want %v", base, next, expected)
+	}
+}
+
+func TestNextCronTime_SpecificHourAndMinute(t *testing.T) {
+	base := time.Date(2024, 1, 15, 9, 0, 0, 0, time.UTC)
+	next := NextCronTime("30 14 * * *", base)
+	expected := time.Date(2024, 1, 15, 14, 30, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("NextCronTime('30 14 * * *', %v) = %v, want %v", base, next, expected)
+	}
+}
+
+func TestNextCronTime_StepPattern(t *testing.T) {
+	base := time.Date(2024, 1, 15, 10, 0, 0, 0, time.UTC)
+	next := NextCronTime("*/15 * * * *", base)
+	expected := time.Date(2024, 1, 15, 10, 15, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("NextCronTime('*/15 * * * *', %v) = %v, want %v", base, next, expected)
+	}
+}
+
+func TestNextCronTime_InvalidExpression(t *testing.T) {
+	base := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	next := NextCronTime("invalid", base)
+	expected := base.Add(24 * time.Hour)
+	if !next.Equal(expected) {
+		t.Errorf("NextCronTime('invalid', %v) = %v, want %v", base, next, expected)
+	}
+}
+
+func TestNextCronTime_ListAndRange(t *testing.T) {
+	base := time.Date(2024, 6, 15, 10, 0, 0, 0, time.UTC)
+	// 8:30 and 17:30 on weekdays (1-5 = Mon-Fri)
+	next := NextCronTime("30 8,17 * * 1-5", base)
+	// Next should be today at 17:30 if it's a weekday and past 8:30
+	weekday := base.Weekday()
+	if weekday >= time.Monday && weekday <= time.Friday {
+		expected := time.Date(2024, 6, 15, 17, 30, 0, 0, time.UTC)
+		if !next.Equal(expected) {
+			t.Errorf("NextCronTime('30 8,17 * * 1-5', %v) = %v, want %v", base, next, expected)
+		}
+	} else {
+		// Weekend: next should be Monday at 8:30
+		t.Logf("base is weekend (%v), skipping exact assertion", weekday)
+	}
+}

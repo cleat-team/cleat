@@ -503,9 +503,524 @@ func TestNewEventTypesJSONRoundTrip(t *testing.T) {
 	}
 }
 
-// ---- Helpers ----
+// TestEventRecordToPayloadRoundTrip_StandardEventTypes tests eventRecordToPayload
+// and populateFromPayload for standard event types not covered by
+// TestNewEventTypesPayloadRoundTrip (call, sleep, signal, defer, child, etc.).
+func TestEventRecordToPayloadRoundTrip_StandardEventTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		rec  EventRecord
+	}{
+		{
+			name: "call",
+			rec: EventRecord{
+				Step: 0, EventType: EventTypeCall,
+				Service: "svc", Op: "op1", Request: `{"id":1}`, Response: `{"ok":true}`,
+			},
+		},
+		{
+			name: "call_with_error",
+			rec: EventRecord{
+				Step: 1, EventType: EventTypeCall,
+				Service: "svc", Op: "fail", Request: `{}`, Response: ``, Err: "timeout",
+			},
+		},
+		{
+			name: "call_with_duration",
+			rec: EventRecord{
+				Step: 2, EventType: EventTypeCall,
+				Service: "svc", Op: "slow", Request: `{}`, Response: `{"ok":true}`, DurationMs: 1500,
+			},
+		},
+		{
+			name: "sleep",
+			rec: EventRecord{
+				Step: 3, EventType: EventTypeSleep,
+				DurationMs: 5000,
+			},
+		},
+		{
+			name: "sleep_zero",
+			rec: EventRecord{
+				Step: 4, EventType: EventTypeSleep,
+				DurationMs: 0,
+			},
+		},
+		{
+			name: "await_signals",
+			rec: EventRecord{
+				Step: 5, EventType: EventTypeAwaitSignals,
+				SignalNames: "payment,approval", TimeoutMs: 30000,
+			},
+		},
+		{
+			name: "await_signals_no_timeout",
+			rec: EventRecord{
+				Step: 6, EventType: EventTypeAwaitSignals,
+				SignalNames: "payment",
+			},
+		},
+		{
+			name: "signal_received",
+			rec: EventRecord{
+				Step: 7, EventType: EventTypeSignalReceived,
+				SignalName: "payment", SignalPayload: `{"paid":true}`,
+			},
+		},
+		{
+			name: "signal_received_empty_payload",
+			rec: EventRecord{
+				Step: 8, EventType: EventTypeSignalReceived,
+				SignalName: "payment",
+			},
+		},
+		{
+			name: "defer",
+			rec: EventRecord{
+				Step: 9, EventType: EventTypeDefer,
+				DeferID: "d1", DeferDescription: "cleanup",
+			},
+		},
+		{
+			name: "child_workflow",
+			rec: EventRecord{
+				Step: 10, EventType: EventTypeChildWorkflow,
+				ChildName: "child-wf", ChildInput: `{"x":1}`, RunID: "run-001",
+			},
+		},
+		{
+			name: "continue_as_new",
+			rec: EventRecord{
+				Step: 11, EventType: EventTypeContinueAsNew,
+				NewInput: `{"restart":true}`,
+			},
+		},
+		{
+			name: "heartbeat",
+			rec: EventRecord{
+				Step: 12, EventType: EventTypeHeartbeat,
+				Service: "svc", Op: "long-op",
+			},
+		},
+		{
+			name: "await_all_children",
+			rec: EventRecord{
+				Step: 13, EventType: EventTypeAwaitAllChildren,
+				Response: `[{"result":"ok"}]`,
+			},
+		},
+		{
+			name: "plugin_call",
+			rec: EventRecord{
+				Step: 14, EventType: EventTypePluginCall,
+				PluginName: "p", PluginFunc: "f", PluginInput: `{"x":1}`,
+				PluginOutput: `{"result":"ok"}`,
+			},
+		},
+		{
+			name: "plugin_call_error",
+			rec: EventRecord{
+				Step: 15, EventType: EventTypePluginCall,
+				PluginName: "p", PluginFunc: "g", PluginInput: `{}`,
+				PluginError: "not found",
+			},
+		},
+		{
+			name: "plugin_call_stream_chunk",
+			rec: EventRecord{
+				Step: 16, EventType: EventTypePluginCallStreamChunk,
+				PluginName: "p", PluginFunc: "f", PluginOutput: `{"chunk":1}`,
+			},
+		},
+		{
+			name: "side_effect",
+			rec: EventRecord{
+				Step: 17, EventType: EventTypeSideEffect,
+				SideEffectResult: `{"random":42}`,
+			},
+		},
+		{
+			name: "scope_acquired",
+			rec: EventRecord{
+				Step: 18, EventType: EventTypeScopeAcquired,
+				ScopeKey: "vo:order:123",
+			},
+		},
+		{
+			name: "scope_acquired_with_error",
+			rec: EventRecord{
+				Step: 19, EventType: EventTypeScopeAcquired,
+				ScopeKey: "vo:order:456", Err: "denied",
+			},
+		},
+	}
 
-// minimalWasm returns a minimal valid WASM module that can be loaded by wazero.
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := eventRecordToPayload(tt.rec)
+			if err != nil {
+				t.Fatalf("eventRecordToPayload: %v", err)
+			}
+
+			got := EventRecord{EventType: tt.rec.EventType}
+			populateFromPayload(&got, payload)
+
+			// Verify core fields round-trip correctly.
+			if got.Service != tt.rec.Service {
+				t.Errorf("Service: expected %q, got %q", tt.rec.Service, got.Service)
+			}
+			if got.Op != tt.rec.Op {
+				t.Errorf("Op: expected %q, got %q", tt.rec.Op, got.Op)
+			}
+			if got.Request != tt.rec.Request {
+				t.Errorf("Request: expected %q, got %q", tt.rec.Request, got.Request)
+			}
+			if got.Response != tt.rec.Response {
+				t.Errorf("Response: expected %q, got %q", tt.rec.Response, got.Response)
+			}
+			if got.Err != tt.rec.Err {
+				t.Errorf("Err: expected %q, got %q", tt.rec.Err, got.Err)
+			}
+			if got.DurationMs != tt.rec.DurationMs {
+				t.Errorf("DurationMs: expected %d, got %d", tt.rec.DurationMs, got.DurationMs)
+			}
+			if got.SignalNames != tt.rec.SignalNames {
+				t.Errorf("SignalNames: expected %q, got %q", tt.rec.SignalNames, got.SignalNames)
+			}
+			if got.TimeoutMs != tt.rec.TimeoutMs {
+				t.Errorf("TimeoutMs: expected %d, got %d", tt.rec.TimeoutMs, got.TimeoutMs)
+			}
+			if got.SignalName != tt.rec.SignalName {
+				t.Errorf("SignalName: expected %q, got %q", tt.rec.SignalName, got.SignalName)
+			}
+			if got.SignalPayload != tt.rec.SignalPayload {
+				t.Errorf("SignalPayload: expected %q, got %q", tt.rec.SignalPayload, got.SignalPayload)
+			}
+			if got.DeferDescription != tt.rec.DeferDescription {
+				t.Errorf("DeferDescription: expected %q, got %q", tt.rec.DeferDescription, got.DeferDescription)
+			}
+			if got.DeferID != tt.rec.DeferID {
+				t.Errorf("DeferID: expected %q, got %q", tt.rec.DeferID, got.DeferID)
+			}
+			if got.ChildName != tt.rec.ChildName {
+				t.Errorf("ChildName: expected %q, got %q", tt.rec.ChildName, got.ChildName)
+			}
+			if got.ChildInput != tt.rec.ChildInput {
+				t.Errorf("ChildInput: expected %q, got %q", tt.rec.ChildInput, got.ChildInput)
+			}
+			if got.RunID != tt.rec.RunID {
+				t.Errorf("RunID: expected %q, got %q", tt.rec.RunID, got.RunID)
+			}
+			if got.NewInput != tt.rec.NewInput {
+				t.Errorf("NewInput: expected %q, got %q", tt.rec.NewInput, got.NewInput)
+			}
+			if got.PluginName != tt.rec.PluginName {
+				t.Errorf("PluginName: expected %q, got %q", tt.rec.PluginName, got.PluginName)
+			}
+			if got.PluginFunc != tt.rec.PluginFunc {
+				t.Errorf("PluginFunc: expected %q, got %q", tt.rec.PluginFunc, got.PluginFunc)
+			}
+			if got.PluginInput != tt.rec.PluginInput {
+				t.Errorf("PluginInput: expected %q, got %q", tt.rec.PluginInput, got.PluginInput)
+			}
+			if got.PluginOutput != tt.rec.PluginOutput {
+				t.Errorf("PluginOutput: expected %q, got %q", tt.rec.PluginOutput, got.PluginOutput)
+			}
+			if got.PluginError != tt.rec.PluginError {
+				t.Errorf("PluginError: expected %q, got %q", tt.rec.PluginError, got.PluginError)
+			}
+			if got.SideEffectResult != tt.rec.SideEffectResult {
+				t.Errorf("SideEffectResult: expected %q, got %q", tt.rec.SideEffectResult, got.SideEffectResult)
+			}
+			if got.ScopeKey != tt.rec.ScopeKey {
+				t.Errorf("ScopeKey: expected %q, got %q", tt.rec.ScopeKey, got.ScopeKey)
+			}
+
+			t.Logf("Payload round-trip OK for %s (payload=%s)", tt.name, string(payload))
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Signal handling pure function tests
+// ---------------------------------------------------------------------------
+
+// splitSignalNames tests
+
+func TestSplitSignalNames_Empty(t *testing.T) {
+	result := splitSignalNames("")
+	if result != nil {
+		t.Errorf("expected nil for empty string, got %v", result)
+	}
+}
+
+func TestSplitSignalNames_Single(t *testing.T) {
+	result := splitSignalNames("payment")
+	if len(result) != 1 || result[0] != "payment" {
+		t.Errorf("expected [payment], got %v", result)
+	}
+}
+
+func TestSplitSignalNames_Multiple(t *testing.T) {
+	result := splitSignalNames("payment,approval,shipping")
+	expected := []string{"payment", "approval", "shipping"}
+	if len(result) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, result)
+	}
+	for i := range expected {
+		if result[i] != expected[i] {
+			t.Errorf("idx %d: expected %q, got %q", i, expected[i], result[i])
+		}
+	}
+}
+
+func TestSplitSignalNames_TrailingComma(t *testing.T) {
+	result := splitSignalNames("a,b,")
+	expected := []string{"a", "b", ""}
+	if len(result) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, result)
+	}
+	for i := range expected {
+		if result[i] != expected[i] {
+			t.Errorf("idx %d: expected %q, got %q", i, expected[i], result[i])
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Pack function tests (pure encoding functions)
+// ---------------------------------------------------------------------------
+
+func TestPackAwaitSignalsResult_NoTimeout(t *testing.T) {
+	result := packAwaitSignalsResult(5, 10, false, 0)
+	sigLen := uint16(result >> 48)
+	payLen := uint16(result >> 32)
+	toFlag := uint16(result>>16) & 1
+	errCode := uint16(result & 0xFFFF)
+	if sigLen != 5 {
+		t.Errorf("expected sigLen=5, got %d", sigLen)
+	}
+	if payLen != 10 {
+		t.Errorf("expected payLen=10, got %d", payLen)
+	}
+	if toFlag != 0 {
+		t.Errorf("expected toFlag=0, got %d", toFlag)
+	}
+	if errCode != 0 {
+		t.Errorf("expected errCode=0, got %d", errCode)
+	}
+}
+
+func TestPackAwaitSignalsResult_Timeout(t *testing.T) {
+	result := packAwaitSignalsResult(0, 0, true, 0)
+	toFlag := uint16(result>>16) & 1
+	if toFlag != 1 {
+		t.Error("expected timeout flag=1")
+	}
+}
+
+func TestPackAwaitSignalsResult_WithError(t *testing.T) {
+	result := packAwaitSignalsResult(3, 8, false, 2)
+	sigLen := uint16(result >> 48)
+	payLen := uint16(result >> 32)
+	errCode := uint16(result & 0xFFFF)
+	if sigLen != 3 {
+		t.Errorf("expected sigLen=3, got %d", sigLen)
+	}
+	if payLen != 8 {
+		t.Errorf("expected payLen=8, got %d", payLen)
+	}
+	if errCode != 2 {
+		t.Errorf("expected errCode=2, got %d", errCode)
+	}
+}
+
+func TestPackSleepResult(t *testing.T) {
+	result := packSleepResult(1, 5000)
+	status := byte(result >> 56)
+	duration := result & 0x00FFFFFFFFFFFFFF
+	if status != 1 {
+		t.Errorf("expected status=1, got %d", status)
+	}
+	if duration != 5000 {
+		t.Errorf("expected duration=5000, got %d", duration)
+	}
+}
+
+func TestPackSleepResult_ZeroDuration(t *testing.T) {
+	result := packSleepResult(0, 0)
+	status := byte(result >> 56)
+	duration := result & 0x00FFFFFFFFFFFFFF
+	if status != 0 {
+		t.Errorf("expected status=0, got %d", status)
+	}
+	if duration != 0 {
+		t.Errorf("expected duration=0, got %d", duration)
+	}
+}
+
+func TestPackAcquireLockResult_Acquired(t *testing.T) {
+	result := packAcquireLockResult(true, 0)
+	acquired := byte(result>>8) & 0xFF
+	errCode := byte(result & 0xFF)
+	if acquired != 1 {
+		t.Errorf("expected acquired=1, got %d", acquired)
+	}
+	if errCode != 0 {
+		t.Errorf("expected errCode=0, got %d", errCode)
+	}
+}
+
+func TestPackAcquireLockResult_NotAcquired(t *testing.T) {
+	result := packAcquireLockResult(false, 0)
+	acquired := byte(result>>8) & 0xFF
+	if acquired != 0 {
+		t.Errorf("expected acquired=0, got %d", acquired)
+	}
+}
+
+func TestPackAcquireLockResult_WithError(t *testing.T) {
+	result := packAcquireLockResult(false, 5)
+	acquired := byte(result>>8) & 0xFF
+	errCode := byte(result & 0xFF)
+	if acquired != 0 {
+		t.Errorf("expected acquired=0, got %d", acquired)
+	}
+	if errCode != 5 {
+		t.Errorf("expected errCode=5, got %d", errCode)
+	}
+}
+
+func TestPackAwaitChildResult(t *testing.T) {
+	result := packAwaitChildResult(10, 3)
+	written := uint32(result >> 32)
+	errCode := uint32(result & 0xFFFFFFFF)
+	if written != 10 {
+		t.Errorf("expected written=10, got %d", written)
+	}
+	if errCode != 3 {
+		t.Errorf("expected errCode=3, got %d", errCode)
+	}
+}
+
+func TestPackAwaitChildResultSuspend(t *testing.T) {
+	result := packAwaitChildResultSuspend()
+	expected := int64(1 << 62)
+	if result != expected {
+		t.Errorf("expected %d, got %d", expected, result)
+	}
+}
+
+func TestPackAwaitPromiseResult(t *testing.T) {
+	result := packAwaitPromiseResult(15, false, 0)
+	resultLen := uint32(result >> 32)
+	toFlag := uint16(result>>16) & 1
+	errCode := uint16(result & 0xFFFF)
+	if resultLen != 15 {
+		t.Errorf("expected resultLen=15, got %d", resultLen)
+	}
+	if toFlag != 0 {
+		t.Errorf("expected toFlag=0, got %d", toFlag)
+	}
+	if errCode != 0 {
+		t.Errorf("expected errCode=0, got %d", errCode)
+	}
+}
+
+func TestPackAwaitPromiseResult_Timeout(t *testing.T) {
+	result := packAwaitPromiseResult(0, true, 0)
+	toFlag := uint16(result>>16) & 1
+	if toFlag != 1 {
+		t.Error("expected timeout flag=1")
+	}
+}
+
+func TestPackAwaitPromiseResult_WithError(t *testing.T) {
+	result := packAwaitPromiseResult(0, false, 7)
+	errCode := uint16(result & 0xFFFF)
+	if errCode != 7 {
+		t.Errorf("expected errCode=7, got %d", errCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// EventRecord comparison tests
+// ---------------------------------------------------------------------------
+
+// TestEventFieldsMatch_AllEventTypes verifies that eventFieldsMatch correctly
+// compares every supported event type against itself and a mismatched variant.
+func TestEventFieldsMatch_AllEventTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		a    EventRecord
+		b    EventRecord
+		want bool
+	}{
+		{
+			name: "Call match",
+			a:    EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: `{}`, Response: `{"ok":true}`},
+			b:    EventRecord{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: `{}`, Response: `{"ok":true}`},
+			want: true,
+		},
+		{
+			name: "Call mismatch",
+			a:    EventRecord{Step: 0, EventType: EventTypeCall, Service: "svcA", Op: "op1"},
+			b:    EventRecord{Step: 0, EventType: EventTypeCall, Service: "svcB", Op: "op2"},
+			want: false,
+		},
+		{
+			name: "Step mismatch",
+			a:    EventRecord{Step: 0, EventType: EventTypeCall},
+			b:    EventRecord{Step: 1, EventType: EventTypeCall},
+			want: false,
+		},
+		{
+			name: "Type mismatch",
+			a:    EventRecord{Step: 0, EventType: EventTypeCall},
+			b:    EventRecord{Step: 0, EventType: EventTypeSleep},
+			want: false,
+		},
+		{
+			name: "Sleep match",
+			a:    EventRecord{Step: 0, EventType: EventTypeSleep, DurationMs: 5000},
+			b:    EventRecord{Step: 0, EventType: EventTypeSleep, DurationMs: 5000},
+			want: true,
+		},
+		{
+			name: "AwaitSignals match",
+			a:    EventRecord{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: "a,b", TimeoutMs: 10000},
+			b:    EventRecord{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: "a,b", TimeoutMs: 10000},
+			want: true,
+		},
+		{
+			name: "SignalReceived match",
+			a:    EventRecord{Step: 0, EventType: EventTypeSignalReceived, SignalName: "pay", SignalPayload: `{"amt":100}`},
+			b:    EventRecord{Step: 0, EventType: EventTypeSignalReceived, SignalName: "pay", SignalPayload: `{"amt":100}`},
+			want: true,
+		},
+		{
+			name: "RunDetached match",
+			a:    EventRecord{Step: 0, EventType: EventTypeRunDetached},
+			b:    EventRecord{Step: 0, EventType: EventTypeRunDetached},
+			want: true,
+		},
+		{
+			name: "Unknown type",
+			a:    EventRecord{Step: 0, EventType: "unknown_type"},
+			b:    EventRecord{Step: 0, EventType: "unknown_type"},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := eventFieldsMatch(tt.a, tt.b)
+			if got != tt.want {
+				t.Errorf("eventFieldsMatch = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 func minimalWasm() []byte {
 	// A minimal WASM module: magic + version, plus an empty code section.
 	return []byte{

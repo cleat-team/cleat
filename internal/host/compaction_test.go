@@ -681,3 +681,198 @@ func TestCompactWorkflowHistory_VerifyTailPreserved(t *testing.T) {
 		t.Errorf("expected 3 compacted events (steps 0,1,2), got %d", len(cs.Events))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Compaction state extraction edge cases
+// ---------------------------------------------------------------------------
+
+// TestExtractCompactionState_WithOpenChildren verifies that child workflows
+// started but not completed are tracked as open children in compaction state.
+func TestExtractCompactionState_WithOpenChildren(t *testing.T) {
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeChildWorkflow, ChildName: "child-a", ChildInput: `{"x":1}`, RunID: "run-a"},
+		{Step: 1, EventType: EventTypeChildWorkflow, ChildName: "child-b", ChildInput: `{"y":2}`, RunID: "run-b"},
+	}
+
+	cs := extractCompactionState(events)
+	if len(cs.OpenChildren) != 2 {
+		t.Fatalf("expected 2 open children, got %d", len(cs.OpenChildren))
+	}
+
+	foundA := false
+	foundB := false
+	for _, c := range cs.OpenChildren {
+		if c.RunID == "run-a" && c.Name == "child-a" && c.Input == `{"x":1}` {
+			foundA = true
+		}
+		if c.RunID == "run-b" && c.Name == "child-b" && c.Input == `{"y":2}` {
+			foundB = true
+		}
+	}
+	if !foundA {
+		t.Error("child-a not found in open children")
+	}
+	if !foundB {
+		t.Error("child-b not found in open children")
+	}
+}
+
+// TestExtractCompactionState_OpenChildrenClosed verifies that children with
+// matching await_child completion events are NOT included in open children.
+func TestExtractCompactionState_OpenChildrenClosed(t *testing.T) {
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeChildWorkflow, ChildName: "child-a", ChildInput: `{"x":1}`, RunID: "run-a"},
+		{Step: 1, EventType: EventTypeChildWorkflow, ChildName: "child-b", ChildInput: `{"y":2}`, RunID: "run-b"},
+		{Step: 2, EventType: EventTypeAwaitChild, RunID: "run-a", Response: `{"ok":true}`},
+	}
+
+	cs := extractCompactionState(events)
+	if len(cs.OpenChildren) != 1 {
+		t.Fatalf("expected 1 open child (child-b), got %d", len(cs.OpenChildren))
+	}
+	if cs.OpenChildren[0].RunID != "run-b" {
+		t.Errorf("expected open child run-b, got %s", cs.OpenChildren[0].RunID)
+	}
+}
+
+// TestExtractCompactionState_AwaitAllChildrenResets verifies that an
+// await_all_children event resets all open children.
+func TestExtractCompactionState_AwaitAllChildrenResets(t *testing.T) {
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeChildWorkflow, ChildName: "child-a", ChildInput: `{}`, RunID: "run-a"},
+		{Step: 1, EventType: EventTypeChildWorkflow, ChildName: "child-b", ChildInput: `{}`, RunID: "run-b"},
+		{Step: 2, EventType: EventTypeAwaitAllChildren, Response: `[{"ok":true}]`},
+	}
+
+	cs := extractCompactionState(events)
+	if len(cs.OpenChildren) != 0 {
+		t.Errorf("expected 0 open children after await_all, got %d", len(cs.OpenChildren))
+	}
+}
+
+// TestExtractCompactionState_WithPendingDefers verifies that defer events
+// are tracked as pending defers in compaction state.
+func TestExtractCompactionState_WithPendingDefers(t *testing.T) {
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup resources"},
+		{Step: 1, EventType: EventTypeDefer, DeferID: "d2", DeferDescription: "close connection"},
+	}
+
+	cs := extractCompactionState(events)
+	if len(cs.PendingDefers) != 2 {
+		t.Fatalf("expected 2 pending defers, got %d", len(cs.PendingDefers))
+	}
+
+	found := make(map[string]bool)
+	for _, d := range cs.PendingDefers {
+		if d.ID == "d1" && d.Description == "cleanup resources" {
+			found["d1"] = true
+		}
+		if d.ID == "d2" && d.Description == "close connection" {
+			found["d2"] = true
+		}
+	}
+	if !found["d1"] {
+		t.Error("defer d1 not found in pending defers")
+	}
+	if !found["d2"] {
+		t.Error("defer d2 not found in pending defers")
+	}
+}
+
+// TestExtractCompactionState_SideEffectRoundTrip verifies that side_effect
+// and scope_acquired events round-trip through compaction correctly.
+// SideEffect is not covered by TestCompactionRoundTripThenReplay.
+func TestExtractCompactionState_SideEffectRoundTrip(t *testing.T) {
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeSideEffect, SideEffectResult: `{"random":42}`},
+		{Step: 1, EventType: EventTypeScopeAcquired, ScopeKey: "vo:order:123"},
+	}
+
+	cs := extractCompactionState(events)
+	reconstructed := buildFullHistoryFromCompaction(nil, cs)
+
+	if len(reconstructed) != len(events) {
+		t.Fatalf("expected %d events, got %d", len(events), len(reconstructed))
+	}
+
+	// SideEffect fields are not stored in compacted form; verify behavior.
+	if reconstructed[0].EventType != EventTypeSideEffect {
+		t.Errorf("expected SideEffect event type, got %s", reconstructed[0].EventType)
+	}
+
+	// ScopeAcquired: ScopeKey should survive round-trip.
+	if reconstructed[1].EventType != EventTypeScopeAcquired {
+		t.Errorf("expected ScopeAcquired event type, got %s", reconstructed[1].EventType)
+	}
+	if reconstructed[1].ScopeKey != "vo:order:123" {
+		t.Errorf("expected ScopeKey='vo:order:123', got %q", reconstructed[1].ScopeKey)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CompactWorkflowHistory store-level edge cases
+// ---------------------------------------------------------------------------
+
+// TestCompactWorkflowHistory_OpenChildrenInState verifies that the compaction
+// state saved by CompactWorkflowHistory contains correct open children info.
+func TestCompactWorkflowHistory_OpenChildrenInState(t *testing.T) {
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeChildWorkflow, ChildName: "child-a", ChildInput: `{"x":1}`, RunID: "run-a"},
+		{Step: 1, EventType: EventTypeChildWorkflow, ChildName: "child-b", ChildInput: `{"y":2}`, RunID: "run-b"},
+		{Step: 2, EventType: EventTypeAwaitChild, RunID: "run-a", Response: `{"ok":true}`},
+		{Step: 3, EventType: EventTypeCall, Service: "svc", Op: "final"},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-children", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// keepStep = 4 - 1 = 3, so steps 0,1,2 are compacted
+	// Step 2 is await_child for run-a, so child-b should be the only open child
+	if len(cs.OpenChildren) != 1 {
+		t.Errorf("expected 1 open child (child-b), got %d", len(cs.OpenChildren))
+	}
+	if len(cs.Events) != 3 {
+		t.Errorf("expected 3 events in state, got %d", len(cs.Events))
+	}
+}
+
+// TestCompactWorkflowHistory_DefersInState verifies that defers are captured
+// in the compaction state by CompactWorkflowHistory.
+func TestCompactWorkflowHistory_DefersInState(t *testing.T) {
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup"},
+		{Step: 1, EventType: EventTypeDefer, DeferID: "d2", DeferDescription: "close db"},
+		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "work"},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-defers", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// keepStep = 3 - 1 = 2, steps 0,1 are compacted
+	if len(cs.PendingDefers) != 2 {
+		t.Errorf("expected 2 pending defers in state, got %d", len(cs.PendingDefers))
+	}
+}
