@@ -320,9 +320,9 @@ func isHostCallsField(field *ast.Field) bool {
 	return ok && pkg.Name == "durable" && sel.Sel.Name == "HostCalls"
 }
 
-// ensureHostCallsImport ensures the file imports "github.com/rcownie/cleat/durable".
+// ensureHostCallsImport ensures the file imports "github.com/rcownie/cleat/cleat".
 func ensureHostCallsImport(file *ast.File, result *analyzer.AnalysisResult) {
-	importPath := "github.com/rcownie/cleat/durable"
+	importPath := "github.com/rcownie/cleat/cleat"
 
 	for _, imp := range file.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)

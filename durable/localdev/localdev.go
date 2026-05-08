@@ -658,18 +658,22 @@ func (r *LocalRunner) runDetached(fn func(h cleat.HostCalls) error) error {
 func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) (string, bool, error) {
 	r.mu.RLock()
 	lp, ok := r.promises[promiseID]
-	r.mu.RUnlock()
-
 	if !ok {
+		r.mu.RUnlock()
 		return "", false, fmt.Errorf("localdev: promise %s not found", promiseID)
 	}
 
 	if lp.status == "resolved" {
-		return lp.result, false, nil
+		result := lp.result
+		r.mu.RUnlock()
+		return result, false, nil
 	}
 	if lp.status == "rejected" {
-		return lp.errorMsg, false, fmt.Errorf("promise rejected: %s", lp.errorMsg)
+		errMsg := lp.errorMsg
+		r.mu.RUnlock()
+		return errMsg, false, fmt.Errorf("promise rejected: %s", errMsg)
 	}
+	r.mu.RUnlock()
 
 	// Pending -- wait for resolution via channel or timeout.
 	timer := time.NewTimer(timeout)
@@ -677,7 +681,6 @@ func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) 
 
 	select {
 	case <-lp.ch:
-		// Promise was resolved/rejected.
 		r.mu.RLock()
 		defer r.mu.RUnlock()
 		if lp.status == "resolved" {

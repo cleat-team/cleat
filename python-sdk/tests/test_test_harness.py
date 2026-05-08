@@ -336,7 +336,7 @@ class TestState:
         h.stub_call("state", "set", '{"ok": true}')
         h.stub_call("state", "get", '{"value": "stored"}')
         h.set_state("mykey", "myvalue")
-        result = h.get_state("mykey", type(str))
+        result = h.get_state("mykey", str)
         assert result == "stored"
 
     def test_incr_state(self):

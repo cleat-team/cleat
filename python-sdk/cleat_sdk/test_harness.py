@@ -604,12 +604,14 @@ class CleatTestHarness(HostCalls):
         result = self.cleat_call("state", "get", {"key": key})
         data = json.loads(result)
         if isinstance(data, dict):
-            if result_type is str:
-                return result
-            return result_type(**data)
+            value = data.get("value", data)
+        else:
+            value = data
         if result_type is str:
-            return str(data)
-        return result_type(data)
+            return str(value)
+        if isinstance(value, dict):
+            return result_type(**value)
+        return result_type(value)
 
     def delete_state(self, key: str) -> None:
         self.cleat_call("state", "delete", {"key": key})
@@ -625,7 +627,11 @@ class CleatTestHarness(HostCalls):
     def create_promise(self, name: str, ttl_ms: Optional[int] = None) -> str:
         self._promise_counter += 1
         promise_id = f"test-prom-{name}-{self._promise_counter}"
-        self._promises[promise_id] = _PromiseState(name=name)
+        if name in self._promises:
+            self._promises[promise_id] = self._promises.pop(name)
+            self._promises[promise_id].name = name
+        else:
+            self._promises[promise_id] = _PromiseState(name=name)
         return promise_id
 
     def await_promise(self, promise_id: str, timeout_ms: int) -> PromiseResult:

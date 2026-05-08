@@ -665,11 +665,11 @@ func TestDispatchLoop_StickyThenGeneral(t *testing.T) {
 	// Verify that sticky claiming is attempted first, and remaining capacity
 	// is filled from the general pool.
 	ms := &mockStore{}
-	stickyCalled := false
-	generalCalled := false
+	var stickyCalled atomic.Bool
+	var generalCalled atomic.Bool
 
 	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
-		stickyCalled = true
+		stickyCalled.Store(true)
 		if limit >= 5 {
 			return []*host.WorkflowInstance{
 				{ID: "sticky-1", DefName: "test", DefVersion: 1, Status: "ready"},
@@ -678,7 +678,7 @@ func TestDispatchLoop_StickyThenGeneral(t *testing.T) {
 		return nil, nil
 	}
 	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
-		generalCalled = true
+		generalCalled.Store(true)
 		// Should be called with remaining = concurrency (5) - sticky (1) = 4.
 		return nil, nil
 	}
@@ -695,7 +695,7 @@ func TestDispatchLoop_StickyThenGeneral(t *testing.T) {
 
 	// Wait until both calls have been made.
 	waitForCond(t, 2*time.Second, func() bool {
-		return stickyCalled && generalCalled
+		return stickyCalled.Load() && generalCalled.Load()
 	})
 
 	w.cancel()
@@ -1147,7 +1147,7 @@ func TestReaperLoop_DefaultInterval(t *testing.T) {
 func TestCompactionLoop_CompactsCandidates(t *testing.T) {
 	ms := &mockStore{}
 	candidatesReturned := false
-	compactCalled := false
+	var compactCalled atomic.Bool
 
 	ms.getCompactionCandidatesFn = func(ctx context.Context, threshold int, limit int) ([]string, error) {
 		if candidatesReturned {
@@ -1168,7 +1168,7 @@ func TestCompactionLoop_CompactsCandidates(t *testing.T) {
 	}
 
 	ms.compactHistoryFn = func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
-		compactCalled = true
+		compactCalled.Store(true)
 		if workflowID != "wf-compact-1" {
 			t.Errorf("compactHistory called with workflowID=%q, want wf-compact-1", workflowID)
 		}
@@ -1188,7 +1188,7 @@ func TestCompactionLoop_CompactsCandidates(t *testing.T) {
 	}()
 
 	waitForCond(t, 2*time.Second, func() bool {
-		return compactCalled
+		return compactCalled.Load()
 	})
 
 	w.cancel()

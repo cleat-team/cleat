@@ -150,7 +150,7 @@ class TestCleatCallResult:
         result = (1 << 63) | (1 << 40)
         response_len, call_error_code, err_code = memory.decode_cleat_call_result(result)
         # responseLen is 24 bits so the sign bit gets masked
-        assert response_len == 0x80_0000  # bit 63 >> 40 = bit 23
+        assert response_len == 0x80_0001  # bit 63>>40=bit23, plus bit 40>>40=bit0
         assert err_code == 0
 
     def test_decode_cleat_call_result_suspect_negative(self):
@@ -394,53 +394,57 @@ class TestAwaitPromiseResult:
     def test_decode_await_promise_success(self):
         """errCode=0, timedOut=False, resultLen=100."""
         result = (100 << 32) | (0 << 16) | 0
-        result_len, timed_out, err_code = memory.decode_await_promise_result(result)
+        result_len, timed_out, rejected, err_code = memory.decode_await_promise_result(result)
         assert err_code == 0
         assert not timed_out
+        assert not rejected
         assert result_len == 100
 
     def test_decode_await_promise_timed_out(self):
-        """errCode=0, timedOut=True, resultLen=0."""
+        """errCode=0, timedOut=True, rejected=False, resultLen=0."""
         result = (1 << 16)
-        result_len, timed_out, err_code = memory.decode_await_promise_result(result)
+        result_len, timed_out, rejected, err_code = memory.decode_await_promise_result(result)
         assert err_code == 0
         assert timed_out
+        assert not rejected
         assert result_len == 0
 
     def test_decode_await_promise_error(self):
-        """errCode=5, timedOut=False, resultLen=200."""
+        """errCode=5, timedOut=False, rejected=False, resultLen=200."""
         result = (200 << 32) | (0 << 16) | 5
-        result_len, timed_out, err_code = memory.decode_await_promise_result(result)
+        result_len, timed_out, rejected, err_code = memory.decode_await_promise_result(result)
         assert err_code == 5
         assert not timed_out
+        assert not rejected
         assert result_len == 200
 
     def test_decode_await_promise_max_values(self):
         """All fields at maximum."""
-        result = (0xFFFF_FFFF << 32) | (0xFF << 16) | 0xFFFF
-        result_len, timed_out, err_code = memory.decode_await_promise_result(result)
+        result = (0xFFFF_FFFF << 32) | (0xFF << 16) | (0xFF << 24) | 0xFFFF
+        result_len, timed_out, rejected, err_code = memory.decode_await_promise_result(result)
         assert err_code == 0xFFFF
         assert timed_out
+        assert rejected
         assert result_len == 0xFFFF_FFFF
 
     def test_decode_await_promise_zero(self):
-        assert memory.decode_await_promise_result(0) == (0, False, 0)
+        assert memory.decode_await_promise_result(0) == (0, False, False, 0)
 
     def test_decode_await_promise_timed_out_any_bit(self):
         """Any bit in the timedOut field (bits 16-23) should produce True."""
         result = (1 << 17)
-        _, timed_out, _ = memory.decode_await_promise_result(result)
+        _, timed_out, _, _ = memory.decode_await_promise_result(result)
         assert timed_out
 
     @pytest.mark.parametrize(
         "packed, expected",
         [
-            (0, (0, False, 0)),
-            ((42 << 32), (42, False, 0)),
-            ((1 << 16), (0, True, 0)),
-            (7, (0, False, 7)),
-            ((0xFFFF_FFFF << 32) | (0xFF << 16) | 0xFFFF,
-             (0xFFFF_FFFF, True, 0xFFFF)),
+            (0, (0, False, False, 0)),
+            ((42 << 32), (42, False, False, 0)),
+            ((1 << 16), (0, True, False, 0)),
+            (7, (0, False, False, 7)),
+            ((0xFFFF_FFFF << 32) | (0xFF << 16) | (0xFF << 24) | 0xFFFF,
+             (0xFFFF_FFFF, True, True, 0xFFFF)),
         ],
     )
     def test_decode_await_promise_result_parametrized(self, packed, expected):
@@ -688,11 +692,10 @@ class TestStringIO:
         assert result == text
 
     def test_write_string_none_string(self):
-        """Passing None or non-string as s argument should be handled
-        gracefully by the encode call (will raise TypeError)."""
+        """Passing None or empty string as s argument returns 0 bytes written."""
         ptr = 11000
-        with pytest.raises((TypeError, AttributeError)):
-            memory.write_string(ptr, None, 10)  # type: ignore
+        assert memory.write_string(ptr, None, 10) == 0  # type: ignore
+        assert memory.write_string(ptr, "", 10) == 0
 
     def test_read_write_separate_pointers(self):
         """Reading from one region and writing to another should be

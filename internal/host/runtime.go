@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 )
+
+var wazeroInitOnce sync.Once
 
 
 // Runtime wraps a wazero runtime with pre-registered host function imports.
@@ -30,6 +33,11 @@ func (r *Runtime) Stderr() string { return r.stderr.String() }
 // for Go wasip1 support. Plugin host functions are registered via the Engine's
 // PluginRegistry — not through NewRuntime.
 func NewRuntime(ctx context.Context) (*Runtime, error) {
+	wazeroInitOnce.Do(func() {
+		dummy := wazero.NewRuntime(context.Background())
+		dummy.Close(context.Background())
+	})
+
 	rt := wazero.NewRuntime(ctx)
 
 	// WASI is required by Go wasip1 modules for goroutine/stack management.
