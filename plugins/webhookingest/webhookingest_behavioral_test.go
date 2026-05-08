@@ -1378,3 +1378,331 @@ func TestSourceDelete(t *testing.T) {
 		t.Errorf("expected 0 sources after delete, got %d", count)
 	}
 }
+
+// ===========================================================================
+// HandleGetSource not found
+// ===========================================================================
+
+func TestGetSourceNotFound(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := authedRequest("GET", "/ingest/sources/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-existent source, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// CreateSource missing required fields
+// ===========================================================================
+
+func TestCreateSourceMissingName(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	body := `{"source_type":"github"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing name, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["error"] == nil {
+		t.Error("expected error message in response")
+	}
+}
+
+func TestCreateSourceInvalidBody(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	body := `not valid json`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid body, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// CreateSource with signal binding
+// ===========================================================================
+
+func TestCreateSourceWithSignalBinding(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	body := `{"name":"signal-source","source_type":"generic","signal_workflow_id":"wf-001","signal_name":"custom_signal"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	if created["signal_workflow_id"] != "wf-001" {
+		t.Errorf("expected signal_workflow_id 'wf-001', got %v", created["signal_workflow_id"])
+	}
+	if created["signal_name"] != "custom_signal" {
+		t.Errorf("expected signal_name 'custom_signal', got %v", created["signal_name"])
+	}
+}
+
+// ===========================================================================
+// List events with and without filters
+// ===========================================================================
+
+func TestListEventsWithFilters(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Create two sources.
+	createBody1 := `{"name":"source-1","source_type":"github"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody1)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source 1: expected 201, got %d", rec.Code)
+	}
+	var src1 map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &src1)
+	sourceID1 := src1["id"].(string)
+
+	createBody2 := `{"name":"source-2","source_type":"stripe"}`
+	req = authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody2)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source 2: expected 201, got %d", rec.Code)
+	}
+	var src2 map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &src2)
+	sourceID2 := src2["id"].(string)
+
+	// Ingest an event for source 1.
+	payload1 := `{"event":"push"}`
+	req = httptest.NewRequest("POST", "/ingest/"+sourceID1, bytes.NewReader([]byte(payload1)))
+	req.Header.Set("X-Github-Event", "push")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("ingest 1: expected 201, got %d", rec.Code)
+	}
+
+	// Ingest an event for source 2.
+	payload2 := `{"event":"charge"}`
+	req = httptest.NewRequest("POST", "/ingest/"+sourceID2, bytes.NewReader([]byte(payload2)))
+	req.Header.Set("X-Event-Type", "payment")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("ingest 2: expected 201, got %d", rec.Code)
+	}
+
+	// List all events.
+	req = authedRequest("GET", "/ingest/events", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list events: expected 200, got %d", rec.Code)
+	}
+	var events []map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &events)
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+
+	// List events filtered by source_id.
+	req = authedRequest("GET", "/ingest/events?source_id="+sourceID1, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list events by source: expected 200, got %d", rec.Code)
+	}
+	json.Unmarshal(rec.Body.Bytes(), &events)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event for source 1 filter, got %d", len(events))
+	}
+
+	// List events filtered by event_type.
+	req = authedRequest("GET", "/ingest/events?event_type=push", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list events by type: expected 200, got %d", rec.Code)
+	}
+	json.Unmarshal(rec.Body.Bytes(), &events)
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event for event_type filter, got %d", len(events))
+	}
+
+	// List events filtered by processed=false.
+	req = authedRequest("GET", "/ingest/events?processed=false", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list events by processed: expected 200, got %d", rec.Code)
+	}
+	json.Unmarshal(rec.Body.Bytes(), &events)
+	if len(events) != 2 {
+		t.Fatalf("expected 2 unprocessed events, got %d", len(events))
+	}
+
+	_ = store // store used implicitly through handler
+}
+
+// ===========================================================================
+// Ingest with non-JSON body
+// ===========================================================================
+
+func TestIngestNonJSONBody(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Create source.
+	createBody := `{"name":"nonjson-test","source_type":"generic"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source: expected 201, got %d", rec.Code)
+	}
+
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	sourceID := created["id"].(string)
+
+	// Ingest a non-JSON plain text payload.
+	rawText := "plain text webhook body"
+	req = httptest.NewRequest("POST", "/ingest/"+sourceID, bytes.NewReader([]byte(rawText)))
+	req.Header.Set("Content-Type", "text/plain")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("ingest: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the payload was stored as a JSON string.
+	store.mu.RLock()
+	if len(store.events) != 1 {
+		store.mu.RUnlock()
+		t.Fatalf("expected 1 event, got %d", len(store.events))
+	}
+	payload := store.events[0].payload
+	store.mu.RUnlock()
+
+	var decodedPayload string
+	if err := json.Unmarshal([]byte(payload), &decodedPayload); err != nil {
+		t.Fatalf("payload should be a JSON string, got: %s (parse error: %v)", payload, err)
+	}
+	if decodedPayload != rawText {
+		t.Errorf("expected payload %q, got %q", rawText, decodedPayload)
+	}
+}
+
+// ===========================================================================
+// Ingest with signal delivery
+// ===========================================================================
+
+func TestIngestWithSignalDelivery(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:               sourceID.String(),
+		tenantID:         testTenantStr,
+		name:             "signal-source",
+		sourceType:       "generic",
+		secret:           "",
+		enabled:          true,
+		signalWorkflowID: "wf-signal-test",
+		signalName:       "my_signal",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	signalChan := make(chan string, 1)
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		env: &plugin.Environment{
+			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
+				signalChan <- signalName
+				return nil
+			},
+		},
+	}
+
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.Middleware(db)(mux)
+
+	// Ingest a payload.
+	payload := `{"action":"triggered"}`
+	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(payload)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("ingest: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify signal was delivered.
+	select {
+	case signalName := <-signalChan:
+		if signalName != "my_signal" {
+			t.Errorf("expected signal name 'my_signal', got %s", signalName)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for signal delivery")
+	}
+
+	// Verify event was marked processed.
+	store.mu.RLock()
+	evt := store.events[0]
+	store.mu.RUnlock()
+	if !evt.processed {
+		t.Error("expected event to be marked processed after signal delivery")
+	}
+	if evt.status != "completed" {
+		t.Errorf("expected status 'completed', got %s", evt.status)
+	}
+}
+
+// ===========================================================================
+// Ingest with invalid source ID (not a UUID)
+// ===========================================================================
+
+func TestIngestInvalidSourceID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := httptest.NewRequest("POST", "/ingest/not-a-uuid", bytes.NewReader([]byte(`{}`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid source ID, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Ingest with source not found (valid UUID but doesn't exist)
+// ===========================================================================
+
+func TestIngestSourceNotFound(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := httptest.NewRequest("POST", "/ingest/"+uuid.New().String(), bytes.NewReader([]byte(`{}`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-existent source, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+

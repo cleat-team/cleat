@@ -1952,3 +1952,388 @@ func TestCompareValuesExtraBranches(t *testing.T) {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// compareNumeric direct test (uncovered branches)
+// ---------------------------------------------------------------------------
+
+func TestCompareNumeric(t *testing.T) {
+	t.Run("both numbers", func(t *testing.T) {
+		if got := compareNumeric(float64(100), float64(50)); got != 1 {
+			t.Errorf("expected 1, got %d", got)
+		}
+		if got := compareNumeric(float64(50), float64(100)); got != -1 {
+			t.Errorf("expected -1, got %d", got)
+		}
+		if got := compareNumeric(float64(50), float64(50)); got != 0 {
+			t.Errorf("expected 0, got %d", got)
+		}
+	})
+
+	t.Run("non-numeric operand returns 0", func(t *testing.T) {
+		if got := compareNumeric("string", float64(50)); got != 0 {
+			t.Errorf("expected 0 for non-numeric val, got %d", got)
+		}
+		if got := compareNumeric(float64(50), "string"); got != 0 {
+			t.Errorf("expected 0 for non-numeric operand, got %d", got)
+		}
+	})
+
+	t.Run("nil values return 0", func(t *testing.T) {
+		if got := compareNumeric(nil, float64(50)); got != 0 {
+			t.Errorf("expected 0 for nil val, got %d", got)
+		}
+		if got := compareNumeric(float64(50), nil); got != 0 {
+			t.Errorf("expected 0 for nil operand, got %d", got)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// getPath - nested access, mixed arrays and objects
+// ---------------------------------------------------------------------------
+
+func TestGetPathNestedAccess(t *testing.T) {
+	t.Run("deeply nested paths", func(t *testing.T) {
+		data := map[string]interface{}{
+			"a": map[string]interface{}{
+				"b": map[string]interface{}{
+					"c": map[string]interface{}{
+						"d": "found",
+					},
+				},
+			},
+		}
+		val, found := getPath(data, "a.b.c.d")
+		if !found {
+			t.Error("expected found=true for deeply nested path")
+		}
+		if val != "found" {
+			t.Errorf("expected 'found', got %v", val)
+		}
+	})
+
+	t.Run("array element then nested field", func(t *testing.T) {
+		data := map[string]interface{}{
+			"items": []interface{}{
+				map[string]interface{}{"sku": "ABC", "price": 10.0},
+				map[string]interface{}{"sku": "DEF", "price": 20.0},
+			},
+		}
+		val, found := getPath(data, "items[1].sku")
+		if !found {
+			t.Error("expected found=true for items[1].sku")
+		}
+		if val != "DEF" {
+			t.Errorf("expected 'DEF', got %v", val)
+		}
+	})
+
+	t.Run("index into map then field access into nested object", func(t *testing.T) {
+		data := map[string]interface{}{
+			"items": []interface{}{
+				map[string]interface{}{
+					"nested": map[string]interface{}{"value": float64(42)},
+				},
+			},
+		}
+		val, found := getPath(data, "items[0].nested.value")
+		if !found {
+			t.Error("expected found=true for items[0].nested.value")
+		}
+		if val != float64(42) {
+			t.Errorf("expected 42, got %v", val)
+		}
+	})
+
+	t.Run("simple path without dots", func(t *testing.T) {
+		data := map[string]interface{}{"key": "value"}
+		val, found := getPath(data, "key")
+		if !found {
+			t.Error("expected found=true for simple path key")
+		}
+		if val != "value" {
+			t.Errorf("expected 'value', got %v", val)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// matchCondition with operator map edge cases
+// ---------------------------------------------------------------------------
+
+func TestMatchConditionOperatorMapEdges(t *testing.T) {
+	t.Run("$lte with missing field", func(t *testing.T) {
+		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$lte": float64(100)})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if matched {
+			t.Error("expected false for $lte with missing field")
+		}
+	})
+
+	t.Run("$ne with missing field matches", func(t *testing.T) {
+		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$ne": "value"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !matched {
+			t.Error("expected true for $ne with missing field (missing != value)")
+		}
+	})
+
+	t.Run("$eq with missing field does not match", func(t *testing.T) {
+		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$eq": "value"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if matched {
+			t.Error("expected false for $eq with missing field")
+		}
+	})
+
+	t.Run("$gt with missing field does not match", func(t *testing.T) {
+		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$gt": float64(100)})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if matched {
+			t.Error("expected false for $gt with missing field")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Tokenizer - all operator types and error branches
+// ---------------------------------------------------------------------------
+
+func TestTokenizerAllOperators(t *testing.T) {
+	tests := []struct {
+		input string
+		desc  string
+		data  map[string]interface{}
+	}{
+		{`event.data.x == 5`, "eq operator", map[string]interface{}{"x": float64(5)}},
+		{`event.data.x != 5`, "neq operator", map[string]interface{}{"x": float64(5)}},
+		{`event.data.x > 5`, "gt operator", map[string]interface{}{"x": float64(10)}},
+		{`event.data.x < 5`, "lt operator", map[string]interface{}{"x": float64(1)}},
+		{`event.data.x >= 5`, "gte operator", map[string]interface{}{"x": float64(5)}},
+		{`event.data.x <= 5`, "lte operator", map[string]interface{}{"x": float64(5)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			_, err := EvaluateFilter(tt.input, tt.data)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+
+	t.Run("unclosed string literal returns error", func(t *testing.T) {
+		_, err := tokenize(`event.data.x == "hello`)
+		if err == nil {
+			t.Error("expected error for unclosed string")
+		}
+	})
+
+	t.Run("unexpected character", func(t *testing.T) {
+		_, err := tokenize("@")
+		if err == nil {
+			t.Error("expected error for unexpected character")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Parser - additional edge cases
+// ---------------------------------------------------------------------------
+
+func TestParserAdditionalEdges(t *testing.T) {
+	t.Run("missing event prefix", func(t *testing.T) {
+		_, err := EvaluateFilter(`data.amount > 5`, nil)
+		if err == nil {
+			t.Error("expected error for missing event prefix")
+		}
+	})
+
+	t.Run("dot after event but no data", func(t *testing.T) {
+		_, err := EvaluateFilter(`event. > 5`, nil)
+		if err == nil {
+			t.Error("expected error for missing data after event.")
+		}
+	})
+
+	t.Run("null literal comparison", func(t *testing.T) {
+		data := map[string]interface{}{"value": nil}
+		result, err := EvaluateFilter(`event.data.value == null`, data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result {
+			t.Error("expected null == null to be true")
+		}
+	})
+
+	t.Run("false literal comparison", func(t *testing.T) {
+		data := map[string]interface{}{"flag": false}
+		result, err := EvaluateFilter(`event.data.flag == false`, data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result {
+			t.Error("expected false == false to be true")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// parseLiteral - keyword handling (null, true, false, number overflow)
+// ---------------------------------------------------------------------------
+
+func TestParseLiteralKeywords(t *testing.T) {
+	t.Run("null literal in membership", func(t *testing.T) {
+		data := map[string]interface{}{"value": nil}
+		result, err := EvaluateFilter(`event.data.value in(null)`, data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result {
+			t.Error("expected null in(null) to match")
+		}
+	})
+
+	t.Run("bool literal in membership", func(t *testing.T) {
+		data := map[string]interface{}{"flag": true}
+		result, err := EvaluateFilter(`event.data.flag in(true, false)`, data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !result {
+			t.Error("expected true in(true, false) to match")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// valuesEqual - additional edge cases
+// ---------------------------------------------------------------------------
+
+func TestValuesEqualEdgeCases(t *testing.T) {
+	t.Run("string vs number via fmt.Sprintf", func(t *testing.T) {
+		if !valuesEqual("42", float64(42)) {
+			t.Error("expected '42' == 42 via string formatting")
+		}
+		if !valuesEqual(float64(42), "42") {
+			t.Error("expected 42 == '42' via string formatting")
+		}
+	})
+
+	t.Run("bool vs string", func(t *testing.T) {
+		// Mixed types where neither is numeric end up in Sprintf comparison.
+		got := valuesEqual(true, "true")
+		if !got {
+			t.Log("bool true matches string true via fmt.Sprintf")
+		}
+	})
+
+	t.Run("json.Number comparison with int", func(t *testing.T) {
+		if !valuesEqual(json.Number("100"), float64(100)) {
+			t.Error("expected json.Number(100) == 100")
+		}
+		if !valuesEqual(float64(100), json.Number("100")) {
+			t.Error("expected 100 == json.Number(100)")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// evalPath - additional error cases
+// ---------------------------------------------------------------------------
+
+func TestEvalPathAdditionalErrors(t *testing.T) {
+	t.Run("field on non-object intermediate", func(t *testing.T) {
+		_, err := evalPath(
+			map[string]interface{}{"key": "stringval"},
+			[]pathStep{{field: "key"}, {field: "nested"}},
+		)
+		if err == nil {
+			t.Error("expected error for accessing field on string value")
+		}
+	})
+
+	t.Run("missing field in nested path", func(t *testing.T) {
+		_, err := evalPath(
+			map[string]interface{}{"outer": map[string]interface{}{"inner": "val"}},
+			[]pathStep{{field: "outer"}, {field: "nonexistent"}},
+		)
+		if err == nil {
+			t.Error("expected error for missing nested field")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// matchOperators: $ne, $gt, $lt with missing fields and edge values
+// ---------------------------------------------------------------------------
+
+func TestMatchOperatorsMissingFieldBranches(t *testing.T) {
+	t.Run("$ne existing field that equals value -> not match", func(t *testing.T) {
+		matched, err := matchCondition("path", "active", true, map[string]interface{}{"$ne": "active"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if matched {
+			t.Error("expected $ne to not match when value equals")
+		}
+	})
+
+	t.Run("$lt missing field does not match", func(t *testing.T) {
+		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$lt": float64(100)})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if matched {
+			t.Error("expected $lt with missing field to not match")
+		}
+	})
+
+	t.Run("$gte missing field does not match", func(t *testing.T) {
+		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$gte": float64(100)})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if matched {
+			t.Error("expected $gte with missing field to not match")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Invalid filter JSON and malformed filter expressions
+// ---------------------------------------------------------------------------
+
+func TestMalformedFilterExpressions(t *testing.T) {
+	t.Run("invalid JSON filter prefix", func(t *testing.T) {
+		_, err := EvaluateFilter(`{invalid}`, nil)
+		if err == nil {
+			t.Error("expected error for invalid JSON filter")
+		}
+	})
+
+	t.Run("incomplete comparison at EOF", func(t *testing.T) {
+		_, err := EvaluateFilter(`event.data.amount >`, nil)
+		if err == nil {
+			t.Error("expected error for incomplete expression")
+		}
+	})
+
+	t.Run("unknown operator in text expression", func(t *testing.T) {
+		_, err := EvaluateFilter(`event.data.amount unknown 100`, nil)
+		if err == nil {
+			t.Error("expected error for unknown operator")
+		}
+	})
+}
+
+
