@@ -1902,6 +1902,10 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 	case "run_detached":
 		// No extra fields to store.
+	case "side_effect":
+		if rec.SideEffectResult != "" {
+			payload["side_effect_result"] = rec.SideEffectResult
+		}
 	case "plugin_call_stream_chunk":
 		if rec.PluginName != "" {
 			payload["plugin_name"] = rec.PluginName
@@ -1917,6 +1921,13 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 		if rec.PluginError != "" {
 			payload["plugin_error"] = rec.PluginError
+		}
+	case "scope_acquired":
+		if rec.ScopeKey != "" {
+			payload["scope_key"] = rec.ScopeKey
+		}
+		if rec.Err != "" {
+			payload["error"] = rec.Err
 		}
 	}
 	return json.Marshal(payload)
@@ -1973,11 +1984,16 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["state_op"].(string); ok { rec.StateOp = v }
 	case "run_detached":
 		// No extra fields to restore.
+	case "side_effect":
+		if v, ok := m["side_effect_result"].(string); ok { rec.SideEffectResult = v }
 	case "plugin_call_stream_chunk":
 		if v, ok := m["plugin_name"].(string); ok { rec.PluginName = v }
 		if v, ok := m["plugin_func"].(string); ok { rec.PluginFunc = v }
 		if v, ok := m["plugin_input"].(string); ok { rec.PluginInput = v }
 		if v, ok := m["plugin_output"].(string); ok { rec.PluginOutput = v }
 		if v, ok := m["plugin_error"].(string); ok { rec.PluginError = v }
+	case "scope_acquired":
+		if v, ok := m["scope_key"].(string); ok { rec.ScopeKey = v }
+		if v, ok := m["error"].(string); ok { rec.Err = v }
 	}
 }

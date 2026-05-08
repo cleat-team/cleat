@@ -44,6 +44,8 @@ const (
 	EventTypePluginCallStreamChunk EventType = "plugin_call_stream_chunk"
 	EventTypeAcquireLock      EventType = "acquire_lock"
 	EventTypeReleaseLock      EventType = "release_lock"
+	EventTypeSideEffect       EventType = "side_effect"
+	EventTypeScopeAcquired    EventType = "scope_acquired"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -116,8 +118,13 @@ type EventRecord struct {
 	LockKey      string `json:"lock_key,omitempty"`
 	LockTTLMs    int64  `json:"lock_ttl_ms,omitempty"`
 	LockAcquired int    `json:"lock_acquired,omitempty"`
-}
 
+	// SideEffect fields.
+	SideEffectResult string `json:"side_effect_result,omitempty"`
+	
+	// Scope / virtual object fields.
+	ScopeKey     string `json:"scope_key,omitempty"`
+}
 // CallRecord is kept for backward compatibility in tests.
 type CallRecord = EventRecord
 
@@ -500,9 +507,13 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				Deferrals:    session.deferrals,
 			}, session.deferrals, session.queryState, nil
 		}
+		// Workflow failed with a non-suspend error. Release any held scopes.
+		session.releaseHeldScopes(ctx)
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, err
 	}
 
+	// Workflow completed successfully. Release any held scopes.
+	session.releaseHeldScopes(ctx)
 	return result, stripCompactedEvents(session.history, compactedStep), nil, session.deferrals, session.queryState, nil
 }
 
@@ -581,6 +592,7 @@ type execSession struct {
 	scopeObjType string // current object type in scope
 	scopeInstKey string // current instance key in scope
 	scopeSet     bool   // true when scope is active
+	heldScopes   []string // concurrency keys held for virtual object scopes
 }
 
 var _ HostHandler = (*execSession)(nil)
@@ -1911,9 +1923,114 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 }
 
 func (s *execSession) SetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
+	if s.isReplay {
+		return s.replaySetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
+	}
+	return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
+}
+
+
+func (s *execSession) ClearScope(ctx context.Context) {
+	if s.scopeSet && s.scopePrefix != "" {
+		scopeKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
+		if s.engine.concurrencyKeyStore != nil {
+			_ = s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey)
+		}
+		for i, held := range s.heldScopes {
+			if held == scopeKey {
+				s.heldScopes = append(s.heldScopes[:i], s.heldScopes[i+1:]...)
+				break
+			}
+		}
+	}
+	s.scopeSet = false
+	s.scopePrefix = ""
+	s.scopeObjType = ""
+	s.scopeInstKey = ""
+}
+
+func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
 	mem := m.Memory()
 
 	// Save previous scope prefix to output buffer.
+	prevScope := ""
+	if s.scopeSet && s.scopePrefix != "" {
+		prevScope = s.scopePrefix
+		_ = writeWasmString(mem, prevScopePtr, prevScope, prevScopeMaxLen)
+	}
+
+	if objectType == "" && instanceKey == "" {
+		s.ClearScope(ctx)
+		return 0
+	}
+
+	// If switching from an existing scope, release the old key first.
+	if s.scopeSet && s.scopePrefix != "" {
+		oldKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
+		if s.engine.concurrencyKeyStore != nil {
+			_ = s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, oldKey)
+		}
+		for i, held := range s.heldScopes {
+			if held == oldKey {
+				s.heldScopes = append(s.heldScopes[:i], s.heldScopes[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// Acquire new scope key.
+	scopeKey := "vo:" + objectType + ":" + instanceKey
+	if s.engine.concurrencyKeyStore != nil {
+		acquired, err := s.engine.concurrencyKeyStore.AcquireConcurrencyKey(ctx, scopeKey, s.workflowID, 24*time.Hour)
+		if err != nil {
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeScopeAcquired,
+				ScopeKey:  scopeKey,
+				Err:       err.Error(),
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+			return packSimpleResult(1, 0)
+		}
+		if !acquired {
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeScopeAcquired,
+				ScopeKey:  scopeKey,
+				Err:       "scope held by another workflow",
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+			s.suspendErr = &SuspendError{
+				Reason: fmt.Sprintf("virtual object scope %s held by another workflow", scopeKey),
+				Until:   time.UnixMilli(s.nowMs).Add(5 * time.Second),
+			}
+			return 0
+		}
+		s.heldScopes = append(s.heldScopes, scopeKey)
+	}
+
+	// Record successful acquisition.
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeScopeAcquired,
+		ScopeKey:  scopeKey,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	s.scopeSet = true
+	s.scopeObjType = objectType
+	s.scopeInstKey = instanceKey
+	s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
+	return 0
+}
+
+func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	// Save previous scope prefix to output buffer (reconstructed from replayed scope state).
 	prevScope := ""
 	if s.scopeSet && s.scopePrefix != "" {
 		prevScope = s.scopePrefix
@@ -1925,14 +2042,46 @@ func (s *execSession) SetScope(ctx context.Context, m api.Module, objectType, in
 		s.scopePrefix = ""
 		s.scopeObjType = ""
 		s.scopeInstKey = ""
-	} else {
+		return 0
+	}
+
+	if s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		s.stepCount++
+
+		if rec.EventType != EventTypeScopeAcquired {
+			return packSimpleResult(1, 0)
+		}
+
+		if rec.Err != "" {
+			// Previous attempt failed.
+			// Do not set scope fields; switch to fresh to retry acquisition.
+			s.isReplay = false
+			return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
+		}
+
+		// Acquisition was successful.
 		s.scopeSet = true
 		s.scopeObjType = objectType
 		s.scopeInstKey = instanceKey
 		s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
+		s.heldScopes = append(s.heldScopes, "vo:"+objectType+":"+instanceKey)
+		return 0
 	}
 
-	return 0
+	// Past recorded history -- switch to fresh execution.
+	s.isReplay = false
+	return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
+}
+
+func (s *execSession) releaseHeldScopes(ctx context.Context) {
+	if s.engine.concurrencyKeyStore == nil {
+		return
+	}
+	for _, scopeKey := range s.heldScopes {
+		_ = s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey)
+	}
+	s.heldScopes = nil
 }
 
 func (s *execSession) GetScope(ctx context.Context, m api.Module, objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen uint32) int64 {
@@ -2076,6 +2225,49 @@ func (s *execSession) replayReleaseLock(ctx context.Context, m api.Module, key s
 	}
 	s.isReplay = false
 	return s.freshReleaseLock(ctx, m, key)
+}
+
+// ---- SideEffect ----
+
+func (s *execSession) SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
+	if s.isReplay {
+		return s.replaySideEffect(ctx, m, respPtr, respMaxLen)
+	}
+	return s.freshSideEffect(ctx, m, computedResult, respPtr, respMaxLen)
+}
+
+func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	rec := EventRecord{
+		Step:             s.stepCount,
+		EventType:        EventTypeSideEffect,
+		SideEffectResult: computedResult,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	written := writeWasmString(mem, respPtr, computedResult, respMaxLen)
+	return packSimpleResult(0, written)
+}
+
+func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, respPtr, respMaxLen uint32) int64 {
+	mem := m.Memory()
+
+	if s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		s.stepCount++
+
+		if rec.EventType != EventTypeSideEffect {
+			return packSimpleResult(1, 0)
+		}
+
+		written := writeWasmString(mem, respPtr, rec.SideEffectResult, respMaxLen)
+		return packSimpleResult(0, written)
+	}
+
+	s.isReplay = false
+	return s.freshSideEffect(ctx, m, "", respPtr, respMaxLen)
 }
 
 // ---- Result packing helpers ----

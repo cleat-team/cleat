@@ -421,6 +421,21 @@ var adapterDefs = map[string]adapterDef{
 				"return nil",
 			},
 		},
+		"SideEffect": {
+			FieldName:  "SideEffect",
+			ReturnType: "(string, error)",
+			Params: []adapterParam{
+				{"fn", "func() (string, error)"},
+			},
+			ResultStmts: []string{
+				"cachedResultLen := uint32(uint64(result) >> 32)",
+				"errCode := uint32(result)",
+				"if errCode != 0 {",
+				`    return "", fmt.Errorf("cleat_side_effect: error code %d", errCode)`,
+				"}",
+				"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), nil",
+			},
+		},
 		"PluginCallStreaming": {
 			FieldName:  "PluginCallStreaming",
 			ReturnType: "(<-chan cleat.StreamEvent, error)",
@@ -616,6 +631,8 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 			closureParams = append(closureParams, p.Name+" time.Duration")
 		case "func(string)":
 			closureParams = append(closureParams, p.Name+" func(string)")
+		case "func() (string, error)":
+			closureParams = append(closureParams, p.Name+" func() (string, error)")
 		}
 	}
 	buf.WriteString(strings.Join(closureParams, ", "))
@@ -643,6 +660,10 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 			fmt.Fprintf(buf, "\t\t\t%sJSON, err := json.Marshal(%s)\n", p.Name, p.Name)
 			fmt.Fprintf(buf, "\t\t\tif err != nil { panic(\"json.Marshal for %s: \" + err.Error()) }\n", p.Name)
 			fmt.Fprintf(buf, "\t\t\t%sPtr, %sLen := stringPtr(string(%sJSON))\n", p.Name, p.Name, p.Name)
+		case "func() (string, error)":
+			fmt.Fprintf(buf, "\t\t\t_computedResult, _sideEffectErr := %s()\n", p.Name)
+			fmt.Fprintf(buf, "\t\t\tif _sideEffectErr != nil { return \"\", _sideEffectErr }\n")
+			fmt.Fprintf(buf, "\t\t\tresultPtr, resultLen := stringPtr(_computedResult)\n")
 		}
 	}
 

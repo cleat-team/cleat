@@ -634,6 +634,11 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithChildWorkflowStore(w.store),
 		host.WithPluginRegistry(w.pluginRegistry),
 	}
+	// If the store supports concurrency keys (PostgresStore, ShardedStore),
+	// enable virtual object scope enforcement.
+	if cks, ok := w.store.(host.ConcurrencyKeyStore); ok {
+		engineOpts = append(engineOpts, host.WithConcurrencyKeyStore(cks))
+	}
 	// Use tenant-scoped database connection for plugin host functions.
 	if w.tenantPools != nil && wf.TenantID != "" {
 		tenantID, err := uuid.Parse(wf.TenantID)

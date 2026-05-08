@@ -328,6 +328,8 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 			SignalWorkflow:               e.signalWorkflowImpl,
 			AcquireLock:                   e.acquireLockImpl,
 			ReleaseLock:                   e.releaseLockImpl,
+			AwaitCondition:               e.awaitConditionImpl,
+			SideEffect:                    e.sideEffectImpl,
 	})
 	return e
 }
@@ -1015,6 +1017,23 @@ func (e *TestEnv) releaseLockImpl(key string) error {
 	defer e.mu.Unlock()
 	delete(e.ConcurrencyKeys, key)
 	return nil
+}
+
+func (e *TestEnv) awaitConditionImpl(predicate func() bool, pollInterval, timeout time.Duration) (bool, error) {
+	deadline := e.Now().Add(timeout)
+	for {
+		if predicate() {
+			return true, nil
+		}
+		if e.Now().After(deadline) {
+			return false, nil
+		}
+		e.durableSleepImpl(pollInterval.Milliseconds())
+	}
+}
+	func (e *TestEnv) sideEffectImpl(computedResult string) (string, error) {
+	// In tests, there's no replay, so computedResult IS authoritative.
+	return computedResult, nil
 }
 
 func (e *TestEnv) AcquireConcurrencyKey(key, workflowID string) (bool, error) {

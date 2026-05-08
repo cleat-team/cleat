@@ -211,6 +211,8 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		PluginCall:                   r.pluginCallImpl,
 		AcquireLock:                   r.acquireLockImpl,
 		ReleaseLock:                   r.releaseLockImpl,
+		AwaitCondition:               r.awaitConditionImpl,
+		SideEffect:                    r.sideEffect,
 	})
 	return r
 }
@@ -733,7 +735,25 @@ func (r *LocalRunner) releaseLockImpl(key string) error {
 	return nil
 }
 
-func (r *LocalRunner) ReleaseConcurrencyKeys(workflowID string) {
+func (r *LocalRunner) awaitConditionImpl(predicate func() bool, pollInterval, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		if predicate() {
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+func (r *LocalRunner) sideEffect(computedResult string) (string, error) {
+	// In local dev, there's no replay, so computedResult IS authoritative.
+	return computedResult, nil
+}
+
+	func (r *LocalRunner) ReleaseConcurrencyKeys(workflowID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for k, v := range r.concurrencyKeys {

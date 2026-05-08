@@ -204,6 +204,13 @@ var importDefs = map[string]importDef{
 			{"ttl_ms", kindInt64},
 		},
 	},
+	"cleat_side_effect": {
+		ImportName: "cleat_side_effect",
+		Params: []paramSpec{
+			{"result", kindInString},
+			{"cachedResult", kindOutString},
+		},
+	},
 	"cleat_release_lock": {
 		ImportName: "cleat_release_lock",
 		Params: []paramSpec{

@@ -61,6 +61,10 @@ type HostHandler interface {
 	// Lock/concurrency key operations.
 	AcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64
 	ReleaseLock(ctx context.Context, m api.Module, key string) int64
+
+	// SideEffect records non-deterministic computation result in event
+	// history on first execution and returns cached result on replay.
+	SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64
 }
 
 // registerHostFunctions registers all cleat_* imports on the "env" host module.
@@ -352,6 +356,15 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		key := readWasmString(mem, keyPtr, keyLen)
 		return uint64(h.ReleaseLock(ctx, m, key))
 	}).Export("cleat_release_lock")
+
+	// cleat_side_effect: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		resultPtr, resultLen, outPtr, outMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		result := readWasmString(mem, resultPtr, resultLen)
+		return uint64(h.SideEffect(ctx, m, result, outPtr, outMaxLen))
+	}).Export("cleat_side_effect")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

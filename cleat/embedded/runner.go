@@ -286,6 +286,8 @@ func (e *execution) hostCalls() cleat.HostCalls {
 		SignalWorkflow:         e.signalWorkflow,
 		AcquireLock:             e.acquireLock,
 		ReleaseLock:            e.releaseLock,
+		AwaitCondition:         e.awaitCondition,
+		SideEffect:              e.sideEffect,
 		})
 }
 
@@ -310,15 +312,34 @@ func (e *execution) releaseLock(key string) error {
 	return nil
 }
 
-func (e *execution) workflowID() string {
-	return e.wfID
+func (e *execution) awaitCondition(predicate func() bool, pollInterval, timeout time.Duration) (bool, error) {
+	deadline := e.runner.now.Add(timeout)
+	for {
+		if predicate() {
+			return true, nil
+		}
+		if e.runner.now.After(deadline) {
+			return false, nil
+		}
+		e.runner.mu.Lock()
+		e.runner.now = e.runner.now.Add(pollInterval)
+		e.runner.mu.Unlock()
+	}
 }
+	func (e *execution) sideEffect(computedResult string) (string, error) {
+		// In embedded mode, there's no replay, so computedResult IS authoritative.
+		return computedResult, nil
+	}
 
-func (e *execution) runID() string {
-	return e.wfRunID
-}
+	func (e *execution) workflowID() string {
+		return e.wfID
+	}
 
-func (e *execution) now() int64 {
+	func (e *execution) runID() string {
+		return e.wfRunID
+	}
+
+	func (e *execution) now() int64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.runner.now.UnixMilli()

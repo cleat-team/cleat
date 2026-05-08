@@ -316,6 +316,20 @@ type HostCalls interface {
 
 	// AcquireLockMs is like AcquireLock but takes TTL in milliseconds.
 	AcquireLockMs(key string, ttlMs int64) (acquired bool, err error)
+
+	// AwaitCondition blocks until the predicate returns true or the timeout expires.
+	// Polls the predicate at pollInterval, using AwaitSignals as the blocking primitive
+	// so the workflow is responsive to external signals between checks.
+	// Returns true if the condition was met, false if the timeout expired.
+	AwaitCondition(predicate func() bool, pollInterval, timeout time.Duration) (met bool)
+
+	// SideEffect executes a non-deterministic function, records its result
+	// in event history on first execution, and returns the cached result on
+	// replay. The fn is always called on first execution; on replay, the
+	// cached result from history is returned and fn is NOT called (the
+	// computed result from fn is ignored on replay).
+	SideEffect(fn func() (string, error)) (string, error)
+
 }
 
 // ---- Streaming types ----
@@ -724,6 +738,9 @@ type hostCallsImpl struct {
 
 	acquireLock    func(key string, ttlMs int64) (bool, error)
 	releaseLock    func(key string) error
+	awaitCondition func(predicate func() bool, pollInterval, timeout time.Duration) (bool, error)
+
+	sideEffect func(computedResult string) (string, error)
 
 	// State map for typed K/V operations.
 	stateMap       map[string]interface{}
@@ -793,6 +810,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		listCrons:                 opts.ListCrons,
 		acquireLock:               opts.AcquireLock,
 		releaseLock:               opts.ReleaseLock,
+		awaitCondition:            opts.AwaitCondition,
+		sideEffect:                opts.SideEffect,
 	}
 }
 
@@ -875,6 +894,14 @@ type HostCallsOptions struct {
 
 	AcquireLock func(key string, ttlMs int64) (acquired bool, err error)
 	ReleaseLock func(key string) error
+
+	// AwaitCondition blocks until the predicate returns true or the timeout expires.
+	AwaitCondition func(predicate func() bool, pollInterval, timeout time.Duration) (bool, error)
+
+	// SideEffect records the result of a non-deterministic function in event
+	// history. On first execution, computedResult comes from calling fn; on
+	// replay the host returns the cached result.
+	SideEffect func(computedResult string) (string, error)
 }
 
 // ---- Interface method implementations ----
@@ -941,6 +968,31 @@ func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 		return h.durableCallWithOptions(opts, service, operation, requestJSON)
 	}
 
+	// Per-call timeout enforcement.
+	// When opts.Timeout > 0, the call is wrapped in a goroutine and must
+	// complete within the deadline or a CallTimeoutError is returned.
+	if opts.Timeout > 0 {
+		type callResult struct {
+			resp string
+			err  error
+		}
+		ch := make(chan callResult, 1)
+		go func() {
+			resp, err := h.DurableCall(service, operation, requestJSON)
+			ch <- callResult{resp, err}
+		}()
+		select {
+		case r := <-ch:
+			return r.resp, r.err
+		case <-time.After(opts.Timeout):
+			return "", &CallTimeoutError{
+				Service:   service,
+				Operation: operation,
+				Timeout:   opts.Timeout,
+			}
+		}
+	}
+
 	if opts.Retry == nil {
 		return h.DurableCall(service, operation, requestJSON)
 	}
@@ -992,6 +1044,42 @@ func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 func (h *hostCallsImpl) DurableCallTypedWithOptions(opts CallOptions, service, operation string, request, result interface{}) error {
 	if h.durableCallTypedWithOptions != nil {
 		return h.durableCallTypedWithOptions(opts, service, operation, request, result)
+	}
+
+	// Per-call timeout enforcement for the typed variant.
+	if opts.Timeout > 0 {
+		type callResult struct {
+			resp string
+			err  error
+		}
+		ch := make(chan callResult, 1)
+		go func() {
+			reqBytes, marshalErr := json.Marshal(request)
+			if marshalErr != nil {
+				ch <- callResult{"", marshalErr}
+				return
+			}
+			resp, callErr := h.DurableCallWithOptions(opts, service, operation, string(reqBytes))
+			ch <- callResult{resp, callErr}
+		}()
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				return r.err
+			}
+			if result != nil {
+				if err := json.Unmarshal([]byte(r.resp), result); err != nil {
+					return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
+				}
+			}
+			return nil
+		case <-time.After(opts.Timeout):
+			return &CallTimeoutError{
+				Service:   service,
+				Operation: operation,
+				Timeout:   opts.Timeout,
+			}
+		}
 	}
 
 	reqBytes, err := json.Marshal(request)
@@ -1160,6 +1248,37 @@ func (h *hostCallsImpl) ListCrons() (string, error) {
 		return "", errors.New("durable: ListCrons not initialized")
 	}
 	return h.listCrons()
+}
+
+func (h *hostCallsImpl) AwaitCondition(predicate func() bool, pollInterval, timeout time.Duration) (met bool) {
+	if h.awaitCondition != nil {
+		met, err := h.awaitCondition(predicate, pollInterval, timeout)
+		if err != nil {
+			return false
+		}
+		return met
+	}
+	deadline := h.Now().Add(timeout)
+	for {
+		if predicate() {
+			return true
+		}
+		if h.Now().After(deadline) {
+			return false
+		}
+		h.AwaitSignals([]string{"__condition_poll"}, pollInterval)
+	}
+}
+
+func (h *hostCallsImpl) SideEffect(fn func() (string, error)) (string, error) {
+	if h.sideEffect == nil {
+		return "", errors.New("durable: SideEffect not initialized")
+	}
+	computedResult, err := fn()
+	if err != nil {
+		return "", err
+	}
+	return h.sideEffect(computedResult)
 }
 
 func (h *hostCallsImpl) AcquireLock(key string, ttl time.Duration) (bool, error) {
@@ -2042,6 +2161,40 @@ func PollUntil[T any](h HostCalls, interval, timeout time.Duration,
 		}
 		h.DurableSleep(interval)
 	}
+}
+
+// AwaitCondition blocks until the predicate returns true or the timeout expires.
+// It uses AwaitSignals as the blocking primitive, so the workflow is responsive
+// to external signals between predicate checks.
+func AwaitCondition(h HostCalls, predicate func() bool, pollInterval, timeout time.Duration) bool {
+	return h.AwaitCondition(predicate, pollInterval, timeout)
+}
+
+// SideEffectTyped is like SideEffect but with typed input/output.
+// fn returns a typed value T, which is JSON-marshaled for storage
+// in the event history and JSON-unmarshaled on return.
+func SideEffectTyped[T any](h HostCalls, fn func() (T, error)) (T, error) {
+	var zero T
+	wrappedFn := func() (string, error) {
+		val, err := fn()
+		if err != nil {
+			return "", err
+		}
+		data, err := json.Marshal(val)
+		if err != nil {
+			return "", fmt.Errorf("durable: SideEffectTyped marshal: %w", err)
+		}
+		return string(data), nil
+	}
+	resultJSON, err := h.SideEffect(wrappedFn)
+	if err != nil {
+		return zero, err
+	}
+	var val T
+	if err := json.Unmarshal([]byte(resultJSON), &val); err != nil {
+		return zero, fmt.Errorf("durable: SideEffectTyped unmarshal: %w", err)
+	}
+	return val, nil
 }
 
 // ---- Helpers ----
