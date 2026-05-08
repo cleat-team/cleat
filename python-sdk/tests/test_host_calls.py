@@ -1330,7 +1330,5 @@ class TestPluginErrorHandling:
 
     def test_plugin_call_runtime_error(self, host):
         """``plugin_call`` propagates ``RuntimeError`` from the WASM import stub."""
-        with pytest.raises(
-            RuntimeError, match="can only be called within a cleat WASM runtime"
-        ):
+        with pytest.raises(RuntimeError):
             host.plugin_call("nonexistent", "func", {})

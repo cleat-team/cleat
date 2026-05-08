@@ -259,7 +259,7 @@ def test_hello_workflow_exists():
 
 def test_agent_template_exists():
     """Verify the agent template has all required files."""
-    template_dir = _sdk_root().parent / "cmd" / "durable" / "templates" / "agent-python"
+    template_dir = _sdk_root().parent / "cmd" / "cleat" / "templates" / "agent-python"
 
     assert template_dir.exists(), f"Agent template directory not found: {template_dir}"
     required_files = ["agent.py", "requirements.txt", "cleat.toml", "README.md", ".gitignore"]

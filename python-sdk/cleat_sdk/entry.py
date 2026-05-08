@@ -169,6 +169,29 @@ def _from_dict(
 # Decorator
 # ---------------------------------------------------------------------------
 
+def _inject_witworld(func: Callable, export_wrapper: Callable) -> None:
+    """Inject a ``WitWorld`` class into *func*'s module.
+
+    ``componentize-py`` requires the entry module to export a class named
+    ``WitWorld`` whose ``run`` method matches the world's entry-point
+    signature.  We create a lightweight class that delegates to the
+    ``@cleat_entry`` wrapper.
+    """
+    import sys
+    module_name = getattr(func, "__module__", None)
+    if module_name is None:
+        return
+    module = sys.modules.get(module_name)
+    if module is None:
+        return
+
+    # Build a WitWorld class whose run method is the export wrapper.
+    # componentize-py only cares that the class exists and has a callable
+    # ``run`` with the right signature.
+    wrapped = staticmethod(export_wrapper)
+    module.WitWorld = type("WitWorld", (), {"run": wrapped})
+
+
 def cleat_entry(name: Optional[str] = None) -> Callable:
     """Mark a function as a Cleat workflow entry point.
 
@@ -325,6 +348,10 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
 
         # Mark the wrapper for introspection tooling.
         export_wrapper._is_cleat_entry = True  # type: ignore[attr-defined]
+
+        # Inject WitWorld into the decorated function's module so
+        # componentize-py can discover the entry point at build time.
+        _inject_witworld(func, export_wrapper)
 
         return export_wrapper
 
