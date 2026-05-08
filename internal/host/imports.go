@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -464,3 +465,12 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 
 // nowMs is the global time provider, atomically settable for tests.
 var nowMs atomic.Int64
+
+func init() {
+	nowMs.Store(time.Now().UnixMilli())
+}
+
+// SetNowMsForReplay sets the global time provider for deterministic replay.
+func SetNowMsForReplay(ms int64) {
+	nowMs.Store(ms)
+}

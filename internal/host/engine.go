@@ -44,6 +44,7 @@ const (
 	EventTypeStateMutation    EventType = "state_mutation"
 	EventTypeRunDetached      EventType = "run_detached"
 	EventTypePluginCallStreamChunk EventType = "plugin_call_stream_chunk"
+	EventTypeDurableLog       EventType = "durable_log"
 	EventTypeAcquireLock      EventType = "acquire_lock"
 	EventTypeReleaseLock      EventType = "release_lock"
 	EventTypeSideEffect            EventType = "side_effect"
@@ -129,6 +130,11 @@ type EventRecord struct {
 	
 	// Scope / virtual object fields.
 	ScopeKey     string `json:"scope_key,omitempty"`
+
+	// Durable log fields.
+	Message  string `json:"message,omitempty"`
+	LogLevel string `json:"log_level,omitempty"`
+	LogKV    string `json:"log_kv,omitempty"`
 }
 // CallRecord is kept for backward compatibility in tests.
 type CallRecord = EventRecord
@@ -724,7 +730,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	if s.engine.signalStore != nil {
 		cancelled, _, err := s.engine.signalStore.PollCancellation(ctx, "")
 		if err == nil && cancelled {
-			written := writeWasmString(mem, responsePtr, "workflow cancelled", responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, "workflow cancelled", responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 	}
@@ -749,11 +755,11 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	s.stepCount++
 
 	if err != nil {
-		written := writeWasmString(mem, responsePtr, err.Error(), responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, err.Error(), responseMaxLen)
 		return packDurableCallResult(int(written), 1, 1)
 	}
 
-	written := writeWasmString(mem, responsePtr, resp, responseMaxLen)
+	written, _ := writeWasmString(mem, responsePtr, resp, responseMaxLen)
 	return packDurableCallResult(int(written), 0, 0)
 }
 
@@ -766,23 +772,23 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 
 		if rec.EventType != EventTypeCall {
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
-			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, service, operation, rec.Service, rec.Op)
-			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Err != "" {
-			written := writeWasmString(mem, responsePtr, rec.Err, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, rec.Err, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
-		written := writeWasmString(mem, responsePtr, rec.Response, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, rec.Response, responseMaxLen)
 		return packDurableCallResult(int(written), 0, 0)
 	}
 
@@ -811,14 +817,14 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 
 		if rec.EventType != EventTypePluginCall {
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
-			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.PluginName != pluginName || rec.PluginFunc != functionName {
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc)
-			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
@@ -840,11 +846,11 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 		}
 
 		if rec.PluginError != "" {
-			written := writeWasmString(mem, responsePtr, rec.PluginError, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, rec.PluginError, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
-		written := writeWasmString(mem, responsePtr, rec.PluginOutput, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, rec.PluginOutput, responseMaxLen)
 		return packDurableCallResult(int(written), 0, 0)
 	}
 
@@ -876,13 +882,13 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 	// Look up the plugin function.
 	if s.engine.pluginRegistry == nil {
 		errMsg := fmt.Sprintf("plugin function %s/%s not available: no plugin registry configured. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
-		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 1, 1)
 	}
 	fn, idempotent, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
 	if !ok {
 		errMsg := fmt.Sprintf("plugin function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
-		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 1, 1)
 	}
 
@@ -890,7 +896,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 	if s.engine.pluginCallGuard != nil && s.callerPluginName != "" {
 		if err := s.engine.pluginCallGuard.Check(s.callerPluginName, pluginName); err != nil {
 			errMsg := err.Error()
-			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 	}
@@ -938,11 +944,11 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 	}
 
 	if err != nil {
-		written := writeWasmString(mem, responsePtr, errStr, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, errStr, responseMaxLen)
 		return packDurableCallResult(int(written), 1, 1)
 	}
 
-	written := writeWasmString(mem, responsePtr, outputJSON, responseMaxLen)
+	written, _ := writeWasmString(mem, responsePtr, outputJSON, responseMaxLen)
 	return packDurableCallResult(int(written), 0, 0)
 }
 
@@ -963,14 +969,14 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	// Look up the streaming plugin function.
 	if s.engine.pluginStreamRegistry == nil {
 		errMsg := "plugin_call_streaming: no plugin stream registry configured"
-		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 0, 1)
 	}
 
 	fn, ok := s.engine.pluginStreamRegistry.Lookup(pluginName, functionName)
 	if !ok {
 		errMsg := fmt.Sprintf("plugin stream function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
-		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 0, 1)
 	}
 
@@ -978,7 +984,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	if s.engine.pluginCallGuard != nil && s.callerPluginName != "" {
 		if err := s.engine.pluginCallGuard.Check(s.callerPluginName, pluginName); err != nil {
 			errMsg := err.Error()
-			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 0, 1)
 		}
 	}
@@ -1004,7 +1010,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	chunkCh, err := fn(callCtx, inputJSON)
 	if err != nil {
 		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: %v", pluginName, functionName, err)
-		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 0, 1)
 	}
 
@@ -1033,11 +1039,11 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	outJSON, err := json.Marshal(collected)
 	if err != nil {
 		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: marshal chunks: %v", pluginName, functionName, err)
-		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 0, 1)
 	}
 
-	written := writeWasmString(mem, responsePtr, string(outJSON), responseMaxLen)
+	written, _ := writeWasmString(mem, responsePtr, string(outJSON), responseMaxLen)
 	return packDurableCallResult(int(written), 0, 0)
 }
 
@@ -1075,11 +1081,11 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 	outJSON, err := json.Marshal(collected)
 	if err != nil {
 		errMsg := fmt.Sprintf("plugin_call_streaming %s/%s: marshal chunks: %v", pluginName, functionName, err)
-		written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), 0, 1)
 	}
 
-	written := writeWasmString(mem, responsePtr, string(outJSON), responseMaxLen)
+	written, _ := writeWasmString(mem, responsePtr, string(outJSON), responseMaxLen)
 	return packDurableCallResult(int(written), 0, 0)
 }
 
@@ -1151,10 +1157,10 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 			s.stepCount++
 
 			if res.err != nil {
-				written := writeWasmString(mem, responsePtr, res.err.Error(), responseMaxLen)
+				written, _ := writeWasmString(mem, responsePtr, res.err.Error(), responseMaxLen)
 				return packDurableCallResult(int(written), 1, 1)
 			}
-			written := writeWasmString(mem, responsePtr, res.resp, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, res.resp, responseMaxLen)
 			return packDurableCallResult(int(written), 0, 0)
 		}
 	}
@@ -1180,23 +1186,23 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 
 		if rec.EventType != EventTypeCall {
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
-			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, service, operation, rec.Service, rec.Op)
-			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Err != "" {
-			written := writeWasmString(mem, responsePtr, rec.Err, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, rec.Err, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
-		written := writeWasmString(mem, responsePtr, rec.Response, responseMaxLen)
+		written, _ := writeWasmString(mem, responsePtr, rec.Response, responseMaxLen)
 		return packDurableCallResult(int(written), 0, 0)
 	}
 
@@ -1248,8 +1254,8 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeSignalReceived {
 				s.stepCount++
-				written := writeWasmString(mem, sigNamePtr, rec.SignalName, sigNameMaxLen)
-				_ = writeWasmString(mem, payloadPtr, rec.SignalPayload, payloadMaxLen)
+				written, _ := writeWasmString(mem, sigNamePtr, rec.SignalName, sigNameMaxLen)
+				writeWasmStringOrTrap(mem, payloadPtr, rec.SignalPayload, payloadMaxLen)
 				return packAwaitSignalsResult(uint32(written), uint32(len(rec.SignalPayload)), false, 0)
 			}
 			if rec.EventType == EventTypeAwaitSignals {
@@ -1259,8 +1265,8 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 					nextRec := s.history[s.stepCount]
 					if nextRec.EventType == EventTypeSignalReceived {
 						s.stepCount++
-						written := writeWasmString(mem, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
-						_ = writeWasmString(mem, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
+						written, _ := writeWasmString(mem, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
+						writeWasmStringOrTrap(mem, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
 						return packAwaitSignalsResult(uint32(written), uint32(len(nextRec.SignalPayload)), false, 0)
 			}
 				}
@@ -1288,8 +1294,8 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				s.history = append(s.history, rec)
 				s.stepCount++
 
-				written := writeWasmString(mem, sigNamePtr, name, sigNameMaxLen)
-				_ = writeWasmString(mem, payloadPtr, payload, payloadMaxLen)
+				written, _ := writeWasmString(mem, sigNamePtr, name, sigNameMaxLen)
+				writeWasmStringOrTrap(mem, payloadPtr, payload, payloadMaxLen)
 				return packAwaitSignalsResult(uint32(written), uint32(len(payload)), false, 0)
 			}
 		}
@@ -1320,7 +1326,7 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 			if rec.EventType == EventTypeDefer {
 				s.stepCount++
 				mem := m.Memory()
-				written := writeWasmString(mem, deferIDPtr, rec.DeferID, deferIDMaxLen)
+				written, _ := writeWasmString(mem, deferIDPtr, rec.DeferID, deferIDMaxLen)
 				return int64(uint64(written)<<32 | 0)
 			}
 		}
@@ -1341,11 +1347,47 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 	s.deferrals[deferID] = description
 
 	mem := m.Memory()
-	written := writeWasmString(mem, deferIDPtr, deferID, deferIDMaxLen)
+	written, _ := writeWasmString(mem, deferIDPtr, deferID, deferIDMaxLen)
 	return int64(uint64(written)<<32 | 0)
 }
 
 func (s *execSession) DurableLog(ctx context.Context, m api.Module, message string) int64 {
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeDurableLog,
+		Message:   message,
+	}
+
+	// Parse structured log fields from JSON if present.
+	if len(message) > 0 && message[0] == '{' {
+		var logEntry struct {
+			Level   string            `json:"level"`
+			Message string            `json:"message"`
+			KV      map[string]string `json:"kv"`
+		}
+		if err := json.Unmarshal([]byte(message), &logEntry); err == nil {
+			rec.LogLevel = logEntry.Level
+			rec.Message = logEntry.Message
+			if kvJSON, err := json.Marshal(logEntry.KV); err == nil {
+				rec.LogKV = string(kvJSON)
+			}
+		}
+	}
+
+	if s.isReplay {
+		// Consume matching event from history.
+		if len(s.history) > 0 {
+			next := s.history[0]
+			if next.EventType == EventTypeDurableLog {
+				s.history = s.history[1:]
+				return 0
+			}
+		}
+		return 0
+	}
+
+	// Fresh execution: append to history batch.
+	s.history = append(s.history, rec)
 	return 0
 }
 
@@ -1358,7 +1400,7 @@ func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reason
 		cancelled, reason, err := s.engine.signalStore.PollCancellation(ctx, "")
 		if err == nil && cancelled {
 			mem := m.Memory()
-			_ = writeWasmString(mem, reasonPtr, reason, reasonMaxLen)
+			writeWasmStringOrTrap(mem, reasonPtr, reason, reasonMaxLen)
 			return int64(uint64(len(reason))<<32 | 1) // cancelled=true
 		}
 	}
@@ -1370,7 +1412,7 @@ func (s *execSession) PollSignal(ctx context.Context, m api.Module, signalName s
 		payload, found, err := s.engine.signalStore.PollSignal(ctx, "", signalName)
 		if err == nil && found {
 			mem := m.Memory()
-			written := writeWasmString(mem, payloadPtr, payload, payloadMaxLen)
+			written, _ := writeWasmString(mem, payloadPtr, payload, payloadMaxLen)
 			flags := uint32(0x0100) // found=true
 			return int64(uint64(written)<<32 | uint64(flags))
 		}
@@ -1468,7 +1510,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			if rec.EventType == EventTypeChildWorkflow {
 				s.stepCount++
 				mem := m.Memory()
-				written := writeWasmString(mem, runIDPtr, rec.RunID, runIDMaxLen)
+				written, _ := writeWasmString(mem, runIDPtr, rec.RunID, runIDMaxLen)
 				return int64(uint64(written)<<32 | 0)
 			}
 		}
@@ -1513,7 +1555,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	s.stepCount++
 
 	mem := m.Memory()
-	written := writeWasmString(mem, runIDPtr, runID, runIDMaxLen)
+	written, _ := writeWasmString(mem, runIDPtr, runID, runIDMaxLen)
 	return int64(uint64(written)<<32 | 0)
 }
 
@@ -1528,10 +1570,10 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 					// Cached result available — return it.
 					s.stepCount++
 					if rec.Err != "" {
-						written := writeWasmString(mem, resultPtr, rec.Err, resultMaxLen)
+						written, _ := writeWasmString(mem, resultPtr, rec.Err, resultMaxLen)
 						return packAwaitChildResult(uint32(written), 1)
 			}
-					written := writeWasmString(mem, resultPtr, rec.Response, resultMaxLen)
+					written, _ := writeWasmString(mem, resultPtr, rec.Response, resultMaxLen)
 					return packAwaitChildResult(uint32(written), 0)
 				}
 				// No cached result yet — fall through to fresh to re-check.
@@ -1556,7 +1598,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 			s.history = append(s.history, rec)
 			s.stepCount++
 
-			written := writeWasmString(mem, resultPtr, result, resultMaxLen)
+			written, _ := writeWasmString(mem, resultPtr, result, resultMaxLen)
 			return packAwaitChildResult(uint32(written), 0)
 		}
 		if err != nil {
@@ -1569,7 +1611,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 			s.history = append(s.history, rec)
 			s.stepCount++
 
-			written := writeWasmString(mem, resultPtr, err.Error(), resultMaxLen)
+			written, _ := writeWasmString(mem, resultPtr, err.Error(), resultMaxLen)
 			return packAwaitChildResult(uint32(written), 1)
 		}
 	}
@@ -1602,7 +1644,7 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 
 	var runIDs []string
 	if err := json.Unmarshal([]byte(runIDsJSON), &runIDs); err != nil {
-		written := writeWasmString(mem, resultsPtr, fmt.Sprintf(`[{"error":"invalid runIDs: %v"}]`, err), resultsMaxLen)
+		written, _ := writeWasmString(mem, resultsPtr, fmt.Sprintf(`[{"error":"invalid runIDs: %v"}]`, err), resultsMaxLen)
 		return packAwaitChildResult(uint32(written), 1)
 	}
 
@@ -1647,7 +1689,7 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 	s.history = append(s.history, rec)
 	s.stepCount++
 
-	written := writeWasmString(mem, resultsPtr, string(outcomesJSON), resultsMaxLen)
+	written, _ := writeWasmString(mem, resultsPtr, string(outcomesJSON), resultsMaxLen)
 	return packAwaitChildResult(uint32(written), 0)
 }
 
@@ -1660,11 +1702,11 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 
 		if rec.EventType != EventTypeAwaitAllChildren {
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
-			written := writeWasmString(mem, resultsPtr, errMsg, resultsMaxLen)
+			written, _ := writeWasmString(mem, resultsPtr, errMsg, resultsMaxLen)
 			return packAwaitChildResult(uint32(written), 1)
 		}
 
-		written := writeWasmString(mem, resultsPtr, rec.Response, resultsMaxLen)
+		written, _ := writeWasmString(mem, resultsPtr, rec.Response, resultsMaxLen)
 		return packAwaitChildResult(uint32(written), 0)
 	}
 
@@ -1718,7 +1760,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			s.history = append(s.history, rec)
 			s.stepCount++
 
-			written := writeWasmString(mem, responsePtr, resp, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, resp, responseMaxLen)
 			return packDurableCallResult(int(written), 0, 0)
 		}
 
@@ -1754,7 +1796,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	s.history = append(s.history, rec)
 	s.stepCount++
 
-	written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+	written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 	return packDurableCallResult(int(written), 1, 1)
 }
 
@@ -1825,7 +1867,7 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 			if rec.EventType == EventTypeCreatePromise {
 				s.stepCount++
 				mem := m.Memory()
-				written := writeWasmString(mem, promiseIDPtr, rec.PromiseID, promiseIDMaxLen)
+				written, _ := writeWasmString(mem, promiseIDPtr, rec.PromiseID, promiseIDMaxLen)
 				return packSimpleResult(0, written)
 			}
 		}
@@ -1858,7 +1900,7 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 	}
 
 	mem := m.Memory()
-	written := writeWasmString(mem, promiseIDPtr, promiseID, promiseIDMaxLen)
+	written, _ := writeWasmString(mem, promiseIDPtr, promiseID, promiseIDMaxLen)
 	return packSimpleResult(0, written)
 }
 
@@ -1870,12 +1912,12 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypePromiseResolved {
 				s.stepCount++
-				written := writeWasmString(mem, resultPtr, rec.PromiseResult, resultMaxLen)
+				written, _ := writeWasmString(mem, resultPtr, rec.PromiseResult, resultMaxLen)
 				return packAwaitPromiseResult(uint32(written), false, 0)
 			}
 			if rec.EventType == EventTypePromiseRejected {
 				s.stepCount++
-				written := writeWasmString(mem, resultPtr, rec.PromiseError, resultMaxLen)
+				written, _ := writeWasmString(mem, resultPtr, rec.PromiseError, resultMaxLen)
 				return packAwaitPromiseResult(uint32(written), false, 1)
 			}
 			if rec.EventType == EventTypeAwaitPromise {
@@ -1900,7 +1942,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			}
 			s.history = append(s.history, rec)
 			s.stepCount++
-			written := writeWasmString(mem, resultPtr, result, resultMaxLen)
+			written, _ := writeWasmString(mem, resultPtr, result, resultMaxLen)
 			return packAwaitPromiseResult(uint32(written), false, 0)
 		}
 		if err == nil && status == "rejected" {
@@ -1912,7 +1954,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			}
 			s.history = append(s.history, rec)
 			s.stepCount++
-			written := writeWasmString(mem, resultPtr, errMsg, resultMaxLen)
+			written, _ := writeWasmString(mem, resultPtr, errMsg, resultMaxLen)
 			return packAwaitPromiseResult(uint32(written), false, 1)
 		}
 	}
@@ -1941,7 +1983,7 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 			if rec.EventType == EventTypeSignalReceived {
 				s.stepCount++
 				mem := m.Memory()
-				written := writeWasmString(mem, responsePtr, rec.SignalPayload, responseMaxLen)
+				written, _ := writeWasmString(mem, responsePtr, rec.SignalPayload, responseMaxLen)
 				return packSimpleResult(0, written)
 			}
 		}
@@ -1962,7 +2004,7 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 			s.stepCount++
 
 			mem := m.Memory()
-			written := writeWasmString(mem, responsePtr, payload, responseMaxLen)
+			written, _ := writeWasmString(mem, responsePtr, payload, responseMaxLen)
 			return packSimpleResult(0, written)
 		}
 	}
@@ -2079,7 +2121,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 	prevScope := ""
 	if s.scopeSet && s.scopePrefix != "" {
 		prevScope = s.scopePrefix
-		_ = writeWasmString(mem, prevScopePtr, prevScope, prevScopeMaxLen)
+		writeWasmStringOrTrap(mem, prevScopePtr, prevScope, prevScopeMaxLen)
 	}
 
 	if objectType == "" && instanceKey == "" {
@@ -2159,7 +2201,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 	prevScope := ""
 	if s.scopeSet && s.scopePrefix != "" {
 		prevScope = s.scopePrefix
-		_ = writeWasmString(mem, prevScopePtr, prevScope, prevScopeMaxLen)
+		writeWasmStringOrTrap(mem, prevScopePtr, prevScope, prevScopeMaxLen)
 	}
 
 	if objectType == "" && instanceKey == "" {
@@ -2216,8 +2258,8 @@ func (s *execSession) GetScope(ctx context.Context, m api.Module, objTypePtr, ob
 
 	var objTypeLen, instKeyLen uint32
 	if s.scopeSet {
-		objTypeLen = writeWasmString(mem, objTypePtr, s.scopeObjType, objTypeMaxLen)
-		instKeyLen = writeWasmString(mem, instKeyPtr, s.scopeInstKey, instKeyMaxLen)
+		objTypeLen, _ = writeWasmString(mem, objTypePtr, s.scopeObjType, objTypeMaxLen)
+		instKeyLen, _ = writeWasmString(mem, instKeyPtr, s.scopeInstKey, instKeyMaxLen)
 	}
 
 	return int64(uint64(objTypeLen)<<32 | uint64(instKeyLen))
@@ -2238,7 +2280,7 @@ func (s *execSession) UUID(ctx context.Context, m api.Module, seed string, uuidP
 	uuidStr := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
 
-	written := writeWasmString(mem, uuidPtr, uuidStr, uuidMaxLen)
+	written, _ := writeWasmString(mem, uuidPtr, uuidStr, uuidMaxLen)
 	return packSimpleResult(0, written)
 }
 
@@ -2374,7 +2416,7 @@ func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, compute
 	s.history = append(s.history, rec)
 	s.stepCount++
 
-	written := writeWasmString(mem, respPtr, computedResult, respMaxLen)
+	written, _ := writeWasmString(mem, respPtr, computedResult, respMaxLen)
 	return packSimpleResult(0, written)
 }
 
@@ -2389,7 +2431,7 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, respPt
 			return packSimpleResult(1, 0)
 		}
 
-		written := writeWasmString(mem, respPtr, rec.SideEffectResult, respMaxLen)
+		written, _ := writeWasmString(mem, respPtr, rec.SideEffectResult, respMaxLen)
 		return packSimpleResult(0, written)
 	}
 
@@ -2403,7 +2445,7 @@ func (s *execSession) WorkflowID(ctx context.Context, m api.Module, idPtr, idMax
 	if id == "" {
 		id = "unknown"
 	}
-	written := writeWasmString(mem, idPtr, id, idMaxLen)
+	written, _ := writeWasmString(mem, idPtr, id, idMaxLen)
 	return packSimpleResult(0, written)
 }
 
@@ -2413,7 +2455,7 @@ func (s *execSession) RunID(ctx context.Context, m api.Module, idPtr, idMaxLen u
 	if runID == "" {
 		runID = "unknown"
 	}
-	written := writeWasmString(mem, idPtr, runID, idMaxLen)
+	written, _ := writeWasmString(mem, idPtr, runID, idMaxLen)
 	return packSimpleResult(0, written)
 }
 

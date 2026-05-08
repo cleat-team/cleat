@@ -23,6 +23,7 @@ type Runtime struct {
 	wazeroRuntime wazero.Runtime
 	stdout        bytes.Buffer
 	stderr        bytes.Buffer
+	callTimeout   time.Duration // per-call WASM execution timeout (0 = none)
 }
 
 // Stdout returns captured stdout output from the most recent module.
@@ -56,7 +57,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("host: instantiating env module: %w", err)
 	}
 
-	return &Runtime{wazeroRuntime: rt}, nil
+	return &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second}, nil
 }
 
 // Close releases all resources held by the runtime.
@@ -245,7 +246,17 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 
 	// Write input JSON into WASM memory.
 	if len(inputJSON) > 0 {
-		mem.Write(inputOffset, inputJSON)
+		if ok := mem.Write(inputOffset, inputJSON); !ok {
+			return "", false, fmt.Errorf("host: write input JSON to WASM memory at offset %d failed", inputOffset)
+		}
+	}
+
+	// Apply per-call WASM execution timeout if configured.
+	callCtx := ctx
+	var cancel context.CancelFunc
+	if r.callTimeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, r.callTimeout)
+		defer cancel()
 	}
 
 	// Call the export: func(argsPtr, argsLen, outPtr, maxOutLen uint32) int64
@@ -257,13 +268,16 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// locations. If DWARF is unavailable (stripped binary), the
 	// trace falls back to raw function indices and offsets.
 	// See formatWasmCallError for the formatting logic.
-	results, err := fn.Call(ctx,
+	results, err := fn.Call(callCtx,
 		uint64(inputOffset),
 		uint64(len(inputJSON)),
 		uint64(outputOffset),
 		uint64(outBufSize),
 	)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", false, fmt.Errorf("host: export %q timed out after %v", exportName, r.callTimeout)
+		}
 		return "", false, formatWasmCallError(err)
 	}
 

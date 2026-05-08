@@ -12,6 +12,8 @@
 package host
 
 import (
+	"fmt"
+
 	"github.com/tetratelabs/wazero/api"
 )
 
@@ -30,16 +32,24 @@ func readWasmString(mem api.Memory, ptr, length uint32) string {
 }
 
 // writeWasmString writes s into WASM linear memory at ptr, up to maxLen bytes.
-// Returns the number of bytes actually written.
-func writeWasmString(mem api.Memory, ptr uint32, s string, maxLen uint32) uint32 {
+// Returns the number of bytes actually written, or an error if the memory write fails.
+func writeWasmString(mem api.Memory, ptr uint32, s string, maxLen uint32) (uint32, error) {
 	data := []byte(s)
 	if uint32(len(data)) > maxLen {
 		data = data[:maxLen]
 	}
 	if len(data) > 0 {
-		mem.Write(ptr, data)
+		if ok := mem.Write(ptr, data); !ok {
+			return 0, fmt.Errorf("writeWasmString: failed to write %d bytes at ptr %d", len(data), ptr)
+		}
 	}
-	return uint32(len(data))
+	return uint32(len(data)), nil
+}
+
+// writeWasmStringOrTrap calls writeWasmString and returns 0 on error.
+func writeWasmStringOrTrap(mem api.Memory, ptr uint32, s string, maxLen uint32) uint32 {
+	n, _ := writeWasmString(mem, ptr, s, maxLen)
+	return n
 }
 
 // packDurableCallResult matches adapter.go DurableCall result encoding:
