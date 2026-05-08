@@ -879,14 +879,18 @@ func (c *sbConn) queryListConfigs(args []driver.NamedValue) (driver.Rows, error)
 }
 
 func (c *sbConn) queryGetConfig(args []driver.NamedValue) (driver.Rows, error) {
-	id, _ := sbArgS(args, 1)
+	id, err := sbArgS(args, 1)
+	if err != nil {
+		return &sbRows{columns: sbConfigColumns}, nil
+	}
 	row, ok := c.db.configs[id]
 	if !ok {
 		return &sbRows{columns: sbConfigColumns}, nil
 	}
+	vals := sbConfigRowToValues(row)
 	return &sbRows{
 		columns: sbConfigColumns,
-		data:    [][]driver.Value{{sbConfigRowToValues(row)}},
+		data:    [][]driver.Value{vals},
 	}, nil
 }
 
@@ -1214,18 +1218,20 @@ func TestSB_ListConfigs_WithData(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
 
+	cid1 := "00000000-0000-0000-0000-00000000000a"
+	cid2 := "00000000-0000-0000-0000-00000000000b"
 	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
 	now := time.Now()
 
 	// Seed two configs
 	fdb.mu.Lock()
-	fdb.configs["cfg-1"] = &sbConfigRow{
-		id: "cfg-1", tenantID: tid, name: "daily", cron: "0 9 * * *",
+	fdb.configs[cid1] = &sbConfigRow{
+		id: cid1, tenantID: tid, name: "daily", cron: "0 9 * * *",
 		s3Bucket: "b1", s3Prefix: "p1/", retentionDays: 30, enabled: true,
 		createdAt: now, updatedAt: now,
 	}
-	fdb.configs["cfg-2"] = &sbConfigRow{
-		id: "cfg-2", tenantID: tid, name: "weekly", cron: "0 9 * * 0",
+	fdb.configs[cid2] = &sbConfigRow{
+		id: cid2, tenantID: tid, name: "weekly", cron: "0 9 * * 0",
 		s3Bucket: "b2", s3Prefix: "p2/", retentionDays: 7, enabled: false,
 		createdAt: now.Add(-time.Hour), updatedAt: now.Add(-time.Hour),
 	}
@@ -1253,13 +1259,13 @@ func TestSB_ListConfigs_TenantIsolation(t *testing.T) {
 	now := time.Now()
 
 	fdb.mu.Lock()
-	fdb.configs["a1"] = &sbConfigRow{
-		id: "a1", tenantID: tidA, name: "tenant-a", cron: "0 9 * * *",
+	fdb.configs["00000000-0000-0000-0000-00000000000e"] = &sbConfigRow{
+		id: "00000000-0000-0000-0000-00000000000e", tenantID: tidA, name: "tenant-a", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
 		createdAt: now, updatedAt: now,
 	}
-	fdb.configs["b1"] = &sbConfigRow{
-		id: "b1", tenantID: tidB, name: "tenant-b", cron: "0 9 * * *",
+	fdb.configs["00000000-0000-0000-0000-00000000000f"] = &sbConfigRow{
+		id: "00000000-0000-0000-0000-00000000000f", tenantID: tidB, name: "tenant-b", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
 		createdAt: now, updatedAt: now,
 	}
@@ -1288,6 +1294,36 @@ func TestSB_ListConfigs_TenantIsolation(t *testing.T) {
 // GetConfig tests
 // =====================================================================
 
+func TestSB_GetConfig_Seeded(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
+	cfgID := "00000000-0000-0000-0000-0000000000aa"
+	now := time.Now()
+
+	fdb.mu.Lock()
+	fdb.configs[cfgID] = &sbConfigRow{
+		id: cfgID, tenantID: tid, name: "seeded-daily", cron: "0 9 * * *",
+		s3Bucket: "my-bucket", s3Prefix: "backups/",
+		retentionDays: 30, enabled: true,
+		createdAt: now, updatedAt: now,
+	}
+	fdb.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	req := sbRequest(t, "GET", "/backups/configs/"+cfgID, nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("get: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var c backupConfig
+	sbReadJSON(t, rec, &c)
+	if c.Name != "seeded-daily" {
+		t.Errorf("want name seeded-daily, got %q", c.Name)
+	}
+}
+
 func TestSB_GetConfig_Success(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
@@ -1296,8 +1332,8 @@ func TestSB_GetConfig_Success(t *testing.T) {
 	now := time.Now()
 
 	fdb.mu.Lock()
-	fdb.configs["cfg-1"] = &sbConfigRow{
-		id: "cfg-1", tenantID: tid, name: "daily", cron: "0 9 * * *",
+	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
+		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
 		s3Bucket: "my-bucket", s3Prefix: "backups/",
 		retentionDays: 30, enabled: true,
 		createdAt: now, updatedAt: now,
@@ -1305,7 +1341,7 @@ func TestSB_GetConfig_Success(t *testing.T) {
 	fdb.mu.Unlock()
 
 	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/configs/cfg-1", nil)
+	req := sbRequest(t, "GET", "/backups/configs/00000000-0000-0000-0000-00000000000c", nil)
 	p.mux.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("get: want 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1352,8 +1388,8 @@ func TestSB_UpdateConfig_Success(t *testing.T) {
 	now := time.Now()
 
 	fdb.mu.Lock()
-	fdb.configs["cfg-1"] = &sbConfigRow{
-		id: "cfg-1", tenantID: tid, name: "daily", cron: "0 9 * * *",
+	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
+		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
 		s3Bucket: "my-bucket", s3Prefix: "backups/",
 		retentionDays: 30, enabled: true,
 		createdAt: now, updatedAt: now,
@@ -1362,7 +1398,7 @@ func TestSB_UpdateConfig_Success(t *testing.T) {
 
 	body := `{"name":"updated-name","enabled":false}`
 	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/cfg-1", bytes.NewReader([]byte(body)))
+	req := sbRequest(t, "PUT", "/backups/configs/00000000-0000-0000-0000-00000000000c", bytes.NewReader([]byte(body)))
 	p.mux.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("update: want 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1406,8 +1442,8 @@ func TestSB_UpdateConfig_InvalidCron(t *testing.T) {
 	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
 
 	fdb.mu.Lock()
-	fdb.configs["cfg-1"] = &sbConfigRow{
-		id: "cfg-1", tenantID: tid, name: "daily", cron: "0 9 * * *",
+	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
+		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
 		createdAt: time.Now(), updatedAt: time.Now(),
 	}
@@ -1416,7 +1452,7 @@ func TestSB_UpdateConfig_InvalidCron(t *testing.T) {
 	// Changing cron to an invalid expression should return 400
 	body := `{"cron":"not-a-cron"}`
 	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/cfg-1", bytes.NewReader([]byte(body)))
+	req := sbRequest(t, "PUT", "/backups/configs/00000000-0000-0000-0000-00000000000c", bytes.NewReader([]byte(body)))
 	p.mux.ServeHTTP(rec, req)
 	if rec.Code != 400 {
 		t.Fatalf("update invalid cron: want 400, got %d: %s", rec.Code, rec.Body.String())
@@ -1435,15 +1471,15 @@ func TestSB_DeleteConfig_Success(t *testing.T) {
 	now := time.Now()
 
 	fdb.mu.Lock()
-	fdb.configs["cfg-1"] = &sbConfigRow{
-		id: "cfg-1", tenantID: tid, name: "daily", cron: "0 9 * * *",
+	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
+		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
 		createdAt: now, updatedAt: now,
 	}
 	fdb.mu.Unlock()
 
 	rec := httptest.NewRecorder()
-	req := sbRequest(t, "DELETE", "/backups/configs/cfg-1", nil)
+	req := sbRequest(t, "DELETE", "/backups/configs/00000000-0000-0000-0000-00000000000c", nil)
 	p.mux.ServeHTTP(rec, req)
 	if rec.Code != 204 {
 		t.Fatalf("delete: want 204, got %d: %s", rec.Code, rec.Body.String())
@@ -1451,7 +1487,7 @@ func TestSB_DeleteConfig_Success(t *testing.T) {
 
 	// Verify it's gone
 	fdb.mu.RLock()
-	_, exists := fdb.configs["cfg-1"]
+	_, exists := fdb.configs["00000000-0000-0000-0000-00000000000c"]
 	fdb.mu.RUnlock()
 	if exists {
 		t.Error("config should be deleted from DB")
@@ -1499,13 +1535,13 @@ func TestSB_ListHistory_WithData(t *testing.T) {
 	sz := int64(1024)
 
 	fdb.mu.Lock()
-	fdb.history["h1"] = &sbHistoryRow{
-		id: "h1", configID: "cfg-1", tenantID: tid,
+	fdb.history["00000000-0000-0000-0000-0000000000a1"] = &sbHistoryRow{
+		id: "00000000-0000-0000-0000-0000000000a1", configID: "00000000-0000-0000-0000-00000000000c", tenantID: tid,
 		filename: "test1.dump", status: "completed",
 		sizeBytes: &sz, startedAt: now, createdAt: now,
 	}
-	fdb.history["h2"] = &sbHistoryRow{
-		id: "h2", configID: "cfg-2", tenantID: tid,
+	fdb.history["00000000-0000-0000-0000-0000000000a2"] = &sbHistoryRow{
+		id: "00000000-0000-0000-0000-0000000000a2", configID: "00000000-0000-0000-0000-00000000000d", tenantID: tid,
 		filename: "test2.dump", status: "running",
 		startedAt: now, createdAt: now,
 	}
@@ -1535,20 +1571,20 @@ func TestSB_ListHistory_WithConfigFilter(t *testing.T) {
 	now := time.Now()
 
 	fdb.mu.Lock()
-	fdb.history["h1"] = &sbHistoryRow{
-		id: "h1", configID: "cfg-1", tenantID: tid,
+	fdb.history["00000000-0000-0000-0000-0000000000a1"] = &sbHistoryRow{
+		id: "00000000-0000-0000-0000-0000000000a1", configID: "00000000-0000-0000-0000-00000000000c", tenantID: tid,
 		filename: "f1.dump", status: "completed",
 		startedAt: now, createdAt: now,
 	}
-	fdb.history["h2"] = &sbHistoryRow{
-		id: "h2", configID: "cfg-2", tenantID: tid,
+	fdb.history["00000000-0000-0000-0000-0000000000a2"] = &sbHistoryRow{
+		id: "00000000-0000-0000-0000-0000000000a2", configID: "00000000-0000-0000-0000-00000000000d", tenantID: tid,
 		filename: "f2.dump", status: "running",
 		startedAt: now, createdAt: now,
 	}
 	fdb.mu.Unlock()
 
 	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/history?config_id=cfg-1", nil)
+	req := sbRequest(t, "GET", "/backups/history?config_id=00000000-0000-0000-0000-00000000000c", nil)
 	p.mux.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("list filtered history: want 200, got %d: %s", rec.Code, rec.Body.String())
@@ -1584,13 +1620,13 @@ func TestSB_ListHistory_TenantIsolation(t *testing.T) {
 	now := time.Now()
 
 	fdb.mu.Lock()
-	fdb.history["h1"] = &sbHistoryRow{
-		id: "h1", configID: "c1", tenantID: tidA,
+	fdb.history["00000000-0000-0000-0000-0000000000a1"] = &sbHistoryRow{
+		id: "00000000-0000-0000-0000-0000000000a1", configID: "00000000-0000-0000-0000-000000000010", tenantID: tidA,
 		filename: "a.dump", status: "completed",
 		startedAt: now, createdAt: now,
 	}
-	fdb.history["h2"] = &sbHistoryRow{
-		id: "h2", configID: "c2", tenantID: tidB,
+	fdb.history["00000000-0000-0000-0000-0000000000a2"] = &sbHistoryRow{
+		id: "00000000-0000-0000-0000-0000000000a2", configID: "00000000-0000-0000-0000-000000000011", tenantID: tidB,
 		filename: "b.dump", status: "completed",
 		startedAt: now, createdAt: now,
 	}
@@ -1619,15 +1655,15 @@ func TestSB_RunBackup_Success(t *testing.T) {
 
 	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
 	fdb.mu.Lock()
-	fdb.configs["cfg-1"] = &sbConfigRow{
-		id: "cfg-1", tenantID: tid, name: "daily", cron: "0 9 * * *",
+	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
+		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
 		createdAt: time.Now(), updatedAt: time.Now(),
 	}
 	fdb.mu.Unlock()
 
 	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs/cfg-1/run", nil)
+	req := sbRequest(t, "POST", "/backups/configs/00000000-0000-0000-0000-00000000000c/run", nil)
 	p.mux.ServeHTTP(rec, req)
 	if rec.Code != 202 {
 		t.Fatalf("run backup: want 202, got %d: %s", rec.Code, rec.Body.String())
