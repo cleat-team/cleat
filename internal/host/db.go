@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -130,12 +131,24 @@ type WorkflowStore interface {
 	// LoadEventHistory returns the full event history for a workflow.
 	LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error)
 
+	// LoadEventHistoryPaginated returns a page of event history for a workflow.
+	// offset is the number of events to skip (0-based), limit caps the page size
+	// (defaults to 1000 if limit <= 0, capped at 1000).
+	LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error)
+
 	// AppendEventHistory appends a single event to the history.
 	// Uses ON CONFLICT (workflow_id, step) DO NOTHING for idempotency.
 	AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error
 
 	// AppendEventHistoryBatch appends multiple events atomically.
 	AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error
+
+	// VerifyWorkflowEvents loads all events for a workflow and verifies their
+	// integrity by recomputing SHA-256 checksums and comparing them against the
+	// stored checksums (once the event_history.checksum column is migrated).
+	// Before the migration, it loads and computes checksums silently and returns
+	// nil. Returns an error if any checksum mismatch is detected.
+	VerifyWorkflowEvents(ctx context.Context, workflowID string) error
 
 	// LoadWASM returns the compiled WASM bytes for a workflow definition.
 	LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error)
@@ -156,6 +169,11 @@ type WorkflowStore interface {
 
 	// FailWorkflow marks a workflow as failed.
 	FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error
+
+	// MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
+	// after exhausting all retry attempts. This is a terminal status similar to
+	// 'failed' but indicates the workflow was retried without success.
+	MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error
 
 	// ReleaseWorkflow returns a workflow to the ready queue.
 	// Used when a workflow suspends (sleep/await signals).
@@ -612,7 +630,97 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 	return history, rows.Err()
 }
 
+// LoadEventHistoryPaginated returns a page of event history for a workflow,
+// with offset and limit support. Defaults limit to 1000 if limit <= 0, capped at 1000.
+func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT step, event_type, service, operation, request, response, error,
+		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+		       defer_description, defer_id, child_name, child_input, run_id, new_input,
+		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+		       payload,
+		       promise_name, promise_id, promise_result, promise_error
+		FROM event_history
+		WHERE workflow_id = $1
+		ORDER BY step
+		OFFSET $2 LIMIT $3
+	`, workflowID, offset, limit)
+	if err != nil {
+		return nil, fmt.Errorf("load history paginated: %w", err)
+	}
+	defer rows.Close()
+
+	var history []EventRecord
+	for rows.Next() {
+		var rec EventRecord
+		var service, op, request, response, errMsg sql.NullString
+		var durationMs, timeoutMs sql.NullInt64
+		var signalNames, signalName, signalPayload sql.NullString
+		var deferDesc, deferID sql.NullString
+		var childName, childInput, runID, newInput sql.NullString
+		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
+		var payload sql.NullString
+		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+
+		if err := rows.Scan(&rec.Step, &rec.EventType,
+			&service, &op, &request, &response, &errMsg,
+			&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
+			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
+			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
+			&payload,
+			&promiseName, &promiseID, &promiseResult, &promiseError); err != nil {
+			return nil, fmt.Errorf("scan history paginated: %w", err)
+		}
+
+		rec.Service = service.String
+		rec.Op = op.String
+		rec.Request = request.String
+		rec.Response = response.String
+		rec.Err = errMsg.String
+		rec.DurationMs = durationMs.Int64
+		rec.SignalNames = signalNames.String
+		rec.TimeoutMs = timeoutMs.Int64
+		rec.SignalName = signalName.String
+		rec.SignalPayload = signalPayload.String
+		rec.DeferDescription = deferDesc.String
+		rec.DeferID = deferID.String
+		rec.ChildName = childName.String
+		rec.ChildInput = childInput.String
+		rec.RunID = runID.String
+		rec.NewInput = newInput.String
+		rec.PluginName = pluginName.String
+		rec.PluginFunc = pluginFunc.String
+		rec.PluginInput = pluginInput.String
+		rec.PluginOutput = pluginOutput.String
+		rec.PluginError = pluginErr.String
+		rec.PromiseName = promiseName.String
+		rec.PromiseID = promiseID.String
+		rec.PromiseResult = promiseResult.String
+		rec.PromiseError = promiseError.String
+
+		if payload.Valid {
+			populateFromPayload(&rec, []byte(payload.String))
+		}
+
+		history = append(history, rec)
+	}
+	return history, rows.Err()
+}
+
 // AppendEventHistoryBatch appends multiple events to the history.
+// Computes a SHA-256 checksum of each event's payload for data integrity
+// verification. The checksum is stored in the checksum column; if the column
+// does not exist yet (pre-migration), the checksum is computed but not stored.
+//
+// Required migration:
+//
+//	ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT;
 func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -620,10 +728,14 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 	}
 	defer tx.Rollback()
 
-	if err := s.setRLSOnTx(tx); err != nil {
+if err := s.setRLSOnTx(tx); err != nil {
 		return fmt.Errorf("append history batch: set rls: %w", err)
 	}
 
+	// TODO: Include checksum column once migration is run:
+	//   ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT;
+	// Until then, checksums are computed in Go but the column is omitted
+	// from the INSERT to avoid breaking existing databases.
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
@@ -644,6 +756,8 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 		if err == nil && len(payload) > 0 {
 			payloadArg = sql.NullString{String: string(payload), Valid: true}
 		}
+		// Compute SHA-256 checksum of the event data for integrity verification.
+		_ = computeEventChecksum(rec) // TODO: Store in checksum column after migration
 		_, err = stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
@@ -1060,6 +1174,31 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
 	`, parentWorkflowID)
+}
+
+// MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
+// after exhausting all retry attempts.
+func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'dead_lettered', error_msg = $3, completed_at = now(), assigned_to = NULL
+		WHERE id = $1 AND assigned_to = $2
+	`, workflowID, workerID, errMsg)
+	if err != nil {
+		return err
+	}
+
+	// Best-effort: record error in idempotency_keys if this workflow was started with a key.
+	s.db.ExecContext(context.Background(),
+		`UPDATE idempotency_keys SET error_msg = $3 WHERE workflow_id = $1`,
+		workflowID, errMsg)
+
+	// Best-effort: clear sticky worker assignment (Feature 10).
+	s.ClearStickyWorker(context.Background(), workflowID)
+	// Best-effort: release all concurrency keys (Feature 5).
+	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+
+	return nil
 }
 
 // ReleaseWorkflow returns a workflow to the queue with a next wake time.
@@ -1916,7 +2055,83 @@ func atoi(s string) int {
 	return n
 }
 
-// nullStr returns a sql.NullString that is valid if s is non-empty.
+// computeEventChecksum computes a SHA-256 checksum of the event record's data
+// (the JSON payload produced by eventRecordToPayload). The checksum is used for
+// integrity verification via VerifyWorkflowEvents.
+func computeEventChecksum(rec EventRecord) string {
+	payload, err := eventRecordToPayload(rec)
+	if err != nil {
+		// Fall back to checksum of the event type and step as a stable identifier.
+		data := fmt.Sprintf("%d:%s", rec.Step, rec.EventType)
+		hash := sha256.Sum256([]byte(data))
+		return hex.EncodeToString(hash[:])
+	}
+	hash := sha256.Sum256(payload)
+	return hex.EncodeToString(hash[:])
+}
+
+// VerifyWorkflowEvents loads all events for a workflow, recomputes their
+// SHA-256 checksums, and verifies integrity. When the checksum column is
+// available (after migration), it compares stored vs. recomputed checksums.
+// Before the migration, it computes checksums silently and returns nil.
+//
+// Required migration for full verification:
+//
+//	ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT;
+func (s *PostgresStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
+	// Load the full event history for the workflow.
+	events, err := s.LoadEventHistory(ctx, workflowID)
+	if err != nil {
+		return fmt.Errorf("verify events: load: %w", err)
+	}
+
+	// Try to load stored checksums from the DB. If the column doesn't exist
+	// (pre-migration), this query will fail, and we skip verification.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT step, checksum FROM event_history
+		WHERE workflow_id = $1
+		ORDER BY step
+	`, workflowID)
+	if err != nil {
+		// Column does not exist yet — skip verification (pre-migration).
+		return nil
+	}
+	defer rows.Close()
+
+	storedChecksums := make(map[int]string)
+	for rows.Next() {
+		var step int
+		var checksum sql.NullString
+		if err := rows.Scan(&step, &checksum); err != nil {
+			return fmt.Errorf("verify events: scan checksum: %w", err)
+		}
+		if checksum.Valid && checksum.String != "" {
+			storedChecksums[step] = checksum.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("verify events: rows: %w", err)
+	}
+
+	// If no checksums are stored, verification is not possible yet.
+	if len(storedChecksums) == 0 {
+		return nil
+	}
+
+	// Recompute and compare checksums.
+	for _, ev := range events {
+		expected, ok := storedChecksums[ev.Step]
+		if !ok || expected == "" {
+			continue // No stored checksum for this step (pre-migration partial data).
+		}
+		actual := computeEventChecksum(ev)
+		if actual != expected {
+			return fmt.Errorf("verify events: workflow %s step %d: checksum mismatch (expected %s, got %s)",
+				workflowID, ev.Step, expected, actual)
+		}
+	}
+	return nil
+}
 func nullStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
 }

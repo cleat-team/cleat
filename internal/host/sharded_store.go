@@ -337,6 +337,33 @@ func (s *ShardedStore) BatchHeartbeat(ctx context.Context, workerID string) (int
 	return total, nil
 }
 
+// LoadEventHistoryPaginated routes by workflow ID.
+func (s *ShardedStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return nil, fmt.Errorf("no shard available for workflow %s", workflowID)
+	}
+	return shard.Store.LoadEventHistoryPaginated(ctx, workflowID, offset, limit)
+}
+
+// VerifyWorkflowEvents routes by workflow ID.
+func (s *ShardedStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available for workflow %s", workflowID)
+	}
+	return shard.Store.VerifyWorkflowEvents(ctx, workflowID)
+}
+
+// MoveToDeadLetterQueue routes by workflow ID.
+func (s *ShardedStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available for workflow %s", workflowID)
+	}
+	return shard.Store.MoveToDeadLetterQueue(ctx, workflowID, workerID, errMsg)
+}
+
 // CompleteWorkflow routes by workflow ID.
 func (s *ShardedStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
 	shard := s.getShard(workflowID)

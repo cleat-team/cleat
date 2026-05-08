@@ -1040,25 +1040,41 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 
 	var collected []plugin.StreamEvent
 	index := 0
-	for chunk := range chunkCh {
-		collected = append(collected, chunk)
-
-		// Record each chunk as an event.
-		rec := EventRecord{
-			Step:             s.stepCount,
-			EventType:        EventTypePluginCallStreamChunk,
-			PluginName:       pluginName,
-			PluginFunc:       functionName,
-			PluginInput:      inputJSON,
-			PluginOutput:     chunk.Content,
-			StreamChunkIndex: index,
-			StreamFinish:     chunk.Finish,
+	// Drain the channel on exit to prevent goroutine leak when the context
+	// is cancelled mid-stream. The producer blocks on send until the receiver
+	// reads; draining ensures it can exit.
+	defer func() {
+		for range chunkCh {
 		}
-		s.history = append(s.history, rec)
-		s.stepCount++
-		index++
-	}
+	}()
+	for {
+		select {
+		case <-callCtx.Done():
+			// Context cancelled — return partial results.
+			goto done
+		case chunk, ok := <-chunkCh:
+			if !ok {
+				goto done
+			}
+			collected = append(collected, chunk)
 
+			// Record each chunk as an event.
+			rec := EventRecord{
+				Step:             s.stepCount,
+				EventType:        EventTypePluginCallStreamChunk,
+				PluginName:       pluginName,
+				PluginFunc:       functionName,
+				PluginInput:      inputJSON,
+				PluginOutput:     chunk.Content,
+				StreamChunkIndex: index,
+				StreamFinish:     chunk.Finish,
+			}
+			s.history = append(s.history, rec)
+			s.stepCount++
+			index++
+		}
+	}
+done:
 	// Return collected chunks as JSON.
 	outJSON, err := json.Marshal(collected)
 	if err != nil {

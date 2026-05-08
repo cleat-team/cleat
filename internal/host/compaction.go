@@ -12,6 +12,11 @@ import (
 // compaction triggers. A workflow with more than this many events is eligible.
 const DefaultCompactionThreshold = 1000
 
+// DefaultMaxCompactedEvents caps the number of compacted events stored in a
+// single compaction state JSONB. Beyond this limit, the oldest events are
+// truncated into a summary to keep the compaction state size bounded.
+const DefaultMaxCompactedEvents = 10000
+
 // Event type codes for compact JSONB storage. Short int codes minimize
 // storage size when a workflow has thousands of compacted events.
 const (
@@ -100,7 +105,17 @@ type CompactionState struct {
 	Events        []CompactedEvent `json:"events"`
 	PendingDefers []CompactedDefer `json:"pending_defers,omitempty"`
 	OpenChildren  []CompactedChild `json:"open_children,omitempty"`
-	QueryState    map[string]string `json:"query_state,omitempty"`
+	QueryState    map[string]string  `json:"query_state,omitempty"`
+
+	// Summary is populated when Events exceeds DefaultMaxCompactedEvents and is
+	// truncated. It records the truncation count for observability.
+	Summary *TruncationSummary `json:"summary,omitempty"`
+}
+
+// TruncationSummary records how many compacted events were truncated to keep
+// the compaction state JSONB size bounded.
+type TruncationSummary struct {
+	TruncatedCount int `json:"truncated_count"`
 }
 
 // CompactedEvent is a sparse representation of a single event in the compacted
@@ -316,6 +331,14 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 				break
 			}
 		}
+	}
+
+	// Cap the compacted events list to prevent unbounded JSONB growth.
+	if len(cs.Events) > DefaultMaxCompactedEvents {
+		truncated := len(cs.Events) - DefaultMaxCompactedEvents
+		cs.Events = cs.Events[truncated:]
+		cs.CompactedStep -= truncated
+		cs.Summary = &TruncationSummary{TruncatedCount: truncated}
 	}
 
 	return cs
