@@ -350,3 +350,271 @@ func TestValidationErrorFullFormat(t *testing.T) {
 		t.Errorf("expected line number in output")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Vet-checks: forbidden calls via Compute
+// ---------------------------------------------------------------------------
+
+func TestVetChecksForbiddenNow(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e003_time_now", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	// Should have E003 (time.Now forbidden)
+	if !hasErrorCode(cr, "E003") {
+		t.Errorf("expected E003 (time.Now forbidden), got errors: %v", listErrorCodes(cr))
+	}
+}
+
+func TestVetChecksForbiddenNetHTTP(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e005_net_http", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	if !hasErrorCode(cr, "E005") {
+		t.Errorf("expected E005 (net/http forbidden), got errors: %v", listErrorCodes(cr))
+	}
+}
+
+func TestVetChecksForbiddenMathRand(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e007_math_rand", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	if !hasErrorCode(cr, "E007") {
+		t.Errorf("expected E007 (math/rand forbidden), got errors: %v", listErrorCodes(cr))
+	}
+}
+
+func TestVetChecksForbiddenSyncMutex(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e013_sync_mutex", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	if !hasErrorCode(cr, "E013") {
+		t.Errorf("expected E013 (sync.Mutex forbidden), got errors: %v", listErrorCodes(cr))
+	}
+}
+
+func TestVetChecksForbiddenFmtPrintln(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e015_fmt_println", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	if !hasErrorCode(cr, "E015") {
+		t.Errorf("expected E015 (fmt.Println forbidden), got errors: %v", listErrorCodes(cr))
+	}
+}
+
+func TestVetChecksNoErrors(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/no_errors", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	if cr.NumErrors() != 0 {
+		t.Errorf("expected 0 errors for clean code, got %d: %v", cr.NumErrors(), listErrorCodes(cr))
+	}
+}
+
+// hasErrorCode checks if any function has an error with the given code.
+func hasErrorCode(cr *Result, code string) bool {
+	for _, errs := range cr.Errors {
+		for _, e := range errs {
+			if e.Code == code {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// listErrorCodes returns a list of all error codes for debugging.
+func listErrorCodes(cr *Result) []string {
+	var codes []string
+	for _, errs := range cr.Errors {
+		for _, e := range errs {
+			codes = append(codes, e.Code)
+		}
+	}
+	return codes
+}
+
+// ---------------------------------------------------------------------------
+// Vet-checks: goroutine detection via Compute (exercises validateConstructs)
+// ---------------------------------------------------------------------------
+
+func TestVetChecksGoroutine(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e001_goroutine", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	if !hasErrorCode(cr, "E001") {
+		t.Errorf("expected E001 (goroutine forbidden), got errors: %v", listErrorCodes(cr))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// hasHostCallsParam edge cases
+// ---------------------------------------------------------------------------
+
+func TestHasHostCallsParamEdgeCases(t *testing.T) {
+	// Nil fd.Type returns false.
+	fd := &analyzer.FuncDecl{Type: nil}
+	if hasHostCallsParam(fd) {
+		t.Error("expected false for nil Type")
+	}
+
+	// Type with nil params returns false.
+	params := types.NewTuple()
+	// Can't easily create a types.Signature with nil params inline, skip.
+	_ = params
+}
+
+// ---------------------------------------------------------------------------
+// resolveNamedType edge cases
+// ---------------------------------------------------------------------------
+
+func TestResolveNamedTypeEdgeCases(t *testing.T) {
+	// Non-named, non-pointer type returns nil.
+	if got := resolveNamedType(types.Typ[types.Int]); got != nil {
+		t.Errorf("expected nil for basic type, got %v", got)
+	}
+
+	// Pointer to non-named type returns nil.
+	ptr := types.NewPointer(types.Typ[types.Int])
+	if got := resolveNamedType(ptr); got != nil {
+		t.Errorf("expected nil for pointer to basic type, got %v", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// structHasHostCallsField edge cases
+// ---------------------------------------------------------------------------
+
+func TestStructHasHostCallsFieldEdgeCases(t *testing.T) {
+	// Non-pointer, non-named type returns false.
+	if structHasHostCallsField(types.Typ[types.Int], nil) {
+		t.Error("expected false for basic type")
+	}
+
+	// Pointer to non-named type returns false.
+	ptr := types.NewPointer(types.Typ[types.Int])
+	if structHasHostCallsField(ptr, nil) {
+		t.Error("expected false for pointer to basic type")
+	}
+
+	// Pointer to named non-struct type returns false.
+	named := types.NewNamed(types.NewTypeName(0, nil, "MyInt", types.Typ[types.Int]), types.Typ[types.Int], nil)
+	ptr = types.NewPointer(named)
+	if structHasHostCallsField(ptr, nil) {
+		t.Error("expected false for pointer to named non-struct")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Vet-checks: channel operations (E002)
+// ---------------------------------------------------------------------------
+
+func TestVetChecksChannelOps(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e002_channel", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	if !hasErrorCode(cr, "E002") {
+		t.Errorf("expected E002 (channel forbidden), got errors: %v", listErrorCodes(cr))
+	}
+	if !hasErrorCode(cr, "E001") {
+		t.Errorf("expected E001 (goroutine), got errors: %v", listErrorCodes(cr))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Vet-checks: os.Getenv + reflect (E010/E011)
+// ---------------------------------------------------------------------------
+
+func TestVetChecksForbiddenPackageRef(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e016_os_reflect", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	if !hasErrorCode(cr, "E010") {
+		t.Errorf("expected E010 (os package ref), got errors: %v", listErrorCodes(cr))
+	}
+	if !hasErrorCode(cr, "E011") {
+		t.Errorf("expected E011 (reflect package ref), got errors: %v", listErrorCodes(cr))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Vet-checks: init function with durable call (E020)
+// ---------------------------------------------------------------------------
+
+func TestVetChecksInitFunction(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e009_init", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph: %v", err)
+	}
+	cr := Compute(result, cg)
+	if !hasErrorCode(cr, "E020") {
+		t.Errorf("expected E020 (init durable call), got errors: %v", listErrorCodes(cr))
+	}
+}

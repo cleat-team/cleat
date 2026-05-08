@@ -25,24 +25,28 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeSession struct {
-	ID        uuid.UUID
-	TenantID  uuid.UUID
-	Provider  string
-	UserEmail driver.Value // nil or string
-	TokenHash driver.Value // nil or string (sha256 hex of session token)
-	CreatedAt time.Time
-	ExpiresAt driver.Value // nil or time.Time
+	ID           uuid.UUID
+	TenantID     uuid.UUID
+	Provider     string
+	State        driver.Value // nil or string (for callback flow)
+	CodeVerifier driver.Value // nil or string
+	UserEmail    driver.Value // nil or string
+	TokenHash    driver.Value // nil or string (sha256 hex of session token)
+	CreatedAt    time.Time
+	ExpiresAt    driver.Value // nil or time.Time
 }
 
 type fakeDBStore struct {
 	mu       sync.RWMutex
 	sessions map[uuid.UUID]*fakeSession
+	configs  map[string]*oauthConfigRow // key: "tenantID:provider"
 	now      func() time.Time
 }
 
 func newFakeDBStore() *fakeDBStore {
 	return &fakeDBStore{
 		sessions: make(map[uuid.UUID]*fakeSession),
+		configs:  make(map[string]*oauthConfigRow),
 		now:      time.Now,
 	}
 }
@@ -130,6 +134,10 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	switch {
 	case strings.Contains(query, "DELETE FROM oauth_sessions"):
 		return c.execDeleteSession(args)
+	case strings.Contains(query, "INSERT INTO oauth_sessions"):
+		return c.execInsertSession(args)
+	case strings.Contains(query, "UPDATE oauth_sessions"):
+		return c.execUpdateSession(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec query: %s", query)
 	}
@@ -170,6 +178,10 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	defer c.store.mu.RUnlock()
 
 	switch {
+	case strings.Contains(query, "FROM oauth_config"):
+		return c.queryOAuthConfig(args)
+	case strings.Contains(query, "WHERE state = $1"):
+		return c.querySessionByState(args)
 	case strings.Contains(query, "token_hash = $1"):
 		return c.queryByTokenHash(args)
 	case strings.Contains(query, "ORDER BY created_at DESC"):
@@ -274,6 +286,15 @@ func argString(args []driver.NamedValue, ordinal int) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("arg %d not found", ordinal)
+}
+
+func argAny(args []driver.NamedValue, ordinal int) (driver.Value, error) {
+	for _, a := range args {
+		if a.Ordinal == ordinal {
+			return a.Value, nil
+		}
+	}
+	return nil, fmt.Errorf("arg %d not found", ordinal)
 }
 
 // ---------------------------------------------------------------------------
@@ -738,3 +759,654 @@ func TestOA_Info(t *testing.T) {
 		t.Errorf("want oauth-provider, got %s", info.Name)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// oauth_config helpers
+// ---------------------------------------------------------------------------
+
+func (s *fakeDBStore) AddOAuthConfig(tenantID uuid.UUID, provider, clientID, clientSecret, redirectURL, domain string, enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := tenantID.String() + ":" + provider
+	s.configs[key] = &oauthConfigRow{
+		TenantID:     tenantID,
+		Provider:     provider,
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		RedirectURL:  redirectURL,
+		Domain:       domain,
+		Enabled:      enabled,
+	}
+}
+
+func (c *fakeConn) execInsertSession(args []driver.NamedValue) (driver.Result, error) {
+	idStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return nil, err
+	}
+	tenantStr, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	tenantID, err := uuid.Parse(tenantStr)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := argString(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	state, err := argString(args, 4)
+	if err != nil {
+		return nil, err
+	}
+	codeVerifier, err := argString(args, 5)
+	if err != nil {
+		return nil, err
+	}
+	expiresAt, err := argAny(args, 6)
+	if err != nil {
+		return nil, err
+	}
+
+	c.store.sessions[id] = &fakeSession{
+		ID:           id,
+		TenantID:     tenantID,
+		Provider:     provider,
+		State:        state,
+		CodeVerifier: codeVerifier,
+		CreatedAt:    c.store.now(),
+		ExpiresAt:    expiresAt,
+	}
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+func (c *fakeConn) execUpdateSession(args []driver.NamedValue) (driver.Result, error) {
+	idStr, err := argString(args, 7)
+	if err != nil {
+		return nil, err
+	}
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return nil, err
+	}
+
+	s, ok := c.store.sessions[id]
+	if !ok {
+		return &fakeResult{rowsAffected: 0}, nil
+	}
+
+	if tokenHash, err := argString(args, 2); err == nil {
+		s.TokenHash = tokenHash
+	}
+	if userEmail, err := argAny(args, 3); err == nil {
+		s.UserEmail = userEmail
+	}
+	if expiresAt, err := argAny(args, 6); err == nil {
+		s.ExpiresAt = expiresAt
+	}
+	s.State = nil
+	s.CodeVerifier = nil
+
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+func (c *fakeConn) queryOAuthConfig(args []driver.NamedValue) (driver.Rows, error) {
+	tenantStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	key := tenantStr + ":" + provider
+	cfg, ok := c.store.configs[key]
+	if !ok || !cfg.Enabled {
+		return &fakeRows{
+			columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "enabled"},
+		}, nil
+	}
+
+	return &fakeRows{
+		columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "enabled"},
+		data: [][]driver.Value{{
+			cfg.TenantID.String(),
+			cfg.Provider,
+			cfg.ClientID,
+			cfg.ClientSecret,
+			cfg.RedirectURL,
+			cfg.Domain,
+			cfg.Enabled,
+		}},
+	}, nil
+}
+
+func (c *fakeConn) querySessionByState(args []driver.NamedValue) (driver.Rows, error) {
+	state, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	now := c.store.now()
+	for _, s := range c.store.sessions {
+		st, ok := s.State.(string)
+		if !ok || st != state {
+			continue
+		}
+		if s.ExpiresAt != nil {
+			if expTime, ok := s.ExpiresAt.(time.Time); ok && !expTime.After(now) {
+				continue
+			}
+		}
+		return &fakeRows{
+			columns: []string{"id", "tenant_id", "provider", "code_verifier"},
+			data: [][]driver.Value{{
+				s.ID.String(),
+				s.TenantID.String(),
+				s.Provider,
+				s.CodeVerifier,
+			}},
+		}, nil
+	}
+	return &fakeRows{columns: []string{"id", "tenant_id", "provider", "code_verifier"}}, nil
+}
+
+func TestOA_Login_Google_Redirect(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+	store.AddOAuthConfig(testTenantID, "google", "g-client-id", "g-secret", "http://localhost/callback", "", true)
+
+	req := httptest.NewRequest("GET", "/oauth/google/login?tenant_id="+testTenantID.String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d: %s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "accounts.google.com") {
+		t.Errorf("expected redirect to accounts.google.com, got: %s", loc)
+	}
+	if !strings.Contains(loc, "client_id=g-client-id") {
+		t.Errorf("expected client_id in redirect, got: %s", loc)
+	}
+	if !strings.Contains(loc, "code_challenge=") {
+		t.Errorf("expected code_challenge in redirect, got: %s", loc)
+	}
+}
+
+func TestOA_Login_GitHub_Redirect(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+	store.AddOAuthConfig(testTenantID, "github", "gh-client-id", "gh-secret", "http://localhost/callback", "", true)
+
+	req := httptest.NewRequest("GET", "/oauth/github/login?tenant_id="+testTenantID.String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d: %s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "github.com/login/oauth/authorize") {
+		t.Errorf("expected GitHub auth URL, got: %s", loc)
+	}
+	if !strings.Contains(loc, "scope=read%3Auser") {
+		t.Errorf("expected scope=read:user, got: %s", loc)
+	}
+}
+
+func TestOA_Login_Okta_Redirect(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+	store.AddOAuthConfig(testTenantID, "okta", "okta-client-id", "okta-secret", "http://localhost/callback", "mycompany.okta.com", true)
+
+	req := httptest.NewRequest("GET", "/oauth/okta/login?tenant_id="+testTenantID.String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302 redirect, got %d: %s", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if !strings.Contains(loc, "mycompany.okta.com") {
+		t.Errorf("expected Okta domain in redirect, got: %s", loc)
+	}
+}
+
+func TestOA_Login_MissingTenant(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+
+	req := httptest.NewRequest("GET", "/oauth/google/login", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Login_InvalidTenantID(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+
+	req := httptest.NewRequest("GET", "/oauth/google/login?tenant_id=not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Login_InvalidProvider(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+
+	req := httptest.NewRequest("GET", "/oauth/bad/login?tenant_id="+testTenantID.String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Login_ConfigNotFound(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+
+	req := httptest.NewRequest("GET", "/oauth/google/login?tenant_id="+testTenantID.String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Callback_InvalidProvider(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+	req := httptest.NewRequest("GET", "/oauth/bad/callback?code=x&state=y", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Callback_MissingCode(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+	req := httptest.NewRequest("GET", "/oauth/google/callback?state=abc", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Callback_MissingState(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=xyz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Callback_InvalidState(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=nonexistent", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Callback_ExpiredState(t *testing.T) {
+	store := newFakeDBStore()
+	_, handler := setupTestPlugin(t, store)
+
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000801")
+	store.mu.Lock()
+	store.sessions[sessionID] = &fakeSession{
+		ID: sessionID, TenantID: testTenantID, Provider: "google",
+		State: "expired-state", CodeVerifier: "verifier",
+		CreatedAt: time.Now().Add(-10 * time.Minute),
+		ExpiresAt: time.Now().Add(-5 * time.Minute),
+	}
+	store.mu.Unlock()
+
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=expired-state", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Callback_ProviderMismatch(t *testing.T) {
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+	p.httpClient = &http.Client{Timeout: time.Second}
+
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000802")
+	store.mu.Lock()
+	store.sessions[sessionID] = &fakeSession{
+		ID: sessionID, TenantID: testTenantID, Provider: "github",
+		State: "mismatch-state", CodeVerifier: "verifier",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	store.mu.Unlock()
+	store.AddOAuthConfig(testTenantID, "github", "gh-id", "gh-secret", "http://localhost/cb", "", true)
+
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=mismatch-state", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Callback_ConfigNotFound(t *testing.T) {
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+	p.httpClient = &http.Client{Timeout: time.Second}
+
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000803")
+	store.mu.Lock()
+	store.sessions[sessionID] = &fakeSession{
+		ID: sessionID, TenantID: testTenantID, Provider: "google",
+		State: "no-cfg-state", CodeVerifier: "verifier",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	store.mu.Unlock()
+
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=no-cfg-state", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Callback_Success(t *testing.T) {
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+
+	mockMux := http.NewServeMux()
+	mockMux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"mock-at","expires_in":3600}`))
+	})
+	mockMux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"email":"user@example.com"}`))
+	})
+	mockSrv := httptest.NewServer(mockMux)
+	defer mockSrv.Close()
+
+	origEndpoints := endpoints
+	endpoints = map[string]providerEndpoints{
+		"google": {
+			tokenURL:    mockSrv.URL + "/token",
+			userinfoURL: mockSrv.URL + "/userinfo",
+		},
+	}
+	defer func() { endpoints = origEndpoints }()
+
+	p.httpClient = mockSrv.Client()
+
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000900")
+	store.mu.Lock()
+	store.sessions[sessionID] = &fakeSession{
+		ID: sessionID, TenantID: testTenantID, Provider: "google",
+		State: "callback-valid-state", CodeVerifier: "test-code-verifier",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	store.mu.Unlock()
+	store.AddOAuthConfig(testTenantID, "google", "test-client-id", "test-secret", "http://localhost/cb", "", true)
+
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=mock-code&state=callback-valid-state", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var result map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &result)
+	if result["user_email"] != "user@example.com" {
+		t.Errorf("expected useremail, got %q", result["user_email"])
+	}
+}
+
+func TestOA_Callback_TokenExchangeError(t *testing.T) {
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+
+	mockMux := http.NewServeMux()
+	mockMux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"error":"invalid_grant"}`))
+	})
+	mockSrv := httptest.NewServer(mockMux)
+	defer mockSrv.Close()
+
+	origEndpoints := endpoints
+	endpoints = map[string]providerEndpoints{"google": {tokenURL: mockSrv.URL + "/token"}}
+	defer func() { endpoints = origEndpoints }()
+
+	p.httpClient = mockSrv.Client()
+
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000901")
+	store.mu.Lock()
+	store.sessions[sessionID] = &fakeSession{
+		ID: sessionID, TenantID: testTenantID, Provider: "google",
+		State: "token-err-state", CodeVerifier: "verifier",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	store.mu.Unlock()
+	store.AddOAuthConfig(testTenantID, "google", "cid", "cs", "http://localhost/cb", "", true)
+
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=token-err-state", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Callback_UserInfoError(t *testing.T) {
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+
+	mockMux := http.NewServeMux()
+	mockMux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"at","expires_in":3600}`))
+	})
+	mockMux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	mockSrv := httptest.NewServer(mockMux)
+	defer mockSrv.Close()
+
+	origEndpoints := endpoints
+	endpoints = map[string]providerEndpoints{
+		"google": {tokenURL: mockSrv.URL + "/token", userinfoURL: mockSrv.URL + "/userinfo"},
+	}
+	defer func() { endpoints = origEndpoints }()
+
+	p.httpClient = mockSrv.Client()
+
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000903")
+	store.mu.Lock()
+	store.sessions[sessionID] = &fakeSession{
+		ID: sessionID, TenantID: testTenantID, Provider: "google",
+		State: "uierr-state", CodeVerifier: "v",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	store.mu.Unlock()
+	store.AddOAuthConfig(testTenantID, "google", "cid", "cs", "http://localhost/cb", "", true)
+
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=uierr-state", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Middleware_TokenHashMismatch(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{db: db, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	nextCalled := false
+	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+	}))
+
+	req := httptest.NewRequest("GET", "/api/protected", nil)
+	req.Header.Set("Authorization", "Bearer nonexistent-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if nextCalled {
+		t.Error("next should not be called for invalid token")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestOA_Middleware_ValidTokenInjectsSession(t *testing.T) {
+	store := newFakeDBStore()
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000950")
+	store.AddSession(sessionID, testTenantID, "valid-mw-token", "mw@example.com", 0)
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{db: db, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	var gotSession *SessionInfo
+	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		info, ok := SessionFromContext(r.Context())
+		if ok {
+			gotSession = info
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/api/protected", nil)
+	req.Header.Set("Authorization", "Bearer valid-mw-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if gotSession == nil {
+		t.Fatal("expected session in context")
+	}
+	if gotSession.TenantID != testTenantID {
+		t.Errorf("expected tenant %s, got %s", testTenantID, gotSession.TenantID)
+	}
+}
+
+func TestOA_Middleware_ExpiredTokenRejected(t *testing.T) {
+	store := newFakeDBStore()
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000951")
+	store.AddSession(sessionID, testTenantID, "expired-mw-token", "old@example.com", -1*time.Hour)
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{db: db, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	nextCalled := false
+	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nextCalled = true
+	}))
+
+	req := httptest.NewRequest("GET", "/api/protected", nil)
+	req.Header.Set("Authorization", "Bearer expired-mw-token")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if nextCalled {
+		t.Error("next should not be called for expired token")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestOA_ExtractSession_ValidToken(t *testing.T) {
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+	_ = handler
+
+	sessionID := uuid.MustParse("00000000-0000-0000-0000-000000000960")
+	store.AddSession(sessionID, testTenantID, "extract-valid-token", "extract@example.com", 0)
+
+	session := p.extractSession(authedRequest("GET", "/oauth/sessions", nil, "extract-valid-token"))
+	if session == nil {
+		t.Fatal("expected non-nil session")
+	}
+	if session.TenantID != testTenantID {
+		t.Errorf("expected tenant %s, got %s", testTenantID, session.TenantID)
+	}
+}
+
+func TestOA_ExtractSession_NoAuthHeader(t *testing.T) {
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+	_ = handler
+
+	req := httptest.NewRequest("GET", "/oauth/sessions", nil)
+	if s := p.extractSession(req); s != nil {
+		t.Error("expected nil session for no auth header")
+	}
+}
+
+func TestOA_ExtractSession_EmptyBearer(t *testing.T) {
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+	_ = handler
+
+	req := httptest.NewRequest("GET", "/oauth/sessions", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	if s := p.extractSession(req); s != nil {
+		t.Error("expected nil for empty Bearer")
+	}
+}
+
+func TestOA_ExtractSession_BasicAuth(t *testing.T) {
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+	_ = handler
+
+	req := httptest.NewRequest("GET", "/oauth/sessions", nil)
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	if s := p.extractSession(req); s != nil {
+		t.Error("expected nil for Basic auth")
+	}
+}
+

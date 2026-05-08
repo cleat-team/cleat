@@ -43,7 +43,7 @@ func TestRegisterVirtualObject_DuplicateNameError(t *testing.T) {
 		EntryPoint:  func(h HostCalls, input string) (string, error) { return "{}", nil },
 	})
 	if err != nil {
-		t.Fatalf("first registration should succeed, got: %v", err)
+		t.Fatalf("unexpected error on first register: %v", err)
 	}
 
 	err = RegisterVirtualObject(VirtualObjectDef{

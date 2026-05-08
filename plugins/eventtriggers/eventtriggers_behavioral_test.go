@@ -4,12 +4,16 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"crypto/sha256"
+	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2336,4 +2340,1509 @@ func TestMalformedFilterExpressions(t *testing.T) {
 	})
 }
 
+// ===========================================================================
+// In-memory fake DB store for DB-backed behavioral tests
+// ===========================================================================
 
+type etSubscriptionRow struct {
+	id            string
+	tenantID      string
+	eventType     string
+	defName       string
+	entryPoint    string
+	inputTemplate string
+	filterExpr    string
+	maxRetries    int
+	enabled       bool
+	createdAt     time.Time
+}
+
+type etIngestedEventRow struct {
+	id        string
+	tenantID  string
+	eventType string
+	eventData string
+	receivedAt time.Time
+	processed bool
+	retryCount int
+	lastRetryAt *time.Time
+	status    string
+	errorMsg  *string
+}
+
+type etAwaiterRow struct {
+	workflowID string
+	tenantID   string
+	eventType  string
+	createdAt  time.Time
+}
+
+type etDBStore struct {
+	mu            sync.RWMutex
+	subscriptions []etSubscriptionRow
+	events        []etIngestedEventRow
+	awaiters      []etAwaiterRow
+	apiKeys       map[string]string
+}
+
+func newETDBStore() *etDBStore {
+	return &etDBStore{
+		subscriptions: make([]etSubscriptionRow, 0),
+		events:        make([]etIngestedEventRow, 0),
+		awaiters:      make([]etAwaiterRow, 0),
+		apiKeys:       make(map[string]string),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fake SQL driver for eventtriggers
+// ---------------------------------------------------------------------------
+
+type etConnector struct {
+	store *etDBStore
+}
+
+func (c *etConnector) Connect(_ context.Context) (driver.Conn, error) {
+	return &etConn{store: c.store}, nil
+}
+func (c *etConnector) Driver() driver.Driver { return &etDrv{} }
+
+type etDrv struct{}
+
+func (*etDrv) Open(_ string) (driver.Conn, error) {
+	return nil, fmt.Errorf("etDrv: use sql.OpenDB")
+}
+
+type etConn struct {
+	store *etDBStore
+}
+
+func (*etConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("etConn: unexpected Prepare call")
+}
+func (*etConn) Close() error      { return nil }
+func (*etConn) Begin() (driver.Tx, error) { return &etTx{}, nil }
+
+type etTx struct{}
+func (*etTx) Commit() error   { return nil }
+func (*etTx) Rollback() error { return nil }
+
+type etResult struct {
+	rowsAffected int64
+}
+func (r *etResult) LastInsertId() (int64, error) { return 0, nil }
+func (r *etResult) RowsAffected() (int64, error) { return r.rowsAffected, nil }
+
+type etRows struct {
+	columns []string
+	data    [][]driver.Value
+	pos     int
+}
+
+func (r *etRows) Columns() []string            { return r.columns }
+func (r *etRows) Close() error                 { return nil }
+func (r *etRows) Next(dest []driver.Value) error {
+	if r.pos >= len(r.data) {
+		return io.EOF
+	}
+	copy(dest, r.data[r.pos])
+	r.pos++
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// ExecContext routing
+// ---------------------------------------------------------------------------
+
+func (c *etConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.store.mu.Lock()
+	defer c.store.mu.Unlock()
+
+	q := strings.Join(strings.Fields(query), " ")
+	switch {
+	case strings.Contains(q, "INSERT INTO ingested_events"):
+		return c.execInsertEvent(args)
+	case strings.Contains(q, "INSERT INTO event_awaiters"):
+		return c.execInsertAwaiter(args)
+	case strings.Contains(q, "DELETE FROM event_awaiters"):
+		return c.execDeleteAwaiter(args)
+	case strings.Contains(q, "DELETE FROM event_subscriptions"):
+		return c.execDeleteSubscription(args)
+	case strings.Contains(q, "SET retry_count"):
+		return c.execUpdateEventRetry(q, args)
+	case strings.Contains(q, "SET processed"):
+		return c.execUpdateEventProcessed(q, args)
+	case strings.Contains(q, "UPDATE ingested_events"):
+		return c.execUpdateEvent(args)
+	default:
+		return nil, fmt.Errorf("etConn: unexpected Exec query: %s", q)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Exec implementations
+// ---------------------------------------------------------------------------
+
+func (c *etConn) execInsertEvent(args []driver.NamedValue) (driver.Result, error) {
+	id, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tenantID, err := etArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	eventType, err := etArgString(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	eventData, err := etArgString(args, 4)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if event already exists (idempotent insert).
+	for _, evt := range c.store.events {
+		if evt.id == id {
+			return &etResult{rowsAffected: 0}, nil
+		}
+	}
+
+	c.store.events = append(c.store.events, etIngestedEventRow{
+		id:         id,
+		tenantID:   tenantID,
+		eventType:  eventType,
+		eventData:  eventData,
+		receivedAt: time.Now(),
+		processed:  false,
+		status:     "pending",
+	})
+	return &etResult{rowsAffected: 1}, nil
+}
+
+func (c *etConn) execInsertAwaiter(args []driver.NamedValue) (driver.Result, error) {
+	workflowID, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tenantID, err := etArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	eventType, err := etArgString(args, 3)
+	if err != nil {
+		return nil, err
+	}
+
+	// Upsert: if exists, update created_at
+	found := false
+	for i, a := range c.store.awaiters {
+		if a.workflowID == workflowID && a.eventType == eventType {
+			c.store.awaiters[i].createdAt = time.Now()
+			found = true
+			break
+		}
+	}
+	if !found {
+		c.store.awaiters = append(c.store.awaiters, etAwaiterRow{
+			workflowID: workflowID,
+			tenantID:   tenantID,
+			eventType:  eventType,
+			createdAt:  time.Now(),
+		})
+	}
+	return &etResult{rowsAffected: 1}, nil
+}
+
+func (c *etConn) execDeleteAwaiter(args []driver.NamedValue) (driver.Result, error) {
+	workflowID, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	eventType, err := etArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, a := range c.store.awaiters {
+		if a.workflowID == workflowID && a.eventType == eventType {
+			c.store.awaiters = append(c.store.awaiters[:i], c.store.awaiters[i+1:]...)
+			return &etResult{rowsAffected: 1}, nil
+		}
+	}
+	return &etResult{rowsAffected: 0}, nil
+}
+
+func (c *etConn) execDeleteSubscription(args []driver.NamedValue) (driver.Result, error) {
+	id, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := etArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, s := range c.store.subscriptions {
+		if s.id == id && s.tenantID == tid {
+			c.store.subscriptions = append(c.store.subscriptions[:i], c.store.subscriptions[i+1:]...)
+			return &etResult{rowsAffected: 1}, nil
+		}
+	}
+	return &etResult{rowsAffected: 0}, nil
+}
+
+func (c *etConn) execUpdateEventProcessed(query string, args []driver.NamedValue) (driver.Result, error) {
+	id, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, evt := range c.store.events {
+		if evt.id == id {
+			evt.processed = true
+			if strings.Contains(query, "consumed") {
+				evt.status = "consumed"
+			} else {
+				evt.status = "completed"
+			}
+			evt.errorMsg = nil
+			c.store.events[i] = evt
+			return &etResult{rowsAffected: 1}, nil
+		}
+	}
+	return &etResult{rowsAffected: 0}, nil
+}
+
+func (c *etConn) execUpdateEventRetry(query string, args []driver.NamedValue) (driver.Result, error) {
+	id, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, evt := range c.store.events {
+		if evt.id == id {
+			if len(args) >= 2 {
+				if v, err := etArgInt64(args, 2); err == nil {
+					evt.retryCount = int(v)
+				}
+			}
+			if len(args) >= 3 {
+				if v, err := etArgAny(args, 3); err == nil {
+					if s, ok := v.(string); ok {
+						evt.errorMsg = &s
+					}
+				}
+			}
+			now := time.Now()
+			evt.lastRetryAt = &now
+
+			if strings.Contains(query, "dead_letter") {
+				evt.status = "dead_letter"
+				evt.processed = true
+			} else if strings.Contains(query, "consumed") {
+				evt.status = "consumed"
+				evt.processed = true
+			} else {
+				evt.status = "pending"
+			}
+			c.store.events[i] = evt
+			return &etResult{rowsAffected: 1}, nil
+		}
+	}
+	return &etResult{rowsAffected: 0}, nil
+}
+
+func (c *etConn) execUpdateEvent(args []driver.NamedValue) (driver.Result, error) {
+	// Generic update for error_msg updates.
+	id, err := etArgString(args, 2) // UPDATE ... SET error_msg = $1 WHERE id = $2
+	if err != nil {
+		// Try with id at position 1
+		id, err = etArgString(args, 1)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for i, evt := range c.store.events {
+		if evt.id == id {
+			if len(args) >= 1 {
+				if v, err := etArgAny(args, 1); err == nil {
+					if s, ok := v.(string); ok {
+						if strings.Contains(s, "failed") || strings.Contains(s, "invalid") {
+							evt.errorMsg = &s
+						}
+					}
+				}
+			}
+			c.store.events[i] = evt
+			return &etResult{rowsAffected: 1}, nil
+		}
+	}
+	return &etResult{rowsAffected: 0}, nil
+}
+
+// ---------------------------------------------------------------------------
+// QueryContext routing
+// ---------------------------------------------------------------------------
+
+func (c *etConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.store.mu.RLock()
+	defer c.store.mu.RUnlock()
+
+	q := strings.Join(strings.Fields(query), " ")
+	switch {
+	case strings.Contains(q, "SELECT tenant_id FROM tenant_api_keys"):
+		return c.queryTenantLookup(args)
+	case strings.Contains(q, "INSERT INTO event_subscriptions"):
+		return c.queryInsertSubscription(args)
+	case strings.Contains(q, "SELECT COUNT(*) FROM event_subscriptions"):
+		return c.querySubCount(args)
+	case strings.Contains(q, "SELECT COALESCE(MAX(max_retries), 3) FROM event_subscriptions"):
+		return c.queryMaxRetries(args)
+	case strings.Contains(q, "SELECT COALESCE(status, 'pending'), event_type, event_data FROM ingested_events"):
+		return c.queryEventForRetry(args)
+	case strings.Contains(q, "SELECT id, event_type, event_data, received_at") && strings.Contains(q, "FROM ingested_events"):
+		return c.queryEventForAwait(args)
+	case strings.Contains(q, "SELECT workflow_id FROM event_awaiters"):
+		return c.queryAwaiters(args)
+	case strings.Contains(q, "FROM event_subscriptions") && strings.Contains(q, "ORDER BY"):
+		return c.queryListSubscriptions(args)
+	case strings.Contains(q, "FROM event_subscriptions") && strings.Contains(q, "event_type ="):
+		return c.querySubscriptionsForMatch(args)
+	case strings.Contains(q, "SELECT id, tenant_id, event_type, event_data, retry_count FROM ingested_events"):
+		return c.queryProcessBatch(args)
+	default:
+		return nil, fmt.Errorf("etConn: unexpected Query query: %s", q)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Query implementations
+// ---------------------------------------------------------------------------
+
+func (c *etConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, error) {
+	keyHash, err := etArgBytes(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	hashHex := fmt.Sprintf("%x", keyHash)
+	tid, ok := c.store.apiKeys[hashHex]
+	if !ok {
+		return &etRows{columns: []string{"tenant_id"}}, nil
+	}
+	return &etRows{
+		columns: []string{"tenant_id"},
+		data:    [][]driver.Value{{tid}},
+	}, nil
+}
+
+func (c *etConn) queryInsertSubscription(args []driver.NamedValue) (driver.Rows, error) {
+	tenantID, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	eventType, err := etArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	defName, err := etArgString(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	entryPoint, err := etArgString(args, 4)
+	if err != nil {
+		return nil, err
+	}
+	inputTemplate, err := etArgString(args, 5)
+	if err != nil {
+		return nil, err
+	}
+	filterExpr := ""
+	if len(args) >= 6 {
+		if v, err := etArgAny(args, 6); err == nil {
+			if s, ok := v.(string); ok {
+				filterExpr = s
+			}
+		}
+	}
+	maxRetries := 3
+	if len(args) >= 7 {
+		if v, err := etArgAny(args, 7); err == nil && v != nil {
+			if n, ok := v.(int64); ok {
+				maxRetries = int(n)
+			}
+		}
+	}
+
+	id := uuid.New().String()
+	now := time.Now()
+
+	c.store.subscriptions = append(c.store.subscriptions, etSubscriptionRow{
+		id:            id,
+		tenantID:      tenantID,
+		eventType:     eventType,
+		defName:       defName,
+		entryPoint:    entryPoint,
+		inputTemplate: inputTemplate,
+		filterExpr:    filterExpr,
+		maxRetries:    maxRetries,
+		enabled:       true,
+		createdAt:     now,
+	})
+
+	return &etRows{
+		columns: []string{"id"},
+		data:    [][]driver.Value{{id}},
+	}, nil
+}
+
+func (c *etConn) querySubCount(args []driver.NamedValue) (driver.Rows, error) {
+	tid, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	eventType, err := etArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	count := 0
+	for _, s := range c.store.subscriptions {
+		if s.tenantID == tid && s.eventType == eventType && s.enabled {
+			count++
+		}
+	}
+	return &etRows{
+		columns: []string{"count"},
+		data:    [][]driver.Value{{int64(count)}},
+	}, nil
+}
+
+func (c *etConn) queryMaxRetries(args []driver.NamedValue) (driver.Rows, error) {
+	id, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	var tenantID, eventType string
+	for _, evt := range c.store.events {
+		if evt.id == id {
+			tenantID = evt.tenantID
+			eventType = evt.eventType
+			break
+		}
+	}
+
+	maxRetries := int64(3)
+	for _, s := range c.store.subscriptions {
+		if s.tenantID == tenantID && s.eventType == eventType {
+			if int64(s.maxRetries) > maxRetries {
+				maxRetries = int64(s.maxRetries)
+			}
+		}
+	}
+	return &etRows{
+		columns: []string{"max"},
+		data:    [][]driver.Value{{maxRetries}},
+	}, nil
+}
+
+func (c *etConn) queryEventForRetry(args []driver.NamedValue) (driver.Rows, error) {
+	id, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, evt := range c.store.events {
+		if evt.id == id {
+			status := evt.status
+			if status == "" {
+				status = "pending"
+			}
+			return &etRows{
+				columns: []string{"status", "event_type", "event_data"},
+				data:    [][]driver.Value{{status, evt.eventType, []byte(evt.eventData)}},
+			}, nil
+		}
+	}
+	return &etRows{columns: []string{"status", "event_type", "event_data"}}, nil
+}
+
+func (c *etConn) queryEventForAwait(args []driver.NamedValue) (driver.Rows, error) {
+	tid, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	eventType, err := etArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the latest unprocessed event matching tenant + type.
+	var best *etIngestedEventRow
+	for _, evt := range c.store.events {
+		if evt.tenantID == tid && evt.eventType == eventType && !evt.processed {
+			if best == nil || evt.receivedAt.After(best.receivedAt) {
+				best = &evt
+			}
+		}
+	}
+
+	if best == nil {
+		return &etRows{columns: []string{"id", "event_type", "event_data", "received_at"}}, nil
+	}
+	return &etRows{
+		columns: []string{"id", "event_type", "event_data", "received_at"},
+		data:    [][]driver.Value{{best.id, best.eventType, []byte(best.eventData), best.receivedAt}},
+	}, nil
+}
+
+func (c *etConn) queryAwaiters(args []driver.NamedValue) (driver.Rows, error) {
+	tid, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	eventType, err := etArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	var data [][]driver.Value
+	for _, a := range c.store.awaiters {
+		if a.tenantID == tid && a.eventType == eventType {
+			data = append(data, []driver.Value{a.workflowID})
+		}
+	}
+	return &etRows{
+		columns: []string{"workflow_id"},
+		data:    data,
+	}, nil
+}
+
+func (c *etConn) querySubscriptionsForMatch(args []driver.NamedValue) (driver.Rows, error) {
+	tid, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	eventType := ""
+	if len(args) >= 2 {
+		if v, err := etArgAny(args, 2); err == nil {
+			if s, ok := v.(string); ok {
+				eventType = s
+			}
+		}
+	}
+
+	var data [][]driver.Value
+	for _, s := range c.store.subscriptions {
+		if s.tenantID == tid && (eventType == "" || s.eventType == eventType) && s.enabled {
+			data = append(data, []driver.Value{
+				s.id, s.tenantID, s.eventType, s.defName, s.entryPoint,
+				[]byte(s.inputTemplate), s.filterExpr, s.enabled, s.createdAt, int64(s.maxRetries),
+			})
+		}
+	}
+	return &etRows{
+		columns: []string{"id", "tenant_id", "event_type", "def_name", "entry_point", "input_template", "filter_expr", "enabled", "created_at", "max_retries"},
+		data:    data,
+	}, nil
+}
+
+func (c *etConn) queryListSubscriptions(args []driver.NamedValue) (driver.Rows, error) {
+	tid, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	var data [][]driver.Value
+	for _, s := range c.store.subscriptions {
+		if s.tenantID == tid {
+			data = append(data, []driver.Value{
+				s.id, s.tenantID, s.eventType, s.defName, s.entryPoint,
+				[]byte(s.inputTemplate), s.filterExpr, int64(s.maxRetries), s.enabled, s.createdAt,
+			})
+		}
+	}
+	return &etRows{
+		columns: []string{"id", "tenant_id", "event_type", "def_name", "entry_point", "input_template", "filter_expr", "max_retries", "enabled", "created_at"},
+		data:    data,
+	}, nil
+}
+
+func (c *etConn) queryProcessBatch(args []driver.NamedValue) (driver.Rows, error) {
+	cutoff := time.Now().Add(-10 * time.Second)
+	var data [][]driver.Value
+	for _, evt := range c.store.events {
+		if !evt.processed && (evt.status == "pending" || evt.status == "") && evt.receivedAt.Before(cutoff) {
+			data = append(data, []driver.Value{
+				evt.id, evt.tenantID, evt.eventType, []byte(evt.eventData), int64(evt.retryCount),
+			})
+		}
+	}
+	return &etRows{
+		columns: []string{"id", "tenant_id", "event_type", "event_data", "retry_count"},
+		data:    data,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Argument extractors for eventtriggers
+// ---------------------------------------------------------------------------
+
+func etArgString(args []driver.NamedValue, ordinal int) (string, error) {
+	for _, a := range args {
+		if a.Ordinal == ordinal {
+			switch v := a.Value.(type) {
+			case string:
+				return v, nil
+			case []byte:
+				return string(v), nil
+			default:
+				return "", fmt.Errorf("arg %d: want string, got %T", ordinal, a.Value)
+			}
+		}
+	}
+	return "", fmt.Errorf("arg %d not found", ordinal)
+}
+
+func etArgBytes(args []driver.NamedValue, ordinal int) ([]byte, error) {
+	for _, a := range args {
+		if a.Ordinal == ordinal {
+			b, ok := a.Value.([]byte)
+			if !ok {
+				return nil, fmt.Errorf("arg %d: want []byte, got %T", ordinal, a.Value)
+			}
+			return b, nil
+		}
+	}
+	return nil, fmt.Errorf("arg %d not found", ordinal)
+}
+
+func etArgInt64(args []driver.NamedValue, ordinal int) (int64, error) {
+	for _, a := range args {
+		if a.Ordinal == ordinal {
+			switch v := a.Value.(type) {
+			case int64:
+				return v, nil
+			case float64:
+				return int64(v), nil
+			default:
+				return 0, fmt.Errorf("arg %d: want int64, got %T", ordinal, a.Value)
+			}
+		}
+	}
+	return 0, fmt.Errorf("arg %d not found", ordinal)
+}
+
+func etArgAny(args []driver.NamedValue, ordinal int) (driver.Value, error) {
+	for _, a := range args {
+		if a.Ordinal == ordinal {
+			return a.Value, nil
+		}
+	}
+	return nil, fmt.Errorf("arg %d not found", ordinal)
+}
+
+// ---------------------------------------------------------------------------
+// Test setup
+// ---------------------------------------------------------------------------
+
+var etTestTenantID = uuid.MustParse("00000000-0000-0000-0000-000000000001")
+var etTestTenantStr = etTestTenantID.String()
+
+func setupETPlugin(t *testing.T) (*Plugin, http.Handler, *etDBStore) {
+	t.Helper()
+
+	store := newETDBStore()
+
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = etTestTenantStr
+
+	db := sql.OpenDB(&etConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+
+	handler := auth.Middleware(db)(mux)
+	return p, handler, store
+}
+
+func etAuthedRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("Authorization", "Bearer test-api-key")
+	return req
+}
+
+// ===========================================================================
+// DB-backed behavioral tests
+// ===========================================================================
+
+func TestPublishEventHandler(t *testing.T) {
+	_, handler, store := setupETPlugin(t)
+
+	// First create a subscription.
+	subBody := `{"event_type":"order.created","def_name":"handleOrder","entry_point":"HandleOrder"}`
+	req := etAuthedRequest("POST", "/api/events/subscriptions", strings.NewReader(subBody))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create sub: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Publish an event.
+	pubBody := `{"id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","event_type":"order.created","data":{"order_id":42}}`
+	req = etAuthedRequest("POST", "/api/events/publish", strings.NewReader(pubBody))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Status  string `json:"status"`
+		Matched int    `json:"matched"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Status != "published" {
+		t.Errorf("expected status 'published', got %s", resp.Status)
+	}
+
+	// Verify the event was stored.
+	store.mu.RLock()
+	n := len(store.events)
+	store.mu.RUnlock()
+	if n != 1 {
+		t.Errorf("expected 1 event in store, got %d", n)
+	}
+}
+
+func TestPublishEventHandlerMissingFields(t *testing.T) {
+	_, handler, _ := setupETPlugin(t)
+
+	// Missing event_type.
+	body := `{"id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","data":{}}`
+	req := etAuthedRequest("POST", "/api/events/publish", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing event_type: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Missing id.
+	body = `{"event_type":"test.type","data":{}}`
+	req = etAuthedRequest("POST", "/api/events/publish", strings.NewReader(body))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing id: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Invalid JSON body.
+	req = etAuthedRequest("POST", "/api/events/publish", strings.NewReader(`not-json`))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid JSON: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPublishEventHandlerNoAuth(t *testing.T) {
+	_, handler, _ := setupETPlugin(t)
+
+	req := httptest.NewRequest("POST", "/api/events/publish",
+		strings.NewReader(`{"id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","event_type":"test","data":{}}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateSubscriptionHandler(t *testing.T) {
+	_, handler, store := setupETPlugin(t)
+
+	body := `{"event_type":"order.created","def_name":"handleOrder","entry_point":"HandleOrder","filter_expr":"event.data.amount > 100","max_retries":5}`
+	req := etAuthedRequest("POST", "/api/events/subscriptions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var sub subscriptionJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &sub); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if sub.EventType != "order.created" {
+		t.Errorf("expected event_type 'order.created', got %s", sub.EventType)
+	}
+	if sub.DefName != "handleOrder" {
+		t.Errorf("expected def_name 'handleOrder', got %s", sub.DefName)
+	}
+	if sub.MaxRetries != 5 {
+		t.Errorf("expected max_retries 5, got %d", sub.MaxRetries)
+	}
+	if !sub.Enabled {
+		t.Error("expected enabled true")
+	}
+	if sub.ID == uuid.Nil {
+		t.Error("expected non-nil subscription ID")
+	}
+
+	store.mu.RLock()
+	n := len(store.subscriptions)
+	store.mu.RUnlock()
+	if n != 1 {
+		t.Errorf("expected 1 subscription in store, got %d", n)
+	}
+}
+
+func TestCreateSubscriptionMissingFields(t *testing.T) {
+	_, handler, _ := setupETPlugin(t)
+
+	// Missing event_type.
+	body := `{"def_name":"test","entry_point":"Test"}`
+	req := etAuthedRequest("POST", "/api/events/subscriptions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing event_type: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Missing def_name.
+	body = `{"event_type":"test","entry_point":"Test"}`
+	req = etAuthedRequest("POST", "/api/events/subscriptions", strings.NewReader(body))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing def_name: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Invalid JSON body.
+	req = etAuthedRequest("POST", "/api/events/subscriptions", strings.NewReader(`not-json`))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid JSON: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateSubscriptionNoAuth(t *testing.T) {
+	_, handler, _ := setupETPlugin(t)
+
+	req := httptest.NewRequest("POST", "/api/events/subscriptions",
+		strings.NewReader(`{"event_type":"test","def_name":"test","entry_point":"Test"}`))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListSubscriptionsHandler(t *testing.T) {
+	_, handler, store := setupETPlugin(t)
+
+	// Empty list initially.
+	req := etAuthedRequest("GET", "/api/events/subscriptions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var subs []subscriptionJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &subs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(subs) != 0 {
+		t.Errorf("expected empty list, got %d", len(subs))
+	}
+
+	// Create 2 subscriptions.
+	for i := 0; i < 2; i++ {
+		body := fmt.Sprintf(`{"event_type":"evt.%d","def_name":"def%d","entry_point":"Entry%d"}`, i, i, i)
+		req := etAuthedRequest("POST", "/api/events/subscriptions", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create sub %d: expected 201, got %d", i, rec.Code)
+		}
+	}
+
+	// List should return 2 subscriptions.
+	req = etAuthedRequest("GET", "/api/events/subscriptions", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &subs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(subs) != 2 {
+		t.Errorf("expected 2 subscriptions, got %d", len(subs))
+	}
+
+	store.mu.RLock()
+	n := len(store.subscriptions)
+	store.mu.RUnlock()
+	if n != 2 {
+		t.Errorf("expected 2 subs in store, got %d", n)
+	}
+}
+
+func TestListSubscriptionsNoAuth(t *testing.T) {
+	_, handler, _ := setupETPlugin(t)
+
+	req := httptest.NewRequest("GET", "/api/events/subscriptions", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteSubscriptionHandler(t *testing.T) {
+	_, handler, store := setupETPlugin(t)
+
+	// Create a subscription.
+	body := `{"event_type":"test","def_name":"test","entry_point":"Test"}`
+	req := etAuthedRequest("POST", "/api/events/subscriptions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+
+	var sub subscriptionJSON
+	json.Unmarshal(rec.Body.Bytes(), &sub)
+
+	// Delete it.
+	req = etAuthedRequest("DELETE", "/api/events/subscriptions/"+sub.ID.String(), nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	store.mu.RLock()
+	n := len(store.subscriptions)
+	store.mu.RUnlock()
+	if n != 0 {
+		t.Errorf("expected 0 subscriptions after delete, got %d", n)
+	}
+}
+
+func TestDeleteSubscriptionNotFound(t *testing.T) {
+	_, handler, _ := setupETPlugin(t)
+
+	req := etAuthedRequest("DELETE", "/api/events/subscriptions/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteSubscriptionInvalidID(t *testing.T) {
+	_, handler, _ := setupETPlugin(t)
+
+	req := etAuthedRequest("DELETE", "/api/events/subscriptions/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteSubscriptionNoAuth(t *testing.T) {
+	_, handler, _ := setupETPlugin(t)
+
+	req := httptest.NewRequest("DELETE", "/api/events/subscriptions/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRegisterAndUnregisterAwaiter(t *testing.T) {
+	store := newETDBStore()
+
+	db := sql.OpenDB(&etConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Register.
+	p.registerAwaiter(context.Background(), etTestTenantID, "wf-123", "order.created")
+
+	store.mu.RLock()
+	n := len(store.awaiters)
+	store.mu.RUnlock()
+	if n != 1 {
+		t.Fatalf("expected 1 awaiter, got %d", n)
+	}
+	if store.awaiters[0].workflowID != "wf-123" {
+		t.Errorf("expected workflowID wf-123, got %s", store.awaiters[0].workflowID)
+	}
+
+	// Unregister.
+	unregisterAwaiter(context.Background(), db, slog.New(slog.NewTextHandler(io.Discard, nil)), "wf-123", "order.created")
+
+	store.mu.RLock()
+	n = len(store.awaiters)
+	store.mu.RUnlock()
+	if n != 0 {
+		t.Errorf("expected 0 awaiters after unregister, got %d", n)
+	}
+}
+
+func TestAwaitEventFindsAndConsumesEvent(t *testing.T) {
+	store := newETDBStore()
+
+	db := sql.OpenDB(&etConnector{store: store})
+	defer db.Close()
+
+	// Add an unprocessed event to the store.
+	store.events = append(store.events, etIngestedEventRow{
+		id:        uuid.New().String(),
+		tenantID:  etTestTenantStr,
+		eventType: "order.created",
+		eventData: `{"order_id":42}`,
+		processed: false,
+		status:    "pending",
+	})
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Set up call context so awaitEvent can identify the tenant.
+	cc := &plugin.CallContext{TenantID: etTestTenantID, WorkflowID: "wf-consumer"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+
+	// Call awaitEvent with matching event type.
+	input, _ := json.Marshal(map[string]interface{}{
+		"event_type": "order.created",
+		"timeout_ms": 5000,
+	})
+	output, err := p.awaitEvent(ctx, string(input))
+	if err != nil {
+		t.Fatalf("awaitEvent: %v", err)
+	}
+
+	var result awaitEventOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if !result.Found {
+		t.Error("expected Found=true")
+	}
+	if result.EventType != "order.created" {
+		t.Errorf("expected event_type 'order.created', got %s", result.EventType)
+	}
+
+	// Verify event is marked as consumed.
+	store.mu.RLock()
+	evt := store.events[0]
+	store.mu.RUnlock()
+	if !evt.processed {
+		t.Error("expected event to be marked processed")
+	}
+	if evt.status != "consumed" {
+		t.Errorf("expected status 'consumed', got %s", evt.status)
+	}
+}
+
+func TestAwaitEventNoEvent(t *testing.T) {
+	store := newETDBStore()
+
+	db := sql.OpenDB(&etConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Set up call context so awaitEvent can identify the tenant.
+	cc := &plugin.CallContext{TenantID: etTestTenantID}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+
+	// When no event, awaitEvent should return Found=false.
+	input, _ := json.Marshal(map[string]interface{}{
+		"event_type": "nonexistent.event",
+		"timeout_ms": 1000,
+	})
+	output, err := p.awaitEvent(ctx, string(input))
+	if err != nil {
+		t.Fatalf("awaitEvent: %v", err)
+	}
+
+	var result awaitEventOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if result.Found {
+		t.Error("expected Found=false for non-existent event")
+	}
+}
+
+func TestAwaitEventWithAwaiterRegistration(t *testing.T) {
+	store := newETDBStore()
+
+	db := sql.OpenDB(&etConnector{store: store})
+	defer db.Close()
+
+	// Create context with workflow ID so registerAwaiter is called.
+	cc := &plugin.CallContext{
+		TenantID:   etTestTenantID,
+		WorkflowID: "wf-await-test",
+	}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// No event in store, so awaitEvent should register an awaiter.
+	input, _ := json.Marshal(map[string]interface{}{
+		"event_type": "order.shipped",
+		"timeout_ms": 5000,
+	})
+	_, err := p.awaitEvent(ctx, string(input))
+	if err != nil {
+		t.Fatalf("awaitEvent: %v", err)
+	}
+
+	// Verify awaiter was registered.
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if len(store.awaiters) != 1 {
+		t.Fatalf("expected 1 awaiter, got %d", len(store.awaiters))
+	}
+	if store.awaiters[0].workflowID != "wf-await-test" {
+		t.Errorf("expected workflowID 'wf-await-test', got %s", store.awaiters[0].workflowID)
+	}
+	if store.awaiters[0].eventType != "order.shipped" {
+		t.Errorf("expected eventType 'order.shipped', got %s", store.awaiters[0].eventType)
+	}
+}
+
+func TestFullPluginLifecycle(t *testing.T) {
+	_, handler, store := setupETPlugin(t)
+
+	// 1. Create a subscription.
+	subBody := `{"event_type":"user.created","def_name":"handleUser","entry_point":"HandleUser","filter_expr":"event.data.role == \"admin\""}`
+	req := etAuthedRequest("POST", "/api/events/subscriptions", strings.NewReader(subBody))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create sub: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var sub subscriptionJSON
+	json.Unmarshal(rec.Body.Bytes(), &sub)
+
+	// 2. List subscriptions and verify.
+	req = etAuthedRequest("GET", "/api/events/subscriptions", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: expected 200, got %d", rec.Code)
+	}
+	var subs []subscriptionJSON
+	json.Unmarshal(rec.Body.Bytes(), &subs)
+	if len(subs) != 1 {
+		t.Fatalf("expected 1 sub, got %d", len(subs))
+	}
+
+	// 3. Publish an event.
+	pubBody := `{"id":"b1b2c3d4-e5f6-7890-abcd-ef1234567890","event_type":"user.created","data":{"role":"admin"}}`
+	req = etAuthedRequest("POST", "/api/events/publish", strings.NewReader(pubBody))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("publish: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify event stored.
+	store.mu.RLock()
+	evtCount := len(store.events)
+	store.mu.RUnlock()
+	if evtCount != 1 {
+		t.Errorf("expected 1 event, got %d", evtCount)
+	}
+
+	// 4. Delete the subscription.
+	req = etAuthedRequest("DELETE", "/api/events/subscriptions/"+sub.ID.String(), nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Background worker tests
+// ===========================================================================
+
+func TestRunEventTriggersNilDB(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Errorf("Run() with nil DB returned error: %v", err)
+	}
+}
+
+func TestRetryEventHandler(t *testing.T) {
+	t.Run("retry dead_letter event returns 200", func(t *testing.T) {
+		_, handler, store := setupETPlugin(t)
+
+		eventID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+		store.mu.Lock()
+		store.events = append(store.events, etIngestedEventRow{
+			id:         eventID.String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			eventData:  `{"key":"value"}`,
+			processed:  true,
+			status:     "dead_letter",
+			receivedAt: time.Now().Add(-time.Hour),
+		})
+		store.mu.Unlock()
+
+		req := etAuthedRequest("POST", "/api/events/"+eventID.String()+"/retry", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("event not found returns 404", func(t *testing.T) {
+		_, handler, _ := setupETPlugin(t)
+		req := etAuthedRequest("POST",
+			"/api/events/cccccccc-cccc-cccc-cccc-cccccccccccc/retry", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("wrong status returns 400", func(t *testing.T) {
+		_, handler, store := setupETPlugin(t)
+		eventID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+		store.mu.Lock()
+		store.events = append(store.events, etIngestedEventRow{
+			id:         eventID.String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			eventData:  `{}`,
+			processed:  true,
+			status:     "completed",
+			receivedAt: time.Now(),
+		})
+		store.mu.Unlock()
+
+		req := etAuthedRequest("POST", "/api/events/"+eventID.String()+"/retry", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("missing auth returns 401", func(t *testing.T) {
+		_, handler, _ := setupETPlugin(t)
+		req := httptest.NewRequest("POST",
+			"/api/events/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/retry", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("invalid event id returns 400", func(t *testing.T) {
+		_, handler, _ := setupETPlugin(t)
+		req := etAuthedRequest("POST", "/api/events/not-a-uuid/retry", nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+func TestProcessBatch(t *testing.T) {
+	t.Run("no unprocessed events", func(t *testing.T) {
+		p, _, _ := setupETPlugin(t)
+		p.processBatch(context.Background())
+	})
+
+	t.Run("with unprocessed events", func(t *testing.T) {
+		p, _, store := setupETPlugin(t)
+		store.mu.Lock()
+		store.events = append(store.events, etIngestedEventRow{
+			id:         uuid.New().String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			eventData:  `{"key":"value"}`,
+			processed:  false,
+			status:     "pending",
+			receivedAt: time.Now().Add(-time.Hour),
+		})
+		store.mu.Unlock()
+
+		p.processBatch(context.Background())
+	})
+
+	t.Run("unprocessed invalid data is dead-lettered", func(t *testing.T) {
+		p, _, store := setupETPlugin(t)
+		store.mu.Lock()
+		store.events = append(store.events, etIngestedEventRow{
+			id:         uuid.New().String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			eventData:  `{invalid json}`,
+			processed:  false,
+			status:     "pending",
+			receivedAt: time.Now().Add(-time.Hour),
+		})
+		store.mu.Unlock()
+
+		p.processBatch(context.Background())
+	})
+}
+
+func TestRetryEventBackground(t *testing.T) {
+	t.Run("invalid event data goes to dead_letter", func(t *testing.T) {
+		p, _, store := setupETPlugin(t)
+		eventID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+		store.mu.Lock()
+		store.events = append(store.events, etIngestedEventRow{
+			id:         eventID.String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			eventData:  `{invalid json}`,
+			processed:  false,
+			status:     "pending",
+			receivedAt: time.Now(),
+		})
+		store.mu.Unlock()
+
+		p.retryEvent(context.Background(), eventID, etTestTenantID, "test.event", []byte(`{invalid json}`), 0)
+	})
+
+	t.Run("valid event with no subscriptions", func(t *testing.T) {
+		p, _, store := setupETPlugin(t)
+		eventID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+		store.mu.Lock()
+		store.events = append(store.events, etIngestedEventRow{
+			id:         eventID.String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			eventData:  `{"key":"value"}`,
+			processed:  false,
+			status:     "pending",
+			receivedAt: time.Now(),
+		})
+		store.mu.Unlock()
+
+		p.retryEvent(context.Background(), eventID, etTestTenantID, "test.event", []byte(`{"key":"value"}`), 0)
+	})
+
+	t.Run("valid event with subscription match retry", func(t *testing.T) {
+		p, _, store := setupETPlugin(t)
+		eventID := uuid.MustParse("cccccccc-cccc-cccc-cccc-cccccccccccc")
+		store.mu.Lock()
+		store.events = append(store.events, etIngestedEventRow{
+			id:         eventID.String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			eventData:  `{"key":"value"}`,
+			processed:  false,
+			status:     "pending",
+			receivedAt: time.Now(),
+		})
+		store.subscriptions = append(store.subscriptions, etSubscriptionRow{
+			id:        uuid.New().String(),
+			tenantID:  etTestTenantStr,
+			eventType: "test.event",
+			defName:   "wf",
+			enabled:   true,
+		})
+		store.mu.Unlock()
+
+		p.retryEvent(context.Background(), eventID, etTestTenantID, "test.event", []byte(`{"key":"value"}`), 0)
+	})
+}
+
+func TestMarkRetryFailed(t *testing.T) {
+	t.Run("below max retries sets pending", func(t *testing.T) {
+		p, _, store := setupETPlugin(t)
+		eventID := uuid.MustParse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+		store.mu.Lock()
+		store.events = append(store.events, etIngestedEventRow{
+			id:         eventID.String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			eventData:  `{"k":"v"}`,
+			processed:  false,
+			status:     "pending",
+			receivedAt: time.Now(),
+		})
+		store.mu.Unlock()
+
+		p.markRetryFailed(context.Background(), eventID, 1, "some error")
+	})
+
+	t.Run("at max retries moves to dead_letter", func(t *testing.T) {
+		p, _, store := setupETPlugin(t)
+		eventID := uuid.MustParse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+		store.mu.Lock()
+		store.events = append(store.events, etIngestedEventRow{
+			id:         eventID.String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			eventData:  `{"k":"v"}`,
+			processed:  false,
+			status:     "pending",
+			receivedAt: time.Now(),
+		})
+		store.subscriptions = append(store.subscriptions, etSubscriptionRow{
+			id:        uuid.New().String(),
+			tenantID:  etTestTenantStr,
+			eventType: "test.event",
+			defName:   "wf",
+			maxRetries: 1,
+			enabled:   true,
+		})
+		store.mu.Unlock()
+
+		p.markRetryFailed(context.Background(), eventID, 1, "reached max retries")
+	})
+}

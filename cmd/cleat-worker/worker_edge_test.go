@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -2114,4 +2115,268 @@ func TestAPIWorkflowUpdate_NoBody(t *testing.T) {
 	if !createCalled {
 		t.Error("expected CreateUpdateRequest to be called")
 	}
+}
+
+
+// ---------------------------------------------------------------------------
+// executeWorkflow: WASM panic recovery
+// ---------------------------------------------------------------------------
+
+func TestExecuteWorkflow_WASMPanicRecovery(t *testing.T) {
+	ms := &mockStore{}
+	done := make(chan struct{})
+
+	ms.loadWASMFn = func(ctx context.Context, defName string, defVersion int) ([]byte, error) {
+		panic("test panic from WASM load")
+	}
+	ms.releaseWorkflowFn = func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+		close(done)
+		return nil
+	}
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+		// Panics with error message call FailWorkflow, not ReleaseWorkflow.
+		close(done)
+		return nil
+	}
+	ms.traceWorkflowFn = func(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
+		return nil, nil
+	}
+
+	w := newTestWorker(ms)
+	w.wg.Add(1)
+	go w.executeWorkflow(&host.WorkflowInstance{
+		ID: "wf-panic-test", DefName: "test", DefVersion: 1, Input: json.RawMessage("{}"),
+	})
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for release/fail after panic")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// executeWorkflow: runtime create error
+// ---------------------------------------------------------------------------
+
+func TestExecuteWorkflow_RuntimeCreateError(t *testing.T) {
+	ms := &mockStore{}
+	wasmLoaded := make(chan struct{})
+	failed := make(chan struct{})
+
+	ms.loadWASMFn = func(ctx context.Context, defName string, defVersion int) ([]byte, error) {
+		close(wasmLoaded)
+		return []byte("bad-wasm"), nil
+	}
+	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]host.EventRecord, error) {
+		<-wasmLoaded
+		return []host.EventRecord{}, nil
+	}
+	ms.loadCompactionStateFn = func(ctx context.Context, workflowID string) (*host.CompactionState, error) {
+		return nil, nil
+	}
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+		close(failed)
+		return nil
+	}
+	ms.traceWorkflowFn = func(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
+		return nil, nil
+	}
+
+	w := newTestWorker(ms)
+	w.wg.Add(1)
+	go w.executeWorkflow(&host.WorkflowInstance{
+		ID: "wf-runtime-err", DefName: "test", DefVersion: 1, Input: json.RawMessage("{}"),
+	})
+
+	select {
+	case <-failed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for FailWorkflow after runtime error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Sticky rebalance: dispatch claims sticky and general
+// ---------------------------------------------------------------------------
+
+func TestDispatchLoop_StickyRebalanceClaim(t *testing.T) {
+	ms := &mockStore{}
+	var mu sync.Mutex
+	stickyCalls := 0
+	generalCalls := 0
+
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+		mu.Lock()
+		stickyCalls++
+		mu.Unlock()
+		if stickyCalls == 1 {
+			return []*host.WorkflowInstance{
+				{ID: "wf-sticky-1", DefName: "test", DefVersion: 1, Status: "ready"},
+			}, nil
+		}
+		return nil, nil
+	}
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+		mu.Lock()
+		generalCalls++
+		mu.Unlock()
+		return nil, nil
+	}
+	ms.loadWASMFn = func(ctx context.Context, defName string, defVersion int) ([]byte, error) {
+		return nil, nil
+	}
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+		return nil
+	}
+
+	w := newTestWorker(ms)
+	w.pollInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.dispatchLoop()
+		close(done)
+	}()
+
+	<-done
+
+	mu.Lock()
+	sc := stickyCalls
+	gc := generalCalls
+	mu.Unlock()
+
+	if sc == 0 {
+		t.Error("expected ClaimStickyWorkflows to be called")
+	}
+	if gc == 0 {
+		t.Log("general pool was not called (capacity may have been filled by sticky)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat: workflows remain in inflight after successful heartbeat
+// ---------------------------------------------------------------------------
+
+func TestHeartbeatLoop_PreservesAliveWorkflows(t *testing.T) {
+	ms := &mockStore{}
+	var mu sync.Mutex
+	heartbeatCalls := 0
+
+	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
+		mu.Lock()
+		heartbeatCalls++
+		mu.Unlock()
+		return true, nil
+	}
+
+	w := newTestWorker(ms)
+	w.heartbeatInterval = 5 * time.Millisecond
+	w.inflight.Store("wf-alive", &host.WorkflowInstance{ID: "wf-alive"})
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.heartbeatLoop()
+		close(done)
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	w.cancel()
+	<-done
+
+	mu.Lock()
+	count := heartbeatCalls
+	mu.Unlock()
+
+	if count == 0 {
+		t.Error("expected at least one heartbeat call")
+	}
+
+	if _, ok := w.inflight.Load("wf-alive"); !ok {
+		t.Error("expected wf-alive to remain in inflight after successful heartbeat")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Context propagation: cancellation during dispatch
+// ---------------------------------------------------------------------------
+
+func TestDispatchLoop_ContextCancellation(t *testing.T) {
+	ms := &mockStore{}
+
+	claimStarted := make(chan struct{})
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+		close(claimStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	w := newTestWorker(ms)
+	w.pollInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.dispatchLoop()
+		close(done)
+	}()
+
+	select {
+	case <-claimStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for claim to start")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatchLoop did not exit after context cancellation")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// executeWorkflow: context cancellation during history load
+// ---------------------------------------------------------------------------
+
+func TestExecuteWorkflow_ContextCancellationDuringHistoryLoad(t *testing.T) {
+	ms := &mockStore{}
+	ctx, cancel := context.WithCancel(context.Background())
+
+	wasmLoaded := make(chan struct{})
+	ms.loadWASMFn = func(ctx context.Context, defName string, defVersion int) ([]byte, error) {
+		close(wasmLoaded)
+		return []byte("some-wasm"), nil
+	}
+	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]host.EventRecord, error) {
+		<-wasmLoaded
+		cancel()
+		return nil, ctx.Err()
+	}
+	ms.releaseWorkflowFn = func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+		return nil
+	}
+	ms.traceWorkflowFn = func(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
+		return nil, nil
+	}
+
+	w := newTestWorker(ms)
+	w.ctx = ctx
+	w.cancel = cancel
+
+	w.wg.Add(1)
+	w.executeWorkflow(&host.WorkflowInstance{
+		ID: "wf-cancel-history", DefName: "test", DefVersion: 1, Input: json.RawMessage("{}"),
+	})
 }

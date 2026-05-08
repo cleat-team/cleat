@@ -1619,7 +1619,8 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		payload = string(body)
-	} else {
+	}
+	if payload == "" {
 		payload = "{}"
 	}
 

@@ -116,10 +116,10 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execInsertSource(args)
 	case strings.Contains(query, "INSERT INTO webhook_events"):
 		return c.execInsertEvent(args)
-	case strings.Contains(query, "UPDATE webhook_events SET processed"):
+	case strings.Contains(query, "SET retry_count"):
+		return c.execUpdateEventRetry(query, args)
+	case strings.Contains(query, "SET processed"):
 		return c.execUpdateEventProcessed(args)
-	case strings.Contains(query, "UPDATE webhook_events SET retry_count"):
-		return c.execUpdateEventRetry(args)
 	case strings.Contains(query, "UPDATE webhook_events"):
 		return c.execUpdateEvent(args)
 	case strings.Contains(query, "DELETE FROM webhook_sources"):
@@ -289,7 +289,7 @@ func (c *fakeConn) execUpdateEventProcessed(args []driver.NamedValue) (driver.Re
 	return &fakeResult{rowsAffected: 0}, nil
 }
 
-func (c *fakeConn) execUpdateEventRetry(args []driver.NamedValue) (driver.Result, error) {
+func (c *fakeConn) execUpdateEventRetry(query string, args []driver.NamedValue) (driver.Result, error) {
 	id, err := argString(args, 1)
 	if err != nil {
 		return nil, err
@@ -313,7 +313,7 @@ func (c *fakeConn) execUpdateEventRetry(args []driver.NamedValue) (driver.Result
 			evt.lastRetryAt = &now
 
 			// Determine status from the query.
-			if strings.Contains(fmt.Sprintf("%v", args), "dead_letter") {
+			if strings.Contains(query, "dead_letter") {
 				evt.status = "dead_letter"
 				evt.processed = true
 			} else {
@@ -1706,3 +1706,251 @@ func TestIngestSourceNotFound(t *testing.T) {
 	}
 }
 
+// ===========================================================================
+// List sources handler
+// ===========================================================================
+
+func TestListSourcesHandler(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Empty list initially.
+	req := authedRequest("GET", "/ingest/sources", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for list sources, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var sources []webhookSourceJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
+		t.Fatalf("unmarshal sources: %v", err)
+	}
+	if len(sources) != 0 {
+		t.Errorf("expected empty list, got %d sources", len(sources))
+	}
+
+	// Create two sources.
+	for i := 0; i < 2; i++ {
+		name := fmt.Sprintf("source-%d", i)
+		body := fmt.Sprintf(`{"name":"%s"}`, name)
+		req := authedRequest("POST", "/ingest/sources", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create source %d: expected 201, got %d", i, rec.Code)
+		}
+	}
+
+	// List should now return 2 sources.
+	req = authedRequest("GET", "/ingest/sources", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for list sources, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
+		t.Fatalf("unmarshal sources: %v", err)
+	}
+	if len(sources) != 2 {
+		t.Errorf("expected 2 sources, got %d", len(sources))
+	}
+
+	// Verify they are stored in the fake DB store.
+	store.mu.RLock()
+	n := len(store.sources)
+	store.mu.RUnlock()
+	if n != 2 {
+		t.Errorf("expected 2 sources in store, got %d", n)
+	}
+}
+
+func TestListSourcesNoAuth(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := httptest.NewRequest("GET", "/ingest/sources", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// markRetryFailed edge cases
+// ===========================================================================
+
+func TestMarkRetryFailed(t *testing.T) {
+	store := newFakeDBStore()
+
+	eventID := uuid.New()
+	store.events = append(store.events, webhookEventRow{
+		id:        eventID.String(),
+		tenantID:  testTenantStr,
+		eventType: "webhook",
+		payload:   `{"test":true}`,
+		processed: false,
+		status:    "pending",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// First failure: should stay pending (retry 0 -> 1, below max of 3).
+	p.markRetryFailed(context.Background(), eventID, 0, "signal delivery failed: timeout")
+
+	store.mu.RLock()
+	evt := store.events[0]
+	store.mu.RUnlock()
+	if evt.retryCount != 1 {
+		t.Errorf("expected retryCount 1, got %d", evt.retryCount)
+	}
+	if evt.status != "pending" {
+		t.Errorf("expected status 'pending', got %s", evt.status)
+	}
+	if evt.errorMsg == nil || *evt.errorMsg != "signal delivery failed: timeout" {
+		t.Errorf("expected error message to be set, got %v", evt.errorMsg)
+	}
+	if evt.lastRetryAt == nil {
+		t.Error("expected lastRetryAt to be set")
+	}
+
+	// Third failure (retry count 2 -> 3, >= max of 3): should go to dead_letter.
+	p.markRetryFailed(context.Background(), eventID, 2, "signal delivery failed: timeout x3")
+
+	store.mu.RLock()
+	evt = store.events[0]
+	store.mu.RUnlock()
+	if evt.retryCount != 3 {
+		t.Errorf("expected retryCount 3, got %d", evt.retryCount)
+	}
+	if evt.status != "dead_letter" {
+		t.Errorf("expected status 'dead_letter', got %s", evt.status)
+	}
+	if !evt.processed {
+		t.Error("expected processed=true after dead_letter")
+	}
+}
+
+// ===========================================================================
+// retryEvent edge cases
+// ===========================================================================
+
+func TestRetryEventNoSignalWorkflow(t *testing.T) {
+	store := newFakeDBStore()
+
+	eventID := uuid.New()
+	store.events = append(store.events, webhookEventRow{
+		id:        eventID.String(),
+		tenantID:  testTenantStr,
+		eventType: "webhook",
+		payload:   `{"test":true}`,
+		processed: false,
+		status:    "pending",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Event with no signal_workflow_id: should complete.
+	p.retryEvent(context.Background(), eventID, uuid.New(), "webhook", []byte(`{"test":true}`),
+		time.Now(), "", "webhook_received", 0)
+
+	store.mu.RLock()
+	evt := store.events[0]
+	store.mu.RUnlock()
+	if !evt.processed {
+		t.Error("expected event to be marked processed")
+	}
+	if evt.status != "completed" {
+		t.Errorf("expected status 'completed', got %s", evt.status)
+	}
+}
+
+func TestRetryEventSignalDeliveryFailure(t *testing.T) {
+	store := newFakeDBStore()
+
+	eventID := uuid.New()
+	store.events = append(store.events, webhookEventRow{
+		id:        eventID.String(),
+		tenantID:  testTenantStr,
+		eventType: "webhook",
+		payload:   `{"test":true}`,
+		receivedAt: time.Now().Add(-30 * time.Second),
+		processed: false,
+		status:    "pending",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	signalCalled := false
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		env: &plugin.Environment{
+			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
+				signalCalled = true
+				return fmt.Errorf("signal delivery failed")
+			},
+		},
+	}
+
+	p.retryEvent(context.Background(), eventID, uuid.New(), "webhook", []byte(`{"test":true}`),
+		time.Now().Add(-30*time.Second), "wf-signal", "webhook_received", 0)
+
+	if !signalCalled {
+		t.Error("expected SignalWorkflow to be called")
+	}
+
+	store.mu.RLock()
+	evt := store.events[0]
+	store.mu.RUnlock()
+	if evt.processed {
+		t.Error("expected event to NOT be processed after failed signal")
+	}
+	if evt.status != "pending" {
+		t.Errorf("expected status 'pending' after first retry, got %s", evt.status)
+	}
+}
+
+// ===========================================================================
+// Run with nil DB
+// ===========================================================================
+
+func TestRunWebhookBackgroundNilDB(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Errorf("Run() with nil DB returned error: %v", err)
+	}
+}
+
+// ===========================================================================
+// Get source with no auth
+// ===========================================================================
+
+func TestGetSourceNoAuth(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := httptest.NewRequest("GET", "/ingest/sources/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
