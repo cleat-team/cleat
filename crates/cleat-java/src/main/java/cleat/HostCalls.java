@@ -235,6 +235,12 @@ public class HostCalls {
         int bodyPtr, int bodyLen,
         int respPtr, int respMaxLen);
 
+    @Import(module = "env", name = "cleat_acquire_lock")
+    private static native long cleatAcquireLockRaw(int keyPtr, int keyLen, long ttlMs);
+
+    @Import(module = "env", name = "cleat_release_lock")
+    private static native long cleatReleaseLockRaw(int keyPtr, int keyLen);
+
     // ========================================================================
     // Internal helpers: pack strings in scratch region, read output buffer
     // ========================================================================
@@ -1846,6 +1852,92 @@ public class HostCalls {
      */
     public CleatResult<FetchResult> fetchGet(String url) {
         return cleatFetch("GET", url, null, null);
+    }
+
+    /**
+     * Convenience method for HTTP GET requests, returning only the body.
+     * <p>
+     * Equivalent to {@code fetchGet(url)} but extracts the body from the
+     * {@link FetchResult}.
+     *
+     * @param url the request URL
+     * @return a result containing the response body on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> fetchGetJson(String url) {
+        CleatResult<FetchResult> result = cleatFetch("GET", url, null, null);
+        if (result.isErr()) {
+            return CleatResult.err(result.getError());
+        }
+        return CleatResult.ok(result.getValue().body);
+    }
+
+    /**
+     * Convenience method for HTTP GET requests with custom headers,
+     * returning only the body.
+     * <p>
+     * Equivalent to {@code fetchGet(url)} with custom headers, but extracts
+     * the body from the {@link FetchResult}.
+     *
+     * @param url     the request URL
+     * @param headers optional HTTP headers
+     * @return a result containing the response body on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> fetchGetJson(String url, Map<String, String> headers) {
+        CleatResult<FetchResult> result = cleatFetch("GET", url, headers, null);
+        if (result.isErr()) {
+            return CleatResult.err(result.getError());
+        }
+        return CleatResult.ok(result.getValue().body);
+    }
+
+    // ========================================================================
+    // Lock operations
+    // ========================================================================
+
+    /**
+     * Attempt to acquire a concurrency lock for the given key.
+     * <p>
+     * The lock is held for at most {@code ttlMs} milliseconds.  Returns
+     * {@code true} if the lock was acquired, {@code false} if it was already
+     * held by another workflow.
+     *
+     * @param key   the lock key
+     * @param ttlMs time-to-live in milliseconds
+     * @return {@code true} if the lock was acquired
+     * @throws RuntimeException if the host reports an error
+     */
+    public boolean acquireLock(String key, long ttlMs) {
+        int[] p = packStrings(key);
+        int keyOff = p[0], keyLen = p[1];
+
+        long result = cleatAcquireLockRaw(keyOff, keyLen, ttlMs);
+
+        int errCode = (int) (result & 0xFFL);
+        if (errCode != 0) {
+            throw new RuntimeException("acquireLock failed with code " + errCode);
+        }
+
+        return ((result >> 8) & 0x1L) != 0;
+    }
+
+    /**
+     * Release a concurrency lock previously acquired by this workflow.
+     *
+     * @param key the lock key to release
+     * @throws RuntimeException if the host reports an error
+     */
+    public void releaseLock(String key) {
+        int[] p = packStrings(key);
+        int keyOff = p[0], keyLen = p[1];
+
+        long result = cleatReleaseLockRaw(keyOff, keyLen);
+
+        int errCode = (int) (result & 0xFFL);
+        if (errCode != 0) {
+            throw new RuntimeException("releaseLock failed with code " + errCode);
+        }
     }
 
     // ========================================================================

@@ -175,6 +175,9 @@ interface durable-children {
         results-ptr: u32,
         results-max-len: u32,
     ) -> u64;
+
+    /// Start a child workflow with explicit version options.
+    durable-child-workflow-with-options: func(name: string, input: string, version: s32) -> string;
 }
 
 /// Durable promise create, await, resolve, and reject operations.
@@ -212,6 +215,15 @@ interface durable-promises {
         error-ptr: u32,
         error-len: u32,
     ) -> u64;
+}
+
+/// Durable distributed lock operations.
+interface durable-lock {
+    /// Acquire a distributed lock with the given key and TTL.
+    durable-acquire-lock: func(key: string, ttl-ms: s64) -> s64;
+
+    /// Release a previously acquired distributed lock.
+    durable-release-lock: func(key: string) -> s64;
 }
 
 /// Queryable state management.
@@ -311,6 +323,7 @@ world cleat-workflow {
     import durable-messaging;
     import durable-identity;
     import plugin;
+    import durable-lock;
 
     /// Main workflow entry point.
     ///

@@ -6,10 +6,12 @@
 pub mod host_calls;
 pub mod memory;
 pub mod plugins;
+pub mod saga;
 pub mod test;
 pub mod version;
 
 pub use host_calls::{FetchResult, HostCalls, RetryPolicy, SignalResult};
+pub use saga::{Saga, SagaStep};
 pub use plugins::{
     AwaitEventResult, AwaitWebhookResult, BlobGetResult, BlobPutResult,
     EvaluateFlagResult, LlmChatMessage, LlmChatResult, LlmTool, LlmToolCall,

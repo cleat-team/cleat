@@ -223,6 +223,12 @@ mod imports {
             body_ptr: *const u8, body_len: u32,
             resp_ptr: *mut u8, resp_max_len: u32,
         ) -> i64;
+
+        // cleat_acquire_lock - ABI 2.46, one string in, i64 ttl
+        pub fn cleat_acquire_lock(key_ptr: *const u8, key_len: u32, ttl_ms: i64) -> i64;
+
+        // cleat_release_lock - ABI 2.47, one string in
+        pub fn cleat_release_lock(key_ptr: *const u8, key_len: u32) -> i64;
     }
 }
 
@@ -369,7 +375,7 @@ impl HostCalls {
     }
 
     /// Continue as new. Mirrors Go's ContinueAsNew.
-    pub fn continue_as_new(&self, input_json: &str) -> Option<String> {
+    pub fn continue_as_new(&self, input_json: &str) -> Result<(), String> {
         let result = unsafe {
             imports::cleat_continue_as_new(
                 input_json.as_ptr(), input_json.len() as u32,
@@ -377,9 +383,9 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Some(format!("continue_as_new error code: {}", err_code));
+            return Err(format!("continue_as_new error code: {}", err_code));
         }
-        None
+        Ok(())
     }
 
     /// Start a child workflow. Mirrors Go's ChildWorkflow.
@@ -1059,6 +1065,39 @@ impl HostCalls {
     /// Convenience method for HTTP GET requests.
     pub fn fetch_get(&self, url: &str) -> Result<FetchResult, String> {
         self.cleat_fetch("GET", url, "{}", "")
+    }
+
+    /// Acquire a concurrency lock. Mirrors Go's AcquireLockMs.
+    /// Returns (acquired, error_message).
+    pub fn acquire_lock(&self, key: &str, ttl_ms: i64) -> (bool, Option<String>) {
+        let result = unsafe {
+            imports::cleat_acquire_lock(
+                key.as_ptr(), key.len() as u32,
+                ttl_ms,
+            )
+        };
+        let err_code = (result as u64 & 0xFF) as u8;
+        let acquired = ((result as u64 >> 8) & 0x1) != 0;
+        if err_code != 0 {
+            return (false, Some(format!("acquire_lock error code: {}", err_code)));
+        }
+        (acquired, None)
+    }
+
+    /// Release a concurrency lock previously acquired by this workflow.
+    /// Mirrors Go's ReleaseLock.
+    /// Returns None on success, or Some(error_message) on failure.
+    pub fn release_lock(&self, key: &str) -> Option<String> {
+        let result = unsafe {
+            imports::cleat_release_lock(
+                key.as_ptr(), key.len() as u32,
+            )
+        };
+        let err_code = (result as u64 & 0xFF) as u8;
+        if err_code != 0 {
+            return Some(format!("release_lock error code: {}", err_code));
+        }
+        None
     }
 }
 

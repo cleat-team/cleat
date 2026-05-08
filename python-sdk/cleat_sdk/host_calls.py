@@ -94,6 +94,9 @@ try:
         cleat_reply_to_signal as _import_cleat_reply_to_signal,
         cleat_signal_workflow as _import_cleat_signal_workflow,
         cleat_extend_timeout as _import_cleat_extend_timeout,
+        cleat_child_workflow_with_options as _import_cleat_child_workflow_with_options,
+        cleat_acquire_lock as _import_cleat_acquire_lock,
+        cleat_release_lock as _import_cleat_release_lock,
     )
     _USING_WASM = True
 except ImportError:
@@ -682,7 +685,36 @@ if not _USING_WASM:
         )
 
 
-# -- 22. cleat_register_update_handler --------------------------------------
+# -- 24. cleat_acquire_lock -------------------------------------------------
+
+
+if not _USING_WASM:
+    def _import_cleat_acquire_lock(
+        key_ptr: int,
+        key_len: int,
+        ttl_ms: int,
+    ) -> int:
+        """Stub for WASM import ``(import "env" "cleat_acquire_lock") (param i32 i32 i64) (result i64)``."""
+        raise NotImplementedError(
+            "cleat_acquire_lock can only be called within a cleat WASM runtime."
+        )
+
+
+# -- 25. cleat_release_lock -------------------------------------------------
+
+
+if not _USING_WASM:
+    def _import_cleat_release_lock(
+        key_ptr: int,
+        key_len: int,
+    ) -> int:
+        """Stub for WASM import ``(import "env" "cleat_release_lock") (param i32 i32) (result i64)``."""
+        raise NotImplementedError(
+            "cleat_release_lock can only be called within a cleat WASM runtime."
+        )
+
+
+# -- 26. cleat_register_update_handler --------------------------------------
 
 
 if not _USING_WASM:
@@ -693,7 +725,7 @@ if not _USING_WASM:
         )
 
 
-# -- 23. cleat_workflow_id ---------------------------------------------------
+# -- 27. cleat_workflow_id ---------------------------------------------------
 
 
 if not _USING_WASM:
@@ -707,7 +739,7 @@ if not _USING_WASM:
         )
 
 
-# -- 24. cleat_run_id --------------------------------------------------------
+# -- 28. cleat_run_id --------------------------------------------------------
 
 
 if not _USING_WASM:
@@ -721,7 +753,7 @@ if not _USING_WASM:
         )
 
 
-# -- 25. cleat_send ---------------------------------------------------------
+# -- 29. cleat_send ---------------------------------------------------------
 
 
 if not _USING_WASM:
@@ -739,7 +771,7 @@ if not _USING_WASM:
         )
 
 
-# -- 26. cleat_schedule_invoke ----------------------------------------------
+# -- 30. cleat_schedule_invoke ----------------------------------------------
 
 
 if not _USING_WASM:
@@ -758,7 +790,7 @@ if not _USING_WASM:
         )
 
 
-# -- 27. cleat_register_query_handler -------------------------------------------
+# -- 31. cleat_register_query_handler -------------------------------------------
 
 
 if not _USING_WASM:
@@ -769,7 +801,7 @@ if not _USING_WASM:
         )
 
 
-# -- 28. cleat_send_signal_and_wait ----------------------------------------------
+# -- 32. cleat_send_signal_and_wait ----------------------------------------------
 
 
 if not _USING_WASM:
@@ -790,7 +822,7 @@ if not _USING_WASM:
         )
 
 
-# -- 29. cleat_reply_to_signal ---------------------------------------------------
+# -- 33. cleat_reply_to_signal ---------------------------------------------------
 
 
 if not _USING_WASM:
@@ -806,7 +838,7 @@ if not _USING_WASM:
         )
 
 
-# -- 30. cleat_signal_workflow ---------------------------------------------------
+# -- 34. cleat_signal_workflow ---------------------------------------------------
 
 
 if not _USING_WASM:
@@ -1502,6 +1534,7 @@ class HostCalls:
         headers: Optional[dict] = None,
         body: str = "",
     ) -> tuple:
+        # Routes through cleat_call('http', 'fetch', ...) — no separate WASM import needed.
         """Perform a cleat HTTP fetch via the ``"http"`` service.
 
         This is a convenience method that delegates to :meth:`cleat_call`
@@ -3115,6 +3148,73 @@ class HostCalls:
         if err_code != 0:
             raise RuntimeError(
                 f"delete_cron failed with error code: {err_code}"
+            )
+
+    # --------------------------------------------------------------------
+    # 36b. acquire_lock — acquire a concurrency lock
+    # --------------------------------------------------------------------
+
+    def acquire_lock(self, key: str, ttl_ms: int) -> bool:
+        """Attempt to acquire a concurrency lock for the given key.
+
+        The lock is held for at most *ttl_ms* milliseconds.  Returns
+        ``True`` if the lock was acquired, ``False`` if it was already
+        held by another workflow.
+
+        Parameters
+        ----------
+        key : str
+            The lock key.
+        ttl_ms : int
+            Time-to-live in milliseconds.
+
+        Returns
+        -------
+        bool
+            ``True`` if the lock was acquired.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
+        result = _import_cleat_acquire_lock(SCRATCH_BASE, key_len, ttl_ms)
+
+        err_code = result & 0xFF
+        acquired = bool((result >> 8) & 0x1)
+
+        if err_code != 0:
+            raise RuntimeError(
+                f"acquire_lock failed with error code: {err_code}"
+            )
+
+        return acquired
+
+    # --------------------------------------------------------------------
+    # 36c. release_lock — release a concurrency lock
+    # --------------------------------------------------------------------
+
+    def release_lock(self, key: str) -> None:
+        """Release a concurrency lock previously acquired by this workflow.
+
+        Parameters
+        ----------
+        key : str
+            The lock key to release.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
+        result = _import_cleat_release_lock(SCRATCH_BASE, key_len)
+
+        err_code = result & 0xFF
+        if err_code != 0:
+            raise RuntimeError(
+                f"release_lock failed with error code: {err_code}"
             )
 
     # --------------------------------------------------------------------

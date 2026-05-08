@@ -507,6 +507,27 @@ export declare function import_cleat_fetch(
 ): i64;
 
 /**
+ * 39b. cleat_acquire_lock: Acquire a concurrency lock.
+ * (import "env" "cleat_acquire_lock") (param i32 i32 i64) (result i64)
+ */
+@external("env", "cleat_acquire_lock")
+export declare function import_cleat_acquire_lock(
+  keyPtr: i32,
+  keyLen: i32,
+  ttlMs: i64,
+): i64;
+
+/**
+ * 39c. cleat_release_lock: Release a concurrency lock.
+ * (import "env" "cleat_release_lock") (param i32 i32) (result i64)
+ */
+@external("env", "cleat_release_lock")
+export declare function import_cleat_release_lock(
+  keyPtr: i32,
+  keyLen: i32,
+): i64;
+
+/**
  * 39. schedule_cron: Register a recurring cron-triggered workflow.
  * (import "env" "schedule_cron") (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
  */
@@ -2297,7 +2318,69 @@ export class HostCalls {
   }
 
   // ────────────────────────────────────────────
-  // 45. scheduleCron — register a recurring workflow
+  // 44. acquireLock — acquire a concurrency lock
+  // ────────────────────────────────────────────
+
+  /**
+   * Attempt to acquire a concurrency lock for the given key.
+   *
+   * The lock is held for at most `ttlMs` milliseconds. Returns
+   * a DurableResult containing `true` if the lock was acquired,
+   * `false` if it was already held by another workflow.
+   *
+   * @param key   - The lock key.
+   * @param ttlMs - Time-to-live in milliseconds.
+   * @returns A DurableResult containing the acquired flag.
+   */
+  acquireLock(key: string, ttlMs: i64): DurableResult<bool> {
+    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, key);
+
+    let result: i64 = import_cleat_acquire_lock(
+      SCRATCH_BASE as i32,
+      keyLen,
+      ttlMs,
+    );
+
+    let errCode: i64 = result & 0xFF;
+    let acquired: bool = ((result >> 8) & 0x1) != 0;
+
+    if (errCode !== 0) {
+      return new DurableResult<bool>(
+        false,
+        "acquire_lock error code: " + errCode.toString(),
+      );
+    }
+
+    return new DurableResult<bool>(acquired, null);
+  }
+
+  // ────────────────────────────────────────────
+  // 45. releaseLock — release a concurrency lock
+  // ────────────────────────────────────────────
+
+  /**
+   * Release a concurrency lock previously acquired by this workflow.
+   *
+   * @param key - The lock key to release.
+   * @returns An error message on failure, or null on success.
+   */
+  releaseLock(key: string): string | null {
+    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, key);
+
+    let result: i64 = import_cleat_release_lock(
+      SCRATCH_BASE as i32,
+      keyLen,
+    );
+
+    let errCode: i64 = result & 0xFF;
+    if (errCode !== 0) {
+      return "release_lock error code: " + errCode.toString();
+    }
+    return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 46. scheduleCron — register a recurring workflow
   // ────────────────────────────────────────────
 
   /**
