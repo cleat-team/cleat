@@ -804,6 +804,107 @@ func authedRequest(method, target string, body io.Reader) *http.Request {
 // Behavioral tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Fake function registry
+// ---------------------------------------------------------------------------
+
+type fakeFuncRegistry struct {
+	funcs map[string]plugin.PluginFunc
+}
+
+func newFakeFuncRegistry() *fakeFuncRegistry {
+	return &fakeFuncRegistry{funcs: map[string]plugin.PluginFunc{}}
+}
+
+func (r *fakeFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	r.funcs[opts.Name] = fn
+	return nil
+}
+
+func (r *fakeFuncRegistry) Has(name string) bool {
+	_, ok := r.funcs[name]
+	return ok
+}
+
+// ===========================================================================
+// RegisterHostFunctions
+// ===========================================================================
+
+func TestRegisterHostFunctions_NilRegistry(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	err := p.RegisterHostFunctions(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil function registry") {
+		t.Fatalf("expected nil registry error, got: %v", err)
+	}
+}
+
+func TestRegisterHostFunctions_Valid(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	reg := newFakeFuncRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
+	if !reg.Has("await_webhook") {
+		t.Error("expected await_webhook to be registered")
+	}
+}
+
+// ===========================================================================
+// Migrations
+// ===========================================================================
+
+func TestMigrations(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	migrations := p.Migrations()
+	if len(migrations) == 0 {
+		t.Error("expected at least one migration")
+	}
+	for i, m := range migrations {
+		if m.Version == 0 {
+			t.Errorf("migration %d: version must be non-zero", i)
+		}
+		if m.Up == "" {
+			t.Errorf("migration %d: Up SQL is empty", i)
+		}
+	}
+}
+
+// ===========================================================================
+// RegisterRoutes
+// ===========================================================================
+
+func TestRegisterRoutes_NilMux(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	err := p.RegisterRoutes(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil mux") {
+		t.Fatalf("expected nil mux error, got: %v", err)
+	}
+}
+
+func TestRegisterRoutes_Valid(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	// Verify each expected route is registered (does not return 404).
+	routes := []struct{ method, path string }{
+		{"POST", "/ingest/11111111-1111-1111-1111-111111111111"},
+		{"GET", "/ingest/sources"},
+		{"POST", "/ingest/sources"},
+		{"GET", "/ingest/sources/11111111-1111-1111-1111-111111111111"},
+		{"DELETE", "/ingest/sources/11111111-1111-1111-1111-111111111111"},
+		{"GET", "/ingest/events"},
+	}
+	for _, r := range routes {
+		req := httptest.NewRequest(r.method, r.path, nil)
+		_, pattern := mux.Handler(req)
+		if pattern == "" {
+			t.Errorf("no handler matched %s %s", r.method, r.path)
+		}
+	}
+}
+
 // TestCreateSource verifies creating a webhook ingestion source and
 // reading it back.
 func TestCreateSource(t *testing.T) {

@@ -931,8 +931,11 @@ func TestNowAndRandom(t *testing.T) {
 	}
 
 	r := session.Random(ctx)
-	if r != 42 {
-		t.Errorf("expected Random()=42, got %d", r)
+	// Deterministic Random() uses SHA256 of fmt.Sprintf("%s:%d:%d", workflowID, stepCount, randomSeq).
+	// For an empty workflowID, stepCount=0, randomSeq=0, the first 8 bytes of SHA256(":0:0") as int64.
+	expected := int64(2123174926926331935)
+	if r != expected {
+		t.Errorf("expected Random()=%d, got %d", expected, r)
 	}
 }
 

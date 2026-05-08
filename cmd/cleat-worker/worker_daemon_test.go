@@ -533,9 +533,14 @@ func waitForCond(t *testing.T, timeout time.Duration, cond func() bool) {
 func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 	ms := &mockStore{}
 	nCalls := 0
+	// Block executeWorkflow from finishing before we check inflight.
+	// loadWASM blocks on a channel, giving the test time to verify
+	// that the workflow was added to inflight before it gets removed.
+	loadWASMCh := make(chan struct{})
+	claimedCh := make(chan string, 1)
+
 	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
 		nCalls++
-		// Return one sticky workflow on the first call, then empty.
 		if nCalls == 1 {
 			return []*host.WorkflowInstance{
 				{ID: "wf-sticky-1", DefName: "test", DefVersion: 1, Status: "ready"},
@@ -545,6 +550,14 @@ func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 	}
 	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
+	}
+	ms.loadWASMFn = func(ctx context.Context, defName string, defVersion int) ([]byte, error) {
+		close(claimedCh)
+		<-loadWASMCh
+		return nil, nil
+	}
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+		return nil
 	}
 
 	w := newTestWorker(ms)
@@ -557,24 +570,17 @@ func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 		w.dispatchLoop()
 	}()
 
-	// Wait until the workflow appears in inflight.
-	waitForCond(t, 2*time.Second, func() bool {
-		count := 0
-		w.inflight.Range(func(_, _ interface{}) bool {
-			count++
-			return true
-		})
-		return count >= 1
-	})
+	// Wait until the workflow is claimed (the goroutine is blocked in loadWASM).
+	select {
+	case <-claimedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for workflow claim")
+	}
 
-	w.cancel()
-	wg.Wait()
-
-	// Verify the workflow was added to inflight.
+	// Verify the workflow was added to inflight BEFORE executeWorkflow finishes.
 	var found bool
 	w.inflight.Range(func(key, value interface{}) bool {
-		got := key.(string)
-		if got == "wf-sticky-1" {
+		if key.(string) == "wf-sticky-1" {
 			found = true
 		}
 		return true
@@ -582,6 +588,11 @@ func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 	if !found {
 		t.Error("expected wf-sticky-1 to be in inflight, but it was not found")
 	}
+
+	// Unblock executeWorkflow so the goroutine can finish.
+	close(loadWASMCh)
+	w.cancel()
+	wg.Wait()
 }
 
 func TestDispatchLoop_StickyThenGeneral(t *testing.T) {

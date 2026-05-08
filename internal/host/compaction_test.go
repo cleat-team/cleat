@@ -1,8 +1,12 @@
 package host
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // TestPluginCallCompactionRoundTrip verifies that plugin_call and
@@ -314,5 +318,366 @@ func TestCompactionRoundTripThenReplay(t *testing.T) {
 			t.Errorf("event %d (%s) round-trip mismatch", i, events[i].EventType)
 			dumpEventDiff(t, events[i], reconstructed[i])
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CompactWorkflowHistory tests (store-level)
+// ---------------------------------------------------------------------------
+
+// mockCompactStore implements WorkflowStore for testing CompactWorkflowHistory.
+type mockCompactStore struct {
+	events         []EventRecord
+	loadErr        error
+	compactErr     error
+	compactWorkflowID string
+	compactState      []byte
+	compactStep       int
+	keepStep          int
+	loadCount         int
+	compactCount      int
+}
+
+func (m *mockCompactStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
+	m.loadCount++
+	if m.loadErr != nil {
+		return nil, m.loadErr
+	}
+	return m.events, nil
+}
+
+func (m *mockCompactStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
+	m.compactCount++
+	m.compactWorkflowID = workflowID
+	m.compactState = compactionState
+	m.compactStep = compactionStep
+	m.keepStep = keepStep
+	return m.compactErr
+}
+
+// satisfy the rest of the WorkflowStore interface with no-ops.
+func (m *mockCompactStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) { return nil, nil }
+func (m *mockCompactStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
+func (m *mockCompactStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
+func (m *mockCompactStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error { return nil }
+func (m *mockCompactStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error { return nil }
+func (m *mockCompactStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
+func (m *mockCompactStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
+func (m *mockCompactStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) { return false, nil }
+func (m *mockCompactStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error { return nil }
+func (m *mockCompactStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error { return nil }
+func (m *mockCompactStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error { return nil }
+func (m *mockCompactStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
+func (m *mockCompactStore) CheckCancellation(ctx context.Context, workflowID string) (bool, string, error) { return false, "", nil }
+func (m *mockCompactStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
+func (m *mockCompactStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) { return "", false, nil }
+func (m *mockCompactStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
+func (m *mockCompactStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) { return "", nil }
+func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) { return "", false, nil }
+func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) { return 0, nil }
+func (m *mockCompactStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) { return "", nil }
+func (m *mockCompactStore) ListWorkflows(ctx context.Context, status string, limit int) ([]WorkflowInstance, error) { return nil, nil }
+func (m *mockCompactStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) { return nil, nil }
+func (m *mockCompactStore) CreateSchedule(ctx context.Context, s Schedule) error { return nil }
+func (m *mockCompactStore) ListSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
+func (m *mockCompactStore) DeleteSchedule(ctx context.Context, name string) error { return nil }
+func (m *mockCompactStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error { return nil }
+func (m *mockCompactStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
+func (m *mockCompactStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error { return nil }
+func (m *mockCompactStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) { return 0, nil }
+func (m *mockCompactStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) { return nil, nil }
+func (m *mockCompactStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) { return nil, nil }
+func (m *mockCompactStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) { return nil, nil }
+func (m *mockCompactStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) { return nil, nil }
+func (m *mockCompactStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error { return nil }
+func (m *mockCompactStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error { return nil }
+func (m *mockCompactStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error { return nil }
+func (m *mockCompactStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) { return "", "", "", nil }
+func (m *mockCompactStore) ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error) { return nil, nil }
+func (m *mockCompactStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error { return nil }
+func (m *mockCompactStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) { return nil, nil }
+func (m *mockCompactStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error { return nil }
+func (m *mockCompactStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) { return false, nil }
+func (m *mockCompactStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockCompactStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error { return nil }
+func (m *mockCompactStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) { return 0, nil }
+func (m *mockCompactStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error { return nil }
+func (m *mockCompactStore) ClearStickyWorker(ctx context.Context, workflowID string) error { return nil }
+func (m *mockCompactStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error { return nil }
+func (m *mockCompactStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) { return nil, nil }
+func (m *mockCompactStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) { return nil, nil }
+func (m *mockCompactStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error { return nil }
+func (m *mockCompactStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error { return nil }
+func (m *mockCompactStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) { return 0, nil }
+func (m *mockCompactStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) { return nil, nil }
+
+func TestCompactWorkflowHistory_EmptyHistory(t *testing.T) {
+	// Empty event history should not trigger compaction.
+	store := &mockCompactStore{events: []EventRecord{}}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-001", DefaultCompactionThreshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if store.loadCount != 1 {
+		t.Errorf("expected 1 LoadEventHistory call, got %d", store.loadCount)
+	}
+	if store.compactCount != 0 {
+		t.Errorf("expected 0 CompactHistory calls for empty history, got %d", store.compactCount)
+	}
+}
+
+func TestCompactWorkflowHistory_SingleEvent(t *testing.T) {
+	// Single event below threshold — should not compact.
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: `{}`, Response: `{"ok":true}`},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-002", DefaultCompactionThreshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if store.compactCount != 0 {
+		t.Errorf("expected 0 CompactHistory calls for single event, got %d", store.compactCount)
+	}
+}
+
+func TestCompactWorkflowHistory_BelowThreshold(t *testing.T) {
+	// DefaultCompactionThreshold=1000 events — below threshold should not compact.
+	events := make([]EventRecord, 500)
+	for i := 0; i < 500; i++ {
+		events[i] = EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-003", DefaultCompactionThreshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if store.compactCount != 0 {
+		t.Errorf("expected 0 CompactHistory calls for 500 events (below %d), got %d", DefaultCompactionThreshold, store.compactCount)
+	}
+}
+
+func TestCompactWorkflowHistory_AboveThreshold(t *testing.T) {
+	// 1500 events with threshold=1000 → should compact (1500 > 1000).
+	// keepStep = len - threshold/2 = 1500 - 500 = 1000.
+	// compactedStep = keepStep = 1000.
+	threshold := 1000
+	nEvents := 1500
+	events := make([]EventRecord, nEvents)
+	for i := 0; i < nEvents; i++ {
+		events[i] = EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
+	}
+
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-004", threshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if store.loadCount != 1 {
+		t.Errorf("expected 1 LoadEventHistory call, got %d", store.loadCount)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 CompactHistory call, got %d", store.compactCount)
+	}
+
+	// Verify compaction parameters.
+	expectedKeepStep := nEvents - threshold/2 // 1500 - 500 = 1000
+	if store.keepStep != expectedKeepStep {
+		t.Errorf("expected keepStep=%d, got %d", expectedKeepStep, store.keepStep)
+	}
+	if store.compactStep != expectedKeepStep {
+		t.Errorf("expected compactStep=%d, got %d", expectedKeepStep, store.compactStep)
+	}
+	if store.compactWorkflowID != "wf-004" {
+		t.Errorf("expected workflowID wf-004, got %q", store.compactWorkflowID)
+	}
+	if store.compactState == nil {
+		t.Fatal("expected non-nil compaction state")
+	}
+}
+
+func TestCompactWorkflowHistory_LoadError(t *testing.T) {
+	// LoadEventHistory returns error → should propagate.
+	store := &mockCompactStore{loadErr: fmt.Errorf("db error")}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-005", DefaultCompactionThreshold)
+	if err == nil {
+		t.Fatal("expected error from LoadEventHistory, got nil")
+	}
+}
+
+func TestCompactWorkflowHistory_CompactError(t *testing.T) {
+	// CompactHistory returns error → should propagate.
+	nEvents := 1500
+	events := make([]EventRecord, nEvents)
+	for i := 0; i < nEvents; i++ {
+		events[i] = EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
+	}
+	store := &mockCompactStore{events: events, compactErr: fmt.Errorf("store error")}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-006", 1000)
+	if err == nil {
+		t.Fatal("expected error from CompactHistory, got nil")
+	}
+}
+
+func TestCompactWorkflowHistory_ExactThreshold(t *testing.T) {
+	// Exactly threshold events should NOT compact (len <= threshold).
+	n := DefaultCompactionThreshold
+	events := make([]EventRecord, n)
+	for i := 0; i < n; i++ {
+		events[i] = EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-007", DefaultCompactionThreshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if store.compactCount != 0 {
+		t.Errorf("expected 0 compactions at threshold boundary, got %d", store.compactCount)
+	}
+}
+
+func TestCompactWorkflowHistory_CompactAll(t *testing.T) {
+	// Very small threshold so every event triggers compaction.
+	// CompactWorkflowHistory keeps the most recent threshold/2 events.
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op1"},
+		{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "op2"},
+		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "op3"},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-008", threshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+	// keepStep = len - threshold/2 = 3 - 1 = 2
+	expectedKeepStep := len(events) - threshold/2
+	if store.keepStep != expectedKeepStep {
+		t.Errorf("expected keepStep=%d, got %d", expectedKeepStep, store.keepStep)
+	}
+}
+
+func TestCompactWorkflowHistory_MultipleEventTypes(t *testing.T) {
+	// Mixed event types to exercise extractCompactionState in the compaction path.
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "start", Request: `{}`, Response: `{"ok":true}`},
+		{Step: 1, EventType: EventTypeSleep, DurationMs: 5000},
+		{Step: 2, EventType: EventTypeSignalReceived, SignalName: "payment", SignalPayload: `{"paid":true}`},
+		{Step: 3, EventType: EventTypeAwaitSignals, SignalNames: "payment", TimeoutMs: 30000},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-009", threshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+	// Verify that the compaction state is valid JSON.
+	if len(store.compactState) == 0 {
+		t.Fatal("expected non-empty compaction state")
+	}
+	// Parse and verify basic structure.
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("compaction state is not valid JSON: %v", err)
+	}
+	if cs.Version != 1 {
+		t.Errorf("expected compaction state version 1, got %d", cs.Version)
+	}
+}
+
+func TestCompactWorkflowHistory_ExactThresholdPlusOne(t *testing.T) {
+	// threshold + 1 events → should compact (len > threshold).
+	threshold := 10
+	events := make([]EventRecord, threshold+1)
+	for i := 0; i < threshold+1; i++ {
+		events[i] = EventRecord{Step: i, EventType: EventTypeCall, Service: "svc", Op: fmt.Sprintf("op%d", i)}
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-010", threshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Errorf("expected 1 compaction for threshold+1 events, got %d", store.compactCount)
+	}
+	// keepStep = len - threshold/2 = 11 - 5 = 6
+	expectedKeepStep := (threshold + 1) - threshold/2
+	if store.keepStep != expectedKeepStep {
+		t.Errorf("expected keepStep=%d, got %d", expectedKeepStep, store.keepStep)
+	}
+}
+
+func TestCompactWorkflowHistory_VerifyCompactionStateContent(t *testing.T) {
+	// Verify the compaction state JSON contains the expected fields.
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op1", Request: `{}`, Response: `{"ok":true}`},
+		{Step: 1, EventType: EventTypeSleep, DurationMs: 1000},
+		{Step: 2, EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup"},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-011", threshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Steps 0..1 are compacted (keepStep = 3 - 1 = 2), step 2 is tail.
+	expectedCompactedStep := len(events) - threshold/2 // 3 - 1 = 2
+	if cs.CompactedStep != expectedCompactedStep {
+		t.Errorf("expected CompactedStep=%d, got %d", expectedCompactedStep, cs.CompactedStep)
+	}
+	if len(cs.Events) != expectedCompactedStep {
+		t.Errorf("expected %d compacted events, got %d", expectedCompactedStep, len(cs.Events))
+	}
+
+	// Check first event fields survived compaction.
+	if cs.Events[0].Type != EventCodeCall {
+		t.Errorf("expected EventCodeCall (%d), got %d", EventCodeCall, cs.Events[0].Type)
+	}
+
+	// Check second event.
+	if cs.Events[1].Type != EventCodeSleep {
+		t.Errorf("expected EventCodeSleep (%d), got %d", EventCodeSleep, cs.Events[1].Type)
+	}
+	if cs.Events[1].DurationMs != 1000 {
+		t.Errorf("expected DurationMs=1000, got %d", cs.Events[1].DurationMs)
+	}
+}
+
+func TestCompactWorkflowHistory_VerifyTailPreserved(t *testing.T) {
+	// Verify that tail events are NOT included in compaction state.
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "old1"},
+		{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "old2"},
+		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "recent1"},
+		{Step: 3, EventType: EventTypeCall, Service: "svc", Op: "recent2"},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-012", threshold)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// keepStep = 4 - 1 = 3, so steps 0,1,2 are compacted and step 3 is tail.
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if len(cs.Events) != 3 {
+		t.Errorf("expected 3 compacted events (steps 0,1,2), got %d", len(cs.Events))
 	}
 }
