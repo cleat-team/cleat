@@ -7,6 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -984,4 +987,547 @@ func TestLoadWASM_CacheSeparateByVersion(t *testing.T) {
 	if calls != 2 {
 		t.Errorf("expected 2 store calls (v1 miss, v2 miss), got %d", calls)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// API handler edge case tests
+// ---------------------------------------------------------------------------
+
+func TestAPIStartWorkflow_Simple(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return []int{1}, nil
+	}
+	startCalled := false
+	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+		startCalled = true
+		if defVersion != 1 {
+			t.Errorf("expected defVersion 1, got %d", defVersion)
+		}
+		return "wf-new-1", false, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	body := `{"input":{"order_id":42}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/test-workflow/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 201 {
+		t.Errorf("expected 201, got %d", resp.StatusCode)
+	}
+	var respBody map[string]string
+	json.NewDecoder(resp.Body).Decode(&respBody)
+	resp.Body.Close()
+	if respBody["id"] != "wf-new-1" {
+		t.Errorf("expected id wf-new-1, got %q", respBody["id"])
+	}
+	if !startCalled {
+		t.Error("expected StartNewRun to be called")
+	}
+}
+
+func TestAPIStartWorkflow_DefinitionNotFound(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/unknown/start", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404 for unknown workflow definition, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPIStartWorkflow_AlreadyExisted(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return []int{1}, nil
+	}
+	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+		return "existing-run-1", true, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/test-workflow/start", strings.NewReader(`{}`))
+	req.Header.Set("Idempotency-Key", "key-123")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 for already-started workflow, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if body["already_started"] != "true" {
+		t.Errorf("expected already_started=true, got %q", body["already_started"])
+	}
+}
+
+func TestAPIStartWorkflow_ConcurrencyKeyConflict(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return []int{1}, nil
+	}
+	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+		return "wf-conflict-1", false, nil
+	}
+	ms.acquireConcurrencyKeyFn = func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
+		return false, nil
+	}
+	failCalled := false
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+		failCalled = true
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	body := `{"concurrency_key":"shared-key-1"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/test-workflow/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 409 {
+		t.Errorf("expected 409 for concurrency key conflict, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if !failCalled {
+		t.Error("expected FailWorkflow to be called after concurrency key conflict")
+	}
+}
+
+func TestAPIStartWorkflow_ConcurrencyKeyHeader(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return []int{1}, nil
+	}
+	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+		return "wf-ck-1", false, nil
+	}
+	acquireCalled := false
+	ms.acquireConcurrencyKeyFn = func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
+		acquireCalled = true
+		if key != "header-key" {
+			t.Errorf("expected key 'header-key', got %q", key)
+		}
+		return true, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/test-workflow/start", strings.NewReader(`{}`))
+	req.Header.Set("Cleat-Concurrency-Key", "header-key")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 201 {
+		t.Errorf("expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if !acquireCalled {
+		t.Error("expected AcquireConcurrencyKey to be called from header")
+	}
+}
+
+func TestAPISignal_Deliver(t *testing.T) {
+	ms := &mockStore{}
+	signalCalled := false
+	ms.deliverSignalFn = func(ctx context.Context, workflowID, signalName, payload string) error {
+		signalCalled = true
+		if workflowID != "wf-signal-1" {
+			t.Errorf("expected workflowID wf-signal-1, got %q", workflowID)
+		}
+		if signalName != "my-signal" {
+			t.Errorf("expected signalName my-signal, got %q", signalName)
+		}
+		if payload != `{"value":42}` {
+			t.Errorf("expected payload %q, got %q", `{"value":42}`, payload)
+		}
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	body := `{"signal_name":"my-signal","payload":"{\"value\":42}"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-signal-1/signal", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if !signalCalled {
+		t.Error("expected DeliverSignal to be called")
+	}
+}
+
+func TestAPISignal_MissingName(t *testing.T) {
+	ms := &mockStore{}
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-signal-1/signal", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for missing signal_name, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPICancel_Basic(t *testing.T) {
+	ms := &mockStore{}
+	cancelCalled := false
+	ms.requestCancellationFn = func(ctx context.Context, workflowID, reason string) error {
+		cancelCalled = true
+		if workflowID != "wf-cancel-1" {
+			t.Errorf("expected workflowID wf-cancel-1, got %q", workflowID)
+		}
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-cancel-1/cancel", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if !cancelCalled {
+		t.Error("expected RequestCancellation to be called")
+	}
+}
+
+func TestAPIGetHistory_ReturnsEvents(t *testing.T) {
+	ms := &mockStore{}
+	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]host.EventRecord, error) {
+		return []host.EventRecord{
+			{Step: 0, EventType: "call"},
+			{Step: 1, EventType: "call"},
+		}, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-hist-1/history", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	var events []host.EventRecord
+	json.NewDecoder(resp.Body).Decode(&events)
+	resp.Body.Close()
+	if len(events) != 2 {
+		t.Errorf("expected 2 events, got %d", len(events))
+	}
+}
+
+func TestAPIGetHistory_Empty(t *testing.T) {
+	ms := &mockStore{}
+	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]host.EventRecord, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-empty-hist/history", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	if string(bodyBytes) != "[]\n" {
+		t.Errorf("expected empty JSON array, got %q", string(bodyBytes))
+	}
+}
+
+func TestAPIGetQueryState(t *testing.T) {
+	ms := &mockStore{}
+	ms.getQueryStateFn = func(ctx context.Context, workflowID, key string) (string, error) {
+		return `{"status":"done"}`, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-query-1/query?key=mykey", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if body["key"] != "mykey" {
+		t.Errorf("expected key mykey, got %q", body["key"])
+	}
+	if body["value"] != `{"status":"done"}` {
+		t.Errorf("expected value %q, got %q", `{"status":"done"}`, body["value"])
+	}
+}
+
+func TestAPIGetDAG_Found(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{
+			ID: "wf-dag-1", DefName: "dag-workflow", DefVersion: 1,
+		}, nil
+	}
+	ms.loadDAGSpecFn = func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+		return json.RawMessage(`{"steps":["step1","step2"]}`), nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-dag-1/dag", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if body["workflow_id"] != "wf-dag-1" {
+		t.Errorf("expected workflow_id wf-dag-1, got %q", body["workflow_id"])
+	}
+}
+
+func TestAPIGetDAG_NotFound(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-missing/dag", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404 for missing workflow DAG, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPIGetDAG_SpecNotFound(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{
+			ID: "wf-dag-2", DefName: "dag-workflow", DefVersion: 1,
+		}, nil
+	}
+	ms.loadDAGSpecFn = func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-dag-2/dag", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404 when no DAG spec, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPIWorkflowPromises_List(t *testing.T) {
+	ms := &mockStore{}
+	ms.listPromisesFn = func(ctx context.Context, workflowID string) ([]host.PromiseInfo, error) {
+		return []host.PromiseInfo{
+			{PromiseID: "prom-1", Status: "pending"},
+		}, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-prom-1/promises", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	var promises []host.PromiseInfo
+	json.NewDecoder(resp.Body).Decode(&promises)
+	resp.Body.Close()
+	if len(promises) != 1 {
+		t.Errorf("expected 1 promise, got %d", len(promises))
+	}
+}
+
+func TestAPIWorkflowPromises_ListEmpty(t *testing.T) {
+	ms := &mockStore{}
+	ms.listPromisesFn = func(ctx context.Context, workflowID string) ([]host.PromiseInfo, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-prom-2/promises", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	if string(bodyBytes) != "[]\n" {
+		t.Errorf("expected empty array, got %q", string(bodyBytes))
+	}
+}
+
+func TestAPIWorkflowPromises_Resolve(t *testing.T) {
+	ms := &mockStore{}
+	resolveCalled := false
+	ms.resolvePromiseFn = func(ctx context.Context, workflowID, promiseID, result string) error {
+		resolveCalled = true
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	body := `{"result":"success"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-prom-1/promises/prom-1/resolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if !resolveCalled {
+		t.Error("expected ResolvePromise to be called")
+	}
+}
+
+func TestAPIWorkflowPromises_Reject(t *testing.T) {
+	ms := &mockStore{}
+	rejectCalled := false
+	ms.rejectPromiseFn = func(ctx context.Context, workflowID, promiseID, errMsg string) error {
+		rejectCalled = true
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	body := `{"reason":"timeout"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-prom-1/promises/prom-1/reject", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if !rejectCalled {
+		t.Error("expected RejectPromise to be called")
+	}
+}
+
+func TestAPIWorkflowUpdate_Create(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-update-1", Status: "running"}, nil
+	}
+	createCalled := false
+	ms.createUpdateRequestFn = func(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+		createCalled = true
+		return nil
+	}
+	ms.createPromiseFn = func(ctx context.Context, workflowID, promiseName, promiseID string) error {
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-update-1/update/my-action", strings.NewReader(`{"param":"value"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 202 {
+		t.Errorf("expected 202, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if !strings.HasPrefix(body["promise_id"], "upd-") {
+		t.Errorf("expected promise_id starting with upd-, got %q", body["promise_id"])
+	}
+	if !createCalled {
+		t.Error("expected CreateUpdateRequest to be called")
+	}
+}
+
+func TestAPIWorkflowUpdate_WorkflowNotFound(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-missing/update/my-action", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPIWorkflowUpdate_DuplicatePending(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-update-2", Status: "running"}, nil
+	}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error) {
+		return []host.UpdateRequestInfo{
+			{UpdateName: "my-action"},
+		}, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-update-2/update/my-action", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 409 {
+		t.Errorf("expected 409 for duplicate pending update, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }
