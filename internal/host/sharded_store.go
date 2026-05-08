@@ -868,3 +868,78 @@ func (s *ShardedStore) ValidateVersion(ctx context.Context, defName string, defV
 	}
 	return shard.Store.ValidateVersion(ctx, defName, defVersion)
 }
+
+// RecordWorkflowMemorySample routes by defName hash for consistent shard affinity.
+func (s *ShardedStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error {
+	shard := s.getShard(defName)
+	if shard == nil {
+		return fmt.Errorf("record_memory_sample: no shard available")
+	}
+	return shard.Store.RecordWorkflowMemorySample(ctx, defName, sampleBytes)
+}
+
+// LoadMemoryEstimates fans out to all shards and merges results.
+func (s *ShardedStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
+	result := make(map[string]float64)
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		estimates, err := shard.Store.LoadMemoryEstimates(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		for k, v := range estimates {
+			result[k] = v
+		}
+	}
+	return result, nil
+}
+
+// LoadMemoryStats fans out to all shards and appends results.
+func (s *ShardedStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error) {
+	var all []WorkflowMemoryStats
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		stats, err := shard.Store.LoadMemoryStats(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		all = append(all, stats...)
+	}
+	return all, nil
+}
+
+// QueueDepth fans out to all shards and sums the counts.
+func (s *ShardedStore) QueueDepth(ctx context.Context) (int64, error) {
+	var total int64
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		n, err := shard.Store.QueueDepth(ctx)
+		if err != nil {
+			return total, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// CleanupMemorySamples fans out to all shards and sums deleted counts.
+func (s *ShardedStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
+	var total int64
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		n, err := shard.Store.CleanupMemorySamples(ctx, maxSamplesPerDef)
+		if err != nil {
+			return total, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
+}

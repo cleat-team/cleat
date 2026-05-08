@@ -410,6 +410,11 @@ func (m *mockCompactStore) MarkVersionDeprecated(ctx context.Context, name strin
 func (m *mockCompactStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error { return nil }
 func (m *mockCompactStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) { return 0, nil }
 func (m *mockCompactStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) { return nil, nil }
+func (m *mockCompactStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error { return nil }
+func (m *mockCompactStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) { return nil, nil }
+func (m *mockCompactStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error) { return nil, nil }
+func (m *mockCompactStore) QueueDepth(ctx context.Context) (int64, error) { return 0, nil }
+func (m *mockCompactStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
 
 func TestCompactWorkflowHistory_EmptyHistory(t *testing.T) {
 	// Empty event history should not trigger compaction.

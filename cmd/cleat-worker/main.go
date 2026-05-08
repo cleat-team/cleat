@@ -64,6 +64,10 @@ var (
 	metricsPollWaitTotalUs    int64
 )
 
+// globalWorker is set during worker startup for access from HTTP handlers
+// that cannot easily receive a *Worker parameter (e.g. handleMetrics).
+var globalWorker *Worker
+
 func main() {
 	dbURL := flag.String("db", "", "PostgreSQL connection URL (required)")
 	concurrency := flag.Int("concurrency", 10, "Max concurrent workflow executions")
@@ -76,6 +80,10 @@ func main() {
 	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
 	shardsFile := flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
 	pluginConfigFile := flag.String("plugin-config", "", "path to plugin config JSON file")
+	memorySoftLimit := flag.Float64("memory-soft-limit", 0.80, "Memory soft limit fraction 0.0-1.0 (stop claiming new work)")
+	memoryHardLimit := flag.Float64("memory-hard-limit", 0.95, "Memory hard limit fraction 0.0-1.0 (reject API workflows)")
+	memoryCheckInterval := flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
+	memorySampleRetention := flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
 	flag.Parse()
 
 	workerID := generateWorkerID()
@@ -277,9 +285,20 @@ func main() {
 		scheduleInterval:    15 * time.Second,
 		compactionThreshold: *compactionThreshold,
 		compactionInterval:  *compactionInterval,
-		pluginRegistry:      pluginRegistry,
-			tenantPools:         tenantPools,
+		pluginRegistry:       pluginRegistry,
+			tenantPools:          tenantPools,
+			memorySampleRetention: *memorySampleRetention,
 		}
+
+	// Initialize memory-aware concurrency controller.
+	monitor := NewMemoryMonitor(*memoryCheckInterval)
+	mc := NewMemoryController(monitor, store, workerID, *concurrency, *memorySoftLimit, *memoryHardLimit)
+	if err := mc.LoadEstimates(ctx); err != nil {
+		log.Printf("[worker %s] Warning: failed to load memory estimates: %v", workerID, err)
+	}
+	w.memoryController = mc
+	atomic.StoreInt64(&metricsDesiredConcurrency, int64(*concurrency))
+	globalWorker = w
 
 		// Start HTTP API server if configured.
 	if *apiAddr != "" {
@@ -298,6 +317,9 @@ func main() {
 		mux.HandleFunc("/api/schedules", api.handleSchedulesList)
 		mux.HandleFunc("/api/workflows/", api.handleWorkflows)
 		mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
+
+		// Workflow definitions endpoint.
+		mux.HandleFunc("/api/definitions", api.handleDefinitions)
 
 		// Plugin discovery endpoint.
 		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
@@ -413,6 +435,9 @@ type Worker struct {
 	// Compaction settings.
 	compactionThreshold int
 	compactionInterval  time.Duration
+
+	memoryController    *MemoryController
+	memorySampleRetention int
 }
 
 func (w *Worker) Run() {
@@ -440,6 +465,14 @@ func (w *Worker) Run() {
 	w.wg.Add(1)
 	go w.compactionLoop()
 
+	// Memory estimate reload loop.
+	w.wg.Add(1)
+	go w.memoryReloadLoop()
+
+	// Memory sample cleanup loop.
+	w.wg.Add(1)
+	go w.memoryCleanupLoop(w.memorySampleRetention)
+
 	log.Printf("[worker %s] Running", w.id)
 
 	<-w.ctx.Done()
@@ -463,6 +496,16 @@ func (w *Worker) dispatchLoop() {
 		default:
 		}
 
+		// Memory-aware tick: read system memory, compute pressure, adjust concurrency.
+		w.memoryController.Tick(w.ctx)
+		state := w.memoryController.State()
+		updateMemoryMetrics(state)
+
+		if !w.memoryController.CanClaim() {
+			time.Sleep(w.pollInterval)
+			continue
+		}
+
 		// Count in-flight workflows.
 		count := 0
 		w.inflight.Range(func(_, _ interface{}) bool {
@@ -470,7 +513,7 @@ func (w *Worker) dispatchLoop() {
 			return true
 		})
 
-		free := w.concurrency - count
+		free := w.memoryController.DynamicConcurrency() - count
 		if free <= 0 {
 			time.Sleep(w.pollInterval)
 			continue
@@ -573,6 +616,18 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		if r := recover(); r != nil {
 			log.Printf("[worker %s] PANIC in %s: %v — releasing", w.id, wf.ID, r)
 			w.releaseOrFail(wf, fmt.Sprintf("panic: %v", r))
+		}
+	}()
+
+	// Measure memory usage before and after to estimate per-workflow footprint.
+	beforeMem := w.memoryController.monitor.SampleUsage()
+	defer func() {
+		afterMem := w.memoryController.monitor.SampleUsage()
+		if afterMem > beforeMem {
+			delta := afterMem - beforeMem
+			if delta > 0 {
+				w.memoryController.RecordWorkflowMemory(context.Background(), wf.DefName, delta)
+			}
 		}
 	}()
 
@@ -887,6 +942,43 @@ func (w *Worker) compactionLoop() {
 				if err := host.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold); err != nil {
 					log.Printf("[worker %s] compaction: error compacting %s: %v", w.id, wfID, err)
 				}
+			}
+		}
+	}
+}
+
+func (w *Worker) memoryReloadLoop() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			if err := w.memoryController.LoadEstimates(w.ctx); err != nil {
+				log.Printf("[worker %s] memory reload: %v", w.id, err)
+			}
+		}
+	}
+}
+
+func (w *Worker) memoryCleanupLoop(maxSamples int) {
+	defer w.wg.Done()
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			deleted, err := w.store.CleanupMemorySamples(w.ctx, maxSamples)
+			if err != nil {
+				log.Printf("[worker %s] memory cleanup: %v", w.id, err)
+			} else if deleted > 0 {
+				log.Printf("[worker %s] memory cleanup: removed %d old samples", w.id, deleted)
 			}
 		}
 	}
@@ -1271,6 +1363,15 @@ func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if s.worker.memoryController != nil && s.worker.memoryController.Pressure() > 0 {
+		s.writeJSON(w, 200, map[string]interface{}{
+			"ok":       true,
+			"degraded": true,
+			"reason":   "memory_pressure",
+			"pressure": s.worker.memoryController.Pressure(),
+		})
+		return
+	}
 	s.writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
@@ -1385,6 +1486,11 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 }
 
 func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, name string) {
+	if s.worker.memoryController != nil && !s.worker.memoryController.CanAcceptAPIWorkflows() {
+		s.writeError(w, 503, "worker is under memory pressure; cannot accept new workflows")
+		return
+	}
+
 	var input struct {
 		Input          json.RawMessage `json:"input"`
 		EntryPoint     string          `json:"entry_point"`
@@ -1767,6 +1873,61 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 	s.writeJSON(w, 201, map[string]string{"status": "created"})
 }
 
+// handleDefinitions handles GET /api/definitions
+func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, 405, "method not allowed")
+		return
+	}
+
+	defs, err := s.store.ListWorkflowDefs(r.Context(), "")
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+
+	// Load memory stats for enrichment.
+	memoryStats := make(map[string]*host.WorkflowMemoryStats)
+	if stats, err := s.store.LoadMemoryStats(r.Context()); err == nil {
+		for i := range stats {
+			memoryStats[stats[i].DefName] = &stats[i]
+		}
+	}
+
+	type defResponse struct {
+		Name            string                   `json:"name"`
+		Version         int                      `json:"version"`
+		ABIVersion      int                      `json:"abi_version"`
+		MinVersion      int                      `json:"min_version"`
+		CreatedAt       time.Time                `json:"created_at"`
+		Deprecated      bool                     `json:"deprecated"`
+		ActiveInstances int                      `json:"active_instances"`
+		Memory          *host.WorkflowMemoryStats `json:"memory,omitempty"`
+	}
+
+	var response []defResponse
+	for _, def := range defs {
+		count, _ := s.store.CountActiveInstances(r.Context(), def.Name, def.Version)
+		dr := defResponse{
+			Name:            def.Name,
+			Version:         def.Version,
+			ABIVersion:      def.ABIVersion,
+			MinVersion:      def.MinVersion,
+			CreatedAt:       def.CreatedAt,
+			Deprecated:      def.Deprecated,
+			ActiveInstances: count,
+		}
+		if ms, ok := memoryStats[def.Name]; ok {
+			dr.Memory = ms
+		}
+		response = append(response, dr)
+	}
+	if response == nil {
+		response = []defResponse{}
+	}
+	s.writeJSON(w, 200, response)
+}
+
 // handleMetrics serves Prometheus-format metrics.
 func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
@@ -1824,6 +1985,13 @@ func handleMetrics(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fmt.Fprintf(w, "cleat_poll_wait_seconds_count 0\n")
 		fmt.Fprintf(w, "cleat_poll_wait_seconds_sum 0\n")
+	}
+
+	// Memory metrics.
+	if globalWorker != nil && globalWorker.memoryController != nil {
+		state := globalWorker.memoryController.State()
+		estimates := globalWorker.memoryController.DefEstimates()
+		emitMemoryMetrics(w, state, estimates)
 	}
 }
 

@@ -488,6 +488,12 @@ func (m *mockStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[s
 	return nil, nil
 }
 
+func (m *mockStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error { return nil }
+func (m *mockStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) { return nil, nil }
+func (m *mockStore) LoadMemoryStats(ctx context.Context) ([]host.WorkflowMemoryStats, error) { return nil, nil }
+func (m *mockStore) QueueDepth(ctx context.Context) (int64, error) { return 0, nil }
+func (m *mockStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
+
 // ---- test helpers ----
 
 // newTestWorker creates a Worker with a mock store and cancellable context,

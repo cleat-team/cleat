@@ -95,3 +95,30 @@ export interface WorkflowCost {
   llmCalls: number;
   startedAt: string;
 }
+
+// ── Workflow definition & memory stats types ──────────────────
+
+export interface WorkflowMemoryStats {
+  def_name: string;
+  min_bytes: number;
+  avg_bytes: number;
+  max_bytes: number;
+  p10: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  p90: number;
+  p99: number;
+  sample_count: number;
+}
+
+export interface WorkflowDefInfo {
+  name: string;
+  version: number;
+  abi_version: number;
+  min_version: number;
+  created_at: string;
+  deprecated: boolean;
+  active_instances: number;
+  memory: WorkflowMemoryStats | null;
+}

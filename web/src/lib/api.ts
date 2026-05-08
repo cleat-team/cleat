@@ -1,4 +1,4 @@
-import type { WorkflowInstance, EventRecord, Schedule, DAGResponse } from './types';
+import type { WorkflowInstance, EventRecord, Schedule, DAGResponse, WorkflowDefInfo } from './types';
 
 const BASE = '';
 
@@ -78,4 +78,8 @@ export async function enableSchedule(name: string): Promise<void> {
 
 export async function disableSchedule(name: string): Promise<void> {
   await fetchJSON(`/api/schedules/${name}/disable`, { method: 'POST' });
+}
+
+export async function listDefinitions(): Promise<WorkflowDefInfo[]> {
+  return fetchJSON<WorkflowDefInfo[]>('/api/definitions');
 }

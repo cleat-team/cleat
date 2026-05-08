@@ -95,6 +95,19 @@ func SetupFullSchema(t *testing.T, db *sql.DB) {
 		`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS tenant_id TEXT`,
 		`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS sticky_worker_id TEXT`,
 		`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS payload JSONB`,
+		// Memory statistics tables (migration 010)
+		`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
+			id BIGSERIAL PRIMARY KEY,
+			def_name TEXT NOT NULL,
+			sample_bytes BIGINT NOT NULL,
+			recorded_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
+		`CREATE INDEX IF NOT EXISTS idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS workflow_memory_stats (
+			def_name TEXT PRIMARY KEY,
+			mean_bytes DOUBLE PRECISION NOT NULL DEFAULT 0,
+			sample_count INTEGER NOT NULL DEFAULT 0,
+			alpha DOUBLE PRECISION NOT NULL DEFAULT 0.3,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT now())`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {

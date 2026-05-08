@@ -2056,3 +2056,143 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["error"].(string); ok { rec.Err = v }
 	}
 }
+
+// RecordWorkflowMemorySample inserts a new sample and updates the EWMA summary.
+func (s *PostgresStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("record memory sample: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO workflow_memory_samples (def_name, sample_bytes) VALUES ($1, $2)`,
+		defName, sampleBytes)
+	if err != nil {
+		return fmt.Errorf("record memory sample: insert sample: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO workflow_memory_stats (def_name, mean_bytes, sample_count, updated_at)
+		VALUES ($1, $2, 1, now())
+		ON CONFLICT (def_name) DO UPDATE SET
+			mean_bytes   = (workflow_memory_stats.alpha * $2 + (1 - workflow_memory_stats.alpha) * workflow_memory_stats.mean_bytes),
+			sample_count = workflow_memory_stats.sample_count + 1,
+			updated_at   = now()
+	`, defName, float64(sampleBytes))
+	if err != nil {
+		return fmt.Errorf("record memory sample: upsert stats: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// LoadMemoryEstimates returns EWMA mean bytes for all def_names.
+func (s *PostgresStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT def_name, mean_bytes FROM workflow_memory_stats`)
+	if err != nil {
+		return nil, fmt.Errorf("load memory estimates: %w", err)
+	}
+	defer rows.Close()
+
+	estimates := make(map[string]float64)
+	for rows.Next() {
+		var name string
+		var mean float64
+		if err := rows.Scan(&name, &mean); err != nil {
+			return nil, fmt.Errorf("load memory estimates: scan: %w", err)
+		}
+		estimates[name] = mean
+	}
+	return estimates, rows.Err()
+}
+
+// LoadMemoryStats returns full distribution statistics for all def_names.
+func (s *PostgresStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT def_name,
+		       MIN(sample_bytes)::BIGINT,
+		       AVG(sample_bytes),
+		       MAX(sample_bytes)::BIGINT,
+		       COALESCE(percentile_cont(0.10) WITHIN GROUP (ORDER BY sample_bytes)::BIGINT, 0),
+		       COALESCE(percentile_cont(0.25) WITHIN GROUP (ORDER BY sample_bytes)::BIGINT, 0),
+		       COALESCE(percentile_cont(0.50) WITHIN GROUP (ORDER BY sample_bytes)::BIGINT, 0),
+		       COALESCE(percentile_cont(0.75) WITHIN GROUP (ORDER BY sample_bytes)::BIGINT, 0),
+		       COALESCE(percentile_cont(0.90) WITHIN GROUP (ORDER BY sample_bytes)::BIGINT, 0),
+		       COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY sample_bytes)::BIGINT, 0),
+		       COUNT(*)::INTEGER
+		FROM workflow_memory_samples
+		GROUP BY def_name
+		ORDER BY def_name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("load memory stats: %w", err)
+	}
+	defer rows.Close()
+
+	var stats []WorkflowMemoryStats
+	for rows.Next() {
+		var st WorkflowMemoryStats
+		if err := rows.Scan(&st.DefName, &st.MinBytes, &st.AvgBytes, &st.MaxBytes,
+			&st.P10, &st.P25, &st.P50, &st.P75, &st.P90, &st.P99, &st.SampleCount); err != nil {
+			return nil, fmt.Errorf("load memory stats: scan: %w", err)
+		}
+		stats = append(stats, st)
+	}
+	return stats, rows.Err()
+}
+
+// QueueDepth returns the count of ready workflows in the store's task queues.
+func (s *PostgresStore) QueueDepth(ctx context.Context) (int64, error) {
+	var count int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM workflow_instances WHERE status = 'ready' AND task_queue = ANY($1)`,
+		pq.Array(s.taskQueues)).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("queue depth: %w", err)
+	}
+	return count, nil
+}
+
+// CleanupMemorySamples deletes samples beyond maxSamplesPerDef per def_name.
+func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
+	defRows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT def_name FROM workflow_memory_samples`)
+	if err != nil {
+		return 0, fmt.Errorf("cleanup memory samples: list defs: %w", err)
+	}
+	defer defRows.Close()
+
+	var defNames []string
+	for defRows.Next() {
+		var name string
+		if err := defRows.Scan(&name); err != nil {
+			return 0, fmt.Errorf("cleanup memory samples: scan def: %w", err)
+		}
+		defNames = append(defNames, name)
+	}
+	if err := defRows.Err(); err != nil {
+		return 0, err
+	}
+
+	var totalDeleted int64
+	for _, defName := range defNames {
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM workflow_memory_samples
+			WHERE def_name = $1
+			  AND id NOT IN (
+			      SELECT id FROM workflow_memory_samples
+			      WHERE def_name = $1
+			      ORDER BY recorded_at DESC
+			      LIMIT $2
+			  )
+		`, defName, maxSamplesPerDef)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("cleanup memory samples: delete %s: %w", defName, err)
+		}
+		n, _ := result.RowsAffected()
+		totalDeleted += n
+	}
+	return totalDeleted, nil
+}

@@ -4,6 +4,7 @@
   import WorkflowList from './pages/WorkflowList.svelte';
   import WorkflowDetail from './pages/WorkflowDetail.svelte';
   import ScheduleManagement from './pages/ScheduleManagement.svelte';
+  import Definitions from './pages/Definitions.svelte';
 
   let route = $state(window.location.hash.slice(1) || 'dashboard');
   let routeParams = $state('');
@@ -34,6 +35,8 @@
       <WorkflowDetail workflowId={routeParams} onNavigate={navigate} />
     {:else if route === 'schedules'}
       <ScheduleManagement />
+    {:else if route === 'definitions'}
+      <Definitions />
     {:else}
       <Dashboard />
     {/if}
