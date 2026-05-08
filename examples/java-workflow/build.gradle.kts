@@ -18,7 +18,7 @@ repositories {
 }
 
 dependencies {
-    implementation(project(":durable-java"))
+    implementation(project(":cleat-java"))
     implementation("org.teavm:teavm-classlib:0.10.2")
 }
 

@@ -5,6 +5,41 @@ use syn::{FnArg, ItemFn, Pat};
 pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     let input_fn: ItemFn = syn::parse2(item).expect("#[cleat_entry] requires a function");
 
+    // A1: Reject async fn — #[cleat_entry] does not support async functions.
+    if input_fn.sig.asyncness.is_some() {
+        return syn::Error::new_spanned(
+            &input_fn.sig.ident,
+            "#[cleat_entry] does not support async functions",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    // A1: Validate return type is Result<T, E>.
+    let return_type_is_result = match &input_fn.sig.output {
+        syn::ReturnType::Type(_, ty) => {
+            if let syn::Type::Path(type_path) = &**ty {
+                type_path
+                    .path
+                    .segments
+                    .last()
+                    .map(|seg| seg.ident == "Result")
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        }
+        syn::ReturnType::Default => false,
+    };
+    if !return_type_is_result {
+        return syn::Error::new_spanned(
+            &input_fn.sig.output,
+            "#[cleat_entry] function must return Result<T, E>",
+        )
+        .to_compile_error()
+        .into();
+    }
+
     let fn_vis = &input_fn.vis;
     let fn_name = &input_fn.sig.ident;
     let fn_block = &input_fn.block;
@@ -20,6 +55,24 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
         )
         .to_compile_error()
         .into();
+    }
+
+    // A1: Validate that the first parameter is &HostCalls.
+    if let Some(FnArg::Typed(first_pt)) = all_args.first() {
+        let is_hostcalls = matches!(
+            &*first_pt.ty,
+            syn::Type::Reference(type_ref)
+                if matches!(&*type_ref.elem, syn::Type::Path(type_path)
+                    if type_path.path.segments.last().map(|s| s.ident == "HostCalls").unwrap_or(false))
+        );
+        if !is_hostcalls {
+            return syn::Error::new_spanned(
+                &first_pt.ty,
+                "first parameter must be &HostCalls",
+            )
+            .to_compile_error()
+            .into();
+        }
     }
 
     // Pop the first arg (HostCalls). We'll add h: &HostCalls to the inner fn.
@@ -57,6 +110,9 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
                 if let Pat::Ident(pi) = &*pt.pat {
                     let name = &pi.ident;
                     args.push(quote! { #name });
+                } else {
+                    // A1: Warn about destructuring patterns that are silently ignored.
+                    eprintln!("warning: destructuring patterns in #[cleat_entry] parameters are silently ignored");
                 }
             }
         }

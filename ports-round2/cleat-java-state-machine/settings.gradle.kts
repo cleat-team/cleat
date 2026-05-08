@@ -1,4 +1,4 @@
 rootProject.name = "cleat-java-state-machine"
 
-include(":durable-java")
-project(":durable-java").projectDir = file("../../crates/durable-java")
+include(":cleat-java")
+project(":cleat-java").projectDir = file("../../crates/cleat-java")

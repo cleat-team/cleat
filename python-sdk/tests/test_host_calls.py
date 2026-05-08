@@ -50,10 +50,9 @@ try:
     )
     from cleat_sdk.test_harness import CleatTestHarness
 except ImportError as e:
-    pytest.skip(
-        f"Skipping host calls tests: {e}.  "
-        "Required modules must exist.",
-        allow_module_level=True,
+    pytest.fail(
+        f"Required import failed: {e}.  "
+        "All SDK modules must be importable.",
     )
 
 

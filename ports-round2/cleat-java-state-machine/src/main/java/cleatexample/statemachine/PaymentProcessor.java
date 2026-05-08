@@ -1,7 +1,7 @@
 package cleatexample.statemachine;
 
-import cleat.DurableEntry;
-import cleat.DurableResult;
+import cleat.CleatEntry;
+import cleat.CleatResult;
 import cleat.HostCalls;
 import cleat.JsonHelper;
 import java.util.HashMap;
@@ -18,7 +18,7 @@ import java.util.Map;
  * <p>
  * <strong>Cleat mapping:</strong>
  * <ul>
- *   <li>Each handler becomes a separate {@code @DurableEntry} static method</li>
+ *   <li>Each handler becomes a separate {@code @CleatEntry} static method</li>
  *   <li>State is stored in Cleat query state with manually prefixed keys
  *       ({@code payment:<paymentId>:status}, {@code payment:<paymentId>:details})</li>
  *   <li>No Virtual Object serialisation — callers should use the workflow ID
@@ -58,7 +58,7 @@ public class PaymentProcessor {
      * @return JSON result: {@code {"success":true, "reason":"..."}} on success,
      *         or {@code {"success":false, "reason":"..."}} on failure
      */
-    @DurableEntry(name = "make_payment")
+    @CleatEntry(name = "make_payment")
     public static String makePayment(HostCalls h, String rawInput) {
         Map<String, Object> input = JsonHelper.parseObject(rawInput);
 
@@ -94,7 +94,7 @@ public class PaymentProcessor {
         String withdrawJSON = JsonHelper.stringify(withdrawReq);
 
         // Call account service to withdraw funds (durable, journaled call)
-        DurableResult<String> callResult = h.durableCall("account", "withdraw", withdrawJSON);
+        CleatResult<String> callResult = h.cleatCall("account", "withdraw", withdrawJSON);
 
         if (callResult.isErr()) {
             return resultJson(false, "Withdrawal failed: " + callResult.getError());
@@ -112,7 +112,7 @@ public class PaymentProcessor {
         h.setQueryState(stateKey(paymentId, KEY_STATUS), "COMPLETED_SUCCESSFULLY");
         h.setQueryState(stateKey(paymentId, KEY_DETAILS), rawInput);
 
-        h.durableLog("Payment " + paymentId + " completed: " + amountCents
+        h.cleatLog("Payment " + paymentId + " completed: " + amountCents
             + " cents withdrawn from " + accountId);
 
         return resultJson(true, "Payment processed successfully");
@@ -132,7 +132,7 @@ public class PaymentProcessor {
      * @param rawInput JSON with key {@code "paymentId"} (String)
      * @return JSON result indicating cancellation status
      */
-    @DurableEntry(name = "cancel_payment")
+    @CleatEntry(name = "cancel_payment")
     public static String cancelPayment(HostCalls h, String rawInput) {
         Map<String, Object> input = JsonHelper.parseObject(rawInput);
 
@@ -147,7 +147,7 @@ public class PaymentProcessor {
             case "NEW": {
                 // Payment not yet made — mark as cancelled to prevent future execution
                 h.setQueryState(stateKey(paymentId, KEY_STATUS), "CANCELLED");
-                h.durableLog("Payment " + paymentId + " cancelled before execution");
+                h.cleatLog("Payment " + paymentId + " cancelled before execution");
                 return resultJson(true, "Payment cancelled");
             }
 
@@ -161,7 +161,7 @@ public class PaymentProcessor {
                 h.setQueryState(stateKey(paymentId, KEY_STATUS), "CANCELLED");
 
                 // Read stored payment details to issue refund
-                DurableResult<String> detailsResult = h.getQueryState(
+                CleatResult<String> detailsResult = h.getQueryState(
                     stateKey(paymentId, KEY_DETAILS));
                 if (detailsResult.isOk() && detailsResult.getValue() != null
                         && !detailsResult.getValue().isEmpty()) {
@@ -174,12 +174,12 @@ public class PaymentProcessor {
                         Map<String, Object> depositReq = new HashMap<>();
                         depositReq.put("accountId", accountId);
                         depositReq.put("amountCents", amountCents);
-                        h.durableCall("account", "deposit",
+                        h.cleatCall("account", "deposit",
                             JsonHelper.stringify(depositReq));
                     }
                 }
 
-                h.durableLog("Payment " + paymentId + " cancelled with refund");
+                h.cleatLog("Payment " + paymentId + " cancelled with refund");
                 return resultJson(true, "Payment cancelled and refunded");
             }
 
@@ -200,7 +200,7 @@ public class PaymentProcessor {
      * @param rawInput JSON with key {@code "paymentId"} (String)
      * @return JSON result indicating cleanup status
      */
-    @DurableEntry(name = "expire_payment")
+    @CleatEntry(name = "expire_payment")
     public static String expirePayment(HostCalls h, String rawInput) {
         Map<String, Object> input = JsonHelper.parseObject(rawInput);
 
@@ -213,7 +213,7 @@ public class PaymentProcessor {
         h.setQueryState(stateKey(paymentId, KEY_STATUS), "");
         h.setQueryState(stateKey(paymentId, KEY_DETAILS), "");
 
-        h.durableLog("Payment " + paymentId + " state expired");
+        h.cleatLog("Payment " + paymentId + " state expired");
         return resultJson(true, "Payment state expired");
     }
 
@@ -235,7 +235,7 @@ public class PaymentProcessor {
      * Returns {@code "NEW"} if no status has been stored yet.
      */
     private static String readStatus(HostCalls h, String paymentId) {
-        DurableResult<String> result = h.getQueryState(
+        CleatResult<String> result = h.getQueryState(
             stateKey(paymentId, KEY_STATUS));
         if (result.isOk() && result.getValue() != null
                 && !result.getValue().isEmpty()) {

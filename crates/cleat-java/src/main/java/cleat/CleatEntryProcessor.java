@@ -77,6 +77,24 @@ public class CleatEntryProcessor extends AbstractProcessor {
                     continue;
                 }
 
+                // B1: Validate the method is static.
+                if (!element.getModifiers().contains(javax.lang.model.element.Modifier.STATIC)) {
+                    processingEnv.getMessager().printMessage(
+                        Diagnostic.Kind.ERROR,
+                        "@CleatEntry method must be static",
+                        element);
+                    continue;
+                }
+
+                // B1: Validate the method is public.
+                if (!element.getModifiers().contains(javax.lang.model.element.Modifier.PUBLIC)) {
+                    processingEnv.getMessager().printMessage(
+                        Diagnostic.Kind.ERROR,
+                        "@CleatEntry method must be public",
+                        element);
+                    continue;
+                }
+
                 ExecutableElement method = (ExecutableElement) element;
                 TypeElement classElement = (TypeElement) method.getEnclosingElement();
 
@@ -116,6 +134,18 @@ public class CleatEntryProcessor extends AbstractProcessor {
 
         // Analyze method parameters.  The first parameter must be HostCalls.
         var params = method.getParameters();
+
+        // B1: Validate first parameter type is cleat.HostCalls.
+        if (params.isEmpty()
+            || !params.get(0).asType().toString().equals("cleat.HostCalls")) {
+            processingEnv.getMessager().printMessage(
+                Diagnostic.Kind.ERROR,
+                "@CleatEntry method first parameter must be cleat.HostCalls, got "
+                    + (params.isEmpty() ? "none" : params.get(0).asType().toString()),
+                method);
+            return;
+        }
+
         int userParamCount = params.size() - 1; // Exclude HostCalls
 
         // Determine return type
@@ -266,7 +296,12 @@ public class CleatEntryProcessor extends AbstractProcessor {
         out.println("            return Memory.encodeExportResult(0, written);");
         out.println();
 
-        // Catch block
+        // Catch block — TerminalError first (non-retryable), then general Exception.
+        out.println("        } catch (cleat.TerminalError e) {");
+        out.println("            String errorJSON = JsonHelper.errorJson(");
+        out.println("                e.getMessage() != null ? e.getMessage() : \"Terminal error\");");
+        out.println("            int written = Memory.writeString(outPtr, maxOutLen, errorJSON);");
+        out.println("            return Memory.encodeExportResult(cleat.Memory.TERMINAL_ERROR_CODE, written);");
         out.println("        } catch (Exception e) {");
         out.println("            // Catch all exceptions and return as error JSON.");
         out.println("            String errorJSON = JsonHelper.errorJson(");

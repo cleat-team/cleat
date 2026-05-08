@@ -327,6 +327,9 @@ func ensureHostCallsImport(file *ast.File, result *analyzer.AnalysisResult) {
 	for _, imp := range file.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)
 		if path == importPath {
+			if imp.Name == nil || imp.Name.Name != "durable" {
+				imp.Name = ast.NewIdent("durable")
+			}
 			return
 		}
 		if imp.Name != nil && imp.Name.Name == "durable" {
@@ -338,6 +341,7 @@ func ensureHostCallsImport(file *ast.File, result *analyzer.AnalysisResult) {
 	}
 
 	newImport := &ast.ImportSpec{
+		Name: ast.NewIdent("durable"),
 		Path: &ast.BasicLit{
 			Kind:  token.STRING,
 			Value: `"` + importPath + `"`,

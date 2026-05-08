@@ -90,6 +90,9 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 		}
 	}
 
+	// Validate that init() functions do not call durable functions.
+	validateInitFunctions(result, cr)
+
 	return cr
 }
 
@@ -117,6 +120,11 @@ type ValidationWarning struct {
 	FuncName string
 	Message  string
 	Line     int
+}
+
+// Error returns a string with the error code prefix and message.
+func (e ValidationError) Error() string {
+	return e.Code + ": " + e.Message
 }
 
 // NumErrors returns the total number of validation errors.
@@ -235,6 +243,19 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 	})
 }
 
+// resolveNamedType unwraps pointer types and returns the underlying named type.
+func resolveNamedType(t types.Type) *types.Named {
+	if named, ok := t.(*types.Named); ok {
+		return named
+	}
+	if ptr, ok := t.(*types.Pointer); ok {
+		if named, ok := ptr.Elem().(*types.Named); ok {
+			return named
+		}
+	}
+	return nil
+}
+
 // checkForbiddenCall checks if a call expression uses a forbidden function.
 func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName string, cr *Result, fset *token.FileSet) {
 	// Check builtins.
@@ -258,6 +279,29 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 		return
 	}
 
+	// Check for nested selectors like sync.Mutex.Lock() or sync.RWMutex.RLock().
+	if innerSel, ok := sel.X.(*ast.SelectorExpr); ok {
+		if innerPkgIdent, ok := innerSel.X.(*ast.Ident); ok {
+			innerPkgPath := resolveImportPath(fd, innerPkgIdent)
+			if innerPkgPath == "sync" {
+				switch innerSel.Sel.Name {
+				case "Mutex", "RWMutex", "WaitGroup", "Once", "Cond", "Pool", "Map":
+					line := 0
+					if fset != nil {
+						line = fset.Position(call.Pos()).Line
+					}
+					cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
+						Code:       "E013",
+						FuncName:   funcName,
+						Message:    "sync." + innerSel.Sel.Name + " operations are non-deterministic across replays",
+						Suggestion: "Use h.DurableCall() for coordination.",
+						Line:       line,
+					})
+				}
+			}
+		}
+	}
+
 	pkgIdent, ok := sel.X.(*ast.Ident)
 	if !ok {
 		return
@@ -265,6 +309,27 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 
 	pkgPath := resolveImportPath(fd, pkgIdent)
 	selName := sel.Sel.Name
+
+	// Check for calls on sync-type variables (e.g., mu.Lock() where mu is sync.Mutex).
+	if pkgPath == "" && fd.Pkg != nil && fd.Pkg.Info != nil {
+		if tv, ok := fd.Pkg.Info.Types[pkgIdent]; ok {
+			if named := resolveNamedType(tv.Type); named != nil {
+				if named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == "sync" {
+					line := 0
+					if fset != nil {
+						line = fset.Position(call.Pos()).Line
+					}
+					cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
+						Code:       "E013",
+						FuncName:   funcName,
+						Message:    "sync." + named.Obj().Name() + " operations are non-deterministic across replays",
+						Suggestion: "Use h.DurableCall() for coordination.",
+						Line:       line,
+					})
+				}
+			}
+		}
+	}
 
 	var code, msg, suggestion string
 
@@ -279,6 +344,11 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 			"time.Sleep() is not allowed in cleat functions",
 			"Use h.DurableSleep() instead."
 
+	case pkgPath == "time" && (selName == "After" || selName == "NewTicker" || selName == "NewTimer"):
+		code, msg, suggestion = "E014",
+			"time."+selName+"() is not allowed in cleat functions",
+			"Use h.DurableSleep() for deterministic delays."
+
 	case pkgPath == "net/http" || strings.HasPrefix(pkgPath, "net/http/"):
 		code, msg, suggestion = "E005",
 			"direct net/http calls are not allowed in cleat functions",
@@ -292,6 +362,44 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 	case pkgPath == "math/rand":
 		code, msg, suggestion = "E007",
 			"math/rand calls are not allowed in cleat functions",
+			"Use h.Random() for deterministic randomness."
+
+	case pkgPath == "math/rand/v2":
+		code, msg, suggestion = "E018",
+			"math/rand/v2 calls are not allowed in cleat functions",
+			"Use h.Random() for deterministic randomness."
+
+	case pkgPath == "sync/atomic":
+		code, msg, suggestion = "E013",
+			"sync/atomic operations are non-deterministic across replays",
+			"Use h.DurableCall() for coordination."
+
+	case pkgPath == "fmt" && (selName == "Print" || selName == "Printf" || selName == "Println" ||
+		selName == "Fprint" || selName == "Fprintf" || selName == "Fprintln"):
+		code, msg, suggestion = "E015",
+			"fmt."+selName+"() is not allowed in cleat functions",
+			"Use h.DurableLog() for deterministic logging."
+
+	case pkgPath == "log" && (selName == "Print" || selName == "Printf" || selName == "Println" ||
+		selName == "Fatal" || selName == "Fatalf" || selName == "Fatalln" ||
+		selName == "Panic" || selName == "Panicf" || selName == "Panicln"):
+		code, msg, suggestion = "E015",
+			"log."+selName+"() is not allowed in cleat functions",
+			"Use h.DurableLog() for deterministic logging."
+
+	case pkgPath == "os" && (selName == "Getenv" || selName == "Environ"):
+		code, msg, suggestion = "E016",
+			"os."+selName+"() is not allowed in cleat functions",
+			"Environment variables may differ across replays. Pass configuration via workflow input."
+
+	case pkgPath == "os" && selName == "Exit":
+		code, msg, suggestion = "E016",
+			"os.Exit() is not allowed in cleat functions",
+			"os.Exit terminates the WASM runtime; return an error instead."
+
+	case pkgPath == "crypto/rand":
+		code, msg, suggestion = "E017",
+			"crypto/rand calls are not allowed in cleat functions",
 			"Use h.Random() for deterministic randomness."
 	}
 
@@ -482,17 +590,119 @@ func resolveImportPath(fd *analyzer.FuncDecl, pkgIdent *ast.Ident) string {
 	}
 
 	name := pkgIdent.Name
-	// Fallback: match by explicit import name or last path component.
+	// Fallback: match by explicit import name (unambiguous).
 	for _, file := range fd.Pkg.Files {
 		for _, imp := range file.Imports {
 			importPath := strings.Trim(imp.Path.Value, `"`)
 			if imp.Name != nil && imp.Name.Name == name {
 				return importPath
 			}
+		}
+	}
+	// Fallback: match by last path component. Only return when exactly
+	// one import matches, to avoid ambiguity (e.g., rand could be
+	// crypto/rand or math/rand).
+	var lastComponentMatch string
+	matchCount := 0
+	for _, file := range fd.Pkg.Files {
+		for _, imp := range file.Imports {
+			importPath := strings.Trim(imp.Path.Value, `"`)
 			if analyzer.LastComponent(importPath) == name {
-				return importPath
+				lastComponentMatch = importPath
+				matchCount++
+			}
+		}
+	}
+	if matchCount == 1 {
+		return lastComponentMatch
+	}
+	return ""
+}
+
+// resolveCallFQName resolves a call expression to a fully-qualified function name
+// using type information. Returns empty string if the callee cannot be resolved.
+func resolveCallFQName(call *ast.CallExpr, info *types.Info) string {
+	if info == nil {
+		return ""
+	}
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		obj, ok := info.Uses[fun]
+		if !ok {
+			return ""
+		}
+		if fn, ok := obj.(*types.Func); ok {
+			return fn.FullName()
+		}
+	case *ast.SelectorExpr:
+		if sel, ok := info.Selections[fun]; ok {
+			if fn, ok := sel.Obj().(*types.Func); ok {
+				return fn.FullName()
+			}
+		}
+		if obj, ok := info.Uses[fun.Sel]; ok {
+			if fn, ok := obj.(*types.Func); ok {
+				return fn.FullName()
 			}
 		}
 	}
 	return ""
+}
+
+// validateInitFunctions checks that init() functions in the target package
+// do not call any function in the durable closure or durable leaves set.
+// Durable calls must happen inside workflow entry points, not in init().
+func validateInitFunctions(result *analyzer.AnalysisResult, cr *Result) {
+	// Build the durable call set.
+	durableSet := make(map[string]bool)
+	for name := range cr.DurableLeaves {
+		durableSet[name] = true
+	}
+	for name := range cr.DurableClosure {
+		durableSet[name] = true
+	}
+	if len(durableSet) == 0 {
+		return
+	}
+
+	for _, fd := range result.Funcs {
+		if fd.Name != "init" || fd.RecvType != nil {
+			continue
+		}
+		if fd.Ast.Body == nil {
+			continue
+		}
+
+		var fset *token.FileSet
+		if fd.Pkg != nil {
+			fset = fd.Pkg.Fset
+		}
+
+		funcName := fd.FullyQualifiedName()
+		ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			callee := resolveCallFQName(call, fd.Pkg.Info)
+			if callee == "" {
+				return true
+			}
+			if durableSet[callee] {
+				line := 0
+				if fset != nil {
+					line = fset.Position(call.Pos()).Line
+				}
+				cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
+					Code:       "E020",
+					FuncName:   funcName,
+					Message:    "init() functions cannot make durable calls — durable calls must happen inside workflow entry points",
+					Suggestion: "Move durable calls from init() into the workflow entry point function.",
+					Line:       line,
+				})
+				return false
+			}
+			return true
+		})
+	}
 }

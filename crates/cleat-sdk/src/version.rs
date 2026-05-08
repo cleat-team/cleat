@@ -25,12 +25,12 @@ pub const WORKFLOW_NAME: &str = match option_env!("CLEAT_WORKFLOW_NAME") {
 
 /// Monotonic version number for this workflow definition.
 /// Set via CLEAT_WORKFLOW_VERSION environment variable.
-/// Default: 0
+/// Default: 1
 pub const WORKFLOW_VERSION: u32 = {
     // We can't use option_env! for integer parsing at const level,
     // so we fall back to compile-time checks and a default.
     // A build.rs is better for full env-to-const support.
-    0
+    1
 };
 
 /// Minimum compatible workflow definition version (for child workflows).

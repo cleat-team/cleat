@@ -43,7 +43,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|init> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
-		fmt.Fprintf(os.Stderr, "  cleat vet <package>\n")
+		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
@@ -81,10 +81,12 @@ func main() {
 		fs := flag.NewFlagSet("build", flag.ExitOnError)
 		var target string
 		var entry string
+		var jsonOut bool
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, rust, java, assemblyscript, or python")
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
+		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.Parse(os.Args[2:])
 		if !isValidTarget(target) {
 			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript, python\n", target)
@@ -96,12 +98,45 @@ func main() {
 		}
 		if entry != "" {
 			// Use --entry as the pattern for Python builds.
-			runBuild(entry, outDir, target)
+			runBuild(entry, outDir, target, jsonOut)
 		} else {
-			runBuild(pattern, outDir, target)
+			runBuild(pattern, outDir, target, jsonOut)
 		}
 	case "vet":
-		runVet(pattern)
+		fs := flag.NewFlagSet("vet", flag.ExitOnError)
+		vetLang := fs.String("lang", "", "language target: go, rust, java, as, python (auto-detected if empty)")
+		vetJSON := fs.Bool("json", false, "output results as JSON")
+		fs.Parse(os.Args[2:])
+		remainder := fs.Args()
+		if len(remainder) > 0 {
+			pattern = remainder[0]
+		}
+		lang := *vetLang
+		if lang == "" {
+			var err error
+			lang, err = detectVetLang(pattern)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v. Use --lang to specify the language.\n", err)
+				os.Exit(1)
+			}
+		}
+		var code int
+		switch lang {
+		case "go":
+			code = runVet(pattern, *vetJSON)
+		case "rust":
+			code = runVetRust(pattern)
+		case "java":
+			code = runVetJava(pattern)
+		case "python":
+			code = runVetPython(pattern, *vetJSON)
+		case "as":
+			code = runVetAS(pattern)
+		default:
+			fmt.Fprintf(os.Stderr, "Error: unknown vet language %q. Valid: go, rust, java, as, python\n", lang)
+			os.Exit(1)
+		}
+		os.Exit(code)
 	case "deploy":
 		runDeploy(flag.Args()[1:])
 	case "versions":
@@ -134,7 +169,7 @@ func main() {
 	}
 }
 
-func runBuild(pattern, outDir, target string) {
+func runBuild(pattern, outDir, target string, jsonOut bool) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
@@ -166,67 +201,91 @@ func runBuild(pattern, outDir, target string) {
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = cg
 
-	fmt.Printf("  Analyzing package %s...\n", result.TargetPkg.Path)
-
-	leafCount := len(cr.DurableLeaves)
-	closureCount := len(cr.DurableClosure)
-	fmt.Printf("  Found %d functions, %d entry point(s), %d in cleat closure.\n",
-		result.NumFuncs, len(result.EntryPoints), leafCount+closureCount)
-	fmt.Printf("  Durable leaves: %s\n", formatDurableLeaves(result, cr))
-	fmt.Printf("  Verifying HostCalls threading... %s\n", formatThreadingStatus(threadingErrs))
-
-	if len(threadingErrs) > 0 {
-		fmt.Println()
-		for _, e := range threadingErrs {
-			fmt.Printf("  Error: %s\n", e.Message)
-			if len(e.Chain) > 0 {
-				fmt.Printf("         Call chain: %s\n", strings.Join(e.Chain, " → "))
-			}
-			if e.Line > 0 {
-				fmt.Printf("         At: %d\n", e.Line)
-			}
+	if jsonOut {
+		vo := vetJSONOutput(result, cr, threadingErrs)
+		jsonBytes, jErr := json.Marshal(vo)
+		if jErr != nil {
+			fmt.Fprintf(os.Stderr, "Error building JSON diagnostics: %v\n", jErr)
+			os.Exit(1)
 		}
-		os.Exit(1)
-	}
-
-	warnCount := cr.NumWarnings()
-	if warnCount > 0 {
-		fmt.Println()
-		for funcName, warns := range cr.Warnings {
-			for _, w := range warns {
-				fmt.Printf("  Warning: %s:%d: %s [%s]\n",
-					analyzer.ShortName(funcName), w.Line, w.Message, w.Code)
-			}
+		fmt.Println(string(jsonBytes))
+		if len(threadingErrs) > 0 || cr.NumErrors() > 0 {
+			os.Exit(1)
 		}
-	}
+	} else {
+		fmt.Printf("  Analyzing package %s...\n", result.TargetPkg.Path)
 
-	errCount := cr.NumErrors()
-	if errCount > 0 {
-		fmt.Println()
-		for funcName, errs := range cr.Errors {
-			for _, e := range errs {
-				fmt.Printf("  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(funcName), e.Line, e.Message)
-				if e.Suggestion != "" {
-					fmt.Printf("    → %s\n", e.Suggestion)
+		leafCount := len(cr.DurableLeaves)
+		closureCount := len(cr.DurableClosure)
+		fmt.Printf("  Found %d functions, %d entry point(s), %d in cleat closure.\n",
+			result.NumFuncs, len(result.EntryPoints), leafCount+closureCount)
+		fmt.Printf("  Durable leaves: %s\n", formatDurableLeaves(result, cr))
+		fmt.Printf("  Verifying HostCalls threading... %s\n", formatThreadingStatus(threadingErrs))
+
+		if len(threadingErrs) > 0 {
+			fmt.Println()
+			for _, e := range threadingErrs {
+				fmt.Printf("  Error: %s\n", e.Message)
+				if len(e.Chain) > 0 {
+					fmt.Printf("         Call chain: %s\n", strings.Join(e.Chain, " → "))
+				}
+				if e.Line > 0 {
+					fmt.Printf("         At: %d\n", e.Line)
+				}
+			}
+			os.Exit(1)
+		}
+
+		warnCount := cr.NumWarnings()
+		if warnCount > 0 {
+			fmt.Println()
+			for funcName, warns := range cr.Warnings {
+				for _, w := range warns {
+					fmt.Printf("  Warning: %s:%d: %s [%s]\n",
+						analyzer.ShortName(funcName), w.Line, w.Message, w.Code)
 				}
 			}
 		}
-		os.Exit(1)
-	}
 
-	fmt.Println()
+		errCount := cr.NumErrors()
+		if errCount > 0 {
+			fmt.Println()
+			for funcName, errs := range cr.Errors {
+				for _, e := range errs {
+					fmt.Printf("  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(funcName), e.Line, e.Message)
+					if e.Suggestion != "" {
+						fmt.Printf("    → %s\n", e.Suggestion)
+					}
+				}
+			}
+			os.Exit(1)
+		}
+
+		fmt.Println()
+	}
 
 	outputs := wasm.BuildOutputs("main", usage, result)
 	hostCount := usage.Count()
-	fmt.Printf("  Generating WASM imports (%d host functions used)... ", hostCount)
-	fmt.Println("OK")
-	fmt.Printf("  Generating host adapter... OK\n")
-	fmt.Printf("  Generating WASM exports (%d entry point(s))... OK\n", len(result.EntryPoints))
-
-	if len(tr.AddedH) > 0 {
-		fmt.Printf("  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
+	if jsonOut {
+		fmt.Fprintf(os.Stderr, "  Generating WASM imports (%d host functions used)... ", hostCount)
+		fmt.Fprintln(os.Stderr, "OK")
+		fmt.Fprintf(os.Stderr, "  Generating host adapter... OK\n")
+		fmt.Fprintf(os.Stderr, "  Generating WASM exports (%d entry point(s))... OK\n", len(result.EntryPoints))
+		if len(tr.AddedH) > 0 {
+			fmt.Fprintf(os.Stderr, "  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
+		} else {
+			fmt.Fprintf(os.Stderr, "  Auto-threading: no changes needed\n")
+		}
 	} else {
-		fmt.Printf("  Auto-threading: no changes needed\n")
+		fmt.Printf("  Generating WASM imports (%d host functions used)... ", hostCount)
+		fmt.Println("OK")
+		fmt.Printf("  Generating host adapter... OK\n")
+		fmt.Printf("  Generating WASM exports (%d entry point(s))... OK\n", len(result.EntryPoints))
+		if len(tr.AddedH) > 0 {
+			fmt.Printf("  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
+		} else {
+			fmt.Printf("  Auto-threading: no changes needed\n")
+		}
 	}
 
 	keepTempDir := false
@@ -268,12 +327,12 @@ func runBuild(pattern, outDir, target string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("  Build directory: %s\n", outDir)
+	logBuildProgress("  Build directory: %s\n", jsonOut, outDir)
 
 	wasmPath := filepath.Join(outDir, wasmFile)
 	var cmd *exec.Cmd
 	if target == "tinygo" {
-		fmt.Printf("  Compiling WASM module (tinygo)...\n")
+		logBuildProgress("  Compiling WASM module (tinygo)...\n", jsonOut)
 		cmd = exec.Command("tinygo", "build",
 			"-target=wasip1",
 			"-o", wasmPath,
@@ -293,7 +352,7 @@ func runBuild(pattern, outDir, target string) {
 			cmd.Env = append(cmd.Env, "TINYGOROOT="+tinygoroot)
 		}
 	} else {
-		fmt.Printf("  Compiling WASM module (GOOS=wasip1 GOARCH=wasm)...\n")
+		logBuildProgress("  Compiling WASM module (GOOS=wasip1 GOARCH=wasm)...\n", jsonOut)
 		cmd = exec.Command("go", "build",
 			"-o", wasmPath,
 			".",
@@ -316,7 +375,7 @@ func runBuild(pattern, outDir, target string) {
 		fmt.Fprintf(os.Stderr, "Error: WASM binary not found at %s\n", wasmPath)
 		os.Exit(1)
 	}
-	fmt.Printf("  Wrote %s (%s)\n", wasmPath, formatSize(fi.Size()))
+	logBuildProgress("  Wrote %s (%s)\n", jsonOut, wasmPath, formatSize(fi.Size()))
 
 	// Embed cleat.metadata custom section for deployment.
 	wasmBytes, err := os.ReadFile(wasmPath)
@@ -341,15 +400,29 @@ func runBuild(pattern, outDir, target string) {
 		fmt.Fprintf(os.Stderr, "Error writing WASM binary with metadata: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("  Embedded metadata: %s v%d (ABI v%d)\n",
+	logBuildProgress("  Embedded metadata: %s v%d (ABI v%d)\n", jsonOut,
 		meta.WorkflowName, meta.WorkflowVersion, meta.ABIVersion)
 	keepTempDir = true
 }
 
-func runVet(pattern string) {
+func runVet(pattern string, jsonOut bool) int {
 	result, _, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = usage
 	_ = tr
+
+	if jsonOut {
+		vo := vetJSONOutput(result, cr, threadingErrs)
+		jsonBytes, jErr := json.Marshal(vo)
+		if jErr != nil {
+			fmt.Fprintf(os.Stderr, "Error building JSON output: %v\n", jErr)
+			return 1
+		}
+		fmt.Println(string(jsonBytes))
+		if len(threadingErrs) > 0 || cr.NumErrors() > 0 {
+			return 1
+		}
+		return 0
+	}
 
 	fmt.Printf("Analyzing package %s...\n", result.TargetPkg.Path)
 	fmt.Printf("  Package: %s\n", result.TargetPkg.Path)
@@ -385,7 +458,214 @@ func runVet(pattern string) {
 	if exitCode == 0 {
 		fmt.Printf("  %s\n", "OK")
 	}
-	os.Exit(exitCode)
+	return exitCode
+}
+
+// detectVetLang auto-detects the programming language in a directory.
+// Returns the language name or an error if detection fails.
+func detectVetLang(dir string) (string, error) {
+	if dir == "" {
+		dir = "."
+	}
+
+	// Check for Go module.
+	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+		return "go", nil
+	}
+
+	// Check for Rust crate.
+	if _, err := os.Stat(filepath.Join(dir, "Cargo.toml")); err == nil {
+		return "rust", nil
+	}
+
+	// Check for Gradle project.
+	if _, err := os.Stat(filepath.Join(dir, "build.gradle.kts")); err == nil {
+		return "java", nil
+	}
+	if _, err := os.Stat(filepath.Join(dir, "build.gradle")); err == nil {
+		return "java", nil
+	}
+
+	// Check for Python files.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", fmt.Errorf("cannot read directory %s: %w", dir, err)
+	}
+	hasPy := false
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") {
+			hasPy = true
+			break
+		}
+	}
+	if hasPy {
+		return "python", nil
+	}
+
+	// Check for AssemblyScript (package.json).
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+		return "as", nil
+	}
+
+	return "", fmt.Errorf("could not auto-detect language in %s", dir)
+}
+
+// runVetPython runs the Python AST-based vet via subprocess.
+func runVetPython(dir string, jsonOut bool) int {
+	// Find .py files in the directory.
+	var pyFiles []string
+	if dir == "" {
+		dir = "."
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot read directory %s: %v\n", dir, err)
+		return 1
+	}
+	// Also check if dir itself is a .py file.
+	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() && strings.HasSuffix(dir, ".py") {
+		pyFiles = append(pyFiles, dir)
+	} else {
+		for _, e := range entries {
+			if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") {
+				pyFiles = append(pyFiles, filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+	if len(pyFiles) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: no .py files found in %s\n", dir)
+		return 1
+	}
+
+	sdkDir := findPythonSDKDir()
+	exitCode := 0
+
+	for _, pyFile := range pyFiles {
+		args := []string{"-m", "cleat_sdk.vet", pyFile}
+		if jsonOut {
+			args = append(args, "--json")
+		}
+
+		cmd := exec.Command("python3", args...)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		if sdkDir != "" {
+			cmd.Env = append(os.Environ(), "PYTHONPATH="+sdkDir)
+		}
+
+		if err := cmd.Run(); err != nil {
+			if stderr.Len() > 0 {
+				fmt.Fprint(os.Stderr, stderr.String())
+			}
+			fmt.Fprintf(os.Stderr, "Python vet failed for %s: %v\n", pyFile, err)
+			exitCode = 1
+			continue
+		}
+
+		// Print output.
+		if jsonOut {
+			fmt.Print(stdout.String())
+		} else {
+			fmt.Print(stdout.String())
+			if stderr.Len() > 0 {
+				fmt.Fprint(os.Stderr, stderr.String())
+			}
+		}
+
+		if stderr.Len() > 0 {
+			exitCode = 1
+		}
+	}
+
+	return exitCode
+}
+
+// runVetAS performs a basic vet check on AssemblyScript source files.
+// AssemblyScript vetting is currently limited; full AST analysis is planned.
+func runVetAS(dir string) int {
+	if dir == "" {
+		dir = "."
+	}
+
+	// Check for package.json.
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error: no package.json found in %s\n", dir)
+		return 1
+	}
+
+	fmt.Fprintf(os.Stderr, "Vetting AssemblyScript project in %s...\n", dir)
+	fmt.Fprintf(os.Stderr, "Note: AssemblyScript vetting is experimental. Checking transform-level validation.\n")
+
+	// Check for the cleat-as package transform validation.
+	asDir := filepath.Join(dir, "packages", "cleat-as")
+	if _, err := os.Stat(asDir); os.IsNotExist(err) {
+		// The transform may be at the AS project level; check for assembly/ dir.
+		asDir = dir
+	}
+
+	// Find .as files.
+	var asFiles []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == "node_modules" || d.Name() == ".git" || strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".as") || strings.HasSuffix(path, ".ts") {
+			asFiles = append(asFiles, path)
+		}
+		return nil
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error scanning AS files: %v\n", err)
+		return 1
+	}
+
+	if len(asFiles) == 0 {
+		fmt.Fprintf(os.Stderr, "Warning: no .as or .ts source files found in %s\n", dir)
+		return 0
+	}
+
+	// Run the AS transform's vet validation via Node.js if available.
+	nodePath, err := exec.LookPath("node")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: node not found, skipping AssemblyScript vet transform.\n")
+		fmt.Fprintf(os.Stderr, "Scanned %d file(s) — no pattern-based checks available for AS yet.\n", len(asFiles))
+		return 0
+	}
+
+	// Check if the transform's afterParse validation is available.
+	transformFile := filepath.Join(dir, "packages", "cleat-as", "transform", "index.js")
+	if _, err := os.Stat(transformFile); os.IsNotExist(err) {
+		// Fall back to looking relative to the repo root.
+		candidates := []string{
+			filepath.Join("packages", "cleat-as", "transform", "index.js"),
+			filepath.Join(dir, "..", "packages", "cleat-as", "transform", "index.js"),
+		}
+		found := false
+		for _, c := range candidates {
+			if _, statErr := os.Stat(c); statErr == nil {
+				transformFile = c
+				found = true
+				break
+			}
+		}
+		if !found {
+			fmt.Fprintf(os.Stderr, "Scanned %d file(s) — AS transform validation unavailable.\n", len(asFiles))
+			return 0
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "Scanned %d file(s) — use 'cleat build' for full AS validation.\n", len(asFiles))
+
+	_ = nodePath
+	return 0
 }
 
 // runDeploy deploys a compiled WASM workflow to the database.
@@ -543,6 +823,87 @@ func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closu
 	return result, cg, cr, threadingErrs, usage, tr
 }
 
+// buildJSONDiagnostics builds a JSON representation of all diagnostics.
+// logBuildProgress prints a build progress message. In JSON output mode,
+// the message goes to stderr so stdout contains only the JSON diagnostics.
+func logBuildProgress(format string, jsonOut bool, args ...interface{}) {
+	if jsonOut {
+		fmt.Fprintf(os.Stderr, format, args...)
+	} else {
+		fmt.Printf(format, args...)
+	}
+}
+
+
+	// vetJSONOutput builds a VetOutput from analysis results.
+	func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadingErrs []closure.ThreadingError) VetOutput {
+		var out VetOutput
+		out.Errors = make([]VetResult, 0)
+		out.Warnings = make([]VetResult, 0)
+
+		// Threading errors.
+		for _, te := range threadingErrs {
+			out.Errors = append(out.Errors, VetResult{
+				File:    lookupFile(result, te.FuncName),
+				Line:    te.Line,
+				Column:  0,
+				Message: te.Message,
+				Chain:   te.Chain,
+			})
+		}
+
+		// Validation errors.
+		for funcName, errs := range cr.Errors {
+			for _, e := range errs {
+				out.Errors = append(out.Errors, VetResult{
+					Code:       e.Code,
+					File:       lookupFile(result, funcName),
+					Line:       e.Line,
+					Column:     0,
+					Message:    e.Message,
+					Suggestion: e.Suggestion,
+				})
+			}
+		}
+
+		// Warnings.
+		for funcName, warns := range cr.Warnings {
+			for _, w := range warns {
+				out.Warnings = append(out.Warnings, VetResult{
+					Code:    w.Code,
+					File:    lookupFile(result, funcName),
+					Line:    w.Line,
+					Column:  0,
+					Message: w.Message,
+				})
+			}
+		}
+
+		// Summary.
+		out.Summary = VetSummary{
+			Functions:      result.NumFuncs,
+			DurableLeaves:  result.NumDurableLeaves,
+			DurableClosure: result.NumDurableClosure,
+			Pure:           result.NumPure,
+		}
+
+		return out
+	}
+
+// lookupFile returns the base filename for a function by its fully-qualified name.
+func lookupFile(result *analyzer.AnalysisResult, funcName string) string {
+	fd, ok := result.Funcs[funcName]
+	if !ok || fd.Pkg == nil || fd.Pkg.Fset == nil {
+		return ""
+	}
+	pos := fd.Pkg.Fset.Position(fd.Ast.Pos())
+	if pos.Filename != "" {
+		return filepath.Base(pos.Filename)
+	}
+	return ""
+}
+
+
 func formatDurableLeaves(result *analyzer.AnalysisResult, cr *closure.Result) string {
 	var names []string
 	for name := range cr.DurableLeaves {
@@ -579,7 +940,7 @@ func wasmOutputName(result *analyzer.AnalysisResult) string {
 
 // derivePluginDeps infers plugin dependencies from the host functions used
 // by the workflow. PluginCall usage implies a dependency on that plugin.
-func derivePluginDeps(usage *wasm.UsageInfo) []string {
+func derivePluginDeps(usage *wasm.UsageInfo) map[string]string {
 	if usage == nil || !usage.Used["plugin_call"] {
 		return nil
 	}

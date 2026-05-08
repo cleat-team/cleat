@@ -22,9 +22,8 @@ try:
         CleatDefer,
     )
 except ImportError as e:
-    pytest.skip(
-        f"Skipping types tests: {e}",
-        allow_module_level=True,
+    pytest.fail(
+        f"Required import failed: {e}",
     )
 
 

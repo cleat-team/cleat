@@ -78,6 +78,9 @@ section "LINT"
 run_step "go vet ./..." \
     go vet ./...
 
+run_step "cleat vet (go) testdata/basic/" \
+    go run ./cmd/cleat vet --lang go --json ./testdata/basic/
+
 run_step "ruff check python-sdk/" \
     ruff check python-sdk/
 

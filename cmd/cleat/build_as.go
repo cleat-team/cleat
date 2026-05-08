@@ -56,6 +56,7 @@ func runBuildAssemblyScript(pattern, outDir string) {
 		"asc",
 		"assembly/index.ts",
 		"--runtime", "stub",
+		"--transform", "@cleat/transform",
 		"--optimize",
 		"--initialMemory", "170",
 		"-o", "dist/workflow.wasm",

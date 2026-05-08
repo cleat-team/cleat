@@ -1,0 +1,4 @@
+[package]
+name = "cleat-test-e001-fs-access"
+version = "0.1.0"
+edition = "2021"

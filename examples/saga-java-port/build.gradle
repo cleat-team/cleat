@@ -23,14 +23,14 @@ repositories {
 
 dependencies {
     // Depend on the cleat Java SDK subproject for implementation
-    implementation project(":durable-java")
+    implementation project(":cleat-java")
 
     // TeaVM classlib for standard Java library emulation
     implementation "org.teavm:teavm-classlib:0.10.2"
     implementation "org.teavm:teavm-jso-apis:0.10.2"
 
-    // Use the SDK as an annotation processor (DurableEntryProcessor is in there)
-    annotationProcessor project(":durable-java")
+    // Use the SDK as an annotation processor (CleatEntryProcessor is in there)
+    annotationProcessor project(":cleat-java")
 
     testImplementation "org.junit.jupiter:junit-jupiter:5.10.0"
 }

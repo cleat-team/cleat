@@ -1,8 +1,8 @@
 package com.cleat.example;
 
 import cleat.HostCalls;
-import cleat.DurableEntry;
-import cleat.DurableResult;
+import cleat.CleatEntry;
+import cleat.CleatResult;
 
 /**
  * Example order processing workflow using the cleat Java SDK.
@@ -30,7 +30,7 @@ public class PlaceOrder {
      * @param input the JSON-encoded order input string
      * @return a JSON result string indicating success or failure
      */
-    @DurableEntry(name = "place_order")
+    @CleatEntry(name = "place_order")
     public static String placeOrder(HostCalls h, String input) {
         // Validate input
         if (input == null || input.isEmpty() || input.equals("{}")) {
@@ -39,7 +39,7 @@ public class PlaceOrder {
 
         // Step 1: Reserve inventory
         String reserveReq = "{\"reservation\":" + input + "}";
-        DurableResult<String> reserveResult = h.durableCall("inventory", "Reserve", reserveReq);
+        CleatResult<String> reserveResult = h.cleatCall("inventory", "Reserve", reserveReq);
         if (reserveResult.isErr()) {
             return "{\"error\":\"inventory reserve failed: " + escapeJSON(reserveResult.getError()) + "\"}";
         }
@@ -47,29 +47,29 @@ public class PlaceOrder {
 
         // Step 2: Charge payment
         String chargeReq = "{\"charge\":" + input + "}";
-        DurableResult<String> chargeResult = h.durableCall("payments", "Charge", chargeReq);
+        CleatResult<String> chargeResult = h.cleatCall("payments", "Charge", chargeReq);
         if (chargeResult.isErr()) {
             // Compensate: release inventory
             String releaseReq = "{\"release\":" + reservationJSON + "}";
-            h.durableCall("inventory", "Release", releaseReq);
+            h.cleatCall("inventory", "Release", releaseReq);
             return "{\"error\":\"payment failed: " + escapeJSON(chargeResult.getError()) + "\"}";
         }
 
         // Step 3: Create shipment
         String shipReq = "{\"shipment\":" + input + ",\"reservation\":" + reservationJSON + "}";
-        DurableResult<String> shipResult = h.durableCall("shipping", "CreateShipment", shipReq);
+        CleatResult<String> shipResult = h.cleatCall("shipping", "CreateShipment", shipReq);
         if (shipResult.isErr()) {
             // Compensate: refund payment + release inventory
             String refundReq = "{\"refund\":" + chargeResult.getValue() + "}";
-            h.durableCall("payments", "Refund", refundReq);
+            h.cleatCall("payments", "Refund", refundReq);
             String releaseReq = "{\"release\":" + reservationJSON + "}";
-            h.durableCall("inventory", "Release", releaseReq);
+            h.cleatCall("inventory", "Release", releaseReq);
             return "{\"error\":\"shipping failed: " + escapeJSON(shipResult.getError()) + "\"}";
         }
 
         // Step 4: Best-effort notification
         String notifyReq = "{\"notification\":" + input + "}";
-        h.durableCall("notifications", "SendEmail", notifyReq);
+        h.cleatCall("notifications", "SendEmail", notifyReq);
 
         return "{\"status\":\"shipped\"}";
     }
@@ -84,17 +84,17 @@ public class PlaceOrder {
      * @param input the JSON-encoded order identifier
      * @return a JSON result string indicating cancellation status
      */
-    @DurableEntry(name = "cancel_order")
+    @CleatEntry(name = "cancel_order")
     public static String cancelOrder(HostCalls h, String input) {
         // Check for cancellation signal
-        DurableResult<Boolean> cancelCheck = h.pollCancellation();
+        CleatResult<Boolean> cancelCheck = h.pollCancellation();
         if (cancelCheck.isOk() && cancelCheck.getValue()) {
             return "{\"status\":\"cancelled\"}";
         }
 
         // Proceed with cancellation
         String cancelReq = "{\"cancel\":" + input + "}";
-        DurableResult<String> result = h.durableCall("orders", "Cancel", cancelReq);
+        CleatResult<String> result = h.cleatCall("orders", "Cancel", cancelReq);
         if (result.isErr()) {
             return "{\"error\":\"cancellation failed: " + escapeJSON(result.getError()) + "\"}";
         }

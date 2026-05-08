@@ -169,15 +169,23 @@ def _from_dict(
 # Decorator
 # ---------------------------------------------------------------------------
 
-def _inject_witworld(func: Callable, export_wrapper: Callable) -> None:
+def _inject_witworld(func: Callable, export_wrapper: Callable,
+                     entry_name: str) -> None:
     """Inject a ``WitWorld`` class into *func*'s module.
 
     ``componentize-py`` requires the entry module to export a class named
     ``WitWorld`` whose ``run`` method matches the world's entry-point
     signature.  We create a lightweight class that delegates to the
     ``@cleat_entry`` wrapper.
+
+    Multiple ``@cleat_entry`` functions in the same module are supported:
+    all wrappers are stored in a registry keyed by entry name, and
+    ``WitWorld.run`` dispatches based on the ``__cleat_entry__`` field in
+    the input JSON.
     """
     import sys
+    from .memory import read_string, write_string
+
     module_name = getattr(func, "__module__", None)
     if module_name is None:
         return
@@ -185,10 +193,54 @@ def _inject_witworld(func: Callable, export_wrapper: Callable) -> None:
     if module is None:
         return
 
-    # Build a WitWorld class whose run method is the export wrapper.
-    # componentize-py only cares that the class exists and has a callable
-    # ``run`` with the right signature.
-    wrapped = staticmethod(export_wrapper)
+    # Initialise registry on the module (shared across all entries).
+    if not hasattr(module, "_cleat_entry_wrappers"):
+        module._cleat_entry_wrappers = {}
+
+    # Store this wrapper keyed by entry name.
+    module._cleat_entry_wrappers[entry_name] = export_wrapper
+
+    def _dispatcher_run(
+        args_ptr: int, args_len: int,
+        out_ptr: int, max_out_len: int,
+    ) -> int:
+        """WitWorld.run dispatcher -- selects the right entry and delegates."""
+        wrappers = module._cleat_entry_wrappers
+        if not wrappers:
+            raise RuntimeError("No cleat_entry functions registered")
+
+        if len(wrappers) == 1:
+            # Single entry: call the only wrapper directly (backward compat).
+            return list(wrappers.values())[0](
+                args_ptr, args_len, out_ptr, max_out_len,
+            )
+
+        # Multiple entries: dispatch based on __cleat_entry__ in input JSON.
+        input_json = read_string(args_ptr, args_len)
+        input_data: dict = json.loads(input_json) if input_json else {}
+
+        entry_key = input_data.pop("__cleat_entry__", None)
+        if entry_key is None:
+            raise ValueError(
+                f"Multiple cleat_entry functions registered "
+                f"({list(wrappers.keys())}), "
+                f"but input JSON does not contain '__cleat_entry__' field"
+            )
+
+        wrapper = wrappers.get(entry_key)
+        if wrapper is None:
+            raise ValueError(
+                f"No cleat_entry named '{entry_key}'. "
+                f"Available entries: {list(wrappers.keys())}"
+            )
+
+        # Write modified input (without __cleat_entry__) back to memory.
+        modified_json = json.dumps(input_data)
+        new_len = write_string(args_ptr, modified_json, args_len)
+
+        return wrapper(args_ptr, new_len, out_ptr, max_out_len)
+
+    wrapped = staticmethod(_dispatcher_run)
     module.WitWorld = type("WitWorld", (), {"run": wrapped})
 
 
@@ -351,7 +403,7 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
 
         # Inject WitWorld into the decorated function's module so
         # componentize-py can discover the entry point at build time.
-        _inject_witworld(func, export_wrapper)
+        _inject_witworld(func, export_wrapper, workflow_name)
 
         return export_wrapper
 

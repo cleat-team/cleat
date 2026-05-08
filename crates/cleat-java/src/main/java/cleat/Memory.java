@@ -41,6 +41,13 @@ public final class Memory {
      */
     public static final long SUSPEND_SENTINEL = 1L << 62;
 
+    /**
+     * Error code for non-retryable terminal errors.
+     * Returned as the errCode in {@link #encodeExportResult(int, int)} when
+     * a {@link TerminalError} is thrown by the workflow method.
+     */
+    public static final int TERMINAL_ERROR_CODE = 2;
+
     // Sleep status constants
     /** Sleep completed normally (replay path). */
     public static final int SLEEP_STATUS_COMPLETED = 0;

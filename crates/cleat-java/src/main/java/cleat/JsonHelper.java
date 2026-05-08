@@ -81,6 +81,20 @@ public final class JsonHelper {
             }
             return (T) Double.valueOf(((Number) result.value).doubleValue());
         }
+        if (type == Float.class || type == float.class) {
+            ParseResult result = parseValue(trimmed, 0);
+            if (!(result.value instanceof Number)) {
+                throw new RuntimeException("Expected JSON number for Float, got: " + trimmed);
+            }
+            return (T) Float.valueOf(((Number) result.value).floatValue());
+        }
+        if (type == Short.class || type == short.class) {
+            ParseResult result = parseValue(trimmed, 0);
+            if (!(result.value instanceof Number)) {
+                throw new RuntimeException("Expected JSON number for Short, got: " + trimmed);
+            }
+            return (T) Short.valueOf(((Number) result.value).shortValue());
+        }
         if (type == Boolean.class || type == boolean.class) {
             ParseResult result = parseValue(trimmed, 0);
             if (!(result.value instanceof Boolean)) {
@@ -302,7 +316,11 @@ public final class JsonHelper {
                     case 'u':
                         if (i + 4 < json.length()) {
                             String hex = json.substring(i + 1, i + 5);
-                            sb.append((char) Integer.parseInt(hex, 16));
+                            try {
+                                sb.append((char) Integer.parseInt(hex, 16));
+                            } catch (NumberFormatException e) {
+                                throw new RuntimeException("Invalid \\uXXXX escape sequence: \\u" + hex + " at position " + i);
+                            }
                             i += 4;
                         }
                         break;
@@ -498,6 +516,12 @@ public final class JsonHelper {
      * This implementation handles {@link String} directly, {@link Map} and
      * {@link List} recursively, and falls back to {@link Object#toString()}
      * for other types.
+     * <p>
+     * <strong>Limitation:</strong> Cycle detection is not implemented.
+     * If the object graph contains circular references, this method will
+     * recurse infinitely and cause a {@link StackOverflowError}. A full
+     * fix would require tracking visited objects (e.g., using an
+     * {@link java.util.IdentityHashMap}) in the recursive helpers.
      *
      * @param obj the object to serialize
      * @return the JSON string

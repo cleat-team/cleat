@@ -57,7 +57,7 @@ func runEmbedded(args []string) {
 		defer os.RemoveAll(outDir)
 
 		// Build the workflow.
-		runBuild(pkgPath, outDir, *target)
+		runBuild(pkgPath, outDir, *target, false)
 
 		// Find the .wasm file.
 		entries, _ := os.ReadDir(outDir)

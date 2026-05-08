@@ -19,7 +19,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import time
 from typing import Any, Optional
 from uuid import UUID
 
@@ -45,9 +44,9 @@ class CleatCallbackHandler:
         self.h = h
         self.verbose = verbose
         self.step_counter = 0
-        self._chain_starts: dict[str, float] = {}
-        self._llm_starts: dict[str, float] = {}
-        self._tool_starts: dict[str, float] = {}
+        self._chain_starts: dict[str, int] = {}
+        self._llm_starts: dict[str, int] = {}
+        self._tool_starts: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # LLM callbacks
@@ -67,7 +66,7 @@ class CleatCallbackHandler:
         """Called when an LLM call starts."""
         self.step_counter += 1
         rid = str(run_id) if run_id else ""
-        self._llm_starts[rid] = time.time()
+        self._llm_starts[rid] = self.h.now()
 
         self.h.set_state(
             f"langchain_step_{self.step_counter}_llm_start",
@@ -100,9 +99,9 @@ class CleatCallbackHandler:
     ) -> None:
         """Called when an LLM call ends."""
         rid = str(run_id) if run_id else ""
-        elapsed = 0.0
+        elapsed = 0
         if rid in self._llm_starts:
-            elapsed = time.time() - self._llm_starts.pop(rid)
+            elapsed = self.h.now() - self._llm_starts.pop(rid)
 
         # Extract response info duck-typed (works with langchain and openai)
         resp_info = self._extract_llm_response(response)
@@ -111,13 +110,13 @@ class CleatCallbackHandler:
             f"langchain_step_{self.step_counter}_llm_end",
             {
                 "run_id": rid,
-                "elapsed_ms": int(elapsed * 1000),
+                "elapsed_ms": elapsed,
                 "response": resp_info,
             },
         )
         if self.verbose:
             self.h.cleat_log(
-                f"[Cleat] LLM end step={self.step_counter} elapsed={elapsed:.2f}s"
+                f"[Cleat] LLM end step={self.step_counter} elapsed={elapsed}ms"
             )
 
     def on_llm_error(
@@ -169,7 +168,7 @@ class CleatCallbackHandler:
         """Called when a tool invocation starts."""
         self.step_counter += 1
         rid = str(run_id) if run_id else ""
-        self._tool_starts[rid] = time.time()
+        self._tool_starts[rid] = self.h.now()
 
         tool_name = serialized.get("name", "unknown")
 
@@ -196,9 +195,9 @@ class CleatCallbackHandler:
     ) -> None:
         """Called when a tool invocation ends."""
         rid = str(run_id) if run_id else ""
-        elapsed = 0.0
+        elapsed = 0
         if rid in self._tool_starts:
-            elapsed = time.time() - self._tool_starts.pop(rid)
+            elapsed = self.h.now() - self._tool_starts.pop(rid)
 
         output_str = str(output)[:2000] if output else ""
 
@@ -206,13 +205,13 @@ class CleatCallbackHandler:
             f"langchain_step_{self.step_counter}_tool_end",
             {
                 "run_id": rid,
-                "elapsed_ms": int(elapsed * 1000),
+                "elapsed_ms": elapsed,
                 "output": output_str,
             },
         )
         if self.verbose:
             self.h.cleat_log(
-                f"[Cleat] Tool end step={self.step_counter} elapsed={elapsed:.2f}s"
+                f"[Cleat] Tool end step={self.step_counter} elapsed={elapsed}ms"
             )
 
     def on_tool_error(
@@ -250,7 +249,7 @@ class CleatCallbackHandler:
     ) -> None:
         """Called when a chain starts executing."""
         rid = str(run_id) if run_id else ""
-        self._chain_starts[rid] = time.time()
+        self._chain_starts[rid] = self.h.now()
 
         chain_name = serialized.get(
             "name",
@@ -273,12 +272,12 @@ class CleatCallbackHandler:
     ) -> None:
         """Called when a chain finishes executing."""
         rid = str(run_id) if run_id else ""
-        elapsed = 0.0
+        elapsed = 0
         if rid in self._chain_starts:
-            elapsed = time.time() - self._chain_starts.pop(rid)
+            elapsed = self.h.now() - self._chain_starts.pop(rid)
 
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] Chain end elapsed={elapsed:.2f}s")
+            self.h.cleat_log(f"[Cleat] Chain end elapsed={elapsed}ms")
 
     def on_chain_error(
         self,

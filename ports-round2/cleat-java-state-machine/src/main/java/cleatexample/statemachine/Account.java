@@ -1,7 +1,7 @@
 package cleatexample.statemachine;
 
-import cleat.DurableEntry;
-import cleat.DurableResult;
+import cleat.CleatEntry;
+import cleat.CleatResult;
 import cleat.HostCalls;
 import cleat.JsonHelper;
 import java.util.HashMap;
@@ -17,7 +17,7 @@ import java.util.Map;
  * <p>
  * <strong>Cleat mapping notes:</strong>
  * <ul>
- *   <li>{@code @VirtualObject} + {@code @Handler} {@literal ->} {@code @DurableEntry} static methods</li>
+ *   <li>{@code @VirtualObject} + {@code @Handler} {@literal ->} {@code @CleatEntry} static methods</li>
  *   <li>{@code ObjectContext.get(StateKey)} {@literal ->} {@link HostCalls#getQueryState(String)}</li>
  *   <li>{@code ObjectContext.set(StateKey, value)} {@literal ->} {@link HostCalls#setQueryState(String, String)}</li>
  *   <li>{@code TerminalException} {@literal ->} error JSON string returned (non-retryable)</li>
@@ -38,7 +38,7 @@ public class Account {
      * @return JSON result: {@code {"success":true, "balance":<newBalance>}}
      *         on success, or an error JSON on failure
      */
-    @DurableEntry(name = "account_deposit")
+    @CleatEntry(name = "account_deposit")
     public static String deposit(HostCalls h, String rawInput) {
         Map<String, Object> input = JsonHelper.parseObject(rawInput);
 
@@ -75,7 +75,7 @@ public class Account {
      *         on success, or {@code {"success":false, "reason":"..."}} on
      *         insufficient funds
      */
-    @DurableEntry(name = "account_withdraw")
+    @CleatEntry(name = "account_withdraw")
     public static String withdraw(HostCalls h, String rawInput) {
         Map<String, Object> input = JsonHelper.parseObject(rawInput);
 
@@ -116,7 +116,7 @@ public class Account {
      * @param rawInput JSON with key {@code "accountId"} (String)
      * @return JSON: {@code {"accountId":"...", "balance":<balance>}}
      */
-    @DurableEntry(name = "account_get_balance")
+    @CleatEntry(name = "account_get_balance")
     public static String getBalance(HostCalls h, String rawInput) {
         Map<String, Object> input = JsonHelper.parseObject(rawInput);
         String accountId = extractString(input, "accountId");
@@ -145,7 +145,7 @@ public class Account {
      * to ensure deterministic replay behaviour.
      */
     private static long readBalance(HostCalls h, String balanceKey) {
-        DurableResult<String> result = h.getQueryState(balanceKey);
+        CleatResult<String> result = h.getQueryState(balanceKey);
         if (result.isOk() && result.getValue() != null && !result.getValue().isEmpty()) {
             try {
                 return Long.parseLong(result.getValue());

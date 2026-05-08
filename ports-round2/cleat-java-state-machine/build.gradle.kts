@@ -18,11 +18,11 @@ repositories {
 }
 
 dependencies {
-    // Cleat durable Java SDK (provides HostCalls, DurableEntry, JsonHelper, etc.)
-    implementation(project(":durable-java"))
+    // Cleat durable Java SDK (provides HostCalls, CleatEntry, JsonHelper, etc.)
+    implementation(project(":cleat-java"))
 
     // Explicit annotation processor config (processor auto-discovered via META-INF/services)
-    annotationProcessor(project(":durable-java"))
+    annotationProcessor(project(":cleat-java"))
 
     // TeaVM runtime class library for WASM target
     implementation("org.teavm:teavm-classlib:0.10.2")

@@ -9,14 +9,14 @@ package cleatexample.statemachine;
  * <p>
  * <strong>Tree-shaking protection:</strong> TeaVM treats {@code @Export}
  * annotated methods as reachability roots, so the generated export wrapper
- * classes (produced by {@link cleat.DurableEntryProcessor}) are preserved
+ * classes (produced by {@link cleat.CleatEntryProcessor}) are preserved
  * automatically — each carries a {@code @Export(name = "...")} annotation
  * that makes the method a WASM export.
  * <p>
  * As an additional safety measure, this main class references all workflow
- * classes directly, ensuring that every {@code @DurableEntry} method is
+ * classes directly, ensuring that every {@code @CleatEntry} method is
  * reachable from TeaVM's analysis and that the generated
- * {@code DurableEntryAggregator} includes all wrappers.
+ * {@code CleatEntryAggregator} includes all wrappers.
  */
 public class WorkflowEntry {
 

@@ -19,7 +19,7 @@ type Metadata struct {
 	WorkflowVersion      int      `json:"workflow_version"`
 	ABIVersion           int      `json:"abi_version"`
 	MinCompatibleVersion int      `json:"min_compatible_version"`
-	PluginDeps           []string `json:"plugin_deps,omitempty"`
+	PluginDeps           map[string]string `json:"plugin_deps,omitempty"`
 }
 
 // CurrentABIVersion is the ABI version produced by this version of cleat.

@@ -1,4 +1,4 @@
-# `durable-java` -- Java SDK for cleat durable workflows
+# `cleat-java` -- Java SDK for cleat durable workflows
 
 Java SDK providing the `cleat` package with WASM ABI bindings for writing
 durable workflows that compile via [TeaVM](https://teavm.org/) to WebAssembly.
@@ -49,9 +49,9 @@ deterministic, so synchronization is not needed.
 
 ## Build setup
 
-The annotation processor (`DurableEntryProcessor`) must run during compilation.
+The annotation processor (`CleatEntryProcessor`) must run during compilation.
 It generates WASM export wrapper classes for each method annotated with
-`@DurableEntry`, plus the `DurableEntryIndex` aggregator and `WorkflowEntry`
+`@CleatEntry`, plus the `CleatEntryIndex` aggregator and `WorkflowEntry`
 analysis root.  The processor is registered via
 `META-INF/services/javax.annotation.processing.Processor`.
 
@@ -92,8 +92,8 @@ conflicts between the SDK's buildscript and the root project:
 **Root `settings.gradle.kts`**:
 ```kotlin
 rootProject.name = "my-workflow"
-include(":durable-java")
-project(":durable-java").projectDir = file("path/to/cleat/crates/durable-java")
+include(":cleat-java")
+project(":cleat-java").projectDir = file("path/to/cleat/crates/cleat-java")
 ```
 
 **Root `build.gradle.kts`** (applies `org.teavm` plugin without loading it):
@@ -111,10 +111,10 @@ plugins {
 
 dependencies {
     // SDK as annotation processor (generates export wrappers):
-    annotationProcessor(project(":durable-java"))
+    annotationProcessor(project(":cleat-java"))
 
     // SDK as compile dependency (HostCalls, Memory, etc.):
-    implementation(project(":durable-java"))
+    implementation(project(":cleat-java"))
 }
 
 teavm {
@@ -127,18 +127,18 @@ teavm {
 }
 ```
 
-The `durable-java` subproject itself declares the `org.teavm` plugin and TeaVM
+The `cleat-java` subproject itself declares the `org.teavm` plugin and TeaVM
 dependencies in its own `build.gradle`/`build.gradle.kts`.  The `apply false`
 pattern ensures the plugin classpath is resolved only once, at the root level.
 
 ## Tree-shaking
 
 TeaVM's WASM compiler performs dead-code elimination.  Generated `@Export`
-classes (produced by `DurableEntryProcessor`) must be preserved -- they are
+classes (produced by `CleatEntryProcessor`) must be preserved -- they are
 the WASM entry points.  The SDK's annotation processor generates
-`cleat.generated.DurableEntryIndex` which references all generated `@Export`
+`cleat.generated.CleatEntryIndex` which references all generated `@Export`
 classes via `Class<?>[]`.  The `cleat.WorkflowEntry` analysis root (also
-generated) holds a static reference to `DurableEntryIndex.WRAPPER_CLASSES`,
+generated) holds a static reference to `CleatEntryIndex.WRAPPER_CLASSES`,
 keeping the entire export chain alive through the tree-shaker's reachability
 analysis.
 
@@ -155,8 +155,8 @@ teavm {
 ```
 
 Note: The `preservedClasses` option is a fallback.  The auto-generated
-`DurableEntryIndex`/`WorkflowEntry` mechanism handles tree-shaking
-automatically for all methods annotated with `@DurableEntry`.
+`CleatEntryIndex`/`WorkflowEntry` mechanism handles tree-shaking
+automatically for all methods annotated with `@CleatEntry`.
 
 ## Detailed constraint notes
 

@@ -127,38 +127,72 @@ func runBuildPython(pattern, outDir string) {
 	fmt.Printf("  Wrote %s (%s)\n", dstWasm, formatSize(fi.Size()))
 }
 
-// detectEntryFunction scans a .py file for the first @cleat_entry decorated
-// function and returns its name.
+// detectEntryFunction uses the proper Python AST-based detector from
+// cleat_sdk.vet (``--detect-entry`` flag) to find the ``@cleat_entry``
+// decorated function in a .py file.
+//
+// It shells out to ``python3 -m cleat_sdk.vet --detect-entry <file>``,
+// which handles:
+//   - AST-based parsing (not fragile string scanning)
+//   - Commented-out decorator filtering
+//   - Multi-line decorator arguments
+//   - ``async def`` detection and rejection
+//   - Multiple entry function error reporting
 func detectEntryFunction(pyFile string) (string, error) {
-	data, err := os.ReadFile(pyFile)
-	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", pyFile, err)
+	// Find the python-sdk directory so we can set PYTHONPATH.
+	// The SDK lives at <binary>/../python-sdk/ or CWD/python-sdk/.
+	sdkDir := findPythonSDKDir()
+
+	cmd := exec.Command("python3", "-m", "cleat_sdk.vet", "--detect-entry", pyFile)
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+
+	if sdkDir != "" {
+		cmd.Env = append(os.Environ(), "PYTHONPATH="+sdkDir)
 	}
 
-	lines := strings.Split(string(data), "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "@cleat_entry") {
-			// Look at the next non-empty line for a function definition.
-			for j := i + 1; j < len(lines); j++ {
-				next := strings.TrimSpace(lines[j])
-				if next == "" {
-					continue
-				}
-				if strings.HasPrefix(next, "def ") {
-					// Extract the function name: "def my_func(..."
-					defPart := strings.TrimPrefix(next, "def ")
-					parenIdx := strings.Index(defPart, "(")
-					if parenIdx > 0 {
-						return defPart[:parenIdx], nil
-					}
-					return "", fmt.Errorf("malformed function definition at line %d: %s", j+1, next)
-				}
-				// Not a function definition line; keep looking.
-				break
+	out, err := cmd.Output()
+	if err != nil {
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr != "" {
+			return "", fmt.Errorf("in %s: %s", pyFile, stderr)
+		}
+		return "", fmt.Errorf("python AST analysis failed for %s: %v", pyFile, err)
+	}
+
+	name := strings.TrimSpace(string(out))
+	if name == "" {
+		return "", fmt.Errorf("no @cleat_entry decorated function found in %s", pyFile)
+	}
+
+	return name, nil
+}
+
+// findPythonSDKDir locates the python-sdk directory for invoking Python
+// analysis tools.  Returns empty string if not found (caller will rely
+// on PYTHONPATH or system-installed cleat_sdk package).
+func findPythonSDKDir() string {
+	// Try relative to the running binary.
+	execPath, err := os.Executable()
+	if err == nil {
+		execDir := filepath.Dir(execPath)
+		// Check <bindir>/python-sdk (same-level) and <bindir>/../python-sdk (parent).
+		candidates := []string{
+			filepath.Join(execDir, "python-sdk"),
+			filepath.Join(execDir, "..", "python-sdk"),
+		}
+		for _, c := range candidates {
+			if info, statErr := os.Stat(c); statErr == nil && info.IsDir() {
+				return c
 			}
 		}
 	}
-
-	return "", fmt.Errorf("no @cleat_entry decorated function found in %s", pyFile)
+	// Fall back to CWD/python-sdk.
+	if cwd, err := os.Getwd(); err == nil {
+		candidate := filepath.Join(cwd, "python-sdk")
+		if info, statErr := os.Stat(candidate); statErr == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
