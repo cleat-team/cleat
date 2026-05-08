@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/cleat"
-	"github.com/rcownie/cleat/cleat/cleattest"
+	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/durable/cleattest"
 	"github.com/stretchr/testify/assert"
 )
 

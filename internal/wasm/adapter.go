@@ -605,7 +605,7 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo) []byte {
 		buf.WriteString("\t\"time\"\n")
 	}
 	buf.WriteString("\n")
-	buf.WriteString("\t\"github.com/rcownie/cleat/cleat\"\n")
+	buf.WriteString("\t\"github.com/rcownie/cleat/durable\"\n")
 	buf.WriteString(")\n\n")
 
 	buf.WriteString(`const _cleatOutBufSize = 65536

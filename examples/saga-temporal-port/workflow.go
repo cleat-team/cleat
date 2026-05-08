@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/durable"
 )
 
 // TransferMoneyTaskQueue is included for compatibility with the original

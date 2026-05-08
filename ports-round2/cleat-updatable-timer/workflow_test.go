@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/cleat/cleattest"
+	"github.com/rcownie/cleat/durable/cleattest"
 )
 
 // Test_Sleep verifies that the workflow sleeps for the configured duration and

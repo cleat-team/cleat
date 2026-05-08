@@ -44,7 +44,7 @@ func scaffoldBasic(projectName string) {
 	mainGo := filepath.Join(dir, "main.go")
 	if err := os.WriteFile(mainGo, []byte(`package main
 
-import "github.com/rcownie/cleat/cleat"
+import "github.com/rcownie/cleat/durable"
 
 // @cleatEntry(name="hello")
 func Hello(h cleat.HostCalls, input string) (string, error) {

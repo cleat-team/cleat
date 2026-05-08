@@ -3,7 +3,7 @@ package workflows
 import (
 	"fmt"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/durable"
 )
 
 // LLMInput configures the AI agent loop simulation.

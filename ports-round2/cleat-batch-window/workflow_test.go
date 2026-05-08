@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/cleat/cleattest"
+	"github.com/rcownie/cleat/durable/cleattest"
 )
 
 // ---------------------------------------------------------------------------

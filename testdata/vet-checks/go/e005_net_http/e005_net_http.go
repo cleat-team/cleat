@@ -3,7 +3,7 @@ package e005
 import (
 	"net/http"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/durable"
 )
 
 // Workflow triggers E005 by using net/http in a durable function.

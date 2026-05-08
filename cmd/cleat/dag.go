@@ -311,7 +311,7 @@ func generateWorkflowFile(spec *dagplugin.DAGSpec) []byte {
 	b.WriteString("\t\"encoding/json\"\n")
 	b.WriteString("\t\"fmt\"\n")
 	b.WriteString("\n")
-	b.WriteString("\t\"github.com/rcownie/cleat/cleat\"\n")
+	b.WriteString("\t\"github.com/rcownie/cleat/durable\"\n")
 	b.WriteString("\tdagplugin \"github.com/rcownie/cleat/plugins/dag\"\n")
 	b.WriteString(")\n\n")
 

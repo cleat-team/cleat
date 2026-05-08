@@ -3,7 +3,7 @@ package e013
 import (
 	"sync"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/durable"
 )
 
 // Workflow triggers E013 by using sync.Mutex.

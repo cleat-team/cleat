@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/durable"
 )
 
 const PAYMENT_STATUS = "payment_status"

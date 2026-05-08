@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/rcownie/cleat/benchmarks/workflows"
-	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/durable"
 )
 
 // ---------------------------------------------------------------------------

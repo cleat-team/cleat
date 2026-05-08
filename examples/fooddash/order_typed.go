@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/durable"
 	"github.com/rcownie/cleat/examples/fooddash/clients/dispatch"
 	"github.com/rcownie/cleat/examples/fooddash/clients/menu"
 	"github.com/rcownie/cleat/examples/fooddash/clients/payments"

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/cleat/ai/llm"
+	"github.com/rcownie/cleat/durable/ai/llm"
 )
 
 // ---------------------------------------------------------------------------

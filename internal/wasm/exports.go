@@ -22,7 +22,7 @@ func GenerateExports(pkgName string, result *analyzer.AnalysisResult) []byte {
 	buf.WriteString("\t\"fmt\"\n")
 	buf.WriteString("\t\"unsafe\"\n")
 	buf.WriteString("\n")
-	buf.WriteString("\t\"github.com/rcownie/cleat/cleat\"\n")
+	buf.WriteString("\t\"github.com/rcownie/cleat/durable\"\n")
 	buf.WriteString(")\n\n")
 
 	buf.WriteString(`// writeJSONOut marshals v to JSON and copies it into the output buffer.

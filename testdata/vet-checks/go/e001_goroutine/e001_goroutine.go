@@ -1,7 +1,7 @@
 package e001
 
 import (
-	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/durable"
 )
 
 // Workflow triggers E001 by using a goroutine.

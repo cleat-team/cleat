@@ -3,7 +3,7 @@ package e007
 import (
 	"math/rand"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/durable"
 )
 
 // Workflow triggers E007 by using math/rand.
