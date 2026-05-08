@@ -188,3 +188,64 @@ func TestGenerateTypeScript_OptionalFields(t *testing.T) {
 		t.Errorf("expected optional field with ?")
 	}
 }
+
+func TestGenerateTypeScript_NoInputOutput(t *testing.T) {
+	ir := &IR{
+		PluginName:    "trigger",
+		PluginVersion: "0.1.0",
+		HostFunctions: []HostFuncIR{
+			{
+				Name: "fire", // no InputType, no OutputType, no Description
+			},
+		},
+	}
+	code, err := GenerateTypeScript(ir)
+	if err != nil {
+		t.Fatalf("GenerateTypeScript: %v", err)
+	}
+	if !strings.Contains(code, "async fire(input: any): Promise<any>") {
+		t.Error("expected async fire with any types for untyped function")
+	}
+	// No JSDoc should be generated since there's no description and no named types
+	if strings.Contains(code, "/**") {
+		t.Error("expected no JSDoc for untyped function without description")
+	}
+}
+
+func TestGenerateTypeScript_UnreferencedType(t *testing.T) {
+	ir := &IR{
+		PluginName:    "test",
+		PluginVersion: "0.1.0",
+		Types: []TypeIR{
+			{
+				Name: "ReferencedType",
+				Fields: []FieldIR{
+					{Name: "val", Type: "string"},
+				},
+			},
+			{
+				Name: "UnreferencedType",
+				Fields: []FieldIR{
+					{Name: "extra", Type: "int64"},
+				},
+			},
+		},
+		HostFunctions: []HostFuncIR{
+			{
+				Name:       "doStuff",
+				InputType:  "ReferencedType",
+				OutputType: "string",
+			},
+		},
+	}
+	code, err := GenerateTypeScript(ir)
+	if err != nil {
+		t.Fatalf("GenerateTypeScript: %v", err)
+	}
+	if !strings.Contains(code, "export interface ReferencedType") {
+		t.Error("expected ReferencedType interface")
+	}
+	if !strings.Contains(code, "export interface UnreferencedType") {
+		t.Error("expected UnreferencedType interface (second pass)")
+	}
+}

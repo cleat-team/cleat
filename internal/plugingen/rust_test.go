@@ -188,3 +188,60 @@ func TestGenerateRust_OptionalField(t *testing.T) {
 		t.Error("expected #[serde(default)] on optional field")
 	}
 }
+
+func TestGenerateRust_NoInputOutput(t *testing.T) {
+	ir := &IR{
+		PluginName:    "trigger",
+		PluginVersion: "0.1.0",
+		HostFunctions: []HostFuncIR{
+			{
+				Name: "fire", // no InputType, no OutputType
+			},
+		},
+	}
+	code, err := GenerateRust(ir)
+	if err != nil {
+		t.Fatalf("GenerateRust: %v", err)
+	}
+	if !strings.Contains(code, "fn fire") {
+		t.Error("expected fn fire method")
+	}
+}
+
+func TestGenerateRust_UnreferencedType(t *testing.T) {
+	ir := &IR{
+		PluginName:    "test",
+		PluginVersion: "0.1.0",
+		Types: []TypeIR{
+			{
+				Name: "ReferencedType",
+				Fields: []FieldIR{
+					{Name: "val", Type: "string"},
+				},
+			},
+			{
+				Name: "UnreferencedType",
+				Fields: []FieldIR{
+					{Name: "extra", Type: "int64"},
+				},
+			},
+		},
+		HostFunctions: []HostFuncIR{
+			{
+				Name:       "doStuff",
+				InputType:  "ReferencedType",
+				OutputType: "string",
+			},
+		},
+	}
+	code, err := GenerateRust(ir)
+	if err != nil {
+		t.Fatalf("GenerateRust: %v", err)
+	}
+	if !strings.Contains(code, "pub struct ReferencedType") {
+		t.Error("expected ReferencedType struct")
+	}
+	if !strings.Contains(code, "pub struct UnreferencedType") {
+		t.Error("expected UnreferencedType struct (second pass)")
+	}
+}

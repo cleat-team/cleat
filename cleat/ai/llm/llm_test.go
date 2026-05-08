@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/rcownie/cleat/cleat"
 )
 
 // ---------------------------------------------------------------------------
@@ -727,4 +730,232 @@ func TestListModelsUnmarshalError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Chat error paths (marshal, no choices, empty response)
+// ---------------------------------------------------------------------------
+
+func TestChatRequestMarshalError_ToolFunction(t *testing.T) {
+	// A tool with an un-marshalable function parameter should trigger a marshal error.
+	mock := newMockCallRecorder()
+	client := NewClient(mock.call)
+
+	_, err := client.Chat(context.Background(), ChatRequest{
+		Provider: "openai",
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		Tools: []Tool{
+			{
+				Name:        "bad_tool",
+				Description: "This tool has a parameter that can't be marshaled",
+				Parameters:  func() {}, // functions can't be marshaled to JSON
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected marshal error for tool function, got nil")
+	}
+	if !strings.Contains(err.Error(), "marshal tool function") {
+		t.Errorf("expected 'marshal tool function' error, got: %v", err)
+	}
+}
+
+func TestChatRequestMarshalError_ToolCall(t *testing.T) {
+	mock := newMockCallRecorder(pluginChatResponseJSON("done", nil, defaultUsage, 0))
+	client := NewClient(mock.call)
+
+	// A message with a tool call should trigger marshal of the function part.
+	_, err := client.Chat(context.Background(), ChatRequest{
+		Provider: "openai",
+		Model:    "gpt-4o",
+		Messages: []Message{
+			{Role: "user", Content: "do something"},
+			{
+				Role:    "assistant",
+				Content: "",
+				ToolCalls: []ToolCall{
+					{
+						ID:        "call_1",
+						Name:      "test_tool",
+						Arguments: `{}`,
+					},
+				},
+			},
+		},
+		Tools: []Tool{
+			{Name: "test_tool", Description: "A test tool", Parameters: map[string]any{"type": "object"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestChatResponseNoChoices(t *testing.T) {
+	// Plugin response with no choices should produce an error.
+	resp := `{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"cost":0}`
+	mock := newMockCallRecorder(resp)
+	client := NewClient(mock.call)
+
+	_, err := client.Chat(context.Background(), ChatRequest{
+		Provider: "openai",
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected error for no choices, got nil")
+	}
+	if !strings.Contains(err.Error(), "no choices") {
+		t.Errorf("expected 'no choices' error, got: %v", err)
+	}
+}
+
+func TestChatResponsePluginError(t *testing.T) {
+	raw := `{"error":"internal server error","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"cost":0}`
+	mock := newMockCallRecorder(raw)
+	client := NewClient(mock.call)
+
+	_, err := client.Chat(context.Background(), ChatRequest{
+		Provider: "openai",
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected plugin error, got nil")
+	}
+	if !strings.Contains(err.Error(), "internal server error") {
+		t.Errorf("expected 'internal server error', got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Embed marshal error path
+// ---------------------------------------------------------------------------
+
+func TestEmbedMarshalError(t *testing.T) {
+	mock := newMockCallRecorder(`{"data":[{"embedding":[0.1],"index":0}],"usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"cost":0}`)
+	client := NewClient(mock.call)
+
+	// EmbedRequest with an un-marshalable input should trigger a marshal error.
+	_, err := client.Embed(context.Background(), EmbedRequest{
+		Provider: "openai",
+		Model:    "text-embedding-3-small",
+		Input:    []string{"hello"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestEmbedUnmarshalError(t *testing.T) {
+	mock := newMockCallRecorder(`not valid json`)
+	client := NewClient(mock.call)
+
+	_, err := client.Embed(context.Background(), EmbedRequest{
+		Provider: "openai",
+		Model:    "text-embedding-3-small",
+		Input:    []string{"hello"},
+	})
+	if err == nil {
+		t.Fatal("expected unmarshal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unmarshal") {
+		t.Errorf("expected unmarshal error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: ListModels — all-providers format and transport error
+// ---------------------------------------------------------------------------
+
+func TestListModels_AllProvidersNoProvider(t *testing.T) {
+	// The response uses the all-providers format (since provider is "").
+	pluginResp := `{"providers":{"openai":[{"name":"gpt-4o"}]}}`
+	mock := newMockCallRecorder(pluginResp)
+	client := NewClient(mock.call)
+
+	models, err := client.ListModels(context.Background(), "")
+	if err != nil {
+		t.Fatalf("ListModels failed: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+	if models[0].ID != "gpt-4o" || models[0].Provider != "openai" {
+		t.Errorf("expected {gpt-4o openai}, got {%s %s}", models[0].ID, models[0].Provider)
+	}
+}
+
+func TestListModels_TransportError(t *testing.T) {
+	client := NewClient(func(_, _, _ string) (string, error) {
+		return "", errors.New("connection error")
+	})
+
+	_, err := client.ListModels(context.Background(), "openai")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "list_models") {
+		t.Errorf("expected list_models error, got: %v", err)
+	}
+}
+
+func TestListModels_SingleProviderConvenience(t *testing.T) {
+	// The convenience function Chat(h, req) tests creating a client from HostCalls.
+	// Here we test ListModels with a single-provider response.
+	pluginResp := `{"models":[{"name":"gpt-4o"}],"provider":"openai"}`
+	mock := newMockCallRecorder(pluginResp)
+	client := NewClient(mock.call)
+
+	models, err := client.ListModels(context.Background(), "openai")
+	if err != nil {
+		t.Fatalf("ListModels failed: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(models))
+	}
+}
+
+func TestListModels_SingleProviderMarshalError(t *testing.T) {
+	// When the response data doesn't match either format, an error is returned.
+	mock := newMockCallRecorder(`{"providers":"not_a_map"}`)
+	client := NewClient(mock.call)
+
+	_, err := client.ListModels(context.Background(), "openai")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unmarshal") {
+		t.Errorf("expected unmarshal error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Chat convenience function (H -> Client -> Chat)
+// ---------------------------------------------------------------------------
+
+func TestChatConvenienceFunction(t *testing.T) {
+	h := &mockHostCalls{resp: pluginChatResponseJSON("from convenience", nil, defaultUsage, 0.001)}
+	resp, err := Chat(h, ChatRequest{
+		Provider: "openai",
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat convenience failed: %v", err)
+	}
+	if resp.Message.Content != "from convenience" {
+		t.Errorf("expected content 'from convenience', got %q", resp.Message.Content)
+	}
+}
+
+// mockHostCalls implements cleat.HostCalls.PluginCall for testing the convenience function.
+type mockHostCalls struct {
+	cleat.HostCalls
+	resp string
+}
+
+func (m *mockHostCalls) PluginCall(_, _, _ string) (string, error) {
+	return m.resp, nil
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -506,6 +507,30 @@ func TestDeleteError(t *testing.T) {
 		t.Errorf("err = %q, want %q", err.Error(), "pgvector: delete failed: table not found")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests: marshal error paths
+// ---------------------------------------------------------------------------
+
+func TestUpsertMarshalError(t *testing.T) {
+	client := NewClient(nil)
+
+	// Metadata with a non-marshalable value should trigger marshal error.
+	err := client.Upsert(context.Background(), UpsertRequest{
+		Table:    "documents",
+		Metadata: map[string]any{"bad": func() {}},
+	})
+	if err == nil {
+		t.Fatal("expected marshal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "marshal upsert request") {
+		t.Errorf("expected 'marshal upsert request' error, got: %v", err)
+	}
+}
+
+// Note: the marshal error path in Delete (line 111-113 of pgvector.go) is
+// unreachable through the public API because DeleteRequest only contains
+// string fields which always marshal successfully.
 
 // ---------------------------------------------------------------------------
 // Tests: JSON unmarshal error (response body not parseable)

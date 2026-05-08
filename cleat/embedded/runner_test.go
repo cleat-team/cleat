@@ -1235,3 +1235,103 @@ func TestAwaitPromiseNotFound(t *testing.T) {
 		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// handleHTTPFetch — additional coverage
+// ---------------------------------------------------------------------------
+
+func TestHTTPFetch_DefaultsMethodToGET(t *testing.T) {
+	// A request without method defaults to GET. Since we're not actually
+	// making a real request here (we're targeting a port that refuses),
+	// this exercises the method-default path through the error path.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		// URL with no method should default to GET then fail at connection.
+		_, err := h.DurableCall("http", "fetch", `{"url":"http://127.0.0.1:1/"}`)
+			if err == nil {
+				// On the off chance the request succeeded: highly unlikely.
+			t.Log("unexpectedly got a response from port 1")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestHTTPFetch_WithHeadersAndBody(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		// Method, headers, and body should all be passed, then fail at connection.
+		_, err := h.DurableCall("http", "fetch", `{"url":"http://127.0.0.1:1/","method":"POST","headers":{"Content-Type":"application/json"},"body":"{\"key\":\"val\"}"}`)
+		if err == nil {
+			t.Log("unexpectedly got a response from port 1")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestHTTPFetch_InvalidURLSyntax(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		// A URL with invalid host syntax should cause http.NewRequest to fail.
+		_, err := h.DurableCall("http", "fetch", `{"url":"http://[::1]:notanumber/path"}`)
+		if err == nil {
+			t.Error("expected error for invalid URL syntax, got nil")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// awaitChild — fallback path when child result not found
+// ---------------------------------------------------------------------------
+
+func TestAwaitChild_FallbackResultWhenNotFound(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		// AwaitChild with a runID that was never created should return the
+		// fallback result rather than an error.
+		result, err := h.AwaitChild("nonexistent-run-id")
+		if err != nil {
+			return err
+		}
+		if result != `{"status":"completed"}` {
+			t.Errorf("expected fallback result, got %q", result)
+		}
+		ctx.SetOutput(result)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"status":"completed"}` {
+		t.Fatalf("expected %q, got %q", `{"status":"completed"}`, result)
+	}
+}

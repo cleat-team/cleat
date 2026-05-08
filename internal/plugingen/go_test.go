@@ -146,3 +146,64 @@ func TestGenerateGo_Empty(t *testing.T) {
 		t.Error("generated code is too short")
 	}
 }
+
+func TestGenerateGo_NoInputOutput(t *testing.T) {
+	ir := &IR{
+		PluginName:    "trigger",
+		PluginVersion: "0.1.0",
+		HostFunctions: []HostFuncIR{
+			{
+				Name: "fire", // no InputType, no OutputType, no Description
+			},
+		},
+	}
+	code, err := GenerateGo(ir)
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if !strings.Contains(code, "input []byte") {
+		t.Error("expected input []byte for untyped function")
+	}
+	if !strings.Contains(code, "([]byte, error)") {
+		t.Error("expected ([]byte, error) return for untyped function")
+	}
+}
+
+func TestGenerateGo_UnreferencedType(t *testing.T) {
+	// A type that is not referenced by any host function should still be emitted.
+	ir := &IR{
+		PluginName:    "test",
+		PluginVersion: "0.1.0",
+		Types: []TypeIR{
+			{
+				Name: "ReferencedType",
+				Fields: []FieldIR{
+					{Name: "val", Type: "string"},
+				},
+			},
+			{
+				Name: "UnreferencedType",
+				Fields: []FieldIR{
+					{Name: "extra", Type: "int64"},
+				},
+			},
+		},
+		HostFunctions: []HostFuncIR{
+			{
+				Name:       "doStuff",
+				InputType:  "ReferencedType",
+				OutputType: "string",
+			},
+		},
+	}
+	code, err := GenerateGo(ir)
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if !strings.Contains(code, "type ReferencedType struct") {
+		t.Error("expected ReferencedType struct")
+	}
+	if !strings.Contains(code, "type UnreferencedType struct") {
+		t.Error("expected UnreferencedType struct (should be emitted in second pass)")
+	}
+}

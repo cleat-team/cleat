@@ -2,6 +2,7 @@ package slacknotify
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -281,5 +282,26 @@ func TestHandleCreateConfigMissingName(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != 400 {
 		t.Errorf("expected 400 for missing name, got %d", rec.Code)
+	}
+}
+
+// errRegistry returns an error from Register to test error paths.
+type errRegistry struct {
+	plugin.FuncRegistry
+}
+
+func (r *errRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	return fmt.Errorf("register error: %s", opts.Name)
+}
+
+func TestRegisterHostFunctionsRegisterError(t *testing.T) {
+	p := &Plugin{}
+	scope := &errRegistry{}
+	err := p.RegisterHostFunctions(scope)
+	if err == nil {
+		t.Fatal("expected error from Register, got nil")
+	}
+	if !strings.Contains(err.Error(), "register error") {
+		t.Errorf("expected register error, got: %v", err)
 	}
 }

@@ -141,3 +141,122 @@ func TestGeneratePython_Empty(t *testing.T) {
 		t.Error("generated code is too short")
 	}
 }
+
+func TestGeneratePython_EmptyTypeFields(t *testing.T) {
+	ir := &IR{
+		PluginName:    "test",
+		PluginVersion: "0.1.0",
+		Types: []TypeIR{
+			{
+				Name:   "EmptyType",
+				Fields: []FieldIR{}, // empty fields → "pass"
+			},
+		},
+		HostFunctions: []HostFuncIR{
+			{
+				Name: "noIO", // no input and no output type
+			},
+			{
+				Name:       "noDesc", // no description
+				InputType:  "string",
+				OutputType: "string",
+			},
+		},
+	}
+	code, err := GeneratePython(ir)
+	if err != nil {
+		t.Fatalf("GeneratePython: %v", err)
+	}
+	if !strings.Contains(code, "pass") {
+		t.Error("expected 'pass' for empty type fields")
+	}
+	if !strings.Contains(code, "input: Any = None") {
+		t.Error("expected 'input: Any = None' for no-IO function")
+	}
+	if !strings.Contains(code, "-> Any:") {
+		t.Error("expected '-> Any:' for no-output function")
+	}
+	if !strings.Contains(code, "Call the noIO host function.") {
+		t.Error("expected generic docstring for function without description")
+	}
+}
+
+func TestGeneratePython_NonBuiltinInputOutput(t *testing.T) {
+	ir := &IR{
+		PluginName:    "test",
+		PluginVersion: "0.1.0",
+		Types: []TypeIR{
+			{
+				Name: "CustomInput",
+				Fields: []FieldIR{
+					{Name: "val", Type: "string"},
+				},
+			},
+			{
+				Name: "CustomOutput",
+				Fields: []FieldIR{
+					{Name: "result", Type: "int64"},
+				},
+			},
+		},
+		HostFunctions: []HostFuncIR{
+			{
+				Name:        "process",
+				Description: "Process custom type",
+				InputType:   "CustomInput",
+				OutputType:  "CustomOutput",
+			},
+		},
+	}
+	code, err := GeneratePython(ir)
+	if err != nil {
+		t.Fatalf("GeneratePython: %v", err)
+	}
+	if !strings.Contains(code, "input: CustomInput") {
+		t.Error("expected typed input param")
+	}
+	if !strings.Contains(code, "-> CustomOutput:") {
+		t.Error("expected typed return")
+	}
+	if !strings.Contains(code, "json.loads") {
+		t.Error("expected json.loads for deserialization")
+	}
+}
+
+func TestGeneratePython_UnreferencedType(t *testing.T) {
+	ir := &IR{
+		PluginName:    "test",
+		PluginVersion: "0.1.0",
+		Types: []TypeIR{
+			{
+				Name: "ReferencedType",
+				Fields: []FieldIR{
+					{Name: "val", Type: "string"},
+				},
+			},
+			{
+				Name: "UnreferencedType",
+				Fields: []FieldIR{
+					{Name: "extra", Type: "int64"},
+				},
+			},
+		},
+		HostFunctions: []HostFuncIR{
+			{
+				Name:       "doStuff",
+				InputType:  "ReferencedType",
+				OutputType: "string",
+			},
+		},
+	}
+	code, err := GeneratePython(ir)
+	if err != nil {
+		t.Fatalf("GeneratePython: %v", err)
+	}
+	if !strings.Contains(code, "class ReferencedType") {
+		t.Error("expected ReferencedType dataclass")
+	}
+	if !strings.Contains(code, "class UnreferencedType") {
+		t.Error("expected UnreferencedType dataclass (second pass)")
+	}
+}

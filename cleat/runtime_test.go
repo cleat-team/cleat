@@ -1815,3 +1815,737 @@ func TestSagaAddParallelCompensatesOnFailure(t *testing.T) {
 		t.Errorf("expected comp1 to be called last, got %v", order)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DurableCallWithOptions — Timeout paths
+// ---------------------------------------------------------------------------
+
+func TestDurableCallWithOptions_TimeoutFires(t *testing.T) {
+	started := make(chan struct{})
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			close(started)
+			time.Sleep(10 * time.Second)
+			return "ok", nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	_, err := h.DurableCallWithOptions(CallOptions{Timeout: 5 * time.Millisecond}, "svc", "op", `{}`)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	var timeoutErr *CallTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
+	}
+	if timeoutErr.Service != "svc" || timeoutErr.Operation != "op" {
+		t.Errorf("unexpected service/operation: %s.%s", timeoutErr.Service, timeoutErr.Operation)
+	}
+	if timeoutErr.Timeout != 5*time.Millisecond {
+		t.Errorf("expected timeout %v, got %v", 5*time.Millisecond, timeoutErr.Timeout)
+	}
+}
+
+func TestDurableCallWithOptions_TimeoutDoesNotFire(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return "quick_result", nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	resp, err := h.DurableCallWithOptions(CallOptions{Timeout: time.Second}, "svc", "op", `{}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != "quick_result" {
+		t.Errorf("expected %q, got %q", "quick_result", resp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableCallWithOptions — StartToCloseTimeout paths
+// ---------------------------------------------------------------------------
+
+func TestDurableCallWithOptions_StartToCloseTimeoutFires(t *testing.T) {
+	started := make(chan struct{})
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			close(started)
+			time.Sleep(10 * time.Second)
+			return "ok", nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	_, err := h.DurableCallWithOptions(CallOptions{StartToCloseTimeout: 5 * time.Millisecond}, "svc", "op", `{}`)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	var timeoutErr *CallTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
+	}
+	if timeoutErr.Timeout != 5*time.Millisecond {
+		t.Errorf("expected timeout %v, got %v", 5*time.Millisecond, timeoutErr.Timeout)
+	}
+}
+
+func TestDurableCallWithOptions_StartToCloseTimeoutDoesNotFire(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return "fast_result", nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	resp, err := h.DurableCallWithOptions(CallOptions{StartToCloseTimeout: time.Second}, "svc", "op", `{}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != "fast_result" {
+		t.Errorf("expected %q, got %q", "fast_result", resp)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableCallWithOptions — host-side DurableCallWithRetry delegation
+// ---------------------------------------------------------------------------
+
+func TestDurableCallWithOptions_DelegatesToDurableCallWithRetry(t *testing.T) {
+	var capturedService, capturedOperation, capturedRequest string
+	var capturedMaxAttempts int64
+	h := NewHostCalls(HostCallsOptions{
+		DurableCallWithRetry: func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error) {
+			capturedService = service
+			capturedOperation = operation
+			capturedRequest = requestJSON
+			capturedMaxAttempts = maxAttempts
+			return "retried_ok", nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	rp := RetryPolicy{MaxAttempts: 5, InitialInterval: time.Second, BackoffCoefficient: 2.0, MaxInterval: 30 * time.Second}
+	resp, err := h.DurableCallWithOptions(CallOptions{Retry: &rp}, "svc", "op", `{"k":"v"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != "retried_ok" {
+		t.Errorf("expected %q, got %q", "retried_ok", resp)
+	}
+	if capturedService != "svc" || capturedOperation != "op" || capturedRequest != `{"k":"v"}` {
+		t.Errorf("unexpected args: %s.%s %q", capturedService, capturedOperation, capturedRequest)
+	}
+	if capturedMaxAttempts != 5 {
+		t.Errorf("expected maxAttempts=5, got %d", capturedMaxAttempts)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableCallJSONWithOptions
+// ---------------------------------------------------------------------------
+
+func TestDurableCallJSONWithOptions_Unmarshals(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return `{"name":"test","value":42}`, nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	var result struct {
+		Name  string `json:"name"`
+		Value int    `json:"value"`
+	}
+	err := h.DurableCallJSONWithOptions(CallOptions{}, "svc", "op", "{}", &result)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Name != "test" || result.Value != 42 {
+		t.Errorf("expected {test 42}, got {%s %d}", result.Name, result.Value)
+	}
+}
+
+func TestDurableCallJSONWithOptions_NilResult(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return `{"name":"test"}`, nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	err := h.DurableCallJSONWithOptions(CallOptions{}, "svc", "op", "{}", nil)
+	if err != nil {
+		t.Fatalf("unexpected error with nil result: %v", err)
+	}
+}
+
+func TestDurableCallJSONWithOptions_PropagatesCallError(t *testing.T) {
+	callErr := errors.New("upstream failure")
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return "", callErr
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	var result struct{}
+	err := h.DurableCallJSONWithOptions(CallOptions{}, "svc", "op", "{}", &result)
+	if err != callErr {
+		t.Errorf("expected original error %v, got %v", callErr, err)
+	}
+}
+
+func TestDurableCallJSONWithOptions_UnmarshalError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return "{bad json}", nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	var result struct{}
+	err := h.DurableCallJSONWithOptions(CallOptions{}, "svc", "op", "{}", &result)
+	if err == nil {
+		t.Fatal("expected unmarshal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unmarshaling") {
+		t.Errorf("expected unmarshaling error, got: %v", err)
+	}
+}
+
+func TestDurableCallJSONWithOptions_NotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	var result struct{}
+	err := h.DurableCallJSONWithOptions(CallOptions{}, "svc", "op", "{}", &result)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableCallTypedWithOptions — Timeout path
+// ---------------------------------------------------------------------------
+
+func TestDurableCallTypedWithOptions_TimeoutFires(t *testing.T) {
+	started := make(chan struct{})
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			close(started)
+			time.Sleep(10 * time.Second)
+			return "ok", nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	err := h.DurableCallTypedWithOptions(CallOptions{Timeout: 5 * time.Millisecond}, "svc", "op", map[string]string{"k": "v"}, nil)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	var timeoutErr *CallTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
+	}
+	if timeoutErr.Timeout != 5*time.Millisecond {
+		t.Errorf("expected timeout %v, got %v", 5*time.Millisecond, timeoutErr.Timeout)
+	}
+}
+
+func TestDurableCallTypedWithOptions_TimeoutDoesNotFire(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return `{"result":"ok"}`, nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	type MyResult struct {
+		Result string `json:"result"`
+	}
+	var res MyResult
+	err := h.DurableCallTypedWithOptions(CallOptions{Timeout: time.Second}, "svc", "op", map[string]string{"k": "v"}, &res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Result != "ok" {
+		t.Errorf("expected result 'ok', got %q", res.Result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableCallTypedWithOptions — StartToCloseTimeout path (no retry)
+// ---------------------------------------------------------------------------
+
+func TestDurableCallTypedWithOptions_StartToCloseTimeoutFires(t *testing.T) {
+	started := make(chan struct{})
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			close(started)
+			time.Sleep(10 * time.Second)
+			return "ok", nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	err := h.DurableCallTypedWithOptions(CallOptions{StartToCloseTimeout: 5 * time.Millisecond}, "svc", "op", map[string]string{}, nil)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	var timeoutErr *CallTimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
+	}
+}
+
+func TestDurableCallTypedWithOptions_StartToCloseTimeoutDoesNotFire(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return `{"result":"ok"}`, nil
+		},
+		DurableSleep: func(ms int64) {},
+	})
+
+	type MyResult struct {
+		Result string `json:"result"`
+	}
+	var res MyResult
+	err := h.DurableCallTypedWithOptions(CallOptions{StartToCloseTimeout: time.Second}, "svc", "op", map[string]string{}, &res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Result != "ok" {
+		t.Errorf("expected result 'ok', got %q", res.Result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitSignalsWithQuorum — delegation and fallback loop behavior
+// ---------------------------------------------------------------------------
+
+func TestAwaitSignalsWithQuorum_DelegatesToHostFunction(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		AwaitSignalsWithQuorum: func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error) {
+			
+			return []SignalResult{{Name: "sig1", Payload: `{"data":"ok"}`, TimedOut: false}}, nil
+		},
+	})
+
+	results, err := h.AwaitSignalsWithQuorum([]string{"sig1"}, 1, 0, time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Name != "sig1" {
+		t.Errorf("expected Name 'sig1', got %q", results[0].Name)
+	}
+}
+
+func TestAwaitSignalsWithQuorum_FallbackTimeout(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableAwaitSignals: func(names []string, timeoutMs int64) (string, string, bool, error) {
+			return "", "", true, nil
+		},
+		DurableLog: func(msg string) {},
+	})
+
+	results, err := h.AwaitSignalsWithQuorum([]string{"x", "y"}, 2, -1, 10*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !strings.Contains(err.Error(), "quorum timeout") {
+		t.Errorf("expected quorum timeout error, got: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(results))
+	}
+}
+
+func TestAwaitSignalsWithQuorum_FallbackMaxRejectionsExceeded(t *testing.T) {
+	callCount := 0
+	h := NewHostCalls(HostCallsOptions{
+		DurableAwaitSignals: func(names []string, timeoutMs int64) (string, string, bool, error) {
+			callCount++
+			return "sig1", `{"rejected":true}`, false, nil
+		},
+		DurableLog: func(msg string) {},
+	})
+
+	_, err := h.AwaitSignalsWithQuorum([]string{"sig1"}, 1, 0, time.Second)
+	if err == nil {
+		t.Fatal("expected max rejections error, got nil")
+	}
+	if !strings.Contains(err.Error(), "max rejections") {
+		t.Errorf("expected max rejections error, got: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("expected 1 await signal call, got %d", callCount)
+	}
+}
+
+func TestAwaitSignalsWithQuorum_FallbackError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableAwaitSignals: func(names []string, timeoutMs int64) (string, string, bool, error) {
+			return "", "", false, errors.New("signal error")
+		},
+		DurableLog: func(msg string) {},
+	})
+
+	_, err := h.AwaitSignalsWithQuorum([]string{"sig1"}, 1, 0, time.Second)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "signal error") {
+		t.Errorf("expected signal error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PluginCallStreaming, DurableDeferFunc, DurableDefer — not-initialized paths
+// ---------------------------------------------------------------------------
+
+func TestPluginCallStreamingNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	_, err := h.PluginCallStreaming("p", "f", "{}")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+func TestDurableDeferFuncNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	_, err := h.DurableDeferFunc(func() {})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+func TestDurableDeferNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	_, err := h.DurableDefer("test defer")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitPromise — not-initialized path
+// ---------------------------------------------------------------------------
+
+func TestAwaitPromiseNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	_, _, err := h.AwaitPromise("p1", time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SideEffect — not-initialized and error propagation
+// ---------------------------------------------------------------------------
+
+func TestSideEffectNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	_, err := h.SideEffect(func() (string, error) {
+		return "val", nil
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+func TestSideEffectPropagatesFnError(t *testing.T) {
+	fnErr := errors.New("fn failure")
+	h := NewHostCalls(HostCallsOptions{
+		SideEffect: func(computedResult string) (string, error) {
+			return computedResult, nil
+		},
+	})
+	_, err := h.SideEffect(func() (string, error) {
+		return "", fnErr
+	})
+	if err != fnErr {
+		t.Errorf("expected original error %v, got %v", fnErr, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitCondition — not-initialized fallback loop
+// ---------------------------------------------------------------------------
+
+func TestAwaitConditionFallbackPredicateTrue(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		Now: func() int64 {
+			return 1000
+		},
+		DurableAwaitSignals: func(names []string, timeoutMs int64) (string, string, bool, error) {
+			return "", "", true, nil
+		},
+	})
+
+	met := AwaitCondition(h, func() bool { return true }, time.Millisecond, time.Second)
+	if !met {
+		t.Error("expected condition to be met")
+	}
+}
+
+func TestAwaitConditionFallbackPredicateFalseThenTimeout(t *testing.T) {
+	callCount := 0
+	h := NewHostCalls(HostCallsOptions{
+		Now: func() int64 {
+			callCount++
+			if callCount <= 1 {
+				return 1000
+			}
+			return 99999
+		},
+		DurableAwaitSignals: func(names []string, timeoutMs int64) (string, string, bool, error) {
+			return "", "", true, nil
+		},
+	})
+
+	met := AwaitCondition(h, func() bool { return false }, time.Millisecond, time.Millisecond)
+	if met {
+		t.Error("expected condition not to be met after timeout")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SetScope — clear-scope path (empty objectType + instanceKey)
+// ---------------------------------------------------------------------------
+
+func TestSetScope_ClearsScopeWithEmptyStrings(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	prev := h.SetScope("Order", "ord-1")
+	if prev != "" {
+		t.Errorf("expected empty previous scope, got %q", prev)
+	}
+
+	objType, instKey := h.GetScope()
+	if objType != "Order" || instKey != "ord-1" {
+		t.Errorf("expected (Order, ord-1), got (%q, %q)", objType, instKey)
+	}
+
+	prev = h.SetScope("", "")
+	if prev != "vo:Order:ord-1:" {
+		t.Errorf("expected previous scope 'vo:Order:ord-1:', got %q", prev)
+	}
+
+	objType, instKey = h.GetScope()
+	if objType != "" || instKey != "" {
+		t.Errorf("expected empty scope, got (%q, %q)", objType, instKey)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ClearScope — when no scope is set
+// ---------------------------------------------------------------------------
+
+func TestClearScope_WhenNoScopeSet(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	prev := h.ClearScope()
+	if prev != "" {
+		t.Errorf("expected empty previous scope, got %q", prev)
+	}
+
+	objType, instKey := h.GetScope()
+	if objType != "" || instKey != "" {
+		t.Errorf("expected empty scope after clear, got (%q, %q)", objType, instKey)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MinVersion — not-initialized
+// ---------------------------------------------------------------------------
+
+func TestMinVersionReturnsOneWhenNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	v := h.MinVersion()
+	if v != 1 {
+		t.Errorf("expected version 1, got %d", v)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PollSignal — not-initialized
+// ---------------------------------------------------------------------------
+
+func TestPollSignalNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	_, _, err := h.PollSignal("sig1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ContinueAsNew / ContinueAsNewWithVersion — not-initialized
+// ---------------------------------------------------------------------------
+
+func TestContinueAsNewNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	err := h.ContinueAsNew("{}")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+func TestContinueAsNewWithVersionNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	err := h.ContinueAsNewWithVersion("{}", 2)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SignalWorkflow — not-initialized
+// ---------------------------------------------------------------------------
+
+func TestSignalWorkflowNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	err := h.SignalWorkflow("run1", "sig", "{}")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitAllChildren — not-initialized
+// ---------------------------------------------------------------------------
+
+func TestAwaitAllChildrenNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	_, err := h.AwaitAllChildren([]string{"run1"})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableCallWithHeartbeat — fallback and delegation
+// ---------------------------------------------------------------------------
+
+func TestDurableCallWithHeartbeatFallbackToDurableCall(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return "fallback_ok", nil
+		},
+	})
+
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != "fallback_ok" {
+		t.Errorf("expected %q, got %q", "fallback_ok", resp)
+	}
+}
+
+func TestDurableCallWithHeartbeatDelegates(t *testing.T) {
+	var capturedInterval time.Duration
+	h := NewHostCalls(HostCallsOptions{
+		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+			capturedInterval = heartbeatInterval
+			return "hb_ok", nil
+		},
+	})
+
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", 500*time.Millisecond, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp != "hb_ok" {
+		t.Errorf("expected %q, got %q", "hb_ok", resp)
+	}
+	if capturedInterval != 500*time.Millisecond {
+		t.Errorf("expected interval 500ms, got %v", capturedInterval)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ChildWorkflowWithOptions — not-initialized
+// ---------------------------------------------------------------------------
+
+func TestChildWorkflowWithOptionsNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	_, err := h.ChildWorkflowWithOptions("wf", "{}", ChildWorkflowOptions{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitChildTyped — fallback unmarshal error and error propagation
+// ---------------------------------------------------------------------------
+
+func TestAwaitChildTypedUnmarshalError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		AwaitChild: func(runID string) (string, error) {
+			return "{bad json}", nil
+		},
+	})
+
+	var result struct{ X int }
+	err := h.AwaitChildTyped("run1", &result)
+	if err == nil {
+		t.Fatal("expected unmarshal error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unmarshaling") {
+		t.Errorf("expected unmarshaling error, got: %v", err)
+	}
+}
+
+func TestAwaitChildTypedPropagatesError(t *testing.T) {
+	awErr := errors.New("child failed")
+	h := NewHostCalls(HostCallsOptions{
+		AwaitChild: func(runID string) (string, error) {
+			return "", awErr
+		},
+	})
+
+	var result struct{}
+	err := h.AwaitChildTyped("run1", &result)
+	if err != awErr {
+		t.Errorf("expected original error %v, got %v", awErr, err)
+	}
+}

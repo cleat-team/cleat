@@ -2241,3 +2241,144 @@ func TestPluginRegistry_RegisterAlreadyExists(t *testing.T) {
 		t.Errorf("expected 'already registered' error, got: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Engine option functions
+// ---------------------------------------------------------------------------
+
+func TestWithSignalStore(t *testing.T) {
+	store := &stubWorkflowStore{}
+	opt := WithSignalStore(store)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.signalStore != store {
+		t.Error("WithSignalStore did not set signalStore")
+	}
+}
+
+func TestWithPromiseStore(t *testing.T) {
+	store := &stubWorkflowStore{}
+	opt := WithPromiseStore(store)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.promiseStore != store {
+		t.Error("WithPromiseStore did not set promiseStore")
+	}
+}
+
+func TestWithWorkflowID(t *testing.T) {
+	want := "test-workflow-id"
+	opt := WithWorkflowID(want)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.workflowID != want {
+		t.Errorf("WithWorkflowID: got %q, want %q", e.workflowID, want)
+	}
+}
+
+func TestWithChildWorkflowStore(t *testing.T) {
+	store := &stubWorkflowStore{}
+	opt := WithChildWorkflowStore(store)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.childWfStore != store {
+		t.Error("WithChildWorkflowStore did not set childWfStore")
+	}
+}
+
+func TestWithConcurrencyKeyStore(t *testing.T) {
+	store := &stubWorkflowStore{}
+	opt := WithConcurrencyKeyStore(store)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.concurrencyKeyStore != store {
+		t.Error("WithConcurrencyKeyStore did not set concurrencyKeyStore")
+	}
+}
+
+func TestWithCompactionState(t *testing.T) {
+	cs := &CompactionState{Version: 1, CompactedStep: 5}
+	opt := WithCompactionState(cs)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.compactionState != cs {
+		t.Error("WithCompactionState did not set compactionState")
+	}
+}
+
+func TestWithPluginRegistry(t *testing.T) {
+	pr := NewPluginRegistry()
+	opt := WithPluginRegistry(pr)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.pluginRegistry != pr {
+		t.Error("WithPluginRegistry did not set pluginRegistry")
+	}
+}
+
+func TestWithPluginStreamRegistry(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	opt := WithPluginStreamRegistry(psr)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.pluginStreamRegistry != psr {
+		t.Error("WithPluginStreamRegistry did not set pluginStreamRegistry")
+	}
+}
+
+func TestWithTenantID(t *testing.T) {
+	want := "test-tenant"
+	opt := WithTenantID(want)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.tenantID != want {
+		t.Errorf("WithTenantID: got %q, want %q", e.tenantID, want)
+	}
+}
+
+func TestWithPluginCallGuard(t *testing.T) {
+	g := NewPluginCallGuard()
+	opt := WithPluginCallGuard(g)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.pluginCallGuard != g {
+		t.Error("WithPluginCallGuard did not set pluginCallGuard")
+	}
+}
+
+func TestWithDB(t *testing.T) {
+	opt := WithDB(nil)
+	e := NewEngine(nil, nil)
+	opt(e)
+	if e.db != nil {
+		t.Error("WithDB(nil) should set db to nil")
+	}
+}
+
+func TestWithOptionsViaNewEngine(t *testing.T) {
+	// Verify that options work when passed via NewEngine.
+	store := &stubWorkflowStore{}
+	psr := NewPluginStreamRegistry()
+	e := NewEngine(nil, nil,
+		WithSignalStore(store),
+		WithPromiseStore(store),
+		WithWorkflowID("wf-1"),
+		WithTenantID("tenant-1"),
+		WithPluginStreamRegistry(psr),
+	)
+	if e.signalStore != store {
+		t.Error("WithSignalStore not applied via NewEngine")
+	}
+	if e.promiseStore != store {
+		t.Error("WithPromiseStore not applied via NewEngine")
+	}
+	if e.workflowID != "wf-1" {
+		t.Errorf("WithWorkflowID: got %q", e.workflowID)
+	}
+	if e.tenantID != "tenant-1" {
+		t.Errorf("WithTenantID: got %q", e.tenantID)
+	}
+	if e.pluginStreamRegistry != psr {
+		t.Error("WithPluginStreamRegistry not applied via NewEngine")
+	}
+}

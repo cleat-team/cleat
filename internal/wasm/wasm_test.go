@@ -234,6 +234,37 @@ func TestGenerateExportsSyntaxValid(t *testing.T) {
 	syntaxCheck(t, "GenerateExports", string(GenerateExports("basic", result)))
 }
 
+func TestGenerateExportsErrorsZeroArgEntryPoints(t *testing.T) {
+	result, cr := loadErrors(t)
+	_ = cr
+	code := string(GenerateExports("errors", result))
+	// BadWithGoroutine, BadWithFuncValue, BadWithFloatCondition have no params
+	// beyond h — their generated code should suppress args parsing.
+	if !strings.Contains(code, "_ = argsPtr") {
+		t.Error("expected args suppression for zero-arg entry points")
+	}
+	if !strings.Contains(code, "_ = argsLen") {
+		t.Error("expected argsLen suppression for zero-arg entry points")
+	}
+	// void-return entry points should not have result variables.
+	if !strings.Contains(code, "BadWithGoroutine(h)") {
+		t.Error("expected void call for BadWithGoroutine")
+	}
+}
+
+func TestGenerateExportsErrorsOnlyReturn(t *testing.T) {
+	result, cr := loadErrors(t)
+	_ = cr
+	code := string(GenerateExports("errors", result))
+	// BadWithInterfaceDispatch returns only error — no result marshal.
+	if !strings.Contains(code, "__susResultErr") {
+		t.Error("expected __susResultErr assignment")
+	}
+	if !strings.Contains(code, "BadWithInterfaceDispatch") {
+		t.Error("expected BadWithInterfaceDispatch export")
+	}
+}
+
 // ---- BuildOutputs ----
 
 func TestBuildOutputsBasic(t *testing.T) {
@@ -340,6 +371,14 @@ func TestNeedsUnsafe(t *testing.T) {
 		Funcs: []HostFunction{{ImportName: "cleat_log", FieldName: "DurableLog"}}}
 	if needsUnsafe(usage2) {
 		t.Error("cleat_log should not need unsafe")
+	}
+}
+
+func TestNeedsJSONWithPluginCallStreaming(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_plugin_call_streaming": true},
+		Funcs: []HostFunction{{ImportName: "cleat_plugin_call_streaming", FieldName: "PluginCallStreaming"}}}
+	if !needsJSON(usage) {
+		t.Error("PluginCallStreaming result stmts contain json.Unmarshal")
 	}
 }
 
@@ -637,5 +676,104 @@ func TestSimpleResultPacking(t *testing.T) {
 		if decodedExtra != tt.extra {
 			t.Errorf("[%#x] extra = %d, want %d", uint64(packed), decodedExtra, tt.extra)
 		}
+	}
+}
+
+// ---- needsTime / needsUnsafe / needsJSON / outBufNames edge cases ----
+
+func TestNeedsTimeTrue(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_call_heartbeat": true},
+		Funcs: []HostFunction{{ImportName: "cleat_call_heartbeat", FieldName: "DurableCallWithHeartbeat"}}}
+	if !needsTime(usage) {
+		t.Error("DurableCallWithHeartbeat uses time.Duration, expected needsTime=true")
+	}
+}
+
+func TestNeedsTimeFalse(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_sleep": true},
+		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleep"}}}
+	if needsTime(usage) {
+		t.Error("DurableSleep should not need time")
+	}
+}
+
+func TestNeedsFmtFalse(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_sleep": true},
+		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleep"}}}
+	if needsFmt(usage) {
+		t.Error("cleat_sleep should not need fmt")
+	}
+}
+
+func TestNeedsJSONFalse(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_call": true},
+		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
+	if needsJSON(usage) {
+		t.Error("cleat_call should not need json")
+	}
+}
+
+func TestNeedsUnsafeFalse(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_log": true},
+		Funcs: []HostFunction{{ImportName: "cleat_log", FieldName: "DurableLog"}}}
+	if needsUnsafe(usage) {
+		t.Error("cleat_log should not need unsafe")
+	}
+}
+
+func TestOutBufNamesUnknownImport(t *testing.T) {
+	if names := outBufNames("nonexistent_import"); names != nil {
+		t.Errorf("expected nil for unknown import, got %v", names)
+	}
+}
+
+// ---- generateExport coverage ----
+
+func TestGenerateExportBasic(t *testing.T) {
+	result, cr := loadBasic(t)
+	_ = cr
+	code := string(GenerateExports("basic", result))
+	if !strings.Contains(code, "writeJSONOut") {
+		t.Error("expected writeJSONOut function")
+	}
+	if !strings.Contains(code, "//go:wasmexport place_order") {
+		t.Error("expected place_order export")
+	}
+	if !strings.Contains(code, "//go:wasmexport cancel_order") {
+		t.Error("expected cancel_order export")
+	}
+}
+
+// ---- needsFmt/needsUnsafe edge cases with unmapped FieldName ----
+
+func TestNeedsFmtWithUnmappedField(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_unknown": true},
+		Funcs: []HostFunction{{ImportName: "cleat_unknown", FieldName: "NonExistentField"}}}
+	if needsFmt(usage) {
+		t.Error("expected false for unmapped field")
+	}
+}
+
+func TestNeedsUnsafeWithUnmappedField(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_unknown": true},
+		Funcs: []HostFunction{{ImportName: "cleat_unknown", FieldName: "NonExistentField"}}}
+	if needsUnsafe(usage) {
+		t.Error("expected false for unmapped field")
+	}
+}
+
+func TestNeedsJSONWithUnmappedField(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_unknown": true},
+		Funcs: []HostFunction{{ImportName: "cleat_unknown", FieldName: "NonExistentField"}}}
+	if needsJSON(usage) {
+		t.Error("expected false for unmapped field")
+	}
+}
+
+func TestNeedsTimeWithUnmappedField(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_unknown": true},
+		Funcs: []HostFunction{{ImportName: "cleat_unknown", FieldName: "NonExistentField"}}}
+	if needsTime(usage) {
+		t.Error("expected false for unmapped field")
 	}
 }

@@ -2,8 +2,10 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rcownie/cleat/internal/plugin"
@@ -133,5 +135,44 @@ func TestPluginRegistration(t *testing.T) {
 	}
 	if !found {
 		t.Error("llm plugin not found after Discover")
+	}
+}
+
+// errorRegistry returns an error on any Register call.
+type errorRegistry struct {
+	plugin.FuncRegistry
+}
+
+func (r *errorRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	return fmt.Errorf("register error: %s", opts.Name)
+}
+
+func TestRegisterHostFunctionsRegisterError(t *testing.T) {
+	p := &Plugin{}
+	scope := &errorRegistry{}
+	err := p.RegisterHostFunctions(scope)
+	if err == nil {
+		t.Fatal("expected error from Register, got nil")
+	}
+}
+
+// errorStreamRegistry returns an error only on RegisterStream.
+type errorStreamRegistry struct {
+	*testStreamRegistry
+}
+
+func (r *errorStreamRegistry) RegisterStream(opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
+	return fmt.Errorf("register stream error: %s", opts.Name)
+}
+
+func TestRegisterHostFunctionsStreamError(t *testing.T) {
+	p := &Plugin{}
+	scope := &errorStreamRegistry{newTestStreamRegistry()}
+	err := p.RegisterHostFunctions(scope)
+	if err == nil {
+		t.Fatal("expected error from RegisterStream, got nil")
+	}
+	if !strings.Contains(err.Error(), "register stream error") {
+		t.Errorf("expected register stream error, got: %v", err)
 	}
 }

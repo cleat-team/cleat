@@ -704,3 +704,325 @@ func TestAnthropicChatMaxTokensDefault(t *testing.T) {
 		t.Fatalf("AnthropicChat() returned error: %v", err)
 	}
 }
+
+// roundTripperFunc adapts a function to the http.RoundTripper interface.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// TestGroqChatEmptyBaseURL verifies GroqChat sets the default base URL when none is provided.
+func TestGroqChatEmptyBaseURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{
+				"message":       map[string]string{"role": "assistant", "content": "Hello from Groq"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+			"model": "llama-3.3-70b",
+		})
+	}))
+	defer srv.Close()
+
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			req.URL.Host = srv.Listener.Addr().String()
+			req.URL.Scheme = "http"
+			return http.DefaultTransport.RoundTrip(req)
+		}),
+	}
+
+	input := ChatInput{Model: "llama-3.3-70b", Messages: []Message{{Role: "user", Content: "hello"}}}
+	out, err := GroqChat(context.Background(), client, "sk-test", "", input)
+	if err != nil {
+		t.Fatalf("GroqChat() returned error: %v", err)
+	}
+	if out.Choices[0].Message.Content != "Hello from Groq" {
+		t.Errorf("unexpected content: %q", out.Choices[0].Message.Content)
+	}
+}
+
+// TestGroqChatStreamEmptyBaseURL verifies GroqChatStream sets the default base URL when none is provided.
+func TestGroqChatStreamEmptyBaseURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n")
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\" Groq\"},\"finish_reason\":null}]}\n\n")
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			req.URL.Host = srv.Listener.Addr().String()
+			req.URL.Scheme = "http"
+			return http.DefaultTransport.RoundTrip(req)
+		}),
+	}
+
+	input := ChatInput{Model: "llama-3.3-70b", Messages: []Message{{Role: "user", Content: "hello"}}}
+	ch, err := GroqChatStream(context.Background(), client, "sk-test", "", input)
+	if err != nil {
+		t.Fatalf("GroqChatStream() returned error: %v", err)
+	}
+	var received string
+	for chunk := range ch {
+		received += chunk.Content
+		if chunk.Done {
+			break
+		}
+	}
+	expected := "Hello Groq"
+	if received != expected {
+		t.Errorf("expected %q, got %q", expected, received)
+	}
+}
+
+// TestOpenAIEmbedParseError verifies OpenAIEmbed handles a non-JSON response.
+func TestOpenAIEmbedParseError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{invalid`))
+	}))
+	defer srv.Close()
+
+	input := EmbedInput{Model: "text-embedding-3-small", Input: []string{"test"}}
+	_, err := OpenAIEmbed(context.Background(), srv.Client(), "sk-test", srv.URL, input)
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !strings.Contains(err.Error(), "parse embed response") {
+		t.Errorf("expected parse error, got: %v", err)
+	}
+}
+
+// TestGeminiChatToolResponse verifies GeminiChat handles tool result messages.
+func TestGeminiChatToolResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"candidates": []map[string]any{{
+				"content": map[string]any{
+					"role":  "model",
+					"parts": []map[string]any{{"text": "The result is 4"}},
+				},
+				"finishReason": "STOP",
+			}},
+			"usageMetadata": map[string]int{
+				"promptTokenCount":     10,
+				"candidatesTokenCount": 5,
+				"totalTokenCount":      15,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	input := ChatInput{
+		Model: "gemini-2.5-flash",
+		Messages: []Message{
+			{Role: "user", Content: "what is 2+2?"},
+			{Role: "assistant", Content: "", ToolCalls: []ToolCall{{
+				ID:   "call_001",
+				Type: "function",
+				Function: FunctionCall{
+					Name:      "calculator",
+					Arguments: `{"expression":"2+2"}`,
+				},
+			}}},
+			{Role: "tool", ToolCallID: "call_001", Content: "4"},
+		},
+		Tools: []Tool{{Type: "function", Function: ToolFunction{
+			Name:        "calculator",
+			Description: "evaluates math",
+			Parameters:  map[string]any{"type": "object"},
+		}}},
+	}
+	out, err := GeminiChat(context.Background(), srv.Client(), "test-key", srv.URL, input)
+	if err != nil {
+		t.Fatalf("GeminiChat() returned error: %v", err)
+	}
+	if len(out.Choices) != 1 {
+		t.Fatalf("expected 1 choice, got %d", len(out.Choices))
+	}
+	if out.Choices[0].Message.Content != "The result is 4" {
+		t.Errorf("unexpected content: %q", out.Choices[0].Message.Content)
+	}
+}
+
+// TestOllamaChatStreamUnit verifies OllamaChatStream returns streaming content.
+func TestOllamaChatStreamUnit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			`{"message":{"content":"Hello"},"done":false}`,
+			`{"message":{"content":" from"},"done":false}`,
+			`{"message":{"content":" Ollama"},"done":false}`,
+			`{"message":{"content":""},"done":true}`,
+		}
+		for _, c := range chunks {
+			fmt.Fprintf(w, "%s\n", c)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer srv.Close()
+
+	input := ChatInput{
+		Model:       "llama3.2",
+		Messages:    []Message{{Role: "user", Content: "hello"}},
+		Temperature: 0.7,
+		MaxTokens:   500,
+	}
+	ch, err := OllamaChatStream(context.Background(), srv.Client(), srv.URL, input)
+	if err != nil {
+		t.Fatalf("OllamaChatStream() returned error: %v", err)
+	}
+
+	var received string
+	for chunk := range ch {
+		received += chunk.Content
+		if chunk.Done {
+			break
+		}
+	}
+	expected := "Hello from Ollama"
+	if received != expected {
+		t.Errorf("expected %q, got %q", expected, received)
+	}
+}
+
+// TestOllamaChatStreamEmptyBaseURL verifies OllamaChatStream sets the default base URL when none is provided.
+func TestOllamaChatStreamEmptyBaseURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"message":{"content":"ok"},"done":true}`+"\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			req.URL.Host = srv.Listener.Addr().String()
+			req.URL.Scheme = "http"
+			return http.DefaultTransport.RoundTrip(req)
+		}),
+	}
+
+	input := ChatInput{Model: "llama3.2", Messages: []Message{{Role: "user", Content: "hi"}}}
+	ch, err := OllamaChatStream(context.Background(), client, "", input)
+	if err != nil {
+		t.Fatalf("OllamaChatStream() returned error: %v", err)
+	}
+	var received string
+	for chunk := range ch {
+		received += chunk.Content
+		if chunk.Done {
+			break
+		}
+	}
+	if received != "ok" {
+		t.Errorf("expected %q, got %q", "ok", received)
+	}
+}
+
+// TestAnthropicChatStreamEventTypes verifies AnthropicChatStream processes event types.
+func TestAnthropicChatStreamEventTypes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/messages") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("x-api-key") != "sk-ant-test" {
+			http.Error(w, `{"error":{"message":"unauthorized"}}`, http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+
+		events := []string{
+			`data: {"type":"content_block_start","content_block":{"type":"text","text":"Hello"}}`,
+			`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":", world"}}`,
+			`data: {"type":"message_stop"}`,
+			`data: [DONE]`,
+		}
+		for _, e := range events {
+			fmt.Fprintf(w, "%s\n\n", e)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer srv.Close()
+
+	input := ChatInput{
+		Model:       "claude-sonnet-4-6",
+		Messages:    []Message{{Role: "user", Content: "hello"}},
+		Temperature: 0.7,
+		MaxTokens:   500,
+	}
+	ch, err := AnthropicChatStream(context.Background(), srv.Client(), "sk-ant-test", srv.URL, input)
+	if err != nil {
+		t.Fatalf("AnthropicChatStream() returned error: %v", err)
+	}
+
+	var received string
+	for chunk := range ch {
+		received += chunk.Content
+		if chunk.Done {
+			break
+		}
+	}
+	expected := "Hello, world"
+	if received != expected {
+		t.Errorf("expected %q, got %q", expected, received)
+	}
+}
+
+// TestAnthropicChatStreamEmptyBaseURL verifies AnthropicChatStream sets the default base URL when none is provided.
+func TestAnthropicChatStreamEmptyBaseURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\n")
+		fmt.Fprintf(w, "data: {\"type\":\"message_stop\"}\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			req.URL.Host = srv.Listener.Addr().String()
+			req.URL.Scheme = "http"
+			return http.DefaultTransport.RoundTrip(req)
+		}),
+	}
+
+	input := ChatInput{Model: "claude-sonnet-4-6", Messages: []Message{{Role: "user", Content: "hi"}}}
+	ch, err := AnthropicChatStream(context.Background(), client, "sk-ant-test", "", input)
+	if err != nil {
+		t.Fatalf("AnthropicChatStream() returned error: %v", err)
+	}
+	var received string
+	for chunk := range ch {
+		received += chunk.Content
+		if chunk.Done {
+			break
+		}
+	}
+	if received != "ok" {
+		t.Errorf("expected %q, got %q", "ok", received)
+	}
+}
