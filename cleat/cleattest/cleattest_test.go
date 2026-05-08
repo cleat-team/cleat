@@ -765,33 +765,67 @@ func TestSignalDuringDurableSleep(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestConcurrentSignalDelivery(t *testing.T) {
+	t.Parallel()
+
 	env := NewTestEnv()
 
 	var wg sync.WaitGroup
-	signals := []string{"sig1", "sig2", "sig3", "sig4", "sig5"}
+	numSignals := 10
 
-	for _, name := range signals {
+	// Deliver 10 signals from 10 goroutines concurrently to the same workflow.
+	for i := 0; i < numSignals; i++ {
 		wg.Add(1)
-		go func(sigName string) {
+		go func(idx int) {
 			defer wg.Done()
-			env.Signal(sigName, "payload-"+sigName)
-		}(name)
+			env.Signal(fmt.Sprintf("sig_%d", idx), fmt.Sprintf("payload_%d", idx))
+		}(i)
 	}
-
 	wg.Wait()
 
-	for _, name := range signals {
-		payload, found, err := env.H().PollSignal(name)
+	// Collect all signal names for polling.
+	allNames := make([]string, numSignals)
+	for i := 0; i < numSignals; i++ {
+		allNames[i] = fmt.Sprintf("sig_%d", i)
+	}
+
+	// Consume all signals via DurableAwaitSignals using poll mode (0 timeout).
+	// Each call consumes exactly one signal. Verify exactly-once semantics.
+	received := make(map[string]int)
+	for i := 0; i < numSignals; i++ {
+		name, payload, timedOut, err := env.H().DurableAwaitSignals(allNames, 0)
 		if err != nil {
-			t.Fatalf("unexpected error for %s: %v", name, err)
+			t.Fatalf("unexpected error at signal %d: %v", i, err)
 		}
-		if !found {
-			t.Fatalf("expected signal %s to be found", name)
+		if timedOut {
+			t.Fatalf("unexpected timeout at signal %d: consumed %d/%d signals", i, i, numSignals)
 		}
-		expectedPayload := "payload-" + name
-		if payload != expectedPayload {
-			t.Fatalf("expected payload %q for %s, got %q", expectedPayload, name, payload)
+		received[name]++
+
+		// Verify payload matches the signal name.
+		var sigIdx int
+		if _, parseErr := fmt.Sscanf(name, "sig_%d", &sigIdx); parseErr == nil {
+			expectedPayload := fmt.Sprintf("payload_%d", sigIdx)
+			if payload != expectedPayload {
+				t.Errorf("signal %s: expected payload %q, got %q", name, expectedPayload, payload)
+			}
 		}
+	}
+
+	// Verify exactly once: every signal was received exactly one time.
+	for i := 0; i < numSignals; i++ {
+		name := fmt.Sprintf("sig_%d", i)
+		if received[name] != 1 {
+			t.Errorf("signal %s received %d times (expected exactly 1)", name, received[name])
+		}
+	}
+
+	// Verify no extra signals remain in the queue.
+	_, _, timedOut, err := env.H().DurableAwaitSignals(allNames, 0)
+	if err != nil {
+		t.Fatalf("unexpected error checking for extras: %v", err)
+	}
+	if !timedOut {
+		t.Error("expected timeout after consuming all signals — some signals may be duplicated")
 	}
 }
 

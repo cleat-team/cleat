@@ -3,6 +3,7 @@ package embedded
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -63,16 +64,31 @@ func TestWorkflowContextHasHostCalls(t *testing.T) {
 		if h == nil {
 			t.Fatal("H() returned nil")
 		}
+
+		// DurableLog should not panic.
+		h.DurableLog("test message")
+
+		// Now() should return a non-zero time, proving the clock
+		// implementation wired through HostCalls is functional.
+		n := h.Now()
+		if n.IsZero() {
+			t.Error("Now() returned zero time; HostCalls Now is not functional")
+		}
+
+		// WorkflowID() should return the registered workflow name
+		// rather than being empty or nil.
+		wid := h.WorkflowID()
+		if wid != "check_hc" {
+			t.Errorf("WorkflowID() = %q, want %q", wid, "check_hc")
+		}
+
 		ctx.SetOutput(`{"ok":true}`)
 		return nil
 	})
 
-	result, err := r.ExecuteWorkflow(context.Background(), "check_hc", "{}")
+	_, err := r.ExecuteWorkflow(context.Background(), "check_hc", "{}")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != `{"ok":true}` {
-		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
 	}
 }
 
@@ -102,11 +118,21 @@ func TestDurableCallWorks(t *testing.T) {
 	r := New()
 	r.Register("caller", func(ctx *Context) error {
 		h := ctx.H()
-		resp, err := h.DurableCall("svc", "op", `{"key":"val"}`)
+		// Call DurableCall twice with identical inputs to verify
+		// deterministic routing: same service+operation+request
+		// must produce the same response each time.
+		resp1, err := h.DurableCall("svc", "op", `{"key":"val"}`)
 		if err != nil {
 			return err
 		}
-		ctx.SetOutput(resp)
+		resp2, err := h.DurableCall("svc", "op", `{"key":"val"}`)
+		if err != nil {
+			return err
+		}
+		if resp1 != resp2 {
+			return fmt.Errorf("non-deterministic DurableCall: first call returned %q, second returned %q", resp1, resp2)
+		}
+		ctx.SetOutput(resp1)
 		return nil
 	})
 

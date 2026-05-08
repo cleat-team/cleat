@@ -102,7 +102,7 @@ func TestLastComponentExtractsCorrectComponent(t *testing.T) {
 		path string
 		want string
 	}{
-		{"github.com/rcownie/cleat", "durable"},
+		{"github.com/rcownie/cleat", "cleat"},
 		{"/usr/local/go", "go"},
 		{"single", "single"},
 		{"", ""},

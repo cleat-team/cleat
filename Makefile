@@ -75,6 +75,67 @@ test-cluster: build-go cluster-up
 	go test -count=1 -timeout=120s ./internal/host/...
 	$(MAKE) cluster-down
 
+# ---- coverage -------------------------------------------------------------
+
+.PHONY: coverage-go
+coverage-go:
+	go test -coverprofile=coverage.out -covermode=atomic ./cleat/... ./internal/... ./plugins/... ./cmd/...
+
+.PHONY: coverage-python
+coverage-python:
+	cd python-sdk && python -m pytest --cov=cleat_sdk --cov-report=term --cov-report=html:tests/coverage
+
+.PHONY: coverage
+coverage: coverage-go coverage-python
+	@echo "Coverage reports generated"
+
+.PHONY: coverage-report
+coverage-report:
+	go tool cover -func=coverage.out
+
+# Thresholds (non-blocking, informational only):
+#   cleat/            70%
+#   internal/host/    60%
+#   internal/plugin/  50%
+#   plugins/          50%
+.PHONY: coverage-check
+coverage-check: coverage-go
+	@go tool cover -func=coverage.out | awk 'BEGIN { \
+	    printf "=== Coverage by Package ===\n"; \
+	    printf "%-25s %8s\n\n", "Package", "Coverage"; \
+	} \
+	/^total:/ { next } \
+	{ \
+	    path = $$1; \
+	    sub(/:[0-9]+:$$/, "", path); \
+	    sub(/\/[^/]+\.go$$/, "", path); \
+	    gsub(/%$$/, "", $$NF); \
+	    cov[path] += $$NF; \
+	    cnt[path]++; \
+	} \
+	END { \
+	    for (p in cov) { \
+	        printf "%-25s %7.2f%%\n", p, cov[p] / cnt[p]; \
+	    } \
+	    printf "\n=== Threshold Check ===\n"; \
+	    printf "%-25s %8s %10s  %s\n\n", "Package", "Coverage", "Threshold", "Result"; \
+	    pkgs["cleat"] = 70; \
+	    pkgs["internal/host"] = 60; \
+	    pkgs["internal/plugin"] = 50; \
+	    pkgs["plugins"] = 50; \
+	    for (p in cov) { \
+	        avg = cov[p] / cnt[p]; \
+	        t = pkgs[p]; \
+	        if (t == "") continue; \
+	        if (avg < t) { \
+	            printf "\033[31m%-25s %7.2f%% %5d%%      FAIL\033[0m\n", p, avg, t; \
+	        } else { \
+	            printf "\033[32m%-25s %7.2f%% %5d%%      PASS\033[0m\n", p, avg, t; \
+	        } \
+	    } \
+	}'
+	@echo "Coverage check complete (non-blocking, exit 0)"
+
 # ---- bench -----------------------------------------------------------------
 
 .PHONY: bench

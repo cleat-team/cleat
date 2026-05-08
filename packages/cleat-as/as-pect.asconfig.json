@@ -1,0 +1,19 @@
+{
+  "targets": {
+    "noCoverage": {
+      "transform": ["@as-pect/transform"]
+    }
+  },
+  "options": {
+    "use": ["ASC_WASI=0"],
+    "exportRuntime": true,
+    "exportStart": "_start",
+    "runtime": "stub",
+    "outFile": "output.wasm",
+    "textFile": "output.wat",
+    "paths": {
+      "@cleat/sdk": "./assembly"
+    }
+  },
+  "entries": ["./node_modules/@as-pect/assembly/assembly/index.ts"]
+}

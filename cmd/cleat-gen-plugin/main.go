@@ -9,10 +9,15 @@ import (
 	"github.com/rcownie/cleat/internal/plugingen"
 )
 
+// Flags are registered at package init time so they are available to both
+// main() and tests. Default values match the original inline definitions.
+var (
+	manifestPath = flag.String("manifest", "", "Path to plugin.json")
+	lang         = flag.String("lang", "typescript", "Target language (typescript, python, rust, go)")
+	output       = flag.String("out", "", "Output file (default: stdout)")
+)
+
 func main() {
-	manifestPath := flag.String("manifest", "", "Path to plugin.json")
-	lang := flag.String("lang", "typescript", "Target language (typescript, python, rust, go)")
-	output := flag.String("out", "", "Output file (default: stdout)")
 	flag.Parse()
 
 	if *manifestPath == "" {

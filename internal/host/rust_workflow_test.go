@@ -204,7 +204,7 @@ func TestRustWorkflowCompensation(t *testing.T) {
 	_, history, _, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
 	// Expect error from workflow
 	if err == nil {
-		t.Log("expected error from compensation path, got nil")
+		t.Error("expected error from compensation path, got nil")
 	}
 	t.Logf("Compensation result: err=%v, history=%d calls", err, len(history))
 	for i, rec := range history {

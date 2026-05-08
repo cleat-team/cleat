@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/rcownie/cleat/internal/host/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -18,21 +20,9 @@ func TestConcurrencyKeyAcquireRelease(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-
-	// Ensure concurrency_keys table exists.
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS concurrency_keys (
-		key_hash BYTEA PRIMARY KEY,
-		key_text TEXT NOT NULL,
-		workflow_id TEXT NOT NULL,
-		acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		expires_at TIMESTAMPTZ NOT NULL
-	)`)
-	if err != nil {
-		t.Fatalf("create concurrency_keys table: %v", err)
-	}
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
+	testutil.SetupFullSchema(t, db)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
@@ -88,20 +78,9 @@ func TestConcurrencyKeyExpiry(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS concurrency_keys (
-		key_hash BYTEA PRIMARY KEY,
-		key_text TEXT NOT NULL,
-		workflow_id TEXT NOT NULL,
-		acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		expires_at TIMESTAMPTZ NOT NULL
-	)`)
-	if err != nil {
-		t.Fatalf("create concurrency_keys table: %v", err)
-	}
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
+	testutil.SetupFullSchema(t, db)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
@@ -154,20 +133,9 @@ func TestConcurrencyKeyStartAPI(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS concurrency_keys (
-		key_hash BYTEA PRIMARY KEY,
-		key_text TEXT NOT NULL,
-		workflow_id TEXT NOT NULL,
-		acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		expires_at TIMESTAMPTZ NOT NULL
-	)`)
-	if err != nil {
-		t.Fatalf("create concurrency_keys table: %v", err)
-	}
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
+	testutil.SetupFullSchema(t, db)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
@@ -247,20 +215,9 @@ func TestConcurrencyKeyReleaseOnComplete(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS concurrency_keys (
-		key_hash BYTEA PRIMARY KEY,
-		key_text TEXT NOT NULL,
-		workflow_id TEXT NOT NULL,
-		acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		expires_at TIMESTAMPTZ NOT NULL
-	)`)
-	if err != nil {
-		t.Fatalf("create concurrency_keys table: %v", err)
-	}
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
+	testutil.SetupFullSchema(t, db)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
@@ -306,20 +263,9 @@ func TestConcurrencyKeyReleaseOnFail(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS concurrency_keys (
-		key_hash BYTEA PRIMARY KEY,
-		key_text TEXT NOT NULL,
-		workflow_id TEXT NOT NULL,
-		acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		expires_at TIMESTAMPTZ NOT NULL
-	)`)
-	if err != nil {
-		t.Fatalf("create concurrency_keys table: %v", err)
-	}
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
+	testutil.SetupFullSchema(t, db)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()

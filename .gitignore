@@ -59,6 +59,8 @@ go.work.sum
 # Python cache
 __pycache__/
 *.pyc
+.pytest_cache/
+htmlcov/
 
 # Node modules in ports
 ports-round2/*/node_modules/

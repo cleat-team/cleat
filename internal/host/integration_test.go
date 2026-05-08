@@ -2,114 +2,14 @@ package host
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/rcownie/cleat/internal/host/testutil"
 )
-
-// setupFullTestSchema creates the complete database schema needed for full
-// pipeline integration tests. It drops any existing tables (including those
-// created by testDB's minimal schema) and recreates them with all columns
-// used by PostgresStore.
-func setupFullTestSchema(t *testing.T, db *sql.DB) {
-	t.Helper()
-
-	dropQueries := []string{
-		`DROP TABLE IF EXISTS workflow_signals CASCADE`,
-		`DROP TABLE IF EXISTS event_history CASCADE`,
-		`DROP TABLE IF EXISTS workflow_instances CASCADE`,
-		`DROP TABLE IF EXISTS workflow_defs CASCADE`,
-		`DROP TABLE IF EXISTS workflow_schedules CASCADE`,
-	}
-	for _, q := range dropQueries {
-		if _, err := db.Exec(q); err != nil {
-			t.Fatalf("drop table: %v", err)
-		}
-	}
-
-	createQueries := []string{
-		`CREATE TABLE workflow_defs (
-			name TEXT NOT NULL,
-			version INTEGER NOT NULL,
-			wasm_bytes BYTEA NOT NULL,
-			entry_points TEXT[] NOT NULL DEFAULT '{}',
-			min_version INTEGER NOT NULL DEFAULT 0,
-			namespace TEXT NOT NULL DEFAULT 'default',
-			max_history_length INTEGER NOT NULL DEFAULT 0,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			PRIMARY KEY (name, version)
-		)`,
-		`CREATE TABLE workflow_instances (
-			id TEXT PRIMARY KEY,
-			def_name TEXT NOT NULL,
-			def_version INTEGER NOT NULL DEFAULT 1,
-			status TEXT NOT NULL DEFAULT 'ready',
-			input JSONB NOT NULL DEFAULT '{}'::jsonb,
-			assigned_to TEXT,
-			heartbeat_at TIMESTAMPTZ,
-			next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			completed_at TIMESTAMPTZ,
-			result JSONB,
-			error_msg TEXT,
-			parent_workflow_id TEXT,
-			namespace TEXT NOT NULL DEFAULT 'default',
-			trace_id TEXT,
-			query_state JSONB DEFAULT '{}'::jsonb,
-			task_queue TEXT NOT NULL DEFAULT 'default',
-			cancellation_requested BOOLEAN NOT NULL DEFAULT false,
-			cancellation_reason TEXT
-		)`,
-		`CREATE TABLE event_history (
-			workflow_id TEXT NOT NULL,
-			step INTEGER NOT NULL,
-			event_type TEXT NOT NULL DEFAULT 'call',
-			service TEXT,
-			operation TEXT,
-			request JSONB,
-			response JSONB,
-			error TEXT,
-			duration_ms BIGINT,
-			signal_names TEXT,
-			timeout_ms BIGINT,
-			signal_name TEXT,
-			signal_payload JSONB,
-			defer_description TEXT,
-			defer_id TEXT,
-			child_name TEXT,
-			child_input JSONB,
-			run_id TEXT,
-			new_input JSONB,
-			plugin_name TEXT,
-			plugin_func TEXT,
-			plugin_input JSONB,
-			plugin_output JSONB,
-			plugin_error TEXT,
-			promise_name TEXT,
-			promise_id TEXT,
-			promise_result TEXT,
-			promise_error TEXT,
-			payload JSONB,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			PRIMARY KEY (workflow_id, step)
-		)`,
-		`CREATE TABLE workflow_signals (
-			workflow_id TEXT NOT NULL,
-			signal_name TEXT NOT NULL,
-			payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-			delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-			PRIMARY KEY (workflow_id, signal_name)
-		)`,
-	}
-	for _, q := range createQueries {
-		if _, err := db.Exec(q); err != nil {
-			t.Fatalf("create table: %v", err)
-		}
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Test 1: Full pipeline — real DB + WASM compile + Engine execute + event
@@ -125,9 +25,9 @@ func TestIntegrationFullPipeline(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-	setupFullTestSchema(t, db)
+	testutil.SetupFullSchema(t, db)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-full-%d", time.Now().UnixNano())
@@ -278,9 +178,9 @@ func TestIntegrationMultiStepSleep(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-	setupFullTestSchema(t, db)
+	testutil.SetupFullSchema(t, db)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-multistep-%d", time.Now().UnixNano())
@@ -382,9 +282,9 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-	setupFullTestSchema(t, db)
+	testutil.SetupFullSchema(t, db)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-signal-%d", time.Now().UnixNano())
@@ -505,9 +405,9 @@ func TestIntegrationReplayDivergence(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-	setupFullTestSchema(t, db)
+	testutil.SetupFullSchema(t, db)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-divergence-%d", time.Now().UnixNano())
@@ -612,9 +512,9 @@ func TestIntegrationNewEventTypesPersistenceRoundTrip(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testDB(t)
+	db := testutil.TestDB(t)
 	defer db.Close()
-	setupFullTestSchema(t, db)
+	testutil.SetupFullSchema(t, db)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-new-events-%d", time.Now().UnixNano())

@@ -133,6 +133,19 @@ jobs:
   test-go:
     name: Test Go (${{ matrix.package.name }}) on ${{ matrix.go-version }}
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      CLEAT_TEST_DB: postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable
     strategy:
       fail-fast: false
       matrix:
@@ -154,8 +167,31 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
+      - name: Install TinyGo (WASM compilation)
+        if: matrix.package.name == 'internal' && matrix.go-version == '1.24'
+        run: |
+          curl -sSfL https://github.com/tinygo-org/tinygo/releases/download/v0.36.0/tinygo_0.36.0_linux_amd64.tar.gz -o /tmp/tinygo.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz
+          echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
+
+      - name: Setup Rust + wasm32-wasip1 (Rust WASM tests)
+        if: matrix.package.name == 'internal'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
       - name: Run tests
-        run: go test -race -count=1 "${{ matrix.package.path }}"
+        run: go test -race -count=1 -json "${{ matrix.package.path }}" 2>&1 | tee test-report.json
+
+      - name: Warn on skipped tests
+        if: always()
+        run: |
+          if [ -f test-report.json ]; then
+            SKIP_COUNT=$(grep -c '"Action":"skip"' test-report.json || echo 0)
+            if [ "$SKIP_COUNT" -gt 0 ]; then
+              echo "::warning title=Skipped Tests (${{ matrix.package.name }})::${SKIP_COUNT} test(s) were skipped. Verify that all test dependencies (PostgreSQL, TinyGo, Rust/cargo) are available."
+            fi
+          fi
 
   # -------------------------------------------------------------------------
   # Test Python (matrix: 3.10 / 3.11 / 3.12)
@@ -245,6 +281,14 @@ jobs:
 
       - name: Run fuzz tests
         run: go test -fuzz=. -fuzztime=60s ./internal/wasm/...
+
+      - name: Warn on skipped tests
+        if: always()
+        run: |
+          SKIP_COUNT=$(go test -json -count=1 ./internal/wasm/... 2>/dev/null | grep -c '"Action":"skip"' || echo 0)
+          if [ "$SKIP_COUNT" -gt 0 ]; then
+            echo "::warning title=Skipped Tests (fuzz)::${SKIP_COUNT} test(s) were skipped."
+          fi
 
   # -------------------------------------------------------------------------
   # Benchmarks (push to main only)
@@ -352,11 +396,58 @@ jobs:
           pip install .
 
   # -------------------------------------------------------------------------
+  # Coverage (informational, non-blocking)
+  # -------------------------------------------------------------------------
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python SDK
+        working-directory: python-sdk
+        run: |
+          pip install --upgrade pip
+          pip install ".[dev]"
+
+      - name: Run Go coverage
+        run: make coverage-go
+
+      - name: Run Python coverage
+        run: make coverage-python
+
+      - name: Upload Go coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage-${{ github.sha }}
+          path: coverage.out
+          retention-days: 30
+
+      - name: Upload Python coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage-${{ github.sha }}
+          path: python-sdk/tests/coverage
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
   # Cluster integration tests (requires Docker)
   # -------------------------------------------------------------------------
   cluster-tests:
     name: Cluster Integration Tests
     runs-on: ubuntu-latest
+    env:
+      CLEAT_TEST_DB: postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable
     steps:
       - uses: actions/checkout@v4
 
@@ -388,7 +479,17 @@ jobs:
           sleep 10
 
       - name: Run integration tests
-        run: go test -count=1 -timeout=120s ./internal/host/...
+        run: go test -count=1 -timeout=120s -json ./internal/host/... 2>&1 | tee test-report.json
+
+      - name: Warn on skipped tests
+        if: always()
+        run: |
+          if [ -f test-report.json ]; then
+            SKIP_COUNT=$(grep -c '"Action":"skip"' test-report.json || echo 0)
+            if [ "$SKIP_COUNT" -gt 0 ]; then
+              echo "::warning title=Skipped Tests (cluster)::${SKIP_COUNT} test(s) were skipped. Verify that CLEAT_TEST_DB and PostgreSQL are configured."
+            fi
+          fi
 
       - name: Cluster logs (on failure)
         if: failure()

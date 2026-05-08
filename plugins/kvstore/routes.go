@@ -170,7 +170,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		SET value = EXCLUDED.value,
 		    version = kv_store.version + 1,
 		    updated_at = now()
-		RETURNING version, created_at
+		RETURNING version
 	`, tid, key, value).Scan(&newVersion)
 	if err != nil {
 		p.logger.Error("kvstore: put (upsert)", "key", key, "error", err)

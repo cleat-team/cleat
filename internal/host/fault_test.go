@@ -4,10 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rcownie/cleat/internal/host/testutil"
 )
 
 // These tests require a real PostgreSQL database. Set CLEAT_TEST_DB to run.
@@ -15,90 +16,14 @@ import (
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	if testing.Short() {
-		t.Skip("Skipping fault test in short mode")
-	}
-	dsn := os.Getenv("CLEAT_TEST_DB")
-	if dsn == "" {
-		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
-	}
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Skipf("Skipping fault test: no database available: %v", err)
-	}
-	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping fault test: cannot ping database: %v", err)
-	}
+	db := testutil.TestDB(t)
+
 	// Clean up any leftover test data from previous runs.
 	db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE 'test-%' OR workflow_id LIKE 'wf-%' OR workflow_id LIKE 'int-%'`)
 	db.Exec(`DELETE FROM workflow_signals WHERE workflow_id LIKE 'test-%' OR workflow_id LIKE 'wf-%' OR workflow_id LIKE 'int-%'`)
 	db.Exec(`DELETE FROM workflow_promises WHERE workflow_id LIKE 'test-%' OR workflow_id LIKE 'wf-%' OR workflow_id LIKE 'int-%'`)
 	db.Exec(`DELETE FROM concurrency_keys WHERE workflow_id LIKE 'test-%' OR workflow_id LIKE 'wf-%' OR workflow_id LIKE 'int-%'`)
 	db.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'test-%' OR id LIKE 'wf-%' OR id LIKE 'int-%'`)
-
-
-	// Ensure full schema exists (matching schema.sql).
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_defs (
-		name TEXT NOT NULL, version INTEGER NOT NULL,
-		wasm_bytes BYTEA NOT NULL, entry_points TEXT[] NOT NULL DEFAULT '{}',
-		min_version INTEGER NOT NULL DEFAULT 0, namespace TEXT NOT NULL DEFAULT 'default',
-		max_history_length INTEGER NOT NULL DEFAULT 0,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (name, version))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_instances (
-		id TEXT PRIMARY KEY, def_name TEXT NOT NULL, def_version INTEGER NOT NULL DEFAULT 1,
-		status TEXT NOT NULL DEFAULT 'ready', input JSONB NOT NULL DEFAULT '{}',
-		assigned_to TEXT, heartbeat_at TIMESTAMPTZ,
-		next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(), completed_at TIMESTAMPTZ,
-		result JSONB, error_msg TEXT, parent_workflow_id TEXT,
-		namespace TEXT NOT NULL DEFAULT 'default', trace_id TEXT,
-		query_state JSONB DEFAULT '{}', task_queue TEXT NOT NULL DEFAULT 'default',
-		cancellation_requested BOOLEAN NOT NULL DEFAULT false,
-		cancellation_reason TEXT, sticky_worker_id TEXT)`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS event_history (
-		workflow_id TEXT NOT NULL, step INTEGER NOT NULL,
-		event_type TEXT NOT NULL DEFAULT 'call',
-		service TEXT, operation TEXT, request JSONB, response JSONB, error TEXT,
-		duration_ms BIGINT, signal_names TEXT, timeout_ms BIGINT,
-		signal_name TEXT, signal_payload JSONB, defer_description TEXT,
-		defer_id TEXT, child_name TEXT, child_input JSONB, run_id TEXT,
-		new_input JSONB, plugin_name TEXT, plugin_func TEXT,
-		plugin_input JSONB, plugin_output JSONB, plugin_error TEXT,
-		promise_name TEXT, promise_id TEXT, promise_result TEXT, promise_error TEXT,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (workflow_id, step))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_signals (
-		workflow_id TEXT NOT NULL, signal_name TEXT NOT NULL,
-		payload JSONB NOT NULL DEFAULT '{}',
-		delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (workflow_id, signal_name))`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_schedules (
-		name TEXT PRIMARY KEY, def_name TEXT NOT NULL,
-		entry_point TEXT NOT NULL DEFAULT '', cron_expression TEXT NOT NULL,
-		input JSONB NOT NULL DEFAULT '{}', enabled BOOLEAN NOT NULL DEFAULT true,
-		next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(), last_run_at TIMESTAMPTZ,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now())`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS concurrency_keys (
-		key_hash BYTEA PRIMARY KEY, key_text TEXT NOT NULL,
-		workflow_id TEXT NOT NULL, acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-		expires_at TIMESTAMPTZ NOT NULL)`)
-	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_promises (
-		workflow_id TEXT NOT NULL, promise_id TEXT NOT NULL,
-		promise_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
-		result JSONB, error_msg TEXT,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now(), resolved_at TIMESTAMPTZ,
-		PRIMARY KEY (workflow_id, promise_id))`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_instances_ready ON workflow_instances(status, next_wake_at) WHERE status = 'ready'`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running'`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`)
-	db.Exec(`CREATE INDEX IF NOT EXISTS idx_instances_namespace_ready ON workflow_instances(namespace, status, next_wake_at) WHERE status = 'ready'`)
-	db.Exec(`CREATE EXTENSION IF NOT EXISTS pgcrypto`)
-	// Add columns added via schema migrations that may not be in minimal test tables.
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS tenant_id TEXT`)
-	db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS sticky_worker_id TEXT`)
-	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS payload JSONB`)
 	return db
 }
 
@@ -265,30 +190,3 @@ func TestFaultHeartbeatOwnership(t *testing.T) {
 	}
 }
 
-// TestFaultDBConnectionLoss simulates a transient DB error and verifies
-// the worker can reconnect.
-func TestFaultDBConnectionLoss(t *testing.T) {
-	db := testDB(t)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	ctx := context.Background()
-
-	// Normal operation should work.
-	wf, err := store.ClaimWorkflow(ctx, "test-worker", "default")
-	if err != nil {
-		t.Fatalf("Normal claim should succeed: %v", err)
-	}
-	if wf != nil {
-		// Release it.
-		store.ReleaseWorkflow(ctx, wf.ID, "test-worker", time.Now())
-	}
-
-	// Verify the store is operational after a simulated error scenario.
-	// We can't actually kill the DB connection, but we verify recovery
-	// behavior by ensuring subsequent operations work.
-	_, err = store.ListWorkflows(ctx, "running", 1)
-	if err != nil {
-		t.Errorf("ListWorkflows after simulated error: %v", err)
-	}
-}

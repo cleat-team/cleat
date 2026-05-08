@@ -94,7 +94,7 @@ func IsHostCallsType(t types.Type) bool {
 	// cleat.HostCalls as interface (passed by value).
 	if named, ok := t.(*types.Named); ok {
 		obj := named.Obj()
-		if obj.Name() == "HostCalls" && obj.Pkg() != nil && obj.Pkg().Name() == "durable" {
+		if obj.Name() == "HostCalls" && obj.Pkg() != nil && obj.Pkg().Name() == "cleat" {
 			return true
 		}
 	}
@@ -102,7 +102,7 @@ func IsHostCallsType(t types.Type) bool {
 	if ptr, ok := t.(*types.Pointer); ok {
 		if named, ok := ptr.Elem().(*types.Named); ok {
 			obj := named.Obj()
-			if obj.Name() == "HostCalls" && obj.Pkg() != nil && obj.Pkg().Name() == "durable" {
+			if obj.Name() == "HostCalls" && obj.Pkg() != nil && obj.Pkg().Name() == "cleat" {
 				return true
 			}
 		}

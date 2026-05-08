@@ -35,6 +35,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
       - name: Test cleat-sdk
         working-directory: crates/cleat-sdk
         run: cargo test

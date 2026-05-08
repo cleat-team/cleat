@@ -59,7 +59,7 @@ func TestAnalyzeUsageBasicDetectsDurableCall(t *testing.T) {
 	result, cr := loadBasic(t)
 	usage := AnalyzeUsage(result, cr)
 	if !usage.Used["cleat_call"] {
-		t.Error("expected durable_call to be used")
+		t.Error("expected cleat_call to be used")
 	}
 	unused := []string{"cleat_sleep", "cleat_await_signals", "cleat_defer",
 		"cleat_log", "cleat_poll_cancellation", "cleat_poll_signal",
@@ -80,10 +80,10 @@ func TestAnalyzeUsageErrorsDetectsMultiple(t *testing.T) {
 	result, cr := loadErrors(t)
 	usage := AnalyzeUsage(result, cr)
 	if !usage.Used["cleat_log"] {
-		t.Error("expected durable_log (leafFunc calls DurableLog)")
+		t.Error("expected cleat_log (leafFunc calls DurableLog)")
 	}
 	if !usage.Used["cleat_call"] {
-		t.Error("expected durable_call (BadWithGoroutine calls DurableCall)")
+		t.Error("expected cleat_call (BadWithGoroutine calls DurableCall)")
 	}
 	if usage.Count() < 2 {
 		t.Errorf("expected Count()>=2, got %d", usage.Count())
@@ -115,8 +115,8 @@ func TestGenerateImportsBasic(t *testing.T) {
 		"//go:build wasip1",
 		"package basic",
 		`import "unsafe"`,
-		"//go:wasmimport env durable_call",
-		"func durableCallImport(",
+		"//go:wasmimport env cleat_call",
+		"func cleatCallImport(",
 		"servicePtr unsafe.Pointer, serviceLen uint32",
 		"operationPtr unsafe.Pointer, operationLen uint32",
 		"requestJSONPtr unsafe.Pointer, requestJSONLen uint32",
@@ -134,8 +134,8 @@ func TestGenerateImportsNoUnused(t *testing.T) {
 	result, cr := loadBasic(t)
 	usage := AnalyzeUsage(result, cr)
 	code := string(GenerateImports("basic", usage))
-	for _, name := range []string{"durableSleepImport", "durableAwaitSignalsImport",
-		"durableDeferImport", "durableLogImport", "durableNowImport", "durableRandomImport"} {
+	for _, name := range []string{"cleatSleepImport", "cleatAwaitSignalsImport",
+		"cleatDeferImport", "cleatLogImport", "cleatNowImport", "cleatRandomImport"} {
 		if strings.Contains(code, name) {
 			t.Errorf("unexpected import stub %q", name)
 		}
@@ -184,7 +184,7 @@ func TestGenerateHostAdapterBasic(t *testing.T) {
 	for _, c := range []string{"//go:build wasip1", "package basic",
 		`"fmt"`, `"unsafe"`, `"github.com/rcownie/cleat/cleat"`,
 		"func makeHostCalls() cleat.HostCalls {",
-		"DurableCall: func(", "responseBuf := make([]byte, _durableOutBufSize)",
+		"DurableCall: func(", "responseBuf := make([]byte, _cleatOutBufSize)",
 	} {
 		if !strings.Contains(code, c) {
 			t.Errorf("expected: %s", c)
@@ -253,13 +253,13 @@ func TestBuildOutputsBasic(t *testing.T) {
 
 func TestGoName(t *testing.T) {
 	tests := []struct{ in, want string }{
-		{"cleat_call", "durableCall"},
-		{"cleat_sleep", "durableSleep"},
-		{"cleat_await_signals", "durableAwaitSignals"},
+		{"cleat_call", "cleatCall"},
+		{"cleat_sleep", "cleatSleep"},
+		{"cleat_await_signals", "cleatAwaitSignals"},
 		{"set_query_state", "setQueryState"},
-		{"cleat_now", "durableNow"},
-		{"cleat_child_workflow", "durableChildWorkflow"},
-		{"cleat_min_version", "durableMinVersion"},
+		{"cleat_now", "cleatNow"},
+		{"cleat_child_workflow", "cleatChildWorkflow"},
+		{"cleat_min_version", "cleatMinVersion"},
 	}
 	for _, tt := range tests {
 		if got := goName(tt.in); got != tt.want {
@@ -308,12 +308,12 @@ func TestNeedsFmt(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_call": true},
 		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
 	if !needsFmt(usage) {
-		t.Error("durable_call adapter uses fmt.Sprintf")
+		t.Error("cleat_call adapter uses fmt.Sprintf")
 	}
 	usage2 := &UsageInfo{Used: map[string]bool{"cleat_sleep": true},
 		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleep"}}}
 	if needsFmt(usage2) {
-		t.Error("durable_sleep should not need fmt")
+		t.Error("cleat_sleep should not need fmt")
 	}
 }
 
@@ -321,12 +321,12 @@ func TestNeedsJSON(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_await_signals": true},
 		Funcs: []HostFunction{{ImportName: "cleat_await_signals", FieldName: "DurableAwaitSignals"}}}
 	if !needsJSON(usage) {
-		t.Error("durable_await_signals uses []string params")
+		t.Error("cleat_await_signals uses []string params")
 	}
 	usage2 := &UsageInfo{Used: map[string]bool{"cleat_call": true},
 		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
 	if needsJSON(usage2) {
-		t.Error("durable_call should not need json")
+		t.Error("cleat_call should not need json")
 	}
 }
 
@@ -334,12 +334,12 @@ func TestNeedsUnsafe(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_call": true},
 		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
 	if !needsUnsafe(usage) {
-		t.Error("durable_call uses unsafe.String")
+		t.Error("cleat_call uses unsafe.String")
 	}
 	usage2 := &UsageInfo{Used: map[string]bool{"cleat_log": true},
 		Funcs: []HostFunction{{ImportName: "cleat_log", FieldName: "DurableLog"}}}
 	if needsUnsafe(usage2) {
-		t.Error("durable_log should not need unsafe")
+		t.Error("cleat_log should not need unsafe")
 	}
 }
 
@@ -361,14 +361,14 @@ func TestNumOutBufs(t *testing.T) {
 
 func TestOutBufNames(t *testing.T) {
 	if names := outBufNames("cleat_call"); len(names) != 1 || names[0] != "responseBuf" {
-		t.Errorf("outBufNames(durable_call)=%v", names)
+		t.Errorf("outBufNames(cleat_call)=%v", names)
 	}
 	if names := outBufNames("cleat_await_signals"); len(names) != 2 ||
 		names[0] != "signalNameBuf" || names[1] != "payloadBuf" {
-		t.Errorf("outBufNames(durable_await_signals)=%v", names)
+		t.Errorf("outBufNames(cleat_await_signals)=%v", names)
 	}
 	if names := outBufNames("cleat_sleep"); names != nil {
-		t.Errorf("outBufNames(durable_sleep) should be nil, got %v", names)
+		t.Errorf("outBufNames(cleat_sleep) should be nil, got %v", names)
 	}
 }
 
