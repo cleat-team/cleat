@@ -90,3 +90,18 @@ func RunMigrations(ctx context.Context, db *sql.DB, coreMigrations []Migration, 
 
 	return nil
 }
+
+// RegisterPluginTables inserts entries into admin.plugin_tables so that
+// the tenant provisioning system knows which tables to GRANT.
+// Called during plugin Init after migrations run.
+func RegisterPluginTables(ctx context.Context, db *sql.DB, pluginName string, tableNames []string) error {
+	for _, tableName := range tableNames {
+		_, err := db.ExecContext(ctx,
+			`INSERT INTO admin.plugin_tables (plugin_name, table_name) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			pluginName, tableName)
+		if err != nil {
+			return fmt.Errorf("register plugin table %s.%s: %w", pluginName, tableName, err)
+		}
+	}
+	return nil
+}

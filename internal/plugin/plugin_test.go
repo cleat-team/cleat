@@ -154,6 +154,50 @@ func TestFailingInitPlugin(t *testing.T) {
 	}
 }
 
+func TestConstructorCalledOnce(t *testing.T) {
+	// Register a plugin with a constructor that tracks invocations.
+	callCount := 0
+	Register(PluginInfo{Name: "ctor-count-test", Version: "0.1.0"}, func() Plugin {
+		callCount++
+		return &testPlugin{
+			info: PluginInfo{Name: "ctor-count-test", Version: "0.1.0"},
+		}
+	})
+
+	// Discover should call the constructor exactly once.
+	plugins, err := Discover()
+	if err != nil {
+		t.Fatalf("Discover failed: %v", err)
+	}
+
+	// Verify constructor was called exactly once.
+	if callCount != 1 {
+		t.Errorf("constructor called %d times, want 1", callCount)
+	}
+
+	// Verify the plugin was loaded.
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "ctor-count-test" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("ctor-count-test plugin not found in discovered plugins")
+	}
+
+	// Verify a second Discover() calls the constructor again.
+	callCount = 0
+	plugins, err = Discover()
+	if err != nil {
+		t.Fatalf("second Discover failed: %v", err)
+	}
+	if callCount != 1 {
+		t.Errorf("second Discover: constructor called %d times, want 1", callCount)
+	}
+}
+
 type testPlugin struct {
 	info PluginInfo
 	init func(ctx context.Context, env *Environment) error

@@ -60,6 +60,8 @@ func FuzzCompactionEquivalence(f *testing.F) {
 	f.Add(fuzzSeed(EventCodeStateMutation, []string{"stock", "42", "set"}, 5))
 	// Single RunDetached (no fields).
 	f.Add(fuzzSeed(EventCodeRunDetached, nil, []int64{}...))
+	// Single PluginCallStreamChunk.
+	f.Add(fuzzSeed(EventCodePluginCallStreamChunk, []string{"s3", "GetObject", `{"key":"x"}`, `{"body":"..."}`, ""}, []int64{}...))
 
 	// Pair: Call + Sleep (tests split at 1-halfway).
 	f.Add(append(
@@ -189,7 +191,7 @@ func parseFuzzEvents(data []byte) []EventRecord {
 	r := &byteReader{data: data}
 
 	for step := 0; r.remaining() > 0; step++ {
-		typeCode := int(r.readByte()) % 18 // clamp to [0, 17]
+		typeCode := int(r.readByte()) % 19 // clamp to [0, 18]
 
 		ev := EventRecord{
 			Step:      step,
@@ -254,6 +256,12 @@ func parseFuzzEvents(data []byte) []EventRecord {
 			ev.StateOp = r.readString()
 			ev.StateDelta = r.readInt64()
 		case EventCodeRunDetached: // no string fields
+		case EventCodePluginCallStreamChunk: // pluginName, pluginFunc, input, output, err (5 strings)
+			ev.PluginName = r.readString()
+			ev.PluginFunc = r.readString()
+			ev.PluginInput = r.readString()
+			ev.PluginOutput = r.readString()
+			ev.PluginError = r.readString()
 		}
 
 		events = append(events, ev)
@@ -385,6 +393,12 @@ func eventFieldsMatch(a, b EventRecord) bool {
 	case EventTypeRunDetached:
 		// RunDetached stores no compacted fields.
 		return true
+	case EventTypePluginCallStreamChunk:
+		return a.PluginName == b.PluginName &&
+			a.PluginFunc == b.PluginFunc &&
+			a.PluginInput == b.PluginInput &&
+			a.PluginOutput == b.PluginOutput &&
+			a.PluginError == b.PluginError
 	}
 	return false
 }
@@ -435,6 +449,8 @@ func eventSummary(ev EventRecord) string {
 		return fmt.Sprintf("StateMutation{key=%s value=%s op=%s delta=%d}", trunc(ev.StateKey, 8), trunc(ev.StateValue, 8), trunc(ev.StateOp, 8), ev.StateDelta)
 	case EventTypeRunDetached:
 		return "RunDetached{}"
+	case EventTypePluginCallStreamChunk:
+		return fmt.Sprintf("PluginCallStreamChunk{name=%s fn=%s}", trunc(ev.PluginName, 12), trunc(ev.PluginFunc, 12))
 	default:
 		return fmt.Sprintf("Unknown{%s}", ev.EventType)
 	}
@@ -510,6 +526,12 @@ func dumpEventDiff(t *testing.T, a, b EventRecord) {
 		mismatchStr("StateOp", a.StateOp, b.StateOp, t)
 	case EventTypeRunDetached:
 		// No compacted fields.
+	case EventTypePluginCallStreamChunk:
+		mismatchStr("PluginName", a.PluginName, b.PluginName, t)
+		mismatchStr("PluginFunc", a.PluginFunc, b.PluginFunc, t)
+		mismatchStr("PluginInput", a.PluginInput, b.PluginInput, t)
+		mismatchStr("PluginOutput", a.PluginOutput, b.PluginOutput, t)
+		mismatchStr("PluginError", a.PluginError, b.PluginError, t)
 	}
 }
 

@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -324,7 +325,9 @@ type Engine struct {
 	pluginRegistry    *PluginRegistry
 	pluginStreamRegistry *PluginStreamRegistry
 	updateHandler         func(name, payload string) (string, error)
-	tenantID          string
+	pluginCallGuard      *PluginCallGuard
+	tenantID             string
+	db                   *sql.DB // tenant-scoped database connection for plugin host functions
 }
 
 // EngineOption configures an Engine.
@@ -384,6 +387,17 @@ func WithUpdateHandler(fn func(name, payload string) (string, error)) EngineOpti
 // the context before calling plugin host functions.
 func WithTenantID(id string) EngineOption {
 	return func(e *Engine) { e.tenantID = id }
+}
+
+// WithPluginCallGuard sets the plugin call guard for enforcing call_plugin
+// capability restrictions on WASM plugins.
+func WithPluginCallGuard(g *PluginCallGuard) EngineOption {
+	return func(e *Engine) { e.pluginCallGuard = g }
+}
+
+// WithDB sets a tenant-scoped database connection for plugin host functions.
+func WithDB(db *sql.DB) EngineOption {
+	return func(e *Engine) { e.db = db }
 }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
@@ -559,7 +573,8 @@ type execSession struct {
 	deferrals  map[string]string // registered defer callbacks (deferID -> description)
 	workflowID string            // parent workflow instance ID (for child workflows)
 	queryState map[string]string // key-value state set via SetQueryState
-	tenantID   string            // tenant ID injected into plugin function context
+	tenantID          string            // tenant ID injected into plugin function context
+	callerPluginName  string            // for WASM plugins, the calling plugin's name (for call_plugin enforcement)
 
 	// Scope management for virtual object instances.
 	scopePrefix  string // "vo:<type>:<key>:" prefix, empty if no scope
@@ -749,6 +764,15 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 		return packDurableCallResult(int(written), 1, 1)
 	}
 
+	// Check plugin call guard (enforces call_plugin capability for WASM plugins).
+	if s.engine.pluginCallGuard != nil && s.callerPluginName != "" {
+		if err := s.engine.pluginCallGuard.Check(s.callerPluginName, pluginName); err != nil {
+			errMsg := err.Error()
+			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+	}
+
 	// Inject call context (tenant ID + workflow ID) for plugin functions.
 	callCtx := ctx
 	cc := &plugin.CallContext{}
@@ -760,6 +784,9 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 	}
 	if s.workflowID != "" {
 		cc.WorkflowID = s.workflowID
+	}
+	if s.engine.db != nil {
+		cc.DB = s.engine.db
 	}
 	callCtx = plugin.WithCallContext(callCtx, cc)
 
@@ -825,6 +852,15 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 		return packDurableCallResult(int(written), 0, 1)
 	}
 
+	// Check plugin call guard for streaming calls too.
+	if s.engine.pluginCallGuard != nil && s.callerPluginName != "" {
+		if err := s.engine.pluginCallGuard.Check(s.callerPluginName, pluginName); err != nil {
+			errMsg := err.Error()
+			written := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			return packDurableCallResult(int(written), 0, 1)
+		}
+	}
+
 	// Inject call context.
 	callCtx := ctx
 	cc := &plugin.CallContext{}
@@ -836,6 +872,9 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	}
 	if s.workflowID != "" {
 		cc.WorkflowID = s.workflowID
+	}
+	if s.engine.db != nil {
+		cc.DB = s.engine.db
 	}
 	callCtx = plugin.WithCallContext(callCtx, cc)
 

@@ -728,3 +728,137 @@ func TestIntegrationNewEventTypesPersistenceRoundTrip(t *testing.T) {
 
 	t.Log("New event types persistence round-trip integration test passed")
 }
+
+// ---------------------------------------------------------------------------
+// Test 6: RLS tenant isolation.
+//
+// Enables Row-Level Security on workflow_instances, creates two tenants with
+// different tenant_ids, inserts workflows for both, then verifies that a store
+// scoped to tenant A only sees tenant A's workflows and tenant B's workflows
+// are invisible (and vice versa).
+// ---------------------------------------------------------------------------
+
+// TestRLSTenantIsolation verifies that Row-Level Security correctly isolates
+// workflow instances between tenants. This test must hit the actual store, not
+// mock it -- it uses a real PostgreSQL database.
+func TestRLSTenantIsolation(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping RLS integration test in short mode")
+	}
+
+	db := testDB(t)
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// Ensure tenant_id column exists on workflow_instances. testDB creates the
+	// column via ALTER TABLE ADD COLUMN IF NOT EXISTS, but a previous test that
+	// used setupFullTestSchema may have dropped and recreated the table without
+	// the column, so we add it here to be safe.
+	if _, err := db.Exec(`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS tenant_id TEXT`); err != nil {
+		t.Fatalf("add tenant_id column: %v", err)
+	}
+
+	// Enable RLS on workflow_instances.
+	if _, err := db.Exec(`ALTER TABLE workflow_instances ENABLE ROW LEVEL SECURITY`); err != nil {
+		t.Fatalf("enable RLS: %v", err)
+	}
+
+	// Create the tenant isolation policy. When the cleat.tenant_id session
+	// variable is set (via set_config), the policy filters rows by tenant_id.
+	// If the variable is not set, it falls back to the default tenant UUID.
+	if _, err := db.Exec(`DROP POLICY IF EXISTS cleat_rls_test ON workflow_instances`); err != nil {
+		t.Fatalf("drop existing policy: %v", err)
+	}
+	if _, err := db.Exec(`CREATE POLICY cleat_rls_test ON workflow_instances
+		FOR ALL
+		USING (tenant_id = COALESCE(current_setting('cleat.tenant_id', true), '00000000-0000-0000-0000-000000000000')::text)`); err != nil {
+		t.Fatalf("create RLS policy: %v", err)
+	}
+
+	// Cleanup: disable RLS (DDL, not subject to RLS), drop the policy, then
+	// delete test rows. Using t.Cleanup ensures this runs even on t.Fatalf.
+	t.Cleanup(func() {
+		db.Exec(`ALTER TABLE workflow_instances DISABLE ROW LEVEL SECURITY`)
+		db.Exec(`DROP POLICY IF EXISTS cleat_rls_test ON workflow_instances`)
+		db.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'rls-test-%'`)
+	})
+
+	// Create two tenants with different UUIDs.
+	tenantA := "aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa"
+	tenantB := "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
+
+	runID_A := fmt.Sprintf("rls-test-a-%d", time.Now().UnixNano())
+	runID_B := fmt.Sprintf("rls-test-b-%d", time.Now().UnixNano())
+
+	// Insert workflow instances for both tenants using direct SQL. INSERT
+	// bypasses the RLS USING clause, so this works regardless of the current
+	// RLS session variable. Set next_wake_at in the past so ClaimWorkflows
+	// immediately qualifies them.
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, next_wake_at)
+		VALUES ($1, 'wf-tenant-a', 1, 'ready', '{}', $2, now() - interval '1 hour')`,
+		runID_A, tenantA); err != nil {
+		t.Fatalf("insert tenant A workflow: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id, next_wake_at)
+		VALUES ($1, 'wf-tenant-b', 1, 'ready', '{}', $2, now() - interval '1 hour')`,
+		runID_B, tenantB); err != nil {
+		t.Fatalf("insert tenant B workflow: %v", err)
+	}
+
+	// ---- Test 1: Tenant A's store should only see tenant A's workflow ----
+	storeA := NewPostgresStore(db).WithTenant(tenantA)
+	wfsA, err := storeA.ClaimWorkflows(ctx, "worker-a", "default", 10)
+	if err != nil {
+		t.Fatalf("ClaimWorkflows tenant A: %v", err)
+	}
+
+	if len(wfsA) != 1 {
+		t.Errorf("tenant A: expected 1 workflow, got %d", len(wfsA))
+	} else {
+		if wfsA[0].ID != runID_A {
+			t.Errorf("tenant A: expected workflow %q, got %q", runID_A, wfsA[0].ID)
+		}
+		if wfsA[0].TenantID != tenantA {
+			t.Errorf("tenant A: expected tenant_id %q, got %q", tenantA, wfsA[0].TenantID)
+		}
+		// Verify tenant A did NOT see tenant B's workflow.
+		for _, wf := range wfsA {
+			if wf.ID == runID_B {
+				t.Error("tenant A should not see tenant B's workflow")
+			}
+		}
+
+		// Release tenant A's workflow so it doesn't affect the tenant B test.
+		if err := storeA.ReleaseWorkflow(ctx, wfsA[0].ID, "worker-a", time.Now()); err != nil {
+			t.Fatalf("ReleaseWorkflow tenant A: %v", err)
+		}
+	}
+
+	// ---- Test 2: Tenant B's store should only see tenant B's workflow ----
+	storeB := NewPostgresStore(db).WithTenant(tenantB)
+	wfsB, err := storeB.ClaimWorkflows(ctx, "worker-b", "default", 10)
+	if err != nil {
+		t.Fatalf("ClaimWorkflows tenant B: %v", err)
+	}
+
+	if len(wfsB) != 1 {
+		t.Errorf("tenant B: expected 1 workflow, got %d", len(wfsB))
+	} else {
+		if wfsB[0].ID != runID_B {
+			t.Errorf("tenant B: expected workflow %q, got %q", runID_B, wfsB[0].ID)
+		}
+		if wfsB[0].TenantID != tenantB {
+			t.Errorf("tenant B: expected tenant_id %q, got %q", tenantB, wfsB[0].TenantID)
+		}
+		// Verify tenant B did NOT see tenant A's workflow.
+		for _, wf := range wfsB {
+			if wf.ID == runID_A {
+				t.Error("tenant B should not see tenant A's workflow")
+			}
+		}
+	}
+
+	t.Log("RLS tenant isolation test passed")
+}

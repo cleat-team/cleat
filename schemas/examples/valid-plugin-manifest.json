@@ -1,0 +1,57 @@
+{
+  "name": "blobstore",
+  "version": "0.1.0",
+  "description": "Content-addressed blob storage with metadata queries",
+  "author": "cleat",
+  "repository": "https://github.com/rcownie/cleat",
+  "min_cleat_version": ">=1.0.0",
+  "capabilities": {
+    "database": true,
+    "http_routes": true,
+    "background_worker": true
+  },
+  "host_functions": {
+    "put": {
+      "description": "Store a blob by key with optional TTL and tags",
+      "input": {
+        "type": "object",
+        "fields": {
+          "key": { "type": "string", "description": "Unique blob key" },
+          "content_type": { "type": "string", "description": "MIME type", "optional": true },
+          "tags": { "type": "map", "description": "Arbitrary metadata tags", "key_type": { "type": "string" }, "value_type": { "type": "string" }, "optional": true },
+          "ttl": { "type": "string", "description": "Duration string like 1h or 30m", "optional": true },
+          "data": { "type": "bytes", "description": "Base64-encoded blob data" }
+        }
+      },
+      "output": {
+        "type": "object",
+        "fields": {
+          "key": { "type": "string" },
+          "sha256": { "type": "string" },
+          "size": { "type": "int64" }
+        }
+      },
+      "idempotent": false
+    },
+    "get": {
+      "description": "Retrieve a blob by key",
+      "input": {
+        "type": "object",
+        "fields": {
+          "key": { "type": "string", "description": "Blob key to retrieve" }
+        }
+      },
+      "output": {
+        "type": "object",
+        "fields": {
+          "key": { "type": "string" },
+          "sha256": { "type": "string" },
+          "size": { "type": "int64" },
+          "content_type": { "type": "string" },
+          "data": { "type": "bytes", "description": "Base64-encoded blob data" }
+        }
+      },
+      "idempotent": true
+    }
+  }
+}

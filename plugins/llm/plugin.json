@@ -1,0 +1,246 @@
+{
+  "name": "llm",
+  "version": "0.1.0",
+  "description": "Unified LLM provider interface (OpenAI, Anthropic, Groq, Ollama, Gemini, Mistral)",
+  "author": "cleat",
+
+  "types": {
+    "message": {
+      "type": "object",
+      "fields": {
+        "role": {
+          "type": "string",
+          "description": "Message role: system, user, assistant, or tool"
+        },
+        "content": {
+          "type": "string",
+          "description": "Message content text"
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "fields": {
+        "name": {
+          "type": "string",
+          "description": "Tool/function name"
+        },
+        "description": {
+          "type": "string",
+          "description": "Tool description"
+        },
+        "parameters": {
+          "type": "object",
+          "description": "JSON Schema parameters for the tool",
+          "optional": true
+        }
+      }
+    },
+    "tool_call": {
+      "type": "object",
+      "fields": {
+        "name": {
+          "type": "string",
+          "description": "Tool function name"
+        },
+        "arguments": {
+          "type": "object",
+          "description": "Tool call arguments",
+          "optional": true
+        }
+      }
+    },
+    "usage_info": {
+      "type": "object",
+      "fields": {
+        "prompt_tokens": {
+          "type": "int64",
+          "description": "Number of tokens in the prompt",
+          "optional": true
+        },
+        "completion_tokens": {
+          "type": "int64",
+          "description": "Number of tokens generated",
+          "optional": true
+        },
+        "total_tokens": {
+          "type": "int64",
+          "description": "Total tokens used",
+          "optional": true
+        }
+      }
+    },
+    "chat_input": {
+      "type": "object",
+      "fields": {
+        "provider": {
+          "type": "string",
+          "description": "LLM provider name (openai, anthropic, groq, ollama, gemini, mistral)"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model identifier"
+        },
+        "messages": {
+          "type": "array",
+          "description": "Array of message objects",
+          "items": { "type": "message" }
+        },
+        "temperature": {
+          "type": "float64",
+          "description": "Sampling temperature (0.0 to 2.0)",
+          "optional": true
+        },
+        "max_tokens": {
+          "type": "int64",
+          "description": "Maximum tokens to generate",
+          "optional": true
+        },
+        "tools": {
+          "type": "array",
+          "description": "Tool definitions the model may call",
+          "items": { "type": "tool" },
+          "optional": true
+        },
+        "tool_choice": {
+          "type": "string",
+          "description": "Tool choice directive (auto, any, none, or specific tool name)",
+          "optional": true
+        },
+        "system": {
+          "type": "string",
+          "description": "System prompt",
+          "optional": true
+        }
+      }
+    },
+    "chat_output": {
+      "type": "object",
+      "fields": {
+        "response": {
+          "type": "string",
+          "description": "Model response text"
+        },
+        "tool_calls": {
+          "type": "array",
+          "description": "Tool calls in the response",
+          "items": { "type": "tool_call" },
+          "optional": true
+        },
+        "finish_reason": {
+          "type": "string",
+          "description": "Finish reason (stop, length, tool_calls, content_filter)"
+        },
+        "usage": {
+          "type": "object",
+          "description": "Token usage info",
+          "fields": {
+            "prompt_tokens": { "type": "int64", "optional": true },
+            "completion_tokens": { "type": "int64", "optional": true },
+            "total_tokens": { "type": "int64", "optional": true }
+          },
+          "optional": true
+        },
+        "error": {
+          "type": "string",
+          "description": "Error message on failure",
+          "optional": true
+        }
+      }
+    },
+    "embed_input": {
+      "type": "object",
+      "fields": {
+        "provider": {
+          "type": "string",
+          "description": "LLM provider name"
+        },
+        "model": {
+          "type": "string",
+          "description": "Embedding model identifier"
+        },
+        "input": {
+          "type": "array",
+          "description": "Array of input texts to embed",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "embed_output": {
+      "type": "object",
+      "fields": {
+        "data": {
+          "type": "array",
+          "description": "Embedding data",
+          "items": { "type": "object" },
+          "optional": true
+        },
+        "model": {
+          "type": "string",
+          "description": "Model used for embedding"
+        },
+        "total_tokens": {
+          "type": "int64",
+          "description": "Total tokens consumed"
+        },
+        "error": {
+          "type": "string",
+          "description": "Error message on failure",
+          "optional": true
+        }
+      }
+    },
+    "list_models_input": {
+      "type": "object",
+      "fields": {
+        "provider": {
+          "type": "string",
+          "description": "Provider name filter (empty = all providers)",
+          "optional": true
+        }
+      }
+    },
+    "list_models_output": {
+      "type": "object",
+      "fields": {
+        "models": {
+          "type": "array",
+          "description": "Model list (when a specific provider is queried)",
+          "items": { "type": "object" },
+          "optional": true
+        },
+        "providers": {
+          "type": "object",
+          "description": "Provider-to-models map (when no specific provider is queried)",
+          "optional": true
+        }
+      }
+    }
+  },
+
+  "host_functions": {
+    "chat": {
+      "description": "Send a chat completion request to an LLM provider",
+      "input": { "type": "chat_input" },
+      "output": { "type": "chat_output" }
+    },
+    "chat_stream": {
+      "description": "Stream a chat completion from an LLM provider (server-sent events)",
+      "input": { "type": "chat_input" },
+      "output": { "type": "chat_output" },
+      "streaming": true
+    },
+    "embed": {
+      "description": "Generate embeddings for input texts",
+      "input": { "type": "embed_input" },
+      "output": { "type": "embed_output" },
+      "idempotent": true
+    },
+    "list_models": {
+      "description": "List available models from one or all configured LLM providers",
+      "input": { "type": "list_models_input" },
+      "output": { "type": "list_models_output" },
+      "idempotent": true
+    }
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cleat.dev/schemas/plugin-manifest.schema.json",
+  "title": "Cleat Plugin Manifest",
+  "type": "object",
+  "required": ["name", "version", "description", "author"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Plugin name. Official plugins use bare names like 'llm'. Third-party plugins use org/name like 'acme/salesforce'.",
+      "pattern": "^[a-z][a-z0-9_-]*(/[a-z][a-z0-9_-]*)?$"
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version, e.g. '1.2.3'",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9.]+)?(\\+[a-zA-Z0-9.]+)?$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "author": {
+      "type": "string",
+      "minLength": 1
+    },
+    "repository": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL of the plugin's source repository"
+    },
+    "min_cleat_version": {
+      "type": "string",
+      "description": "Minimum cleat version required, as a semver constraint like '>=1.0.0'",
+      "default": ">=1.0.0"
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "database": {"type": "boolean", "default": false},
+        "start_workflow": {"type": "boolean", "default": false},
+        "signal_workflow": {"type": "boolean", "default": false},
+        "http_routes": {"type": "boolean", "default": false},
+        "http_middleware": {"type": "boolean", "default": false},
+        "background_worker": {"type": "boolean", "default": false},
+        "call_plugin": {
+          "type": "array",
+          "items": {"type": "string"},
+          "default": []
+        }
+      }
+    },
+    "host_functions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["description", "input", "output"],
+        "properties": {
+          "description": {"type": "string"},
+          "input": {"$ref": "#/$defs/typeSchema"},
+          "output": {"$ref": "#/$defs/typeSchema"},
+          "idempotent": {"type": "boolean", "default": false},
+          "streaming": {"type": "boolean", "default": false}
+        }
+      }
+    },
+    "types": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["fields"],
+        "properties": {
+          "fields": {
+            "type": "object",
+            "additionalProperties": {"$ref": "#/$defs/fieldSchema"}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "fieldSchema": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "int64", "float64", "bool", "bytes", "timestamp", "uuid", "object", "enum", "array", "optional", "map"]
+        },
+        "description": {"type": "string"},
+        "optional": {"type": "boolean", "default": false},
+        "format": {"type": "string"},
+        "items": {"$ref": "#/$defs/fieldSchema"},
+        "values": {"type": "array", "items": {"type": "string"}},
+        "fields": {"type": "object", "additionalProperties": {"$ref": "#/$defs/fieldSchema"}},
+        "key_type": {"$ref": "#/$defs/fieldSchema"},
+        "value_type": {"$ref": "#/$defs/fieldSchema"}
+      }
+    },
+    "typeSchema": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["string", "int64", "float64", "bool", "bytes", "timestamp", "uuid", "object"]
+        },
+        "fields": {"type": "object", "additionalProperties": {"$ref": "#/$defs/fieldSchema"}},
+        "optional": {"type": "boolean", "default": false}
+      }
+    }
+  }
+}

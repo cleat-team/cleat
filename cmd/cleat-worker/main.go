@@ -28,6 +28,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -38,6 +39,7 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 
@@ -96,6 +98,7 @@ func main() {
 
 	var store host.WorkflowStore
 	var db *sql.DB
+	var tenantPools *plugin.TenantPools
 	if *shardsFile != "" {
 		configs, err := loadShardConfigs(*shardsFile)
 		if err != nil {
@@ -143,6 +146,12 @@ func main() {
 		// Start periodic cleanup of expired idempotency keys.
 		go idempotencyCleanupLoop(ctx, db, 1*time.Hour)
 
+		// Create per-tenant database connection pools for tenant-scoped plugin operations.
+		baseDSN := baseDSNFromURL(*dbURL)
+		if baseDSN != "" {
+			tenantPools = plugin.NewTenantPools(db, baseDSN)
+		}
+
 	}
 
 	// ---- Plugin loading (always, regardless of --api-addr) ----
@@ -187,7 +196,7 @@ func main() {
 	}
 
 	var err error
-	plugList, err = plugin.LoadAll(ctx, pluginEnv)
+	plugList, err = plugin.Discover()
 	if err != nil {
 		log.Fatalf("[worker %s] plugin: %v", workerID, err)
 	}
@@ -195,6 +204,8 @@ func main() {
 	if err := plugin.RunMigrations(ctx, db, nil, plugList); err != nil {
 		log.Fatalf("[worker %s] plugin migrations: %v", workerID, err)
 	}
+
+	plugin.InitAll(ctx, pluginEnv, plugList)
 
 	for _, lp := range plugList {
 		if !lp.Healthy {
@@ -267,9 +278,10 @@ func main() {
 		compactionThreshold: *compactionThreshold,
 		compactionInterval:  *compactionInterval,
 		pluginRegistry:      pluginRegistry,
-	}
+			tenantPools:         tenantPools,
+		}
 
-	// Start HTTP API server if configured.
+		// Start HTTP API server if configured.
 	if *apiAddr != "" {
 		api := &apiServer{store: store, worker: w}
 
@@ -379,6 +391,7 @@ type Worker struct {
 	namespace         string
 	pluginRegistry       *host.PluginRegistry
 	pluginStreamRegistry *host.PluginStreamRegistry
+	tenantPools          *plugin.TenantPools
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -617,8 +630,22 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithSignalStore(w.store.(host.SignalStore)),
 		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion}),
 		host.WithWorkflowID(wf.ID),
+		host.WithTenantID(wf.TenantID),
 		host.WithChildWorkflowStore(w.store),
 		host.WithPluginRegistry(w.pluginRegistry),
+	}
+	// Use tenant-scoped database connection for plugin host functions.
+	if w.tenantPools != nil && wf.TenantID != "" {
+		tenantID, err := uuid.Parse(wf.TenantID)
+		if err == nil {
+			tenantDB, err := w.tenantPools.For(w.ctx, tenantID)
+			if err != nil {
+				log.Printf("[worker %s] %s: cannot get tenant pool for %s: %v", w.id, wf.ID, wf.TenantID, err)
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("tenant pool: %v", err), nil)
+				return
+			}
+			engineOpts = append(engineOpts, host.WithDB(tenantDB))
+		}
 	}
 	if compactionState != nil {
 		engineOpts = append(engineOpts, host.WithCompactionState(compactionState))
@@ -1810,4 +1837,45 @@ func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, interval time.Durat
 			}
 		}
 	}
+}
+
+// baseDSNFromURL parses a PostgreSQL URL and returns a key=value DSN
+// suitable for use as a base connection string (without user/password).
+// Example URL: "postgres://user:pass@localhost:5432/cleat?sslmode=disable"
+// Returns:     "host=localhost port=5432 dbname=cleat sslmode=disable"
+func baseDSNFromURL(dbURL string) string {
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "5432"
+	}
+	dbname := strings.TrimPrefix(u.Path, "/")
+	sslmode := u.Query().Get("sslmode")
+	if sslmode == "" {
+		sslmode = "disable"
+	}
+	return fmt.Sprintf("host=%s port=%s dbname=%s sslmode=%s", host, port, dbname, sslmode)
+}
+
+// baseDSNFromDSN parses a PostgreSQL DSN in key=value format and returns a
+// base DSN with user and password stripped. If the input DSN cannot be parsed,
+// it is returned as-is (the tenant pool constructor will fail gracefully).
+func baseDSNFromDSN(dsn string) string {
+	// Simple approach: remove user=... and password=... from the DSN.
+	// This handles the common case for shard connection strings.
+	var parts []string
+	for _, part := range strings.Fields(dsn) {
+		if strings.HasPrefix(part, "user=") || strings.HasPrefix(part, "password=") {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ")
 }

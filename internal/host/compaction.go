@@ -35,6 +35,7 @@ const (
 	EventCodeRunDetached    = 17
 	EventCodeAcquireLock    = 18
 	EventCodeReleaseLock    = 19
+	EventCodePluginCallStreamChunk = 20
 )
 
 var eventTypeToCode = map[EventType]int{
@@ -58,6 +59,7 @@ var eventTypeToCode = map[EventType]int{
 	EventTypeRunDetached:      EventCodeRunDetached,
 	EventTypeAcquireLock:      EventCodeAcquireLock,
 	EventTypeReleaseLock:      EventCodeReleaseLock,
+	EventTypePluginCallStreamChunk: EventCodePluginCallStreamChunk,
 }
 
 var codeToEventType = map[int]EventType{
@@ -81,6 +83,7 @@ var codeToEventType = map[int]EventType{
 	EventCodeRunDetached:      EventTypeRunDetached,
 	EventCodeAcquireLock:      EventTypeAcquireLock,
 	EventCodeReleaseLock:      EventTypeReleaseLock,
+	EventCodePluginCallStreamChunk: EventTypePluginCallStreamChunk,
 }
 
 // CompactionState holds the minimal state needed to reconstruct the compacted
@@ -273,6 +276,12 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.Response = fmt.Sprintf("%d", ev.LockAcquired)
 		case EventTypeReleaseLock:
 			ce.ChildName = ev.LockKey
+		case EventTypePluginCallStreamChunk:
+			ce.PluginName = ev.PluginName
+			ce.PluginFunc = ev.PluginFunc
+			ce.PluginInput = ev.PluginInput
+			ce.PluginOutput = ev.PluginOutput
+			ce.PluginError = ev.PluginError
 		}
 		cs.Events = append(cs.Events, ce)
 	}
@@ -382,6 +391,12 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			fmt.Sscanf(ce.Response, "%d", &rec.LockAcquired)
 		case EventCodeReleaseLock:
 			rec.LockKey = ce.ChildName
+		case EventCodePluginCallStreamChunk:
+			rec.PluginName = ce.PluginName
+			rec.PluginFunc = ce.PluginFunc
+			rec.PluginInput = ce.PluginInput
+			rec.PluginOutput = ce.PluginOutput
+			rec.PluginError = ce.PluginError
 		}
 		full = append(full, rec)
 	}

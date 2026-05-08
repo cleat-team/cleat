@@ -1,0 +1,63 @@
+{
+  "name": "example/hello-world",
+  "version": "0.1.0",
+  "description": "A minimal example third-party plugin",
+  "author": "example-corp",
+  "repository": "https://github.com/example/cleat-hello-world",
+  "min_cleat_version": ">=1.0.0",
+  "capabilities": {
+    "database": false,
+    "start_workflow": false,
+    "signal_workflow": false,
+    "http_routes": false,
+    "http_middleware": false,
+    "background_worker": false,
+    "call_plugin": []
+  },
+  "host_functions": {
+    "greet": {
+      "description": "Returns a greeting for the given name",
+      "input": {
+        "type": "object",
+        "fields": {
+          "name": {
+            "type": "string",
+            "description": "Name to greet"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "fields": {
+          "message": {
+            "type": "string",
+            "description": "The greeting message"
+          }
+        }
+      },
+      "idempotent": true
+    },
+    "reverse": {
+      "description": "Reverses a string",
+      "input": {
+        "type": "object",
+        "fields": {
+          "text": {
+            "type": "string",
+            "description": "Text to reverse"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "fields": {
+          "reversed": {
+            "type": "string",
+            "description": "The reversed text"
+          }
+        }
+      },
+      "idempotent": true
+    }
+  }
+}

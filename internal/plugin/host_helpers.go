@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -68,6 +69,7 @@ func EncodeSuspend() uint64 {
 type CallContext struct {
 	TenantID   uuid.UUID `json:"tenant_id"`
 	WorkflowID string    `json:"workflow_id"`
+	DB         *sql.DB   // tenant-scoped database connection
 }
 
 type callContextKeyType struct{}

@@ -7,13 +7,15 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/tetratelabs/wazero"
 	"golang.org/x/mod/semver"
-	"strconv"
+
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -50,6 +52,11 @@ type PluginLoader struct {
 	mu       sync.Mutex
 	cache    map[pluginCacheKey]wazero.CompiledModule
 	maxSize  int
+
+	// limits defines the maximum capabilities for WASM plugins loaded
+	// through this loader. If zero-valued (default), no capability
+	// restrictions are enforced.
+	limits plugin.CapabilityLimits
 }
 
 // NewPluginLoader creates a PluginLoader backed by the given database
@@ -310,6 +317,13 @@ func (l *PluginLoader) LoadPlugin(ctx context.Context, name string, version stri
 	return compiled, nil
 }
 
+// SetLimits configures the maximum capabilities allowed for WASM plugins
+// loaded through this loader. If limits is the zero value, no capability
+// restrictions are enforced.
+func (l *PluginLoader) SetLimits(limits plugin.CapabilityLimits) {
+	l.limits = limits
+}
+
 // DeployPlugin inserts a new plugin definition into the database.
 // If the definition already exists, it is updated (upsert semantics).
 //
@@ -338,6 +352,30 @@ func (l *PluginLoader) DeployPlugin(ctx context.Context, name string, version st
 
 	log.Printf("[plugin-loader] Deployed %s v%s (%d bytes)", name, version, len(wasmBytes))
 	return nil
+}
+
+// DeployPluginWithCapabilities is like DeployPlugin but additionally validates
+// the declared capabilities against configured limits before deploying.
+// If the capabilities violate the limits, the deployment is refused.
+func (l *PluginLoader) DeployPluginWithCapabilities(ctx context.Context, name string, version string, wasmBytes []byte, config map[string]interface{}, declared plugin.Capabilities) error {
+	// If limits are set, validate declared capabilities.
+	if l.limits.IsSet() {
+		// Convert declared Capabilities to CapabilityLimits for validation.
+		declaredLimits := plugin.CapabilityLimits{
+			Database:         declared.Database,
+			StartWorkflow:    declared.StartWorkflow,
+			SignalWorkflow:   declared.SignalWorkflow,
+			HTTPRoutes:       declared.HTTPRoutes,
+			HTTPMiddleware:   declared.HTTPMiddleware,
+			BackgroundWorker: declared.BackgroundWorker,
+			CallPlugin:       declared.CallPlugin,
+		}
+		if err := plugin.ValidateCapabilities(declaredLimits, l.limits); err != nil {
+			return fmt.Errorf("deploy plugin %s v%s: capability check failed: %w", name, version, err)
+		}
+	}
+
+	return l.DeployPlugin(ctx, name, version, wasmBytes, config)
 }
 
 // DeprecatePlugin marks a plugin version as deprecated.

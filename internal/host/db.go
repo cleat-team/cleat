@@ -314,6 +314,43 @@ func NewPostgresStore(db *sql.DB, taskQueues ...string) *PostgresStore {
 	}
 }
 
+// WithTenant returns a copy of the store scoped to the given tenant ID.
+// This is used in the dispatch loop to set the correct tenant context
+// before executing a workflow. The returned store's methods will set
+// the RLS session variable via set_config.
+func (s *PostgresStore) WithTenant(tenantID string) *PostgresStore {
+	cp := *s
+	cp.tenantID = tenantID
+	return &cp
+}
+
+// setRLSOnTx executes SELECT set_config to set the RLS tenant_id
+// for the given transaction. This ensures the RLS policy on tenant-scoped
+// tables correctly filters rows by the current tenant. Must be called
+// after BEGIN and before any tenant-scoped queries.
+func (s *PostgresStore) setRLSOnTx(tx *sql.Tx) error {
+	if s.tenantID == "" {
+		return nil
+	}
+	_, err := tx.Exec("SELECT set_config('cleat.tenant_id', $1, true)", s.tenantID)
+	return err
+}
+
+// beginTxWithRLS begins a transaction and sets the RLS tenant context,
+// ensuring all subsequent queries in the transaction are scoped to the
+// current tenant. The caller must commit or rollback the returned tx.
+func (s *PostgresStore) beginTxWithRLS(ctx context.Context) (*sql.Tx, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	if err := s.setRLSOnTx(tx); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("set rls: %w", err)
+	}
+	return tx, nil
+}
+
 // ClaimWorkflow atomically claims a runnable workflow using SKIP LOCKED.
 func (s *PostgresStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
 	return s.claimWorkflowImpl(ctx, workerID, namespace)
@@ -333,7 +370,13 @@ func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID, namespa
 // ClaimWorkflows atomically claims up to limit runnable workflow instances.
 // Like ClaimWorkflow but batches multiple claims into one query.
 func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running',
 		    assigned_to = $1,
@@ -379,16 +422,23 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace 
 	}
 
 	if len(wfs) == 0 {
+		tx.Rollback()
 		return nil, nil
 	}
-	return wfs, nil
+	return wfs, tx.Commit()
 }
 
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
 // that are sticky to this worker. Filters on sticky_worker_id to use the
 // idx_instances_sticky partial index for low-contention claiming.
 func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("claim sticky workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'running',
 		    assigned_to = $1,
@@ -435,9 +485,10 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, name
 	}
 
 	if len(wfs) == 0 {
+		tx.Rollback()
 		return nil, nil
 	}
-	return wfs, nil
+	return wfs, tx.Commit()
 }
 
 // LoadEventHistory returns all event records for a workflow, ordered by step.
@@ -522,6 +573,10 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 		return fmt.Errorf("append history batch: begin tx: %w", err)
 	}
 	defer tx.Rollback()
+
+	if err := s.setRLSOnTx(tx); err != nil {
+		return fmt.Errorf("append history batch: set rls: %w", err)
+	}
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
@@ -825,7 +880,13 @@ func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, def
 
 // Heartbeat updates the heartbeat timestamp.
 func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return false, fmt.Errorf("heartbeat: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET heartbeat_at = now()
 		WHERE id = $1 AND assigned_to = $2
@@ -834,21 +895,31 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 		return false, fmt.Errorf("heartbeat: %w", err)
 	}
 	n, _ := result.RowsAffected()
-	return n > 0, nil
+	return n > 0, tx.Commit()
 }
 
 // CompleteWorkflow marks a workflow as done.
 func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("complete workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	qsJSON, _ := json.Marshal(queryState)
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2
 	`, workflowID, workerID, result, qsJSON)
 	if err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 
@@ -867,16 +938,26 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 
 // FailWorkflow marks a workflow as failed.
 func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("fail workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	qsJSON, _ := json.Marshal(queryState)
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2
 	`, workflowID, workerID, errMsg, qsJSON)
 	if err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 
@@ -895,22 +976,42 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, 
 
 // ReleaseWorkflow returns a workflow to the queue with a next wake time.
 func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("release workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, next_wake_at = $3
 		WHERE id = $1 AND assigned_to = $2
 	`, workflowID, workerID, nextWakeAt)
-	return err
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // RequestCancellation sets the cancellation flag.
 func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("request cancellation: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET cancellation_requested = true, cancellation_reason = $2
 		WHERE id = $1
 	`, workflowID, reason)
-	return err
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // CheckCancellation checks if a workflow has been cancelled.
@@ -934,6 +1035,10 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 		return "", false, err
 	}
 	defer tx.Rollback()
+
+	if err := s.setRLSOnTx(tx); err != nil {
+		return "", false, err
+	}
 
 	var payload string
 	err = tx.QueryRowContext(ctx, `
@@ -1008,6 +1113,10 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 			return existingWfID, true, nil
 		}
 
+		if err := s.setRLSOnTx(tx); err != nil {
+			return "", false, fmt.Errorf("start new run: set rls: %w", err)
+		}
+
 		// Insert the workflow instance.
 		err = tx.QueryRowContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
@@ -1024,8 +1133,14 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 	}
 
 	// No idempotency key — normal flow.
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("start new run: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var runID string
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
 		        COALESCE((SELECT namespace FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
@@ -1035,7 +1150,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
-	return runID, false, nil
+	return runID, false, tx.Commit()
 }
 
 // StartChildWorkflow creates a child workflow instance linked to a parent.
@@ -1097,12 +1212,22 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 
 // DeliverSignal satisfies the SignalStore interface.
 func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("deliver signal: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (workflow_id, signal_name) DO UPDATE SET payload = $3, delivered_at = now()
 	`, workflowID, signalName, payload)
-	return err
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
 }
 
 // PollSignal satisfies the SignalStore interface by checking for a delivered signal.
@@ -1296,6 +1421,10 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 		return fmt.Errorf("compact history: begin tx: %w", err)
 	}
 	defer tx.Rollback()
+
+	if err := s.setRLSOnTx(tx); err != nil {
+		return fmt.Errorf("compact history: set rls: %w", err)
+	}
 
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history WHERE workflow_id = $1 AND step < $2 AND tenant_id = $3
@@ -1773,6 +1902,22 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 	case "run_detached":
 		// No extra fields to store.
+	case "plugin_call_stream_chunk":
+		if rec.PluginName != "" {
+			payload["plugin_name"] = rec.PluginName
+		}
+		if rec.PluginFunc != "" {
+			payload["plugin_func"] = rec.PluginFunc
+		}
+		if rec.PluginInput != "" {
+			payload["plugin_input"] = rec.PluginInput
+		}
+		if rec.PluginOutput != "" {
+			payload["plugin_output"] = rec.PluginOutput
+		}
+		if rec.PluginError != "" {
+			payload["plugin_error"] = rec.PluginError
+		}
 	}
 	return json.Marshal(payload)
 }
@@ -1828,5 +1973,11 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["state_op"].(string); ok { rec.StateOp = v }
 	case "run_detached":
 		// No extra fields to restore.
+	case "plugin_call_stream_chunk":
+		if v, ok := m["plugin_name"].(string); ok { rec.PluginName = v }
+		if v, ok := m["plugin_func"].(string); ok { rec.PluginFunc = v }
+		if v, ok := m["plugin_input"].(string); ok { rec.PluginInput = v }
+		if v, ok := m["plugin_output"].(string); ok { rec.PluginOutput = v }
+		if v, ok := m["plugin_error"].(string); ok { rec.PluginError = v }
 	}
 }
