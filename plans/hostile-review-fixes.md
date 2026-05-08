@@ -1,9 +1,234 @@
 # Hostile Review Remediation Plan
 
 Goal: fix every CRITICAL and HIGH issue, and as many MEDIUM issues as
-possible.  Each phase can ship independently.  Phases are ordered by
-dependency: you can't observe what you haven't fixed, you can't
-performance-tune what you can't observe.
+possible.
+
+---
+
+## Three-Stream Implementation Model
+
+The work splits into three independent streams that can be implemented
+on separate git clones with no merge conflicts.  Each stream has a
+clear theme, touches mostly disjoint files, and can ship independently.
+
+**Prerequisite (do first, merge to main, then branch all three streams):**
+Phase 1 — Stop the Bleeding.  These are one-liners and quick wins that
+touch core files every stream depends on.  Ship in days.  Once merged,
+the three streams branch off and never conflict.
+
+### Stream A: Engine Correctness & Performance
+
+**Theme:** The core execution guarantees — what happens when a workflow
+runs, replays, or crashes.
+
+**Files touched:** `internal/host/engine.go`, `internal/host/imports.go`,
+`internal/host/memory.go`, `internal/host/runtime.go`,
+`internal/host/db.go`, `internal/host/compaction.go`,
+`internal/host/versioned_loader.go`, `internal/host/plugin_loader.go`,
+`internal/host/sharded_store.go`, `internal/wasm/exports.go`,
+`benchmarks/wasm_bench_test.go`, `schema.sql` (event_history columns)
+
+**Work items (from the detailed phases below):**
+
+From Phase 1 (prerequisite items in this stream's domain):
+- 1.1: Initialize `nowMs` with real time
+- 1.3: Add WASM execution timeout
+- 1.6: Check `mem.Write` return value everywhere
+- 1.7: Make DurableLog actually durable
+
+From Phase 2 — Correctness Hardening:
+- 2.1: Make DurableCall exactly-once (write-ahead or immediate flush)
+- 2.2: Make ContinueAsNew atomic
+- 2.3: Make event/status updates atomic
+- 2.4: Call version compatibility check at replay
+- 2.5: Make DurableDefer run on WASM trap/panic
+- 2.6: Fix binary data in JSONB (base64 or BYTEA)
+- 2.7: Increase output buffer and add overflow detection
+- 2.8: Remove WASI clock_time_get and random_get
+
+From Phase 5 — Performance:
+- 5.1: Enable wazero JIT compiler
+- 5.2: Replace 200ms sleep with readiness polling
+- 5.3: Fix unbounded WASM byte cache (LRU with byte limits)
+- 5.4: Fix PluginLoader random eviction → LRU
+- 5.5: Batch heartbeat writes
+- 5.6: Parallel shard claiming
+
+From Phase 3:
+- 3.6: Add real benchmarks with WASM in the loop (needed before 5.x)
+
+From Phase 6 — Reliability Polish:
+- 6.1: Fix reaper timeout vs interval
+- 6.2: Add event history integrity checks
+- 6.3: Implement dead letter queue status
+- 6.4: Fix streaming plugin goroutine leak
+- 6.5: Add compaction state size limit
+- 6.6: Add event_history pagination in API
+
+**Stream A delivers:** exactly-once calls, crash-safe state transitions,
+JIT-compiled WASM at near-native speed, correct replay with integrity
+checks, and real throughput benchmarks.
+
+---
+
+### Stream B: Security & Observability
+
+**Theme:** What attackers can reach and what operators can see.
+
+**Files touched:** `cmd/cleat-worker/main.go` (API handlers, metrics
+recording, auth wiring, rate limiting), `cmd/cleat-worker/metrics.go`,
+`cmd/cleat-worker/config.go`, `internal/auth/middleware.go`,
+`internal/host/engine.go` (redaction, error structures, retry caps),
+`internal/host/db.go` (retention, structured errors),
+`internal/plugin/capabilities.go`, `internal/plugin/registry.go`,
+`monitoring/grafana/dashboard.json`, `docs/guide/deploying-to-production.md`
+
+**Work items:**
+
+From Phase 1 (prerequisite items in this stream's domain):
+- 1.2: Wire auth middleware into the HTTP server
+- 1.4: Add HTTP request size limits (MaxBytesReader)
+- 1.5: Add HTTP server timeouts
+
+From Phase 3 — Observability:
+- 3.1: Wire Prometheus metrics into execution path
+- 3.2: Fix histogram buckets
+- 3.3: Add background goroutine metrics
+- 3.4: Align Grafana dashboard with actual metric names
+- 3.5: Add replay-vs-first-run metrics
+- 3.7: Persist structured error types
+
+From Phase 4 — Security Hardening:
+- 4.1: Add rate limiting
+- 4.2: Implement redaction
+- 4.3: Restrict plugin database access
+- 4.4: Cap retry maxAttempts
+- 4.5: Fix DurableCallWithRetry context-aware backoff
+- 4.6: Stop logging workflow results to stdout
+- 4.7: Add event retention policy
+
+**Stream B delivers:** authenticated API, rate-limited endpoints, working
+Prometheus metrics and Grafana dashboards, redacted secrets in event
+history, scoped plugin database access, and time-based data retention.
+
+---
+
+### Stream C: Developer Experience & Operations
+
+**Theme:** How developers write, test, and debug workflows; how operators
+deploy, upgrade, and recover.
+
+**Files touched:** `cleat/cleattest/cleattest.go`, `cleat/runtime.go`
+(interface split), `internal/analyzer/`, `internal/callgraph/`,
+`internal/closure/`, `internal/transform/`, `internal/wasm/build.go`,
+`internal/plugin/` (crash recovery), `cmd/cleat-worker/main.go` (drain
+API, search/filter, migration runner), `cmd/cleat-worker/config.go`,
+`migrations/`, `sdk/python/`, `docs/guide/upgrading.md`,
+`docs/guide/disaster-recovery.md`, `docs/guide/zero-downtime-deploy.md`,
+`.github/workflows/`, `charts/cleat/templates/deployment.yaml`
+
+**Work items:**
+
+From Phase 7 — Developer Experience & Testing:
+- 7.1: Add replay testing to TestEnv
+- 7.2: Fix SendSignalAndWait to use simulated clock
+- 7.3: Implement ContinueAsNew in TestEnv
+- 7.4: Add generics tests to transformer pipeline
+- 7.5: Handle build tags in transformer
+- 7.6: Ensure TinyGo path in CI
+- 7.7: Add workflow stack traces (DWARF-based)
+- 7.8: Split HostCalls interface into capability groups
+
+From Phase 8 — Operations, Ecosystem, and Debts:
+- 8.1: Add migration runner
+- 8.2: Document upgrade path
+- 8.3: Document RPO/RTO/DR
+- 8.4: Add worker drain API
+- 8.5: Add search/filter by input content and error
+- 8.6: Validate Python WASM end-to-end
+- 8.7: Add plugin crash recovery boundaries
+- 8.8: Write zero-downtime deployment guide
+
+**Stream C delivers:** replay-tested TestEnv, generics-safe transformer,
+TinyGo in CI, DWARF stack traces on failure, composable HostCalls
+interface, migration runner, documented upgrade/DR/drain procedures,
+searchable workflows, and plugin crash isolation.
+
+---
+
+### File Ownership Matrix
+
+```
+                        Stream A   Stream B   Stream C
+internal/host/engine.go    ██         █         ░
+internal/host/imports.go   ██
+internal/host/memory.go    ██
+internal/host/runtime.go   ██
+internal/host/db.go        ██         █
+internal/host/compaction.go██
+internal/host/*loader*.go  ██
+internal/host/sharded*.go  ██
+internal/wasm/exports.go   ██
+internal/wasm/build.go                 ░         ██
+benchmarks/                ██
+schema.sql                 █
+cmd/cleat-worker/main.go    ░         ██         █
+cmd/cleat-worker/metrics.go            ██
+cmd/cleat-worker/config.go  ░         █          █
+internal/auth/                         ██
+internal/plugin/capabilities.go        ██
+internal/plugin/registry.go            ██
+internal/plugin/*.go (rest)            ░         ██
+monitoring/grafana/                    ██
+cleat/cleattest/                                  ██
+cleat/runtime.go                                  ██
+internal/analyzer/                                ██
+internal/callgraph/                               ██
+internal/closure/                                 ██
+internal/transform/                               ██
+sdk/python/                                       ██
+docs/guide/*.md                                   ██
+.github/workflows/                                ██
+charts/cleat/                                     ██
+migrations/                                       ██
+plans/                                            ██
+
+██ = primary owner    █ = modifies    ░ = reads
+```
+
+Files with multiple owners: `engine.go` (Stream A owns correctness,
+Stream B touches retry backoff and redaction), `db.go` (Stream A owns
+event persistence, Stream B touches retention and structured errors),
+`main.go` (Stream B owns API setup, Stream C adds drain and search
+endpoints).  These are safe because each stream touches different
+sections of the same files — different functions, different imports.
+A merge will be a clean union, not a conflict.
+
+---
+
+### Workflow
+
+```
+1. Phase 1 merges to main (1-3 days)
+2. main is tagged v0.2.0
+3. Three worktrees branch off v0.2.0:
+     git worktree add ../stream-a stream-a
+     git worktree add ../stream-b stream-b
+     git worktree add ../stream-c stream-c
+4. Streams implemented in parallel (2-4 weeks)
+5. Each stream merges to main independently when done
+6. Integration test pass after all three are merged
+7. Tag v0.3.0
+```
+
+---
+
+## Detailed Phases (by original numbering)
+
+The phases below are the original detailed work items.  The three-stream
+model above groups them into independent work units.  Each stream lead
+finds their items by looking for their stream label (A/B/C) in the
+stream assignment above, then reads the corresponding detailed phase.
 
 ---
 
