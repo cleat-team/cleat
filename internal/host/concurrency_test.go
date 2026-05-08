@@ -857,3 +857,124 @@ func TestConcurrencyKeyReplayAcquireAlreadyHeld(t *testing.T) {
 		t.Error("replay acquire should return acquired=true from history")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Additional concurrency key tests
+// ---------------------------------------------------------------------------
+
+// TestAcquireConcurrencyKeyWithAlreadyHeldKey verifies that when a concurrency
+// key is already held by one workflow, another workflow cannot acquire it
+// (through the store-level interface).
+func TestAcquireConcurrencyKeyWithAlreadyHeldKey(t *testing.T) {
+	ctx := context.Background()
+
+	cks := newMockConcurrencyKeyStore()
+
+	key := "already-held-key"
+	wf1 := "wf-holder"
+	wf2 := "wf-contender"
+
+	// First workflow acquires the key.
+	acquired, err := cks.AcquireConcurrencyKey(ctx, key, wf1, 30*time.Second)
+	if err != nil {
+		t.Fatalf("first workflow acquire: %v", err)
+	}
+	if !acquired {
+		t.Fatal("first workflow should acquire the key")
+	}
+
+	// Second workflow tries to acquire the same key — should fail.
+	acquired, err = cks.AcquireConcurrencyKey(ctx, key, wf2, 30*time.Second)
+	if err != nil {
+		t.Fatalf("second workflow acquire: %v", err)
+	}
+	if acquired {
+		t.Error("second workflow should NOT acquire the already-held key")
+	}
+
+	// After release, the second workflow should be able to acquire.
+	err = cks.ReleaseConcurrencyKey(ctx, key)
+	if err != nil {
+		t.Fatalf("ReleaseConcurrencyKey: %v", err)
+	}
+	acquired, err = cks.AcquireConcurrencyKey(ctx, key, wf2, 30*time.Second)
+	if err != nil {
+		t.Fatalf("second workflow acquire after release: %v", err)
+	}
+	if !acquired {
+		t.Error("second workflow should acquire after key release")
+	}
+}
+
+// TestReleaseConcurrencyKeyForNonExistentKey verifies that releasing a
+// concurrency key that was never acquired does not return an error (the
+// operation is idempotent at the store level).
+func TestReleaseConcurrencyKeyForNonExistentKey(t *testing.T) {
+	ctx := context.Background()
+
+	cks := newMockConcurrencyKeyStore()
+
+	// Release a key that was never acquired — should not error.
+	err := cks.ReleaseConcurrencyKey(ctx, "non-existent-key-for-release")
+	if err != nil {
+		t.Errorf("releasing non-existent key should succeed, got: %v", err)
+	}
+
+	// Release another non-existent key to verify idempotency.
+	err = cks.ReleaseConcurrencyKey(ctx, "another-non-existent-key")
+	if err != nil {
+		t.Errorf("releasing another non-existent key should succeed, got: %v", err)
+	}
+
+	// Verify the store is still usable (acquire works after releasing non-existent).
+	acquired, err := cks.AcquireConcurrencyKey(ctx, "fresh-key", "wf-fresh", 30*time.Second)
+	if err != nil {
+		t.Fatalf("acquire after non-existent release: %v", err)
+	}
+	if !acquired {
+		t.Error("should acquire fresh key after releasing non-existent keys")
+	}
+}
+
+// TestConcurrencyKeyTTLExpiration verifies that a concurrency key with a very
+// short TTL is automatically released after expiry, allowing another workflow
+// to acquire it. This tests the expiration logic within the mock store.
+func TestConcurrencyKeyTTLExpiration(t *testing.T) {
+	ctx := context.Background()
+
+	cks := newMockConcurrencyKeyStore()
+
+	key := "ttl-expiration-key"
+	wf1 := "wf-ttl-holder"
+	wf2 := "wf-ttl-taker"
+
+	// Acquire with a very short TTL (1ms).
+	acquired, err := cks.AcquireConcurrencyKey(ctx, key, wf1, 1*time.Millisecond)
+	if err != nil {
+		t.Fatalf("acquire with TTL: %v", err)
+	}
+	if !acquired {
+		t.Fatal("should acquire key with short TTL")
+	}
+
+	// Immediately try to acquire from another workflow — key is still held.
+	acquired, err = cks.AcquireConcurrencyKey(ctx, key, wf2, 30*time.Second)
+	if err != nil {
+		t.Fatalf("immediate re-acquire: %v", err)
+	}
+	if acquired {
+		t.Error("second workflow should NOT acquire before TTL expiry")
+	}
+
+	// Wait for TTL to expire.
+	time.Sleep(5 * time.Millisecond)
+
+	// Now the second workflow should be able to acquire.
+	acquired, err = cks.AcquireConcurrencyKey(ctx, key, wf2, 30*time.Second)
+	if err != nil {
+		t.Fatalf("re-acquire after TTL expiry: %v", err)
+	}
+	if !acquired {
+		t.Error("second workflow should acquire after TTL expiry")
+	}
+}

@@ -724,3 +724,568 @@ func TestLR_ChildWorkflowTyped_MarshalError(t *testing.T) {
 		t.Errorf("expected marshaling error, got: %v", err)
 	}
 }
+
+// =========================================================================
+// durableCallTypedWithOptions
+// =========================================================================
+
+func TestLR_DurableCallTypedWithOptions_Success(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return `{"name":"hello"}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	type resp struct{ Name string }
+	var result resp
+	err := r.durableCallTypedWithOptions(cleat.CallOptions{}, "svc", "op", map[string]string{"k": "v"}, &result)
+	if err != nil {
+		t.Fatalf("durableCallTypedWithOptions: %v", err)
+	}
+	if result.Name != "hello" {
+		t.Errorf("want hello, got %q", result.Name)
+	}
+}
+
+func TestLR_DurableCallTypedWithOptions_NilResult(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return `{"name":"hello"}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	err := r.durableCallTypedWithOptions(cleat.CallOptions{}, "svc", "op", map[string]string{"k": "v"}, nil)
+	if err != nil {
+		t.Fatalf("durableCallTypedWithOptions with nil result: %v", err)
+	}
+}
+
+func TestLR_DurableCallTypedWithOptions_MarshalError(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	err := r.durableCallTypedWithOptions(cleat.CallOptions{}, "svc", "op", make(chan int), nil)
+	if err == nil {
+		t.Fatal("expected marshal error")
+	}
+	if !strings.Contains(err.Error(), "marshaling") {
+		t.Errorf("expected marshaling error, got: %v", err)
+	}
+}
+
+func TestLR_DurableCallTypedWithOptions_UnmarshalError(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return `[1,2,3]`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	type resp struct{ Name string }
+	var result resp
+	err := r.durableCallTypedWithOptions(cleat.CallOptions{}, "svc", "op", map[string]string{"k": "v"}, &result)
+	if err == nil {
+		t.Fatal("expected unmarshal error")
+	}
+	if !strings.Contains(err.Error(), "unmarshaling") {
+		t.Errorf("expected unmarshaling error, got: %v", err)
+	}
+}
+
+func TestLR_DurableCallTypedWithOptions_CallError(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return "", fmt.Errorf("upstream failure")
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	err := r.durableCallTypedWithOptions(cleat.CallOptions{}, "svc", "op", map[string]string{"k": "v"}, nil)
+	if err == nil {
+		t.Fatal("expected call error")
+	}
+	if !strings.Contains(err.Error(), "upstream failure") {
+		t.Errorf("expected upstream failure, got: %v", err)
+	}
+}
+
+// =========================================================================
+// awaitChildTyped
+// =========================================================================
+
+func TestLR_AwaitChildTyped_Success(t *testing.T) {
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		return `{"status":"done"}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	runID, _ := r.childWorkflow("child", `{}`)
+	type result struct{ Status string }
+	var res result
+	err := r.awaitChildTyped(runID, &res)
+	if err != nil {
+		t.Fatalf("awaitChildTyped: %v", err)
+	}
+	if res.Status != "done" {
+		t.Errorf("want done, got %q", res.Status)
+	}
+}
+
+func TestLR_AwaitChildTyped_NilResult(t *testing.T) {
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		return `{"status":"done"}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	runID, _ := r.childWorkflow("child", `{}`)
+	err := r.awaitChildTyped(runID, nil)
+	if err == nil {
+		t.Error("expected error for nil result (json.Unmarshal(nil))")
+	}
+}
+
+func TestLR_AwaitChildTyped_ChildError(t *testing.T) {
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		return "", fmt.Errorf("child boom")
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	runID, _ := r.childWorkflow("fail", `{}`)
+	var res string
+	err := r.awaitChildTyped(runID, &res)
+	if err == nil {
+		t.Fatal("expected child error")
+	}
+	if !strings.Contains(err.Error(), "child boom") {
+		t.Errorf("expected child boom, got: %v", err)
+	}
+}
+
+func TestLR_AwaitChildTyped_UnmarshalError(t *testing.T) {
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		return `not-valid-json-object`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	runID, _ := r.childWorkflow("bad", `{}`)
+	type result struct{ Status string }
+	var res result
+	err := r.awaitChildTyped(runID, &res)
+	if err == nil {
+		t.Fatal("expected unmarshal error")
+	}
+}
+
+// =========================================================================
+// durableCallTypedWithHeartbeat
+// =========================================================================
+
+func TestLR_DurableCallTypedWithHeartbeat_Success(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return `{"value":42}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	type resp struct{ Value int }
+	var result resp
+	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, &result, 0, nil)
+	if err != nil {
+		t.Fatalf("durableCallTypedWithHeartbeat: %v", err)
+	}
+	if result.Value != 42 {
+		t.Errorf("want 42, got %d", result.Value)
+	}
+}
+
+func TestLR_DurableCallTypedWithHeartbeat_NilResult(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return `{"value":42}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, nil, 0, nil)
+	if err != nil {
+		t.Fatalf("durableCallTypedWithHeartbeat with nil result: %v", err)
+	}
+}
+
+func TestLR_DurableCallTypedWithHeartbeat_MarshalError(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	err := r.durableCallTypedWithHeartbeat("svc", "op", make(chan int), nil, 0, nil)
+	if err == nil {
+		t.Fatal("expected marshal error")
+	}
+	if !strings.Contains(err.Error(), "marshaling") {
+		t.Errorf("expected marshaling error, got: %v", err)
+	}
+}
+
+func TestLR_DurableCallTypedWithHeartbeat_CallError(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return "", fmt.Errorf("heartbeat fail")
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, nil, 0, nil)
+	if err == nil {
+		t.Fatal("expected call error")
+	}
+	if !strings.Contains(err.Error(), "heartbeat fail") {
+		t.Errorf("expected heartbeat fail, got: %v", err)
+	}
+}
+
+func TestLR_DurableCallTypedWithHeartbeat_UnmarshalError(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return `not-json`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	type resp struct{ Value int }
+	var result resp
+	err := r.durableCallTypedWithHeartbeat("svc", "op", map[string]string{"k": "v"}, &result, 0, nil)
+	if err == nil {
+		t.Fatal("expected unmarshal error")
+	}
+}
+
+// =========================================================================
+// setQueryState
+// =========================================================================
+
+func TestLR_SetQueryState_SetsValue(t *testing.T) {
+	r := NewLocalRunner()
+	r.setQueryState("mykey", "myvalue")
+	r.mu.RLock()
+	val, ok := r.queryState["mykey"]
+	r.mu.RUnlock()
+	if !ok {
+		t.Error("queryState key not set")
+	}
+	if val != "myvalue" {
+		t.Errorf("want myvalue, got %q", val)
+	}
+}
+
+func TestLR_SetQueryState_Overwrites(t *testing.T) {
+	r := NewLocalRunner()
+	r.setQueryState("k", "v1")
+	r.setQueryState("k", "v2")
+	r.mu.RLock()
+	val := r.queryState["k"]
+	r.mu.RUnlock()
+	if val != "v2" {
+		t.Errorf("want v2, got %q", val)
+	}
+}
+
+// =========================================================================
+// runDetached
+// =========================================================================
+
+func TestLR_RunDetached_Success(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	called := false
+	err := r.runDetached(func(h cleat.HostCalls) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runDetached: %v", err)
+	}
+	if !called {
+		t.Error("detached function was not called")
+	}
+	events := r.Events()
+	found := false
+	for _, e := range events {
+		if e.Type == "run_detached" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected run_detached event")
+	}
+}
+
+func TestLR_RunDetached_Error(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	err := r.runDetached(func(h cleat.HostCalls) error {
+		return fmt.Errorf("detached failure")
+	})
+	if err == nil {
+		t.Fatal("expected error from detached function")
+	}
+	if !strings.Contains(err.Error(), "detached failure") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// =========================================================================
+// awaitPromiseImpl
+// =========================================================================
+
+func TestLR_AwaitPromiseImpl_NotFound(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	_, timedOut, err := r.awaitPromiseImpl("nonexistent", time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error for nonexistent promise")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected not found error, got: %v", err)
+	}
+	if timedOut {
+		t.Error("timedOut should be false for non-existent promise")
+	}
+}
+
+func TestLR_AwaitPromiseImpl_AlreadyResolved(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	id, err := r.createPromiseImpl("test-promise")
+	if err != nil {
+		t.Fatalf("createPromiseImpl: %v", err)
+	}
+	// Directly resolve the promise in internal state.
+	r.mu.Lock()
+	lp := r.promises[id]
+	lp.status = "resolved"
+	lp.result = "result-value"
+	close(lp.ch)
+	r.mu.Unlock()
+
+	result, timedOut, err := r.awaitPromiseImpl(id, time.Second)
+	if err != nil {
+		t.Fatalf("awaitPromiseImpl: %v", err)
+	}
+	if timedOut {
+		t.Error("should not time out on resolved promise")
+	}
+	if result != "result-value" {
+		t.Errorf("want result-value, got %q", result)
+	}
+}
+
+func TestLR_AwaitPromiseImpl_AlreadyRejected(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	id, err := r.createPromiseImpl("rejected-promise")
+	if err != nil {
+		t.Fatalf("createPromiseImpl: %v", err)
+	}
+	// Directly reject the promise in internal state.
+	r.mu.Lock()
+	lp := r.promises[id]
+	lp.status = "rejected"
+	lp.errorMsg = "rejection reason"
+	close(lp.ch)
+	r.mu.Unlock()
+
+	_, timedOut, err := r.awaitPromiseImpl(id, time.Second)
+	if err == nil {
+		t.Fatal("expected rejection error")
+	}
+	if !strings.Contains(err.Error(), "rejected") {
+		t.Errorf("expected rejection error, got: %v", err)
+	}
+	if timedOut {
+		t.Error("timedOut should be false for rejected promise")
+	}
+}
+
+func TestLR_AwaitPromiseImpl_PendingTimeout(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	id, err := r.createPromiseImpl("pending-promise")
+	if err != nil {
+		t.Fatalf("createPromiseImpl: %v", err)
+	}
+	result, timedOut, err := r.awaitPromiseImpl(id, time.Millisecond)
+	if err != nil {
+		t.Fatalf("awaitPromiseImpl: %v", err)
+	}
+	if !timedOut {
+		t.Error("expected timeout on pending promise")
+	}
+	if result != "" {
+		t.Errorf("expected empty result on timeout, got %q", result)
+	}
+}
+
+func TestLR_AwaitPromiseImpl_PendingResolvedViaChannel(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	id, err := r.createPromiseImpl("will-resolve")
+	if err != nil {
+		t.Fatalf("createPromiseImpl: %v", err)
+	}
+
+	done := make(chan struct{})
+	var result string
+	var timedOut bool
+	var awaitErr error
+
+	go func() {
+		result, timedOut, awaitErr = r.awaitPromiseImpl(id, time.Second)
+		close(done)
+	}()
+
+	time.Sleep(5 * time.Millisecond)
+
+	r.mu.Lock()
+	lp := r.promises[id]
+	lp.status = "resolved"
+	lp.result = "channel-resolved"
+	close(lp.ch)
+	r.mu.Unlock()
+
+	<-done
+
+	if awaitErr != nil {
+		t.Fatalf("awaitPromiseImpl: %v", awaitErr)
+	}
+	if timedOut {
+		t.Error("should not time out when resolved via channel")
+	}
+	if result != "channel-resolved" {
+		t.Errorf("want channel-resolved, got %q", result)
+	}
+}
+
+func TestLR_AwaitPromiseImpl_PendingRejectedViaChannel(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	id, err := r.createPromiseImpl("will-reject")
+	if err != nil {
+		t.Fatalf("createPromiseImpl: %v", err)
+	}
+
+	done := make(chan struct{})
+	var timedOut bool
+	var awaitErr error
+
+	go func() {
+		_, timedOut, awaitErr = r.awaitPromiseImpl(id, time.Second)
+		close(done)
+	}()
+
+	time.Sleep(5 * time.Millisecond)
+
+	r.mu.Lock()
+	lp := r.promises[id]
+	lp.status = "rejected"
+	lp.errorMsg = "rejected-via-channel"
+	close(lp.ch)
+	r.mu.Unlock()
+
+	<-done
+
+	if awaitErr == nil {
+		t.Fatal("expected rejection error")
+	}
+	if !strings.Contains(awaitErr.Error(), "rejected-via-channel") {
+		t.Errorf("expected rejected-via-channel, got: %v", awaitErr)
+	}
+	if timedOut {
+		t.Error("should not time out when rejected via channel")
+	}
+}
+
+// =========================================================================
+// pluginCallImpl
+// =========================================================================
+
+func TestLR_PluginCallImpl_ReturnsError(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	resp, err := r.pluginCallImpl("myplugin", "myfunc", `{}`)
+	if err == nil {
+		t.Fatal("expected error from pluginCallImpl")
+	}
+	if resp != "" {
+		t.Errorf("expected empty response, got %q", resp)
+	}
+	if !strings.Contains(err.Error(), "not available") {
+		t.Errorf("expected 'not available' in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "myplugin") || !strings.Contains(err.Error(), "myfunc") {
+		t.Errorf("error should mention plugin and function names, got: %v", err)
+	}
+}
+
+// =========================================================================
+// acquireLockImpl / releaseLockImpl
+// =========================================================================
+
+func TestLR_AcquireLockImpl_FirstAcquisitionSucceeds(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithWorkflowID("wf-1"))
+	ok, err := r.acquireLockImpl("lock-key", 30000)
+	if err != nil {
+		t.Fatalf("acquireLockImpl: %v", err)
+	}
+	if !ok {
+		t.Error("first acquisition should succeed")
+	}
+}
+
+func TestLR_AcquireLockImpl_SameWorkflowReacquires(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithWorkflowID("wf-1"))
+	ok, _ := r.acquireLockImpl("lock-key", 30000)
+	if !ok {
+		t.Fatal("first acquisition should succeed")
+	}
+	ok, err := r.acquireLockImpl("lock-key", 30000)
+	if err != nil {
+		t.Fatalf("acquireLockImpl: %v", err)
+	}
+	if !ok {
+		t.Error("re-acquire by same workflow should succeed (idempotent)")
+	}
+}
+
+func TestLR_AcquireLockImpl_DifferentWorkflowFails(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithWorkflowID("wf-1"))
+	ok, _ := r.acquireLockImpl("lock-key", 30000)
+	if !ok {
+		t.Fatal("first acquisition should succeed")
+	}
+	// Directly change workflow ID to simulate different workflow.
+	r.workflowID = "wf-2"
+	ok, err := r.acquireLockImpl("lock-key", 30000)
+	if err != nil {
+		t.Fatalf("acquireLockImpl: %v", err)
+	}
+	if ok {
+		t.Error("different workflow should not acquire held key")
+	}
+}
+
+func TestLR_ReleaseLockImpl_ReleasesKey(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithWorkflowID("wf-1"))
+	ok, _ := r.acquireLockImpl("lock-key", 30000)
+	if !ok {
+		t.Fatal("first acquisition should succeed")
+	}
+	err := r.releaseLockImpl("lock-key")
+	if err != nil {
+		t.Fatalf("releaseLockImpl: %v", err)
+	}
+	// After release, a different workflow should be able to acquire.
+	r.workflowID = "wf-2"
+	ok, err = r.acquireLockImpl("lock-key", 30000)
+	if err != nil {
+		t.Fatalf("acquireLockImpl after release: %v", err)
+	}
+	if !ok {
+		t.Error("should acquire after release")
+	}
+}
+
+func TestLR_ReleaseLockImpl_NonexistentKey(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	err := r.releaseLockImpl("key-that-does-not-exist")
+	if err != nil {
+		t.Fatalf("releaseLockImpl on nonexistent key: %v", err)
+	}
+}
+
+// =========================================================================
+// awaitConditionImpl
+// =========================================================================
+
+func TestLR_AwaitConditionImpl_TrueImmediately(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	met, err := r.awaitConditionImpl(func() bool { return true }, time.Millisecond, time.Second)
+	if err != nil {
+		t.Fatalf("awaitConditionImpl: %v", err)
+	}
+	if !met {
+		t.Error("expected condition met")
+	}
+}
+
+func TestLR_AwaitConditionImpl_Timeout(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	met, err := r.awaitConditionImpl(func() bool { return false }, time.Millisecond, 5*time.Millisecond)
+	if err != nil {
+		t.Fatalf("awaitConditionImpl: %v", err)
+	}
+	if met {
+		t.Error("expected timeout, not condition met")
+	}
+}

@@ -336,6 +336,9 @@ type mockCompactStore struct {
 	keepStep          int
 	loadCount         int
 	compactCount      int
+	// For LoadCompactionState tests.
+	loadCompactionStateResult *CompactionState
+	loadCompactionStateErr    error
 }
 
 func (m *mockCompactStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
@@ -388,7 +391,15 @@ func (m *mockCompactStore) LoadWorkflowConfig(ctx context.Context, defName strin
 func (m *mockCompactStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) { return nil, nil }
 func (m *mockCompactStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) { return nil, nil }
 func (m *mockCompactStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) { return nil, nil }
-func (m *mockCompactStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) { return nil, nil }
+func (m *mockCompactStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) {
+	if m.loadCompactionStateErr != nil {
+		return nil, m.loadCompactionStateErr
+	}
+	if m.loadCompactionStateResult != nil {
+		return m.loadCompactionStateResult, nil
+	}
+	return nil, nil
+}
 func (m *mockCompactStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error { return nil }
 func (m *mockCompactStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error { return nil }
 func (m *mockCompactStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error { return nil }
@@ -499,6 +510,138 @@ func TestCompactWorkflowHistory_AboveThreshold(t *testing.T) {
 	}
 	if store.compactState == nil {
 		t.Fatal("expected non-nil compaction state")
+	}
+}
+
+// TestCompactionWithOpenChildrenAndTail verifies that child workflows still
+// running survive compaction correctly through the full CompactWorkflowHistory
+// path, and that tail events are excluded from the compaction state.
+func TestCompactionWithOpenChildrenAndTail(t *testing.T) {
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeChildWorkflow, ChildName: "child-a", ChildInput: `{"x":1}`, RunID: "run-a"},
+		{Step: 1, EventType: EventTypeChildWorkflow, ChildName: "child-b", ChildInput: `{"y":2}`, RunID: "run-b"},
+		{Step: 2, EventType: EventTypeAwaitChild, RunID: "run-a", Response: `{"ok":true}`},
+		{Step: 3, EventType: EventTypeCall, Service: "svc", Op: "continue"},
+		{Step: 4, EventType: EventTypeCall, Service: "svc", Op: "finalize"},
+	}
+
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-open-children", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+
+	// keepStep = 5 - 1 = 4, so steps 0,1,2,3 are compacted, step 4 is tail.
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("unmarshal compaction state: %v", err)
+	}
+
+	// Steps 0-3 are compacted → 4 compacted events.
+	if len(cs.Events) != 4 {
+		t.Errorf("expected 4 compacted events, got %d", len(cs.Events))
+	}
+
+	// Only child-b should be open (child-a was completed by step 2).
+	if len(cs.OpenChildren) != 1 {
+		t.Fatalf("expected 1 open child, got %d", len(cs.OpenChildren))
+	}
+	if cs.OpenChildren[0].RunID != "run-b" {
+		t.Errorf("expected open child run-b, got %s", cs.OpenChildren[0].RunID)
+	}
+	if cs.OpenChildren[0].Name != "child-b" {
+		t.Errorf("expected open child name child-b, got %s", cs.OpenChildren[0].Name)
+	}
+
+	// Verify reconstruction produces the full history.
+	tail := events[store.keepStep:]
+	reconstructed := buildFullHistoryFromCompaction(tail, &cs)
+	if len(reconstructed) != len(events) {
+		t.Errorf("expected %d reconstructed events, got %d", len(events), len(reconstructed))
+	}
+	for i := range events {
+		if !eventFieldsMatch(events[i], reconstructed[i]) {
+			t.Errorf("event %d mismatch", i)
+			dumpEventDiff(t, events[i], reconstructed[i])
+		}
+	}
+}
+
+// TestCompactWorkflowHistory_ThresholdExactlyAtBoundary verifies that exactly
+// threshold events do NOT trigger compaction, confirming the boundary condition
+// in CompactWorkflowHistory with a clean small threshold value.
+func TestCompactWorkflowHistory_ThresholdExactlyAtBoundary(t *testing.T) {
+	threshold := 5
+	events := make([]EventRecord, threshold)
+	for i := 0; i < threshold; i++ {
+		events[i] = EventRecord{
+			Step: i, EventType: EventTypeCall,
+			Service: "svc", Op: fmt.Sprintf("op%d", i),
+		}
+	}
+
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-threshold-exact", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 0 {
+		t.Errorf("expected 0 compactions at exact threshold (%d events, threshold=%d), got %d",
+			len(events), threshold, store.compactCount)
+	}
+}
+
+// TestLoadCompactionStateNonExistentWorkflow verifies that calling
+// LoadCompactionState for a workflow that has never been compacted returns
+// nil without error.
+func TestLoadCompactionStateNonExistentWorkflow(t *testing.T) {
+	store := &mockCompactStore{}
+	cs, err := store.LoadCompactionState(context.Background(), "non-existent-workflow")
+	if err != nil {
+		t.Fatalf("LoadCompactionState: expected no error, got %v", err)
+	}
+	if cs != nil {
+		t.Fatal("expected nil CompactionState for non-existent workflow")
+	}
+
+	// Also verify that a workflow with a valid compaction state returns it.
+	validState := &CompactionState{
+		Version:       1,
+		CompactedStep: 10,
+		Events: []CompactedEvent{
+			{Type: EventCodeCall, Service: "svc", Op: "op1"},
+		},
+	}
+	store2 := &mockCompactStore{loadCompactionStateResult: validState}
+	cs2, err2 := store2.LoadCompactionState(context.Background(), "existent-workflow")
+	if err2 != nil {
+		t.Fatalf("LoadCompactionState: expected no error, got %v", err2)
+	}
+	if cs2 == nil {
+		t.Fatal("expected non-nil CompactionState for existent workflow")
+	}
+	if cs2.Version != 1 {
+		t.Errorf("expected version 1, got %d", cs2.Version)
+	}
+	if cs2.CompactedStep != 10 {
+		t.Errorf("expected compacted step 10, got %d", cs2.CompactedStep)
+	}
+	if len(cs2.Events) != 1 {
+		t.Errorf("expected 1 compacted event, got %d", len(cs2.Events))
+	}
+
+	// Verify LoadCompactionState error propagation.
+	store3 := &mockCompactStore{loadCompactionStateErr: fmt.Errorf("db error")}
+	cs3, err3 := store3.LoadCompactionState(context.Background(), "error-workflow")
+	if err3 == nil {
+		t.Fatal("expected error from LoadCompactionState, got nil")
+	}
+	if cs3 != nil {
+		t.Fatal("expected nil CompactionState on error")
 	}
 }
 

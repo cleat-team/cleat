@@ -927,3 +927,159 @@ func TestQueryEventsLimit(t *testing.T) {
 		t.Fatalf("expected at most 2 events with limit=2, got %d", len(events))
 	}
 }
+
+// =========================================================================
+// Migrations
+// =========================================================================
+
+func TestAL_Migrations(t *testing.T) {
+	p := &Plugin{}
+	migrations := p.Migrations()
+	if len(migrations) == 0 {
+		t.Fatal("expected at least 1 migration")
+	}
+	for _, m := range migrations {
+		if m.Version == 0 {
+			t.Error("migration version must be non-zero")
+		}
+		if m.Up == "" {
+			t.Error("migration Up SQL must be non-empty")
+		}
+		if m.Down == "" {
+			t.Error("migration Down SQL must be non-empty")
+		}
+	}
+}
+
+// =========================================================================
+// Background Run
+// =========================================================================
+
+func TestAL_Run_NilDB(t *testing.T) {
+	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run with nil DB: want nil, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after cancel")
+	}
+}
+
+func TestAL_Run_Cancel(t *testing.T) {
+	p, _, store := setupTestPlugin(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run cancel: want nil, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after cancel")
+	}
+
+	// Verify the store is still usable after Run returns.
+	store.mu.RLock()
+	_ = len(store.events)
+	store.mu.RUnlock()
+}
+
+// =========================================================================
+// RegisterRoutes — nil mux error
+// =========================================================================
+
+func TestAL_RegisterRoutes_NilMux(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterRoutes(nil)
+	if err == nil || !strings.Contains(err.Error(), "nil mux") {
+		t.Errorf("want nil mux error, got: %v", err)
+	}
+}
+
+// =========================================================================
+// writeError helper
+// =========================================================================
+
+func TestAL_WriteError(t *testing.T) {
+	p := &Plugin{}
+	rec := httptest.NewRecorder()
+	p.writeError(rec, http.StatusBadRequest, "test error")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("want 400, got %d", rec.Code)
+	}
+	var m map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if m["error"] != "test error" {
+		t.Errorf("want 'test error', got %q", m["error"])
+	}
+}
+
+// =========================================================================
+// handleQueryEvents — error paths
+// =========================================================================
+
+func TestAL_HandleQueryEvents_MissingTenant(t *testing.T) {
+	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/audit/events", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("missing tenant: want 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// =========================================================================
+// Plugin info
+// =========================================================================
+
+func TestAL_PluginInfo(t *testing.T) {
+	p := &Plugin{}
+	info := p.Info()
+	if info.Name != "audit-log" {
+		t.Errorf("want 'audit-log', got %q", info.Name)
+	}
+	if info.Version == "" {
+		t.Error("version should not be empty")
+	}
+}
+
+// =========================================================================
+// cleanupRetention — no events to delete
+// =========================================================================
+
+func TestAL_CleanupRetention_NoEvents(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		config: Config{RetentionDays: 90},
+	}
+
+	affected, err := p.cleanupRetention(context.Background())
+	if err != nil {
+		t.Fatalf("cleanupRetention: %v", err)
+	}
+	if affected != 0 {
+		t.Errorf("expected 0 deleted events with empty store, got %d", affected)
+	}
+}

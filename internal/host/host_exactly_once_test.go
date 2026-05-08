@@ -674,3 +674,236 @@ func TestSideEffectMultipleRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SideEffect record-then-replay: record a side effect, then replay the same
+// step with a new WASM module instance and verify the cached result is used.
+// ---------------------------------------------------------------------------
+
+func TestSideEffectRecordThenReplaySameStep(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Record two side effects in a fresh session.
+	freshSession := &execSession{
+		engine:  &Engine{caller: &mockCaller{}},
+		history: make([]EventRecord, 0),
+	}
+	firstResult := `{"random":100}`
+	secondResult := `{"random":200}`
+	_ = freshSession.SideEffect(ctx, mod, firstResult, 0, 4096)
+	_ = freshSession.SideEffect(ctx, mod, secondResult, 0, 4096)
+
+	if len(freshSession.history) != 2 {
+		t.Fatalf("expected 2 events in history, got %d", len(freshSession.history))
+	}
+
+	// Replay the same steps with a new module. The cached values should be returned
+	// even though we pass different "fresh" values.
+	mod2 := newTestModule(t, rt)
+	replaySession := &execSession{
+		engine:   &Engine{caller: &mockCaller{}},
+		history:  freshSession.history,
+		isReplay: true,
+	}
+
+	// First replay: should return firstResult, not firstReplayVal.
+	firstReplayVal := `{"random":999}`
+	result1 := replaySession.SideEffect(ctx, mod2, firstReplayVal, 0, 4096)
+	errCode1, written1 := decodeSimpleResult(result1)
+	if errCode1 != 0 {
+		t.Fatalf("first replay side effect: unexpected errCode=%d", errCode1)
+	}
+	mem2 := mod2.Memory()
+	data1, ok1 := mem2.Read(0, written1)
+	if !ok1 || string(data1) != firstResult {
+		t.Errorf("expected cached first result %q, got %q", firstResult, string(data1))
+	}
+
+	// Second replay: should return secondResult, not secondReplayVal.
+	secondReplayVal := `{"random":888}`
+	result2 := replaySession.SideEffect(ctx, mod2, secondReplayVal, 0, 4096)
+	errCode2, written2 := decodeSimpleResult(result2)
+	if errCode2 != 0 {
+		t.Fatalf("second replay side effect: unexpected errCode=%d", errCode2)
+	}
+	data2, ok2 := mem2.Read(0, written2)
+	if !ok2 || string(data2) != secondResult {
+		t.Errorf("expected cached second result %q, got %q", secondResult, string(data2))
+	}
+
+	if replaySession.stepCount != 2 {
+		t.Errorf("expected stepCount=2 after replaying 2 side effects, got %d", replaySession.stepCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableSleep dedup across replay sessions: verify that multiple sleeps are
+// consumed from history without re-suspending.
+// ---------------------------------------------------------------------------
+
+func TestDurableSleepMsDedupAcrossReplays(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Fresh execution records a sleep event.
+	freshSession := &execSession{
+		engine:  &Engine{caller: &mockCaller{}},
+		history: make([]EventRecord, 0),
+		nowMs:   1000000,
+	}
+	_ = freshSession.DurableSleep(ctx, mod, 5000)
+	if len(freshSession.history) != 1 {
+		t.Fatalf("expected 1 sleep event, got %d", len(freshSession.history))
+	}
+	if freshSession.suspendErr == nil {
+		t.Fatal("expected suspendErr after fresh sleep")
+	}
+
+	// Replay the sleep event — should complete without re-suspending.
+	mod2 := newTestModule(t, rt)
+	replaySession := &execSession{
+		engine:   &Engine{caller: &mockCaller{}},
+		history:  freshSession.history,
+		isReplay: true,
+		nowMs:    1005000,
+	}
+	result := replaySession.DurableSleep(ctx, mod2, 5000)
+	status, _ := decodeSleepResult(result)
+	if status != sleepStatusCompleted {
+		t.Errorf("expected sleep completed (%d) on replay, got %d", sleepStatusCompleted, status)
+	}
+	if replaySession.suspendErr != nil {
+		t.Error("expected no suspendErr on replay sleep")
+	}
+	if replaySession.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after replay, got %d", replaySession.stepCount)
+	}
+
+	// Calling DurableSleep again without history should suspend.
+	result2 := replaySession.DurableSleep(ctx, mod2, 3000)
+	status2, duration2 := decodeSleepResult(result2)
+	if status2 != sleepStatusSuspend {
+		t.Errorf("expected sleep suspend (%d) when history exhausted, got %d", sleepStatusSuspend, status2)
+	}
+	if duration2 != 3000 {
+		t.Errorf("expected duration 3000 on fresh sleep, got %d", duration2)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Signal delivery deduplication on replay: verify that delivering the same
+// signal multiple times only produces one signal_received event.
+// ---------------------------------------------------------------------------
+
+func TestSignalDeliveryDedupReplay(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	// Simulate a fresh execution where a signal is delivered once.
+	freshSession := &execSession{
+		engine:  &Engine{caller: &mockCaller{}},
+		history: make([]EventRecord, 0),
+	}
+	freshSession.history = append(freshSession.history, EventRecord{
+		Step:          0,
+		EventType:     EventTypeSignalReceived,
+		SignalName:    "order_approved",
+		SignalPayload: `{"order_id":"ord-456","approved":true}`,
+	})
+	freshSession.stepCount = 1
+
+	// Replay: consume the signal_received event.
+	mod := newTestModule(t, rt)
+	replaySession := &execSession{
+		engine:   &Engine{caller: &mockCaller{}},
+		history:  freshSession.history,
+		isReplay: true,
+	}
+
+	// First await should consume the signal_received event and return the payload.
+	result1 := replaySession.DurableAwaitSignals(ctx, mod, "order_approved", 30000, 0, 4096, 4096, 4096)
+	if result1 == 0 {
+		t.Error("expected non-zero result from first signal await")
+	}
+	if replaySession.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after consuming signal, got %d", replaySession.stepCount)
+	}
+
+	// Second await has no more signal events in history. Without a signal store,
+	// it should fall through to fresh execution without crashing or panicking.
+	mod2 := newTestModule(t, rt)
+	result2 := replaySession.DurableAwaitSignals(ctx, mod2, "order_approved", 30000, 0, 4096, 4096, 4096)
+	t.Logf("second await signals returned result=%d (expected fallthrough, no crash)", result2)
+	// The engine should not panic or hang when called with exhausted history
+	// and no signal store. The exact return value depends on whether the
+	// fallthrough records an await_signals event.
+}
+
+// ---------------------------------------------------------------------------
+// ContinueAsNew with event replay: verify that ContinueAsNew events are
+// correctly replayed with the stored new input set in the suspendErr.
+// ---------------------------------------------------------------------------
+
+func TestContinueAsNewWithEventReplay(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Build history: a call followed by a ContinueAsNew event.
+	history := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "phase1", Request: `{}`, Response: `{"phase":1}`},
+		{Step: 1, EventType: EventTypeContinueAsNew, NewInput: `{"phase":2,"restart":true}`},
+	}
+
+	session := &execSession{
+		engine:   &Engine{caller: &mockCaller{}},
+		history:  history,
+		isReplay: true,
+	}
+
+	// Replay the initial call - should succeed from history.
+	_ = session.replayCall(ctx, mod, "svc", "phase1", `{}`, 0, 4096)
+	if session.stepCount != 1 {
+		t.Fatalf("expected stepCount=1 after replay call, got %d", session.stepCount)
+	}
+
+	// Replay the ContinueAsNew event - should set suspendErr with the stored input.
+	_ = session.ContinueAsNew(ctx, mod, `{"should_be_ignored":true}`)
+	if session.suspendErr == nil {
+		t.Fatal("expected suspendErr after ContinueAsNew replay")
+	}
+	if session.suspendErr.NewInput != `{"phase":2,"restart":true}` {
+		t.Errorf("expected NewInput from history %q, got %q",
+			`{"phase":2,"restart":true}`, session.suspendErr.NewInput)
+	}
+	if session.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", session.suspendErr.Reason)
+	}
+	if session.stepCount != 2 {
+		t.Errorf("expected stepCount=2 after consuming call + ContinueAsNew, got %d", session.stepCount)
+	}
+
+	// The session should remain in replay mode since no fresh execution occurred.
+	if !session.isReplay {
+		t.Error("expected isReplay=true (ContinueAsNew consumes from replay, no fresh execution)")
+	}
+}

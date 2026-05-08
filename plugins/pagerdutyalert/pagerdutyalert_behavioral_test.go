@@ -40,6 +40,8 @@ type fakeDBStore struct {
 	mu       sync.RWMutex
 	apiKeys  map[string]string               // key_hash -> tenant_id
 	pdConfig map[string]*fakePDConfigRow     // "tenant:id" -> row
+	failNextExec  bool                       // next ExecContext returns error
+	failNextQuery bool                       // next QueryContext returns error
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -129,6 +131,11 @@ func argAny(args []driver.NamedValue, ordinal int) (driver.Value, error) {
 func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
+
+	if c.store.failNextExec {
+		c.store.failNextExec = false
+		return nil, fmt.Errorf("simulated exec error")
+	}
 
 	switch {
 	case strings.Contains(query, "INSERT INTO pd_config"):
@@ -241,6 +248,18 @@ func (c *fakeConn) execDeletePDConfig(args []driver.NamedValue) (driver.Result, 
 // ---------------------------------------------------------------------------
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	// Check fail flag under write lock before acquiring read lock for the query.
+	c.store.mu.Lock()
+	shouldFail := c.store.failNextQuery
+	if shouldFail {
+		c.store.failNextQuery = false
+	}
+	c.store.mu.Unlock()
+
+	if shouldFail {
+		return nil, fmt.Errorf("simulated query error")
+	}
+
 	c.store.mu.RLock()
 	defer c.store.mu.RUnlock()
 
@@ -808,4 +827,503 @@ func (t *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	mockReq, _ := http.NewRequestWithContext(req.Context(), req.Method, newURL, req.Body)
 	mockReq.Header = req.Header
 	return http.DefaultTransport.RoundTrip(mockReq)
+}
+
+// ---------------------------------------------------------------------------
+// Fault-injection HTTP transport
+// ---------------------------------------------------------------------------
+
+type failTransport struct {
+	err error
+}
+
+func (t *failTransport) RoundTrip(_ *http.Request) (*http.Response, error) {
+	return nil, t.err
+}
+
+// ---------------------------------------------------------------------------
+// Mock FuncRegistry that returns an error on Register
+// ---------------------------------------------------------------------------
+
+type failRegistry struct {
+	err error
+}
+
+func (r *failRegistry) Register(_ plugin.FuncOptions, _ plugin.PluginFunc) error {
+	return r.err
+}
+
+// ---------------------------------------------------------------------------
+// Additional route handler error-path tests
+// ---------------------------------------------------------------------------
+
+func TestPDCreateConfig_InvalidJSON(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	body := `{invalid json}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDCreateConfig_DBError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+	store.failNextExec = true
+
+	body := `{"name":"test","routing_key":"rk_test"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for DB error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDCreateConfig_NoTenant(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	body := `{"name":"test","routing_key":"rk_test"}`
+	req := httptest.NewRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	p.handleCreateConfig(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for missing tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDGetConfig_InvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	req := authedRequest("GET", "/pagerduty/configs/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid ID, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDGetConfig_DBError(t *testing.T) {
+	p, _, store := setupTestPlugin(t, nil)
+	store.failNextQuery = true
+
+	// Go through the mux (for PathValue) but inject tenant context.
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(auth.WithTenantID(r.Context(), testTenantID))
+		mux.ServeHTTP(w, r)
+	})
+
+	req := httptest.NewRequest("GET", "/pagerduty/configs/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for DB error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDGetConfig_NoTenant(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	req := httptest.NewRequest("GET", "/pagerduty/configs/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	p.handleGetConfig(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for missing tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDUpdateConfig_NoFields(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	// Create a valid config first using the same handler chain.
+	createBody := `{"name":"orig","routing_key":"rk_orig"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	configID := created["id"].(string)
+
+	// Update with empty body — no fields to update.
+	updateBody := `{}`
+	req = authedRequest("PUT", "/pagerduty/configs/"+configID, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for no fields, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDUpdateConfig_InvalidJSON(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	updateBody := `not json`
+	req := authedRequest("PUT", "/pagerduty/configs/"+uuid.New().String(), bytes.NewReader([]byte(updateBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDUpdateConfig_DBError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+	store.failNextExec = true
+
+	updateBody := `{"name":"updated"}`
+	req := authedRequest("PUT", "/pagerduty/configs/"+uuid.New().String(), bytes.NewReader([]byte(updateBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for DB error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDUpdateConfig_NoTenant(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	body := `{"name":"updated"}`
+	req := httptest.NewRequest("PUT", "/pagerduty/configs/"+uuid.New().String(), bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	p.handleUpdateConfig(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for missing tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDDeleteConfig_InvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	req := authedRequest("DELETE", "/pagerduty/configs/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid ID, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDDeleteConfig_DBError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+	store.failNextExec = true
+
+	req := authedRequest("DELETE", "/pagerduty/configs/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for DB error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDDeleteConfig_NoTenant(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	req := httptest.NewRequest("DELETE", "/pagerduty/configs/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	p.handleDeleteConfig(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for missing tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDListConfigs_DBError(t *testing.T) {
+	p, _, store := setupTestPlugin(t, nil)
+	store.failNextQuery = true
+
+	req := httptest.NewRequest("GET", "/pagerduty/configs", nil)
+	req = req.WithContext(auth.WithTenantID(context.Background(), testTenantID))
+	rec := httptest.NewRecorder()
+	p.handleListConfigs(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for DB error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDListConfigs_NoTenant(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	req := httptest.NewRequest("GET", "/pagerduty/configs", nil)
+	rec := httptest.NewRecorder()
+	p.handleListConfigs(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for missing tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDUpdateConfig_NotFound(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	body := `{"name":"nope"}`
+	req := authedRequest("PUT", "/pagerduty/configs/"+uuid.New().String(), bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for not found, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional host function error-path tests
+// ---------------------------------------------------------------------------
+
+func TestRegisterHostFunctions_RegistryError(t *testing.T) {
+	p := &Plugin{}
+	scope := &failRegistry{err: fmt.Errorf("register declined")}
+	err := p.RegisterHostFunctions(scope)
+	if err == nil {
+		t.Fatal("expected error from registry")
+	}
+	if !strings.Contains(err.Error(), "register declined") {
+		t.Errorf("expected 'register declined', got: %v", err)
+	}
+}
+
+func TestTriggerIncident_NoCallContext(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	// No call context in the background context — triggerIncident should reject.
+	_, err := p.triggerIncident(context.Background(), `{}`)
+	if err == nil {
+		t.Fatal("expected error for missing call context")
+	}
+	if !strings.Contains(err.Error(), "no tenant context") {
+		t.Errorf("expected tenant context error, got: %v", err)
+	}
+}
+
+func TestResolveIncident_NoCallContext(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	_, err := p.resolveIncident(context.Background(), `{}`)
+	if err == nil {
+		t.Fatal("expected error for missing call context")
+	}
+	if !strings.Contains(err.Error(), "no tenant context") {
+		t.Errorf("expected tenant context error, got: %v", err)
+	}
+}
+
+func TestTriggerIncident_InvalidJSON(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	_, err := p.triggerIncident(withCallContext(context.Background()), `not json`)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON input")
+	}
+	if !strings.Contains(err.Error(), "invalid input") {
+		t.Errorf("expected 'invalid input' error, got: %v", err)
+	}
+}
+
+func TestResolveIncident_InvalidJSON(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	_, err := p.resolveIncident(withCallContext(context.Background()), `not json`)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON input")
+	}
+	if !strings.Contains(err.Error(), "invalid input") {
+		t.Errorf("expected 'invalid input' error, got: %v", err)
+	}
+}
+
+func TestPostToPagerDuty_HTTPError(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, &http.Client{
+		Transport: &failTransport{err: fmt.Errorf("connection refused")},
+		Timeout:   5 * time.Second,
+	})
+
+	_, err := p.postToPagerDuty(context.Background(), pdEventRequest{
+		RoutingKey:  "rk_test",
+		EventAction: "trigger",
+	})
+	if err == nil {
+		t.Fatal("expected error from failing HTTP transport")
+	}
+	if !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("expected transport error, got: %v", err)
+	}
+}
+
+func TestPostToPagerDuty_Non2xx(t *testing.T) {
+	pdMux := http.NewServeMux()
+	pdMux.HandleFunc("/v2/enqueue", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"status":"error","message":"server error"}`))
+	})
+	pdSrv := httptest.NewServer(pdMux)
+	defer pdSrv.Close()
+
+	origTransport := &mockTransport{
+		origURL: "https://events.pagerduty.com",
+		mockURL: pdSrv.URL,
+	}
+	client := &http.Client{Transport: origTransport, Timeout: 5 * time.Second}
+
+	p, _, _ := setupTestPlugin(t, client)
+
+	_, err := p.postToPagerDuty(context.Background(), pdEventRequest{
+		RoutingKey:  "rk_test",
+		EventAction: "trigger",
+	})
+	if err == nil {
+		t.Fatal("expected error from non-2xx API response")
+	}
+	if !strings.Contains(err.Error(), "500") && !strings.Contains(err.Error(), "API returned") {
+		t.Errorf("expected API error, got: %v", err)
+	}
+}
+
+func TestPostToPagerDuty_ParseError(t *testing.T) {
+	pdMux := http.NewServeMux()
+	pdMux.HandleFunc("/v2/enqueue", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`not valid json at all`))
+	})
+	pdSrv := httptest.NewServer(pdMux)
+	defer pdSrv.Close()
+
+	origTransport := &mockTransport{
+		origURL: "https://events.pagerduty.com",
+		mockURL: pdSrv.URL,
+	}
+	client := &http.Client{Transport: origTransport, Timeout: 5 * time.Second}
+
+	p, _, _ := setupTestPlugin(t, client)
+
+	_, err := p.postToPagerDuty(context.Background(), pdEventRequest{
+		RoutingKey:  "rk_test",
+		EventAction: "trigger",
+	})
+	if err == nil {
+		t.Fatal("expected error from invalid response JSON")
+	}
+	if !strings.Contains(err.Error(), "parse response") {
+		t.Errorf("expected 'parse response' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TriggerIncident config disabled test
+// ---------------------------------------------------------------------------
+
+func TestTriggerIncident_DisabledConfig(t *testing.T) {
+	p, _, store := setupTestPlugin(t, nil)
+
+	// Create a config then disable it.
+	cfgID := uuid.New().String()
+	store.mu.Lock()
+	store.pdConfig[testTenantStr+":"+cfgID] = &fakePDConfigRow{
+		tenantID:   testTenantStr,
+		id:         cfgID,
+		name:       "disabled",
+		routingKey: "rk_disabled",
+		enabled:    false,
+		createdAt:  time.Now(),
+		updatedAt:  time.Now(),
+	}
+	store.mu.Unlock()
+
+	input := `{"config_id":"` + cfgID + `","summary":"test","severity":"error","source":"src"}`
+	_, err := p.triggerIncident(withCallContext(context.Background()), input)
+	if err == nil {
+		t.Fatal("expected error for disabled config")
+	}
+	if !strings.Contains(err.Error(), "config not found or disabled") {
+		t.Errorf("expected 'disabled' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TriggerIncident with structured details
+// ---------------------------------------------------------------------------
+
+func TestTriggerIncident_WithStructuredDetails(t *testing.T) {
+	pdMux := http.NewServeMux()
+	pdMux.HandleFunc("/v2/enqueue", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req pdEventRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if req.Payload == nil || req.Payload.CustomDetails == nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"status":"error","message":"missing details"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"success","dedup_key":"details_abc"}`))
+	})
+	pdSrv := httptest.NewServer(pdMux)
+	defer pdSrv.Close()
+
+	origTransport := &mockTransport{
+		origURL: "https://events.pagerduty.com",
+		mockURL: pdSrv.URL,
+	}
+	client := &http.Client{Transport: origTransport, Timeout: 5 * time.Second}
+
+	p, handler, _ := setupTestPlugin(t, client)
+
+	createBody := `{"name":"details-test","routing_key":"rk_details"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create config: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	configID := created["id"].(string)
+
+	// Trigger with JSON details that should be parsed as structured data.
+	input := `{"config_id":"` + configID + `","summary":"details test","severity":"error","source":"test","details":"{\"key\":\"value\",\"count\":42}"}`
+	out, err := p.triggerIncident(withCallContext(context.Background()), input)
+	if err != nil {
+		t.Fatalf("triggerIncident returned error: %v", err)
+	}
+	var result triggerIncidentOutput
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if result.Status != "success" {
+		t.Errorf("expected success, got %q", result.Status)
+	}
+	if result.IncidentKey != "details_abc" {
+		t.Errorf("expected dedup_key 'details_abc', got %q", result.IncidentKey)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ResolveIncident config not found
+// ---------------------------------------------------------------------------
+
+func TestResolveIncident_ConfigNotFound(t *testing.T) {
+	p, _, _ := setupTestPlugin(t, nil)
+
+	input := `{"config_id":"` + uuid.New().String() + `","incident_key":"inc_123"}`
+	_, err := p.resolveIncident(withCallContext(context.Background()), input)
+	if err == nil {
+		t.Fatal("expected error for config not found")
+	}
+	if !strings.Contains(err.Error(), "config not found") && !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' error, got: %v", err)
+	}
 }
