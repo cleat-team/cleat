@@ -306,10 +306,15 @@ type HostCalls interface {
 	// (e.g. entity IDs, correlation IDs) that are stable across replays.
 	UUID(seed string) string
 
-	// NewUUID generates a random UUID deterministically. On first execution
-	// produces a fresh UUID from Random(). On replay returns the same value.
-	// Safe to use without SideEffect — determinism is built in.
+	// NewUUID generates a random UUID (v4) deterministically. On first
+	// execution produces a fresh UUID from Random(). On replay returns the
+	// same value. No SideEffect needed — determinism is built into Random().
 	NewUUID() string
+
+	// NewUUIDv7 generates a time-sortable UUID (v7) deterministically.
+	// The timestamp comes from Now() (deterministic on replay). The random
+	// portion comes from Random() (also deterministic). Safe without SideEffect.
+	NewUUIDv7() string
 
 	// AcquireLock attempts to acquire a concurrency lock for the given key.
 	// Returns true if the lock was acquired, false if already held.
@@ -1708,9 +1713,7 @@ func (h *hostCallsImpl) UUID(seed string) string {
 		hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
 }
 
-// NewUUID generates a random UUID deterministically. Uses Random() which is
-// seeded from (workflowID, stepCount, randomSeq) and produces the same
-// sequence on replay. No SideEffect needed — determinism is built into Random().
+// NewUUID generates a random UUID (v4) deterministically.
 func (h *hostCallsImpl) NewUUID() string {
 	r1 := uint64(h.Random())
 	r2 := uint64(h.Random())
@@ -1726,6 +1729,37 @@ func (h *hostCallsImpl) NewUUID() string {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
+// NewUUIDv7 generates a time-sortable UUID (v7) deterministically.
+// The timestamp comes from Now() — deterministic on replay. The random
+// portion comes from Random() — also deterministic on replay.
+func (h *hostCallsImpl) NewUUIDv7() string {
+	ts := uint64(h.NowMs()) // Unix timestamp in ms
+	r1 := uint64(h.Random())
+	r2 := uint64(h.Random())
+
+	// Build 16 bytes per RFC 9562 UUID v7 layout:
+	//   [0..5]  = 48-bit timestamp (big-endian)
+	//   [6..7]  = version (4 bits = 0x7) + 12 bits rand_a
+	//   [8..9]  = variant (2 bits = 10) + 14 bits rand_b
+	//   [10..15] = 48 more bits rand_b
+	b := make([]byte, 16)
+	b[0] = byte(ts >> 40); b[1] = byte(ts >> 32); b[2] = byte(ts >> 24)
+	b[3] = byte(ts >> 16); b[4] = byte(ts >> 8); b[5] = byte(ts)
+	b[6] = byte(r1 >> 56); b[7] = byte(r1 >> 48)
+	b[8] = byte(r1 >> 40); b[9] = byte(r1 >> 32)
+	b[10] = byte(r1 >> 24); b[11] = byte(r1 >> 16)
+	b[12] = byte(r1 >> 8); b[13] = byte(r1)
+	b[14] = byte(r2 >> 56); b[15] = byte(r2 >> 48)
+
+	// Version 7: set high nibble of byte 6 to 0x7.
+	b[6] = (b[6] & 0x0f) | 0x70
+	// Variant 1: set high 2 bits of byte 8 to 10.
+	b[8] = (b[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 
 func (h *hostCallsImpl) SetState(key string, value interface{}) {
 	sk := h.scopedKey(key)
