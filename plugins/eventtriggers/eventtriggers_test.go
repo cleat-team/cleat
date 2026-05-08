@@ -2,6 +2,7 @@ package eventtriggers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -515,5 +516,373 @@ func TestFilterStructuredEdgeCases(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("expected error for unknown operator")
+	}
+}
+
+func TestRegisterHostFunctionsNilScope(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterHostFunctions(nil)
+	if err == nil {
+		t.Fatal("expected error for nil scope")
+	}
+}
+
+func TestPluginRegistration(t *testing.T) {
+	plugins, err := plugin.Discover()
+	if err != nil {
+		t.Fatalf("Discover() returned error: %v", err)
+	}
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "event-triggers" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("event-triggers plugin not found after Discover")
+	}
+}
+
+func TestRegisterRoutesNilMux(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterRoutes(nil)
+	if err == nil {
+		t.Fatal("expected error for nil mux")
+	}
+}
+
+func TestUnregisterAwaiterEmptyID(t *testing.T) {
+	// Must not panic or error when called with empty workflow ID.
+	unregisterAwaiter(context.Background(), nil, nil, "", "test-event")
+}
+
+// TestMergeInputAndTemplateNil verifies mergeInputAndTemplate handles nil template.
+func TestMergeInputAndTemplateNil(t *testing.T) {
+	data := map[string]interface{}{"key": "value"}
+	result, err := mergeInputAndTemplate(nil, data)
+	if err != nil {
+		t.Fatalf("mergeInputAndTemplate(nil, data) returned error: %v", err)
+	}
+	var merged map[string]interface{}
+	if err := json.Unmarshal(result, &merged); err != nil {
+		t.Fatalf("failed to decode result: %v", err)
+	}
+	if merged["key"] != "value" {
+		t.Errorf("expected key='value', got %v", merged["key"])
+	}
+}
+
+// TestMergeInputAndTemplateNonObject verifies mergeInputAndTemplate handles non-object templates.
+func TestMergeInputAndTemplateNonObject(t *testing.T) {
+	tmpl := json.RawMessage(`"just a string"`)
+	data := map[string]interface{}{"key": "value"}
+	result, err := mergeInputAndTemplate(tmpl, data)
+	if err != nil {
+		t.Fatalf("mergeInputAndTemplate(string, data) returned error: %v", err)
+	}
+	var merged map[string]interface{}
+	if err := json.Unmarshal(result, &merged); err != nil {
+		t.Fatalf("failed to decode result: %v", err)
+	}
+	if merged["key"] != "value" {
+		t.Errorf("expected key='value', got %v", merged["key"])
+	}
+}
+
+// TestFilterLiteralFalse verifies the filter returns error for boolean false value.
+func TestFilterStructuredInvalidPath(t *testing.T) {
+	_, err := EvaluateFilter(`{"event.data.missing": {"$exists": "not-bool"}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{}},
+	})
+	if err == nil {
+		t.Error("expected error for $exists with non-bool value")
+	}
+}
+
+// TestFilterStructuredNeqNonExistent verifies $ne on a non-existent field returns true.
+func TestFilterStructuredNeqNonExistent(t *testing.T) {
+	result, err := EvaluateFilter(`{"event.data.nonexistent": {"$ne": "value"}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected true for $ne on non-existent field")
+	}
+}
+
+// TestFilterStructuredGtLtNonExistent verifies comparison operators on non-existent fields.
+func TestFilterStructuredGtLtNonExistent(t *testing.T) {
+	data := map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{}},
+	}
+
+	tests := []struct {
+		filter string
+		expect bool
+	}{
+		{`{"event.data.nonexistent": {"$gt": 100}}`, false},
+		{`{"event.data.nonexistent": {"$gte": 100}}`, false},
+		{`{"event.data.nonexistent": {"$lt": 100}}`, false},
+		{`{"event.data.nonexistent": {"$lte": 100}}`, false},
+		{`{"event.data.nonexistent": {"$in": ["a","b"]}}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.filter, func(t *testing.T) {
+			result, err := EvaluateFilter(tt.filter, data)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result != tt.expect {
+				t.Errorf("expected %v, got %v", tt.expect, result)
+			}
+		})
+	}
+}
+
+// TestFilterStructuredNinNonExistent verifies $nin on non-existent field.
+func TestFilterStructuredNinNonExistent(t *testing.T) {
+	result, err := EvaluateFilter(`{"event.data.nonexistent": {"$nin": ["a","b"]}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected true for $nin on non-existent field")
+	}
+}
+
+// TestFilterStructuredNinMatch verifies $nin returns false when value is in list.
+func TestFilterStructuredNinMatch(t *testing.T) {
+	result, err := EvaluateFilter(`{"event.data.status": {"$nin": ["active", "pending"]}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{"status": "active"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result {
+		t.Error("expected false for $nin with matching value")
+	}
+}
+
+// TestFilterStructuredInvalidIn verifies $in with non-array operand returns error.
+func TestFilterStructuredInvalidIn(t *testing.T) {
+	_, err := EvaluateFilter(`{"event.data.status": {"$in": "not-an-array"}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{"status": "active"}},
+	})
+	if err == nil {
+		t.Error("expected error for $in with non-array operand")
+	}
+}
+
+// TestFilterStructuredInvalidNin verifies $nin with non-array operand returns error.
+func TestFilterStructuredInvalidNin(t *testing.T) {
+	_, err := EvaluateFilter(`{"event.data.status": {"$nin": "not-an-array"}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{"status": "active"}},
+	})
+	if err == nil {
+		t.Error("expected error for $nin with non-array operand")
+	}
+}
+
+// TestFilterStructuredLt verifies $lt operator.
+func TestFilterStructuredLt(t *testing.T) {
+	result, err := EvaluateFilter(`{"event.data.amount": {"$lt": 200}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{"amount": 150.0}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected true for $lt 200 with value 150")
+	}
+}
+
+// TestFilterStructuredGte verifies $gte operator.
+func TestFilterStructuredGte(t *testing.T) {
+	result, err := EvaluateFilter(`{"event.data.amount": {"$gte": 150}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{"amount": 150.0}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected true for $gte 150 with value 150")
+	}
+}
+
+// TestFilterStructuredLte verifies $lte operator.
+func TestFilterStructuredLte(t *testing.T) {
+	result, err := EvaluateFilter(`{"event.data.amount": {"$lte": 150}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{"amount": 150.0}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected true for $lte 150 with value 150")
+	}
+}
+
+// TestFilterStructuredGtNonNumeric verifies $gt with non-numeric returns false.
+func TestFilterStructuredGtNonNumeric(t *testing.T) {
+	result, err := EvaluateFilter(`{"event.data.amount": {"$gt": 100}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{"amount": "abc"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result {
+		t.Error("expected false for $gt with non-numeric value")
+	}
+}
+
+// TestFilterStructuredEqFalse verifies $eq returns false on mismatch.
+func TestFilterStructuredEqFalse(t *testing.T) {
+	result, err := EvaluateFilter(`{"event.data.status": {"$eq": "inactive"}}`, map[string]interface{}{
+		"event": map[string]interface{}{"data": map[string]interface{}{"status": "active"}},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result {
+		t.Error("expected false for $eq with non-matching value")
+	}
+}
+
+// TestFilterComparisonNeq verifies != comparison operator.
+func TestFilterComparisonNeq(t *testing.T) {
+	data := map[string]interface{}{"price": 100.0}
+	result, err := EvaluateFilter(`event.data.price != 200`, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected true for price != 200")
+	}
+}
+
+// TestFilterNonObjectPath verifies error when path step doesn't hit an object.
+func TestFilterNonObjectPath(t *testing.T) {
+	data := map[string]interface{}{"price": 100.0}
+	_, err := EvaluateFilter(`event.data.price.nested`, data)
+	if err == nil {
+		t.Error("expected error for accessing field of non-object")
+	}
+}
+
+// TestFilterComparisonBool verifies comparison with boolean values.
+func TestFilterComparisonBool(t *testing.T) {
+	data := map[string]interface{}{"active": true}
+	result, err := EvaluateFilter(`event.data.active == true`, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected true for active == true")
+	}
+
+	result, err = EvaluateFilter(`event.data.active != true`, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result {
+		t.Error("expected false for active != true")
+	}
+}
+
+// TestFilterComparisonBoolInvalidOperator verifies error with comparison operator other
+// than == or != on booleans.
+func TestFilterComparisonBoolInvalidOperator(t *testing.T) {
+	data := map[string]interface{}{"active": true}
+	_, err := EvaluateFilter(`event.data.active > false`, data)
+	if err == nil {
+		t.Error("expected error for > on boolean")
+	}
+}
+
+// TestFilterComparisonStringOrder verifies string ordering comparisons.
+func TestFilterComparisonStringOrder(t *testing.T) {
+	data := map[string]interface{}{"name": "bravo"}
+	result, err := EvaluateFilter(`event.data.name > "alpha"`, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected true for 'bravo' > 'alpha'")
+	}
+
+	result, err = EvaluateFilter(`event.data.name < "charlie"`, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("expected true for 'bravo' < 'charlie'")
+	}
+}
+
+// TestFilterComparisonTypeMismatch verifies error on type mismatch.
+func TestFilterComparisonTypeMismatch(t *testing.T) {
+	data := map[string]interface{}{"price": 100.0}
+	_, err := EvaluateFilter(`event.data.price == "string"`, data)
+	if err == nil {
+		t.Error("expected error for comparing number with string")
+	}
+}
+
+// TestFilterComparisonNullInvalidOperator verifies error on null with unsupported op.
+func TestFilterComparisonNullInvalidOperator(t *testing.T) {
+	data := map[string]interface{}{"deleted": nil}
+	_, err := EvaluateFilter(`event.data.deleted > null`, data)
+	if err == nil {
+		t.Error("expected error for > on null")
+	}
+}
+
+// TestFilterComparisonNullNeqFalse verifies null != null returns false.
+func TestFilterComparisonNullNeqFalse(t *testing.T) {
+	data := map[string]interface{}{"deleted": nil}
+	result, err := EvaluateFilter(`event.data.deleted != null`, data)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result {
+		t.Error("expected false for null != null")
+	}
+}
+
+// TestFilterUnsupportedType verifies error for unsupported type.
+func TestFilterUnsupportedType(t *testing.T) {
+	data := map[string]interface{}{"items": []interface{}{1, 2, 3}}
+	_, err := EvaluateFilter(`event.data.items == 1`, data)
+	if err == nil {
+		t.Error("expected error for comparing array with number")
+	}
+}
+
+// TestFilterTokenizeError verifies error from tokenizer.
+func TestFilterTokenizeError(t *testing.T) {
+	_, err := EvaluateFilter("event.data.x = 5", nil)
+	if err == nil {
+		t.Error("expected error for single '='")
+	}
+}
+
+// TestFilterParseError verifies parse error with unknown operator.
+func TestFilterEOFError(t *testing.T) {
+	_, err := EvaluateFilter("event.data.x >=", nil)
+	if err == nil {
+		t.Error("expected parse error for trailing operator")
+	}
+}
+
+// TestFilterParseTrailing verifies error for trailing tokens.
+func TestFilterParseTrailing(t *testing.T) {
+	_, err := EvaluateFilter("event.data.x == 5 extra", nil)
+	if err == nil {
+		t.Error("expected error for trailing tokens")
 	}
 }

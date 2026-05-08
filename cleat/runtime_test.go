@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1197,5 +1198,620 @@ func TestRetrySuccessOnFirstAttempt(t *testing.T) {
 	}
 	if sleepCount != 0 {
 		t.Errorf("expected 0 sleeps, got %d", sleepCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableCallTyped
+// ---------------------------------------------------------------------------
+
+func TestDurableCallTypedDelegatesToTypedField(t *testing.T) {
+	var capturedService, capturedOperation string
+	var capturedRequest interface{}
+	h := NewHostCalls(HostCallsOptions{
+		DurableCallTyped: func(service, operation string, request, result interface{}) error {
+			capturedService = service
+			capturedOperation = operation
+			capturedRequest = request
+			_ = result
+			return nil
+		},
+	})
+
+	type Req struct{ X int }
+	type Res struct{ Y int }
+	var res Res
+	err := h.DurableCallTyped("svc", "op", Req{X: 42}, &res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedService != "svc" || capturedOperation != "op" {
+		t.Errorf("unexpected service/operation: %s.%s", capturedService, capturedOperation)
+	}
+	req, ok := capturedRequest.(Req)
+	if !ok || req.X != 42 {
+		t.Errorf("unexpected request: %v", capturedRequest)
+	}
+}
+
+func TestDurableCallTypedFallsBackToDurableCall(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, requestJSON string) (string, error) {
+			return `{"result":"ok"}`, nil
+		},
+	})
+
+	type Req struct {
+		Data string `json:"data"`
+	}
+	type Res struct {
+		Result string `json:"result"`
+	}
+	var res Res
+	err := h.DurableCallTyped("svc", "op", Req{Data: "hello"}, &res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Result != "ok" {
+		t.Errorf("expected result 'ok', got %q", res.Result)
+	}
+}
+
+func TestDurableCallTypedNilResultAllowed(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, requestJSON string) (string, error) {
+			return `{"result":"ok"}`, nil
+		},
+	})
+	err := h.DurableCallTyped("svc", "op", map[string]string{"k": "v"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error with nil result: %v", err)
+	}
+}
+
+func TestDurableCallTypedMarshalingError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	err := h.DurableCallTyped("svc", "op", make(chan int), nil)
+	if err == nil {
+		t.Fatal("expected marshaling error, got nil")
+	}
+	if !strings.Contains(err.Error(), "marshaling") {
+		t.Errorf("expected marshaling error, got: %v", err)
+	}
+}
+
+func TestDurableCallTypedUnmarshalError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return "{bad json}", nil
+		},
+	})
+	type Res struct {
+		X int `json:"x"`
+	}
+	var res Res
+	err := h.DurableCallTyped("svc", "op", map[string]int{"k": 1}, &res)
+	if err == nil {
+		t.Fatal("expected unmarshaling error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unmarshaling") {
+		t.Errorf("expected unmarshaling error, got: %v", err)
+	}
+}
+
+func TestDurableCallTypedPropagatesCallError(t *testing.T) {
+	callErr := errors.New("call failed")
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return "", callErr
+		},
+	})
+	type Req struct{}
+	type Res struct{}
+	var res Res
+	err := h.DurableCallTyped("svc", "op", Req{}, &res)
+	if err != callErr {
+		t.Errorf("expected original error %v, got %v", callErr, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableCallTypedWithOptions
+// ---------------------------------------------------------------------------
+
+func TestDurableCallTypedWithOptionsDelegates(t *testing.T) {
+	var capturedOpts CallOptions
+	h := NewHostCalls(HostCallsOptions{
+		DurableCallTypedWithOptions: func(opts CallOptions, service, operation string, request, result interface{}) error {
+			capturedOpts = opts
+			return nil
+		},
+	})
+
+	err := h.DurableCallTypedWithOptions(CallOptions{Timeout: time.Second}, "svc", "op", map[string]string{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedOpts.Timeout != time.Second {
+		t.Errorf("expected timeout 1s, got %v", capturedOpts.Timeout)
+	}
+}
+
+func TestDurableCallTypedWithOptionsFallback(t *testing.T) {
+	var capturedRequestJSON string
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, requestJSON string) (string, error) {
+			capturedRequestJSON = requestJSON
+			return `{"result":"fallback"}`, nil
+		},
+	})
+
+	type Res struct {
+		Result string `json:"result"`
+	}
+	var res Res
+	err := h.DurableCallTypedWithOptions(CallOptions{}, "svc", "op", map[string]string{"k": "v"}, &res)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Result != "fallback" {
+		t.Errorf("expected result 'fallback', got %q", res.Result)
+	}
+	if capturedRequestJSON != `{"k":"v"}` {
+		t.Errorf("unexpected request JSON: %s", capturedRequestJSON)
+	}
+}
+
+func TestDurableCallTypedWithOptionsNilResult(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		DurableCall: func(_, _, _ string) (string, error) {
+			return `{"result":"ok"}`, nil
+		},
+	})
+	err := h.DurableCallTypedWithOptions(CallOptions{}, "svc", "op", map[string]string{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error with nil result: %v", err)
+	}
+}
+
+func TestDurableCallTypedWithOptionsMarshalingError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	err := h.DurableCallTypedWithOptions(CallOptions{}, "svc", "op", make(chan int), nil)
+	if err == nil {
+		t.Fatal("expected marshaling error, got nil")
+	}
+	if !strings.Contains(err.Error(), "marshaling") {
+		t.Errorf("expected marshaling error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableSend
+// ---------------------------------------------------------------------------
+
+func TestDurableSendPassesThrough(t *testing.T) {
+	var capturedService, capturedOperation, capturedRequest string
+	h := NewHostCalls(HostCallsOptions{
+		DurableSend: func(service, operation, requestJSON string) error {
+			capturedService = service
+			capturedOperation = operation
+			capturedRequest = requestJSON
+			return nil
+		},
+	}).(*hostCallsImpl)
+
+	err := h.DurableSend("my_svc", "my_op", `{"key":"val"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedService != "my_svc" || capturedOperation != "my_op" || capturedRequest != `{"key":"val"}` {
+		t.Errorf("unexpected args: %q %q %q", capturedService, capturedOperation, capturedRequest)
+	}
+}
+
+func TestDurableSendNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	err := h.DurableSend("svc", "op", "{}")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ScheduleInvoke
+// ---------------------------------------------------------------------------
+
+func TestScheduleInvokePassesThrough(t *testing.T) {
+	var capturedService, capturedOperation, capturedRequest string
+	var capturedDelayMs int64
+	h := NewHostCalls(HostCallsOptions{
+		ScheduleInvoke: func(service, operation, requestJSON string, delayMs int64) error {
+			capturedService = service
+			capturedOperation = operation
+			capturedRequest = requestJSON
+			capturedDelayMs = delayMs
+			return nil
+		},
+	}).(*hostCallsImpl)
+
+	err := h.ScheduleInvoke("my_svc", "my_op", `{"key":"val"}`, 5000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedService != "my_svc" || capturedOperation != "my_op" || capturedRequest != `{"key":"val"}` || capturedDelayMs != 5000 {
+		t.Errorf("unexpected args: %q %q %q %d", capturedService, capturedOperation, capturedRequest, capturedDelayMs)
+	}
+}
+
+func TestScheduleInvokeNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	err := h.ScheduleInvoke("svc", "op", "{}", 1000)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitPromiseMs
+// ---------------------------------------------------------------------------
+
+func TestAwaitPromiseMsDelegatesToAwaitPromise(t *testing.T) {
+	var capturedID string
+	var capturedTimeout time.Duration
+	h := NewHostCalls(HostCallsOptions{
+		AwaitPromise: func(promiseID string, timeout time.Duration) (string, bool, error) {
+			capturedID = promiseID
+			capturedTimeout = timeout
+			return "resolved_value", false, nil
+		},
+	}).(*hostCallsImpl)
+
+	result, timedOut, err := h.AwaitPromiseMs("promise_123", 5000)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != "resolved_value" {
+		t.Errorf("expected 'resolved_value', got %q", result)
+	}
+	if timedOut {
+		t.Error("expected timedOut to be false")
+	}
+	if capturedID != "promise_123" {
+		t.Errorf("expected promise ID 'promise_123', got %q", capturedID)
+	}
+	if capturedTimeout != 5*time.Second {
+		t.Errorf("expected timeout 5s, got %v", capturedTimeout)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ResolvePromise
+// ---------------------------------------------------------------------------
+
+func TestResolvePromisePassesThrough(t *testing.T) {
+	var capturedID, capturedValue string
+	h := NewHostCalls(HostCallsOptions{
+		ResolvePromise: func(id, value string) error {
+			capturedID = id
+			capturedValue = value
+			return nil
+		},
+	}).(*hostCallsImpl)
+
+	err := h.ResolvePromise("prom_1", `{"approved":true}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedID != "prom_1" || capturedValue != `{"approved":true}` {
+		t.Errorf("unexpected args: %q %q", capturedID, capturedValue)
+	}
+}
+
+func TestResolvePromiseNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	err := h.ResolvePromise("p1", "ok")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RejectPromise
+// ---------------------------------------------------------------------------
+
+func TestRejectPromisePassesThrough(t *testing.T) {
+	var capturedID, capturedErrMsg string
+	h := NewHostCalls(HostCallsOptions{
+		RejectPromise: func(id, errMsg string) error {
+			capturedID = id
+			capturedErrMsg = errMsg
+			return nil
+		},
+	}).(*hostCallsImpl)
+
+	err := h.RejectPromise("prom_1", "something went wrong")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if capturedID != "prom_1" || capturedErrMsg != "something went wrong" {
+		t.Errorf("unexpected args: %q %q", capturedID, capturedErrMsg)
+	}
+}
+
+func TestRejectPromiseNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	err := h.RejectPromise("p1", "error")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "not initialized") {
+		t.Errorf("expected 'not initialized' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RunDetached
+// ---------------------------------------------------------------------------
+
+func TestRunDetachedDelegates(t *testing.T) {
+	var fnCalled bool
+	var hc HostCalls
+	hc = NewHostCalls(HostCallsOptions{
+		RunDetached: func(fn func(h HostCalls) error) error {
+			fnCalled = true
+			return fn(hc)
+		},
+	})
+
+	err := hc.RunDetached(func(h HostCalls) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !fnCalled {
+		t.Error("expected RunDetached function to be called")
+	}
+}
+
+func TestRunDetachedNotInitialized(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{})
+	err := h.RunDetached(func(h HostCalls) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("expected no error when not initialized, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitCondition (package-level)
+// ---------------------------------------------------------------------------
+
+func TestAwaitConditionPackageLevelDelegates(t *testing.T) {
+	var capturedPredicate bool
+	var capturedPollInterval, capturedTimeout time.Duration
+	h := NewHostCalls(HostCallsOptions{
+		AwaitCondition: func(pred func() bool, pollInterval, timeout time.Duration) (bool, error) {
+			capturedPredicate = pred()
+			capturedPollInterval = pollInterval
+			capturedTimeout = timeout
+			return true, nil
+		},
+	})
+
+	met := AwaitCondition(h, func() bool { return true }, time.Second, time.Minute)
+	if !met {
+		t.Error("expected met to be true")
+	}
+	if !capturedPredicate {
+		t.Error("expected predicate to return true")
+	}
+	if capturedPollInterval != time.Second {
+		t.Errorf("expected pollInterval 1s, got %v", capturedPollInterval)
+	}
+	if capturedTimeout != time.Minute {
+		t.Errorf("expected timeout 1m, got %v", capturedTimeout)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SideEffectTyped
+// ---------------------------------------------------------------------------
+
+func TestSideEffectTypedSuccess(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		SideEffect: func(computedResult string) (string, error) {
+			return computedResult, nil
+		},
+	})
+
+	type MyResult struct {
+		Value string `json:"value"`
+	}
+	result, err := SideEffectTyped[MyResult](h, func() (MyResult, error) {
+		return MyResult{Value: "hello"}, nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Value != "hello" {
+		t.Errorf("expected value 'hello', got %q", result.Value)
+	}
+}
+
+func TestSideEffectTypedFunctionError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		SideEffect: func(computedResult string) (string, error) {
+			return computedResult, nil
+		},
+	})
+
+	fnErr := errors.New("fn error")
+	_, err := SideEffectTyped[string](h, func() (string, error) {
+		return "", fnErr
+	})
+	if err != fnErr {
+		t.Errorf("expected original error %v, got %v", fnErr, err)
+	}
+}
+
+func TestSideEffectTypedMarshalError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		SideEffect: func(computedResult string) (string, error) {
+			return computedResult, nil
+		},
+	})
+
+	// An un-marshalable type (channel) inside the result should produce a marshal error.
+	type BadResult struct {
+		Ch chan int
+	}
+	_, err := SideEffectTyped[BadResult](h, func() (BadResult, error) {
+		return BadResult{Ch: make(chan int)}, nil
+	})
+	if err == nil {
+		t.Fatal("expected marshaling error, got nil")
+	}
+	if !strings.Contains(err.Error(), "marshal") {
+		t.Errorf("expected marshal error, got: %v", err)
+	}
+}
+
+func TestSideEffectTypedUnmarshalError(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		SideEffect: func(computedResult string) (string, error) {
+			// Return invalid JSON that won't unmarshal into the target type.
+			return "not-json", nil
+		},
+	})
+
+	_, err := SideEffectTyped[string](h, func() (string, error) {
+		return "some-value", nil
+	})
+	if err == nil {
+		t.Fatal("expected unmarshaling error, got nil")
+	}
+	if !strings.Contains(err.Error(), "unmarshal") {
+		t.Errorf("expected unmarshal error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Saga.AddParallel
+// ---------------------------------------------------------------------------
+
+func TestSagaAddParallelAllSucceed(t *testing.T) {
+	var order []string
+	mu := sync.Mutex{}
+	h := NewHostCalls(HostCallsOptions{
+		DurableLog: func(msg string) {},
+	})
+
+	s := NewSaga()
+	s.AddParallel(
+		SagaStep{
+			Description: "step1",
+			Forward: func(h HostCalls) (string, error) {
+				mu.Lock()
+				order = append(order, "step1")
+				mu.Unlock()
+				return "result1", nil
+			},
+			Compensate: func(h HostCalls) error {
+				mu.Lock()
+				order = append(order, "comp1")
+				mu.Unlock()
+				return nil
+			},
+		},
+		SagaStep{
+			Description: "step2",
+			Forward: func(h HostCalls) (string, error) {
+				mu.Lock()
+				order = append(order, "step2")
+				mu.Unlock()
+				return "result2", nil
+			},
+			Compensate: func(h HostCalls) error {
+				mu.Lock()
+				order = append(order, "comp2")
+				mu.Unlock()
+				return nil
+			},
+		},
+	)
+	err := s.Run(h)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(order) != 2 {
+		t.Fatalf("expected 2 steps, got %v", order)
+	}
+}
+
+func TestSagaAddParallelCompensatesOnFailure(t *testing.T) {
+	var order []string
+	mu := sync.Mutex{}
+	h := NewHostCalls(HostCallsOptions{
+		DurableLog: func(msg string) {},
+	})
+
+	s := NewSaga()
+	s.AddParallel(
+		SagaStep{
+			Description: "step1",
+			Forward: func(h HostCalls) (string, error) {
+				mu.Lock()
+				order = append(order, "step1")
+				mu.Unlock()
+				return "result1", nil
+			},
+			Compensate: func(h HostCalls) error {
+				mu.Lock()
+				order = append(order, "comp1")
+				mu.Unlock()
+				return nil
+			},
+		},
+		SagaStep{
+			Description: "step2",
+			Forward: func(h HostCalls) (string, error) {
+				mu.Lock()
+				order = append(order, "step2")
+				mu.Unlock()
+				return "", errors.New("step2 failed")
+			},
+			Compensate: func(h HostCalls) error {
+				mu.Lock()
+				order = append(order, "comp2")
+				mu.Unlock()
+				return nil
+			},
+		},
+	)
+	err := s.Run(h)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "step2 failed") {
+		t.Errorf("expected 'step2 failed' in error, got: %v", err)
+	}
+	// Comp1 should have been called (step1 succeeded, needs compensation).
+	// Step2 failed, so comp2 should not be called.
+	if len(order) != 3 {
+		t.Fatalf("expected 3 ops (2 forward + 1 comp), got %v", order)
+	}
+	if order[2] != "comp1" {
+		t.Errorf("expected comp1 to be called last, got %v", order)
 	}
 }

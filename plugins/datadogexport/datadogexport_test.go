@@ -2,10 +2,13 @@ package datadogexport
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/auth"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -85,5 +88,81 @@ func TestRegisterRoutes(t *testing.T) {
 		if pattern == "" {
 			t.Errorf("no handler matched %s %s", tt.method, tt.path)
 		}
+	}
+}
+
+func TestPluginRegistration(t *testing.T) {
+	plugins, err := plugin.Discover()
+	if err != nil {
+		t.Fatalf("Discover() returned error: %v", err)
+	}
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "datadog-export" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("datadog-export plugin not found after Discover")
+	}
+}
+
+func TestRegisterRoutesNilMux(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterRoutes(nil)
+	if err == nil {
+		t.Fatal("expected error for nil mux")
+	}
+}
+
+// TestHandleGetConfigInvalidID verifies that an invalid UUID returns 400.
+func TestHandleGetConfigInvalidID(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(nil, nil)),
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	ctx := auth.WithTenantID(context.Background(), uuid.MustParse("00000000-0000-0000-0000-000000000001"))
+	req := httptest.NewRequest("GET", "/datadog/configs/not-a-uuid", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid config id, got %d", rec.Code)
+	}
+}
+
+// TestHandleDeleteConfigInvalidID verifies that an invalid UUID returns 400.
+func TestHandleDeleteConfigInvalidID(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(nil, nil)),
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	ctx := auth.WithTenantID(context.Background(), uuid.MustParse("00000000-0000-0000-0000-000000000001"))
+	req := httptest.NewRequest("DELETE", "/datadog/configs/not-a-uuid", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid config id, got %d", rec.Code)
+	}
+}
+
+// TestHandleUpdateConfigInvalidID verifies that an invalid UUID returns 400.
+func TestHandleUpdateConfigInvalidID(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(nil, nil)),
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	ctx := auth.WithTenantID(context.Background(), uuid.MustParse("00000000-0000-0000-0000-000000000001"))
+	req := httptest.NewRequest("PUT", "/datadog/configs/not-a-uuid", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid config id, got %d", rec.Code)
 	}
 }

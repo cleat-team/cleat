@@ -366,6 +366,9 @@ func eventFieldsMatch(a, b EventRecord) bool {
 			a.PluginOutput == b.PluginOutput &&
 			a.PluginError == b.PluginError
 
+	case EventTypeSideEffect:
+		return a.SideEffectResult == b.SideEffectResult
+
 	case EventTypeCreatePromise:
 		return a.PromiseName == b.PromiseName &&
 			a.PromiseID == b.PromiseID

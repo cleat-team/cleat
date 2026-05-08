@@ -3,6 +3,7 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -244,5 +245,50 @@ func TestJSONBytes(t *testing.T) {
 	}
 	if len(b) == 0 {
 		t.Fatal("expected non-empty JSON output")
+	}
+}
+
+func TestValidateTypeDefMissingFieldType(t *testing.T) {
+	err := validateTypeDef(TypeDef{
+		Fields: map[string]FieldDef{
+			"bad_field": {Type: ""},
+		},
+	}, nil, "testType")
+	if err == nil {
+		t.Fatal("expected error for field with empty type")
+	}
+	if !strings.Contains(err.Error(), "type is required") {
+		t.Errorf("expected 'type is required', got: %v", err)
+	}
+}
+
+func TestValidateTypeDefUnsupportedFieldType(t *testing.T) {
+	err := validateTypeDef(TypeDef{
+		Fields: map[string]FieldDef{
+			"bad_field": {Type: "unsupported_type"},
+		},
+	}, nil, "testType")
+	if err == nil {
+		t.Fatal("expected error for unsupported field type")
+	}
+	if !strings.Contains(err.Error(), "unsupported type") {
+		t.Errorf("expected 'unsupported type', got: %v", err)
+	}
+}
+
+func TestValidateTypeDefEmptyFields(t *testing.T) {
+	err := validateTypeDef(TypeDef{}, nil, "emptyType")
+	if err != nil {
+		t.Errorf("expected no error for empty fields, got: %v", err)
+	}
+}
+
+func TestValidateTypeRefEmptyType(t *testing.T) {
+	err := validateTypeRef(TypeDef{Type: ""}, nil, "test")
+	if err == nil {
+		t.Fatal("expected error for empty type")
+	}
+	if !strings.Contains(err.Error(), "type is empty") {
+		t.Errorf("expected 'type is empty', got: %v", err)
 	}
 }

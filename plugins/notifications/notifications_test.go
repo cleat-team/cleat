@@ -1288,3 +1288,110 @@ func TestCreateWebhookInvalidJSON(t *testing.T) {
 		t.Fatalf("expected 400 for invalid JSON, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// ---- Exported interface tests ----
+
+func TestRegisterHostFunctions(t *testing.T) {
+	p := &Plugin{}
+	scope := &testFuncRegistry{}
+	err := p.RegisterHostFunctions(scope)
+	if err != nil {
+		t.Fatalf("RegisterHostFunctions() returned error: %v", err)
+	}
+	if _, ok := scope.funcs["send_webhook"]; !ok {
+		t.Error("expected 'send_webhook' function to be registered")
+	}
+}
+
+func TestRegisterHostFunctionsNilScope(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterHostFunctions(nil)
+	if err == nil {
+		t.Fatal("expected error for nil scope, got nil")
+	}
+}
+
+// testFuncRegistry implements plugin.FuncRegistry for testing.
+type testFuncRegistry struct {
+	funcs map[string]plugin.FuncOptions
+}
+
+func (r *testFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	if r.funcs == nil {
+		r.funcs = make(map[string]plugin.FuncOptions)
+	}
+	r.funcs[opts.Name] = opts
+	return nil
+}
+
+
+// ---- joinSetClauses tests ----
+
+func TestJoinSetClauses(t *testing.T) {
+	tests := []struct {
+		input []string
+		want  string
+	}{
+		{nil, ""},
+		{[]string{}, ""},
+		{[]string{"url = $1"}, "url = $1"},
+		{[]string{"url = $1", "secret = $2"}, "url = $1, secret = $2"},
+		{[]string{"a = $1", "b = $2", "c = $3"}, "a = $1, b = $2, c = $3"},
+	}
+	for _, tt := range tests {
+		got := joinSetClauses(tt.input)
+		if got != tt.want {
+			t.Errorf("joinSetClauses(%v) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// ---- sendWebhook host function edge cases ----
+
+func TestSendWebhookNoTenant(t *testing.T) {
+	p := &Plugin{logger: slog.Default(), db: nil}
+	_, err := p.sendWebhook(context.Background(), `{"webhook_id":"`+uuid.New().String()+`","event_type":"test"}`)
+	if err == nil {
+		t.Fatal("expected error for missing tenant")
+	}
+	if !strings.Contains(err.Error(), "no tenant context") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestSendWebhookInvalidJSON(t *testing.T) {
+	p := &Plugin{logger: slog.Default()}
+	cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-1"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+	_, err := p.sendWebhook(ctx, `not json`)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestSendWebhookNilPayload(t *testing.T) {
+	p, store := setupTestPlugin(t)
+	webhookID := uuid.New()
+	now := time.Now().UTC()
+	store.mu.Lock()
+	store.configs = append(store.configs, &testWebhookCfg{
+		tenantID:  testTenantID,
+		id:        webhookID,
+		url:       "https://example.com/hook",
+		secret:    "",
+		events:    `["test.event"]`,
+		enabled:   true,
+		createdAt: now,
+		updatedAt: now,
+	})
+	store.mu.Unlock()
+
+	cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-test"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+
+	input := fmt.Sprintf(`{"webhook_id":"%s","event_type":"test.event"}`, webhookID.String())
+	_, err := p.sendWebhook(ctx, input)
+	if err != nil {
+		t.Fatalf("sendWebhook: %v", err)
+	}
+}

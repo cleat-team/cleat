@@ -132,3 +132,21 @@ func TestNextRun_Range(t *testing.T) {
 		t.Errorf("range: expected %v, got %v", expected, next)
 	}
 }
+
+func TestPluginRegistration(t *testing.T) {
+	plugins, err := plugin.Discover()
+	if err != nil {
+		t.Fatalf("Discover() returned error: %v", err)
+	}
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "scheduler" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("scheduler plugin not found after Discover")
+	}
+}
+

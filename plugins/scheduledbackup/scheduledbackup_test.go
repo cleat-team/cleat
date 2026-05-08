@@ -185,3 +185,20 @@ func TestCLIBackupList_NoFlags(t *testing.T) {
 		t.Error("expected error for missing flags")
 	}
 }
+
+func TestPluginRegistration(t *testing.T) {
+	plugins, err := plugin.Discover()
+	if err != nil {
+		t.Fatalf("Discover() returned error: %v", err)
+	}
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "scheduled-backup" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("scheduled-backup plugin not found after Discover")
+	}
+}

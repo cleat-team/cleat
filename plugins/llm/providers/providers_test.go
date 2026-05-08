@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -482,5 +483,224 @@ func TestOllamaDefaultMaxTokens(t *testing.T) {
 	_, err := OllamaChat(context.Background(), srv.Client(), srv.URL, input)
 	if err != nil {
 		t.Fatalf("OllamaChat() returned error: %v", err)
+	}
+}
+
+// TestGroqChatStream verifies that GroqChatStream correctly delegates to
+// OpenAIChatStream and returns streaming content.
+func TestGroqChatStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+
+		// Send SSE stream chunks.
+		chunks := []string{
+			`data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"content":" "},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"content":"from"},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"content":" Groq"},"finish_reason":null}]}`,
+			`data: {"choices":[{"delta":{"content":""},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}
+		for _, c := range chunks {
+			fmt.Fprintf(w, "%s\n\n", c)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer srv.Close()
+
+	input := ChatInput{
+		Model:       "llama-3.3-70b",
+		Messages:    []Message{{Role: "user", Content: "hello"}},
+		Temperature: 0.7,
+		MaxTokens:   500,
+	}
+	ch, err := GroqChatStream(context.Background(), srv.Client(), "sk-test", srv.URL, input)
+	if err != nil {
+		t.Fatalf("GroqChatStream() returned error: %v", err)
+	}
+
+	var received string
+	for chunk := range ch {
+		received += chunk.Content
+		if chunk.Done {
+			break
+		}
+	}
+	expected := "Hello from Groq"
+	if received != expected {
+		t.Errorf("expected %q, got %q", expected, received)
+	}
+}
+
+// TestGroqChatStreamDefaultBaseURL verifies GroqChatStream with empty baseURL.
+func TestGroqChatStreamDefaultBaseURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n")
+		w.(http.Flusher).Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		w.(http.Flusher).Flush()
+	}))
+	defer srv.Close()
+
+	input := ChatInput{Model: "llama-3.3-70b", Messages: []Message{{Role: "user", Content: "hi"}}}
+	ch, err := GroqChatStream(context.Background(), srv.Client(), "sk-test", srv.URL, input)
+	if err != nil {
+		t.Fatalf("GroqChatStream() returned error: %v", err)
+	}
+	var received string
+	for chunk := range ch {
+		received += chunk.Content
+		if chunk.Done {
+			break
+		}
+	}
+	if received != "ok" {
+		t.Errorf("expected %q, got %q", "ok", received)
+	}
+}
+
+// TestAnthropicChatCostModels verifies cost calculation for different Anthropic models.
+func TestAnthropicChatCostModels(t *testing.T) {
+	tests := []struct {
+		model     string
+		costRange [2]float64 // [min, max] expected cost
+	}{
+		{"claude-opus-4-7", [2]float64{0.0001, 0.05}},
+		{"claude-haiku-4-5", [2]float64{0.00001, 0.005}},
+		{"unknown-model", [2]float64{0.0001, 0.02}}, // default cost
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(map[string]any{
+					"content": []map[string]any{{
+						"type": "text",
+						"text": "Hello",
+					}},
+					"usage": map[string]int{"input_tokens": 100, "output_tokens": 50},
+					"model": tt.model,
+				})
+			}))
+			defer srv.Close()
+
+			input := ChatInput{Model: tt.model, Messages: []Message{{Role: "user", Content: "hello"}}}
+			out, err := AnthropicChat(context.Background(), srv.Client(), "sk-ant-test", srv.URL, input)
+			if err != nil {
+				t.Fatalf("AnthropicChat() returned error: %v", err)
+			}
+			if out.Cost <= tt.costRange[0] || out.Cost > tt.costRange[1] {
+				t.Errorf("expected cost in [%f, %f] for model %q, got %f",
+					tt.costRange[0], tt.costRange[1], tt.model, out.Cost)
+			}
+			if out.Model != tt.model {
+				t.Errorf("expected model %q, got %q", tt.model, out.Model)
+			}
+		})
+	}
+}
+
+// TestAnthropicChatToolResponse verifies handling of tool result messages.
+func TestAnthropicChatToolResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "The result is 4",
+			}},
+			"usage": map[string]int{"input_tokens": 20, "output_tokens": 5},
+			"model": "claude-sonnet-4-6",
+		})
+	}))
+	defer srv.Close()
+
+	input := ChatInput{
+		Model: "claude-sonnet-4-6",
+		Messages: []Message{
+			{Role: "user", Content: "what is 2+2?"},
+			{Role: "assistant", Content: "", ToolCalls: []ToolCall{{
+				ID:   "call_123",
+				Type: "function",
+				Function: FunctionCall{
+					Name:      "calculator",
+					Arguments: `{"expression":"2+2"}`,
+				},
+			}}},
+			{Role: "tool", ToolCallID: "call_123", Content: "4"},
+		},
+		Tools: []Tool{{Type: "function", Function: ToolFunction{
+			Name:        "calculator",
+			Description: "evaluates math",
+			Parameters:  map[string]any{"type": "object"},
+		}}},
+	}
+	out, err := AnthropicChat(context.Background(), srv.Client(), "sk-ant-test", srv.URL, input)
+	if err != nil {
+		t.Fatalf("AnthropicChat() returned error: %v", err)
+	}
+	if len(out.Choices) != 1 {
+		t.Fatalf("expected 1 choice, got %d", len(out.Choices))
+	}
+	if out.Choices[0].Message.Content != "The result is 4" {
+		t.Errorf("unexpected content: %q", out.Choices[0].Message.Content)
+	}
+}
+
+// TestAnthropicChatDefaultBaseURL verifies AnthropicChat with empty base URL.
+func TestAnthropicChatDefaultBaseURL(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": "ok"}},
+			"usage":   map[string]int{"input_tokens": 1, "output_tokens": 1},
+			"model":   "claude-sonnet-4-6",
+		})
+	}))
+	defer srv.Close()
+
+	input := ChatInput{Model: "claude-sonnet-4-6", Messages: []Message{{Role: "user", Content: "hi"}}}
+	out, err := AnthropicChat(context.Background(), srv.Client(), "sk-ant-test", srv.URL, input)
+	if err != nil {
+		t.Fatalf("AnthropicChat() returned error: %v", err)
+	}
+	if out.Choices[0].Message.Content != "ok" {
+		t.Errorf("unexpected content: %q", out.Choices[0].Message.Content)
+	}
+}
+
+// TestAnthropicChatMaxTokensDefault verifies default max_tokens of 4096.
+func TestAnthropicChatMaxTokensDefault(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody struct {
+			MaxTokens int `json:"max_tokens"`
+		}
+		json.NewDecoder(r.Body).Decode(&reqBody)
+		if reqBody.MaxTokens != 4096 {
+			t.Errorf("expected default max_tokens 4096, got %d", reqBody.MaxTokens)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"content": []map[string]any{{"type": "text", "text": "ok"}},
+			"usage":   map[string]int{"input_tokens": 1, "output_tokens": 1},
+			"model":   "claude-sonnet-4-6",
+		})
+	}))
+	defer srv.Close()
+
+	input := ChatInput{Model: "claude-sonnet-4-6", Messages: []Message{{Role: "user", Content: "hi"}}}
+	_, err := AnthropicChat(context.Background(), srv.Client(), "sk-ant-test", srv.URL, input)
+	if err != nil {
+		t.Fatalf("AnthropicChat() returned error: %v", err)
 	}
 }

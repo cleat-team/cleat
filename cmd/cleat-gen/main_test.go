@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"go/ast"
 	"go/format"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,6 +310,175 @@ type GetStateResponse struct {}
 	svc := strings.TrimSuffix(spec.PackageName, "_spec")
 	if svc != "orders" {
 		t.Errorf("TrimSuffix(%q) = %q, want %q", spec.PackageName, svc, "orders")
+	}
+}
+
+func TestExprToString_DefaultCase(t *testing.T) {
+	// The default case in exprToString uses fmt.Sprintf("%T", expr).
+	// Test with an expression that doesn't match any known case.
+	// The expression "C" (a channel type) hits the default branch.
+	src := `package test
+	type _ chan int
+	`
+	fset, decls := mustParseType(t, src)
+	typeSpec := decls[0].(*ast.GenDecl).Specs[0].(*ast.TypeSpec)
+	got := exprToString(typeSpec.Type)
+	_ = fset
+	// Should contain the expression type name.
+	if got == "" {
+		t.Errorf("expected non-empty result for channel type")
+	}
+}
+
+func TestExprToString_Ellipsis(t *testing.T) {
+	src := `package test
+	type _ func(...int)
+	`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "test.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Find the FuncType with an Ellipsis field.
+	for _, decl := range f.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range genDecl.Specs {
+			typeSpec, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			funcType, ok := typeSpec.Type.(*ast.FuncType)
+			if !ok || funcType.Params == nil {
+				continue
+			}
+			for _, param := range funcType.Params.List {
+				got := exprToString(param.Type)
+				if got != "...int" {
+					t.Errorf("exprToString(...int) = %q, want %q", got, "...int")
+				}
+			}
+		}
+	}
+}
+
+func TestRunClient_Basic(t *testing.T) {
+	dir := t.TempDir()
+	specContent := `package payments_spec
+
+type ChargeRequest struct {
+	UserID      string ` + "`json:\"user_id\"`" + `
+	AmountCents int    ` + "`json:\"amount_cents\"`" + `
+}
+
+type ChargeResponse struct {
+	ChargeID string ` + "`json:\"charge_id\"`" + `
+	Status   string ` + "`json:\"status\"`" + `
+}
+
+type Client interface {
+	Charge(req ChargeRequest) (*ChargeResponse, error)
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "spec.go"), []byte(specContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run runClient with --o to write output to a temp file.
+	outputFile := filepath.Join(t.TempDir(), "gen_client.go")
+	runClient([]string{"-o", outputFile, "-service", "payments", "-p", "payments", dir})
+
+	// Verify the generated file exists and contains expected content.
+	code, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("failed to read generated file: %v", err)
+	}
+	s := string(code)
+	checks := []string{
+		"package payments",
+		`DurableCallTyped("payments", "Charge"`,
+		"type Client struct",
+	}
+	for _, check := range checks {
+		if !strings.Contains(s, check) {
+			t.Errorf("expected output to contain %q", check)
+		}
+	}
+}
+
+func TestRunClient_Stdout(t *testing.T) {
+	dir := t.TempDir()
+	specContent := `package inventory_spec
+
+type CheckRequest struct {
+	SKU string ` + "`json:\"sku\"`" + `
+}
+
+type CheckResponse struct {
+	Available bool ` + "`json:\"available\"`" + `
+}
+
+type Client interface {
+	CheckStock(req CheckRequest) (*CheckResponse, error)
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "spec.go"), []byte(specContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture stdout by running in a sub-process-like capture.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = w
+
+	outCh := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		io.Copy(&buf, r)
+		outCh <- buf.String()
+	}()
+
+	runClient([]string{"-service", "inventory", dir})
+
+	w.Close()
+	os.Stdout = old
+	output := <-outCh
+
+	if !strings.Contains(output, "package inventory") {
+		t.Errorf("expected 'package inventory' in stdout, got: %s", output)
+	}
+	if !strings.Contains(output, "DurableCallTyped") {
+		t.Errorf("expected DurableCallTyped in stdout, got: %s", output)
+	}
+}
+
+func TestRunClient_ServiceNameDerivation(t *testing.T) {
+	dir := t.TempDir()
+	specContent := `package orders_spec
+
+type Client interface {
+	GetState(req struct{}) error
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "spec.go"), []byte(specContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outputFile := filepath.Join(t.TempDir(), "gen.go")
+	runClient([]string{"-o", outputFile, dir})
+
+	code, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("failed to read generated file: %v", err)
+	}
+	s := string(code)
+	if !strings.Contains(s, `DurableCallTyped("orders"`) {
+		t.Errorf("expected service name 'orders' derived from package, got: %s", s)
 	}
 }
 

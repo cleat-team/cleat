@@ -38,9 +38,12 @@ type eventRow struct {
 }
 
 type fakeEventStore struct {
-	mu      sync.RWMutex
-	events  []eventRow // appended in order
-	apiKeys map[string]string // key_hash_hex -> tenant_id string
+	mu          sync.RWMutex
+	events      []eventRow // appended in order
+	apiKeys     map[string]string // key_hash_hex -> tenant_id string
+	failOnExec  bool  // when true, ExecContext returns an error
+	failOnRead  bool  // when true, read queries return an error
+	failOnAppend bool // when true, INSERT queries return an error
 }
 
 func newFakeEventStore() *fakeEventStore {
@@ -114,6 +117,9 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		// Read events query: SELECT sequence, event, created_at ...
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
+		if c.store.failOnRead {
+			return nil, fmt.Errorf("fakeConn: simulated read failure")
+		}
 		return c.queryReadEvents(args)
 	case strings.Contains(query, "sequence >"):
 		// SSE poll query: SELECT sequence, event ... WHERE sequence > $3
@@ -144,6 +150,9 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 }
 
 func (c *fakeConn) queryAppend(args []driver.NamedValue) (driver.Rows, error) {
+	if c.store.failOnAppend {
+		return nil, fmt.Errorf("fakeConn: simulated append failure")
+	}
 	tidStr, err := argString(args, 1)
 	if err != nil {
 		return nil, err
@@ -801,5 +810,354 @@ func TestAppendDuplicateEvents(t *testing.T) {
 	if int(events[0]["sequence"].(float64)) != 1 || int(events[1]["sequence"].(float64)) != 2 {
 		t.Errorf("expected sequences 1 and 2, got %v and %v",
 			events[0]["sequence"], events[1]["sequence"])
+	}
+}
+
+// TestRunNoDB verifies that Run returns immediately when db is nil.
+func TestRunNoDB(t *testing.T) {
+	p := &Plugin{
+		logger: slog.Default(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Already cancelled, so Run should return quickly.
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() with nil db returned error: %v", err)
+	}
+}
+
+// TestRunCancelledContext verifies that Run respects context cancellation
+// when db is set.
+func TestRunCancelledContext(t *testing.T) {
+	store := newFakeEventStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.Default(),
+		config: Config{RetentionDays: -1}, // disable retention
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() with cancelled ctx returned error: %v", err)
+	}
+}
+
+// TestCleanupRetentionMinusOne verifies that cleanup returns 0 when
+// retention is negative (disabled).
+func TestCleanupRetentionDisabled(t *testing.T) {
+	store := newFakeEventStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.Default(),
+		config: Config{RetentionDays: -1},
+	}
+
+	n := p.cleanup(context.Background())
+	if n != 0 {
+		t.Errorf("expected 0 deleted events for disabled retention, got %d", n)
+	}
+}
+
+// TestHandleReadInvalidFromSequence verifies that an invalid from_sequence
+// query parameter is ignored and all events are returned.
+func TestHandleReadInvalidFromSequence(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	// Append an event first.
+	req := authedRequest("POST", "/events/invalid-seq-stream", bytes.NewReader([]byte(`{"x":1}`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("APPEND: expected 201, got %d", rec.Code)
+	}
+
+	// Read with invalid from_sequence (non-numeric) — should be ignored.
+	req = authedRequest("GET", "/events/invalid-seq-stream?from_sequence=not-a-number", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("READ with invalid from_sequence: expected 200, got %d", rec.Code)
+	}
+
+	var events []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("READ: failed to decode: %v", err)
+	}
+	if len(events) != 1 {
+		t.Errorf("expected 1 event when from_sequence is invalid, got %d", len(events))
+	}
+}
+
+// TestHandleReadInvalidLimit verifies that an invalid limit parameter
+// is ignored and the default limit is used.
+func TestHandleReadInvalidLimit(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	// Append an event.
+	req := authedRequest("POST", "/events/invalid-limit-stream", bytes.NewReader([]byte(`{"x":1}`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("APPEND: expected 201, got %d", rec.Code)
+	}
+
+	// Read with invalid limit.
+	req = authedRequest("GET", "/events/invalid-limit-stream?limit=not-a-number", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("READ with invalid limit: expected 200, got %d", rec.Code)
+	}
+
+	var events []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("READ: failed to decode: %v", err)
+	}
+	if len(events) != 1 {
+		t.Errorf("expected 1 event when limit is invalid, got %d", len(events))
+	}
+}
+
+// TestHandleReadLimitTooHigh verifies that limit values over 1000 are clamped.
+func TestHandleReadLimitTooHigh(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	// Append 3 events.
+	for i := 0; i < 3; i++ {
+		req := authedRequest("POST", "/events/high-limit-stream", bytes.NewReader([]byte(`{"n":`+fmt.Sprintf("%d", i)+`}`)))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("APPEND %d: expected 201, got %d", i, rec.Code)
+		}
+	}
+
+	// Read with limit exceeding 1000 — should be clamped.
+	req := authedRequest("GET", "/events/high-limit-stream?limit=9999", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("READ with high limit: expected 200, got %d", rec.Code)
+	}
+
+	var events []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("READ: failed to decode: %v", err)
+	}
+	if len(events) != 3 {
+		t.Errorf("expected 3 events, got %d", len(events))
+	}
+}
+
+// TestHandleReadFromZero verifies from_sequence=0 returns all events.
+func TestHandleReadFromZero(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	// Append 2 events.
+	for i := 0; i < 2; i++ {
+		req := authedRequest("POST", "/events/zero-seq-stream", bytes.NewReader([]byte(`{"n":`+fmt.Sprintf("%d", i+1)+`}`)))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("APPEND %d: expected 201, got %d", i, rec.Code)
+		}
+	}
+
+	// Read with from_sequence=0 — should return all events (seq > 0).
+	req := authedRequest("GET", "/events/zero-seq-stream?from_sequence=0", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("READ from_seq=0: expected 200, got %d", rec.Code)
+	}
+
+	var events []map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &events)
+	if len(events) != 2 {
+		t.Errorf("from_seq=0: expected 2 events, got %d", len(events))
+	}
+}
+
+// TestHandleReadNegativeFromSequence verifies that from_sequence with a value
+// <= 0 is treated as 0 (returns all events).
+func TestHandleReadNegativeFromSequence(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	// Append 1 event.
+	req := authedRequest("POST", "/events/neg-seq-stream", bytes.NewReader([]byte(`{"x":1}`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("APPEND: expected 201, got %d", rec.Code)
+	}
+
+	// Read with from_sequence=-5 (should be treated as <= 0 = 0).
+	req = authedRequest("GET", "/events/neg-seq-stream?from_sequence=-5", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var events []map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &events)
+	if len(events) != 1 {
+		t.Errorf("from_seq=-5: expected 1 event, got %d", len(events))
+	}
+}
+
+// TestHandleReadDBError verifies that a database error during read returns 500.
+func TestHandleReadDBError(t *testing.T) {
+	store := newFakeEventStore()
+	keyHash := sha256.Sum256([]byte(testAPIKey))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantID.String()
+	store.failOnRead = true
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{
+		db:     db,
+		mux:    http.NewServeMux(),
+		logger: slog.Default(),
+		config: Config{MaxEventSize: 1 * 1024 * 1024},
+	}
+	p.RegisterRoutes(p.mux)
+	handler := auth.Middleware(db)(p.mux)
+
+	// Append an event (should succeed).
+	store.mu.Lock()
+	store.events = append(store.events, eventRow{
+		tenantID:  testTenantID,
+		streamID:  "fail-stream",
+		sequence:  1,
+		event:     []byte(`{"x":1}`),
+		createdAt: time.Now().UTC(),
+	})
+	store.mu.Unlock()
+
+	// Read should fail due to failOnRead.
+	req := authedRequest("GET", "/events/fail-stream", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("expected 500 for DB error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleAppendEmptyBody verifies that an empty request body returns 400.
+func TestHandleAppendEmptyBody(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := authedRequest("POST", "/events/empty-body", bytes.NewReader([]byte{}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for empty body, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleAppendInvalidJSON verifies that non-JSON body returns 400.
+func TestHandleAppendInvalidJSON(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := authedRequest("POST", "/events/bad-json", bytes.NewReader([]byte("not json")))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleAppendOversize verifies that oversized events return 413.
+func TestHandleAppendOversize(t *testing.T) {
+	p, handler, _ := setupTestPlugin(t)
+	p.config.MaxEventSize = 10
+
+	body := strings.Repeat("x", 100)
+	req := authedRequest("POST", "/events/oversize", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 413 {
+		t.Errorf("expected 413 for oversized body, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRegisterRoutesNilMux verifies that RegisterRoutes returns an error for nil mux.
+func TestRegisterRoutesNilMux(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterRoutes(nil)
+	if err == nil {
+		t.Fatal("expected error for nil mux")
+	}
+}
+
+// TestPluginRegistration verifies that the plugin is properly registered via init()
+// and can be discovered and instantiated. This covers the factory function in init().
+func TestPluginRegistration(t *testing.T) {
+	plugins, err := plugin.Discover()
+	if err != nil {
+		t.Fatalf("Discover() returned error: %v", err)
+	}
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "eventstore" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("eventstore plugin not found after Discover")
+	}
+}
+
+// TestCleanupRetentionDefault verifies cleanup uses default retention when set to 0.
+func TestCleanupRetentionDefault(t *testing.T) {
+	store := newFakeEventStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.Default(),
+		config: Config{RetentionDays: 0},
+	}
+
+	n := p.cleanup(context.Background())
+	if n != 0 {
+		t.Errorf("expected 0 deleted events for default retention, got %d", n)
+	}
+}
+
+// TestHandleAppendDBError verifies that a database error during append returns 500.
+func TestHandleAppendDBError(t *testing.T) {
+	store := newFakeEventStore()
+	keyHash := sha256.Sum256([]byte(testAPIKey))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantID.String()
+	store.failOnAppend = true
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{
+		db:     db,
+		mux:    http.NewServeMux(),
+		logger: slog.Default(),
+		config: Config{MaxEventSize: 1 * 1024 * 1024},
+	}
+	p.RegisterRoutes(p.mux)
+	handler := auth.Middleware(db)(p.mux)
+
+	req := authedRequest("POST", "/events/fail-append", bytes.NewReader([]byte(`{"x":1}`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("expected 500 for append DB error, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

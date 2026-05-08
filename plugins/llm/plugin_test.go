@@ -118,3 +118,20 @@ func (r *testFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFun
 	r.funcs[opts.Name] = opts
 	return nil
 }
+
+func TestPluginRegistration(t *testing.T) {
+	plugins, err := plugin.Discover()
+	if err != nil {
+		t.Fatalf("Discover() returned error: %v", err)
+	}
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "llm" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("llm plugin not found after Discover")
+	}
+}

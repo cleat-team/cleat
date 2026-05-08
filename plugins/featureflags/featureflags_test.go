@@ -3,8 +3,12 @@ package featureflags
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -452,5 +456,246 @@ func TestEvaluateFlag_50PercentRolloutThreshold(t *testing.T) {
 			t.Errorf("user %s: hash=%d, expected enabled=%v, got %v",
 				user, pct, expectedEnabled, result.Enabled)
 		}
+	}
+}
+
+// ---- Exported interface tests ----
+
+func TestMigrations(t *testing.T) {
+	p := &Plugin{}
+	migrations := p.Migrations()
+	if len(migrations) != 1 {
+		t.Fatalf("expected 1 migration, got %d", len(migrations))
+	}
+	if migrations[0].Version != 1 {
+		t.Errorf("expected version 1, got %d", migrations[0].Version)
+	}
+	if !strings.Contains(migrations[0].Up, "feature_flags") {
+		t.Error("expected migration to mention feature_flags")
+	}
+	if !strings.Contains(migrations[0].Down, "DROP TABLE") {
+		t.Error("expected Down to contain DROP TABLE")
+	}
+}
+
+func TestRegisterRoutes(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	err := p.RegisterRoutes(mux)
+	if err != nil {
+		t.Fatalf("RegisterRoutes() returned error: %v", err)
+	}
+
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{"POST", "/features/flags"},
+		{"GET", "/features/flags"},
+		{"GET", "/features/flags/550e8400-e29b-41d4-a716-446655440000"},
+		{"PUT", "/features/flags/550e8400-e29b-41d4-a716-446655440000"},
+		{"DELETE", "/features/flags/550e8400-e29b-41d4-a716-446655440000"},
+		{"POST", "/features/evaluate"},
+	}
+	for _, tt := range tests {
+		req := httptest.NewRequest(tt.method, tt.path, nil)
+		_, pattern := mux.Handler(req)
+		if pattern == "" {
+			t.Errorf("no handler matched %s %s", tt.method, tt.path)
+		}
+	}
+}
+
+func TestRegisterRoutesNilMux(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterRoutes(nil)
+	if err == nil {
+		t.Fatal("expected error for nil mux, got nil")
+	}
+}
+
+func TestRegisterHostFunctions(t *testing.T) {
+	p := &Plugin{}
+	scope := &testFuncRegistry{}
+	err := p.RegisterHostFunctions(scope)
+	if err != nil {
+		t.Fatalf("RegisterHostFunctions() returned error: %v", err)
+	}
+	if _, ok := scope.funcs["evaluate_flag"]; !ok {
+		t.Error("expected 'evaluate_flag' function to be registered")
+	}
+}
+
+func TestRegisterHostFunctionsNilScope(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterHostFunctions(nil)
+	if err == nil {
+		t.Fatal("expected error for nil scope, got nil")
+	}
+}
+
+// testFuncRegistry implements plugin.FuncRegistry for testing.
+type testFuncRegistry struct {
+	funcs map[string]plugin.FuncOptions
+}
+
+func (r *testFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	if r.funcs == nil {
+		r.funcs = make(map[string]plugin.FuncOptions)
+	}
+	r.funcs[opts.Name] = opts
+	return nil
+}
+
+// ---- Hash percentage edge cases ----
+
+func TestHashPercentageEmptyKeys(t *testing.T) {
+	// hash with no keys should not panic and return a value in [0, 100).
+	pct := hashPercentage()
+	if pct < 0 || pct >= 100 {
+		t.Errorf("hashPercentage() = %d, want in [0, 100)", pct)
+	}
+}
+
+func TestHashPercentageSingleKey(t *testing.T) {
+	pct := hashPercentage("single-key")
+	if pct < 0 || pct >= 100 {
+		t.Errorf("hashPercentage('single-key') = %d, want in [0, 100)", pct)
+	}
+}
+
+// ---- evaluateRule edge cases ----
+
+func TestEvaluateRuleContainsNonStringValue(t *testing.T) {
+	// When rule.Value is not a string for "contains", the rule should not match.
+	result := evaluateRule(Rule{Attribute: "attr", Operator: "contains", Value: 42}, "hello world")
+	if result {
+		t.Error("expected contains with non-string value to return false")
+	}
+}
+
+func TestEvaluateRuleInNonArrayValue(t *testing.T) {
+	// When rule.Value is not an array for "in", the rule should not match.
+	result := evaluateRule(Rule{Attribute: "attr", Operator: "in", Value: "not-an-array"}, "value")
+	if result {
+		t.Error("expected in with non-array value to return false")
+	}
+}
+
+func TestEvaluateRuleNotInNonArrayValue(t *testing.T) {
+	// When rule.Value is not an array for "not_in", the rule should match (no match possible).
+	result := evaluateRule(Rule{Attribute: "attr", Operator: "not_in", Value: "not-an-array"}, "value")
+	if !result {
+		t.Error("expected not_in with non-array value to return true (no match possible)")
+	}
+}
+
+func TestEvaluateRuleUnknownOperator(t *testing.T) {
+	// Unknown operator should not match.
+	result := evaluateRule(Rule{Attribute: "attr", Operator: "unknown", Value: "val"}, "val")
+	if result {
+		t.Error("expected unknown operator to return false")
+	}
+}
+
+// ---- Empty evaluation context edge cases ----
+
+func TestEvaluateFlagEmptyAttributes(t *testing.T) {
+	flag := &Flag{
+		Key:               "test-flag",
+		TenantID:          "tenant-1",
+		Enabled:           true,
+		Rules:             json.RawMessage(`[{"attribute": "custom_attr", "operator": "eq", "value": "value"}]`),
+		RolloutPercentage: 0,
+	}
+	// Empty attributes map — rule references custom_attr which doesn't exist.
+	ctx := EvaluationContext{UserID: "user-1", Attributes: map[string]interface{}{}}
+	result := EvaluateFlag(flag, ctx)
+	if result.Enabled {
+		t.Error("expected flag to be disabled when attribute is missing")
+	}
+}
+
+func TestEvaluateFlagNilAttributes(t *testing.T) {
+	flag := &Flag{
+		Key:               "test-flag",
+		TenantID:          "tenant-1",
+		Enabled:           true,
+		Rules:             json.RawMessage(`[{"attribute": "user_id", "operator": "eq", "value": "user-1"}]`),
+		RolloutPercentage: 0,
+	}
+	// Nil attributes — user_id is in ctx.UserID but the rule system uses contextMap, not UserID directly.
+	ctx := EvaluationContext{UserID: "user-1"}
+	result := EvaluateFlag(flag, ctx)
+	if !result.Enabled {
+		t.Error("expected flag to be enabled when user_id matches via EvaluationContext")
+	}
+}
+
+func TestEvaluateFlagNoUserIDWithRollout(t *testing.T) {
+	flag := &Flag{
+		Key:               "test-flag",
+		TenantID:          "tenant-1",
+		Enabled:           true,
+		Rules:             json.RawMessage("[]"),
+		RolloutPercentage: 100,
+	}
+	ctx := EvaluationContext{}
+	result := EvaluateFlag(flag, ctx)
+	if !result.Enabled {
+		t.Error("expected flag to be enabled with no user_id and 100% rollout")
+	}
+}
+
+func TestEvaluateFlagRolloutDefaultUser(t *testing.T) {
+	flag := &Flag{
+		Key:               "test-flag",
+		TenantID:          "tenant-1",
+		Enabled:           true,
+		Rules:             json.RawMessage("[]"),
+		RolloutPercentage: 50,
+	}
+	// Empty user ID uses "default" for rollout hash.
+	// The result should be deterministic.
+	ctx := EvaluationContext{}
+	first := EvaluateFlag(flag, ctx)
+	for i := 0; i < 20; i++ {
+		result := EvaluateFlag(flag, ctx)
+		if result.Enabled != first.Enabled {
+			t.Fatalf("rollout inconsistent for default user: was %v, now %v", first.Enabled, result.Enabled)
+		}
+	}
+}
+
+// ---- evaluateFlag host function (via direct call) ----
+
+func TestEvaluateFlagHostNoTenant(t *testing.T) {
+	p := &Plugin{}
+	_, err := p.evaluateFlag(context.Background(), `{"key":"test","context":{"user_id":"u1"}}`)
+	if err == nil {
+		t.Fatal("expected error for missing tenant")
+	}
+	if !strings.Contains(err.Error(), "no tenant context") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestEvaluateFlagHostInvalidJSON(t *testing.T) {
+	p := &Plugin{}
+	cc := &plugin.CallContext{TenantID: uuid.New(), WorkflowID: "wf-1"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+	_, err := p.evaluateFlag(ctx, `not json`)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+}
+
+func TestEvaluateFlagHostMissingKey(t *testing.T) {
+	p := &Plugin{}
+	cc := &plugin.CallContext{TenantID: uuid.New(), WorkflowID: "wf-1"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+	_, err := p.evaluateFlag(ctx, `{"context":{"user_id":"u1"}}`)
+	if err == nil {
+		t.Fatal("expected error for missing key")
 	}
 }

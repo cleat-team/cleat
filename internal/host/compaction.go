@@ -283,9 +283,9 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 		case EventTypeReleaseLock:
 			ce.ChildName = ev.LockKey
 		case EventTypeSideEffect:
+			ce.Response = ev.SideEffectResult
 		case EventTypeScopeAcquired:
 			ce.ChildName = ev.ScopeKey
-			ce.Response = ev.SideEffectResult
 		case EventTypePluginCallStreamChunk:
 			ce.PluginName = ev.PluginName
 			ce.PluginFunc = ev.PluginFunc

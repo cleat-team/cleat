@@ -2,6 +2,7 @@ package auditlog
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -124,5 +125,46 @@ func TestRegisterRoutes(t *testing.T) {
 	_, pattern := mux.Handler(req)
 	if pattern == "" {
 		t.Error("no handler matched GET /audit/events")
+	}
+}
+
+func TestRegisterRoutesNilMux(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterRoutes(nil)
+	if err == nil {
+		t.Fatal("expected error for nil mux")
+	}
+}
+
+func TestPluginRegistration(t *testing.T) {
+	plugins, err := plugin.Discover()
+	if err != nil {
+		t.Fatalf("Discover() returned error: %v", err)
+	}
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "audit-log" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("audit-log plugin not found after Discover")
+	}
+}
+
+func TestMiddlewareDBDisabled(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(nil, nil)),
+	}
+	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
 	}
 }

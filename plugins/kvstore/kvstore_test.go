@@ -812,6 +812,42 @@ func TestDeleteNonExistent(t *testing.T) {
 	}
 }
 
+// TestMigrations verifies that the Migrations method returns the expected schema.
+func TestMigrations(t *testing.T) {
+	p := &Plugin{}
+	migrations := p.Migrations()
+	if len(migrations) != 1 {
+		t.Fatalf("expected 1 migration, got %d", len(migrations))
+	}
+	if migrations[0].Version != 1 {
+		t.Errorf("expected Version 1, got %d", migrations[0].Version)
+	}
+	if migrations[0].Up == "" {
+		t.Error("expected non-empty Up SQL")
+	}
+	if !strings.Contains(migrations[0].Up, "CREATE TABLE") {
+		t.Error("expected Up to contain CREATE TABLE")
+	}
+	if !strings.Contains(migrations[0].Up, "kv_store") {
+		t.Error("expected Up to mention kv_store")
+	}
+	if migrations[0].Down == "" {
+		t.Error("expected non-empty Down SQL")
+	}
+	if !strings.Contains(migrations[0].Down, "DROP TABLE") {
+		t.Error("expected Down to contain DROP TABLE")
+	}
+}
+
+// TestRegisterRoutesNilMux verifies that RegisterRoutes returns an error for a nil mux.
+func TestRegisterRoutesNilMux(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterRoutes(nil)
+	if err == nil {
+		t.Fatal("expected error for nil mux, got nil")
+	}
+}
+
 // TestPutWithIfMatch verifies optimistic concurrency: PUT with If-Match header
 // matching the current version should succeed and increment the version.
 func TestPutWithIfMatch(t *testing.T) {
