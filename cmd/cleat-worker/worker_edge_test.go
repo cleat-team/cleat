@@ -1531,3 +1531,587 @@ func TestAPIWorkflowUpdate_DuplicatePending(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+// ---------------------------------------------------------------------------
+// Reaper loop edge cases
+// ---------------------------------------------------------------------------
+
+func TestReaperLoop_CancelContext(t *testing.T) {
+	// Context cancellation must cause reaperLoop to exit promptly.
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.reaperLoop()
+		close(done)
+	}()
+
+	w.cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reaperLoop did not stop after context cancellation")
+	}
+}
+
+func TestReaperLoop_ConnectionError(t *testing.T) {
+	// A connection error from ReapStaleInstances must be logged and
+	// the loop must continue without crashing.
+	ms := &mockStore{}
+	ms.reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) {
+		return 0, errors.New("connection refused")
+	}
+
+	w := newTestWorker(ms)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.reaperLoop()
+		close(done)
+	}()
+	<-done
+}
+
+func TestReaperLoop_NonConnectionError(t *testing.T) {
+	// A non-connection error (e.g. permission denied) must be logged and
+	// the loop must continue.
+	ms := &mockStore{}
+	ms.reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) {
+		return 0, errors.New("permission denied")
+	}
+
+	w := newTestWorker(ms)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.reaperLoop()
+		close(done)
+	}()
+	<-done
+}
+
+func TestReaperLoop_ZeroReaped(t *testing.T) {
+	// When there are no stale instances, ReapStaleInstances returns 0.
+	ms := &mockStore{}
+	ms.reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) {
+		return 0, nil
+	}
+
+	w := newTestWorker(ms)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.reaperLoop()
+		close(done)
+	}()
+	<-done
+}
+
+func TestReaperLoop_SomeReaped(t *testing.T) {
+	// When ReapStaleInstances returns a positive count, the loop logs it.
+	ms := &mockStore{}
+	ms.reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) {
+		return 5, nil
+	}
+
+	w := newTestWorker(ms)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.reaperLoop()
+		close(done)
+	}()
+	<-done
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency key reaper loop edge cases
+// ---------------------------------------------------------------------------
+
+func TestConcurrencyKeyReaperLoop_ContextCancel(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.concurrencyKeyReaperLoop()
+		close(done)
+	}()
+
+	w.cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("concurrencyKeyReaperLoop did not stop after context cancellation")
+	}
+}
+
+func TestConcurrencyKeyReaperLoop_ConnectionError(t *testing.T) {
+	ms := &mockStore{}
+	ms.reapExpiredConcurrencyKeysFn = func(ctx context.Context) (int64, error) {
+		return 0, errors.New("connection refused")
+	}
+
+	w := newTestWorker(ms)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.concurrencyKeyReaperLoop()
+		close(done)
+	}()
+	<-done
+}
+
+func TestConcurrencyKeyReaperLoop_GenericError(t *testing.T) {
+	ms := &mockStore{}
+	ms.reapExpiredConcurrencyKeysFn = func(ctx context.Context) (int64, error) {
+		return 0, errors.New("internal error")
+	}
+
+	w := newTestWorker(ms)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.concurrencyKeyReaperLoop()
+		close(done)
+	}()
+	<-done
+}
+
+func TestConcurrencyKeyReaperLoop_KeysReaped(t *testing.T) {
+	ms := &mockStore{}
+	ms.reapExpiredConcurrencyKeysFn = func(ctx context.Context) (int64, error) {
+		return 5, nil
+	}
+
+	w := newTestWorker(ms)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.concurrencyKeyReaperLoop()
+		close(done)
+	}()
+	<-done
+}
+
+func TestConcurrencyKeyReaperLoop_ZeroReaped(t *testing.T) {
+	ms := &mockStore{}
+	ms.reapExpiredConcurrencyKeysFn = func(ctx context.Context) (int64, error) {
+		return 0, nil
+	}
+
+	w := newTestWorker(ms)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.concurrencyKeyReaperLoop()
+		close(done)
+	}()
+	<-done
+}
+
+// ---------------------------------------------------------------------------
+// updateDispatchLoop
+// ---------------------------------------------------------------------------
+
+func TestUpdateDispatchLoop_ContextCancel(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.updateDispatchLoop()
+		close(done)
+	}()
+
+	w.cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("updateDispatchLoop did not stop after context cancellation")
+	}
+}
+
+func TestUpdateDispatchLoop_NoPanic(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.inflight.Store("wf-upd-1", &host.WorkflowInstance{ID: "wf-upd-1"})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	w.ctx = ctx
+	w.cancel = cancel
+
+	done := make(chan struct{})
+	go func() {
+		w.wg.Add(1)
+		w.updateDispatchLoop()
+		close(done)
+	}()
+	<-done
+}
+
+// ---------------------------------------------------------------------------
+// API handler remaining edges
+// ---------------------------------------------------------------------------
+
+func TestAPIGetQueryState_KeyNotFound(t *testing.T) {
+	ms := &mockStore{}
+	ms.getQueryStateFn = func(ctx context.Context, workflowID, key string) (string, error) {
+		return "", nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-query-2/query?key=missingkey", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200 for missing query key, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if body["value"] != "" {
+		t.Errorf("expected empty value for missing key, got %q", body["value"])
+	}
+}
+
+func TestAPIGetQueryState_StoreError(t *testing.T) {
+	ms := &mockStore{}
+	ms.getQueryStateFn = func(ctx context.Context, workflowID, key string) (string, error) {
+		return "", errors.New("db error")
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-query-err/query?key=mykey", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500 for store error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPISignal_StoreError(t *testing.T) {
+	ms := &mockStore{}
+	ms.deliverSignalFn = func(ctx context.Context, workflowID, signalName, payload string) error {
+		return errors.New("workflow not found")
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	body := `{"signal_name":"my-signal","payload":"{}"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-missing/signal", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500 for store error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPISignal_ErrorOnDeliverWithEmptyName(t *testing.T) {
+	// Empty signal_name should be rejected before any store call.
+	ms := &mockStore{}
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	body := `{"signal_name":"","payload":"{}"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/signal", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 400 {
+		t.Errorf("expected 400 for empty signal_name, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPICancel_StoreError(t *testing.T) {
+	ms := &mockStore{}
+	ms.requestCancellationFn = func(ctx context.Context, workflowID, reason string) error {
+		return errors.New("workflow not found")
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-missing/cancel", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500 for store error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPICancel_EmptyBody(t *testing.T) {
+	// Cancel with no body should still work (reason defaults to empty).
+	ms := &mockStore{}
+	cancelCalled := false
+	ms.requestCancellationFn = func(ctx context.Context, workflowID, reason string) error {
+		cancelCalled = true
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-cancel-2/cancel", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 200 {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if !cancelCalled {
+		t.Error("expected RequestCancellation to be called")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Workflow update handler edges
+// ---------------------------------------------------------------------------
+
+func TestAPIWorkflowUpdate_CreateError(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-update-err", Status: "running"}, nil
+	}
+	ms.createUpdateRequestFn = func(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+		return errors.New("database error")
+	}
+	ms.createPromiseFn = func(ctx context.Context, workflowID, promiseName, promiseID string) error {
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-update-err/update/my-action", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500 for CreateUpdateRequest error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPIWorkflowUpdate_GetPendingError(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-update-pend-err", Status: "running"}, nil
+	}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error) {
+		return nil, errors.New("db error")
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-update-pend-err/update/my-action", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500 for GetPendingUpdateRequests error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPIWorkflowUpdate_GetWorkflowError(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return nil, errors.New("db error")
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-db-err/update/my-action", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500 for GetWorkflowByID error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPIWorkflowUpdate_PromiseStoreError(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-update-prom-err", Status: "running"}, nil
+	}
+	ms.createUpdateRequestFn = func(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+		return nil
+	}
+	ms.createPromiseFn = func(ctx context.Context, workflowID, promiseName, promiseID string) error {
+		return errors.New("promise error")
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-update-prom-err/update/my-action", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	// The promise creation failure is logged but the handler should still
+	// return 202 since the update request was created.
+	if resp.StatusCode != 202 {
+		t.Errorf("expected 202 despite promise error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// ---------------------------------------------------------------------------
+// DAG handler edges
+// ---------------------------------------------------------------------------
+
+func TestAPIGetDAG_GetWorkflowError(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return nil, errors.New("db error")
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-dag-err/dag", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500 for GetWorkflowByID error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPIGetDAG_LoadSpecError(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-dag-err", DefName: "dag-workflow", DefVersion: 1}, nil
+	}
+	ms.loadDAGSpecFn = func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+		return nil, errors.New("spec corrupted")
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-dag-err/dag", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 404 {
+		t.Errorf("expected 404 for LoadDAGSpec error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestAPIGetDAG_UnmarshalError(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-dag-bad", DefName: "dag-workflow", DefVersion: 1}, nil
+	}
+	ms.loadDAGSpecFn = func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+		return json.RawMessage(`not valid json`), nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-dag-bad/dag", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 500 {
+		t.Errorf("expected 500 for unmarshal error, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// ---------------------------------------------------------------------------
+// workflow update with no body (nil body)
+// ---------------------------------------------------------------------------
+
+func TestAPIWorkflowUpdate_NoBody(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-update-nobody", Status: "running"}, nil
+	}
+	createCalled := false
+	ms.createUpdateRequestFn = func(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+		createCalled = true
+		if payload != "{}" {
+			t.Errorf("expected default payload '{}', got %q", payload)
+		}
+		return nil
+	}
+	ms.createPromiseFn = func(ctx context.Context, workflowID, promiseName, promiseID string) error {
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-update-nobody/update/my-action", nil)
+	w := httptest.NewRecorder()
+	api.handleWorkflows(w, req)
+
+	resp := w.Result()
+	if resp.StatusCode != 202 {
+		t.Errorf("expected 202, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if !createCalled {
+		t.Error("expected CreateUpdateRequest to be called")
+	}
+}
