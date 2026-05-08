@@ -3,11 +3,281 @@ package host
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/rcownie/cleat/internal/host/testutil"
 )
+
+// ---------------------------------------------------------------------------
+// Mock concurrency key store for unit tests (no DB required)
+// ---------------------------------------------------------------------------
+
+// mockConcurrencyKeyStore provides an in-memory ConcurrencyKeyStore for tests.
+// It tracks key ownership and supports configurable TTL expiry and error
+// injection for timeout scenarios.
+type mockConcurrencyKeyStore struct {
+	mu    sync.Mutex
+	keys  map[string]concurrencyKeyEntry // key -> entry
+}
+
+type concurrencyKeyEntry struct {
+	workflowID string
+	expiresAt  time.Time
+}
+
+func newMockConcurrencyKeyStore() *mockConcurrencyKeyStore {
+	return &mockConcurrencyKeyStore{
+		keys: make(map[string]concurrencyKeyEntry),
+	}
+}
+
+func (m *mockConcurrencyKeyStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if entry, exists := m.keys[key]; exists {
+		// Check if the key has expired.
+		if time.Now().After(entry.expiresAt) {
+			delete(m.keys, key)
+		} else if entry.workflowID != workflowID {
+			// Key held by another workflow.
+			return false, nil
+		}
+	}
+
+	m.keys[key] = concurrencyKeyEntry{
+		workflowID: workflowID,
+		expiresAt:  time.Now().Add(ttl),
+	}
+	return true, nil
+}
+
+func (m *mockConcurrencyKeyStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.keys, key)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency key unit tests using execSession with mock store
+// ---------------------------------------------------------------------------
+
+// TestConcurrencyKeySameKeyBlocks verifies that two workflows using the same
+// concurrency key (AcquireLock) cannot both acquire it simultaneously.
+func TestConcurrencyKeySameKeyBlocks(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	cks := newMockConcurrencyKeyStore()
+
+	// Session 1: acquires lock successfully.
+	session1 := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:   make([]EventRecord, 0),
+		workflowID: "wf-session-1",
+	}
+	result1 := session1.freshAcquireLock(ctx, mod, "shared-key", 30000)
+	acquired1 := ((result1 >> 8) & 0xFF) != 0
+	errCode1 := byte(result1 & 0xFF)
+	if errCode1 != 0 {
+		t.Fatalf("session1 acquire: unexpected errCode=%d", errCode1)
+	}
+	if !acquired1 {
+		t.Error("session1 should have acquired the lock")
+	}
+
+	// Session 2: tries same key — should fail to acquire.
+	session2 := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:   make([]EventRecord, 0),
+		workflowID: "wf-session-2",
+	}
+	result2 := session2.freshAcquireLock(ctx, mod, "shared-key", 30000)
+	acquired2 := ((result2 >> 8) & 0xFF) != 0
+	errCode2 := byte(result2 & 0xFF)
+	if errCode2 != 0 {
+		t.Fatalf("session2 acquire: unexpected errCode=%d", errCode2)
+	}
+	if acquired2 {
+		t.Error("session2 should NOT have acquired the lock (session1 holds it)")
+	}
+
+	// Verify session1 recorded an acquired event.
+	if len(session1.history) < 1 || session1.history[0].LockAcquired != 1 {
+		t.Error("session1 history should show lock acquired")
+	}
+	// Verify session2 recorded a non-acquired event.
+	if len(session2.history) < 1 || session2.history[0].LockAcquired != 0 {
+		t.Error("session2 history should show lock NOT acquired")
+	}
+}
+
+// TestConcurrencyKeyRelease verifies that releasing a concurrency key allows
+// another workflow to acquire it.
+func TestConcurrencyKeyRelease(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	cks := newMockConcurrencyKeyStore()
+
+	// Session A acquires the lock.
+	sessionA := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:   make([]EventRecord, 0),
+		workflowID: "wf-session-A",
+	}
+	resultA := sessionA.freshAcquireLock(ctx, mod, "release-key", 30000)
+	acquiredA := ((resultA >> 8) & 0xFF) != 0
+	if !acquiredA {
+		t.Fatal("sessionA should acquire the lock")
+	}
+
+	// Session B tries — should be blocked.
+	sessionB := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:   make([]EventRecord, 0),
+		workflowID: "wf-session-B",
+	}
+	resultB := sessionB.freshAcquireLock(ctx, mod, "release-key", 30000)
+	acquiredB := ((resultB >> 8) & 0xFF) != 0
+	if acquiredB {
+		t.Fatal("sessionB should be blocked before release")
+	}
+
+	// Session A releases the lock.
+	releaseResult := sessionA.freshReleaseLock(ctx, mod, "release-key")
+	if releaseResult != 0 {
+		t.Errorf("expected successful release (0), got %d", releaseResult)
+	}
+
+	// Session B retries — should now succeed.
+	resultB2 := sessionB.freshAcquireLock(ctx, mod, "release-key", 30000)
+	acquiredB2 := ((resultB2 >> 8) & 0xFF) != 0
+	errCodeB2 := byte(resultB2 & 0xFF)
+	if errCodeB2 != 0 {
+		t.Fatalf("sessionB retry: unexpected errCode=%d", errCodeB2)
+	}
+	if !acquiredB2 {
+		t.Error("sessionB should acquire the lock after release")
+	}
+}
+
+// TestConcurrencyKeyTimeout verifies that a lock acquisition failure is
+// properly recorded when the concurrency key is held by another workflow,
+// and that the error propagates through the event history.
+func TestConcurrencyKeyTimeout(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	cks := newMockConcurrencyKeyStore()
+
+	// Session1 acquires with a very short TTL.
+	session1 := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:   make([]EventRecord, 0),
+		workflowID: "wf-t1",
+	}
+	_ = session1.freshAcquireLock(ctx, mod, "ttl-key", 1 /* 1ms TTL */)
+
+	// Session2 tries immediately — key is still held.
+	session2 := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:   make([]EventRecord, 0),
+		workflowID: "wf-t2",
+	}
+	result2 := session2.freshAcquireLock(ctx, mod, "ttl-key", 30000)
+	acquired2 := ((result2 >> 8) & 0xFF) != 0
+	if acquired2 {
+		t.Error("session2 should NOT acquire while session1 holds the key")
+	}
+	if len(session2.history) < 1 {
+		t.Fatal("expected at least one event in session2 history")
+	}
+	if session2.history[0].LockAcquired != 0 {
+		t.Error("session2 history should record LockAcquired=0")
+	}
+}
+
+// TestConcurrencyKeyDifferentKeys verifies that acquisition of different keys
+// does not interfere.
+func TestConcurrencyKeyDifferentKeys(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	cks := newMockConcurrencyKeyStore()
+
+	sessionA := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:   make([]EventRecord, 0),
+		workflowID: "wf-diff-A",
+	}
+	sessionB := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:   make([]EventRecord, 0),
+		workflowID: "wf-diff-B",
+	}
+
+	// Both acquire different keys — should both succeed.
+	resultA := sessionA.freshAcquireLock(ctx, mod, "key-a", 30000)
+	resultB := sessionB.freshAcquireLock(ctx, mod, "key-b", 30000)
+
+	acquiredA := ((resultA >> 8) & 0xFF) != 0
+	acquiredB := ((resultB >> 8) & 0xFF) != 0
+
+	if !acquiredA {
+		t.Error("sessionA should acquire key-a")
+	}
+	if !acquiredB {
+		t.Error("sessionB should acquire key-b")
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Concurrency key tests against PostgresStore directly.

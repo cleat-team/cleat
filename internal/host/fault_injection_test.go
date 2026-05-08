@@ -372,3 +372,110 @@ func TestFaultInjectorToggle(t *testing.T) {
 		t.Errorf("Expected 1 event after successful append, got %d", len(history))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PluginCall error propagation
+// ---------------------------------------------------------------------------
+
+// TestFaultPluginCallError verifies that when a PluginCall's host function
+// returns an error, the error is captured in the event history and does not
+// panic or hang the engine.
+func TestFaultPluginCallError(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Register a plugin function that always returns an error.
+	reg := NewPluginRegistry()
+	reg.Register("test-plugin", "FailingFunc", func(_ context.Context, _ string) (string, error) {
+		return "", fmt.Errorf("injected plugin error: disk full")
+	})
+
+	session := &execSession{
+		engine: &Engine{
+			pluginRegistry: reg,
+			caller:         &mockCaller{},
+		},
+		history: make([]EventRecord, 0),
+	}
+
+	result := session.freshPluginCall(ctx, mod, "test-plugin", "FailingFunc", `{"key":"val"}`, 0, 4096)
+	errCode, _ := decodeSimpleResult(result)
+	if errCode == 0 {
+		t.Error("expected non-zero error code for failing plugin call")
+	}
+
+	// Event should be recorded with the error.
+	if len(session.history) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(session.history))
+	}
+	rec := session.history[0]
+	if rec.EventType != EventTypePluginCall {
+		t.Errorf("expected PluginCall event, got %s", rec.EventType)
+	}
+	if rec.PluginError != "injected plugin error: disk full" {
+		t.Errorf("expected plugin error message, got %q", rec.PluginError)
+	}
+	if rec.PluginName != "test-plugin" || rec.PluginFunc != "FailingFunc" {
+		t.Errorf("expected test-plugin/FailingFunc, got %s/%s", rec.PluginName, rec.PluginFunc)
+	}
+}
+
+// TestFaultPluginCallTransientThenRetry verifies that a plugin function that
+// fails transiently and then succeeds on retry records the success in history.
+// This simulates the retry pattern: a network blip causes the first call to
+// fail, but a retry succeeds.
+func TestFaultPluginCallTransientThenRetry(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	callCount := 0
+	reg := NewPluginRegistry()
+	reg.Register("test-plugin", "FlakyFunc", func(_ context.Context, _ string) (string, error) {
+		callCount++
+		if callCount == 1 {
+			return "", fmt.Errorf("transient network error")
+		}
+		return `{"result":"ok"}`, nil
+	})
+
+	session := &execSession{
+		engine: &Engine{
+			pluginRegistry: reg,
+			caller:         &mockCaller{},
+		},
+		history: make([]EventRecord, 0),
+	}
+
+	// First call fails.
+	result1 := session.freshPluginCall(ctx, mod, "test-plugin", "FlakyFunc", `{"x":1}`, 0, 4096)
+	errCode1, _ := decodeSimpleResult(result1)
+	if errCode1 == 0 {
+		t.Error("expected error code on first transient failure")
+	}
+	if len(session.history) != 1 || session.history[0].PluginError != "transient network error" {
+		t.Errorf("expected transient error recorded, got %q", session.history[0].PluginError)
+	}
+
+	// Second call (simulating retry) succeeds.
+	result2 := session.freshPluginCall(ctx, mod, "test-plugin", "FlakyFunc", `{"x":1}`, 0, 4096)
+	errCode2, _ := decodeSimpleResult(result2)
+	if errCode2 != 0 {
+		t.Errorf("expected success on retry, got errCode=%d", errCode2)
+	}
+	if len(session.history) != 2 {
+		t.Fatalf("expected 2 events (fail + success), got %d", len(session.history))
+	}
+	if session.history[1].PluginOutput != `{"result":"ok"}` {
+		t.Errorf("expected success output, got %q", session.history[1].PluginOutput)
+	}
+}

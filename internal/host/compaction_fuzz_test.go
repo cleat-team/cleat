@@ -399,6 +399,17 @@ func eventFieldsMatch(a, b EventRecord) bool {
 			a.PluginInput == b.PluginInput &&
 			a.PluginOutput == b.PluginOutput &&
 			a.PluginError == b.PluginError
+
+	case EventTypeAcquireLock:
+		return a.LockKey == b.LockKey &&
+			a.LockTTLMs == b.LockTTLMs &&
+			a.LockAcquired == b.LockAcquired
+
+	case EventTypeReleaseLock:
+		return a.LockKey == b.LockKey
+
+	case EventTypeScopeAcquired:
+		return a.ScopeKey == b.ScopeKey
 	}
 	return false
 }

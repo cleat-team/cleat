@@ -269,6 +269,10 @@ type TestEnv struct {
 
 	pluginCallStubs []*pluginCallStub
 
+	// cancellation tracking for SetCancelled / PollCancellation tests.
+	cancelled    bool
+	cancelReason string
+
 	// signalReplyChannels maps correlation IDs to reply channels for
 	// SendSignalAndWait / ReplyToSignal.
 	signalReplyChannels map[string]chan string
@@ -386,6 +390,24 @@ func (e *TestEnv) Signal(name, payload string) {
 	}
 	e.pendingSignals = append(e.pendingSignals, sig)
 	e.deliverSignals()
+}
+
+// SetCancelled configures the test environment to report cancellation.
+// After calling this, PollCancellation will return (true, reason).
+// This enables testing workflow cancellation behavior.
+func (e *TestEnv) SetCancelled(reason string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cancelled = true
+	e.cancelReason = reason
+}
+
+// ClearCancelled resets the cancellation state.
+func (e *TestEnv) ClearCancelled() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cancelled = false
+	e.cancelReason = ""
 }
 
 // AdvanceTime advances the simulated clock by the given duration.
@@ -661,7 +683,9 @@ func (e *TestEnv) durableLogImpl(message string) {
 }
 
 func (e *TestEnv) pollCancellationImpl() (bool, string) {
-	return false, ""
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cancelled, e.cancelReason
 }
 
 func (e *TestEnv) pollSignalImpl(signalName string) (string, bool, error) {
