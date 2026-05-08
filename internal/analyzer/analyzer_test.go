@@ -4,6 +4,8 @@ import (
 	"go/token"
 	"go/types"
 	"testing"
+
+	"golang.org/x/tools/go/packages"
 )
 
 func TestHostCallsMethodNil(t *testing.T) {
@@ -251,5 +253,69 @@ func TestIsHostCallsTypeWithPointerToNamedHostCallsWrongPkg(t *testing.T) {
 	ptr := types.NewPointer(named)
 	if IsHostCallsType(ptr) {
 		t.Error("IsHostCallsType(*workflow.HostCalls) should return false for non-cleat pkg")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isUserPackage tests
+// ---------------------------------------------------------------------------
+
+func TestIsUserPackageEmptyTarget(t *testing.T) {
+	pkg := &packages.Package{PkgPath: "any/pkg"}
+	if !isUserPackage(pkg, "") {
+		t.Error("isUserPackage should return true for empty targetModule")
+	}
+}
+
+func TestIsUserPackageExactMatch(t *testing.T) {
+	pkg := &packages.Package{PkgPath: "github.com/rcownie/cleat/workflow"}
+	if !isUserPackage(pkg, "github.com/rcownie/cleat/workflow") {
+		t.Error("isUserPackage should return true for exact match")
+	}
+}
+
+func TestIsUserPackageSubPackage(t *testing.T) {
+	pkg := &packages.Package{PkgPath: "github.com/rcownie/cleat/workflow/sub"}
+	if !isUserPackage(pkg, "github.com/rcownie/cleat/workflow") {
+		t.Error("isUserPackage should return true for sub-package")
+	}
+}
+
+func TestIsUserPackageNonMatch(t *testing.T) {
+	pkg := &packages.Package{PkgPath: "other/module/pkg"}
+	if isUserPackage(pkg, "github.com/rcownie/cleat") {
+		t.Error("isUserPackage should return false for non-matching package")
+	}
+}
+
+func TestIsUserPackageSimilarPrefix(t *testing.T) {
+	// "github.com/rcownie/cleat-extra" should NOT match "github.com/rcownie/cleat"
+	pkg := &packages.Package{PkgPath: "github.com/rcownie/cleat-extra/pkg"}
+	if isUserPackage(pkg, "github.com/rcownie/cleat") {
+		t.Error("isUserPackage should return false for package with similar but different prefix")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// pkgDir tests
+// ---------------------------------------------------------------------------
+
+func TestPkgDirWithGoFiles(t *testing.T) {
+	pkg := &packages.Package{
+		GoFiles: []string{"/some/dir/main.go"},
+	}
+	dir := pkgDir(pkg)
+	if dir != "/some/dir" {
+		t.Errorf("expected /some/dir, got %q", dir)
+	}
+}
+
+func TestPkgDirNoGoFiles(t *testing.T) {
+	pkg := &packages.Package{
+		GoFiles: []string{},
+	}
+	dir := pkgDir(pkg)
+	if dir != "" {
+		t.Errorf("expected empty string, got %q", dir)
 	}
 }

@@ -6,7 +6,6 @@ package ratelimiter
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"sync"
 
@@ -28,7 +27,7 @@ func init() {
 // It stores rate limit configurations in PostgreSQL and maintains an
 // in-memory cache of token buckets for fast middleware checks.
 type Plugin struct {
-	db      *sql.DB
+db      plugin.DB
 	logger  *slog.Logger
 
 	mu      sync.Mutex

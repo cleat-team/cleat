@@ -405,3 +405,68 @@ func TestIsOfficialEdgeCases(t *testing.T) {
 		}
 	}
 }
+
+func TestParseConstraint_ErrorPaths(t *testing.T) {
+	tests := []struct {
+		input string
+	}{
+		{">=invalid"},
+		{"^invalid"},
+		{"~invalid"},
+		{"=invalid"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			_, err := parseConstraint(tc.input)
+			if err == nil {
+				t.Errorf("parseConstraint(%q): expected error, got nil", tc.input)
+			}
+		})
+	}
+}
+
+func TestParseConstraint_Whitespace(t *testing.T) {
+	cr, err := parseConstraint("  >=1.0.0  ")
+	if err != nil {
+		t.Fatalf("parseConstraint with whitespace: %v", err)
+	}
+	if cr.min != "v1.0.0" {
+		t.Errorf("expected min=v1.0.0, got %q", cr.min)
+	}
+}
+
+func TestParseConstraint_BareInvalid(t *testing.T) {
+	_, err := parseConstraint("not-a-version")
+	if err == nil {
+		t.Error("expected error for bare invalid version")
+	}
+}
+
+func TestVersionInRange_InvalidVersion(t *testing.T) {
+	got := versionInRange("not-a-version", constraintRange{})
+	if got {
+		t.Error("expected false for invalid version")
+	}
+}
+
+func TestVersionInRange_ExactCaseSensitive(t *testing.T) {
+	// v-prefix matters: "1.0.0" vs "v1.0.0"
+	got := versionInRange("1.0.0", constraintRange{exact: "v1.0.0"})
+	if got {
+		t.Error("expected false for non-v-prefixed version against v-prefixed exact")
+	}
+}
+
+func TestVersionInRange_MinOnly(t *testing.T) {
+	got := versionInRange("v2.0.0", constraintRange{min: "v1.0.0"})
+	if !got {
+		t.Error("expected true: v2.0.0 >= v1.0.0")
+	}
+}
+
+func TestVersionInRange_MaxOnly(t *testing.T) {
+	got := versionInRange("v0.5.0", constraintRange{max: "v1.0.0"})
+	if !got {
+		t.Error("expected true: v0.5.0 < v1.0.0")
+	}
+}

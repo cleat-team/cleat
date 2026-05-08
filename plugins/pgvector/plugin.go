@@ -2,7 +2,6 @@ package pgvector
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,7 +22,7 @@ func init() {
 // Plugin implements vector similarity search using the pgvector PostgreSQL
 // extension. Workflows can store and query embedding vectors with metadata.
 type Plugin struct {
-	db     *sql.DB
+db     plugin.DB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config

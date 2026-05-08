@@ -237,31 +237,114 @@ func TestDetectVetLang(t *testing.T) {
 	// Use the repo root (has go.mod) for Go detection.
 	repoRoot := filepath.Join("..", "..")
 	tests := []struct {
-		dir      string
+		name     string
+		setup    func(t *testing.T) string
 		wantLang string
 		wantErr  bool
 	}{
-		{repoRoot, "go", false},
-		{filepath.Join("..", "..", "testdata", "vet-checks", "rust", "e001_fs_access"), "rust", false},
-		{filepath.Join("..", "..", "testdata", "vet-checks", "python", "py002_open"), "python", false},
-		{"nonexistent-directory-12345", "", true},
+		{
+			name:     "go_mod",
+			setup:    func(t *testing.T) string { return repoRoot },
+			wantLang: "go",
+		},
+		{
+			name: "rust_cargo_toml",
+			setup: func(t *testing.T) string {
+				return filepath.Join("..", "..", "testdata", "vet-checks", "rust", "e001_fs_access")
+			},
+			wantLang: "rust",
+		},
+		{
+			name: "python_py_files",
+			setup: func(t *testing.T) string {
+				return filepath.Join("..", "..", "testdata", "vet-checks", "python", "py002_open")
+			},
+			wantLang: "python",
+		},
+		{
+			name: "nonexistent_directory",
+			setup: func(t *testing.T) string { return "nonexistent-directory-12345" },
+			wantErr: true,
+		},
+		{
+			name: "java_build_gradle_kts",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				os.WriteFile(filepath.Join(dir, "build.gradle.kts"), []byte("plugins {}"), 0644)
+				return dir
+			},
+			wantLang: "java",
+		},
+		{
+			name: "java_build_gradle",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				os.WriteFile(filepath.Join(dir, "build.gradle"), []byte("plugins {}"), 0644)
+				return dir
+			},
+			wantLang: "java",
+		},
+		{
+			name: "assemblyscript_package_json",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0644)
+				return dir
+			},
+			wantLang: "as",
+		},
+		{
+			name: "fallback_go_ext",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0644)
+				return dir
+			},
+			wantLang: "go",
+		},
+		{
+			name: "fallback_rust_ext",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				os.WriteFile(filepath.Join(dir, "lib.rs"), []byte("fn main() {}"), 0644)
+				return dir
+			},
+			wantLang: "rust",
+		},
+		{
+			name: "fallback_java_ext",
+			setup: func(t *testing.T) string {
+				dir := t.TempDir()
+				os.WriteFile(filepath.Join(dir, "Main.java"), []byte("class Main {}"), 0644)
+				return dir
+			},
+			wantLang: "java",
+		},
+		{
+			name: "empty_dir_no_detection",
+			setup: func(t *testing.T) string {
+				return t.TempDir()
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
-		t.Run(filepath.Base(tt.dir), func(t *testing.T) {
-			got, err := detectVetLang(tt.dir)
+		t.Run(tt.name, func(t *testing.T) {
+			dir := tt.setup(t)
+			got, err := detectVetLang(dir)
 			if tt.wantErr {
 				if err == nil {
-					t.Errorf("detectVetLang(%q) = %q, want error", tt.dir, got)
+					t.Errorf("detectVetLang(%q) = %q, want error", dir, got)
 				}
 				return
 			}
 			if err != nil {
-				t.Errorf("detectVetLang(%q) = error: %v", tt.dir, err)
+				t.Errorf("detectVetLang(%q) = error: %v", dir, err)
 				return
 			}
 			if got != tt.wantLang {
-				t.Errorf("detectVetLang(%q) = %q, want %q", tt.dir, got, tt.wantLang)
+				t.Errorf("detectVetLang(%q) = %q, want %q", dir, got, tt.wantLang)
 			}
 		})
 	}

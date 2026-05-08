@@ -2,7 +2,6 @@ package llm
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -38,7 +37,7 @@ type Config struct {
 
 // Plugin implements the LLM provider plugin.
 type Plugin struct {
-	db         *sql.DB
+db         plugin.DB
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config

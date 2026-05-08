@@ -37,11 +37,27 @@ import (
 
 // PluginInfo describes a plugin for discovery and documentation.
 type PluginInfo struct {
-	Name        string   `json:"name"`
-	Version     string   `json:"version"`
-	Description string   `json:"description"`
-	Author      string   `json:"author,omitempty"`
-	Requires    []string `json:"requires,omitempty"`
+	Name           string         `json:"name"`
+	Version        string         `json:"version"`
+	Description    string         `json:"description"`
+	Author         string         `json:"author,omitempty"`
+	Requires       []string       `json:"requires,omitempty"`
+	DatabaseAccess DatabaseAccess `json:"database_access,omitempty"`
+}
+
+// DB is the minimal database interface that plugins receive.
+// Both *sql.DB and host.ReadOnlyDB satisfy this interface.
+type DB interface {
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+	QueryRow(query string, args ...interface{}) *sql.Row
+	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+	Close() error
+	PingContext(ctx context.Context) error
 }
 
 // Plugin is the only required interface. Every plugin must implement this.
@@ -53,7 +69,7 @@ type Plugin interface {
 // Environment provides plugins with raw access to cleat infrastructure.
 // No wrappers, no abstractions -- standard library types.
 type Environment struct {
-	DB       *sql.DB
+	DB       DB
 	Mux      *http.ServeMux
 	Config   []byte
 	Logger   *slog.Logger

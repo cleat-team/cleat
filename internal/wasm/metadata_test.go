@@ -153,3 +153,65 @@ func TestDecodeULEB128_Truncated(t *testing.T) {
 		t.Errorf("expected 0 for truncated input, got %d", n)
 	}
 }
+
+func TestReadCustomSection_CorruptNameLen(t *testing.T) {
+	// WASM header + custom section where the name length ULEB128 has the
+	// continuation bit set on the last byte (truncated). This exercises the
+	// nn <= 0 error path in readCustomSection (line ~107).
+	wasm := []byte{
+		0x00, 0x61, 0x73, 0x6d, // magic
+		0x01, 0x00, 0x00, 0x00, // version
+		0x00, // section ID = custom
+		0x01, // section size = 1
+		0x80, // truncated name length (continuation bit, no more bytes)
+	}
+	_, err := ReadMetadata(wasm)
+	if err == nil {
+		t.Error("expected error for corrupt name length in readCustomSection")
+	}
+}
+
+func TestStripCustomSection_CorruptNameLen(t *testing.T) {
+	wasm := []byte{
+		0x00, 0x61, 0x73, 0x6d,
+		0x01, 0x00, 0x00, 0x00,
+		0x00, // section ID = custom
+		0x01, // section size = 1
+		0x80, // truncated name length ULEB128
+	}
+	_, err := stripCustomSection(wasm, "cleat.metadata")
+	if err == nil {
+		t.Error("expected error for corrupt name length in stripCustomSection")
+	}
+}
+
+func TestStripCustomSection_NameOverflow(t *testing.T) {
+	// Custom section where the declared name length exceeds the remaining bytes.
+	wasm := []byte{
+		0x00, 0x61, 0x73, 0x6d,
+		0x01, 0x00, 0x00, 0x00,
+		0x00, // section ID = custom
+		0x02, // section size = 2
+		0x05, // name length = 5 (but only 1 byte follows)
+		0x00, // partial name byte
+	}
+	_, err := stripCustomSection(wasm, "cleat.metadata")
+	if err == nil {
+		t.Error("expected error for name overflow in stripCustomSection")
+	}
+}
+
+func TestReadCustomSection_NameOverflow(t *testing.T) {
+	wasm := []byte{
+		0x00, 0x61, 0x73, 0x6d,
+		0x01, 0x00, 0x00, 0x00,
+		0x00, // section ID = custom
+		0x02, // section size = 2
+		0x05, // name length = 5 (but only 1 byte follows)
+		0x00, // partial name byte
+	}
+	_, err := ReadMetadata(wasm)
+	if err == nil {
+		t.Error("expected error for name overflow in readCustomSection")
+	}
+}

@@ -1397,7 +1397,7 @@ func (s *stubWorkflowStore) Heartbeat(ctx context.Context, workflowID, workerID 
 func (s *stubWorkflowStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
 	return nil
 }
-func (s *stubWorkflowStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+func (s *stubWorkflowStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
 func (s *stubWorkflowStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
@@ -1554,6 +1554,9 @@ func (s *stubWorkflowStore) QueueDepth(ctx context.Context) (int64, error) {
 	return 0, nil
 }
 func (s *stubWorkflowStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
 func (s *stubWorkflowStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {

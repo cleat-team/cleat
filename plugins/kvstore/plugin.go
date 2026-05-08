@@ -5,7 +5,6 @@ package kvstore
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -27,7 +26,7 @@ func init() {
 
 // Plugin implements a versioned JSONB key-value store with tenant isolation.
 type Plugin struct {
-	db     *sql.DB
+db     plugin.DB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config

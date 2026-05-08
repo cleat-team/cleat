@@ -5,7 +5,6 @@ package auditlog
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -27,7 +26,7 @@ func init() {
 
 // Plugin implements audit trail recording and querying.
 type Plugin struct {
-	db     *sql.DB
+db     plugin.DB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config

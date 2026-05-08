@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -374,12 +375,12 @@ func (s *ShardedStore) CompleteWorkflow(ctx context.Context, workflowID, workerI
 }
 
 // FailWorkflow routes by workflow ID.
-func (s *ShardedStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+func (s *ShardedStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return fmt.Errorf("fail_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.FailWorkflow(ctx, workflowID, workerID, errMsg, queryState)
+	return shard.Store.FailWorkflow(ctx, workflowID, workerID, errorMsg, errorCode, errorOp, queryState)
 }
 
 // ReleaseWorkflow routes by workflow ID.
@@ -1028,6 +1029,29 @@ func (s *ShardedStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDe
 			return total, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
 		}
 		total += n
+	}
+	return total, nil
+}
+
+// DeleteExpiredEvents fans out to all shards and sums the deleted counts.
+// Errors from individual shards are collected and returned as a single
+// multi-error; remaining shards are still processed.
+func (s *ShardedStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	var total int64
+	var errs []string
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		n, err := shard.Store.DeleteExpiredEvents(ctx, olderThan)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("shard %q: %v", shard.Config.Name, err))
+			continue
+		}
+		total += n
+	}
+	if len(errs) > 0 {
+		return total, fmt.Errorf("DeleteExpiredEvents errors: %s", strings.Join(errs, "; "))
 	}
 	return total, nil
 }

@@ -6,7 +6,6 @@ package webhookingest
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -30,7 +29,7 @@ func init() {
 // Plugin implements inbound webhook ingestion with source management,
 // HMAC verification, and workflow-accessible event polling.
 type Plugin struct {
-	db     *sql.DB
+db     plugin.DB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config

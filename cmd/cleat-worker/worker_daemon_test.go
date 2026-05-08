@@ -28,67 +28,68 @@ import (
 // Each method checks for a custom function field first; if set, it delegates
 // to that function. Otherwise it returns a safe zero-valued result.
 type mockStore struct {
-	claimWorkflowFn                    func(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error)
-	claimWorkflowsFn                   func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
-	claimStickyWorkflowsFn             func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
-	loadEventHistoryFn                 func(ctx context.Context, workflowID string) ([]host.EventRecord, error)
-	appendEventHistoryFn               func(ctx context.Context, workflowID string, rec host.EventRecord) error
-	appendEventHistoryBatchFn          func(ctx context.Context, workflowID string, recs []host.EventRecord) error
-	loadWASMFn                         func(ctx context.Context, defName string, defVersion int) ([]byte, error)
-	listVersionsFn                     func(ctx context.Context, defName string) ([]int, error)
-	heartbeatFn                        func(ctx context.Context, workflowID, workerID string) (bool, error)
-	completeWorkflowFn                 func(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
-	failWorkflowFn                     func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error
-	releaseWorkflowFn                  func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error
-	requestCancellationFn              func(ctx context.Context, workflowID, reason string) error
-	checkCancellationFn                func(ctx context.Context, workflowID string) (bool, string, error)
-	deliverSignalFn                    func(ctx context.Context, workflowID, signalName, payload string) error
-	pollAndClaimSignalFn               func(ctx context.Context, workflowID, signalName string) (string, bool, error)
-	startNewRunFn                      func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
-	startChildWorkflowFn               func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
-	getChildResultFn                   func(ctx context.Context, runID string) (string, bool, error)
-	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
-	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
-	listWorkflowsFn                    func(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error)
-	getWorkflowByIDFn                  func(ctx context.Context, id string) (*host.WorkflowInstance, error)
-	createScheduleFn                   func(ctx context.Context, s host.Schedule) error
-	listSchedulesFn                    func(ctx context.Context) ([]host.Schedule, error)
-	deleteScheduleFn                   func(ctx context.Context, name string) error
-	setScheduleEnabledFn               func(ctx context.Context, name string, enabled bool) error
-	getDueSchedulesFn                  func(ctx context.Context) ([]host.Schedule, error)
-	updateScheduleNextRunFn            func(ctx context.Context, name string, nextRun time.Time) error
-	loadWorkflowConfigFn               func(ctx context.Context, defName string, defVersion int) (int, error)
-	loadDAGSpecFn                      func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error)
-	traceWorkflowFn                    func(ctx context.Context, workflowID, traceID string) (sql.Result, error)
-	getCompactionCandidatesFn          func(ctx context.Context, threshold int, limit int) ([]string, error)
-	loadCompactionStateFn              func(ctx context.Context, workflowID string) (*host.CompactionState, error)
-	compactHistoryFn                   func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
-	createPromiseFn                    func(ctx context.Context, workflowID, promiseName, promiseID string) error
-	resolvePromiseFn                   func(ctx context.Context, workflowID, promiseID, result string) error
-	rejectPromiseFn                    func(ctx context.Context, workflowID, promiseID, errMsg string) error
-	getPromiseFn                       func(ctx context.Context, workflowID, promiseID string) (string, string, string, error)
-	listPromisesFn                     func(ctx context.Context, workflowID string) ([]host.PromiseInfo, error)
-	createUpdateRequestFn              func(ctx context.Context, workflowID, updateName, payload, promiseID string) error
-	getPendingUpdateRequestsFn         func(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error)
-	completeUpdateRequestFn            func(ctx context.Context, workflowID, updateName, result, errMsg string) error
-	acquireConcurrencyKeyFn            func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error)
-	releaseConcurrencyKeyFn            func(ctx context.Context, key string) error
-	releaseWorkflowConcurrencyKeysFn   func(ctx context.Context, workflowID string) error
-	reapExpiredConcurrencyKeysFn       func(ctx context.Context) (int64, error)
-	updateStickyWorkerFn               func(ctx context.Context, workflowID, workerID string) error
-	clearStickyWorkerFn                func(ctx context.Context, workflowID string) error
-	deployWorkflowDefFn                func(ctx context.Context, def *host.WorkflowDef) error
-	listWorkflowDefsFn                 func(ctx context.Context, name string) ([]host.WorkflowDef, error)
-	getWorkflowDefFn                   func(ctx context.Context, name string, version int) (*host.WorkflowDef, error)
-	markVersionDeprecatedFn            func(ctx context.Context, name string, version int, deprecated bool) error
-	purgeWorkflowDefFn                 func(ctx context.Context, name string, version int) error
-	countActiveInstancesFn             func(ctx context.Context, name string, version int) (int, error)
+	claimWorkflowFn                   func(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error)
+	claimWorkflowsFn                  func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
+	claimStickyWorkflowsFn            func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
+	loadEventHistoryFn                func(ctx context.Context, workflowID string) ([]host.EventRecord, error)
+	appendEventHistoryFn              func(ctx context.Context, workflowID string, rec host.EventRecord) error
+	appendEventHistoryBatchFn         func(ctx context.Context, workflowID string, recs []host.EventRecord) error
+	loadWASMFn                        func(ctx context.Context, defName string, defVersion int) ([]byte, error)
+	listVersionsFn                    func(ctx context.Context, defName string) ([]int, error)
+	heartbeatFn                       func(ctx context.Context, workflowID, workerID string) (bool, error)
+	completeWorkflowFn                func(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
+	failWorkflowFn                    func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error
+	releaseWorkflowFn                 func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error
+	requestCancellationFn             func(ctx context.Context, workflowID, reason string) error
+	checkCancellationFn               func(ctx context.Context, workflowID string) (bool, string, error)
+	deliverSignalFn                   func(ctx context.Context, workflowID, signalName, payload string) error
+	pollAndClaimSignalFn              func(ctx context.Context, workflowID, signalName string) (string, bool, error)
+	startNewRunFn                     func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
+	startChildWorkflowFn              func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
+	getChildResultFn                  func(ctx context.Context, runID string) (string, bool, error)
+	reapStaleInstancesFn              func(ctx context.Context, timeout time.Duration) (int, error)
+	getQueryStateFn                   func(ctx context.Context, workflowID, key string) (string, error)
+	listWorkflowsFn                   func(ctx context.Context, status string, limit int) ([]host.WorkflowInstance, error)
+	getWorkflowByIDFn                 func(ctx context.Context, id string) (*host.WorkflowInstance, error)
+	createScheduleFn                  func(ctx context.Context, s host.Schedule) error
+	listSchedulesFn                   func(ctx context.Context) ([]host.Schedule, error)
+	deleteScheduleFn                  func(ctx context.Context, name string) error
+	setScheduleEnabledFn              func(ctx context.Context, name string, enabled bool) error
+	getDueSchedulesFn                 func(ctx context.Context) ([]host.Schedule, error)
+	updateScheduleNextRunFn           func(ctx context.Context, name string, nextRun time.Time) error
+	loadWorkflowConfigFn              func(ctx context.Context, defName string, defVersion int) (int, error)
+	loadDAGSpecFn                     func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error)
+	traceWorkflowFn                   func(ctx context.Context, workflowID, traceID string) (sql.Result, error)
+	getCompactionCandidatesFn         func(ctx context.Context, threshold int, limit int) ([]string, error)
+	loadCompactionStateFn             func(ctx context.Context, workflowID string) (*host.CompactionState, error)
+	compactHistoryFn                  func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
+	createPromiseFn                   func(ctx context.Context, workflowID, promiseName, promiseID string) error
+	resolvePromiseFn                  func(ctx context.Context, workflowID, promiseID, result string) error
+	rejectPromiseFn                   func(ctx context.Context, workflowID, promiseID, errMsg string) error
+	getPromiseFn                      func(ctx context.Context, workflowID, promiseID string) (string, string, string, error)
+	listPromisesFn                    func(ctx context.Context, workflowID string) ([]host.PromiseInfo, error)
+	createUpdateRequestFn             func(ctx context.Context, workflowID, updateName, payload, promiseID string) error
+	getPendingUpdateRequestsFn        func(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error)
+	completeUpdateRequestFn           func(ctx context.Context, workflowID, updateName, result, errMsg string) error
+	acquireConcurrencyKeyFn           func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error)
+	releaseConcurrencyKeyFn           func(ctx context.Context, key string) error
+	releaseWorkflowConcurrencyKeysFn  func(ctx context.Context, workflowID string) error
+	reapExpiredConcurrencyKeysFn      func(ctx context.Context) (int64, error)
+	updateStickyWorkerFn              func(ctx context.Context, workflowID, workerID string) error
+	clearStickyWorkerFn               func(ctx context.Context, workflowID string) error
+	deployWorkflowDefFn               func(ctx context.Context, def *host.WorkflowDef) error
+	listWorkflowDefsFn                func(ctx context.Context, name string) ([]host.WorkflowDef, error)
+	getWorkflowDefFn                  func(ctx context.Context, name string, version int) (*host.WorkflowDef, error)
+	markVersionDeprecatedFn           func(ctx context.Context, name string, version int, deprecated bool) error
+	purgeWorkflowDefFn                func(ctx context.Context, name string, version int) error
+	countActiveInstancesFn            func(ctx context.Context, name string, version int) (int, error)
 	getActiveInstanceCountsByVersionFn func(ctx context.Context) (map[string]int, error)
 	cleanupMemorySamplesFn             func(ctx context.Context, maxSamplesPerDef int) (int64, error)
 	recordWorkflowMemorySampleFn       func(ctx context.Context, defName string, sampleBytes int64) error
 	loadMemoryEstimatesFn              func(ctx context.Context) (map[string]float64, error)
 	loadMemoryStatsFn                  func(ctx context.Context) ([]host.WorkflowMemoryStats, error)
 	queueDepthFn                       func(ctx context.Context) (int64, error)
+	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
 }
 
 func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error) {
@@ -161,9 +162,9 @@ func (m *mockStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, 
 	return nil
 }
 
-func (m *mockStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+func (m *mockStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	if m.failWorkflowFn != nil {
-		return m.failWorkflowFn(ctx, workflowID, workerID, errMsg, queryState)
+		return m.failWorkflowFn(ctx, workflowID, workerID, errMsg, errorCode, errorOp, errorCode, errorOp, queryState)
 	}
 	return nil
 }
@@ -248,9 +249,9 @@ func (m *mockStore) GetQueryState(ctx context.Context, workflowID, key string) (
 	return "", nil
 }
 
-func (m *mockStore) ListWorkflows(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error) {
+func (m *mockStore) ListWorkflows(ctx context.Context, status string, limit int) ([]host.WorkflowInstance, error) {
 	if m.listWorkflowsFn != nil {
-		return m.listWorkflowsFn(ctx, filter)
+		return m.listWorkflowsFn(ctx, status, limit)
 	}
 	return nil, nil
 }
@@ -528,6 +529,13 @@ func (m *mockStore) QueueDepth(ctx context.Context) (int64, error) {
 	return 0, nil
 }
 
+func (m *mockStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	if m.deleteExpiredEventsFn != nil {
+		return m.deleteExpiredEventsFn(ctx, olderThan)
+	}
+	return 0, nil
+}
+
 // ---- test helpers ----
 
 // newTestWorker creates a Worker with a mock store and cancellable context,
@@ -573,6 +581,11 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 		cancel:              cancel,
 		wasmCache:           make(map[string][]byte),
 	}
+}
+
+// newTestAPIServer creates an apiServer with a proper maxBodySize for tests.
+func newTestAPIServer(ms *mockStore) *apiServer {
+	return &apiServer{store: ms, worker: newTestWorker(ms), maxBodySize: 1 << 20}
 }
 
 // waitForCond polls cond until it returns true or the timeout elapses.
@@ -622,7 +635,7 @@ func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 		<-loadWASMCh
 		return nil, nil
 	}
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 		return nil
 	}
 
@@ -909,7 +922,7 @@ func TestDispatchLoop_ConnectionError(t *testing.T) {
 func TestHeartbeatLoop_UpdatesHeartbeats(t *testing.T) {
 	ms := &mockStore{}
 	var (
-		mu         sync.Mutex
+		mu       sync.Mutex
 		heartbeats []string
 	)
 	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
@@ -1295,7 +1308,7 @@ func TestCompactionLoop_StoreError(t *testing.T) {
 
 func TestAPIHealthz(t *testing.T) {
 	ms := &mockStore{}
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -1316,13 +1329,13 @@ func TestAPIHealthz(t *testing.T) {
 
 func TestAPIWorkflowsList(t *testing.T) {
 	ms := &mockStore{}
-	ms.listWorkflowsFn = func(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error) {
+	ms.listWorkflowsFn = func(ctx context.Context, status string, limit int) ([]host.WorkflowInstance, error) {
 		return []host.WorkflowInstance{
 			{ID: "wf-1", DefName: "test", DefVersion: 1, Status: "running"},
 		}, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
 	w := httptest.NewRecorder()
@@ -1347,7 +1360,7 @@ func TestAPIWorkflowsList(t *testing.T) {
 
 func TestAPIWorkflowsList_MethodNotAllowed(t *testing.T) {
 	ms := &mockStore{}
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows", nil)
 	w := httptest.NewRecorder()
@@ -1368,7 +1381,7 @@ func TestAPIWorkflowsGetByID(t *testing.T) {
 		}, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-detail", nil)
 	w := httptest.NewRecorder()
@@ -1396,7 +1409,7 @@ func TestAPISchedulesList(t *testing.T) {
 		}, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/schedules", nil)
 	w := httptest.NewRecorder()
@@ -1421,14 +1434,6 @@ func TestAPISchedulesList(t *testing.T) {
 
 func TestAPIMetrics(t *testing.T) {
 	t.Skip("skipping: metrics now use prometheus/promauto; TestAPIMetrics_ZeroCounts covers basic endpoint")
-	atomic.StoreInt64(&metricsWorkflowsCompleted, 10)
-	atomic.StoreInt64(&metricsWorkflowsFailed, 1)
-	atomic.StoreInt64(&metricsWorkflowsClaimed, 100)
-	atomic.StoreInt64(&metricsDurableCallsTotal, 42)
-	atomic.StoreInt64(&metricsReplayDurationUs, 5000)
-	atomic.StoreInt64(&metricsReplayCount, 5)
-	atomic.StoreInt64(&metricsPollWaitCount, 8)
-	atomic.StoreInt64(&metricsPollWaitTotalUs, 40000)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
@@ -1465,17 +1470,6 @@ func TestAPIMetrics(t *testing.T) {
 }
 
 func TestAPIMetrics_ZeroCounts(t *testing.T) {
-	// Reset all metrics to zero.
-	atomic.StoreInt64(&metricsWorkflowsActive, 0)
-	atomic.StoreInt64(&metricsWorkflowsCompleted, 0)
-	atomic.StoreInt64(&metricsWorkflowsFailed, 0)
-	atomic.StoreInt64(&metricsWorkflowsClaimed, 0)
-	atomic.StoreInt64(&metricsDurableCallsTotal, 0)
-	atomic.StoreInt64(&metricsReplayDurationUs, 0)
-	atomic.StoreInt64(&metricsReplayCount, 0)
-	atomic.StoreInt64(&metricsPollWaitCount, 0)
-	atomic.StoreInt64(&metricsPollWaitTotalUs, 0)
-
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	w := httptest.NewRecorder()
 	handleMetrics(w, req)
@@ -1496,7 +1490,7 @@ func TestAPIMetrics_ZeroCounts(t *testing.T) {
 
 func TestAPIHealthz_ContentType(t *testing.T) {
 	ms := &mockStore{}
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -1520,7 +1514,7 @@ func TestAPIWorkflows_Routing(t *testing.T) {
 		return nil, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	// GET existing workflow — 200.
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-exists", nil)
@@ -1555,7 +1549,7 @@ func TestAPISchedulesCreate(t *testing.T) {
 		return nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"name":"my-schedule","cron":"*/5 * * * *","def_name":"my-workflow"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/schedules", strings.NewReader(body))
@@ -1572,7 +1566,7 @@ func TestAPISchedulesCreate(t *testing.T) {
 }
 
 func TestAPISchedulesCreate_Validation(t *testing.T) {
-	api := &apiServer{store: &mockStore{}, worker: newTestWorker(&mockStore{})}
+	api := newTestAPIServer(&mockStore{})
 
 	tests := []struct {
 		name string
@@ -1596,7 +1590,7 @@ func TestAPISchedulesCreate_Validation(t *testing.T) {
 
 func TestAPIWriteJSON(t *testing.T) {
 	ms := &mockStore{}
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	w := httptest.NewRecorder()
 	api.writeJSON(w, 201, map[string]string{"status": "created"})
@@ -1614,7 +1608,7 @@ func TestAPIWriteJSON(t *testing.T) {
 
 func TestAPIWriteError(t *testing.T) {
 	ms := &mockStore{}
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	w := httptest.NewRecorder()
 	api.writeError(w, 400, "bad request")
@@ -1646,7 +1640,7 @@ func TestAPISchedules_EnableDisable(t *testing.T) {
 		return nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	// Enable
 	req := httptest.NewRequest(http.MethodPost, "/api/schedules/my-sched/enable", nil)
@@ -1679,7 +1673,7 @@ func TestAPISchedules_Delete(t *testing.T) {
 		return nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/schedules/to-delete", nil)
 	w := httptest.NewRecorder()
@@ -2009,25 +2003,6 @@ func TestDispatchLoop_ClaimWorkflowsFallback(t *testing.T) {
 	}
 }
 
-// Test metrics atomic access (no race conditions).
-func TestMetricsAtomic(t *testing.T) {
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			atomic.AddInt64(&metricsWorkflowsClaimed, 1)
-			atomic.AddInt64(&metricsWorkflowsCompleted, 1)
-			atomic.AddInt64(&metricsWorkflowsActive, 1)
-			_ = atomic.LoadInt64(&metricsWorkflowsClaimed)
-			_ = atomic.LoadInt64(&metricsWorkflowsCompleted)
-			_ = atomic.LoadInt64(&metricsWorkflowsActive)
-		}()
-	}
-	wg.Wait()
-	// Ensure no data races (go test -race will catch them).
-}
-
 func TestBaseDSNFromURL_EdgeCases(t *testing.T) {
 	tests := []struct {
 		url  string
@@ -2053,7 +2028,7 @@ func TestBaseDSNFromDSN_EdgeCases(t *testing.T) {
 		dsn  string
 		want string
 	}{
-		{"", ""},
+			{"", ""},
 		{"host=localhost", "host=localhost"},
 		{"user=admin password=secret", ""},
 		{"host=a user=b password=c port=1", "host=a port=1"},
@@ -2137,7 +2112,7 @@ func TestDispatchPendingUpdates_NoEngine(t *testing.T) {
 func TestReleaseOrFail_WithError(t *testing.T) {
 	ms := &mockStore{}
 	failed := false
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 		failed = true
 		if errMsg != "test error" {
 			t.Errorf("expected errMsg 'test error', got %q", errMsg)
@@ -2217,7 +2192,7 @@ func TestAPIStartWorkflow(t *testing.T) {
 		return "wf-new-1", false, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	reqBody := `{"input":{"order_id":"abc"},"entry_point":"place_order"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(reqBody))
@@ -2256,7 +2231,7 @@ func TestAPIStartWorkflow_DefNotFound(t *testing.T) {
 		return nil, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"input":{}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/no-such-wf/start", strings.NewReader(body))
@@ -2279,7 +2254,7 @@ func TestAPIStartWorkflow_WithIdempotencyKey(t *testing.T) {
 		return "wf-existing", true, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"input":{}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(body))
@@ -2310,7 +2285,7 @@ func TestAPIStartWorkflow_WithConcurrencyKey(t *testing.T) {
 		return true, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"input":{},"concurrency_key":"my-key"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(body))
@@ -2330,7 +2305,7 @@ func TestAPISignal(t *testing.T) {
 		return nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"signal_name":"my-signal","payload":"hello"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/signal", strings.NewReader(body))
@@ -2351,7 +2326,7 @@ func TestAPISignal(t *testing.T) {
 
 func TestAPISignal_MissingName(t *testing.T) {
 	ms := &mockStore{}
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"payload":"hello"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/signal", strings.NewReader(body))
@@ -2371,7 +2346,7 @@ func TestAPICancel(t *testing.T) {
 		return nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"reason":"user requested"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/cancel", strings.NewReader(body))
@@ -2398,7 +2373,7 @@ func TestAPIGetHistory(t *testing.T) {
 		}, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/history", nil)
 	w := httptest.NewRecorder()
@@ -2425,7 +2400,7 @@ func TestAPIGetHistory_Nil(t *testing.T) {
 		return nil, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/history", nil)
 	w := httptest.NewRecorder()
@@ -2451,7 +2426,7 @@ func TestAPIGetQueryState(t *testing.T) {
 		return "state-value-42", nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/query?key=mykey", nil)
 	w := httptest.NewRecorder()
@@ -2480,7 +2455,7 @@ func TestAPIGetDAG(t *testing.T) {
 		return json.RawMessage(`{"nodes":[{"name":"step1"}]}`), nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-dag-1/dag", nil)
 	w := httptest.NewRecorder()
@@ -2503,7 +2478,7 @@ func TestAPIGetDAG_WorkflowNotFound(t *testing.T) {
 		return nil, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-missing/dag", nil)
 	w := httptest.NewRecorder()
@@ -2524,7 +2499,7 @@ func TestAPIGetDAG_SpecNotFound(t *testing.T) {
 		return nil, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-dag-2/dag", nil)
 	w := httptest.NewRecorder()
@@ -2544,7 +2519,7 @@ func TestAPIListPromises(t *testing.T) {
 		}, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/promises", nil)
 	w := httptest.NewRecorder()
@@ -2570,7 +2545,7 @@ func TestAPIListPromises_Nil(t *testing.T) {
 		return nil, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/promises", nil)
 	w := httptest.NewRecorder()
@@ -2593,7 +2568,7 @@ func TestAPIResolvePromise(t *testing.T) {
 		return nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"result":"success"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/resolve", strings.NewReader(body))
@@ -2614,7 +2589,7 @@ func TestAPIResolvePromise(t *testing.T) {
 
 func TestAPIResolvePromise_InvalidJSON(t *testing.T) {
 	ms := &mockStore{}
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `not-json`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/resolve", strings.NewReader(body))
@@ -2634,7 +2609,7 @@ func TestAPIRejectPromise(t *testing.T) {
 		return nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"reason":"something went wrong"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/reject", strings.NewReader(body))
@@ -2655,7 +2630,7 @@ func TestAPIRejectPromise(t *testing.T) {
 
 func TestAPIRejectPromise_InvalidJSON(t *testing.T) {
 	ms := &mockStore{}
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/reject", nil)
 	w := httptest.NewRecorder()
@@ -2679,7 +2654,7 @@ func TestAPIWorkflowUpdate(t *testing.T) {
 		return nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"status":"new"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-upd-1/update/my-update", strings.NewReader(body))
@@ -2707,7 +2682,7 @@ func TestAPIWorkflowUpdate_NotFound(t *testing.T) {
 		return nil, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"status":"new"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-missing/update/my-update", strings.NewReader(body))
@@ -2732,7 +2707,7 @@ func TestAPIWorkflowUpdate_Duplicate(t *testing.T) {
 		}, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	body := `{"status":"new"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-upd-2/update/my-update", strings.NewReader(body))
@@ -2761,7 +2736,7 @@ func TestAPIDefinitions(t *testing.T) {
 		return 0, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/definitions", nil)
 	w := httptest.NewRecorder()
@@ -2783,7 +2758,7 @@ func TestAPIDefinitions(t *testing.T) {
 
 func TestAPIDefinitions_MethodNotAllowed(t *testing.T) {
 	ms := &mockStore{}
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/definitions", nil)
 	w := httptest.NewRecorder()
@@ -2804,7 +2779,7 @@ func TestAPIDefinitions_Empty(t *testing.T) {
 		return nil, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/definitions", nil)
 	w := httptest.NewRecorder()
@@ -2837,7 +2812,7 @@ func TestAPIDefinitions_WithMemoryStats(t *testing.T) {
 		return 3, nil
 	}
 
-	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+	api := newTestAPIServer(ms)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/definitions", nil)
 	w := httptest.NewRecorder()

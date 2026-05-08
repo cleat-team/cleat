@@ -327,7 +327,7 @@ func behRouteHandler(t *testing.T) (*Plugin, http.Handler) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	return p, auth.Middleware(p.db)(mux)
+	return p, auth.Middleware(p.db.(*sql.DB))(mux)
 }
 
 // ---------------------------------------------------------------------------
@@ -484,7 +484,7 @@ func TestHandlePut_EmptyKey(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handlePut(w, r)
 	})
-	authHandler := auth.Middleware(p.db)(handler)
+	authHandler := auth.Middleware(p.db.(*sql.DB))(handler)
 
 	body := `{"max_requests":10,"window_seconds":60}`
 	req := behAuthedReq("PUT", "/rate-limits/", bytes.NewReader([]byte(body)))
@@ -502,7 +502,7 @@ func TestHandleDelete_EmptyKey(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handleDelete(w, r)
 	})
-	authHandler := auth.Middleware(p.db)(handler)
+	authHandler := auth.Middleware(p.db.(*sql.DB))(handler)
 
 	req := behAuthedReq("DELETE", "/rate-limits/", nil)
 	rec := httptest.NewRecorder()

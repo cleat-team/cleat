@@ -1575,11 +1575,12 @@ func TestPostgresStore_ClaimWorkflows_Empty(t *testing.T) {
 
 func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1"},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt},
 			},
 		},
 	}, nil)
@@ -1604,7 +1605,7 @@ func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil},
 			},
 		},
 	}, nil)
@@ -1643,7 +1644,7 @@ func TestPostgresStore_ClaimStickyWorkflows_Success(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"stickywf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, "tenant-1"},
+				{"stickywf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, "tenant-1", nil},
 			},
 		},
 	}, nil)
@@ -1686,7 +1687,7 @@ func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil},
 			},
 		},
 	}, nil)
@@ -2044,7 +2045,7 @@ func TestPostgresStore_FailWorkflow(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", "something broke", map[string]string{"key": "val"})
+	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", "something broke", "", "", map[string]string{"key": "val"})
 	if err != nil {
 		t.Fatalf("FailWorkflow: %v", err)
 	}
@@ -2055,7 +2056,7 @@ func TestPostgresStore_FailWorkflow_NilQueryState(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", "error", nil)
+	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", "error", "", "", nil)
 	if err != nil {
 		t.Fatalf("FailWorkflow (nil qs): %v", err)
 	}

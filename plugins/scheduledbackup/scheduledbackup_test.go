@@ -202,3 +202,196 @@ func TestPluginRegistration(t *testing.T) {
 		t.Error("scheduled-backup plugin not found after Discover")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// parseField edge case tests (pure function)
+// ---------------------------------------------------------------------------
+
+func TestParseField_Star(t *testing.T) {
+	cf, err := parseField("*", 0, 59)
+	if err != nil {
+		t.Fatalf("parseField(*): unexpected error: %v", err)
+	}
+	if !cf.any {
+		t.Error("expected any=true for *")
+	}
+	if cf.step != 0 {
+		t.Errorf("expected step=0, got %d", cf.step)
+	}
+}
+
+func TestParseField_StepInvalid(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+	}{
+		{"non-numeric step", "*/abc"},
+		{"zero step", "*/0"},
+		{"negative step", "*/-1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseField(tc.field, 0, 59)
+			if err == nil {
+				t.Errorf("parseField(%q): expected error", tc.field)
+			}
+		})
+	}
+}
+
+func TestParseField_ListInvalid(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+	}{
+		{"non-numeric in list", "1,abc,3"},
+		{"out of range in list", "100,200"},
+		{"empty list element", "1,,3"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseField(tc.field, 0, 59)
+			if err == nil {
+				t.Errorf("parseField(%q): expected error", tc.field)
+			}
+		})
+	}
+}
+
+func TestParseField_RangeInvalid(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		min   int
+		max   int
+	}{
+		{"invalid range start", "a-5", 0, 59},
+		{"invalid range end", "1-a", 0, 59},
+		{"range start out of bounds", "100-200", 0, 59},
+		{"range end out of bounds", "1-200", 0, 59},
+		{"range end before start", "30-10", 0, 59},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseField(tc.field, tc.min, tc.max)
+			if err == nil {
+				t.Errorf("parseField(%q): expected error", tc.field)
+			}
+		})
+	}
+}
+
+func TestParseField_RangeWithStep(t *testing.T) {
+	cf, err := parseField("1-10/3", 0, 59)
+	if err != nil {
+		t.Fatalf("parseField(1-10/3): unexpected error: %v", err)
+	}
+	if cf.any {
+		t.Error("expected any=false for range-with-step")
+	}
+	expected := map[int]bool{1: true, 4: true, 7: true, 10: true}
+	for k, v := range expected {
+		if cf.values[k] != v {
+			t.Errorf("expected values[%d] = %v, got %v", k, v, cf.values[k])
+		}
+	}
+	for v := 0; v <= 11; v++ {
+		if !expected[v] && cf.values[v] {
+			t.Errorf("unexpected value %d in range-with-step", v)
+		}
+	}
+}
+
+func TestParseField_RangeWithStepInvalid(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+	}{
+		{"invalid range step non-numeric", "1-10/abc"},
+		{"invalid range step zero", "1-10/0"},
+		{"invalid range step negative", "1-10/-1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseField(tc.field, 0, 59)
+			if err == nil {
+				t.Errorf("parseField(%q): expected error", tc.field)
+			}
+		})
+	}
+}
+
+func TestParseField_SingleOutOfRange(t *testing.T) {
+	tests := []struct {
+		name  string
+		field string
+		min   int
+		max   int
+	}{
+		{"below min", "-1", 0, 59},
+		{"above max", "100", 0, 59},
+		{"non-numeric", "abc", 0, 59},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseField(tc.field, tc.min, tc.max)
+			if err == nil {
+				t.Errorf("parseField(%q): expected error", tc.field)
+			}
+		})
+	}
+}
+
+func TestParseCron_InvalidFields(t *testing.T) {
+	tests := []struct {
+		name string
+		expr string
+	}{
+		{"too few fields", "* * * *"},
+		{"too many fields", "* * * * * *"},
+		{"invalid minute", "abc * * * *"},
+		{"invalid hour", "* abc * * *"},
+		{"invalid day", "* * abc * *"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseCron(tc.expr)
+			if err == nil {
+				t.Errorf("parseCron(%q): expected error", tc.expr)
+			}
+		})
+	}
+}
+
+func TestMatches_StepPattern(t *testing.T) {
+	cf, err := parseField("*/15", 0, 59)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		val  int
+		want bool
+	}{
+		{0, true},
+		{15, true},
+		{30, true},
+		{45, true},
+		{5, false},
+		{10, false},
+	}
+	for _, tc := range tests {
+		got := cf.matches(tc.val)
+		if got != tc.want {
+			t.Errorf("matches(*/15, %d) = %v, want %v", tc.val, got, tc.want)
+		}
+	}
+}
+
+func TestNextRun_StepRange(t *testing.T) {
+	base := time.Date(2025, 6, 1, 10, 5, 0, 0, time.UTC)
+	next := nextRun("0-59/15 * * * *", base)
+	expected := time.Date(2025, 6, 1, 10, 15, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("step range: expected %v, got %v", expected, next)
+	}
+}

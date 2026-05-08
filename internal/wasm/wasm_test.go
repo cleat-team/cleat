@@ -2,6 +2,7 @@ package wasm
 
 import (
 	"go/parser"
+	"go/ast"
 	"go/token"
 	"strings"
 	"testing"
@@ -776,4 +777,40 @@ func TestNeedsTimeWithUnmappedField(t *testing.T) {
 	if needsTime(usage) {
 		t.Error("expected false for unmapped field")
 	}
+}
+
+func TestGenerateExportsResultOnlyReturn(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages(
+		"github.com/rcownie/cleat/testdata/vet-checks/go/e009_init", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages(e009_init): %v", err)
+	}
+	code := string(GenerateExports("main", result))
+	if !strings.Contains(code, "__r := Workflow(h)") {
+		t.Error("expected result-only assignment for Workflow")
+	}
+	syntaxCheck(t, "GenerateExports(e009)", code)
+}
+
+func TestGenerateExportsNilEntryPoint(t *testing.T) {
+	result := &analyzer.AnalysisResult{
+		TargetPkg:   &analyzer.Package{Types: nil},
+		EntryPoints: []string{"nonexistent"},
+		Funcs:       map[string]*analyzer.FuncDecl{},
+	}
+	code := string(GenerateExports("main", result))
+	if !strings.Contains(code, "package main") {
+		t.Error("expected valid output even with nil entry point")
+	}
+}
+
+func TestCollectHostCallsCallsNilBody(t *testing.T) {
+	fd := &analyzer.FuncDecl{
+		Name: "test",
+		Ast:  &ast.FuncDecl{Body: nil},
+	}
+	info := &UsageInfo{}
+	collectHostCallsCalls(fd, info)
+	// Should not panic when Ast is nil.
 }

@@ -6,7 +6,6 @@ package eventtriggers
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
@@ -26,7 +25,7 @@ func init() {
 // Plugin implements event-driven workflow triggers with tenant-isolated
 // event subscriptions, idempotent event ingestion, and filter expressions.
 type Plugin struct {
-	db     *sql.DB
+db     plugin.DB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	env    *plugin.Environment

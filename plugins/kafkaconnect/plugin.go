@@ -6,7 +6,6 @@ package kafkaconnect
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -30,7 +29,7 @@ func init() {
 
 // Plugin implements Kafka publish and consume integration for workflows.
 type Plugin struct {
-	db         *sql.DB
+db         plugin.DB
 	mux        *http.ServeMux
 	logger     *slog.Logger
 	httpClient *http.Client

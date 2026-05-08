@@ -901,3 +901,145 @@ func TestExprMarkerComparisonExpr(t *testing.T) {
 func TestExprMarkerMembershipExpr(t *testing.T) {
 	membershipExpr{}.exprMarker()
 }
+
+// ---------------------------------------------------------------------------
+// getPath edge case tests
+// ---------------------------------------------------------------------------
+
+func TestGetPath_NonExistentField(t *testing.T) {
+	data := map[string]interface{}{
+		"existing": "value",
+	}
+	_, ok := getPath(data, "missing")
+	if ok {
+		t.Error("expected false for missing top-level field")
+	}
+}
+
+func TestGetPath_NonNumericArrayIndex(t *testing.T) {
+	data := map[string]interface{}{
+		"items": []interface{}{"a", "b", "c"},
+	}
+	// "items[abc]" should fail due to non-numeric index
+	_, ok := getPath(data, "items[abc]")
+	if ok {
+		t.Error("expected false for non-numeric array index")
+	}
+}
+
+func TestGetPath_NegativeArrayIndex(t *testing.T) {
+	data := map[string]interface{}{
+		"items": []interface{}{"a", "b", "c"},
+	}
+	_, ok := getPath(data, "items[-1]")
+	if ok {
+		t.Error("expected false for negative array index")
+	}
+}
+
+func TestGetPath_TypeMismatch(t *testing.T) {
+	data := map[string]interface{}{
+		"scalar": "hello",
+	}
+	// Trying to index into a scalar value should fail.
+	_, ok := getPath(data, "scalar.field")
+	if ok {
+		t.Error("expected false when accessing field on non-map value")
+	}
+}
+
+func TestGetPath_ArrayIndexOnNonArray(t *testing.T) {
+	data := map[string]interface{}{
+		"scalar": "hello",
+	}
+	_, ok := getPath(data, "scalar[0]")
+	if ok {
+		t.Error("expected false when indexing into non-array value")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// parsePath edge case tests
+// ---------------------------------------------------------------------------
+
+
+func TestParsePath_TrailingDot(t *testing.T) {
+	_, err := EvaluateFilter("event.data. > 5", nil)
+	if err == nil {
+		t.Error("expected error for trailing dot in path")
+	}
+}
+
+func TestParsePath_EmptyBrackets(t *testing.T) {
+	_, err := EvaluateFilter("event.data.items[] == 5", nil)
+	if err == nil {
+		t.Error("expected error for empty brackets")
+	}
+}
+
+func TestParsePath_NonNumberInBrackets(t *testing.T) {
+	_, err := EvaluateFilter(`event.data.items[abc] == 5`, nil)
+	if err == nil {
+		t.Error("expected error for non-number in brackets")
+	}
+}
+
+func TestParsePath_UnclosedBracket(t *testing.T) {
+	_, err := EvaluateFilter("event.data.items[0 == 5", nil)
+	if err == nil {
+		t.Error("expected error for unclosed bracket")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// EvaluateFilter edge case tests
+// ---------------------------------------------------------------------------
+
+func TestEvaluateFilter_NonExistentPath(t *testing.T) {
+	data := map[string]interface{}{
+		"event": map[string]interface{}{
+			"data": map[string]interface{}{
+				"price": 100.0,
+			},
+		},
+	}
+	_, err := EvaluateFilter("event.data.nonexistent > 50", data)
+	if err == nil {
+		t.Error("expected error for non-existent path")
+	}
+}
+
+func TestEvaluateFilter_MissingEventKey(t *testing.T) {
+	data := map[string]interface{}{
+		"wrong_key": "value",
+	}
+	_, err := EvaluateFilter("event.data.x == 5", data)
+	if err == nil {
+		t.Error("expected error for missing event key in data")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// parsePath edge case tests via EvaluateFilter
+// ---------------------------------------------------------------------------
+
+func TestEvaluateFilter_InvalidPathStart(t *testing.T) {
+	_, err := EvaluateFilter("badstart.data.x > 5", nil)
+	if err == nil {
+		t.Error("expected error for path not starting with 'event'")
+	}
+}
+
+func TestEvaluateFilter_MissingDotAfterEvent(t *testing.T) {
+	_, err := EvaluateFilter("eventXdata.x > 5", nil)
+	if err == nil {
+		t.Error("expected error for missing '.' after 'event'")
+	}
+}
+
+func TestEvaluateFilter_MissingDataAfterDot(t *testing.T) {
+	_, err := EvaluateFilter("event.nodata.x > 5", nil)
+	if err == nil {
+		t.Error("expected error for missing 'data' after 'event.'")
+	}
+}

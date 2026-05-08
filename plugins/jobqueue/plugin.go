@@ -6,7 +6,6 @@ package jobqueue
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"net/http"
 
@@ -26,7 +25,7 @@ func init() {
 
 // Plugin implements a standalone job queue with tenant isolation.
 type Plugin struct {
-	db     *sql.DB
+db     plugin.DB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	env    *plugin.Environment

@@ -5,12 +5,52 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"path/filepath"
 	"testing"
 
 	"github.com/rcownie/cleat/internal/analyzer"
 	"github.com/rcownie/cleat/internal/closure"
 )
+
+// ---------------------------------------------------------------------------
+// isErrorType — dev.go
+// ---------------------------------------------------------------------------
+
+func TestIsErrorType(t *testing.T) {
+	errorType := types.NewNamed(
+		types.NewTypeName(0, nil, "error", nil),
+		nil, nil,
+	)
+
+	t.Run("error_type", func(t *testing.T) {
+		if !isErrorType(errorType) {
+			t.Error("isErrorType(error) should be true")
+		}
+	})
+
+	t.Run("string_type", func(t *testing.T) {
+		if isErrorType(types.Typ[types.String]) {
+			t.Error("isErrorType(string) should be false")
+		}
+	})
+
+	t.Run("non_named_type", func(t *testing.T) {
+		if isErrorType(types.Typ[types.Int]) {
+			t.Error("isErrorType(int) should be false")
+		}
+	})
+
+	t.Run("different_named_type", func(t *testing.T) {
+		myType := types.NewNamed(
+			types.NewTypeName(0, types.NewPackage("mypkg", "mypkg"), "MyError", nil),
+			nil, nil,
+		)
+		if isErrorType(myType) {
+			t.Error("isErrorType(mypkg.MyError) should be false (not builtin error)")
+		}
+	})
+}
 
 func TestIsValidTarget(t *testing.T) {
 	valid := []string{"go", "tinygo", "rust", "java", "assemblyscript", "python"}

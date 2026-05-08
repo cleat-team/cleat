@@ -40,6 +40,7 @@ type WorkflowInstance struct {
 	AssignedTo string          `json:"assigned_to"`
 	NextWakeAt time.Time       `json:"next_wake_at"`
 	TenantID   string          `json:"tenant_id,omitempty"`
+	CreatedAt  time.Time       `json:"created_at,omitempty"`
 }
 
 // Schedule is a row from workflow_schedules.
@@ -168,7 +169,7 @@ type WorkflowStore interface {
 	CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
 
 	// FailWorkflow marks a workflow as failed.
-	FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error
+	FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 
 	// MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 	// after exhausting all retry attempts. This is a terminal status similar to
@@ -353,6 +354,12 @@ type WorkflowStore interface {
 
 	// CleanupMemorySamples deletes samples beyond maxSamplesPerDef per def_name.
 	CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error)
+
+	// DeleteExpiredEvents deletes event history rows for workflows that are in a
+	// terminal state (completed/failed) and whose last update is older than the
+	// cutoff time.  It also deletes associated compaction states.
+	// Returns the number of event rows deleted.
+	DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error)
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
@@ -455,7 +462,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace 
 			LIMIT $4
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at
 	`, workerID, namespace, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
@@ -467,9 +474,10 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace 
 		var wf WorkflowInstance
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
+		var createdAt sql.NullTime
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -478,6 +486,9 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace 
 		}
 		if tenantID.Valid {
 			wf.TenantID = tenantID.String
+		}
+		if createdAt.Valid {
+			wf.CreatedAt = createdAt.Time
 		}
 		wfs = append(wfs, &wf)
 	}
@@ -518,7 +529,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, name
 			LIMIT $4
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at
 	`, workerID, namespace, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
@@ -530,9 +541,10 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, name
 		var wf WorkflowInstance
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
+		var createdAt sql.NullTime
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
@@ -1112,7 +1124,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 }
 
 // FailWorkflow marks a workflow as failed.
-func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("fail workflow: begin: %w", err)
@@ -1125,9 +1137,15 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, 
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'failed', error_msg = $3, completed_at = now(), assigned_to = NULL, query_state = $4
+		SET status = 'failed',
+		    error_msg = $3,
+		    error_code = $4,
+		    error_op = $5,
+		    completed_at = now(),
+		    assigned_to = NULL,
+		    query_state = $6
 		WHERE id = $1 AND assigned_to = $2
-	`, workflowID, workerID, errMsg, qsJSON)
+	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsJSON)
 	if err != nil {
 		return err
 	}
@@ -1139,7 +1157,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, 
 	// Best-effort: record error in idempotency_keys if this workflow was started with a key.
 	s.db.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $3 WHERE workflow_id = $1`,
-		workflowID, errMsg)
+		workflowID, errorMsg)
 
 	// Best-effort: clear sticky worker assignment (Feature 10).
 	s.ClearStickyWorker(context.Background(), workflowID)
@@ -2551,5 +2569,58 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 		n, _ := result.RowsAffected()
 		totalDeleted += n
 	}
+	return totalDeleted, nil
+}
+
+
+// DeleteExpiredEvents deletes event history rows for completed/failed workflows
+// whose completed_at is older than the cutoff. It uses batching to avoid
+// locking the event_history table when there are millions of rows to delete.
+func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalDeleted int64
+	for {
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM event_history
+			WHERE workflow_id IN (
+				SELECT id FROM workflow_instances
+				WHERE status IN ('done', 'failed')
+				  AND completed_at IS NOT NULL
+				  AND completed_at < $1
+				LIMIT 10000
+			)
+		`, olderThan)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		totalDeleted += n
+		if n == 0 {
+			break
+		}
+	}
+
+	// Also batch cleanup compaction states for those workflows.
+	for {
+		result, err := s.db.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
+			WHERE id IN (
+				SELECT id FROM workflow_instances
+				WHERE status IN ('done', 'failed')
+				  AND completed_at IS NOT NULL
+				  AND completed_at < $1
+				  AND compaction_state IS NOT NULL
+				LIMIT 10000
+			)
+		`, olderThan)
+		if err != nil {
+			break
+		}
+		n, _ := result.RowsAffected()
+		if n == 0 {
+			break
+		}
+	}
+
 	return totalDeleted, nil
 }

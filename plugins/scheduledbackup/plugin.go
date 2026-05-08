@@ -5,7 +5,6 @@ package scheduledbackup
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -28,7 +27,7 @@ func init() {
 
 // Plugin implements scheduled PostgreSQL backups with tenant isolation.
 type Plugin struct {
-	db     *sql.DB
+db     plugin.DB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config

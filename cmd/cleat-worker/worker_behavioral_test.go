@@ -79,7 +79,7 @@ func TestDispatchLoop_StickyReclaim(t *testing.T) {
 		<-loadWASMCh
 		return nil, nil
 	}
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 		return nil
 	}
 
@@ -272,7 +272,7 @@ func TestReleaseOrFail_NoError(t *testing.T) {
 		released = true
 		return nil
 	}
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 		failed = true
 		return nil
 	}

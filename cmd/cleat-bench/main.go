@@ -121,7 +121,7 @@ func runBenchmark(ctx context.Context, store *host.PostgresStore, defName string
 			result, history, _, _, _, err := engine.Execute(ctx, wasmBytes, entryPoint, input)
 			if err != nil {
 				log.Printf("Execute error for %s: %v", runID, err)
-				store.FailWorkflow(ctx, runID, "", err.Error(), nil)
+				store.FailWorkflow(ctx, runID, "", err.Error(), "", "", nil)
 				return
 			}
 
@@ -188,7 +188,7 @@ func runReplayBenchmark(ctx context.Context, store *host.PostgresStore, defName 
 			_, history, _, _, _, err := engine.Execute(ctx, wasmBytes, entryPoint, input)
 			if err != nil {
 				log.Printf("First execute error: %v", err)
-				store.FailWorkflow(ctx, runID, "", err.Error(), nil)
+				store.FailWorkflow(ctx, runID, "", err.Error(), "", "", nil)
 				return
 			}
 
@@ -207,7 +207,7 @@ func runReplayBenchmark(ctx context.Context, store *host.PostgresStore, defName 
 			_, _, _, _, _, err = engine2.Replay(ctx, wasmBytes, entryPoint, input, history)
 			if err != nil {
 				log.Printf("Replay error: %v", err)
-				store.FailWorkflow(ctx, runID, "", err.Error(), nil)
+				store.FailWorkflow(ctx, runID, "", err.Error(), "", "", nil)
 				return
 			}
 

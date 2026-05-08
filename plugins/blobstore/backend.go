@@ -11,6 +11,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // Backend stores and retrieves blob bytes. Implementations must be safe for
@@ -27,10 +28,10 @@ type Backend interface {
 // memoryBackend stores blobs in the PostgreSQL blob_content.data BYTEA column.
 // This is the default backend for dev/testing and requires no external services.
 type memoryBackend struct {
-	db *sql.DB
+	db plugin.DB
 }
 
-func newMemoryBackend(db *sql.DB) *memoryBackend {
+func newMemoryBackend(db plugin.DB) *memoryBackend {
 	return &memoryBackend{db: db}
 }
 

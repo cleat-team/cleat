@@ -434,3 +434,163 @@ func TestDetectEntryFunctionFallback_NonDefAfterDecorator(t *testing.T) {
 		t.Fatal("expected error when non-def line follows @cleat_entry")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// build_python.go -- detectEntryFunctionFallback continuation line
+// ---------------------------------------------------------------------------
+
+func TestDetectEntryFunctionFallback_ContinuationParen(t *testing.T) {
+	// Decorator with parenthesized args continuing on next line.
+	content := "@cleat_entry(\ndef my_func():\n    pass\n"
+	tmpFile := filepath.Join(t.TempDir(), "test.py")
+	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	name, err := detectEntryFunctionFallback(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "my_func" {
+		t.Errorf("expected 'my_func', got %q", name)
+	}
+}
+
+func TestDetectEntryFunctionFallback_CommentAfterDecorator(t *testing.T) {
+	// Comment line between decorator and def should be skipped.
+	content := "@cleat_entry\n# some comment about this decorator\ndef commented_func():\n    pass\n"
+	tmpFile := filepath.Join(t.TempDir(), "test.py")
+	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	name, err := detectEntryFunctionFallback(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "commented_func" {
+		t.Errorf("expected 'commented_func', got %q", name)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// buildParams qualifier edge cases
+// ---------------------------------------------------------------------------
+
+func TestBuildParams_QualifierDifferentPackage(t *testing.T) {
+	// A parameter whose type is from a different package should use the
+	// qualifier's other.Name() branch.
+	otherPkg := types.NewPackage("other/module", "otherpkg")
+	otherType := types.NewNamed(
+		types.NewTypeName(0, otherPkg, "OtherType", nil),
+		types.NewStruct(nil, nil), nil,
+	)
+
+	result := &analyzer.AnalysisResult{
+		TargetPkg: &analyzer.Package{Path: "my/pkg", Name: "mypkg"},
+	}
+	sig := types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(0, nil, "h", types.Typ[types.String]),
+			types.NewParam(0, nil, "input", otherType),
+		),
+		nil, false,
+	)
+	fd := &analyzer.FuncDecl{Type: sig}
+	params := buildParams(result, fd)
+	if len(params) != 1 {
+		t.Fatalf("expected 1 param, got %d", len(params))
+	}
+	if params[0].TypeStr != "otherpkg.OtherType" {
+		t.Errorf("expected TypeStr 'otherpkg.OtherType', got %q", params[0].TypeStr)
+	}
+}
+
+func TestBuildParams_QualifierSamePackage(t *testing.T) {
+	// A parameter whose type is from the target package should use the
+	// result.TargetPkg.Name branch.
+	targetPkg := types.NewPackage("my/pkg", "mypkg")
+	targetType := types.NewNamed(
+		types.NewTypeName(0, targetPkg, "MyType", nil),
+		types.NewStruct(nil, nil), nil,
+	)
+
+	result := &analyzer.AnalysisResult{
+		TargetPkg: &analyzer.Package{Path: "my/pkg", Name: "mypkg"},
+	}
+	sig := types.NewSignatureType(nil, nil, nil,
+		types.NewTuple(
+			types.NewParam(0, nil, "h", types.Typ[types.String]),
+			types.NewParam(0, nil, "data", targetType),
+		),
+		nil, false,
+	)
+	fd := &analyzer.FuncDecl{Type: sig}
+	params := buildParams(result, fd)
+	if len(params) != 1 {
+		t.Fatalf("expected 1 param, got %d", len(params))
+	}
+	if params[0].TypeStr != "mypkg.MyType" {
+		t.Errorf("expected TypeStr 'mypkg.MyType', got %q", params[0].TypeStr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dev.go -- generateDevMain for return kinds not tested by fixtures
+// ---------------------------------------------------------------------------
+
+func TestGenerateDevMain_ReturnNothing(t *testing.T) {
+	result := &analyzer.AnalysisResult{
+		TargetPkg: &analyzer.Package{Path: "test/pkg", Name: "testpkg"},
+	}
+	params := []paramInfo{}
+	kind := returnNothing
+	src, err := generateDevMain(result, "MyFunc", params, kind, "")
+	if err != nil {
+		t.Fatalf("generateDevMain failed: %v", err)
+	}
+	content := string(src)
+	// For returnNothing: just calls "testpkg.MyFunc(h)" without assigning.
+	if !strings.Contains(content, "testpkg.MyFunc(h)") {
+		t.Error("expected 'testpkg.MyFunc(h)' call (no assignment)")
+	}
+	if !strings.Contains(content, "emitResult") {
+		t.Error("expected emitResult call")
+	}
+}
+
+func TestGenerateDevMain_ReturnError(t *testing.T) {
+	result := &analyzer.AnalysisResult{
+		TargetPkg: &analyzer.Package{Path: "test/pkg", Name: "testpkg"},
+	}
+	params := []paramInfo{}
+	kind := returnError
+	src, err := generateDevMain(result, "MyFunc", params, kind, "")
+	if err != nil {
+		t.Fatalf("generateDevMain failed: %v", err)
+	}
+	content := string(src)
+	// For returnError: assigns err, checks it, emits result "ok".
+	if !strings.Contains(content, "err := testpkg.MyFunc(h)") {
+		t.Error("expected 'err := testpkg.MyFunc(h)' call")
+	}
+	if !strings.Contains(content, "emitResult(runner, \"ok\")") {
+		t.Error("expected emitResult with \"ok\"")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// build_rust.go -- extractCrateName: package section followed by another section
+// ---------------------------------------------------------------------------
+
+func TestExtractCrateName_SectionAfterPackage(t *testing.T) {
+	// [package] section followed by [dependencies] before name -> no name found.
+	content := "[package]\n[dependencies]\nname = \"should-not-match\"\n"
+	tmpFile := filepath.Join(t.TempDir(), "Cargo.toml")
+	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := extractCrateName(tmpFile)
+	if want := "rust_workflow"; got != want {
+		t.Errorf("extractCrateName = %q, want %q", got, want)
+	}
+}
+

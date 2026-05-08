@@ -4,7 +4,6 @@ package oauthprovider
 
 import (
 	"context"
-	"database/sql"
 	"log/slog"
 	"net/http"
 	"time"
@@ -25,7 +24,7 @@ func init() {
 
 // Plugin implements OAuth2/OIDC authentication with Google, GitHub, and Okta.
 type Plugin struct {
-	db         *sql.DB
+db         plugin.DB
 	mux        *http.ServeMux
 	logger     *slog.Logger
 	httpClient *http.Client

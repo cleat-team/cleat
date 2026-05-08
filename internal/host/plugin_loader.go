@@ -361,8 +361,12 @@ func (l *PluginLoader) DeployPluginWithCapabilities(ctx context.Context, name st
 	// If limits are set, validate declared capabilities.
 	if l.limits.IsSet() {
 		// Convert declared Capabilities to CapabilityLimits for validation.
+		dbAccess := plugin.DatabaseAccessNone
+		if declared.Database {
+			dbAccess = plugin.DatabaseAccessReadWrite
+		}
 		declaredLimits := plugin.CapabilityLimits{
-			Database:         declared.Database,
+			Database:         dbAccess,
 			StartWorkflow:    declared.StartWorkflow,
 			SignalWorkflow:   declared.SignalWorkflow,
 			HTTPRoutes:       declared.HTTPRoutes,

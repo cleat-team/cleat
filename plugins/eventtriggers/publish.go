@@ -2,7 +2,6 @@ package eventtriggers
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -20,7 +19,7 @@ import (
 // through the HTTP API.
 func PublishEvent(
 	ctx context.Context,
-	db *sql.DB,
+db plugin.DB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	eventID uuid.UUID,
@@ -81,7 +80,7 @@ func PublishEvent(
 // errors are logged but do not halt processing).
 func triggerMatchingWorkflows(
 	ctx context.Context,
-	db *sql.DB,
+db plugin.DB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	eventID uuid.UUID,
@@ -169,7 +168,7 @@ func triggerMatchingWorkflows(
 // an event has been successfully stored.
 func signalAwaiters(
 	ctx context.Context,
-	db *sql.DB,
+db plugin.DB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	tenantID uuid.UUID,
@@ -224,7 +223,7 @@ func signalAwaiters(
 }
 
 // unregisterAwaiter removes the awaiter record.
-func unregisterAwaiter(ctx context.Context, db *sql.DB, logger *slog.Logger, workflowID, eventType string) {
+func unregisterAwaiter(ctx context.Context, db plugin.DB, logger *slog.Logger, workflowID, eventType string) {
 	if workflowID == "" {
 		return
 	}

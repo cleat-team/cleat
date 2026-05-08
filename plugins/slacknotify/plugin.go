@@ -5,7 +5,6 @@ package slacknotify
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -28,7 +27,7 @@ func init() {
 
 // Plugin implements Slack webhook message sending for workflows.
 type Plugin struct {
-	db         *sql.DB
+db         plugin.DB
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config

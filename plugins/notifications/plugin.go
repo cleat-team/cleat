@@ -9,7 +9,6 @@ package notifications
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -32,7 +31,7 @@ func init() {
 
 // Plugin implements webhook delivery with retry and delivery tracking.
 type Plugin struct {
-	db         *sql.DB
+db         plugin.DB
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config

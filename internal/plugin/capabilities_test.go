@@ -9,11 +9,11 @@ import (
 
 func TestValidateCapabilitiesNoViolations(t *testing.T) {
 	declared := CapabilityLimits{
-		Database:       true,
+		Database:       DatabaseAccessReadWrite,
 		SignalWorkflow: true,
 	}
 	limits := CapabilityLimits{
-		Database:       true,
+		Database:       DatabaseAccessReadWrite,
 		SignalWorkflow: true,
 	}
 	if err := ValidateCapabilities(declared, limits); err != nil {
@@ -23,17 +23,17 @@ func TestValidateCapabilitiesNoViolations(t *testing.T) {
 
 func TestValidateCapabilitiesDatabaseDenied(t *testing.T) {
 	declared := CapabilityLimits{
-		Database: true,
+		Database: DatabaseAccessReadWrite,
 	}
 	limits := CapabilityLimits{
-		Database: false,
+		Database: DatabaseAccessNone,
 	}
 	err := ValidateCapabilities(declared, limits)
 	if err == nil {
 		t.Fatal("expected error for database denied")
 	}
-	if !strings.Contains(err.Error(), "database access denied") {
-		t.Errorf("expected 'database access denied', got: %v", err)
+	if !strings.Contains(err.Error(), "database access") {
+		t.Errorf("expected .database access. in error, got: %v", err)
 	}
 }
 
@@ -111,14 +111,14 @@ func TestValidateCapabilitiesCallPluginExactMatch(t *testing.T) {
 
 func TestValidateCapabilitiesMultipleViolations(t *testing.T) {
 	declared := CapabilityLimits{
-		Database:       true,
+		Database:       DatabaseAccessReadWrite,
 		StartWorkflow:  true,
 		SignalWorkflow: true,
 		HTTPRoutes:     true,
 		CallPlugin:     []string{"foo"},
 	}
 	limits := CapabilityLimits{
-		Database:         false,
+		Database:         DatabaseAccessNone,
 		StartWorkflow:    false,
 		SignalWorkflow:   false,
 		HTTPRoutes:       false,
@@ -130,8 +130,8 @@ func TestValidateCapabilitiesMultipleViolations(t *testing.T) {
 		t.Fatal("expected error for multiple violations")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "database access denied") {
-		t.Errorf("expected 'database access denied' in error")
+	if !strings.Contains(msg, "database access") {
+		t.Errorf("expected .database access. in error")
 	}
 	if !strings.Contains(msg, "start_workflow denied") {
 		t.Errorf("expected 'start_workflow denied' in error")
@@ -149,8 +149,8 @@ func TestValidateCapabilitiesMultipleViolations(t *testing.T) {
 
 func TestDefaultLimits(t *testing.T) {
 	limits := DefaultLimits()
-	if !limits.Database {
-		t.Error("expected Database to be true")
+	if limits.Database != DatabaseAccessNone {
+		t.Error("expected Database to be DatabaseAccessNone")
 	}
 	if limits.StartWorkflow {
 		t.Error("expected StartWorkflow to be false")
@@ -225,8 +225,8 @@ func TestValidateCapabilitiesBackgroundWorkerDenied(t *testing.T) {
 func TestDeriveCapabilitiesNoInterfaces(t *testing.T) {
 	p := &noopPlugin{}
 	caps := DeriveCapabilities(p)
-	if !caps.Database {
-		t.Error("expected Database to be true for all Go plugins")
+	if caps.Database != "" {
+		t.Error("expected Database to be empty (no default database access)")
 	}
 	if caps.HTTPRoutes {
 		t.Error("expected HTTPRoutes to be false for noop")
@@ -251,8 +251,8 @@ func (p *routesPlugin) RegisterRoutes(mux *http.ServeMux) error {
 func TestDeriveCapabilitiesWithRoutes(t *testing.T) {
 	p := &routesPlugin{}
 	caps := DeriveCapabilities(p)
-	if !caps.Database {
-		t.Error("expected Database to be true")
+	if caps.Database != "" {
+		t.Error("expected Database to be empty (no default database access)")
 	}
 	if !caps.HTTPRoutes {
 		t.Error("expected HTTPRoutes to be true for routesPlugin")
@@ -277,8 +277,8 @@ func (p *middlewarePlugin) Middleware(next http.Handler) http.Handler {
 func TestDeriveCapabilitiesWithMiddleware(t *testing.T) {
 	p := &middlewarePlugin{}
 	caps := DeriveCapabilities(p)
-	if !caps.Database {
-		t.Error("expected Database to be true")
+	if caps.Database != "" {
+		t.Error("expected Database to be empty (no default database access)")
 	}
 	if caps.HTTPRoutes {
 		t.Error("expected HTTPRoutes to be false")
@@ -303,8 +303,8 @@ func (p *backgroundPlugin) Run(ctx context.Context) error {
 func TestDeriveCapabilitiesWithBackground(t *testing.T) {
 	p := &backgroundPlugin{}
 	caps := DeriveCapabilities(p)
-	if !caps.Database {
-		t.Error("expected Database to be true")
+	if caps.Database != "" {
+		t.Error("expected Database to be empty (no default database access)")
 	}
 	if caps.HTTPRoutes {
 		t.Error("expected HTTPRoutes to be false")
@@ -327,8 +327,8 @@ func TestCapabilityLimitsIsSet(t *testing.T) {
 		t.Error("expected DefaultLimits().IsSet() to be true")
 	}
 
-	if !(CapabilityLimits{Database: true}).IsSet() {
-		t.Error("expected IsSet() to be true when Database is true")
+	if !(CapabilityLimits{Database: DatabaseAccessReadWrite}).IsSet() {
+		t.Error("expected IsSet() to be true when Database is set")
 	}
 
 	if !(CapabilityLimits{CallPlugin: []string{"foo"}}).IsSet() {

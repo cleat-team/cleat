@@ -901,7 +901,7 @@ func TestPutRateLimit(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	handler := auth.Middleware(p.db)(mux)
+	handler := auth.Middleware(p.db.(*sql.DB))(mux)
 
 	body := `{"max_requests":100,"window_seconds":60}`
 	req := httptest.NewRequest("PUT", "/rate-limits/myapi", bytes.NewReader([]byte(body)))
@@ -946,7 +946,7 @@ func TestPutRateLimitUpdate(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	handler := auth.Middleware(p.db)(mux)
+	handler := auth.Middleware(p.db.(*sql.DB))(mux)
 
 	// Create with 50 req / 30s.
 	body1 := `{"max_requests":50,"window_seconds":30}`
@@ -1013,7 +1013,7 @@ func TestPutRateLimitInvalidBody(t *testing.T) {
 func TestPutRateLimitEmptyKey(t *testing.T) {
 	p, _ := newPluginWithDB(t)
 
-	handler := auth.Middleware(p.db)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := auth.Middleware(p.db.(*sql.DB))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handlePut(w, r)
 	}))
 
@@ -1223,7 +1223,7 @@ func routeHandler(t *testing.T) (*Plugin, http.Handler) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	return p, auth.Middleware(p.db)(mux)
+	return p, auth.Middleware(p.db.(*sql.DB))(mux)
 }
 
 // ---------------------------------------------------------------------------

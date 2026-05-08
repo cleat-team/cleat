@@ -13,6 +13,23 @@ const (
 	ErrTimeout             // execution timeout
 )
 
+// String returns a human-readable representation of the error code
+// suitable for storage in the error_code column.
+func (c ErrorCode) String() string {
+	switch c {
+	case ErrTransient:
+		return "transient"
+	case ErrPermanent:
+		return "permanent"
+	case ErrCancelled:
+		return "cancelled"
+	case ErrTimeout:
+		return "timeout"
+	default:
+		return "unknown"
+	}
+}
+
 // CleatError is a typed error with classification for retry decisions.
 type CleatError struct {
 	Code       ErrorCode

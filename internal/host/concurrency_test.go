@@ -469,7 +469,7 @@ func TestConcurrencyKeyStartAPI(t *testing.T) {
 	}
 
 	// Simulate handleStartWorkflow failure path: fail the second workflow on conflict.
-	err = store.FailWorkflow(ctx, wfID2, "", "concurrency key conflict: "+key, nil)
+	err = store.FailWorkflow(ctx, wfID2, "", "concurrency key conflict: "+key, "", "", nil)
 	if err != nil {
 		t.Fatalf("FailWorkflow: %v", err)
 	}
@@ -582,7 +582,7 @@ func TestConcurrencyKeyReleaseOnFail(t *testing.T) {
 	}
 
 	// FailWorkflow should release the key.
-	err = store.FailWorkflow(ctx, wfID, "", "something went wrong", nil)
+	err = store.FailWorkflow(ctx, wfID, "", "something went wrong", "", "", nil)
 	if err != nil {
 		t.Fatalf("FailWorkflow: %v", err)
 	}

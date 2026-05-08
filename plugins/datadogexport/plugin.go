@@ -6,7 +6,6 @@ package datadogexport
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -29,7 +28,7 @@ func init() {
 
 // Plugin exports workflow metrics to Datadog.
 type Plugin struct {
-	db         *sql.DB
+db         plugin.DB
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config

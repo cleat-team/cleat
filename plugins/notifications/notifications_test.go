@@ -1014,7 +1014,7 @@ func TestHostFunctionSendWebhook(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID,
 		WorkflowID: "wf-test",
-		DB:         p.db,
+		DB:         p.db.(*sql.DB),
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
@@ -1060,7 +1060,7 @@ func TestHostFunctionInvalidWebhook(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID,
 		WorkflowID: "wf-test",
-		DB:         p.db,
+		DB:         p.db.(*sql.DB),
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
@@ -1082,7 +1082,7 @@ func TestHostFunctionMissingWebhookID(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID,
 		WorkflowID: "wf-test",
-		DB:         p.db,
+		DB:         p.db.(*sql.DB),
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
@@ -1100,7 +1100,7 @@ func TestHostFunctionMissingEventType(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID,
 		WorkflowID: "wf-test",
-		DB:         p.db,
+		DB:         p.db.(*sql.DB),
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 

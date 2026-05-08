@@ -2,7 +2,6 @@ package featureflags
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,7 +22,7 @@ func init() {
 // Plugin implements feature flag evaluation with targeting rules and
 // gradual rollout for the cleat durable execution engine.
 type Plugin struct {
-	db     *sql.DB
+db     plugin.DB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config

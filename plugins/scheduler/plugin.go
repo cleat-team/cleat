@@ -5,7 +5,6 @@ package scheduler
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -27,7 +26,7 @@ func init() {
 
 // Plugin implements user-managed cron schedules with tenant isolation.
 type Plugin struct {
-	db     *sql.DB
+db     plugin.DB
 	env    *plugin.Environment
 	mux    *http.ServeMux
 	logger *slog.Logger

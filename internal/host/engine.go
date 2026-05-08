@@ -21,6 +21,10 @@ import (
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
+// MaxRetryAttempts is the worker-enforced ceiling for DurableCallWithRetry
+// maxAttempts, preventing a misconfigured WASM module from retrying forever.
+const MaxRetryAttempts = 100
+
 // EventType classifies event history records.
 type EventType string
 
@@ -425,6 +429,7 @@ type Engine struct {
 	pluginCallGuard      *PluginCallGuard
 	tenantID             string
 	db                   *sql.DB // tenant-scoped database connection for plugin host functions
+	maxRetries           int     // worker-configured ceiling for retry attempts; 0 means use MaxRetryAttempts
 }
 
 // EngineOption configures an Engine.
@@ -495,6 +500,13 @@ func WithPluginCallGuard(g *PluginCallGuard) EngineOption {
 // WithDB sets a tenant-scoped database connection for plugin host functions.
 func WithDB(db *sql.DB) EngineOption {
 	return func(e *Engine) { e.db = db }
+}
+
+// WithMaxRetryAttempts sets a worker-configured ceiling on retry attempts
+// for DurableCallWithRetry, overriding MaxRetryAttempts when set to a
+// positive value less than the constant.
+func WithMaxRetryAttempts(n int) EngineOption {
+	return func(e *Engine) { e.maxRetries = n }
 }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
@@ -742,6 +754,9 @@ func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, op
 func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	mem := m.Memory()
 
+	durableCallsTotal.Inc()
+	freshStepsTotal.Inc()
+
 	// Check cancellation before making the call.
 	callCtx := ctx
 	if s.engine.signalStore != nil {
@@ -789,6 +804,8 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 
 func (s *execSession) replayCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	mem := m.Memory()
+
+	replayStepsTotal.Inc()
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
@@ -1760,6 +1777,17 @@ func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
 	nonRetryableErrorsJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
 
+	// Worker-enforced ceiling on retry attempts to prevent runaway retries
+	// from misconfigured WASM modules.  Use the engine-configured limit if
+	// set (it comes from --max-retries on the command line), otherwise the
+	// package-level constant.
+	ceiling := MaxRetryAttempts
+	if s.engine.maxRetries > 0 && s.engine.maxRetries < ceiling {
+		ceiling = s.engine.maxRetries
+	}
+	if maxAttempts > int64(ceiling) {
+		maxAttempts = int64(ceiling)
+	}
 	if s.isReplay {
 		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 	}
@@ -1818,7 +1846,11 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 				backoffMs = maxIntervalMs
 			}
 			if backoffMs > 0 {
-				time.Sleep(time.Duration(backoffMs) * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					return packDurableCallResult(0, 0, 0)
+				case <-time.After(time.Duration(backoffMs) * time.Millisecond):
+				}
 			}
 		}
 	}
