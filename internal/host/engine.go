@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -580,6 +581,7 @@ type execSession struct {
 	stepCount  int
 	isReplay   bool
 	nowMs      int64
+	randomSeq  int64 // monotonic counter for deterministic Random()
 	suspendErr *SuspendError
 	signals    map[string]string // pending signals delivered during this session
 	deferrals  map[string]string // registered defer callbacks (deferID -> description)
@@ -1700,7 +1702,13 @@ func (s *execSession) Now(ctx context.Context) int64 {
 }
 
 func (s *execSession) Random(ctx context.Context) int64 {
-	return 42
+	// Deterministic random: seeded from workflow ID and step count.
+	// On replay, stepCount is the same for each call, so Random()
+	// always returns the same sequence.
+	data := fmt.Sprintf("%s:%d:%d", s.workflowID, s.stepCount, s.randomSeq)
+	s.randomSeq++
+	hash := sha256.Sum256([]byte(data))
+	return int64(binary.BigEndian.Uint64(hash[:8]))
 }
 
 func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64 {

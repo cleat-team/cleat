@@ -306,6 +306,11 @@ type HostCalls interface {
 	// (e.g. entity IDs, correlation IDs) that are stable across replays.
 	UUID(seed string) string
 
+	// NewUUID generates a random UUID deterministically. On first execution
+	// produces a fresh UUID from Random(). On replay returns the same value.
+	// Safe to use without SideEffect — determinism is built in.
+	NewUUID() string
+
 	// AcquireLock attempts to acquire a concurrency lock for the given key.
 	// Returns true if the lock was acquired, false if already held.
 	// The ttl controls how long the lock is held before auto-release.
@@ -740,6 +745,7 @@ type hostCallsImpl struct {
 	runDetached               func(fn func(h HostCalls) error) error
 	now                       func() int64
 	random                    func() int64
+	newUUID                   func() string
 
 	pluginCall                func(pluginName, functionName, inputJSON string) (string, error)
 	pluginCallStreaming       func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
@@ -814,6 +820,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		runDetached:               opts.RunDetached,
 		now:                       opts.Now,
 		random:                    opts.Random,
+		newUUID:                   opts.NewUUID,
 		pluginCall:                opts.PluginCall,
 		pluginCallStreaming:       opts.PluginCallStreaming,
 		durableSend:               opts.DurableSend,
@@ -897,6 +904,7 @@ type HostCallsOptions struct {
 	RunDetached               func(fn func(h HostCalls) error) error
 	Now                       func() int64
 	Random                    func() int64
+	NewUUID                   func() string
 	PluginCall                func(pluginName, functionName, inputJSON string) (string, error)
 	PluginCallStreaming       func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
 	DurableSend               func(service, operation, requestJSON string) error
@@ -1700,6 +1708,25 @@ func (h *hostCallsImpl) UUID(seed string) string {
 		hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
 }
 
+// NewUUID generates a random UUID deterministically. Uses Random() which is
+// seeded from (workflowID, stepCount, randomSeq) and produces the same
+// sequence on replay. No SideEffect needed — determinism is built into Random().
+func (h *hostCallsImpl) NewUUID() string {
+	r1 := uint64(h.Random())
+	r2 := uint64(h.Random())
+	// Format as random (version 4) UUID.
+	b := make([]byte, 16)
+	b[0] = byte(r1 >> 56); b[1] = byte(r1 >> 48); b[2] = byte(r1 >> 40); b[3] = byte(r1 >> 32)
+	b[4] = byte(r1 >> 24); b[5] = byte(r1 >> 16); b[6] = byte(r1 >> 8);  b[7] = byte(r1)
+	b[8]  = byte(r2 >> 56); b[9] = byte(r2 >> 48); b[10] = byte(r2 >> 40); b[11] = byte(r2 >> 32)
+	b[12] = byte(r2 >> 24); b[13] = byte(r2 >> 16); b[14] = byte(r2 >> 8);  b[15] = byte(r2)
+	// Set version 4 (random) and variant 1 bits.
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func (h *hostCallsImpl) SetState(key string, value interface{}) {
 	sk := h.scopedKey(key)
 	if h.stateMap == nil {
@@ -1960,6 +1987,7 @@ func (h *hostCallsImpl) NowMs() int64 {
 	}
 	return h.now()
 }
+
 
 func (h *hostCallsImpl) Random() int64 {
 	if h.random == nil {
