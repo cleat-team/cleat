@@ -65,6 +65,27 @@ type HostHandler interface {
 	// SideEffect records non-deterministic computation result in event
 	// history on first execution and returns cached result on replay.
 	SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64
+
+	// WorkflowID returns the current workflow's unique identifier.
+	WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64
+
+	// RunID returns the current workflow run's unique identifier.
+	RunID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64
+
+	// ResolvePromise resolves a durable promise with a value.
+	ResolvePromise(ctx context.Context, m api.Module, promiseID, value string) int64
+
+	// RejectPromise rejects a durable promise with an error message.
+	RejectPromise(ctx context.Context, m api.Module, promiseID, errMsg string) int64
+
+	// DurableSend sends a fire-and-forget request to an external service.
+	DurableSend(ctx context.Context, m api.Module, service, operation, requestJSON string) int64
+
+	// DurableScheduleInvoke schedules a delayed one-shot invocation.
+	DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64
+
+	// RegisterQueryHandler registers a read-only query handler.
+	RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64
 }
 
 // registerHostFunctions registers all cleat_* imports on the "env" host module.
@@ -376,6 +397,69 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		result := readWasmString(mem, resultPtr, resultLen)
 		return uint64(h.SideEffect(ctx, m, result, outPtr, outMaxLen))
 	}).Export("cleat_side_effect")
+
+	// cleat_workflow_id: (ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		idPtr, idMaxLen uint32) uint64 {
+		return uint64(handlerFromContext(ctx).WorkflowID(ctx, m, idPtr, idMaxLen))
+	}).Export("cleat_workflow_id")
+
+	// cleat_run_id: (ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		idPtr, idMaxLen uint32) uint64 {
+		return uint64(handlerFromContext(ctx).RunID(ctx, m, idPtr, idMaxLen))
+	}).Export("cleat_run_id")
+
+	// cleat_resolve_promise: (ptr,len x2) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		idPtr, idLen, valPtr, valLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		promiseID := readWasmString(mem, idPtr, idLen)
+		value := readWasmString(mem, valPtr, valLen)
+		return uint64(h.ResolvePromise(ctx, m, promiseID, value))
+	}).Export("cleat_resolve_promise")
+
+	// cleat_reject_promise: (ptr,len x2) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		idPtr, idLen, errPtr, errLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		promiseID := readWasmString(mem, idPtr, idLen)
+		errMsg := readWasmString(mem, errPtr, errLen)
+		return uint64(h.RejectPromise(ctx, m, promiseID, errMsg))
+	}).Export("cleat_reject_promise")
+
+	// cleat_send: (ptr,len x3) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		service := readWasmString(mem, svcPtr, svcLen)
+		op := readWasmString(mem, opPtr, opLen)
+		req := readWasmString(mem, reqPtr, reqLen)
+		return uint64(h.DurableSend(ctx, m, service, op, req))
+	}).Export("cleat_send")
+
+	// cleat_schedule_invoke: (ptr,len x3, i64) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32, delayMs int64) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		service := readWasmString(mem, svcPtr, svcLen)
+		op := readWasmString(mem, opPtr, opLen)
+		req := readWasmString(mem, reqPtr, reqLen)
+		return uint64(h.DurableScheduleInvoke(ctx, m, service, op, req, delayMs))
+	}).Export("cleat_schedule_invoke")
+
+	// cleat_register_query_handler: (ptr,len) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		namePtr, nameLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		name := readWasmString(mem, namePtr, nameLen)
+		return uint64(h.RegisterQueryHandler(ctx, m, name))
+	}).Export("cleat_register_query_handler")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

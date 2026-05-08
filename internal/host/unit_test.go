@@ -229,7 +229,7 @@ func TestParseVersion(t *testing.T) {
 		{" 1.2.3", semverVersion{1, 2, 3}, false},
 		{"0.0.0", semverVersion{0, 0, 0}, false},
 		{"10.20.30", semverVersion{10, 20, 30}, false},
-		{"1.2", semverVersion{}, true},       // need 3 parts
+		{"1.2", semverVersion{}, true},         // need 3 parts
 		{"abc.def.ghi", semverVersion{}, true}, // non-numeric
 		// "1.2.3.4" parses as 1.2.3 (only first 3 parts used)
 	}
@@ -254,8 +254,8 @@ func TestParseVersion(t *testing.T) {
 
 func TestCompareTo(t *testing.T) {
 	tests := []struct {
-		a, b  semverVersion
-		want  int
+		a, b semverVersion
+		want int
 	}{
 		{semverVersion{1, 0, 0}, semverVersion{1, 0, 0}, 0},
 		{semverVersion{2, 0, 0}, semverVersion{1, 0, 0}, 1},
@@ -285,8 +285,8 @@ func TestMatchesConstraint(t *testing.T) {
 		{"=1.4.2", true},
 		{"==1.4.2", true},
 		{"=1.4.3", false},
-		{"1.4.2", true},   // bare = exact
-		{"1.4.3", false},  // bare = exact, no match
+		{"1.4.2", true},  // bare = exact
+		{"1.4.3", false}, // bare = exact, no match
 		{">=1.4.0", true},
 		{">=1.5.0", false},
 		{">1.4.0", true},
@@ -345,19 +345,19 @@ func TestEnsureVPrefix(t *testing.T) {
 
 func TestSplitSemver(t *testing.T) {
 	tests := []struct {
-		input       string
-		wantMajor   int
-		wantMinor   int
-		wantPatch   int
+		input     string
+		wantMajor int
+		wantMinor int
+		wantPatch int
 	}{
 		{"v1.2.3", 1, 2, 3},
 		{"v0.0.0", 0, 0, 0},
 		{"v10.20.30", 10, 20, 30},
-		{"1.2.3", 1, 2, 3},         // no v prefix
-		{"v1.2.3-beta", 1, 2, 3},   // with pre-release
-		{"v1.2", 1, 2, 0},          // partial
-		{"v1", 1, 0, 0},            // major only
-		{"", 0, 0, 0},              // empty
+		{"1.2.3", 1, 2, 3},       // no v prefix
+		{"v1.2.3-beta", 1, 2, 3}, // with pre-release
+		{"v1.2", 1, 2, 0},        // partial
+		{"v1", 1, 0, 0},          // major only
+		{"", 0, 0, 0},            // empty
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -372,10 +372,10 @@ func TestSplitSemver(t *testing.T) {
 
 func TestParseConstraint(t *testing.T) {
 	tests := []struct {
-		input    string
-		wantMin  string
-		wantMax  string
-		wantErr  bool
+		input   string
+		wantMin string
+		wantMax string
+		wantErr bool
 	}{
 		// Empty/wildcard
 		{"", "v0.0.0", "", false},
@@ -914,7 +914,7 @@ func (c *multiRowConn) Prepare(query string) (driver.Stmt, error) {
 	return &multiRowStmt{conn: c, query: query}, nil
 }
 
-func (c *multiRowConn) Close() error  { return nil }
+func (c *multiRowConn) Close() error { return nil }
 func (c *multiRowConn) Begin() (driver.Tx, error) {
 	return &multiRowTx{}, nil
 }
@@ -929,14 +929,15 @@ type multiRowStmt struct {
 	query string
 }
 
-func (s *multiRowStmt) Close() error    { return nil }
-func (s *multiRowStmt) NumInput() int    { return -1 }
+func (s *multiRowStmt) Close() error  { return nil }
+func (s *multiRowStmt) NumInput() int { return -1 }
 
 func (s *multiRowStmt) Exec(args []driver.Value) (driver.Result, error) {
 	return &multiRowResult{}, nil
 }
 
 type multiRowResult struct{ driver.Result }
+
 func (r *multiRowResult) LastInsertId() (int64, error) { return 0, nil }
 func (r *multiRowResult) RowsAffected() (int64, error) { return 0, nil }
 
@@ -1435,7 +1436,7 @@ func (s *stubWorkflowStore) PollCancellation(ctx context.Context, workflowID str
 func (s *stubWorkflowStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	return "", nil
 }
-func (s *stubWorkflowStore) ListWorkflows(ctx context.Context, status string, limit int) ([]WorkflowInstance, error) {
+func (s *stubWorkflowStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	return nil, nil
 }
 func (s *stubWorkflowStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
@@ -1747,9 +1748,9 @@ func TestCheckStaleVersions_DeprecatedNoInstancesGC(t *testing.T) {
 
 type mockGCStore struct {
 	*stubWorkflowStore
-	defs     []WorkflowDef
-	counts   map[string]int
-	purged   []string
+	defs   []WorkflowDef
+	counts map[string]int
+	purged []string
 }
 
 func (m *mockGCStore) ListWorkflowDefs(_ context.Context, name string) ([]WorkflowDef, error) {
@@ -1907,9 +1908,9 @@ func TestGarbageCollectVersions_DefaultsApplied(t *testing.T) {
 
 type mockPurgeStore struct {
 	*stubWorkflowStore
-	defs     []WorkflowDef
-	counts   map[string]int
-	purged   []string
+	defs   []WorkflowDef
+	counts map[string]int
+	purged []string
 }
 
 func (m *mockPurgeStore) ListWorkflowDefs(_ context.Context, name string) ([]WorkflowDef, error) {

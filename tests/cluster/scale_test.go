@@ -93,7 +93,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 
 	// Phase 2: Add worker-2 and worker-3. Release some back to ready for them.
 	releasedCount := 0
-	wfs, err := store.ListWorkflows(ctx, "running", 100)
+	wfs, err := store.ListWorkflows(ctx, host.WorkflowFilter{Status: "running", Limit: 100})
 	if err == nil {
 		for _, wf := range wfs {
 			if releasedCount >= 5 {
@@ -123,7 +123,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 	t.Logf("Phase 2 (3 workers): claimed %d workflows", atomic.LoadInt32(&phase2Count))
 
 	// Phase 3: "Remove" worker-2 and worker-3 — release their workflows.
-	wfs2, err := store.ListWorkflows(ctx, "running", 100)
+	wfs2, err := store.ListWorkflows(ctx, host.WorkflowFilter{Status: "running", Limit: 100})
 	if err == nil {
 		for _, wf := range wfs2 {
 			if wf.AssignedTo == "worker-2" || wf.AssignedTo == "worker-3" {
@@ -211,7 +211,7 @@ func TestScaleUpWorkers(t *testing.T) {
 		float64(claimed1)/duration1.Seconds())
 
 	// Release workflows for the multi-worker test.
-	wfs, err := store.ListWorkflows(ctx, "running", 1000)
+	wfs, err := store.ListWorkflows(ctx, host.WorkflowFilter{Status: "running", Limit: 1000})
 	if err == nil {
 		for _, wf := range wfs {
 			store.ReleaseWorkflow(ctx, wf.ID, "worker-1", time.Now())

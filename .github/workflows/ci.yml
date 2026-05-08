@@ -194,6 +194,46 @@ jobs:
           fi
 
   # -------------------------------------------------------------------------
+  # Test Go with TinyGo (dedicated job)
+  #
+  # Installs TinyGo and runs the full WASM test suite, including the
+  # TinyGo compilation integration test in internal/host/. The job fails
+  # if TinyGo is unavailable or the TinyGo build path breaks — tests that
+  # would otherwise silently t.Skip() are forced to run.
+  # -------------------------------------------------------------------------
+  test-tinygo:
+    name: Test Go with TinyGo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Install TinyGo
+        run: |
+          curl -sSfL https://github.com/tinygo-org/tinygo/releases/download/v0.36.0/tinygo_0.36.0_linux_amd64.tar.gz -o /tmp/tinygo.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz
+          echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
+
+      - name: Verify TinyGo
+        run: tinygo version
+
+      - name: Test WASM build pipeline (internal/wasm)
+        run: go test -race -count=1 ./internal/wasm/...
+
+      - name: Test WASM runtime + TinyGo compilation (internal/host)
+        run: go test -race -count=1 -timeout=180s ./internal/host/...
+
+      - name: Test closure validator (internal/closure)
+        run: go test -race -count=1 ./internal/closure/...
+
+      - name: Test analyzer (internal/analyzer)
+        run: go test -race -count=1 ./internal/analyzer/...
+
+  # -------------------------------------------------------------------------
   # Test Python (matrix: 3.10 / 3.11 / 3.12)
   # -------------------------------------------------------------------------
   test-python:

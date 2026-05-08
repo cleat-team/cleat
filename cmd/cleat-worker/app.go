@@ -85,7 +85,7 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
-	workflows, err := s.store.ListWorkflows(r.Context(), "dead_lettered", 100)
+	workflows, err := s.store.ListWorkflows(r.Context(), host.WorkflowFilter{Status: "dead_lettered", Limit: 100})
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return

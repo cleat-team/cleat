@@ -401,19 +401,25 @@ func (s *ShardedStore) GetQueryState(ctx context.Context, workflowID, key string
 }
 
 // ListWorkflows merges results from all shards.
-func (s *ShardedStore) ListWorkflows(ctx context.Context, status string, limit int) ([]WorkflowInstance, error) {
+func (s *ShardedStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	var all []WorkflowInstance
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
 	for _, shard := range shards {
-		workflows, err := shard.Store.ListWorkflows(ctx, status, limit)
+		workflows, err := shard.Store.ListWorkflows(ctx, filter)
 		if err != nil {
 			return nil, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
 		}
 		all = append(all, workflows...)
 	}
-	if len(all) > limit && limit > 0 {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	} else if limit > 1000 {
+		limit = 1000
+	}
+	if len(all) > limit {
 		all = all[:limit]
 	}
 	return all, nil
@@ -629,7 +635,7 @@ func (s *ShardedStore) PollCancellation(ctx context.Context, workflowID string) 
 	return shard.Store.PollCancellation(ctx, workflowID)
 }
 
-	// CreatePromise routes by workflow ID.
+// CreatePromise routes by workflow ID.
 func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
@@ -638,7 +644,7 @@ func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseNam
 	return shard.Store.CreatePromise(ctx, workflowID, promiseName, promiseID)
 }
 
-	// ResolvePromise routes by workflow ID.
+// ResolvePromise routes by workflow ID.
 func (s *ShardedStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
@@ -647,7 +653,7 @@ func (s *ShardedStore) ResolvePromise(ctx context.Context, workflowID, promiseID
 	return shard.Store.ResolvePromise(ctx, workflowID, promiseID, result)
 }
 
-	// RejectPromise routes by workflow ID.
+// RejectPromise routes by workflow ID.
 func (s *ShardedStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
@@ -656,7 +662,7 @@ func (s *ShardedStore) RejectPromise(ctx context.Context, workflowID, promiseID,
 	return shard.Store.RejectPromise(ctx, workflowID, promiseID, errMsg)
 }
 
-	// GetPromise routes by workflow ID.
+// GetPromise routes by workflow ID.
 func (s *ShardedStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
@@ -665,7 +671,7 @@ func (s *ShardedStore) GetPromise(ctx context.Context, workflowID, promiseID str
 	return shard.Store.GetPromise(ctx, workflowID, promiseID)
 }
 
-	// ListPromises routes by workflow ID.
+// ListPromises routes by workflow ID.
 func (s *ShardedStore) ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {

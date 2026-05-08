@@ -33,6 +33,9 @@ reliable distributed applications.
 | Guide | Description | Time |
 |-------|-------------|------|
 | [Deploying to production](deploying-to-production.md) | Configuration, monitoring, backups, scaling, health checks, graceful shutdown | 20 minutes |
+| [Zero-downtime deployment](zero-downtime-deploy.md) | Blue/green worker pool replacement without interrupting running workflows | 15 minutes |
+| [Upgrading cleat](upgrading.md) | Worker binary upgrades, schema migrations, workflow rollback, PostgreSQL upgrades | 15 minutes |
+| [Disaster recovery](disaster-recovery.md) | Recovery from database restore, reaper reclaim, RPO/RTO, cross-region failover | 15 minutes |
 | [Migrating from Temporal](migration-from-temporal.md) | Key differences and migration path for Temporal users | 15 minutes |
 
 For teams running cleat in production or migrating from another system.

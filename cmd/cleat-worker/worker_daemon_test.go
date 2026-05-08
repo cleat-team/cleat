@@ -28,61 +28,61 @@ import (
 // Each method checks for a custom function field first; if set, it delegates
 // to that function. Otherwise it returns a safe zero-valued result.
 type mockStore struct {
-	claimWorkflowFn                   func(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error)
-	claimWorkflowsFn                  func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
-	claimStickyWorkflowsFn            func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
-	loadEventHistoryFn                func(ctx context.Context, workflowID string) ([]host.EventRecord, error)
-	appendEventHistoryFn              func(ctx context.Context, workflowID string, rec host.EventRecord) error
-	appendEventHistoryBatchFn         func(ctx context.Context, workflowID string, recs []host.EventRecord) error
-	loadWASMFn                        func(ctx context.Context, defName string, defVersion int) ([]byte, error)
-	listVersionsFn                    func(ctx context.Context, defName string) ([]int, error)
-	heartbeatFn                       func(ctx context.Context, workflowID, workerID string) (bool, error)
-	completeWorkflowFn                func(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
-	failWorkflowFn                    func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error
-	releaseWorkflowFn                 func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error
-	requestCancellationFn             func(ctx context.Context, workflowID, reason string) error
-	checkCancellationFn               func(ctx context.Context, workflowID string) (bool, string, error)
-	deliverSignalFn                   func(ctx context.Context, workflowID, signalName, payload string) error
-	pollAndClaimSignalFn              func(ctx context.Context, workflowID, signalName string) (string, bool, error)
-	startNewRunFn                     func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
-	startChildWorkflowFn              func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
-	getChildResultFn                  func(ctx context.Context, runID string) (string, bool, error)
-	reapStaleInstancesFn              func(ctx context.Context, timeout time.Duration) (int, error)
-	getQueryStateFn                   func(ctx context.Context, workflowID, key string) (string, error)
-	listWorkflowsFn                   func(ctx context.Context, status string, limit int) ([]host.WorkflowInstance, error)
-	getWorkflowByIDFn                 func(ctx context.Context, id string) (*host.WorkflowInstance, error)
-	createScheduleFn                  func(ctx context.Context, s host.Schedule) error
-	listSchedulesFn                   func(ctx context.Context) ([]host.Schedule, error)
-	deleteScheduleFn                  func(ctx context.Context, name string) error
-	setScheduleEnabledFn              func(ctx context.Context, name string, enabled bool) error
-	getDueSchedulesFn                 func(ctx context.Context) ([]host.Schedule, error)
-	updateScheduleNextRunFn           func(ctx context.Context, name string, nextRun time.Time) error
-	loadWorkflowConfigFn              func(ctx context.Context, defName string, defVersion int) (int, error)
-	loadDAGSpecFn                     func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error)
-	traceWorkflowFn                   func(ctx context.Context, workflowID, traceID string) (sql.Result, error)
-	getCompactionCandidatesFn         func(ctx context.Context, threshold int, limit int) ([]string, error)
-	loadCompactionStateFn             func(ctx context.Context, workflowID string) (*host.CompactionState, error)
-	compactHistoryFn                  func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
-	createPromiseFn                   func(ctx context.Context, workflowID, promiseName, promiseID string) error
-	resolvePromiseFn                  func(ctx context.Context, workflowID, promiseID, result string) error
-	rejectPromiseFn                   func(ctx context.Context, workflowID, promiseID, errMsg string) error
-	getPromiseFn                      func(ctx context.Context, workflowID, promiseID string) (string, string, string, error)
-	listPromisesFn                    func(ctx context.Context, workflowID string) ([]host.PromiseInfo, error)
-	createUpdateRequestFn             func(ctx context.Context, workflowID, updateName, payload, promiseID string) error
-	getPendingUpdateRequestsFn        func(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error)
-	completeUpdateRequestFn           func(ctx context.Context, workflowID, updateName, result, errMsg string) error
-	acquireConcurrencyKeyFn           func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error)
-	releaseConcurrencyKeyFn           func(ctx context.Context, key string) error
-	releaseWorkflowConcurrencyKeysFn  func(ctx context.Context, workflowID string) error
-	reapExpiredConcurrencyKeysFn      func(ctx context.Context) (int64, error)
-	updateStickyWorkerFn              func(ctx context.Context, workflowID, workerID string) error
-	clearStickyWorkerFn               func(ctx context.Context, workflowID string) error
-	deployWorkflowDefFn               func(ctx context.Context, def *host.WorkflowDef) error
-	listWorkflowDefsFn                func(ctx context.Context, name string) ([]host.WorkflowDef, error)
-	getWorkflowDefFn                  func(ctx context.Context, name string, version int) (*host.WorkflowDef, error)
-	markVersionDeprecatedFn           func(ctx context.Context, name string, version int, deprecated bool) error
-	purgeWorkflowDefFn                func(ctx context.Context, name string, version int) error
-	countActiveInstancesFn            func(ctx context.Context, name string, version int) (int, error)
+	claimWorkflowFn                    func(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error)
+	claimWorkflowsFn                   func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
+	claimStickyWorkflowsFn             func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
+	loadEventHistoryFn                 func(ctx context.Context, workflowID string) ([]host.EventRecord, error)
+	appendEventHistoryFn               func(ctx context.Context, workflowID string, rec host.EventRecord) error
+	appendEventHistoryBatchFn          func(ctx context.Context, workflowID string, recs []host.EventRecord) error
+	loadWASMFn                         func(ctx context.Context, defName string, defVersion int) ([]byte, error)
+	listVersionsFn                     func(ctx context.Context, defName string) ([]int, error)
+	heartbeatFn                        func(ctx context.Context, workflowID, workerID string) (bool, error)
+	completeWorkflowFn                 func(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
+	failWorkflowFn                     func(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error
+	releaseWorkflowFn                  func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error
+	requestCancellationFn              func(ctx context.Context, workflowID, reason string) error
+	checkCancellationFn                func(ctx context.Context, workflowID string) (bool, string, error)
+	deliverSignalFn                    func(ctx context.Context, workflowID, signalName, payload string) error
+	pollAndClaimSignalFn               func(ctx context.Context, workflowID, signalName string) (string, bool, error)
+	startNewRunFn                      func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
+	startChildWorkflowFn               func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
+	getChildResultFn                   func(ctx context.Context, runID string) (string, bool, error)
+	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
+	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
+	listWorkflowsFn                    func(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error)
+	getWorkflowByIDFn                  func(ctx context.Context, id string) (*host.WorkflowInstance, error)
+	createScheduleFn                   func(ctx context.Context, s host.Schedule) error
+	listSchedulesFn                    func(ctx context.Context) ([]host.Schedule, error)
+	deleteScheduleFn                   func(ctx context.Context, name string) error
+	setScheduleEnabledFn               func(ctx context.Context, name string, enabled bool) error
+	getDueSchedulesFn                  func(ctx context.Context) ([]host.Schedule, error)
+	updateScheduleNextRunFn            func(ctx context.Context, name string, nextRun time.Time) error
+	loadWorkflowConfigFn               func(ctx context.Context, defName string, defVersion int) (int, error)
+	loadDAGSpecFn                      func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error)
+	traceWorkflowFn                    func(ctx context.Context, workflowID, traceID string) (sql.Result, error)
+	getCompactionCandidatesFn          func(ctx context.Context, threshold int, limit int) ([]string, error)
+	loadCompactionStateFn              func(ctx context.Context, workflowID string) (*host.CompactionState, error)
+	compactHistoryFn                   func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
+	createPromiseFn                    func(ctx context.Context, workflowID, promiseName, promiseID string) error
+	resolvePromiseFn                   func(ctx context.Context, workflowID, promiseID, result string) error
+	rejectPromiseFn                    func(ctx context.Context, workflowID, promiseID, errMsg string) error
+	getPromiseFn                       func(ctx context.Context, workflowID, promiseID string) (string, string, string, error)
+	listPromisesFn                     func(ctx context.Context, workflowID string) ([]host.PromiseInfo, error)
+	createUpdateRequestFn              func(ctx context.Context, workflowID, updateName, payload, promiseID string) error
+	getPendingUpdateRequestsFn         func(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error)
+	completeUpdateRequestFn            func(ctx context.Context, workflowID, updateName, result, errMsg string) error
+	acquireConcurrencyKeyFn            func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error)
+	releaseConcurrencyKeyFn            func(ctx context.Context, key string) error
+	releaseWorkflowConcurrencyKeysFn   func(ctx context.Context, workflowID string) error
+	reapExpiredConcurrencyKeysFn       func(ctx context.Context) (int64, error)
+	updateStickyWorkerFn               func(ctx context.Context, workflowID, workerID string) error
+	clearStickyWorkerFn                func(ctx context.Context, workflowID string) error
+	deployWorkflowDefFn                func(ctx context.Context, def *host.WorkflowDef) error
+	listWorkflowDefsFn                 func(ctx context.Context, name string) ([]host.WorkflowDef, error)
+	getWorkflowDefFn                   func(ctx context.Context, name string, version int) (*host.WorkflowDef, error)
+	markVersionDeprecatedFn            func(ctx context.Context, name string, version int, deprecated bool) error
+	purgeWorkflowDefFn                 func(ctx context.Context, name string, version int) error
+	countActiveInstancesFn             func(ctx context.Context, name string, version int) (int, error)
 	getActiveInstanceCountsByVersionFn func(ctx context.Context) (map[string]int, error)
 	cleanupMemorySamplesFn             func(ctx context.Context, maxSamplesPerDef int) (int64, error)
 	recordWorkflowMemorySampleFn       func(ctx context.Context, defName string, sampleBytes int64) error
@@ -248,9 +248,9 @@ func (m *mockStore) GetQueryState(ctx context.Context, workflowID, key string) (
 	return "", nil
 }
 
-func (m *mockStore) ListWorkflows(ctx context.Context, status string, limit int) ([]host.WorkflowInstance, error) {
+func (m *mockStore) ListWorkflows(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error) {
 	if m.listWorkflowsFn != nil {
-		return m.listWorkflowsFn(ctx, status, limit)
+		return m.listWorkflowsFn(ctx, filter)
 	}
 	return nil, nil
 }
@@ -909,7 +909,7 @@ func TestDispatchLoop_ConnectionError(t *testing.T) {
 func TestHeartbeatLoop_UpdatesHeartbeats(t *testing.T) {
 	ms := &mockStore{}
 	var (
-		mu       sync.Mutex
+		mu         sync.Mutex
 		heartbeats []string
 	)
 	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
@@ -1316,7 +1316,7 @@ func TestAPIHealthz(t *testing.T) {
 
 func TestAPIWorkflowsList(t *testing.T) {
 	ms := &mockStore{}
-	ms.listWorkflowsFn = func(ctx context.Context, status string, limit int) ([]host.WorkflowInstance, error) {
+	ms.listWorkflowsFn = func(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error) {
 		return []host.WorkflowInstance{
 			{ID: "wf-1", DefName: "test", DefVersion: 1, Status: "running"},
 		}, nil
@@ -2053,7 +2053,7 @@ func TestBaseDSNFromDSN_EdgeCases(t *testing.T) {
 		dsn  string
 		want string
 	}{
-			{"", ""},
+		{"", ""},
 		{"host=localhost", "host=localhost"},
 		{"user=admin password=secret", ""},
 		{"host=a user=b password=c port=1", "host=a port=1"},

@@ -403,17 +403,42 @@ func resolveCalleeFQName(call *ast.CallExpr, info *types.Info) string {
 			return ""
 		}
 		if fn, ok := obj.(*types.Func); ok {
-			return fn.FullName()
+			return analyzer.FuncFQName(fn)
 		}
 	case *ast.SelectorExpr:
 		if sel, ok := info.Selections[fun]; ok {
 			if fn, ok := sel.Obj().(*types.Func); ok {
-				return fn.FullName()
+				return analyzer.FuncFQName(fn)
 			}
 		}
 		if obj, ok := info.Uses[fun.Sel]; ok {
 			if fn, ok := obj.(*types.Func); ok {
-				return fn.FullName()
+				return analyzer.FuncFQName(fn)
+			}
+		}
+	case *ast.IndexExpr:
+		// Generic function instantiation: Func[T](args)
+		if ident, ok := fun.X.(*ast.Ident); ok {
+			obj, ok := info.Uses[ident]
+			if !ok {
+				return ""
+			}
+			if fn, ok := obj.(*types.Func); ok {
+				return analyzer.FuncFQName(fn)
+			}
+			return ""
+		}
+		// Generic method call with explicit type args: obj.Method[T](args)
+		if sel, ok := fun.X.(*ast.SelectorExpr); ok {
+			if selInfo, ok := info.Selections[sel]; ok {
+				if fn, ok := selInfo.Obj().(*types.Func); ok {
+					return analyzer.FuncFQName(fn)
+				}
+			}
+			if obj, ok := info.Uses[sel.Sel]; ok {
+				if fn, ok := obj.(*types.Func); ok {
+					return analyzer.FuncFQName(fn)
+				}
 			}
 		}
 	}

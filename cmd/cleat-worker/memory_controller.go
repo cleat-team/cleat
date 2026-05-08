@@ -29,7 +29,7 @@ type MemoryControllerState struct {
 }
 
 const (
-	defaultAlpha          = 0.3  // EWMA smoothing factor
+	defaultAlpha            = 0.3 // EWMA smoothing factor
 	defaultRecoveryInterval = 5 * time.Second
 	defaultScalingThreshold = 50
 	defaultMemoryEstimate   = 32 * 1024 * 1024 // 32 MB safe default

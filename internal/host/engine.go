@@ -46,8 +46,10 @@ const (
 	EventTypePluginCallStreamChunk EventType = "plugin_call_stream_chunk"
 	EventTypeAcquireLock      EventType = "acquire_lock"
 	EventTypeReleaseLock      EventType = "release_lock"
-	EventTypeSideEffect       EventType = "side_effect"
-	EventTypeScopeAcquired    EventType = "scope_acquired"
+	EventTypeSideEffect            EventType = "side_effect"
+	EventTypeScopeAcquired         EventType = "scope_acquired"
+	EventTypeDurableSend           EventType = "durable_send"
+	EventTypeDurableScheduleInvoke EventType = "durable_schedule_invoke"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -231,12 +233,27 @@ type pluginFuncEntry struct {
 }
 
 // PluginRegistry maps plugin function names to implementations.
+// It also tracks plugin health: if a plugin function panics, the
+// entire plugin is marked unhealthy and all its functions return
+// an error without being invoked.
 type PluginRegistry struct {
-	funcs map[string]pluginFuncEntry // key = lookupKey(pluginName, funcName)
+	funcs         map[string]pluginFuncEntry // key = lookupKey(pluginName, funcName)
+	healthTracker *plugin.PluginHealthTracker
 }
 
 func NewPluginRegistry() *PluginRegistry {
-	return &PluginRegistry{funcs: make(map[string]pluginFuncEntry)}
+	return &PluginRegistry{
+		funcs:         make(map[string]pluginFuncEntry),
+		healthTracker: plugin.NewPluginHealthTracker(),
+	}
+}
+
+// SetHealthTracker replaces the default health tracker with a shared one.
+// Used to share a single tracker between PluginRegistry and
+// PluginStreamRegistry so a panic in any function marks the plugin
+// unhealthy across both registries.
+func (pr *PluginRegistry) SetHealthTracker(t *plugin.PluginHealthTracker) {
+	pr.healthTracker = t
 }
 
 // lookupKey returns a unique key for a plugin function. The \x00 separator
@@ -247,24 +264,30 @@ func lookupKey(pluginName, funcName string) string {
 }
 
 // Register adds a plugin function. Returns an error if the function name
-// is already registered for this plugin.
+// is already registered for this plugin. The function is wrapped with
+// panic recovery so a plugin crash does not take down the worker.
 func (pr *PluginRegistry) Register(pluginName, funcName string, fn PluginFunc) error {
 	key := lookupKey(pluginName, funcName)
 	if _, exists := pr.funcs[key]; exists {
 		return fmt.Errorf("plugin function %q already registered", key)
 	}
-	pr.funcs[key] = pluginFuncEntry{fn: fn, idempotent: false}
+	pluginFn := plugin.PluginFunc(fn)
+	wrapped := plugin.RecoverPluginFunc(pluginName, pr.healthTracker, pluginFn)
+	pr.funcs[key] = pluginFuncEntry{fn: PluginFunc(wrapped), idempotent: false}
 	return nil
 }
 
 // RegisterIdempotent registers a plugin function that is safe to re-invoke
-// during replay (e.g., read-only S3 GET operations).
+// during replay (e.g., read-only S3 GET operations). The function is wrapped
+// with panic recovery.
 func (pr *PluginRegistry) RegisterIdempotent(pluginName, funcName string, fn PluginFunc) error {
 	key := lookupKey(pluginName, funcName)
 	if _, exists := pr.funcs[key]; exists {
 		return fmt.Errorf("plugin function %q already registered", key)
 	}
-	pr.funcs[key] = pluginFuncEntry{fn: fn, idempotent: true}
+	pluginFn := plugin.PluginFunc(fn)
+	wrapped := plugin.RecoverPluginFunc(pluginName, pr.healthTracker, pluginFn)
+	pr.funcs[key] = pluginFuncEntry{fn: PluginFunc(wrapped), idempotent: true}
 	return nil
 }
 
@@ -279,13 +302,47 @@ func (pr *PluginRegistry) Lookup(pluginName, funcName string) (PluginFunc, bool,
 	return entry.fn, entry.idempotent, ok
 }
 
+// IsPluginHealthy reports whether the given plugin has not panicked.
+func (pr *PluginRegistry) IsPluginHealthy(pluginName string) bool {
+	return pr.healthTracker.IsHealthy(pluginName)
+}
+
+// MarkPluginUnhealthy marks a plugin as unhealthy with the given error.
+// All future invocations of the plugin's host functions are blocked.
+func (pr *PluginRegistry) MarkPluginUnhealthy(pluginName string, err error) {
+	pr.healthTracker.MarkUnhealthy(pluginName, err)
+}
+
+// PluginHealthStatus returns the current health status of all plugins
+// that have been marked unhealthy. Healthy plugins are not included.
+func (pr *PluginRegistry) PluginHealthStatus() []plugin.HealthStatus {
+	return pr.healthTracker.UnhealthyStatus()
+}
+
+// UnhealthyError returns the error that caused the plugin to be marked
+// unhealthy, or nil if the plugin is healthy.
+func (pr *PluginRegistry) UnhealthyError(pluginName string) error {
+	return pr.healthTracker.UnhealthyError(pluginName)
+}
+
 // PluginStreamRegistry maps plugin function names to streaming implementations.
 type PluginStreamRegistry struct {
-	funcs map[string]PluginStreamFunc
+	funcs         map[string]PluginStreamFunc
+	healthTracker *plugin.PluginHealthTracker
 }
 
 func NewPluginStreamRegistry() *PluginStreamRegistry {
-	return &PluginStreamRegistry{funcs: make(map[string]PluginStreamFunc)}
+	return &PluginStreamRegistry{
+		funcs:         make(map[string]PluginStreamFunc),
+		healthTracker: plugin.NewPluginHealthTracker(),
+	}
+}
+
+// SetHealthTracker replaces the default health tracker with a shared one.
+// Used to share a single tracker between PluginRegistry and
+// PluginStreamRegistry.
+func (psr *PluginStreamRegistry) SetHealthTracker(t *plugin.PluginHealthTracker) {
+	psr.healthTracker = t
 }
 
 func (psr *PluginStreamRegistry) Register(pluginName, funcName string, fn PluginStreamFunc) error {
@@ -293,7 +350,9 @@ func (psr *PluginStreamRegistry) Register(pluginName, funcName string, fn Plugin
 	if _, exists := psr.funcs[key]; exists {
 		return fmt.Errorf("plugin stream function %q already registered", key)
 	}
-	psr.funcs[key] = fn
+	pluginFn := plugin.PluginStreamFunc(fn)
+	wrapped := plugin.RecoverPluginStreamFunc(pluginName, psr.healthTracker, pluginFn)
+	psr.funcs[key] = PluginStreamFunc(wrapped)
 	return nil
 }
 
@@ -311,6 +370,28 @@ func (psr *PluginStreamRegistry) Has(pluginName, funcName string) bool {
 // RegisterStream implements plugin.StreamFuncRegistry.
 func (psr *PluginStreamRegistry) RegisterStream(pluginName string, opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
 	return psr.Register(pluginName, opts.Name, PluginStreamFunc(fn))
+}
+
+// IsPluginHealthy reports whether the given streaming plugin has not panicked.
+func (psr *PluginStreamRegistry) IsPluginHealthy(pluginName string) bool {
+	return psr.healthTracker.IsHealthy(pluginName)
+}
+
+// MarkPluginUnhealthy marks a streaming plugin as unhealthy with the given error.
+func (psr *PluginStreamRegistry) MarkPluginUnhealthy(pluginName string, err error) {
+	psr.healthTracker.MarkUnhealthy(pluginName, err)
+}
+
+// PluginHealthStatus returns the current health status of all streaming plugins
+// that have been marked unhealthy. Healthy plugins are not included.
+func (psr *PluginStreamRegistry) PluginHealthStatus() []plugin.HealthStatus {
+	return psr.healthTracker.UnhealthyStatus()
+}
+
+// UnhealthyError returns the error that caused the streaming plugin to be
+// marked unhealthy, or nil if the plugin is healthy.
+func (psr *PluginStreamRegistry) UnhealthyError(pluginName string) error {
+	return psr.healthTracker.UnhealthyError(pluginName)
 }
 
 // RetryableError is optionally implemented by errors to indicate retryability.
@@ -488,6 +569,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		nowMs:      nowMs.Load(),
 		deferrals:  make(map[string]string),
 		workflowID: e.workflowID,
+		execRunID:  e.workflowID,
 		tenantID:   e.tenantID,
 	}
 
@@ -511,6 +593,10 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 			}, session.deferrals, session.queryState, nil
 		}
 		// Workflow failed with a non-suspend error. Release any held scopes.
+		// Invoke registered defer callbacks on trap.
+		if len(session.deferrals) > 0 {
+			e.invokeDefersOnTrap(execCtx, mod, session.deferrals)
+		}
 		session.releaseHeldScopes(ctx)
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, err
 	}
@@ -553,6 +639,24 @@ func (e *Engine) RunDeferCompiled(ctx context.Context, compiled wazero.CompiledM
 	return e.rt.CallExport(ctx, mod, deferName, input)
 }
 
+// invokeDefersOnTrap attempts to invoke registered defer callbacks after a WASM trap.
+// Each defer is called as a separate export. Failures are logged but not returned —
+// the original trap error takes priority.
+func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferrals map[string]string) {
+	for deferID, description := range deferrals {
+		exportName := "cleat_defer_" + deferID
+		fn := mod.ExportedFunction(exportName)
+		if fn == nil {
+			log.Printf("[engine] defer %q (%s): export %q not found", deferID, description, exportName)
+			continue
+		}
+		_, _, err := e.rt.CallExportWithSuspend(ctx, mod, exportName, []byte("{}"))
+		if err != nil {
+			log.Printf("[engine] defer %q (%s) failed: %v", deferID, description, err)
+		}
+	}
+}
+
 // DispatchUpdate dispatches an update to a workflow by invoking its registered handler.
 // The handler receives the update name and payload JSON, and returns the result JSON.
 // Returns an error if no update handler is configured on the engine.
@@ -586,10 +690,12 @@ type execSession struct {
 	suspendErr *SuspendError
 	signals    map[string]string // pending signals delivered during this session
 	deferrals  map[string]string // registered defer callbacks (deferID -> description)
-	workflowID string            // parent workflow instance ID (for child workflows)
-	queryState map[string]string // key-value state set via SetQueryState
+	workflowID  string            // parent workflow instance ID (for child workflows)
+	execRunID   string            // current execution run ID
+	queryState  map[string]string // key-value state set via SetQueryState
 	tenantID          string            // tenant ID injected into plugin function context
 	callerPluginName  string            // for WASM plugins, the calling plugin's name (for call_plugin enforcement)
+	queryHandlers     []string          // registered query handler names
 
 	// Scope management for virtual object instances.
 	scopePrefix  string // "vo:<type>:<key>:" prefix, empty if no scope
@@ -2290,6 +2396,160 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, respPt
 	s.isReplay = false
 	return s.freshSideEffect(ctx, m, "", respPtr, respMaxLen)
 }
+
+func (s *execSession) WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
+	mem := m.Memory()
+	id := s.workflowID
+	if id == "" {
+		id = "unknown"
+	}
+	written := writeWasmString(mem, idPtr, id, idMaxLen)
+	return packSimpleResult(0, written)
+}
+
+func (s *execSession) RunID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
+	mem := m.Memory()
+	runID := s.execRunID
+	if runID == "" {
+		runID = "unknown"
+	}
+	written := writeWasmString(mem, idPtr, runID, idMaxLen)
+	return packSimpleResult(0, written)
+}
+
+func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseID, value string) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			s.stepCount++
+			if rec.EventType == EventTypePromiseResolved {
+				return 0
+			}
+		}
+		s.isReplay = false
+	}
+
+	// Fresh execution: record and dispatch.
+	rec := EventRecord{
+		Step:          s.stepCount,
+		EventType:     EventTypePromiseResolved,
+		PromiseID:     promiseID,
+		PromiseResult: value,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	if s.engine.promiseStore != nil {
+		if err := s.engine.promiseStore.ResolvePromise(ctx, s.workflowID, promiseID, value); err != nil {
+			log.Printf("[engine] resolve_promise: %v", err)
+		}
+	}
+	return 0
+}
+
+func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID, errMsg string) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			s.stepCount++
+			if rec.EventType == EventTypePromiseRejected {
+				return 0
+			}
+		}
+		s.isReplay = false
+	}
+
+	// Fresh execution: record and dispatch.
+	rec := EventRecord{
+		Step:         s.stepCount,
+		EventType:    EventTypePromiseRejected,
+		PromiseID:    promiseID,
+		PromiseError: errMsg,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	if s.engine.promiseStore != nil {
+		if err := s.engine.promiseStore.RejectPromise(ctx, s.workflowID, promiseID, errMsg); err != nil {
+			log.Printf("[engine] reject_promise: %v", err)
+		}
+	}
+	return 0
+}
+
+func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, operation, requestJSON string) int64 {
+	if s.isReplay {
+		// On replay, skip (fire-and-forget is recorded but not re-executed).
+		if s.stepCount < len(s.history) {
+			s.stepCount++
+		}
+		return 0
+	}
+
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeDurableSend,
+		Service:   service,
+		Op:        operation,
+		Request:   requestJSON,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	// Execute the fire-and-forget call through the caller.
+	if s.engine.caller != nil {
+		go func() {
+			if ctx.Err() != nil {
+				return
+			}
+			_, _ = s.engine.caller.Call(ctx, service, operation, requestJSON)
+		}()
+	}
+	return 0
+}
+
+func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			s.stepCount++
+		}
+		return 0
+	}
+
+	rec := EventRecord{
+		Step:       s.stepCount,
+		EventType:  EventTypeDurableScheduleInvoke,
+		Service:    service,
+		Op:         operation,
+		Request:    requestJSON,
+		DurationMs: delayMs,
+	}
+	s.history = append(s.history, rec)
+	s.stepCount++
+
+	// Schedule the call. For now, run in a goroutine after the delay.
+	if s.engine.caller != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(delayMs) * time.Millisecond):
+				_, _ = s.engine.caller.Call(ctx, service, operation, requestJSON)
+			}
+		}()
+	}
+	return 0
+}
+
+func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64 {
+	// Query handlers are registered but don't produce event history entries.
+	// They are invoked out-of-band by the worker, not during replay.
+	s.queryHandlers = append(s.queryHandlers, name)
+	return 0
+}
+
+// QueryHandlers returns the list of registered query handler names.
+func (s *execSession) QueryHandlers() []string { return s.queryHandlers }
 
 // ---- Result packing helpers ----
 

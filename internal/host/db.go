@@ -15,14 +15,14 @@ import (
 // WorkflowDef is a row from the workflow_defs table.
 // It represents a deployed version of a workflow definition.
 type WorkflowDef struct {
-	Name        string            `json:"name"`
-	Version     int               `json:"version"`
-	WASMBytes   []byte            `json:"wasm_bytes,omitempty"`
-	ABIVersion  int               `json:"abi_version"`
-	MinVersion  int               `json:"min_version"`
-	PluginDeps  map[string]string `json:"plugin_deps,omitempty"`
-	CreatedAt   time.Time         `json:"created_at"`
-	Deprecated  bool              `json:"deprecated"`
+	Name       string            `json:"name"`
+	Version    int               `json:"version"`
+	WASMBytes  []byte            `json:"wasm_bytes,omitempty"`
+	ABIVersion int               `json:"abi_version"`
+	MinVersion int               `json:"min_version"`
+	PluginDeps map[string]string `json:"plugin_deps,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+	Deprecated bool              `json:"deprecated"`
 }
 
 // WorkflowInstance is a row from workflow_instances.
@@ -72,7 +72,6 @@ type ConcurrencyKeyInfo struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
-
 // UpdateRequestInfo holds the state of an incoming update request.
 type UpdateRequestInfo struct {
 	WorkflowID string    `json:"workflow_id"`
@@ -98,6 +97,17 @@ type WorkflowMemoryStats struct {
 	P90         int64   `json:"p90"`
 	P99         int64   `json:"p99"`
 	SampleCount int     `json:"sample_count"`
+}
+
+// WorkflowFilter contains optional filter parameters for listing workflow instances.
+// Empty/zero values mean "no filter" for that parameter.
+type WorkflowFilter struct {
+	Status        string
+	InputContains string
+	ErrorContains string
+	Search        string
+	Offset        int
+	Limit         int
 }
 
 // WorkflowStore is the database interface for the worker.
@@ -180,8 +190,10 @@ type WorkflowStore interface {
 	// GetQueryState returns the query state for a workflow instance key.
 	GetQueryState(ctx context.Context, workflowID, key string) (string, error)
 
-	// ListWorkflows returns workflow instances filtered by status.
-	ListWorkflows(ctx context.Context, status string, limit int) ([]WorkflowInstance, error)
+	// ListWorkflows returns workflow instances filtered by the given filter parameters.
+	// Supported filters: Status, InputContains, ErrorContains, Search.
+	// Supports pagination via Offset and Limit (default 100, max 1000).
+	ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error)
 
 	// GetWorkflowByID returns a single workflow instance by ID.
 	GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error)
@@ -241,17 +253,16 @@ type WorkflowStore interface {
 	// ListPromises returns all promises for a workflow ordered by creation time.
 	ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error)
 
-
 	// ---- Update Request methods (Feature 3: Update Handler) ----
-	
+
 	// CreateUpdateRequest registers an incoming update request for a workflow.
 	// The update will be dispatched to the workflow's registered handler.
 	CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error
-	
+
 	// GetPendingUpdateRequests returns all pending (not yet dispatched) update
 	// requests for a workflow.
 	GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error)
-	
+
 	// CompleteUpdateRequest marks an update request as completed with a result or error.
 	CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error
 
@@ -582,10 +593,10 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PluginInput = pluginInput.String
 		rec.PluginOutput = pluginOutput.String
 		rec.PluginError = pluginErr.String
-			rec.PromiseName = promiseName.String
-			rec.PromiseID = promiseID.String
-			rec.PromiseResult = promiseResult.String
-			rec.PromiseError = promiseError.String
+		rec.PromiseName = promiseName.String
+		rec.PromiseID = promiseID.String
+		rec.PromiseResult = promiseResult.String
+		rec.PromiseError = promiseError.String
 
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
@@ -1314,8 +1325,10 @@ func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key strin
 	return value.String, nil
 }
 
-// ListWorkflows returns workflow instances filtered by status, ordered by creation time.
-func (s *PostgresStore) ListWorkflows(ctx context.Context, status string, limit int) ([]WorkflowInstance, error) {
+// ListWorkflows returns workflow instances filtered by the given filter parameters,
+// ordered by creation time DESC. Supports search by input content, error message,
+// and combined full-text search, as well as pagination via Offset/Limit.
+func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	query := `
 		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at
 		FROM workflow_instances
@@ -1324,18 +1337,51 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, status string, limit 
 	var args []interface{}
 	argN := 0
 
-	if status != "" {
+	if filter.Status != "" {
 		argN++
 		query += fmt.Sprintf(" AND status = $%d", argN)
-		args = append(args, status)
+		args = append(args, filter.Status)
+	}
+
+	if filter.InputContains != "" {
+		argN++
+		// Cast the JSONB input column to text for ILIKE substring matching.
+		// For production workloads with many rows, consider adding a GIN index:
+		//   CREATE INDEX idx_workflow_instances_input_gin
+		//   ON workflow_instances USING GIN (input jsonb_path_ops);
+		query += fmt.Sprintf(" AND input::text ILIKE $%d", argN)
+		args = append(args, "%"+filter.InputContains+"%")
+	}
+
+	if filter.ErrorContains != "" {
+		argN++
+		query += fmt.Sprintf(" AND error_msg ILIKE $%d", argN)
+		args = append(args, "%"+filter.ErrorContains+"%")
+	}
+
+	if filter.Search != "" {
+		argN++
+		pattern := "%" + filter.Search + "%"
+		query += fmt.Sprintf(" AND (input::text ILIKE $%d OR result::text ILIKE $%d OR error_msg ILIKE $%d)", argN, argN, argN)
+		args = append(args, pattern)
 	}
 
 	query += " ORDER BY created_at DESC"
 
-	if limit > 0 {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	} else if limit > 1000 {
+		limit = 1000
+	}
+	argN++
+	query += fmt.Sprintf(" LIMIT $%d", argN)
+	args = append(args, limit)
+
+	if filter.Offset > 0 {
 		argN++
-		query += fmt.Sprintf(" LIMIT $%d", argN)
-		args = append(args, limit)
+		query += fmt.Sprintf(" OFFSET $%d", argN)
+		args = append(args, filter.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -2000,60 +2046,138 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	}
 	switch rec.EventType {
 	case "call":
-		if v, ok := m["service"].(string); ok { rec.Service = v }
-		if v, ok := m["operation"].(string); ok { rec.Op = v }
-		if v, ok := m["request"].(string); ok { rec.Request = v }
-		if v, ok := m["response"].(string); ok { rec.Response = v }
-		if v, ok := m["error"].(string); ok { rec.Err = v }
-		if v, ok := m["duration_ms"].(float64); ok { rec.DurationMs = int64(v) }
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["operation"].(string); ok {
+			rec.Op = v
+		}
+		if v, ok := m["request"].(string); ok {
+			rec.Request = v
+		}
+		if v, ok := m["response"].(string); ok {
+			rec.Response = v
+		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
+		if v, ok := m["duration_ms"].(float64); ok {
+			rec.DurationMs = int64(v)
+		}
 	case "sleep":
-		if v, ok := m["duration_ms"].(float64); ok { rec.DurationMs = int64(v) }
+		if v, ok := m["duration_ms"].(float64); ok {
+			rec.DurationMs = int64(v)
+		}
 	case "await_signals":
-		if v, ok := m["signal_names"].(string); ok { rec.SignalNames = v }
-		if v, ok := m["timeout_ms"].(float64); ok { rec.TimeoutMs = int64(v) }
+		if v, ok := m["signal_names"].(string); ok {
+			rec.SignalNames = v
+		}
+		if v, ok := m["timeout_ms"].(float64); ok {
+			rec.TimeoutMs = int64(v)
+		}
 	case "signal_received":
-		if v, ok := m["signal_name"].(string); ok { rec.SignalName = v }
-		if v, ok := m["signal_payload"].(string); ok { rec.SignalPayload = v }
+		if v, ok := m["signal_name"].(string); ok {
+			rec.SignalName = v
+		}
+		if v, ok := m["signal_payload"].(string); ok {
+			rec.SignalPayload = v
+		}
 	case "defer":
-		if v, ok := m["defer_description"].(string); ok { rec.DeferDescription = v }
-		if v, ok := m["defer_id"].(string); ok { rec.DeferID = v }
+		if v, ok := m["defer_description"].(string); ok {
+			rec.DeferDescription = v
+		}
+		if v, ok := m["defer_id"].(string); ok {
+			rec.DeferID = v
+		}
 	case "child_workflow":
-		if v, ok := m["child_name"].(string); ok { rec.ChildName = v }
-		if v, ok := m["child_input"].(string); ok { rec.ChildInput = v }
-		if v, ok := m["run_id"].(string); ok { rec.RunID = v }
+		if v, ok := m["child_name"].(string); ok {
+			rec.ChildName = v
+		}
+		if v, ok := m["child_input"].(string); ok {
+			rec.ChildInput = v
+		}
+		if v, ok := m["run_id"].(string); ok {
+			rec.RunID = v
+		}
 	case "continue_as_new":
-		if v, ok := m["new_input"].(string); ok { rec.NewInput = v }
+		if v, ok := m["new_input"].(string); ok {
+			rec.NewInput = v
+		}
 	case "plugin_call":
-		if v, ok := m["plugin_name"].(string); ok { rec.PluginName = v }
-		if v, ok := m["plugin_func"].(string); ok { rec.PluginFunc = v }
-		if v, ok := m["plugin_input"].(string); ok { rec.PluginInput = v }
-		if v, ok := m["plugin_output"].(string); ok { rec.PluginOutput = v }
-		if v, ok := m["plugin_error"].(string); ok { rec.PluginError = v }
+		if v, ok := m["plugin_name"].(string); ok {
+			rec.PluginName = v
+		}
+		if v, ok := m["plugin_func"].(string); ok {
+			rec.PluginFunc = v
+		}
+		if v, ok := m["plugin_input"].(string); ok {
+			rec.PluginInput = v
+		}
+		if v, ok := m["plugin_output"].(string); ok {
+			rec.PluginOutput = v
+		}
+		if v, ok := m["plugin_error"].(string); ok {
+			rec.PluginError = v
+		}
 	case "create_promise", "await_promise", "promise_resolved", "promise_rejected":
-		if v, ok := m["promise_name"].(string); ok { rec.PromiseName = v }
-		if v, ok := m["promise_id"].(string); ok { rec.PromiseID = v }
-		if v, ok := m["promise_result"].(string); ok { rec.PromiseResult = v }
-		if v, ok := m["promise_error"].(string); ok { rec.PromiseError = v }
+		if v, ok := m["promise_name"].(string); ok {
+			rec.PromiseName = v
+		}
+		if v, ok := m["promise_id"].(string); ok {
+			rec.PromiseID = v
+		}
+		if v, ok := m["promise_result"].(string); ok {
+			rec.PromiseResult = v
+		}
+		if v, ok := m["promise_error"].(string); ok {
+			rec.PromiseError = v
+		}
 	case "update_handler":
-		if v, ok := m["update_handler_name"].(string); ok { rec.UpdateHandlerName = v }
+		if v, ok := m["update_handler_name"].(string); ok {
+			rec.UpdateHandlerName = v
+		}
 	case "state_mutation":
-		if v, ok := m["state_key"].(string); ok { rec.StateKey = v }
-		if v, ok := m["state_value"].(string); ok { rec.StateValue = v }
-		if v, ok := m["state_delta"].(float64); ok { rec.StateDelta = int64(v) }
-		if v, ok := m["state_op"].(string); ok { rec.StateOp = v }
+		if v, ok := m["state_key"].(string); ok {
+			rec.StateKey = v
+		}
+		if v, ok := m["state_value"].(string); ok {
+			rec.StateValue = v
+		}
+		if v, ok := m["state_delta"].(float64); ok {
+			rec.StateDelta = int64(v)
+		}
+		if v, ok := m["state_op"].(string); ok {
+			rec.StateOp = v
+		}
 	case "run_detached":
 		// No extra fields to restore.
 	case "side_effect":
-		if v, ok := m["side_effect_result"].(string); ok { rec.SideEffectResult = v }
+		if v, ok := m["side_effect_result"].(string); ok {
+			rec.SideEffectResult = v
+		}
 	case "plugin_call_stream_chunk":
-		if v, ok := m["plugin_name"].(string); ok { rec.PluginName = v }
-		if v, ok := m["plugin_func"].(string); ok { rec.PluginFunc = v }
-		if v, ok := m["plugin_input"].(string); ok { rec.PluginInput = v }
-		if v, ok := m["plugin_output"].(string); ok { rec.PluginOutput = v }
-		if v, ok := m["plugin_error"].(string); ok { rec.PluginError = v }
+		if v, ok := m["plugin_name"].(string); ok {
+			rec.PluginName = v
+		}
+		if v, ok := m["plugin_func"].(string); ok {
+			rec.PluginFunc = v
+		}
+		if v, ok := m["plugin_input"].(string); ok {
+			rec.PluginInput = v
+		}
+		if v, ok := m["plugin_output"].(string); ok {
+			rec.PluginOutput = v
+		}
+		if v, ok := m["plugin_error"].(string); ok {
+			rec.PluginError = v
+		}
 	case "scope_acquired":
-		if v, ok := m["scope_key"].(string); ok { rec.ScopeKey = v }
-		if v, ok := m["error"].(string); ok { rec.Err = v }
+		if v, ok := m["scope_key"].(string); ok {
+			rec.ScopeKey = v
+		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
 	}
 }
 

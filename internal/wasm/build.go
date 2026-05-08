@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/rcownie/cleat/internal/analyzer"
 )
 
 // BuildConfig holds the parameters for assembling a build directory.
@@ -61,6 +63,22 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 			if strings.HasPrefix(base, "gen_") {
 				continue
 			}
+
+			// Warn on files with platform-specific suffixes that the
+			// compiler will exclude for the WASM target.
+			for _, warn := range analyzer.WasmFilenameWarnings(base) {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", warn)
+			}
+
+			// Evaluate build constraints; skip files constrained out.
+			ok, err := analyzer.MatchWasmBuildConstraint(filename, content)
+			if err != nil {
+				return fmt.Errorf("checking build constraints for %s: %w", base, err)
+			}
+			if !ok {
+				continue
+			}
+
 			dst := filepath.Join(cfg.OutDir, base)
 			rewritten := rewritePackageToMain(content)
 			if err := os.WriteFile(dst, rewritten, 0644); err != nil {
@@ -77,11 +95,27 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 			if strings.HasPrefix(base, "gen_") {
 				continue
 			}
-			dst := filepath.Join(cfg.OutDir, base)
+
+			// Warn on files with platform-specific suffixes that the
+			// compiler will exclude for the WASM target.
+			for _, warn := range analyzer.WasmFilenameWarnings(base) {
+				fmt.Fprintf(os.Stderr, "warning: %s\n", warn)
+			}
+
+			// Evaluate build constraints; skip files constrained out.
 			content, err := os.ReadFile(src)
 			if err != nil {
 				return fmt.Errorf("reading %s: %w", base, err)
 			}
+			ok, err := analyzer.MatchWasmBuildConstraint(src, content)
+			if err != nil {
+				return fmt.Errorf("checking build constraints for %s: %w", base, err)
+			}
+			if !ok {
+				continue
+			}
+
+			dst := filepath.Join(cfg.OutDir, base)
 			rewritten := rewritePackageToMain(content)
 			if err := os.WriteFile(dst, rewritten, 0644); err != nil {
 				return fmt.Errorf("writing %s: %w", base, err)

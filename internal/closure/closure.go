@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"go/types"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/rcownie/cleat/internal/analyzer"
@@ -85,8 +86,16 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 	result.NumPure = len(cr.Pure)
 
 	// Validate supported constructs in all cleat functions.
+	// Functions defined in files that would be excluded for the WASM target
+	// (GOOS=wasip1 GOARCH=wasm) are skipped — they won't appear in the
+	// compiled WASM module and may legitimately use non-deterministic
+	// platform APIs.
+	wasmCache := make(map[string]bool)
 	for _, fd := range result.Funcs {
 		if fd.DurabilityTag == "DurableLeaf" || fd.DurabilityTag == "DurableClosure" {
+			if !isWASEligible(fd, wasmCache) {
+				continue
+			}
 			validateConstructs(fd, cr)
 		}
 	}
@@ -642,17 +651,42 @@ func resolveCallFQName(call *ast.CallExpr, info *types.Info) string {
 			return ""
 		}
 		if fn, ok := obj.(*types.Func); ok {
-			return fn.FullName()
+			return analyzer.FuncFQName(fn)
 		}
 	case *ast.SelectorExpr:
 		if sel, ok := info.Selections[fun]; ok {
 			if fn, ok := sel.Obj().(*types.Func); ok {
-				return fn.FullName()
+				return analyzer.FuncFQName(fn)
 			}
 		}
 		if obj, ok := info.Uses[fun.Sel]; ok {
 			if fn, ok := obj.(*types.Func); ok {
-				return fn.FullName()
+				return analyzer.FuncFQName(fn)
+			}
+		}
+	case *ast.IndexExpr:
+		// Generic function instantiation: Func[T](args)
+		if ident, ok := fun.X.(*ast.Ident); ok {
+			obj, ok := info.Uses[ident]
+			if !ok {
+				return ""
+			}
+			if fn, ok := obj.(*types.Func); ok {
+				return analyzer.FuncFQName(fn)
+			}
+			return ""
+		}
+		// Generic method call with explicit type args: obj.Method[T](args)
+		if sel, ok := fun.X.(*ast.SelectorExpr); ok {
+			if selInfo, ok := info.Selections[sel]; ok {
+				if fn, ok := selInfo.Obj().(*types.Func); ok {
+					return analyzer.FuncFQName(fn)
+				}
+			}
+			if obj, ok := info.Uses[sel.Sel]; ok {
+				if fn, ok := obj.(*types.Func); ok {
+					return analyzer.FuncFQName(fn)
+				}
 			}
 		}
 	}
@@ -715,4 +749,52 @@ func validateInitFunctions(result *analyzer.AnalysisResult, cr *Result) {
 			return true
 		})
 	}
+}
+
+// isWASEligible reports whether the function's source file would be
+// compiled for the WASM target (GOOS=wasip1 GOARCH=wasm). Functions in
+// files that are build-constrained out (e.g. *_linux.go, *_amd64.go, or
+// files with //go:build constraints that exclude wasip1/wasm) are not
+// eligible and should be skipped during validation.
+//
+// cache maps source file path -> eligibility, avoiding repeated I/O when
+// multiple functions live in the same file.
+func isWASEligible(fd *analyzer.FuncDecl, cache map[string]bool) bool {
+	if fd.Pkg == nil || fd.Pkg.Fset == nil || fd.Ast == nil {
+		return true // can't determine position; err on the side of validation
+	}
+
+	filename := fd.Pkg.Fset.Position(fd.Ast.Pos()).Filename
+	if filename == "" || filename == "-" {
+		return true
+	}
+
+	// Check cache.
+	if eligible, ok := cache[filename]; ok {
+		return eligible
+	}
+
+	// Quick check: filename suffix (no I/O needed).
+	if analyzer.FilenameConstrainedOut(filename) {
+		cache[filename] = false
+		return false
+	}
+
+	// Read the file to check //go:build constraints.
+	content, err := os.ReadFile(filename)
+	if err != nil {
+		// Can't read the file — let the validation proceed (safe side).
+		cache[filename] = true
+		return true
+	}
+
+	ok, err := analyzer.MatchWasmBuildConstraint(filename, content)
+	if err != nil {
+		// Parse error — let validation proceed.
+		cache[filename] = true
+		return true
+	}
+
+	cache[filename] = ok
+	return ok
 }

@@ -3,13 +3,16 @@ package host
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
+	"github.com/tetratelabs/wazero/sys"
 )
 
 var wazeroInitOnce sync.Once
@@ -127,6 +130,73 @@ func (r *Runtime) InstantiateAndInit(ctx context.Context, wasmBytes []byte) (api
 	return mod, nil
 }
 
+// wasmTrapError wraps a WASM trap/exit error with a formatted message
+// that includes the stack trace with DWARF-resolved source locations.
+type wasmTrapError struct {
+	cause error
+	msg   string
+}
+
+func (e *wasmTrapError) Error() string { return e.msg }
+
+// Unwrap preserves the original error so errors.Is/errors.As still work.
+func (e *wasmTrapError) Unwrap() error { return e.cause }
+
+// formatWasmCallError formats an error from a wazero function call into a
+// human-readable WASM stack trace.
+//
+// wazero's engine already resolves DWARF source locations and embeds the
+// stack trace in the error message. This function classifies the error and
+// produces a clean format.
+//
+// For ExitError (from proc_exit / context cancellation), we report the
+// exit code. For WASM trap errors, wazero's message already includes the
+// full stack trace with file:line locations resolved from DWARF debug info
+// (when the module was compiled with debug symbols, which is the default
+// for Go `GOOS=wasip1 GOARCH=wasm` builds). We replace the "wasm error:"
+// prefix with "wasm trap:" for consistency.
+//
+// If DWARF info is not available (e.g., the module was stripped), the
+// wazero message falls back to raw function indices and instruction offsets.
+func formatWasmCallError(err error) error {
+	// ExitError: the module called proc_exit (e.g., Go's os.Exit) or context
+	// was cancelled. These don't carry stack trace info.
+	var exitErr *sys.ExitError
+	if errors.As(err, &exitErr) {
+		switch exitErr.ExitCode() {
+		case sys.ExitCodeContextCanceled:
+			return &wasmTrapError{cause: err, msg: "wasm trap: context canceled"}
+		case sys.ExitCodeDeadlineExceeded:
+			return &wasmTrapError{cause: err, msg: "wasm trap: deadline exceeded"}
+		default:
+			return &wasmTrapError{
+				cause: err,
+				msg:   fmt.Sprintf("wasm trap: exit(code=%d)", exitErr.ExitCode()),
+			}
+		}
+	}
+
+	// Trap error: wazero's format already includes the stack trace with
+	// DWARF-resolved source locations (file:line). Replace the "wasm error:"
+	// prefix with "wasm trap:" for consistency.
+	//
+	// Example wazero output:
+	//   wasm error: unreachable
+	//   wasm stack trace:
+	//       env.cleat_call(i32,i32,i32,i32,i32,i32,i32,i32)
+	//           0x1234: /build/workflow.go:42:5
+	//       main.handler(i32,i32)
+	//           0x5678: /build/workflow.go:15:7
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "wasm error:") {
+		errMsg = strings.Replace(errMsg, "wasm error:", "wasm trap:", 1)
+		return &wasmTrapError{cause: err, msg: errMsg}
+	}
+
+	// Fallback: unknown error type — wrap with "wasm trap:" prefix.
+	return &wasmTrapError{cause: err, msg: fmt.Sprintf("wasm trap: %s", errMsg)}
+}
+
 // ErrSuspended is returned by CallExport when the workflow suspends.
 var ErrSuspended = fmt.Errorf("workflow suspended")
 
@@ -179,6 +249,14 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	}
 
 	// Call the export: func(argsPtr, argsLen, outPtr, maxOutLen uint32) int64
+	//
+	// When the WASM module traps (unreachable, OOB memory, etc.),
+	// wazero's engine recovers and returns an error with a stack trace.
+	// If the module was compiled with DWARF debug info (default for
+	// Go wasip1 builds), the stack trace includes source file:line
+	// locations. If DWARF is unavailable (stripped binary), the
+	// trace falls back to raw function indices and offsets.
+	// See formatWasmCallError for the formatting logic.
 	results, err := fn.Call(ctx,
 		uint64(inputOffset),
 		uint64(len(inputJSON)),
@@ -186,7 +264,7 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 		uint64(outBufSize),
 	)
 	if err != nil {
-		return "", false, fmt.Errorf("host: export %q call failed: %w", exportName, err)
+		return "", false, formatWasmCallError(err)
 	}
 
 	if len(results) == 0 {

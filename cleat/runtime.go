@@ -43,16 +43,10 @@ type CronSchedule struct {
 	Enabled      bool   `json:"enabled"`
 }
 
-// HostCalls is the interface workflow code programs against. It provides
-// durable, deterministic access to external services, time, and randomness.
-//
-// Entry points receive a HostCalls as their first parameter. Helper functions
-// in the durable closure can thread it through their call chains (manually or
-// via the auto-threading transformer).
-//
-// The concrete implementation is *hostCallsImpl, created by the WASM host
-// adapter at runtime. For tests, mock implementations can be provided.
-type HostCalls interface {
+// Caller is the interface for making durable calls to external services.
+// It groups all methods that invoke remote operations (API calls, plugins,
+// HTTP fetches, side effects).
+type Caller interface {
 	// DurableCall makes or replays an API call (service, operation, request).
 	DurableCall(service, operation, requestJSON string) (responseJSON string, err error)
 
@@ -98,6 +92,36 @@ type HostCalls interface {
 	// Returns a channel that receives StreamEvent chunks.
 	PluginCallStreaming(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
 
+	// DurableFetch makes an HTTP request as a durable operation.
+	// Delegates to DurableCall("http", "fetch", requestJSON) internally.
+	DurableFetch(url, method string, headers map[string]string, body string) (responseJSON string, statusCode int, err error)
+
+	// DurableFetchJSON is like DurableFetch but unmarshals the response into result.
+	DurableFetchJSON(url, method string, headers map[string]string, body string, result interface{}) error
+
+	// FetchGet is a shorthand for DurableFetch with GET method, no headers, no body.
+	FetchGet(url string) (responseJSON string, statusCode int, err error)
+
+	// FetchGetJSON is like FetchGet but unmarshals the response into result.
+	FetchGetJSON(url string, result interface{}) error
+
+	// DurableSend sends a one-way (fire-and-forget) message to a service.
+	DurableSend(service, operation, requestJSON string) error
+
+	// ScheduleInvoke schedules a one-way message to be delivered after a delay.
+	ScheduleInvoke(service, operation, requestJSON string, delayMs int64) error
+
+	// SideEffect executes a non-deterministic function, records its result
+	// in event history on first execution, and returns the cached result on
+	// replay. The fn is always called on first execution; on replay, the
+	// cached result from history is returned and fn is NOT called (the
+	// computed result from fn is ignored on replay).
+	SideEffect(fn func() (string, error)) (string, error)
+}
+
+// Timer provides durable, deterministic time operations.
+// Use instead of time.Now() and time.Sleep() for replay-safe workflow code.
+type Timer interface {
 	// DurableSleep suspends the workflow for the given duration.
 	DurableSleep(d time.Duration)
 
@@ -105,6 +129,19 @@ type HostCalls interface {
 	// Prefer DurableSleep(time.Duration) for readability.
 	DurableSleepMs(ms int64)
 
+	// Now returns the current wall-clock time. Use instead of time.Now()
+	// for deterministic replay.
+	Now() time.Time
+
+	// NowMs returns the current wall-clock time in milliseconds since epoch.
+	// Prefer Now() for readability.
+	NowMs() int64
+}
+
+// Signaler provides durable signal operations for workflow communication.
+// Signals allow workflows to communicate with each other and with external
+// systems in a deterministic, replay-safe manner.
+type Signaler interface {
 	// AwaitSignals blocks until one of the named signals arrives or the
 	// timeout expires. Returns a structured SignalResult.
 	AwaitSignals(signalNames []string, timeout time.Duration) SignalResult
@@ -112,14 +149,43 @@ type HostCalls interface {
 	// DurableAwaitSignals is the low-level signal wait. Prefer AwaitSignals.
 	DurableAwaitSignals(signalNames []string, timeoutMs int64) (signalName, payload string, timedOut bool, err error)
 
-	// CreatePromise creates a named durable promise and returns its ID.
-	// The promise can be resolved or rejected by an external caller via the REST API.
-	CreatePromise(name string) (promiseID string, err error)
+	// SendSignalAndWait sends a signal to another workflow and waits for a response.
+	// The signal is sent with an embedded correlation ID; the target workflow uses
+	// ReplyToSignal to send a response back.
+	SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (response string, err error)
 
-	// AwaitPromise waits for a promise to be resolved by an external caller.
-	// Returns the result, whether it timed out, and any error.
-	// Blocks the workflow until resolved or timeout expires.
-	AwaitPromise(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
+	// ReplyToSignal sends a response back to the sender of a signal identified by
+	// the given correlation ID. Only valid inside a signal handler context where
+	// the correlation ID was embedded in the received signal payload.
+	ReplyToSignal(correlationID, response string) error
+
+	// AwaitSignalsWithQuorum waits for at least minCount signals from the named
+	// set, up to an optional maxRejections threshold, within the given timeout.
+	// Returns the collected signals or an error if quorum was not met.
+	// When maxRejections >= 0, signals whose JSON payload contains "rejected":true
+	// count toward the rejection limit; exceeding it aborts the wait.
+	AwaitSignalsWithQuorum(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
+
+	// SignalWorkflow sends a signal to another workflow from within a workflow.
+	// This is a recorded (journaled) operation that delivers a signal to the
+	// target workflow's signal queue. Unlike SendSignalAndWait, this is
+	// fire-and-forget -- the caller does not wait for a response.
+	SignalWorkflow(targetRunID, signalName, payload string) error
+
+	// PollSignal checks for a non-blocking signal.
+	PollSignal(signalName string) (payload string, found bool, err error)
+}
+
+// Lifecycle provides workflow lifecycle management: versioning, child workflows,
+// cancellation, logging, continuation, and deferred cleanup.
+type Lifecycle interface {
+	// ContinueAsNew creates a new workflow run with fresh event history,
+	// passing the current state as input.
+	ContinueAsNew(newInputJSON string) error
+
+	// ContinueAsNewWithVersion restarts the workflow with new input and
+	// optionally a new version. If newVersion is 0, uses the current version.
+	ContinueAsNewWithVersion(newInputJSON string, newVersion int64) error
 
 	// DurableDefer registers a function to run when the workflow exits
 	// (LIFO order, always runs even on error). Returns a deferID.
@@ -149,17 +215,6 @@ type HostCalls interface {
 	// cancel. Returns true and the reason if so.
 	PollCancellation() (cancelled bool, reason string)
 
-	// PollSignal checks for a non-blocking signal.
-	PollSignal(signalName string) (payload string, found bool, err error)
-
-	// ContinueAsNew creates a new workflow run with fresh event history,
-	// passing the current state as input.
-	ContinueAsNew(newInputJSON string) error
-
-	// ContinueAsNewWithVersion restarts the workflow with new input and
-	// optionally a new version. If newVersion is 0, uses the current version.
-	ContinueAsNewWithVersion(newInputJSON string, newVersion int64) error
-
 	// ChildWorkflow starts a child workflow with its own event history.
 	ChildWorkflow(name string, inputJSON string) (runID string, err error)
 
@@ -184,6 +239,11 @@ type HostCalls interface {
 	// AwaitChildTyped waits for a child workflow and unmarshals its result.
 	AwaitChildTyped(runID string, result interface{}) error
 
+	// RunDetached runs fn with a fresh HostCalls that ignores cancellation.
+	// fn executes immediately, is recorded in history, and survives crash/replay.
+	// On replay, fn IS re-executed (not replayed from cache).
+	RunDetached(fn func(h HostCalls) error) error
+
 	// Version returns the current workflow version number for schema evolution.
 	Version() int
 
@@ -191,6 +251,43 @@ type HostCalls interface {
 	// workflow replays against newer code than it started with, the runtime
 	// can detect version skew.
 	MinVersion() int
+}
+
+// HostCalls is the composite interface that workflow code programs against.
+// It provides durable, deterministic access to external services, time, signals,
+// workflow lifecycle, state, promises, randomness, and more.
+//
+// The interface is composed from capability-grouped sub-interfaces:
+//   - Caller: durable service calls, plugins, HTTP, side effects
+//   - Timer: deterministic time and sleep
+//   - Signaler: signal communication between workflows
+//   - Lifecycle: versioning, child workflows, cancellation, logging, defer
+//
+// Remaining methods (promises, state, registration, cron, locks, etc.)
+// are declared directly on HostCalls.
+//
+// Entry points receive a HostCalls as their first parameter. Helper functions
+// in the durable closure can thread it through their call chains (manually or
+// via the auto-threading transformer).
+//
+// The concrete implementation is *hostCallsImpl, created by the WASM host
+// adapter at runtime. For tests, mock implementations of individual group
+// interfaces (e.g., Caller, Timer) can be used where the full HostCalls
+// is not needed.
+type HostCalls interface {
+	Caller
+	Timer
+	Signaler
+	Lifecycle
+
+	// CreatePromise creates a named durable promise and returns its ID.
+	// The promise can be resolved or rejected by an external caller via the REST API.
+	CreatePromise(name string) (promiseID string, err error)
+
+	// AwaitPromise waits for a promise to be resolved by an external caller.
+	// Returns the result, whether it timed out, and any error.
+	// Blocks the workflow until resolved or timeout expires.
+	AwaitPromise(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
 
 	// SetQueryState records state that can be read by query handlers.
 	SetQueryState(key, value string)
@@ -226,29 +323,6 @@ type HostCalls interface {
 	// Queries are deterministic, read-only, and do not record events.
 	RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
 
-	// SendSignalAndWait sends a signal to another workflow and waits for a response.
-	// The signal is sent with an embedded correlation ID; the target workflow uses
-	// ReplyToSignal to send a response back.
-	SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (response string, err error)
-
-	// ReplyToSignal sends a response back to the sender of a signal identified by
-	// the given correlation ID. Only valid inside a signal handler context where
-	// the correlation ID was embedded in the received signal payload.
-	ReplyToSignal(correlationID, response string) error
-
-	// AwaitSignalsWithQuorum waits for at least minCount signals from the named
-	// set, up to an optional maxRejections threshold, within the given timeout.
-	// Returns the collected signals or an error if quorum was not met.
-	// When maxRejections >= 0, signals whose JSON payload contains "rejected":true
-	// count toward the rejection limit; exceeding it aborts the wait.
-	AwaitSignalsWithQuorum(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
-
-	// SignalWorkflow sends a signal to another workflow from within a workflow.
-	// This is a recorded (journaled) operation that delivers a signal to the
-	// target workflow's signal queue. Unlike SendSignalAndWait, this is
-	// fire-and-forget -- the caller does not wait for a response.
-	SignalWorkflow(targetRunID, signalName, payload string) error
-
 	// ScheduleCron creates a recurring workflow trigger from a cron expression.
 	// cronExpr is a standard 5-field cron expression, timezone is an IANA timezone
 	// name (e.g. "America/New_York"), inputJSON is the workflow input.
@@ -261,32 +335,6 @@ type HostCalls interface {
 	// ListCrons returns all recurring workflow triggers as a JSON array of
 	// CronSchedule entries.
 	ListCrons() (string, error)
-
-	// RunDetached runs fn with a fresh HostCalls that ignores cancellation.
-	// fn executes immediately, is recorded in history, and survives crash/replay.
-	// On replay, fn IS re-executed (not replayed from cache).
-	RunDetached(fn func(h HostCalls) error) error
-
-	// DurableFetch makes an HTTP request as a durable operation.
-	// Delegates to DurableCall("http", "fetch", requestJSON) internally.
-	DurableFetch(url, method string, headers map[string]string, body string) (responseJSON string, statusCode int, err error)
-
-	// DurableFetchJSON is like DurableFetch but unmarshals the response into result.
-	DurableFetchJSON(url, method string, headers map[string]string, body string, result interface{}) error
-
-	// FetchGet is a shorthand for DurableFetch with GET method, no headers, no body.
-	FetchGet(url string) (responseJSON string, statusCode int, err error)
-
-	// FetchGetJSON is like FetchGet but unmarshals the response into result.
-	FetchGetJSON(url string, result interface{}) error
-
-	// Now returns the current wall-clock time. Use instead of time.Now()
-	// for deterministic replay.
-	Now() time.Time
-
-	// NowMs returns the current wall-clock time in milliseconds since epoch.
-	// Prefer Now() for readability.
-	NowMs() int64
 
 	// Random returns a deterministic random number seeded from the event
 	// history. Use instead of math/rand for deterministic replay.
@@ -338,14 +386,6 @@ type HostCalls interface {
 	// so the workflow is responsive to external signals between checks.
 	// Returns true if the condition was met, false if the timeout expired.
 	AwaitCondition(predicate func() bool, pollInterval, timeout time.Duration) (met bool)
-
-	// SideEffect executes a non-deterministic function, records its result
-	// in event history on first execution, and returns the cached result on
-	// replay. The fn is always called on first execution; on replay, the
-	// cached result from history is returned and fn is NOT called (the
-	// computed result from fn is ignored on replay).
-	SideEffect(fn func() (string, error)) (string, error)
-
 }
 
 // ---- Streaming types ----

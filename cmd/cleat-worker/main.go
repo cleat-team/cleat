@@ -41,6 +41,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/host"
+	"github.com/rcownie/cleat/internal/migration"
 	"github.com/rcownie/cleat/internal/plugin"
 
 	// Plugins
@@ -84,6 +85,7 @@ func main() {
 	memoryHardLimit := flag.Float64("memory-hard-limit", 0.95, "Memory hard limit fraction 0.0-1.0 (reject API workflows)")
 	memoryCheckInterval := flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
 	memorySampleRetention := flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
+	migrationsDir := flag.String("migrations-dir", "migrations/", "Directory containing versioned SQL migration files")
 	flag.Parse()
 
 	workerID := generateWorkerID()
@@ -99,10 +101,19 @@ func main() {
 		pluginRegistry       = host.NewPluginRegistry()
 		pluginStreamRegistry = host.NewPluginStreamRegistry()
 		plugList             []*plugin.LoadedPlugin
-		plugHandler    http.Handler
-		plugMux        *http.ServeMux
-		bgWg          sync.WaitGroup
+		plugHandler          http.Handler
+		plugMux              *http.ServeMux
+		bgWg                 sync.WaitGroup
+
+		// Shared health tracker for both registries so a panic in
+		// any function marks the plugin unhealthy across all paths.
+		pluginHealthTracker = plugin.NewPluginHealthTracker()
 	)
+
+	// Share the health tracker so a panic in a regular function
+	// also blocks streaming calls and vice versa.
+	pluginRegistry.SetHealthTracker(pluginHealthTracker)
+	pluginStreamRegistry.SetHealthTracker(pluginHealthTracker)
 
 	var store host.WorkflowStore
 	var db *sql.DB
@@ -160,6 +171,14 @@ func main() {
 			tenantPools = plugin.NewTenantPools(db, baseDSN)
 		}
 
+	}
+
+	// ---- Run SQL migrations ----
+	if db != nil {
+		migrator := migration.NewRunner(db, *migrationsDir)
+		if err := migrator.Run(ctx); err != nil {
+			log.Fatalf("[worker %s] migration failed: %v", workerID, err)
+		}
 	}
 
 	// ---- Plugin loading (always, regardless of --api-addr) ----
@@ -273,22 +292,22 @@ func main() {
 	}
 
 	w := &Worker{
-		id:                  workerID,
-		store:               store,
-		concurrency:         *concurrency,
-		heartbeatInterval:   *heartbeatInterval,
-		pollInterval:        *pollInterval,
-		ctx:                 ctx,
-		cancel:              cancel,
-		namespace:           *namespace,
-		wasmCache:           make(map[string][]byte),
-		scheduleInterval:    15 * time.Second,
-		compactionThreshold: *compactionThreshold,
-		compactionInterval:  *compactionInterval,
-		pluginRegistry:       pluginRegistry,
-			tenantPools:          tenantPools,
-			memorySampleRetention: *memorySampleRetention,
-		}
+		id:                    workerID,
+		store:                 store,
+		concurrency:           *concurrency,
+		heartbeatInterval:     *heartbeatInterval,
+		pollInterval:          *pollInterval,
+		ctx:                   ctx,
+		cancel:                cancel,
+		namespace:             *namespace,
+		wasmCache:             make(map[string][]byte),
+		scheduleInterval:      15 * time.Second,
+		compactionThreshold:   *compactionThreshold,
+		compactionInterval:    *compactionInterval,
+		pluginRegistry:        pluginRegistry,
+		tenantPools:           tenantPools,
+		memorySampleRetention: *memorySampleRetention,
+	}
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
@@ -300,7 +319,7 @@ func main() {
 	atomic.StoreInt64(&metricsDesiredConcurrency, int64(*concurrency))
 	globalWorker = w
 
-		// Start HTTP API server if configured.
+	// Start HTTP API server if configured.
 	if *apiAddr != "" {
 		api := &apiServer{store: store, worker: w}
 
@@ -312,6 +331,8 @@ func main() {
 
 		mux.HandleFunc("/healthz", api.handleHealthz)
 		mux.HandleFunc("/metrics", handleMetrics)
+		// Drain endpoint — called by the Kubernetes preStop hook for graceful shutdown.
+		mux.HandleFunc("/api/admin/drain", api.handleDrain)
 		// Schedule API routes (registered before workflows so /api/schedules is not caught by /api/workflows/).
 		mux.HandleFunc("/api/schedules/", api.handleSchedules)
 		mux.HandleFunc("/api/schedules", api.handleSchedulesList)
@@ -326,17 +347,28 @@ func main() {
 			w.Header().Set("Content-Type", "application/json")
 			type pluginStatus struct {
 				plugin.PluginInfo
-				Healthy bool   `json:"healthy"`
-				Error   string `json:"error,omitempty"`
+				Healthy        bool   `json:"healthy"`
+				RuntimeHealthy bool   `json:"runtime_healthy"`
+				Error          string `json:"error,omitempty"`
+			}
+			// Build a set of plugins that have been marked unhealthy at runtime.
+			runtimeUnhealthy := make(map[string]bool)
+			for _, hs := range pluginRegistry.PluginHealthStatus() {
+				runtimeUnhealthy[hs.Name] = true
 			}
 			var statuses []pluginStatus
 			for _, lp := range plugList {
+				name := lp.Plugin.Info().Name
 				ps := pluginStatus{
-					PluginInfo: lp.Plugin.Info(),
-					Healthy:    lp.Healthy,
+					PluginInfo:     lp.Plugin.Info(),
+					Healthy:        lp.Healthy,
+					RuntimeHealthy: !runtimeUnhealthy[name],
 				}
 				if lp.Error != nil {
 					ps.Error = lp.Error.Error()
+				}
+				if runtimeErr := pluginRegistry.UnhealthyError(name); runtimeErr != nil && ps.Error == "" {
+					ps.Error = runtimeErr.Error()
 				}
 				statuses = append(statuses, ps)
 			}
@@ -354,7 +386,7 @@ func main() {
 				f, ferr := webFS.Open(path)
 				if ferr != nil {
 					r.URL.Path = "/"
-			} else {
+				} else {
 					f.Close()
 				}
 				fileServer.ServeHTTP(w, r)
@@ -405,12 +437,12 @@ func main() {
 }
 
 type Worker struct {
-	id                string
-	store             host.WorkflowStore
-	concurrency       int
-	heartbeatInterval time.Duration
-	pollInterval      time.Duration
-	namespace         string
+	id                   string
+	store                host.WorkflowStore
+	concurrency          int
+	heartbeatInterval    time.Duration
+	pollInterval         time.Duration
+	namespace            string
 	pluginRegistry       *host.PluginRegistry
 	pluginStreamRegistry *host.PluginStreamRegistry
 	tenantPools          *plugin.TenantPools
@@ -422,7 +454,7 @@ type Worker struct {
 	inflight    sync.Map // map[workflowID]*host.WorkflowInstance
 	execEngines sync.Map // map[workflowID]*host.Engine
 	wasmCache   map[string][]byte
-	wasmMu    sync.RWMutex
+	wasmMu      sync.RWMutex
 
 	scheduleMu       sync.Mutex
 	scheduleInterval time.Duration
@@ -432,11 +464,15 @@ type Worker struct {
 	backoffUntil        time.Time
 	circuitOpen         atomic.Bool
 
+	// Drain support: when true, the worker stops claiming new work
+	// and exits once all in-flight workflows finish.
+	draining atomic.Bool
+
 	// Compaction settings.
 	compactionThreshold int
 	compactionInterval  time.Duration
 
-	memoryController    *MemoryController
+	memoryController      *MemoryController
 	memorySampleRetention int
 }
 
@@ -496,6 +532,18 @@ func (w *Worker) dispatchLoop() {
 		default:
 		}
 
+		// If drain is active, stop claiming new work.
+		if w.draining.Load() {
+			if w.countInflight() == 0 {
+				// Brief delay so any pending HTTP drain responses can flush.
+				time.Sleep(100 * time.Millisecond)
+				log.Printf("[worker %s] Drain complete (dispatch loop), exiting", w.id)
+				os.Exit(0)
+			}
+			time.Sleep(w.pollInterval)
+			continue
+		}
+
 		// Memory-aware tick: read system memory, compute pressure, adjust concurrency.
 		w.memoryController.Tick(w.ctx)
 		state := w.memoryController.State()
@@ -507,11 +555,7 @@ func (w *Worker) dispatchLoop() {
 		}
 
 		// Count in-flight workflows.
-		count := 0
-		w.inflight.Range(func(_, _ interface{}) bool {
-			count++
-			return true
-		})
+		count := w.countInflight()
 
 		free := w.memoryController.DynamicConcurrency() - count
 		if free <= 0 {
@@ -611,6 +655,7 @@ func (w *Worker) dispatchLoop() {
 
 func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	defer w.wg.Done()
+	defer w.checkDrainComplete()
 	defer w.inflight.Delete(wf.ID)
 	defer func() {
 		if r := recover(); r != nil {
@@ -816,7 +861,7 @@ func (w *Worker) reaperLoop() {
 			if err != nil {
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Reaper: DB appears down", w.id)
-			} else {
+				} else {
 					log.Printf("[worker %s] Reaper: %v", w.id, err)
 				}
 				continue
@@ -843,7 +888,7 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 			if err != nil {
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Concurrency key reaper: DB appears down", w.id)
-			} else {
+				} else {
 					log.Printf("[worker %s] Concurrency key reaper: %v", w.id, err)
 				}
 				continue
@@ -871,7 +916,7 @@ func (w *Worker) scheduleLoop() {
 				w.scheduleMu.Unlock()
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Scheduler: DB appears down", w.id)
-			} else {
+				} else {
 					log.Printf("[worker %s] Scheduler: %v", w.id, err)
 				}
 				continue
@@ -1109,6 +1154,26 @@ func (w *Worker) releaseOrFail(wf *host.WorkflowInstance, errMsg string) {
 		w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, nil)
 	} else {
 		w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
+	}
+}
+
+// countInflight returns the number of currently in-flight (claimed) workflows.
+func (w *Worker) countInflight() int {
+	count := 0
+	w.inflight.Range(func(_, _ interface{}) bool {
+		count++
+		return true
+	})
+	return count
+}
+
+// checkDrainComplete is called in the defer chain of executeWorkflow, after
+// inflight.Delete. If draining is active and no workflows remain in-flight,
+// the worker exits cleanly.
+func (w *Worker) checkDrainComplete() {
+	if w.draining.Load() && w.countInflight() == 0 {
+		log.Printf("[worker %s] Drain complete — all in-flight workflows finished, exiting", w.id)
+		os.Exit(0)
 	}
 }
 
@@ -1377,15 +1442,105 @@ func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
+// handleDrain handles GET and POST /api/admin/drain for drain coordination.
+func (s *apiServer) handleDrain(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleDrainStart(w, r)
+	case http.MethodGet:
+		s.handleDrainStatus(w, r)
+	default:
+		s.writeError(w, 405, "method not allowed")
+	}
+}
+
+// handleDrainStart sets the draining flag and reports in-flight count.
+func (s *apiServer) handleDrainStart(w http.ResponseWriter, r *http.Request) {
+	s.worker.draining.Store(true)
+	count := s.worker.countInflight()
+	log.Printf("[worker %s] Drain requested — %d in-flight workflows", s.worker.id, count)
+	s.writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"status":    "draining",
+		"in_flight": count,
+	})
+}
+
+// handleDrainStatus returns the current drain state and in-flight count.
+func (s *apiServer) handleDrainStatus(w http.ResponseWriter, r *http.Request) {
+	count := s.worker.countInflight()
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"draining":  s.worker.draining.Load(),
+		"in_flight": count,
+	})
+}
+
 // handleWorkflowsList handles GET /api/workflows (without trailing path).
+// Supports query parameters:
+//   - status: filter by workflow status (e.g., "running", "ready", "done", "failed")
+//   - input_contains: search for workflows whose input JSON contains the given string
+//   - error_contains: search for workflows whose error_message contains the given string
+//   - search: combined search across input, result, and error_message columns
+//   - offset: pagination offset (default 0)
+//   - limit: page size (default 100, max 1000)
 func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
-	status := r.URL.Query().Get("status")
-	limit := 100
-	workflows, err := s.store.ListWorkflows(r.Context(), status, limit)
+
+	q := r.URL.Query()
+
+	filter := host.WorkflowFilter{
+		Status:        q.Get("status"),
+		InputContains: q.Get("input_contains"),
+		ErrorContains: q.Get("error_contains"),
+		Search:        q.Get("search"),
+	}
+
+	// Validate search string lengths to prevent abuse.
+	const maxSearchLen = 500
+	if len(filter.InputContains) > maxSearchLen {
+		s.writeError(w, 400, "input_contains exceeds maximum length of 500 characters")
+		return
+	}
+	if len(filter.ErrorContains) > maxSearchLen {
+		s.writeError(w, 400, "error_contains exceeds maximum length of 500 characters")
+		return
+	}
+	if len(filter.Search) > maxSearchLen {
+		s.writeError(w, 400, "search exceeds maximum length of 500 characters")
+		return
+	}
+
+	// Parse pagination parameters.
+	if offsetStr := q.Get("offset"); offsetStr != "" {
+		offset, err := parseIntParam(offsetStr, "offset")
+		if err != nil {
+			s.writeError(w, 400, err.Error())
+			return
+		}
+		filter.Offset = offset
+	}
+	if limitStr := q.Get("limit"); limitStr != "" {
+		limit, err := parseIntParam(limitStr, "limit")
+		if err != nil {
+			s.writeError(w, 400, err.Error())
+			return
+		}
+		if limit < 1 {
+			s.writeError(w, 400, "limit must be >= 1")
+			return
+		}
+		if limit > 1000 {
+			s.writeError(w, 400, "limit must not exceed 1000")
+			return
+		}
+		filter.Limit = limit
+	} else {
+		filter.Limit = 100
+	}
+
+	workflows, err := s.store.ListWorkflows(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -1449,7 +1604,7 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 			case parts[3] == "reject" && r.Method == http.MethodPost:
 				s.handleRejectPromise(w, r, id, promiseID)
 			default:
-			s.writeError(w, 404, "not found")
+				s.writeError(w, 404, "not found")
 			}
 		} else {
 			s.writeError(w, 404, "not found")
@@ -1897,13 +2052,13 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type defResponse struct {
-		Name            string                   `json:"name"`
-		Version         int                      `json:"version"`
-		ABIVersion      int                      `json:"abi_version"`
-		MinVersion      int                      `json:"min_version"`
-		CreatedAt       time.Time                `json:"created_at"`
-		Deprecated      bool                     `json:"deprecated"`
-		ActiveInstances int                      `json:"active_instances"`
+		Name            string                    `json:"name"`
+		Version         int                       `json:"version"`
+		ABIVersion      int                       `json:"abi_version"`
+		MinVersion      int                       `json:"min_version"`
+		CreatedAt       time.Time                 `json:"created_at"`
+		Deprecated      bool                      `json:"deprecated"`
+		ActiveInstances int                       `json:"active_instances"`
 		Memory          *host.WorkflowMemoryStats `json:"memory,omitempty"`
 	}
 
@@ -1986,4 +2141,20 @@ func baseDSNFromDSN(dsn string) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+// parseIntParam parses a string as an integer for use as a query parameter.
+// Returns an error with a descriptive message referencing the parameter name.
+func parseIntParam(s, paramName string) (int, error) {
+	if s == "" {
+		return 0, fmt.Errorf("%s must not be empty", paramName)
+	}
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return 0, fmt.Errorf("invalid %s value %q: must be a non-negative integer", paramName, s)
+	}
+	if n < 0 {
+		return 0, fmt.Errorf("%s must not be negative", paramName)
+	}
+	return n, nil
 }

@@ -9,6 +9,20 @@
 // abstractions over it. The Environment struct uses standard library
 // types (*sql.DB, *http.ServeMux, *slog.Logger) so plugin authors
 // don't need to learn a new API.
+//
+// Crash recovery boundaries:
+//
+// Go-compiled plugins share the worker process, so a panic in a plugin
+// host function can crash the entire worker. The RecoverPluginFunc and
+// RecoverPluginStreamFunc wrappers (in recovery.go) add defer/recover
+// boundaries around each host function call. When a panic is caught, the
+// plugin is marked unhealthy and subsequent invocations are rejected
+// without calling into the plugin.
+//
+// Long-term migration: compile plugins to WASM modules instead of
+// linking them into the worker binary. WASM provides process-level
+// isolation so a plugin crash cannot affect the worker or other plugins.
+// The recovery wrappers exist for Go-compiled plugins only.
 package plugin
 
 import (

@@ -61,6 +61,13 @@ spec:
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - "wget -q -O- --post-data='{}' http://localhost:{{ .Values.api.port }}/api/admin/drain || true"
           {{- with .Values.containerSecurityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}

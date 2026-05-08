@@ -614,7 +614,6 @@ func TestPostgresStore_LoadDAGSpec_Success(t *testing.T) {
 	}
 }
 
-
 func TestPostgresStore_LoadDAGSpec_NotFound(t *testing.T) {
 	db := newNoopDB(t)
 	defer db.Close()
@@ -890,14 +889,14 @@ func TestPostgresStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 		{
 			match: "SELECT name, version, wasm_bytes",
 			data: [][]driver.Value{{
-				"test-wf",           // name
-				int64(1),            // version
-				[]byte(nil),         // wasm_bytes
-				int64(1),            // abi_version
-				int64(0),            // min_version
-				[]byte(nil),         // plugin_deps (NULL)
-				createdAt,           // created_at
-				false,               // deprecated
+				"test-wf",   // name
+				int64(1),    // version
+				[]byte(nil), // wasm_bytes
+				int64(1),    // abi_version
+				int64(0),    // min_version
+				[]byte(nil), // plugin_deps (NULL)
+				createdAt,   // created_at
+				false,       // deprecated
 			}},
 		},
 	}, nil)
@@ -1003,7 +1002,7 @@ func TestPostgresStore_GetPromise_Resolved(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "SELECT status, result::text",
-			data: [][]driver.Value{{"resolved", `{"ok":true}`, ""}},
+			data:  [][]driver.Value{{"resolved", `{"ok":true}`, ""}},
 		},
 	}, nil)
 	defer db.Close()
@@ -1278,7 +1277,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wfs, err := store.ListWorkflows(testCtx, "running", 10)
+	wfs, err := store.ListWorkflows(testCtx, WorkflowFilter{Status: "running", Limit: 10})
 	if err != nil {
 		t.Fatalf("ListWorkflows: %v", err)
 	}
@@ -1302,7 +1301,7 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wfs, err := store.ListWorkflows(testCtx, "", 0)
+	wfs, err := store.ListWorkflows(testCtx, WorkflowFilter{Limit: 100})
 	if err != nil {
 		t.Fatalf("ListWorkflows (no filter): %v", err)
 	}
@@ -1316,7 +1315,7 @@ func TestPostgresStore_ListWorkflows_Empty(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wfs, err := store.ListWorkflows(testCtx, "running", 10)
+	wfs, err := store.ListWorkflows(testCtx, WorkflowFilter{Status: "running", Limit: 10})
 	if err != nil {
 		t.Fatalf("ListWorkflows: %v", err)
 	}
@@ -1730,40 +1729,40 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 			match: "SELECT step, event_type, service",
 			data: [][]driver.Value{
 				{
-					int64(0),             // step
-					"call",               // event_type
-					"my-service",         // service (for payload population)
-					"my-op",              // operation
-					`{"req":"data"}`,     // request
-					`{"resp":"ok"}`,      // response
-					"",                   // error
-					int64(150),           // duration_ms
-					"",                   // signal_names
-					int64(0),             // timeout_ms
-					"",                   // signal_name
-					"",                   // signal_payload
-					"",                   // defer_description
-					"",                   // defer_id
-					"",                   // child_name
-					"",                   // child_input
-					"",                   // run_id
-					"",                   // new_input
-					"",                   // plugin_name
-					"",                   // plugin_func
-					"",                   // plugin_input
-					"",                   // plugin_output
-					"",                   // plugin_error
-					[]byte(nil),          // payload (nil = no payload)
-					"",                   // promise_name
-					"",                   // promise_id
-					"",                   // promise_result
-					"",                   // promise_error
+					int64(0),         // step
+					"call",           // event_type
+					"my-service",     // service (for payload population)
+					"my-op",          // operation
+					`{"req":"data"}`, // request
+					`{"resp":"ok"}`,  // response
+					"",               // error
+					int64(150),       // duration_ms
+					"",               // signal_names
+					int64(0),         // timeout_ms
+					"",               // signal_name
+					"",               // signal_payload
+					"",               // defer_description
+					"",               // defer_id
+					"",               // child_name
+					"",               // child_input
+					"",               // run_id
+					"",               // new_input
+					"",               // plugin_name
+					"",               // plugin_func
+					"",               // plugin_input
+					"",               // plugin_output
+					"",               // plugin_error
+					[]byte(nil),      // payload (nil = no payload)
+					"",               // promise_name
+					"",               // promise_id
+					"",               // promise_result
+					"",               // promise_error
 				},
 				{
-					int64(1),             // step
-					"sleep",              // event_type
+					int64(1), // step
+					"sleep",  // event_type
 					"", "", "", "", "",
-					int64(5000),          // duration_ms
+					int64(5000), // duration_ms
 					"", int64(0),
 					"", "",
 					"", "",
@@ -2189,17 +2188,17 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{{
-				"wf-1",           // id
-				"test-wf",        // def_name
-				int64(1),         // def_version
-				"running",        // status
-				[]byte(`{}`),     // input
-				nil,              // assigned_to (NULL)
-				nil,              // heartbeat_at (NULL)
-				nil,              // next_wake_at (NULL)
-				nil,              // completed_at (NULL)
-				nil,              // result::text (NULL)
-				nil,              // error_msg (NULL)
+				"wf-1",       // id
+				"test-wf",    // def_name
+				int64(1),     // def_version
+				"running",    // status
+				[]byte(`{}`), // input
+				nil,          // assigned_to (NULL)
+				nil,          // heartbeat_at (NULL)
+				nil,          // next_wake_at (NULL)
+				nil,          // completed_at (NULL)
+				nil,          // result::text (NULL)
+				nil,          // error_msg (NULL)
 			}},
 		},
 	}, nil)

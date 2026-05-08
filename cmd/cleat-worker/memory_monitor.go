@@ -21,7 +21,7 @@ type MemoryInfo struct {
 	AvailableBytes uint64
 	UsedBytes      uint64
 	TotalBytes     uint64
-	Source         string    // "cgroupv2", "procmeminfo", "goheap"
+	Source         string // "cgroupv2", "procmeminfo", "goheap"
 	CollectedAt    time.Time
 }
 

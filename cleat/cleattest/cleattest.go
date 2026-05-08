@@ -9,6 +9,7 @@ package cleattest
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,6 +30,47 @@ type CallRecord struct {
 	Response  string
 	Err       error
 	RetryCount int // Number of retry attempts before this call succeeded (0 if no retry)
+}
+
+// RecordedCall captures a single HostCalls invocation for replay testing.
+type RecordedCall struct {
+	Function string // Name of the HostCalls function
+	Args     string // Serialized arguments key for matching
+	Response string // Serialized response
+	Err      error  // Error returned, if any
+}
+
+// Clock is implemented by *simClock and provides a simulated After timer.
+type Clock interface {
+	After(d time.Duration) <-chan time.Time
+}
+
+// simClock uses the TestEnv's simulated time to fire After channels.
+type simClock struct {
+	env *TestEnv
+}
+
+func (c *simClock) After(d time.Duration) <-chan time.Time {
+	ch := make(chan time.Time, 1)
+	c.env.mu.Lock()
+	nowTime := time.UnixMilli(c.env.nowMs)
+	wakeAt := nowTime.Add(d)
+	wake := make(chan struct{})
+	c.env.sleepRecs = append(c.env.sleepRecs, sleepRecord{wakeAt: wakeAt, wake: wake})
+	c.env.mu.Unlock()
+
+	go func() {
+		// Wait for AdvanceTime to trigger the wake, OR fall back to real time.
+		realTimer := time.NewTimer(d)
+		select {
+		case <-wake:
+			realTimer.Stop()
+			ch <- time.Now()
+		case <-realTimer.C:
+			ch <- time.Now()
+		}
+	}()
+	return ch
 }
 
 // ChildWorkflowCallRecord records a child workflow invocation made through the test env.
@@ -280,6 +322,24 @@ type TestEnv struct {
 	// signalReplyChannels maps correlation IDs to reply channels for
 	// SendSignalAndWait / ReplyToSignal.
 	signalReplyChannels map[string]chan string
+
+	// replayMode enables call recording and replay.
+	replayMode bool
+	// replayHistory stores recorded calls for replay matching.
+	replayHistory []RecordedCall
+	// replayDivergence counts calls during replay not found in history.
+	replayDivergence int
+	// replayRecording is true during the recording phase (set by EnableReplay,
+	// cleared by StartReplay). During recording, calls are recorded but never
+	// checked against history or counted as divergent.
+	replayRecording bool
+
+	// ContinueAsNew tracking.
+	continued      bool
+	continuedInput string
+
+	// clock provides simulated timeouts.
+	clock Clock
 }
 
 // NewTestEnv creates a new TestEnv with a clean initial state.
@@ -304,6 +364,7 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 	for _, opt := range opts {
 		opt(e)
 	}
+	e.clock = &simClock{env: e}
 	e.h = cleat.NewHostCalls(cleat.HostCallsOptions{
 		DurableCall:                  e.durableCallImpl,
 		DurableCallWithOptions:       e.durableCallWithOptionsImpl,
@@ -331,6 +392,8 @@ func NewTestEnv(opts ...TestEnvOption) *TestEnv {
 		RegisterQueryHandler:        e.registerQueryHandlerImpl,
 		RunDetached:                  e.runDetachedImpl,
 		PluginCall: e.pluginCallImpl,
+			DurableSend:                   e.durableSendImpl,
+			ScheduleInvoke:                e.durableScheduleInvokeImpl,
 			SendSignalAndWait:            e.sendSignalAndWaitImpl,
 			ReplyToSignal:                e.replyToSignalImpl,
 			SignalWorkflow:               e.signalWorkflowImpl,
@@ -556,15 +619,80 @@ func (e *TestEnv) Reset() {
 	e.ConcurrencyKeys = make(map[string]string)
 	e.pluginCallStubs = nil
 		e.signalReplyChannels = make(map[string]chan string)
+	e.replayMode = false
+	e.replayHistory = nil
+	e.replayDivergence = 0
+	e.replayRecording = false
+	e.continued = false
+	e.continuedInput = ""
+}
+
+// EnableReplay enables replay recording mode.
+// When enabled, all HostCalls are recorded into the replay history.
+// On subsequent calls matching the same function+args key, the cached
+// response is returned instead of executing fresh.
+func (e *TestEnv) EnableReplay() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.replayMode = true
+	e.replayRecording = true
+}
+
+// StartReplay switches from recording mode to replay mode.
+// After calling this, HostCalls will check the replay history and return
+// cached responses. Calls not found in history will increment replayDivergence.
+func (e *TestEnv) StartReplay() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.replayRecording = false
+	e.replayDivergence = 0
+}
+
+// AssertReplayDivergence fails the test if the actual number of divergent
+// calls (calls during replay that were not found in history) does not match
+// expectedDivergence.
+func (e *TestEnv) AssertReplayDivergence(t TestingT, expectedDivergence int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.replayDivergence != expectedDivergence {
+		t.Fatalf("cleattest: expected replay divergence count %d, got %d", expectedDivergence, e.replayDivergence)
+	}
+}
+
+// AssertContinued fails the test if ContinueAsNew was not called, or if its
+// input does not match expectedInput.
+func (e *TestEnv) AssertContinued(t TestingT, expectedInput string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.continued {
+		t.Fatalf("cleattest: expected ContinueAsNew to have been called")
+	}
+	if e.continuedInput != expectedInput {
+		t.Fatalf("cleattest: expected ContinueAsNew input %q, got %q", expectedInput, e.continuedInput)
+	}
+}
+
+// LastContinuedInput returns the input passed to the last ContinueAsNew call.
+// Returns empty string if ContinueAsNew was never called.
+func (e *TestEnv) LastContinuedInput() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.continuedInput
 }
 
 // ---------------------------------------------------------------------------
 // Internal HostCalls function implementations
 // ---------------------------------------------------------------------------
 
-func (e *TestEnv) durableCallImpl(service, operation, requestJSON string) (string, error) {
+func (e *TestEnv) durableCallImpl(service, operation, requestJSON string) (resp string, retErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	replayKey := "DurableCall|" + service + "|" + operation + "|" + requestJSON
+	if cachedResp, cachedErr, matched := e.replayLookup("DurableCall", replayKey); matched {
+		return cachedResp, cachedErr
+	}
+	defer func() { e.replayRecord("DurableCall", replayKey, resp, retErr) }()
 
 	rec := CallRecord{
 		Service:    service,
@@ -583,7 +711,9 @@ func (e *TestEnv) durableCallImpl(service, operation, requestJSON string) (strin
 			rec.Err = err
 			rec.RetryCount = rb.attempts
 			e.callHistory = append(e.callHistory, rec)
-			return "", err
+			resp = ""
+			retErr = err
+			return
 		}
 		// Success on final attempt — track the retry count but proceed to stub.
 		rec.RetryCount = rb.attempts
@@ -598,7 +728,9 @@ func (e *TestEnv) durableCallImpl(service, operation, requestJSON string) (strin
 			rec.Err = err
 			rec.RetryCount = attempt + 1
 			e.callHistory = append(e.callHistory, rec)
-			return "", err
+			resp = ""
+			retErr = err
+			return
 		}
 		rec.RetryCount = attempt
 	}
@@ -612,7 +744,9 @@ func (e *TestEnv) durableCallImpl(service, operation, requestJSON string) (strin
 				rec.Err = stub.err
 			}
 			e.callHistory = append(e.callHistory, rec)
-			return stub.response, stub.err
+			resp = stub.response
+			retErr = stub.err
+			return
 		}
 	}
 
@@ -620,7 +754,9 @@ func (e *TestEnv) durableCallImpl(service, operation, requestJSON string) (strin
 	err := fmt.Errorf("cleattest: no stub registered for %s.%s (request: %q)", service, operation, requestJSON)
 	rec.Err = err
 	e.callHistory = append(e.callHistory, rec)
-	return "", err
+	resp = ""
+	retErr = err
+	return
 }
 
 func (e *TestEnv) durableCallWithOptionsImpl(_ cleat.CallOptions, service, operation, requestJSON string) (string, error) {
@@ -629,17 +765,41 @@ func (e *TestEnv) durableCallWithOptionsImpl(_ cleat.CallOptions, service, opera
 
 func (e *TestEnv) durableSleepImpl(ms int64) {
 	e.mu.Lock()
+
+	replayKey := fmt.Sprintf("DurableSleep|%d", ms)
+	if _, _, matched := e.replayLookup("DurableSleep", replayKey); matched {
+		e.mu.Unlock()
+		return
+	}
+
 	nowTime := time.UnixMilli(e.nowMs)
 	wakeAt := nowTime.Add(time.Duration(ms) * time.Millisecond)
 	wake := make(chan struct{})
 	e.sleepRecs = append(e.sleepRecs, sleepRecord{wakeAt: wakeAt, wake: wake})
+	e.replayRecord("DurableSleep", replayKey, "", nil)
 	e.mu.Unlock()
 
 	<-wake
 }
 
-func (e *TestEnv) durableAwaitSignalsImpl(signalNames []string, timeoutMs int64) (string, string, bool, error) {
+func (e *TestEnv) durableAwaitSignalsImpl(signalNames []string, timeoutMs int64) (signalName string, payload string, timedOut bool, retErr error) {
 	e.mu.Lock()
+
+	replayKey := fmt.Sprintf("DurableAwaitSignals|%v|%d", signalNames, timeoutMs)
+	if cachedResp, cachedErr, matched := e.replayLookup("DurableAwaitSignals", replayKey); matched {
+		var resp struct {
+			Name     string `json:"name"`
+			Payload  string `json:"payload"`
+			TimedOut bool   `json:"timedOut"`
+		}
+		json.Unmarshal([]byte(cachedResp), &resp)
+		signalName = resp.Name
+		payload = resp.Payload
+		timedOut = resp.TimedOut
+		retErr = cachedErr
+		e.mu.Unlock()
+		return
+	}
 
 	nowTime := time.UnixMilli(e.nowMs)
 	deadline := nowTime.Add(time.Duration(timeoutMs) * time.Millisecond)
@@ -648,15 +808,35 @@ func (e *TestEnv) durableAwaitSignalsImpl(signalNames []string, timeoutMs int64)
 	for i, sig := range e.pendingSignals {
 		if !sig.time.After(nowTime) && matchesAny(sig.name, signalNames) {
 			e.pendingSignals = append(e.pendingSignals[:i], e.pendingSignals[i+1:]...)
+			signalName = sig.name
+			payload = sig.payload
+			timedOut = false
+			retErr = nil
+			respData, _ := json.Marshal(struct {
+				Name     string `json:"name"`
+				Payload  string `json:"payload"`
+				TimedOut bool   `json:"timedOut"`
+			}{signalName, payload, timedOut})
+			e.replayRecord("DurableAwaitSignals", replayKey, string(respData), retErr)
 			e.mu.Unlock()
-			return sig.name, sig.payload, false, nil
+			return
 		}
 	}
 
 	// Zero timeout means "poll only".
 	if timeoutMs <= 0 {
+		signalName = ""
+		payload = ""
+		timedOut = true
+		retErr = nil
+		respData, _ := json.Marshal(struct {
+			Name     string `json:"name"`
+			Payload  string `json:"payload"`
+			TimedOut bool   `json:"timedOut"`
+		}{signalName, payload, timedOut})
+		e.replayRecord("DurableAwaitSignals", replayKey, string(respData), retErr)
 		e.mu.Unlock()
-		return "", "", true, nil
+		return
 	}
 
 	// No matching signal yet -- register a waiter.
@@ -670,31 +850,85 @@ func (e *TestEnv) durableAwaitSignalsImpl(signalNames []string, timeoutMs int64)
 
 	sig := <-ch
 	if sig.name == "" {
-		return "", "", true, nil // timeout sentinel
+		signalName = ""
+		payload = ""
+		timedOut = true
+		retErr = nil
+		// Note: recording skipped here (lock not held); matches original behavior.
+		return
 	}
-	return sig.name, sig.payload, false, nil
+	signalName = sig.name
+	payload = sig.payload
+	timedOut = false
+	retErr = nil
+	return
 }
 
-func (e *TestEnv) durableDeferImpl(description string) (string, error) {
+func (e *TestEnv) durableDeferImpl(description string) (resp string, retErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	replayKey := "DurableDefer|" + description
+	if cachedResp, cachedErr, matched := e.replayLookup("DurableDefer", replayKey); matched {
+		return cachedResp, cachedErr
+	}
+	defer func() { e.replayRecord("DurableDefer", replayKey, resp, retErr) }()
+
 	e.deferCounter++
-	return fmt.Sprintf("defer-%d", e.deferCounter), nil
+	resp = fmt.Sprintf("defer-%d", e.deferCounter)
+	return
 }
 
 func (e *TestEnv) durableLogImpl(message string) {
 	_ = message // mark parameter as used for coverage
 }
 
-func (e *TestEnv) pollCancellationImpl() (bool, string) {
+func (e *TestEnv) pollCancellationImpl() (cancelled bool, reason string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.cancelled, e.cancelReason
+
+	replayKey := "PollCancellation"
+	if cachedResp, _, matched := e.replayLookup("PollCancellation", replayKey); matched {
+		var resp struct {
+			Cancelled bool   `json:"cancelled"`
+			Reason    string `json:"reason"`
+		}
+		json.Unmarshal([]byte(cachedResp), &resp)
+		return resp.Cancelled, resp.Reason
+	}
+	defer func() {
+		respData, _ := json.Marshal(struct {
+			Cancelled bool   `json:"cancelled"`
+			Reason    string `json:"reason"`
+		}{cancelled, reason})
+		e.replayRecord("PollCancellation", replayKey, string(respData), nil)
+	}()
+
+	cancelled = e.cancelled
+	reason = e.cancelReason
+	return
 }
 
-func (e *TestEnv) pollSignalImpl(signalName string) (string, bool, error) {
+func (e *TestEnv) pollSignalImpl(signalName string) (payload string, found bool, retErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	replayKey := "PollSignal|" + signalName
+	if cachedResp, cachedErr, matched := e.replayLookup("PollSignal", replayKey); matched {
+		var resp struct {
+			Payload string `json:"payload"`
+			Found   bool   `json:"found"`
+		}
+		json.Unmarshal([]byte(cachedResp), &resp)
+		return resp.Payload, resp.Found, cachedErr
+	}
+	defer func() {
+		respData, _ := json.Marshal(struct {
+			Payload string `json:"payload"`
+			Found   bool   `json:"found"`
+		}{payload, found})
+		e.replayRecord("PollSignal", replayKey, string(respData), retErr)
+	}()
 
 	nowTime := time.UnixMilli(e.nowMs)
 	for i, sig := range e.pendingSignals {
@@ -706,10 +940,19 @@ func (e *TestEnv) pollSignalImpl(signalName string) (string, bool, error) {
 	return "", false, nil
 }
 
-func (e *TestEnv) continueAsNewImpl(newInputJSON string) error {
-	// No-op for testing; the workflow code called ContinueAsNew but we
-	// simply accept it rather than restarting.
-	return nil
+func (e *TestEnv) continueAsNewImpl(newInputJSON string) (retErr error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	replayKey := "ContinueAsNew|" + newInputJSON
+	if _, cachedErr, matched := e.replayLookup("ContinueAsNew", replayKey); matched {
+		return cachedErr
+	}
+	defer func() { e.replayRecord("ContinueAsNew", replayKey, "", retErr) }()
+
+	e.continued = true
+	e.continuedInput = newInputJSON
+	return
 }
 
 // RegisterChildWorkflow registers a handler function for a child workflow with the
@@ -729,9 +972,15 @@ func (e *TestEnv) OnChildWorkflow(name string) *ChildWorkflowStubBuilder {
 	}
 }
 
-func (e *TestEnv) childWorkflowImpl(name, inputJSON string) (string, error) {
+func (e *TestEnv) childWorkflowImpl(name, inputJSON string) (resp string, retErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	replayKey := "ChildWorkflow|" + name + "|" + inputJSON
+	if cachedResp, cachedErr, matched := e.replayLookup("ChildWorkflow", replayKey); matched {
+		return cachedResp, cachedErr
+	}
+	defer func() { e.replayRecord("ChildWorkflow", replayKey, resp, retErr) }()
 
 	// Record the child workflow invocation.
 	childRec := ChildWorkflowCallRecord{
@@ -750,7 +999,8 @@ func (e *TestEnv) childWorkflowImpl(name, inputJSON string) (string, error) {
 			childRec.Err = err
 		}
 		e.childWorkflowCallHistory = append(e.childWorkflowCallHistory, childRec)
-		return runID, nil
+		resp = runID
+		return
 	}
 
 	e.deferCounter++
@@ -767,19 +1017,30 @@ func (e *TestEnv) childWorkflowImpl(name, inputJSON string) (string, error) {
 		childRec.RunID = runID
 		e.childWorkflowCallHistory = append(e.childWorkflowCallHistory, childRec)
 	}
-	return runID, nil
+	resp = runID
+	return
 }
 
-func (e *TestEnv) awaitChildImpl(runID string) (string, error) {
+func (e *TestEnv) awaitChildImpl(runID string) (resp string, retErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	replayKey := "AwaitChild|" + runID
+	if cachedResp, cachedErr, matched := e.replayLookup("AwaitChild", replayKey); matched {
+		return cachedResp, cachedErr
+	}
+	defer func() { e.replayRecord("AwaitChild", replayKey, resp, retErr) }()
+
 	if result, ok := e.childResults[runID]; ok {
 		if result.err != nil {
-			return "", result.err
+			retErr = result.err
+			return
 		}
-		return result.result, nil
+		resp = result.result
+		return
 	}
-	return `{"status":"completed"}`, nil
+	resp = `{"status":"completed"}`
+	return
 }
 
 func (e *TestEnv) awaitAllChildrenImpl(runIDs []string) ([]cleat.ChildResult, error) {
@@ -826,16 +1087,34 @@ func (e *TestEnv) durableCallTypedWithHeartbeatImpl(service, operation string, r
 	return json.Unmarshal([]byte(resp), result)
 }
 
-func (e *TestEnv) versionImpl() int {
+func (e *TestEnv) versionImpl() (v int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.versionVal
+
+	replayKey := "Version"
+	if cachedResp, _, matched := e.replayLookup("Version", replayKey); matched {
+		v, _ = strconv.Atoi(cachedResp)
+		return
+	}
+	defer func() { e.replayRecord("Version", replayKey, strconv.Itoa(v), nil) }()
+
+	v = e.versionVal
+	return
 }
 
-func (e *TestEnv) minVersionImpl() int {
+func (e *TestEnv) minVersionImpl() (v int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.minVersionVal
+
+	replayKey := "MinVersion"
+	if cachedResp, _, matched := e.replayLookup("MinVersion", replayKey); matched {
+		v, _ = strconv.Atoi(cachedResp)
+		return
+	}
+	defer func() { e.replayRecord("MinVersion", replayKey, strconv.Itoa(v), nil) }()
+
+	v = e.minVersionVal
+	return
 }
 
 func (e *TestEnv) setQueryStateImpl(key, value string) {
@@ -844,21 +1123,38 @@ func (e *TestEnv) setQueryStateImpl(key, value string) {
 	e.queryState[key] = value
 }
 
-func (e *TestEnv) nowImpl() int64 {
+func (e *TestEnv) nowImpl() (ms int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.nowMs
+
+	replayKey := "Now"
+	if cachedResp, _, matched := e.replayLookup("Now", replayKey); matched {
+		ms, _ = strconv.ParseInt(cachedResp, 10, 64)
+		return
+	}
+	defer func() { e.replayRecord("Now", replayKey, strconv.FormatInt(ms, 10), nil) }()
+
+	ms = e.nowMs
+	return
 }
 
-func (e *TestEnv) randomImpl() int64 {
+func (e *TestEnv) randomImpl() (val int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.randomIdx < len(e.randomSeq) {
-		val := e.randomSeq[e.randomIdx]
-		e.randomIdx++
-		return val
+
+	replayKey := "Random"
+	if cachedResp, _, matched := e.replayLookup("Random", replayKey); matched {
+		val, _ = strconv.ParseInt(cachedResp, 10, 64)
+		return
 	}
-	return 0
+	defer func() { e.replayRecord("Random", replayKey, strconv.FormatInt(val, 10), nil) }()
+
+	if e.randomIdx < len(e.randomSeq) {
+		val = e.randomSeq[e.randomIdx]
+		e.randomIdx++
+		return
+	}
+	return
 }
 
 func (e *TestEnv) createPromiseImpl(name string) (string, error) {
@@ -931,7 +1227,16 @@ func (e *TestEnv) awaitPromiseImpl(promiseID string, timeout time.Duration) (str
 	return "", true, nil
 }
 
-func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (string, error) {
+func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (resp string, retErr error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	replayKey := "PluginCall|" + pluginName + "|" + functionName + "|" + inputJSON
+	if cachedResp, cachedErr, matched := e.replayLookup("PluginCall", replayKey); matched {
+		return cachedResp, cachedErr
+	}
+	defer func() { e.replayRecord("PluginCall", replayKey, resp, retErr) }()
+
 	for _, stub := range e.pluginCallStubs {
 		if stub.pluginName == pluginName && stub.functionName == functionName {
 			return stub.result, stub.err
@@ -941,8 +1246,14 @@ func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (st
 }
 
 // sendSignalAndWaitImpl sends a signal and registers a reply channel.
-func (e *TestEnv) sendSignalAndWaitImpl(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
+func (e *TestEnv) sendSignalAndWaitImpl(targetRunID, signalName, payload string, timeout time.Duration) (resp string, retErr error) {
 	e.mu.Lock()
+
+	replayKey := "SendSignalAndWait|" + targetRunID + "|" + signalName + "|" + payload + "|" + timeout.String()
+	if cachedResp, cachedErr, matched := e.replayLookup("SendSignalAndWait", replayKey); matched {
+		e.mu.Unlock()
+		return cachedResp, cachedErr
+	}
 
 	// Generate a correlation ID and embed it in the payload.
 	correlationID := fmt.Sprintf("corr-%s-%s-%d", targetRunID, signalName, e.deferCounter)
@@ -972,16 +1283,28 @@ func (e *TestEnv) sendSignalAndWaitImpl(targetRunID, signalName, payload string,
 	// Send the signal.
 	err := e.H().SignalWorkflow(targetRunID, signalName, enrichedPayload)
 	if err != nil {
-		return "", err
+		resp = ""
+		retErr = err
+		e.mu.Lock()
+		e.replayRecord("SendSignalAndWait", replayKey, resp, retErr)
+		e.mu.Unlock()
+		return
 	}
 
 	// Wait for the reply with a timeout.
 	select {
 	case response := <-replyCh: // cleat:allow E002 -- SDK test helper, not user workflow
-		return response, nil
-	case <-time.After(timeout): // cleat:allow E002,E014 -- SDK test helper; intentional timeout pattern
-		return "", fmt.Errorf("cleattest: SendSignalAndWait timed out after %v", timeout)
+		resp = response
+		retErr = nil
+	case <-e.clock.After(timeout): // cleat:allow E002,E014 -- SDK test helper; intentional timeout pattern
+		resp = ""
+		retErr = fmt.Errorf("cleattest: SendSignalAndWait timed out after %v", timeout)
 	}
+
+	e.mu.Lock()
+	e.replayRecord("SendSignalAndWait", replayKey, resp, retErr)
+	e.mu.Unlock()
+	return
 }
 
 // replyToSignalImpl sends a response back via the correlation ID.
@@ -1001,7 +1324,20 @@ func (e *TestEnv) replyToSignalImpl(correlationID, response string) error {
 // signalWorkflowImpl delivers a signal to a target workflow.
 // In the test env, the target workflow is the current workflow itself.
 func (e *TestEnv) signalWorkflowImpl(targetRunID, signalName, payload string) error {
+	e.mu.Lock()
+
+	replayKey := "SignalWorkflow|" + targetRunID + "|" + signalName + "|" + payload
+	if _, cachedErr, matched := e.replayLookup("SignalWorkflow", replayKey); matched {
+		e.mu.Unlock()
+		return cachedErr
+	}
+
+	e.mu.Unlock()
 	e.Signal(signalName, payload)
+
+	e.mu.Lock()
+	e.replayRecord("SignalWorkflow", replayKey, "", nil)
+	e.mu.Unlock()
 	return nil
 }
 
@@ -1034,15 +1370,39 @@ func (e *TestEnv) RejectPromise(promiseID, errMsg string) {
 
 // AcquireConcurrencyKey attempts to acquire a concurrency key for a workflow.
 // Uses the mock function if set, otherwise uses the default in-memory map behavior.
-func (e *TestEnv) acquireLockImpl(key string, ttlMs int64) (bool, error) {
-	return e.AcquireConcurrencyKey(key, "")
+func (e *TestEnv) acquireLockImpl(key string, ttlMs int64) (acquired bool, retErr error) {
+	e.mu.Lock()
+
+	replayKey := "AcquireLock|" + key
+	if cachedResp, cachedErr, matched := e.replayLookup("AcquireLock", replayKey); matched {
+		e.mu.Unlock()
+		acquired, _ = strconv.ParseBool(cachedResp)
+		return acquired, cachedErr
+	}
+
+	e.mu.Unlock()
+
+	// AcquireConcurrencyKey acquires e.mu internally, so we must not hold it here.
+	acquired, retErr = e.AcquireConcurrencyKey(key, "")
+
+	e.mu.Lock()
+	e.replayRecord("AcquireLock", replayKey, strconv.FormatBool(acquired), retErr)
+	e.mu.Unlock()
+	return
 }
 
-func (e *TestEnv) releaseLockImpl(key string) error {
+func (e *TestEnv) releaseLockImpl(key string) (retErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	replayKey := "ReleaseLock|" + key
+	if _, cachedErr, matched := e.replayLookup("ReleaseLock", replayKey); matched {
+		return cachedErr
+	}
+	defer func() { e.replayRecord("ReleaseLock", replayKey, "", retErr) }()
+
 	delete(e.ConcurrencyKeys, key)
-	return nil
+	return
 }
 
 func (e *TestEnv) awaitConditionImpl(predicate func() bool, pollInterval, timeout time.Duration) (bool, error) {
@@ -1057,13 +1417,51 @@ func (e *TestEnv) awaitConditionImpl(predicate func() bool, pollInterval, timeou
 		e.durableSleepImpl(pollInterval.Milliseconds())
 	}
 }
-	func (e *TestEnv) sideEffectImpl(computedResult string) (string, error) {
-	// In tests, there's no replay, so computedResult IS authoritative.
-	return computedResult, nil
+
+func (e *TestEnv) durableSendImpl(service, operation, requestJSON string) (retErr error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	replayKey := "DurableSend|" + service + "|" + operation + "|" + requestJSON
+	if _, cachedErr, matched := e.replayLookup("DurableSend", replayKey); matched {
+		return cachedErr
+	}
+	defer func() { e.replayRecord("DurableSend", replayKey, "", retErr) }()
+
+	// Fire-and-forget: no-op in tests
+	return nil
+}
+
+func (e *TestEnv) durableScheduleInvokeImpl(service, operation, requestJSON string, delayMs int64) (retErr error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	replayKey := "ScheduleInvoke|" + service + "|" + operation + "|" + requestJSON + "|" + strconv.FormatInt(delayMs, 10)
+	if _, cachedErr, matched := e.replayLookup("ScheduleInvoke", replayKey); matched {
+		return cachedErr
+	}
+	defer func() { e.replayRecord("ScheduleInvoke", replayKey, "", retErr) }()
+
+	// Scheduling: no-op in tests
+	return nil
+}
+
+func (e *TestEnv) sideEffectImpl(computedResult string) (resp string, retErr error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	replayKey := "SideEffect|" + computedResult
+	if cachedResp, cachedErr, matched := e.replayLookup("SideEffect", replayKey); matched {
+		return cachedResp, cachedErr
+	}
+	defer func() { e.replayRecord("SideEffect", replayKey, resp, retErr) }()
+
+	resp = computedResult
+	return
 }
 
 func (e *TestEnv) AcquireConcurrencyKey(key, workflowID string) (bool, error) {
-	if e.AcquireConcurrencyKeyFn != nil {
+		if e.AcquireConcurrencyKeyFn != nil {
 		return e.AcquireConcurrencyKeyFn(key, workflowID)
 	}
 	e.mu.Lock()
@@ -1097,6 +1495,35 @@ func (e *TestEnv) ReleaseConcurrencyKeys(workflowID string) {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// replayLookup checks the replay history. Returns cached response if found.
+// Only active during replay (not recording). Must be called with e.mu held.
+func (e *TestEnv) replayLookup(function, replayKey string) (resp string, retErr error, matched bool) {
+	if !e.replayMode || e.replayRecording {
+		return "", nil, false
+	}
+	for _, rec := range e.replayHistory {
+		if rec.Function == function && rec.Args == replayKey {
+			return rec.Response, rec.Err, true
+		}
+	}
+	e.replayDivergence++
+	return "", nil, false
+}
+
+// replayRecord records a call in replay history (recording phase only).
+// Must be called with e.mu held.
+func (e *TestEnv) replayRecord(function, replayKey, response string, err error) {
+	if !e.replayMode || !e.replayRecording {
+		return
+	}
+	e.replayHistory = append(e.replayHistory, RecordedCall{
+		Function: function,
+		Args:     replayKey,
+		Response: response,
+		Err:      err,
+	})
+}
 
 // deliverSignals checks pending signals against registered waiters.
 // Must be called with e.mu held.

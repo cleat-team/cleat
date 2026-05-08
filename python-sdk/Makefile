@@ -32,7 +32,8 @@ EXAMPLE_WORKFLOWS := \
 	hello_workflow \
 	child_workflow \
 	saga_workflow \
-	update_handler_workflow
+	update_handler_workflow \
+	durable_call_workflow
 
 # Individual WASM targets for each example
 WASM_FILES := $(addprefix $(OUT_DIR)/, $(addsuffix .wasm, $(EXAMPLE_WORKFLOWS)))

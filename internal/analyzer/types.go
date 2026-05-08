@@ -119,6 +119,28 @@ func HostCallsMethod(sel *types.Selection) bool {
 	return IsHostCallsType(sel.Recv())
 }
 
+// FuncFQName returns the fully-qualified name of a *types.Func in the same
+// format used as keys in AnalysisResult.Funcs. For generic instantiations,
+// it uses Origin() to return the type-parameter form (e.g., "*Container[T].Process"
+// instead of "(*Container[string]).Process").
+func FuncFQName(fn *types.Func) string {
+	// Use Origin() for generic instantiations to get the type-parameter form.
+	if origin := fn.Origin(); origin != nil {
+		fn = origin
+	}
+	sig := fn.Type().(*types.Signature)
+	if sig.Recv() != nil {
+		recvType := sig.Recv().Type()
+		return types.TypeString(recvType, func(other *types.Package) string {
+			if other.Path() == fn.Pkg().Path() {
+				return ""
+			}
+			return other.Name()
+		}) + "." + fn.Name()
+	}
+	return fn.Pkg().Path() + "." + fn.Name()
+}
+
 // ShortName returns the short function name from a fully-qualified name.
 // "pkg.Func" → "Func", "(*pkg.Type).Method" → "Method".
 func ShortName(fqname string) string {
