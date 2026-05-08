@@ -14,8 +14,8 @@ import (
 
 func TestGenerateWorkerID(t *testing.T) {
 	id := generateWorkerID()
-	if len(id) != 8 {
-		t.Errorf("generateWorkerID() = %q (len %d), want 8 hex chars", id, len(id))
+	if len(id) != 32 {
+		t.Errorf("generateWorkerID() = %q (len %d), want 32 hex chars", id, len(id))
 	}
 	for _, c := range id {
 		if !strings.ContainsRune("0123456789abcdef", c) {
