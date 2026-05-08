@@ -373,22 +373,40 @@ public class HostCalls {
     }
 
     /**
-     * Suspend workflow execution for a duration.
+     * Suspend workflow execution for a duration specified in milliseconds.
      * <p>
      * On replay ({@link Memory#SLEEP_STATUS_COMPLETED}), this returns
      * {@code false} — the workflow should continue without actually sleeping.
      * On fresh execution ({@link Memory#SLEEP_STATUS_SUSPEND}), returns
      * {@code true} — the workflow should propagate the suspension by
      * returning {@link Memory#SUSPEND_SENTINEL} from the export.
+     * <p>
+     * Prefer {@link #cleatSleep(long)} (which accepts seconds) over this
+     * millisecond variant.
      *
-     * @param durationMs sleep duration in milliseconds
+     * @param timeoutMs sleep duration in milliseconds
      * @return {@code true} if the workflow should suspend (fresh execution),
      *         {@code false} to continue (replay)
      */
-    public boolean cleatSleep(long durationMs) {
-        long result = cleatSleepRaw(durationMs);
+    public boolean cleatSleepMs(long timeoutMs) {
+        long result = cleatSleepRaw(timeoutMs);
         int status = Memory.decodeSleepStatus(result);
         return status == Memory.SLEEP_STATUS_SUSPEND;
+    }
+
+    /**
+     * Suspend workflow execution for a duration specified in seconds.
+     * <p>
+     * This is the preferred API. Delegates to
+     * {@link #cleatSleepMs(long)}.
+     *
+     * @param timeoutSeconds sleep duration in seconds
+     * @return {@code true} if the workflow should suspend (fresh execution),
+     *         {@code false} to continue (replay)
+     * @see #cleatSleepMs(long)
+     */
+    public boolean cleatSleep(long timeoutSeconds) {
+        return cleatSleepMs(timeoutSeconds * 1000);
     }
 
     /**
@@ -509,7 +527,7 @@ public class HostCalls {
     /**
      * Poll for a specific pending external signal.
      * <p>
-     * Unlike {@link #awaitSignals(String[], long)}, this call is non-blocking
+     * Unlike {@link #awaitSignalsMs(String[], long)}, this call is non-blocking
      * and checks once.  If no signal is pending with the given name, the
      * result carries an error.
      *
@@ -563,7 +581,7 @@ public class HostCalls {
      * <p>
      * Promises are durable, first-class entities in cleat. They can be
      * resolved by this or another workflow, and awaited by one or more
-     * workflows using {@link #awaitPromise(String, long)}.
+     * workflows using {@link #awaitPromiseMs(String, long)}.
      *
      * @param name the promise name
      * @return a result containing the promise ID on success, or an error
@@ -689,6 +707,9 @@ public class HostCalls {
      * Blocks until the promise with the given ID is resolved or the timeout
      * expires. On timeout, {@link AwaitPromiseResult#timedOut} is
      * {@code true}.
+     * <p>
+     * Prefer {@link #awaitPromise(String, long)} (which accepts seconds) over
+     * this millisecond variant.
      *
      * @param promiseId the promise ID to wait for
      * @param timeoutMs maximum wait time in milliseconds (use
@@ -696,7 +717,7 @@ public class HostCalls {
      * @return a result containing an {@link AwaitPromiseResult} with the
      *         resolved value and timeout indicator
      */
-    public CleatResult<AwaitPromiseResult> awaitPromise(String promiseId, long timeoutMs) {
+    public CleatResult<AwaitPromiseResult> awaitPromiseMs(String promiseId, long timeoutMs) {
         int[] p = packStrings(promiseId);
 
         long result = cleatAwaitPromiseRaw(
@@ -716,6 +737,24 @@ public class HostCalls {
     }
 
     /**
+     * Wait for a promise to resolve, with an optional timeout specified in
+     * seconds.
+     * <p>
+     * This is the preferred API. Delegates to
+     * {@link #awaitPromiseMs(String, long)}.
+     *
+     * @param promiseId      the promise ID to wait for
+     * @param timeoutSeconds maximum wait time in seconds (use
+     *                       {@link Long#MAX_VALUE} for no timeout)
+     * @return a result containing an {@link AwaitPromiseResult} with the
+     *         resolved value and timeout indicator
+     * @see #awaitPromiseMs(String, long)
+     */
+    public CleatResult<AwaitPromiseResult> awaitPromise(String promiseId, long timeoutSeconds) {
+        return awaitPromiseMs(promiseId, timeoutSeconds * 1000);
+    }
+
+    /**
      * Wait for one or more external signals, with an optional timeout.
      * <p>
      * Blocks until one of the named signals is received or the timeout
@@ -725,6 +764,9 @@ public class HostCalls {
      * The signal names are serialized internally as a JSON string array
      * (e.g. {@code ["payment_received","order_cancelled"]}).  The returned
      * signal name and payload are from whichever signal arrives first.
+     * <p>
+     * Prefer {@link #awaitSignals(String[], long)} (which accepts seconds)
+     * over this millisecond variant.
      *
      * @param signalNames the signal names to wait for
      * @param timeoutMs   maximum wait time in milliseconds (use
@@ -732,7 +774,7 @@ public class HostCalls {
      * @return a result containing an {@link AwaitSignalsResult} with the
      *         received signal name, payload, and timeout indicator
      */
-    public CleatResult<AwaitSignalsResult> awaitSignals(String[] signalNames, long timeoutMs) {
+    public CleatResult<AwaitSignalsResult> awaitSignalsMs(String[] signalNames, long timeoutMs) {
         // Serialize signal names as a JSON string array (matching Go adapter).
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < signalNames.length; i++) {
@@ -774,6 +816,24 @@ public class HostCalls {
             Math.min(payloadLen, payloadBufSize));
 
         return CleatResult.ok(new AwaitSignalsResult(sigName, payload, timedOut));
+    }
+
+    /**
+     * Wait for one or more external signals, with an optional timeout
+     * specified in seconds.
+     * <p>
+     * This is the preferred API. Delegates to
+     * {@link #awaitSignalsMs(String[], long)}.
+     *
+     * @param signalNames   the signal names to wait for
+     * @param timeoutSeconds maximum wait time in seconds (use
+     *                       {@link Long#MAX_VALUE} for no timeout)
+     * @return a result containing an {@link AwaitSignalsResult} with the
+     *         received signal name, payload, and timeout indicator
+     * @see #awaitSignalsMs(String[], long)
+     */
+    public CleatResult<AwaitSignalsResult> awaitSignals(String[] signalNames, long timeoutSeconds) {
+        return awaitSignalsMs(signalNames, timeoutSeconds * 1000);
     }
 
     /**
@@ -1030,10 +1090,14 @@ public class HostCalls {
     // ========================================================================
 
     /**
-     * Send a signal to a target workflow and wait for a response.
+     * Send a signal to a target workflow and wait for a response, with a
+     * timeout in milliseconds.
      * <p>
      * The signal carries an embedded correlation ID. The target workflow
      * can use {@link #replyToSignal(String, String)} to send a response back.
+     * <p>
+     * Prefer {@link #sendSignalAndWait(String, String, String, long)}
+     * (which accepts seconds) over this millisecond variant.
      *
      * @param targetRunId the target workflow's run ID
      * @param signalName  the signal name to send
@@ -1042,7 +1106,7 @@ public class HostCalls {
      * @return a result containing the response on success, or an error
      *         description on failure
      */
-    public CleatResult<String> sendSignalAndWait(
+    public CleatResult<String> sendSignalAndWaitMs(
         String targetRunId, String signalName, String payload, long timeoutMs) {
         int[] p = packStrings(targetRunId, signalName, payload);
         int targetOff = p[0], sigOff = p[1], payOff = p[2];
@@ -1065,6 +1129,26 @@ public class HostCalls {
 
         String response = readOutput(responseLen);
         return CleatResult.ok(response);
+    }
+
+    /**
+     * Send a signal to a target workflow and wait for a response, with a
+     * timeout specified in seconds.
+     * <p>
+     * This is the preferred API. Delegates to
+     * {@link #sendSignalAndWaitMs(String, String, String, long)}.
+     *
+     * @param targetRunId   the target workflow's run ID
+     * @param signalName    the signal name to send
+     * @param payload       the signal payload JSON
+     * @param timeoutSeconds maximum wait time in seconds
+     * @return a result containing the response on success, or an error
+     *         description on failure
+     * @see #sendSignalAndWaitMs(String, String, String, long)
+     */
+    public CleatResult<String> sendSignalAndWait(
+        String targetRunId, String signalName, String payload, long timeoutSeconds) {
+        return sendSignalAndWaitMs(targetRunId, signalName, payload, timeoutSeconds * 1000);
     }
 
     /**
@@ -1094,11 +1178,15 @@ public class HostCalls {
     }
 
     /**
-     * Wait for at least {@code minCount} signals from the named set.
+     * Wait for at least {@code minCount} signals from the named set, with a
+     * timeout in milliseconds.
      * <p>
      * Collects signals until {@code minCount} is reached,
      * {@code maxRejections} is exceeded (if {@code >= 0}), or the timeout
      * expires.
+     * <p>
+     * Prefer {@link #awaitSignalsWithQuorum(String[], int, int, long)}
+     * (which accepts seconds) over this millisecond variant.
      *
      * @param signalNames   the signal names to wait for
      * @param minCount      minimum number of signals required to proceed
@@ -1107,7 +1195,7 @@ public class HostCalls {
      * @param timeoutMs     maximum wait time in milliseconds
      * @return a result containing the list of collected signals, or an error
      */
-    public CleatResult<java.util.List<AwaitSignalsResult>> awaitSignalsWithQuorum(
+    public CleatResult<java.util.List<AwaitSignalsResult>> awaitSignalsWithQuorumMs(
         String[] signalNames, int minCount, int maxRejections, long timeoutMs) {
         java.util.List<AwaitSignalsResult> results = new java.util.ArrayList<>();
         long deadline = System.currentTimeMillis() + timeoutMs;
@@ -1120,7 +1208,7 @@ public class HostCalls {
                     "quorum timeout: got " + results.size() + "/" + minCount + " signals");
             }
 
-            CleatResult<AwaitSignalsResult> signalResult = this.awaitSignals(signalNames, remainingMs);
+            CleatResult<AwaitSignalsResult> signalResult = this.awaitSignalsMs(signalNames, remainingMs);
             if (signalResult.isErr()) {
                 return CleatResult.err("quorum signal error: " + signalResult.getError());
             }
@@ -1154,9 +1242,29 @@ public class HostCalls {
     }
 
     /**
+     * Wait for at least {@code minCount} signals from the named set, with a
+     * timeout specified in seconds.
+     * <p>
+     * This is the preferred API. Delegates to
+     * {@link #awaitSignalsWithQuorumMs(String[], int, int, long)}.
+     *
+     * @param signalNames    the signal names to wait for
+     * @param minCount       minimum number of signals required to proceed
+     * @param maxRejections  maximum rejections tolerated before aborting
+     *                       ({@code -1} to disable)
+     * @param timeoutSeconds maximum wait time in seconds
+     * @return a result containing the list of collected signals, or an error
+     * @see #awaitSignalsWithQuorumMs(String[], int, int, long)
+     */
+    public CleatResult<java.util.List<AwaitSignalsResult>> awaitSignalsWithQuorum(
+        String[] signalNames, int minCount, int maxRejections, long timeoutSeconds) {
+        return awaitSignalsWithQuorumMs(signalNames, minCount, maxRejections, timeoutSeconds * 1000);
+    }
+
+    /**
      * Send a signal to a target workflow (fire-and-forget).
      * <p>
-     * Unlike {@link #sendSignalAndWait(String, String, String, long)},
+     * Unlike {@link #sendSignalAndWaitMs(String, String, String, long)},
      * this method does not wait for a response. The signal is enqueued and
      * the workflow continues immediately. This is a recorded (journaled)
      * operation.
@@ -1189,7 +1297,7 @@ public class HostCalls {
 
     /**
      * Resolve a promise with a value, making it available to any workflow
-     * awaiting it via {@link #awaitPromise(String, long)}.
+     * awaiting it via {@link #awaitPromiseMs(String, long)}.
      *
      * @param id    the promise ID (from {@link #createPromise(String)})
      * @param value the resolved value (typically a JSON string)
@@ -1211,7 +1319,7 @@ public class HostCalls {
 
     /**
      * Reject a promise with an error, causing any workflow awaiting it via
-     * {@link #awaitPromise(String, long)} to receive a failure.
+     * {@link #awaitPromiseMs(String, long)} to receive a failure.
      *
      * @param id    the promise ID (from {@link #createPromise(String)})
      * @param error the error description
@@ -1262,10 +1370,14 @@ public class HostCalls {
     }
 
     /**
-     * Schedule a service invocation to occur after a delay.
+     * Schedule a service invocation to occur after a delay specified in
+     * milliseconds.
      * <p>
      * The invocation is queued and will be delivered to the target service
      * after the specified delay.  This is a fire-and-forget operation.
+     * <p>
+     * Prefer {@link #scheduleInvoke(String, String, String, long)}
+     * (which accepts seconds) over this millisecond variant.
      *
      * @param service     the service name
      * @param operation   the operation name
@@ -1273,7 +1385,7 @@ public class HostCalls {
      * @param delayMs     delay in milliseconds before the invocation
      * @return a result indicating success, or an error description on failure
      */
-    public CleatResult<Void> scheduleInvoke(String service, String operation, String requestJSON, long delayMs) {
+    public CleatResult<Void> scheduleInvokeMs(String service, String operation, String requestJSON, long delayMs) {
         int[] p = packStrings(service, operation, requestJSON);
         int svcOff = p[0], opOff = p[1], reqOff = p[2];
         int svcLen = p[3], opLen = p[4], reqLen = p[5];
@@ -1285,6 +1397,24 @@ public class HostCalls {
             return CleatResult.err("scheduleInvoke failed with code " + errCode);
         }
         return CleatResult.ok(null);
+    }
+
+    /**
+     * Schedule a service invocation to occur after a delay specified in
+     * seconds.
+     * <p>
+     * This is the preferred API. Delegates to
+     * {@link #scheduleInvokeMs(String, String, String, long)}.
+     *
+     * @param service      the service name
+     * @param operation    the operation name
+     * @param requestJSON  the JSON request payload
+     * @param delaySeconds delay in seconds before the invocation
+     * @return a result indicating success, or an error description on failure
+     * @see #scheduleInvokeMs(String, String, String, long)
+     */
+    public CleatResult<Void> scheduleInvoke(String service, String operation, String requestJSON, long delaySeconds) {
+        return scheduleInvokeMs(service, operation, requestJSON, delaySeconds * 1000);
     }
 
     // ========================================================================
@@ -1897,18 +2027,22 @@ public class HostCalls {
     // ========================================================================
 
     /**
-     * Attempt to acquire a concurrency lock for the given key.
+     * Attempt to acquire a concurrency lock for the given key, with a TTL
+     * specified in milliseconds.
      * <p>
      * The lock is held for at most {@code ttlMs} milliseconds.  Returns
      * {@code true} if the lock was acquired, {@code false} if it was already
      * held by another workflow.
+     * <p>
+     * Prefer {@link #acquireLock(String, long)} (which accepts seconds) over
+     * this millisecond variant.
      *
      * @param key   the lock key
      * @param ttlMs time-to-live in milliseconds
      * @return {@code true} if the lock was acquired
      * @throws RuntimeException if the host reports an error
      */
-    public boolean acquireLock(String key, long ttlMs) {
+    public boolean acquireLockMs(String key, long ttlMs) {
         int[] p = packStrings(key);
         int keyOff = p[0], keyLen = p[1];
 
@@ -1920,6 +2054,23 @@ public class HostCalls {
         }
 
         return ((result >> 8) & 0x1L) != 0;
+    }
+
+    /**
+     * Attempt to acquire a concurrency lock for the given key, with a TTL
+     * specified in seconds.
+     * <p>
+     * This is the preferred API. Delegates to
+     * {@link #acquireLockMs(String, long)}.
+     *
+     * @param key         the lock key
+     * @param ttlSeconds  time-to-live in seconds
+     * @return {@code true} if the lock was acquired
+     * @throws RuntimeException if the host reports an error
+     * @see #acquireLockMs(String, long)
+     */
+    public boolean acquireLock(String key, long ttlSeconds) {
+        return acquireLockMs(key, ttlSeconds * 1000);
     }
 
     /**
@@ -1945,7 +2096,7 @@ public class HostCalls {
     // ========================================================================
 
     /**
-     * Result of an {@link #awaitSignals(String[], long)} call.
+     * Result of an {@link #awaitSignalsMs(String[], long)} call.
      * <p>
      * Contains the signal that was received (or empty if timed out), its
      * payload, and whether the timeout expired before any signal arrived.
@@ -1984,7 +2135,7 @@ public class HostCalls {
     }
 
     /**
-     * Result of an {@link #awaitPromise(String, long)} call.
+     * Result of an {@link #awaitPromiseMs(String, long)} call.
      * <p>
      * Contains the promise's resolved value (or empty if timed out), and
      * whether the timeout expired before the promise was resolved.

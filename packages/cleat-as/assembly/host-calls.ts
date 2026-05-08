@@ -792,7 +792,27 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Make a recorded API call to an external service.
+   * Make a recorded API call to an external service (timeout in seconds).
+   *
+   * Service, operation, and request JSON are encoded to the scratch buffer,
+   * the host call is made, and the response is read from the output buffer.
+   *
+   * When timeoutSeconds > 0, the host enforces a per-call deadline. If the host
+   * does not expose the `cleat_call_with_timeout` import, pass 0 to use
+   * the standard (non-timeout) import.
+   *
+   * @param service        - Service name (e.g., "payment", "email").
+   * @param operation      - Operation name (e.g., "charge", "send").
+   * @param requestJson    - Request payload as a JSON string.
+   * @param timeoutSeconds - Optional per-call timeout in seconds (0 = no timeout).
+   * @returns The call outcome containing response JSON or error details.
+   */
+  cleatCall(service: string, operation: string, requestJson: string, timeoutSeconds: i64 = 0): CleatCallOutcome {
+    return this.cleatCallMs(service, operation, requestJson, timeoutSeconds * 1000);
+  }
+
+  /**
+   * Make a recorded API call to an external service (timeout in milliseconds).
    *
    * Service, operation, and request JSON are encoded to the scratch buffer,
    * the host call is made, and the response is read from the output buffer.
@@ -807,7 +827,7 @@ export class HostCalls {
    * @param timeoutMs    - Optional per-call timeout in milliseconds (0 = no timeout).
    * @returns The call outcome containing response JSON or error details.
    */
-  cleatCall(service: string, operation: string, requestJson: string, timeoutMs: i64 = 0): CleatCallOutcome {
+  cleatCallMs(service: string, operation: string, requestJson: string, timeoutMs: i64 = 0): CleatCallOutcome {
     // Encode input strings sequentially into the scratch buffer
     let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
     let opOffset: usize = SCRATCH_BASE + svcLen;
@@ -866,16 +886,29 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Suspend workflow execution for a duration.
+   * Suspend workflow execution for a duration (seconds).
    *
    * On fresh execution, returns `true` to signal that the workflow should
    * suspend. On replay, returns `false` (the sleep already completed).
    *
-   * @param durationMs - Sleep duration in milliseconds.
+   * @param timeoutSeconds - Sleep duration in seconds.
    * @returns `true` if the workflow should suspend, `false` if completed.
    */
-  cleatSleep(durationMs: i64): bool {
-    let result: i64 = import_cleat_sleep(durationMs);
+  cleatSleep(timeoutSeconds: i64): bool {
+    return this.cleatSleepMs(timeoutSeconds * 1000);
+  }
+
+  /**
+   * Suspend workflow execution for a duration (milliseconds).
+   *
+   * On fresh execution, returns `true` to signal that the workflow should
+   * suspend. On replay, returns `false` (the sleep already completed).
+   *
+   * @param timeoutMs - Sleep duration in milliseconds.
+   * @returns `true` if the workflow should suspend, `false` if completed.
+   */
+  cleatSleepMs(timeoutMs: i64): bool {
+    let result: i64 = import_cleat_sleep(timeoutMs);
     let decoded = decodeSleepResult(result);
     let shouldSuspend: bool = decoded.status === 1;
     if (shouldSuspend) {
@@ -1193,7 +1226,26 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Wait for one or more external signals, with a timeout.
+   * Wait for one or more external signals, with a timeout in seconds.
+   *
+   * Signal names are passed as a JSON array string, e.g.,
+   * `'["payment_received","order_cancelled"]'`.
+   *
+   * The scratch buffer is split: the first portion holds the input
+   * (signal names JSON), and the remainder serves as the payload output
+   * buffer. The output buffer at `OUTPUT_OFFSET` holds the received
+   * signal name.
+   *
+   * @param namesJson     - JSON array of signal names to wait for.
+   * @param timeoutSeconds - Timeout in seconds.
+   * @returns The outcome with signal name, payload, and timeout status.
+   */
+  awaitSignals(namesJson: string, timeoutSeconds: i64): AwaitSignalsOutcome {
+    return this.awaitSignalsMs(namesJson, timeoutSeconds * 1000);
+  }
+
+  /**
+   * Wait for one or more external signals, with a timeout in milliseconds.
    *
    * Signal names are passed as a JSON array string, e.g.,
    * `'["payment_received","order_cancelled"]'`.
@@ -1207,7 +1259,7 @@ export class HostCalls {
    * @param timeoutMs - Timeout in milliseconds.
    * @returns The outcome with signal name, payload, and timeout status.
    */
-  awaitSignals(namesJson: string, timeoutMs: i64): AwaitSignalsOutcome {
+  awaitSignalsMs(namesJson: string, timeoutMs: i64): AwaitSignalsOutcome {
     // Write the signal names JSON into the lower portion of the scratch buffer
     let namesLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE / 2, namesJson);
 
@@ -1311,7 +1363,21 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Wait for a durable promise to resolve, with a timeout.
+   * Wait for a durable promise to resolve, with a timeout in seconds.
+   *
+   * If the promise is not yet resolved when the timeout elapses, the
+   * workflow should suspend by returning the suspension sentinel.
+   *
+   * @param id             - The promise ID to wait for.
+   * @param timeoutSeconds - Timeout in seconds.
+   * @returns The outcome with the resolved value and timeout status.
+   */
+  awaitPromise(id: string, timeoutSeconds: i64): AwaitPromiseOutcome {
+    return this.awaitPromiseMs(id, timeoutSeconds * 1000);
+  }
+
+  /**
+   * Wait for a durable promise to resolve, with a timeout in milliseconds.
    *
    * If the promise is not yet resolved when the timeout elapses, the
    * workflow should suspend by returning the suspension sentinel.
@@ -1320,7 +1386,7 @@ export class HostCalls {
    * @param timeoutMs - Timeout in milliseconds.
    * @returns The outcome with the resolved value and timeout status.
    */
-  awaitPromise(id: string, timeoutMs: i64): AwaitPromiseOutcome {
+  awaitPromiseMs(id: string, timeoutMs: i64): AwaitPromiseOutcome {
     let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, id);
 
     let result: i64 = import_cleat_await_promise(
@@ -1579,7 +1645,28 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Send a signal to a target workflow and wait for a response.
+   * Send a signal to a target workflow and wait for a response (seconds).
+   *
+   * The signal carries an embedded correlation ID. The target workflow
+   * should use `replyToSignal` to send a response back.
+   *
+   * @param targetRunId    - The target workflow's run ID.
+   * @param signalName     - The signal name to send.
+   * @param payload        - The signal payload JSON.
+   * @param timeoutSeconds - Maximum wait time in seconds.
+   * @returns A DurableResult containing the response on success.
+   */
+  sendSignalAndWait(
+    targetRunId: string,
+    signalName: string,
+    payload: string,
+    timeoutSeconds: i64,
+  ): DurableResult<string> {
+    return this.sendSignalAndWaitMs(targetRunId, signalName, payload, timeoutSeconds * 1000);
+  }
+
+  /**
+   * Send a signal to a target workflow and wait for a response (milliseconds).
    *
    * The signal carries an embedded correlation ID. The target workflow
    * should use `replyToSignal` to send a response back.
@@ -1590,7 +1677,7 @@ export class HostCalls {
    * @param timeoutMs   - Maximum wait time in milliseconds.
    * @returns A DurableResult containing the response on success.
    */
-  sendSignalAndWait(
+  sendSignalAndWaitMs(
     targetRunId: string,
     signalName: string,
     payload: string,
@@ -1666,7 +1753,28 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Wait for at least minCount signals from the named set.
+   * Wait for at least minCount signals from the named set (seconds).
+   *
+   * Collects signals until minCount is reached, maxRejections is exceeded,
+   * or the timeout expires.
+   *
+   * @param namesJson      - JSON array of signal names to wait for.
+   * @param minCount       - Minimum number of signals required to proceed.
+   * @param maxRejections  - Maximum rejections tolerated (-1 to disable).
+   * @param timeoutSeconds - Maximum wait time in seconds.
+   * @returns The collected signal results.
+   */
+  awaitSignalsWithQuorum(
+    namesJson: string,
+    minCount: i32,
+    maxRejections: i32,
+    timeoutSeconds: i64,
+  ): AwaitSignalsOutcome[] {
+    return this.awaitSignalsWithQuorumMs(namesJson, minCount, maxRejections, timeoutSeconds * 1000);
+  }
+
+  /**
+   * Wait for at least minCount signals from the named set (milliseconds).
    *
    * Collects signals until minCount is reached, maxRejections is exceeded,
    * or the timeout expires.
@@ -1677,13 +1785,13 @@ export class HostCalls {
    * @param timeoutMs     - Maximum wait time in milliseconds.
    * @returns The collected signal results.
    */
-  awaitSignalsWithQuorum(
+  awaitSignalsWithQuorumMs(
     namesJson: string,
     minCount: i32,
     maxRejections: i32,
     timeoutMs: i64,
   ): AwaitSignalsOutcome[] {
-    // Simple implementation: call awaitSignals in a loop.
+    // Simple implementation: call awaitSignalsMs in a loop.
     let results: AwaitSignalsOutcome[] = [];
     let deadline: i64 = this.now() + timeoutMs;
     let rejectionCount: i32 = 0;
@@ -1696,7 +1804,7 @@ export class HostCalls {
         );
       }
 
-      let outcome: AwaitSignalsOutcome = this.awaitSignals(namesJson, remainingMs);
+      let outcome: AwaitSignalsOutcome = this.awaitSignalsMs(namesJson, remainingMs);
       if (outcome.timedOut) {
         throw new Error(
           "quorum timeout: got " + results.length.toString() + "/" + minCount.toString() + " signals",
@@ -1874,7 +1982,23 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Schedule a one-shot delayed invocation of a service operation.
+   * Schedule a one-shot delayed invocation of a service operation (seconds).
+   *
+   * The invocation will be executed after the delay has elapsed.
+   * This is fire-and-forget — no result is returned.
+   *
+   * @param service       - Service name.
+   * @param operation     - Operation name.
+   * @param requestJson   - Request payload as a JSON string.
+   * @param delaySeconds  - Delay in seconds before the invocation fires.
+   * @returns An error message on failure, or null on success.
+   */
+  scheduleInvoke(service: string, operation: string, requestJson: string, delaySeconds: i64): string | null {
+    return this.scheduleInvokeMs(service, operation, requestJson, delaySeconds * 1000);
+  }
+
+  /**
+   * Schedule a one-shot delayed invocation of a service operation (milliseconds).
    *
    * The invocation will be executed after the delay has elapsed.
    * This is fire-and-forget — no result is returned.
@@ -1885,7 +2009,7 @@ export class HostCalls {
    * @param delayMs      - Delay in milliseconds before the invocation fires.
    * @returns An error message on failure, or null on success.
    */
-  scheduleInvoke(service: string, operation: string, requestJson: string, delayMs: i64): string | null {
+  scheduleInvokeMs(service: string, operation: string, requestJson: string, delayMs: i64): string | null {
     let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
     let opOffset: usize = SCRATCH_BASE + svcLen;
     let remaining: i32 = OUT_BUF_SIZE - svcLen;
@@ -2208,7 +2332,7 @@ export class HostCalls {
    * ```ts
    * // cleatSleep returns `true` on fresh execution (should suspend).
    * // On replay it returns `false` immediately (sleep already completed).
-   * let isReplay = !host.cleatSleep(1); // 1ms sleep, non-zero
+   * let isReplay = !host.cleatSleepMs(1); // 1ms sleep, non-zero
    * ```
    *
    * **Caveat:** A 1ms sleep is recorded in the event history. Use this
@@ -2322,7 +2446,22 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Attempt to acquire a concurrency lock for the given key.
+   * Attempt to acquire a concurrency lock for the given key (seconds).
+   *
+   * The lock is held for at most `ttlSeconds` seconds. Returns
+   * a DurableResult containing `true` if the lock was acquired,
+   * `false` if it was already held by another workflow.
+   *
+   * @param key         - The lock key.
+   * @param ttlSeconds  - Time-to-live in seconds.
+   * @returns A DurableResult containing the acquired flag.
+   */
+  acquireLock(key: string, ttlSeconds: i64): DurableResult<bool> {
+    return this.acquireLockMs(key, ttlSeconds * 1000);
+  }
+
+  /**
+   * Attempt to acquire a concurrency lock for the given key (milliseconds).
    *
    * The lock is held for at most `ttlMs` milliseconds. Returns
    * a DurableResult containing `true` if the lock was acquired,
@@ -2332,7 +2471,7 @@ export class HostCalls {
    * @param ttlMs - Time-to-live in milliseconds.
    * @returns A DurableResult containing the acquired flag.
    */
-  acquireLock(key: string, ttlMs: i64): DurableResult<bool> {
+  acquireLockMs(key: string, ttlMs: i64): DurableResult<bool> {
     let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, key);
 
     let result: i64 = import_cleat_acquire_lock(

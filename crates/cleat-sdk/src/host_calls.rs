@@ -4,6 +4,7 @@
 use crate::memory;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// All 18 host function imports from the "env" WASM module.
 /// Each returns i64 with a bit-packed result. Strings cross as (ptr, len) pairs.
@@ -272,15 +273,20 @@ impl HostCalls {
         (resp, None)
     }
 
-    /// Suspend execution for a duration. Mirrors Go's DurableSleep.
+    /// Sleep for a duration. Preferred over cleat_sleep_ms.
+    pub fn cleat_sleep(&self, d: Duration) -> bool {
+        self.cleat_sleep_ms(d.as_millis() as i64)
+    }
+
+    /// Suspend execution for a duration in milliseconds. Mirrors Go's DurableSleep.
     ///
     /// On a fresh execution the host returns status = 1 (bits 56-63) or the
     /// direct `SUSPEND_SENTINEL` value. In either case we panic with
     /// [`SuspendSentinel`] so the export wrapper can propagate the sentinel
     /// back to the engine. On replay the call returns status = 0 and we return
     /// `false` (no suspend needed).
-    pub fn cleat_sleep(&self, duration_ms: i64) -> bool {
-        let result = unsafe { imports::cleat_sleep(duration_ms) };
+    pub fn cleat_sleep_ms(&self, ms: i64) -> bool {
+        let result = unsafe { imports::cleat_sleep(ms) };
         // Some host runtimes return SUSPEND_SENTINEL directly.
         if result == memory::SUSPEND_SENTINEL {
             std::panic::panic_any(crate::SuspendSentinel);
@@ -449,9 +455,14 @@ impl HostCalls {
         (result, None)
     }
 
-    /// Await external signals. Mirrors Go's AwaitSignals.
+    /// Await external signals for a duration. Preferred over await_signals_ms.
+    pub fn await_signals(&self, signal_names: &[&str], timeout: Duration) -> (String, String, bool, Option<String>) {
+        self.await_signals_ms(signal_names, timeout.as_millis() as i64)
+    }
+
+    /// Await external signals in milliseconds. Mirrors Go's AwaitSignals.
     /// Returns (signal_name, payload, timed_out, error).
-    pub fn await_signals(&self, signal_names: &[&str], timeout_ms: i64) -> (String, String, bool, Option<String>) {
+    pub fn await_signals_ms(&self, signal_names: &[&str], timeout_ms: i64) -> (String, String, bool, Option<String>) {
         // JSON-marshal the signal names array, matching Go's adapter.go behavior.
         let names_json = serde_json::to_string(signal_names).unwrap_or_else(|_| "[]".to_string());
         let mut sig_name_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
@@ -510,9 +521,14 @@ impl HostCalls {
         (id, None)
     }
 
-    /// Await a durable promise. Mirrors Go's AwaitPromise (ABI 2.21).
+    /// Await a durable promise for a duration. Preferred over await_promise_ms.
+    pub fn await_promise(&self, promise_id: &str, timeout: Duration) -> (String, bool, Option<String>) {
+        self.await_promise_ms(promise_id, timeout.as_millis() as i64)
+    }
+
+    /// Await a durable promise in milliseconds. Mirrors Go's AwaitPromise (ABI 2.21).
     /// Returns (result, timed_out, error).
-    pub fn await_promise(&self, promise_id: &str, timeout_ms: i64) -> (String, bool, Option<String>) {
+    pub fn await_promise_ms(&self, promise_id: &str, timeout_ms: i64) -> (String, bool, Option<String>) {
         let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
             imports::cleat_await_promise(
@@ -563,9 +579,13 @@ impl HostCalls {
         (resp, None)
     }
 
-    /// Send a signal to a target workflow and wait for a response.
-    /// Mirrors Go's SendSignalAndWait.
-    pub fn send_signal_and_wait(&self, target_run_id: &str, signal_name: &str, payload: &str, timeout_ms: i64) -> Result<String, String> {
+    /// Send a signal to a target workflow and wait for a response with a timeout duration. Preferred over send_signal_and_wait_ms.
+    pub fn send_signal_and_wait(&self, target_run_id: &str, signal_name: &str, payload: &str, timeout: Duration) -> Result<String, String> {
+        self.send_signal_and_wait_ms(target_run_id, signal_name, payload, timeout.as_millis() as i64)
+    }
+
+    /// Send a signal to a target workflow and wait for a response in milliseconds. Mirrors Go's SendSignalAndWait.
+    pub fn send_signal_and_wait_ms(&self, target_run_id: &str, signal_name: &str, payload: &str, timeout_ms: i64) -> Result<String, String> {
         let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
             imports::cleat_send_signal_and_wait(
@@ -621,7 +641,7 @@ impl HostCalls {
 
             // Gather signal names not yet received as a &[&str].
             let remaining_names: Vec<&str> = signal_names.iter().map(|s| s.as_str()).collect();
-            let (name, payload, timed_out, err) = self.await_signals(&remaining_names, remaining.as_millis() as i64);
+            let (name, payload, timed_out, err) = self.await_signals_ms(&remaining_names, remaining.as_millis() as i64);
             if let Some(e) = err {
                 return Err(format!("quorum signal error: {}", e));
             }
@@ -826,8 +846,13 @@ impl HostCalls {
         Ok(())
     }
 
+    /// Schedule an invoke with a delay duration. Preferred over schedule_invoke_ms.
+    pub fn schedule_invoke(&self, service: &str, operation: &str, request_json: &str, delay: Duration) -> Result<(), String> {
+        self.schedule_invoke_ms(service, operation, request_json, delay.as_millis() as i64)
+    }
+
     /// Schedule an invoke with a delay in milliseconds. Mirrors Go's ScheduleInvoke.
-    pub fn schedule_invoke(&self, service: &str, operation: &str, request_json: &str, delay_ms: i64) -> Result<(), String> {
+    pub fn schedule_invoke_ms(&self, service: &str, operation: &str, request_json: &str, delay_ms: i64) -> Result<(), String> {
         let result = unsafe {
             imports::schedule_invoke(
                 service.as_ptr(), service.len() as u32,
@@ -1067,9 +1092,14 @@ impl HostCalls {
         self.cleat_fetch("GET", url, "{}", "")
     }
 
-    /// Acquire a concurrency lock. Mirrors Go's AcquireLockMs.
+    /// Acquire a concurrency lock with a TTL duration. Preferred over acquire_lock_ms.
+    pub fn acquire_lock(&self, key: &str, ttl: Duration) -> (bool, Option<String>) {
+        self.acquire_lock_ms(key, ttl.as_millis() as i64)
+    }
+
+    /// Acquire a concurrency lock in milliseconds. Mirrors Go's AcquireLockMs.
     /// Returns (acquired, error_message).
-    pub fn acquire_lock(&self, key: &str, ttl_ms: i64) -> (bool, Option<String>) {
+    pub fn acquire_lock_ms(&self, key: &str, ttl_ms: i64) -> (bool, Option<String>) {
         let result = unsafe {
             imports::cleat_acquire_lock(
                 key.as_ptr(), key.len() as u32,

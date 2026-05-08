@@ -18,10 +18,10 @@ Usage::
     resp = host.cleat_call("payment", "charge", {"amount": 100})
 
     # Durable sleep (suspends workflow on fresh execution)
-    host.cleat_sleep(5000)
+    host.cleat_sleep(5.0)
 
     # Signal handling
-    result = host.await_signals(["payment_received"], 30000)
+    result = host.await_signals(["payment_received"], 30.0)
 
     # Child workflows
     run_id = host.child_workflow("order_processor", {"order_id": "ord-42"})
@@ -1488,8 +1488,10 @@ class HostCalls:
     # 10. cleat_sleep — suspend for a duration
     # --------------------------------------------------------------------
 
-    def cleat_sleep(self, duration_ms: int) -> bool:
-        """Suspend workflow execution for a duration.
+    def cleat_sleep(self, timeout_seconds: float) -> bool:
+        """Suspend workflow execution for a duration in seconds.
+
+        Compatible with Temporal/DBOS timeout conventions.
 
         On fresh execution the host signals suspension and this method
         raises :exc:`SuspendSentinel`.  On replay the sleep has already
@@ -1497,7 +1499,34 @@ class HostCalls:
 
         Parameters
         ----------
-        duration_ms : int
+        timeout_seconds : float
+            Sleep duration in seconds.
+
+        Returns
+        -------
+        bool
+            Always ``False`` on replay (suspend scenarios raise
+            :exc:`SuspendSentinel` instead).
+
+        Raises
+        ------
+        SuspendSentinel
+            If the workflow should suspend (fresh execution).
+        """
+        return self.cleat_sleep_ms(int(timeout_seconds * 1000))
+
+    def cleat_sleep_ms(self, timeout_ms: int) -> bool:
+        """Suspend workflow execution for a duration in milliseconds.
+
+        Prefer the seconds-based :meth:`cleat_sleep` variant.
+
+        On fresh execution the host signals suspension and this method
+        raises :exc:`SuspendSentinel`.  On replay the sleep has already
+        completed and ``False`` is returned.
+
+        Parameters
+        ----------
+        timeout_ms : int
             Sleep duration in milliseconds.
 
         Returns
@@ -1511,7 +1540,7 @@ class HostCalls:
         SuspendSentinel
             If the workflow should suspend (fresh execution).
         """
-        result = _import_cleat_sleep(duration_ms)
+        result = _import_cleat_sleep(timeout_ms)
 
         # Some host runtimes return SUSPEND_SENTINEL directly.
         if result == SUSPEND_SENTINEL:
@@ -1651,8 +1680,43 @@ class HostCalls:
     # 12. await_signals — wait for signals
     # --------------------------------------------------------------------
 
-    def await_signals(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
-        """Wait for one or more external signals, with a timeout.
+    def await_signals(self, signal_names: list[str], timeout_seconds: float) -> SignalResult:
+        """Wait for one or more external signals, with a timeout in seconds.
+
+        Compatible with Temporal/DBOS timeout conventions.
+
+        Blocks until one of the named signals is received or the timeout
+        expires.
+
+        Parameters
+        ----------
+        signal_names : list[str]
+            List of signal names to wait for.
+        timeout_seconds : float
+            Maximum wait time in seconds.  Pass ``0`` or a negative
+            value to wait indefinitely (no timeout).  When waiting
+            indefinitely the host suspends the workflow until a matching
+            signal arrives.
+
+        Returns
+        -------
+        SignalResult
+            The received signal name, payload, and timeout indicator.
+
+        Raises
+        ------
+        SuspendSentinel
+            If the host indicates the workflow should suspend (no signal
+            ready and a non-zero timeout was specified).
+        RuntimeError
+            If the host reports an error.
+        """
+        return self.await_signals_ms(signal_names, int(timeout_seconds * 1000))
+
+    def await_signals_ms(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
+        """Wait for one or more external signals, with a timeout in milliseconds.
+
+        Prefer the seconds-based :meth:`await_signals` variant.
 
         Blocks until one of the named signals is received or the timeout
         expires.
@@ -2211,8 +2275,34 @@ class HostCalls:
     # 24. await_promise — await a cleat promise
     # --------------------------------------------------------------------
 
-    def await_promise(self, promise_id: str, timeout_ms: int) -> PromiseResult:
-        """Wait for a cleat promise to resolve, with a timeout.
+    def await_promise(self, promise_id: str, timeout_seconds: float) -> PromiseResult:
+        """Wait for a cleat promise to resolve, with a timeout in seconds.
+
+        Compatible with Temporal/DBOS timeout conventions.
+
+        Parameters
+        ----------
+        promise_id : str
+            The promise ID to wait for.
+        timeout_seconds : float
+            Maximum wait time in seconds.
+
+        Returns
+        -------
+        PromiseResult
+            The resolved value, timeout indicator, and rejection flag.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        return self.await_promise_ms(promise_id, int(timeout_seconds * 1000))
+
+    def await_promise_ms(self, promise_id: str, timeout_ms: int) -> PromiseResult:
+        """Wait for a cleat promise to resolve, with a timeout in milliseconds.
+
+        Prefer the seconds-based :meth:`await_promise` variant.
 
         Parameters
         ----------
@@ -2830,9 +2920,51 @@ class HostCalls:
         target_run_id: str,
         signal_name: str,
         payload: str,
+        timeout_seconds: float,
+    ) -> str:
+        """Send a signal to a target workflow and wait for a response, with a timeout in seconds.
+
+        Compatible with Temporal/DBOS timeout conventions.
+
+        The signal carries an embedded correlation ID. The target workflow
+        can call :meth:`reply_to_signal` to send a response back.
+
+        Parameters
+        ----------
+        target_run_id : str
+            The target workflow's run ID.
+        signal_name : str
+            The signal name to send.
+        payload : str
+            The signal payload as a JSON string (will be enriched with a
+            correlation ID).
+        timeout_seconds : float
+            Maximum wait time in seconds for the response.
+
+        Returns
+        -------
+        str
+            The response payload from the target workflow.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error or the timeout expires.
+        """
+        return self.send_signal_and_wait_ms(
+            target_run_id, signal_name, payload, int(timeout_seconds * 1000)
+        )
+
+    def send_signal_and_wait_ms(
+        self,
+        target_run_id: str,
+        signal_name: str,
+        payload: str,
         timeout_ms: int,
     ) -> str:
-        """Send a signal to a target workflow and wait for a response.
+        """Send a signal to a target workflow and wait for a response, with a timeout in milliseconds.
+
+        Prefer the seconds-based :meth:`send_signal_and_wait` variant.
 
         The signal carries an embedded correlation ID. The target workflow
         can call :meth:`reply_to_signal` to send a response back.
@@ -2977,7 +3109,7 @@ class HostCalls:
                     f"quorum timeout: got {len(results)}/{min_count} signals"
                 )
 
-            result = self.await_signals(signal_names, remaining_ms)
+            result = self.await_signals_ms(signal_names, remaining_ms)
             if result.timed_out:
                 raise RuntimeError(
                     f"quorum timeout: got {len(results)}/{min_count} signals"
@@ -3154,8 +3286,38 @@ class HostCalls:
     # 36b. acquire_lock — acquire a concurrency lock
     # --------------------------------------------------------------------
 
-    def acquire_lock(self, key: str, ttl_ms: int) -> bool:
-        """Attempt to acquire a concurrency lock for the given key.
+    def acquire_lock(self, key: str, ttl_seconds: float) -> bool:
+        """Attempt to acquire a concurrency lock for the given key, with a TTL in seconds.
+
+        Compatible with Temporal/DBOS timeout conventions.
+
+        The lock is held for at most *ttl_seconds* seconds.  Returns
+        ``True`` if the lock was acquired, ``False`` if it was already
+        held by another workflow.
+
+        Parameters
+        ----------
+        key : str
+            The lock key.
+        ttl_seconds : float
+            Time-to-live in seconds.
+
+        Returns
+        -------
+        bool
+            ``True`` if the lock was acquired.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        return self.acquire_lock_ms(key, int(ttl_seconds * 1000))
+
+    def acquire_lock_ms(self, key: str, ttl_ms: int) -> bool:
+        """Attempt to acquire a concurrency lock for the given key, with a TTL in milliseconds.
+
+        Prefer the seconds-based :meth:`acquire_lock` variant.
 
         The lock is held for at most *ttl_ms* milliseconds.  Returns
         ``True`` if the lock was acquired, ``False`` if it was already
