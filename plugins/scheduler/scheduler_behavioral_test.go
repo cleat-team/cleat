@@ -1466,3 +1466,167 @@ func TestScheduleUpdateBadJSON(t *testing.T) {
 		t.Errorf("expected 400 for bad JSON, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests: CLI commands — flag validation
+// ---------------------------------------------------------------------------
+
+func TestCliListMissingFlags(t *testing.T) {
+	p := &Plugin{}
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"no flags", []string{}},
+		{"missing tenant", []string{"--dsn=postgres://localhost"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := p.cliList(tt.args)
+			if err == nil {
+				t.Errorf("cliList(%v): expected error", tt.args)
+			}
+		})
+	}
+}
+
+func TestCliListInvalidTenant(t *testing.T) {
+	p := &Plugin{}
+	err := p.cliList([]string{"--dsn=postgres://localhost", "--tenant=not-a-uuid"})
+	if err == nil {
+		t.Error("cliList: expected error for invalid tenant UUID")
+	}
+}
+
+func TestCliAddMissingFlags(t *testing.T) {
+	p := &Plugin{}
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"no flags", []string{}},
+		{"missing tenant", []string{"--dsn=postgres://localhost"}},
+		{"missing name", []string{"--dsn=postgres://localhost", "--tenant=00000000-0000-0000-0000-000000000001"}},
+		{"missing cron", []string{"--dsn=postgres://localhost", "--tenant=00000000-0000-0000-0000-000000000001", "--name=test"}},
+		{"missing workflow", []string{"--dsn=postgres://localhost", "--tenant=00000000-0000-0000-0000-000000000001", "--name=test", "--cron=* * * * *"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := p.cliAdd(tt.args)
+			if err == nil {
+				t.Errorf("cliAdd(%v): expected error", tt.args)
+			}
+		})
+	}
+}
+
+func TestCliAddInvalidTenant(t *testing.T) {
+	p := &Plugin{}
+	err := p.cliAdd([]string{
+		"--dsn=postgres://localhost",
+		"--tenant=not-a-uuid",
+		"--name=test",
+		"--cron=* * * * *",
+		"--workflow=wf",
+	})
+	if err == nil {
+		t.Error("cliAdd: expected error for invalid tenant UUID")
+	}
+}
+
+func TestCliAddInvalidCron(t *testing.T) {
+	p := &Plugin{}
+	err := p.cliAdd([]string{
+		"--dsn=postgres://localhost",
+		"--tenant=00000000-0000-0000-0000-000000000001",
+		"--name=test",
+		"--cron=invalid",
+		"--workflow=wf",
+	})
+	if err == nil {
+		t.Error("cliAdd: expected error for invalid cron expression")
+	}
+}
+
+func TestCliAddInvalidJSON(t *testing.T) {
+	p := &Plugin{}
+	err := p.cliAdd([]string{
+		"--dsn=postgres://localhost",
+		"--tenant=00000000-0000-0000-0000-000000000001",
+		"--name=test",
+		"--cron=*/5 * * * *",
+		"--workflow=wf",
+		"--input=not-json",
+	})
+	if err == nil {
+		t.Error("cliAdd: expected error for invalid JSON input")
+	}
+}
+
+func TestCliDeleteMissingFlags(t *testing.T) {
+	p := &Plugin{}
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"no flags", []string{}},
+		{"missing tenant", []string{"--dsn=postgres://localhost"}},
+		{"missing id", []string{"--dsn=postgres://localhost", "--tenant=00000000-0000-0000-0000-000000000001"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := p.cliDelete(tt.args)
+			if err == nil {
+				t.Errorf("cliDelete(%v): expected error", tt.args)
+			}
+		})
+	}
+}
+
+func TestCliDeleteInvalidUUIDs(t *testing.T) {
+	p := &Plugin{}
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"invalid tenant", []string{
+			"--dsn=postgres://localhost",
+			"--tenant=not-a-uuid",
+			"--id=00000000-0000-0000-0000-000000000001",
+		}},
+		{"invalid schedule id", []string{
+			"--dsn=postgres://localhost",
+			"--tenant=00000000-0000-0000-0000-000000000001",
+			"--id=not-a-uuid",
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := p.cliDelete(tt.args)
+			if err == nil {
+				t.Errorf("cliDelete(%v): expected error", tt.args)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Run() with valid db and cancelled context
+// ---------------------------------------------------------------------------
+
+func TestRunWithDBAndCancelledContext(t *testing.T) {
+	clock := newControllableClock()
+	p, _, _ := setupTestPlugin(t, clock)
+
+	p.env = &plugin.Environment{
+		DB: p.db,
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() returned error: %v", err)
+	}
+}
