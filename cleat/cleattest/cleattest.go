@@ -1,5 +1,9 @@
 // Package cleattest provides a mock HostCalls implementation for testing
 // workflows without compiling to WASM or running a full host.
+//
+// NOTE: This test SDK package intentionally uses Go features (channels,
+// timers) that may be flagged by `cleat vet`. These are safe here because
+// this is test infrastructure, not user workflow code.
 package cleattest
 
 import (
@@ -973,9 +977,9 @@ func (e *TestEnv) sendSignalAndWaitImpl(targetRunID, signalName, payload string,
 
 	// Wait for the reply with a timeout.
 	select {
-	case response := <-replyCh:
+	case response := <-replyCh: // cleat:allow E002 -- SDK test helper, not user workflow
 		return response, nil
-	case <-time.After(timeout):
+	case <-time.After(timeout): // cleat:allow E002,E014 -- SDK test helper; intentional timeout pattern
 		return "", fmt.Errorf("cleattest: SendSignalAndWait timed out after %v", timeout)
 	}
 }

@@ -3,6 +3,11 @@
 //
 // This is the "durable SDK" — the only import the workflow author needs.
 // Everything else comes from ordinary Go and the code transformer.
+//
+// NOTE: This SDK runtime intentionally uses Go features (goroutines,
+// channels, interface calls, function-value calls, timers) that are
+// forbidden in user workflow code. These are safe here because this
+// is the runtime implementation, not a user workflow.
 package cleat
 
 import (

@@ -78,8 +78,27 @@ section "LINT"
 run_step "go vet ./..." \
     go vet ./...
 
-run_step "cleat vet (go) testdata/basic/" \
-    go run ./cmd/cleat vet --lang go --json ./testdata/basic/
+run_step "cleat vet (go) ./... (blocking)" \
+    go run ./cmd/cleat vet --lang go --json ./...
+
+run_step "cleat vet (go) testdata/vet-checks/e001 (expect errors)" \
+    bash -c '
+        output=$(go run ./cmd/cleat vet --lang go ./testdata/vet-checks/go/e001_goroutine/ 2>&1)
+        rc=$?
+        if [ "$rc" -eq 1 ]; then
+            echo "Found expected errors (vet correctly validated testdata)"
+            echo "$output"
+            exit 0
+        elif [ "$rc" -eq 0 ]; then
+            echo "ERROR: expected errors but none found — vet may be broken"
+            echo "$output"
+            exit 1
+        else
+            echo "ERROR: vet failed with unexpected exit code $rc"
+            echo "$output"
+            exit 1
+        fi
+    '
 
 run_step "ruff check python-sdk/" \
     ruff check python-sdk/

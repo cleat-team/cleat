@@ -5,6 +5,12 @@
 //
 // This is a pure library plugin built on existing HostCalls primitives
 // (ChildWorkflow, AwaitAllChildren). No new WASM imports, no schema changes.
+//
+// NOTE: This plugin intentionally uses goroutines and channels for parallel
+// DAG execution. The goroutine lifecycle is fully managed (bounded by a
+// channel semaphore, barrier-collected via results channel). These patterns
+// are safe here because this is SDK plugin infrastructure, not user workflow
+// code. Each violation is marked with // cleat:allow comments.
 package dag
 
 import (
@@ -164,19 +170,19 @@ func (d *DAG) startLevelParallel(h cleat.HostCalls, input interface{}, level []*
 	ch := make(chan levelItem, len(level))
 
 	for i, task := range level {
-		sem <- struct{}{}
-		go func(idx int, t *Task) {
+		sem <- struct{}{} // cleat:allow E002 -- SDK plugin, not user workflow; channel semaphore is safe here
+		go func(idx int, t *Task) { // cleat:allow E001 -- SDK plugin, not user workflow; goroutine lifecycle is fully managed
 			defer func() { <-sem }()
 
 			inputJSON, err := d.buildTaskInput(t, input)
 			if err != nil {
-				ch <- levelItem{idx, "", t, err}
+				ch <- levelItem{idx, "", t, err} // cleat:allow E002
 				return
 			}
 
 			runID, err := h.ChildWorkflow(t.Name, string(inputJSON))
 			if err != nil {
-				ch <- levelItem{idx, "", t, fmt.Errorf("dag: failed to start child workflow %s: %w", t.Name, err)}
+				ch <- levelItem{idx, "", t, fmt.Errorf("dag: failed to start child workflow %s: %w", t.Name, err)} // cleat:allow E002
 				return
 			}
 			ch <- levelItem{idx, runID, t, nil}
@@ -186,7 +192,7 @@ func (d *DAG) startLevelParallel(h cleat.HostCalls, input interface{}, level []*
 	// Collect all results (channel acts as barrier for all goroutines).
 	results := make([]levelItem, len(level))
 	for i := 0; i < len(level); i++ {
-		results[i] = <-ch
+		results[i] = <-ch // cleat:allow E002
 	}
 
 	// Check for errors.

@@ -43,7 +43,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|init> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
-		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] <package>\n")
+		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
@@ -107,6 +107,7 @@ func main() {
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
 		vetLang := fs.String("lang", "", "language target: go, rust, java, as, python (auto-detected if empty)")
 		vetJSON := fs.Bool("json", false, "output results as JSON")
+		vetCI := fs.Bool("ci", false, "output in GitHub Actions annotation format (takes precedence over --json)")
 		fs.Parse(os.Args[2:])
 		remainder := fs.Args()
 		if len(remainder) > 0 {
@@ -121,16 +122,18 @@ func main() {
 				os.Exit(1)
 			}
 		}
+		// --ci takes precedence over --json when both are set.
+		useJSON := *vetJSON && !*vetCI
 		var code int
 		switch lang {
 		case "go":
-			code = runVet(pattern, *vetJSON)
+			code = runVet(pattern, useJSON, *vetCI)
 		case "rust":
 			code = runVetRust(pattern)
 		case "java":
 			code = runVetJava(pattern)
 		case "python":
-			code = runVetPython(pattern, *vetJSON)
+			code = runVetPython(pattern, useJSON)
 		case "as":
 			code = runVetAS(pattern)
 		default:
@@ -411,10 +414,43 @@ func runBuild(pattern, outDir, target string, jsonOut bool) {
 	keepTempDir = true
 }
 
-func runVet(pattern string, jsonOut bool) int {
+func runVet(pattern string, jsonOut bool, ciOut bool) int {
 	result, _, cr, threadingErrs, usage, tr := analyze(pattern)
 	_ = usage
 	_ = tr
+
+	if ciOut {
+		// GitHub Actions annotation format.
+		exitCode := 0
+		for _, e := range threadingErrs {
+			f := lookupFile(result, e.FuncName)
+			if f == "" {
+				f = "unknown"
+			}
+			fmt.Printf("::error file=%s,line=%d,title=Threading::%s\n", f, e.Line, e.Message)
+			exitCode = 1
+		}
+		for funcName, errs := range cr.Errors {
+			f := lookupFile(result, funcName)
+			if f == "" {
+				f = "unknown"
+			}
+			for _, e := range errs {
+				fmt.Printf("::error file=%s,line=%d,title=%s::%s\n", f, e.Line, e.Code, e.Message)
+				exitCode = 1
+			}
+		}
+		for funcName, warns := range cr.Warnings {
+			f := lookupFile(result, funcName)
+			if f == "" {
+				f = "unknown"
+			}
+			for _, w := range warns {
+				fmt.Printf("::warning file=%s,line=%d,title=%s::%s\n", f, w.Line, w.Code, w.Message)
+			}
+		}
+		return exitCode
+	}
 
 	if jsonOut {
 		vo := vetJSONOutput(result, cr, threadingErrs)

@@ -5,12 +5,16 @@ These tests validate that:
 2. The build script validates @cleat_entry decorators
 3. All stubs are properly wrapped for conditional import
 4. The WIT file covers all required imports
+5. End-to-end Python WASM compilation round-trip
 """
 
 import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
+
+import pytest
 
 
 def _sdk_root():
@@ -292,3 +296,77 @@ def test_langchain_integration_files():
     assert "def get_tuple" in source
     assert "def put" in source
     assert "def put_writes" in source
+
+
+# ==============================================================================
+# End-to-end Python WASM round-trip test
+# ==============================================================================
+
+
+def test_python_wasm_roundtrip(tmp_path):
+    """End-to-end test: compile a Python workflow to WASM and verify the output.
+
+    Creates a minimal Python workflow, compiles it with build_wasm.py, and
+    verifies the resulting .wasm file exists and is non-empty. Optionally
+    validates with wasm-tools if available.
+    """
+    # Check if componentize-py is available
+    try:
+        subprocess.run(
+            ["componentize-py", "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pytest.skip("componentize-py not installed")
+
+    # Create a minimal Python workflow in a temp directory
+    workflow_dir = tmp_path / "workflow"
+    workflow_dir.mkdir()
+    workflow_file = workflow_dir / "workflow.py"
+    workflow_file.write_text(textwrap.dedent("""\
+        from cleat_sdk.entry import cleat_entry
+        from cleat_sdk.host_calls import HostCalls
+
+        @cleat_entry
+        def hello_workflow(h: HostCalls, name: str) -> str:
+            h.cleat_log(f"Hello, {name}!")
+            return f"Hello, {name}!"
+    """))
+
+    # Run the build script
+    build_script = str(_scripts_dir() / "build_wasm.py")
+    output = str(workflow_dir / "hello_workflow.wasm")
+    entry = f"{workflow_file}:hello_workflow"
+
+    result = subprocess.run(
+        [sys.executable, build_script, "--entry", entry, "--output", output],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=str(_sdk_root()),
+    )
+
+    assert result.returncode == 0, (
+        f"Build failed (exit {result.returncode})\n"
+        f"stdout: {result.stdout}\n"
+        f"stderr: {result.stderr}"
+    )
+
+    # Verify WASM file exists and is non-empty
+    wasm_path = Path(output)
+    assert wasm_path.exists(), f"WASM output file not found: {output}"
+    assert wasm_path.stat().st_size > 0, f"WASM output file is empty: {output}"
+
+    # If wasm-tools is available, validate the WASM binary
+    try:
+        val_result = subprocess.run(
+            ["wasm-tools", "validate", output],
+            capture_output=True, text=True, timeout=30,
+        )
+        if val_result.returncode != 0:
+            pytest.fail(
+                f"wasm-tools validation failed:\n"
+                f"stderr: {val_result.stderr}"
+            )
+    except FileNotFoundError:
+        pass  # wasm-tools not available

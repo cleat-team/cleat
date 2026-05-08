@@ -1443,6 +1443,68 @@ func TestRunBuild_PythonTarget_NoPyFile(t *testing.T) {
 }
 
 // ============================================================================
+// Build pipeline — Python WASM round-trip (end-to-end)
+// ============================================================================
+
+func TestRunBuild_PythonTarget_WasmRoundtrip(t *testing.T) {
+	if _, err := exec.LookPath("componentize-py"); err != nil {
+		t.Skip("componentize-py not installed; skipping Python WASM round-trip test")
+	}
+
+	tmpDir := t.TempDir()
+
+	pyFile := filepath.Join(tmpDir, "workflow.py")
+	content := `from cleat_sdk.entry import cleat_entry
+from cleat_sdk.host_calls import HostCalls
+
+@cleat_entry
+def hello_workflow(h: HostCalls, name: str) -> str:
+    h.cleat_log(f"Hello, {name}!")
+    return f"Hello, {name}!"
+`
+	if err := os.WriteFile(pyFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	repoRoot := repoRoot(t)
+	buildScript := filepath.Join(repoRoot, "python-sdk", "scripts", "build_wasm.py")
+	sdkRoot := filepath.Join(repoRoot, "python-sdk")
+
+	wasmOutput := filepath.Join(tmpDir, "hello_workflow.wasm")
+	entry := pyFile + ":hello_workflow"
+
+	cmd := exec.Command("python3", buildScript, "--entry", entry, "--output", wasmOutput)
+	cmd.Dir = sdkRoot
+	cmd.Env = append(os.Environ(), "PYTHONPATH="+sdkRoot)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build_wasm.py failed: %v\nOutput:\n%s", err, string(out))
+	}
+
+	// Verify .wasm file exists and is non-empty.
+	if _, err := os.Stat(wasmOutput); os.IsNotExist(err) {
+		t.Fatal("WASM output file not found")
+	}
+	fi, err := os.Stat(wasmOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() == 0 {
+		t.Fatal("WASM output file is empty")
+	}
+
+	// If wasm-tools is available, validate the WASM binary.
+	if _, err := exec.LookPath("wasm-tools"); err == nil {
+		validateCmd := exec.Command("wasm-tools", "validate", wasmOutput)
+		validateOut, validateErr := validateCmd.CombinedOutput()
+		if validateErr != nil {
+			t.Errorf("wasm-tools validation failed: %v\nOutput:\n%s", validateErr, string(validateOut))
+		}
+	}
+}
+
+// ============================================================================
 // init.go — runInit dispatch without args (error path)
 // ============================================================================
 

@@ -85,6 +85,21 @@ type UpdateRequestInfo struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// WorkflowMemoryStats holds distribution statistics for per-definition memory usage.
+type WorkflowMemoryStats struct {
+	DefName     string  `json:"def_name"`
+	MinBytes    int64   `json:"min_bytes"`
+	AvgBytes    float64 `json:"avg_bytes"`
+	MaxBytes    int64   `json:"max_bytes"`
+	P10         int64   `json:"p10"`
+	P25         int64   `json:"p25"`
+	P50         int64   `json:"p50"`
+	P75         int64   `json:"p75"`
+	P90         int64   `json:"p90"`
+	P99         int64   `json:"p99"`
+	SampleCount int     `json:"sample_count"`
+}
+
 // WorkflowStore is the database interface for the worker.
 type WorkflowStore interface {
 	// ClaimWorkflow atomically dequeues a runnable workflow instance.
@@ -289,6 +304,21 @@ type WorkflowStore interface {
 	// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count for
 	// all workflow definitions that have active instances.
 	GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error)
+
+	// RecordWorkflowMemorySample inserts a new memory sample and updates the EWMA summary.
+	RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error
+
+	// LoadMemoryEstimates returns EWMA mean bytes for all def_names.
+	LoadMemoryEstimates(ctx context.Context) (map[string]float64, error)
+
+	// LoadMemoryStats returns full distribution statistics for all def_names.
+	LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error)
+
+	// QueueDepth returns the count of ready workflows in the store's task queues.
+	QueueDepth(ctx context.Context) (int64, error)
+
+	// CleanupMemorySamples deletes samples beyond maxSamplesPerDef per def_name.
+	CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error)
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
