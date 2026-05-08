@@ -272,3 +272,125 @@ func TestSignalDeliveryTwiceOverwrites(t *testing.T) {
 		t.Errorf("expected deliverCount=2, got %d", store.deliverCount)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Signal delivery to non-existent workflow (no-op at store level)
+// ---------------------------------------------------------------------------
+
+// TestSignalDeliveryToNonExistentWorkflow verifies that delivering a signal to
+// a workflow that does not exist is handled as a no-op by the mock signal
+// store. The signal is stored but no error is returned (the store has no
+// referential integrity check — that is the caller's responsibility).
+func TestSignalDeliveryToNonExistentWorkflow(t *testing.T) {
+	ctx := context.Background()
+	store := newMockSignalWorkflowStore()
+
+	// Deliver a signal to a workflow that has never been registered.
+	// The mock store should accept it without error (no referential check).
+	err := store.DeliverSignal(ctx, "non-existent-workflow-id", "test_signal", `{"data":"hello"}`)
+	if err != nil {
+		t.Fatalf("DeliverSignal to non-existent workflow: %v", err)
+	}
+	if store.deliverCount != 1 {
+		t.Errorf("expected deliverCount=1, got %d", store.deliverCount)
+	}
+
+	// Verify the signal was stored and can be polled.
+	payload, found, err := store.PollAndClaimSignal(ctx, "non-existent-workflow-id", "test_signal")
+	if err != nil {
+		t.Fatalf("PollAndClaimSignal after delivery: %v", err)
+	}
+	if !found {
+		t.Fatal("expected signal to be found even for non-existent workflow")
+	}
+	if payload != `{"data":"hello"}` {
+		t.Errorf("expected payload %q, got %q", `{"data":"hello"}`, payload)
+	}
+
+	// Delivering another signal to the same non-existent workflow should also
+	// succeed (the store is purely a signal queue with no workflow validation).
+	err = store.DeliverSignal(ctx, "non-existent-workflow-id", "another_signal", `{"count":2}`)
+	if err != nil {
+		t.Fatalf("second DeliverSignal to non-existent workflow: %v", err)
+	}
+	if store.deliverCount != 2 {
+		t.Errorf("expected deliverCount=2, got %d", store.deliverCount)
+	}
+
+	// Both signals should be independently pollable.
+	payload, found, err = store.PollAndClaimSignal(ctx, "non-existent-workflow-id", "another_signal")
+	if err != nil {
+		t.Fatalf("PollAndClaimSignal second signal: %v", err)
+	}
+	if !found {
+		t.Fatal("expected second signal to be found")
+	}
+	if payload != `{"count":2}` {
+		t.Errorf("expected payload %q, got %q", `{"count":2}`, payload)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PollSignal for never-delivered signal
+// ---------------------------------------------------------------------------
+
+// TestPollSignalForNeverDeliveredSignal verifies that PollSignal returns
+// not-found (found=false) when polling for a signal that was never delivered
+// to the workflow, without returning an error.
+func TestPollSignalForNeverDeliveredSignal(t *testing.T) {
+	ctx := context.Background()
+	store := newMockSignalWorkflowStore()
+
+	// Poll for a signal that was never delivered — should return not found.
+	payload, found, err := store.PollSignal(ctx, "wf-never", "never_delivered")
+	if err != nil {
+		t.Fatalf("PollSignal: %v", err)
+	}
+	if found {
+		t.Fatal("expected found=false for never-delivered signal")
+	}
+	if payload != "" {
+		t.Errorf("expected empty payload, got %q", payload)
+	}
+	if store.pollCount != 1 {
+		t.Errorf("expected pollCount=1, got %d", store.pollCount)
+	}
+
+	// Verify PollAndClaimSignal also returns not found.
+	_, found, err = store.PollAndClaimSignal(ctx, "wf-never", "never_delivered")
+	if err != nil {
+		t.Fatalf("PollAndClaimSignal: %v", err)
+	}
+	if found {
+		t.Fatal("expected PollAndClaimSignal to return not-found for never-delivered signal")
+	}
+	if store.claimCount != 1 {
+		t.Errorf("expected claimCount=1, got %d", store.claimCount)
+	}
+
+	// Verify that after delivering a signal, PollSignal returns it.
+	err = store.DeliverSignal(ctx, "wf-never", "now_delivered", `{"status":"ok"}`)
+	if err != nil {
+		t.Fatalf("DeliverSignal: %v", err)
+	}
+
+	payload, found, err = store.PollSignal(ctx, "wf-never", "now_delivered")
+	if err != nil {
+		t.Fatalf("PollSignal after delivery: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found=true after delivery")
+	}
+	if payload != `{"status":"ok"}` {
+		t.Errorf("expected payload %q, got %q", `{"status":"ok"}`, payload)
+	}
+
+	// Polling for a completely different signal name should still return not found.
+	_, found, err = store.PollSignal(ctx, "wf-never", "other_signal")
+	if err != nil {
+		t.Fatalf("PollSignal other signal: %v", err)
+	}
+	if found {
+		t.Fatal("expected found=false for other never-delivered signal")
+	}
+}

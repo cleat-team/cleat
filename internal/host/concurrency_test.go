@@ -1158,3 +1158,162 @@ func TestReapExpiredConcurrencyKeysNoExpiredKeys(t *testing.T) {
 		t.Error("key-2 should still be held by wf-2")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Acquire concurrency key with expired key
+// ---------------------------------------------------------------------------
+
+// TestAcquireConcurrencyKeyWithExpiredKey verifies that an expired concurrency
+// key can be acquired by a new workflow through the execSession-level
+// freshAcquireLock, which delegates to the store's AcquireConcurrencyKey
+// (which cleans up expired keys during acquisition).
+func TestAcquireConcurrencyKeyWithExpiredKey(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	cks := newMockConcurrencyKeyStore()
+
+	// Workflow 1 acquires the key with a very short TTL.
+	session1 := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:    make([]EventRecord, 0),
+		workflowID: "wf-expirer",
+	}
+	result1 := session1.freshAcquireLock(ctx, mod, "expiring-key", 1 /* 1ms TTL */)
+	acquired1 := ((result1 >> 8) & 0xFF) != 0
+	if !acquired1 {
+		t.Fatal("wf-expirer should acquire the key initially")
+	}
+
+	// Wait for TTL to expire.
+	time.Sleep(5 * time.Millisecond)
+
+	// Now a new workflow should be able to acquire the key (expired keys are
+	// cleaned up during AcquireConcurrencyKey).
+	session2 := &execSession{
+		engine: &Engine{
+			caller:             &mockCaller{},
+			concurrencyKeyStore: cks,
+		},
+		history:    make([]EventRecord, 0),
+		workflowID: "wf-taker",
+	}
+	result2 := session2.freshAcquireLock(ctx, mod, "expiring-key", 30000)
+	acquired2 := ((result2 >> 8) & 0xFF) != 0
+	errCode2 := byte(result2 & 0xFF)
+	if errCode2 != 0 {
+		t.Fatalf("unexpected errCode=%d", errCode2)
+	}
+	if !acquired2 {
+		t.Error("wf-taker should acquire the expired key after TTL expiry")
+	}
+
+	// Verify both events are recorded in history.
+	if len(session1.history) < 1 || session1.history[0].LockAcquired != 1 {
+		t.Error("session1 history should show lock acquired")
+	}
+	if len(session2.history) < 1 || session2.history[0].LockAcquired != 1 {
+		t.Error("session2 history should show lock acquired (expired key was re-acquired)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Race between acquire and reap
+// ---------------------------------------------------------------------------
+
+// TestRaceBetweenAcquireAndReap verifies that concurrent calls to
+// AcquireConcurrencyKey and ReapExpiredConcurrencyKeys do not deadlock or
+// produce inconsistent state. The mock store is safe for concurrent access
+// via a mutex, so these operations should complete without error.
+func TestRaceBetweenAcquireAndReap(t *testing.T) {
+	ctx := context.Background()
+
+	cks := newMockConcurrencyKeyStore()
+
+	// Pre-populate the store with an already-expired key.
+	cks.mu.Lock()
+	cks.keys["stale-key"] = concurrencyKeyEntry{
+		workflowID: "wf-stale",
+		expiresAt:  time.Now().Add(-1 * time.Second),
+	}
+	cks.mu.Unlock()
+
+	// Acquire a key that won't expire during the test.
+	_, err := cks.AcquireConcurrencyKey(ctx, "live-key", "wf-live", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire live-key: %v", err)
+	}
+
+	// Run 10 concurrent goroutines that alternate between acquire and reap.
+	var wg sync.WaitGroup
+	errs := make(chan error, 20)
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Acquire a unique key.
+			key := fmt.Sprintf("race-key-%d", i)
+			_, err := cks.AcquireConcurrencyKey(ctx, key, fmt.Sprintf("wf-race-%d", i), 30*time.Second)
+			if err != nil {
+				errs <- fmt.Errorf("goroutine %d acquire: %w", i, err)
+			}
+		}(i)
+	}
+
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := cks.ReapExpiredConcurrencyKeys(ctx)
+			if err != nil {
+				errs <- fmt.Errorf("reap: %w", err)
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent error: %v", err)
+	}
+
+	// Verify the live key is still held by wf-live.
+	acquired, err := cks.AcquireConcurrencyKey(ctx, "live-key", "wf-other", 30*time.Second)
+	if err != nil {
+		t.Fatalf("acquire live-key after race: %v", err)
+	}
+	if acquired {
+		t.Error("live-key should still be held by wf-live after concurrent operations")
+	}
+
+	// Verify the stale key was reaped and is now available.
+	acquired, err = cks.AcquireConcurrencyKey(ctx, "stale-key", "wf-new", 30*time.Second)
+	if err != nil {
+		t.Fatalf("acquire stale-key after race: %v", err)
+	}
+	if !acquired {
+		t.Error("stale-key should be available after concurrent reap")
+	}
+
+	// Verify all 10 race keys were acquired.
+	for i := 0; i < 10; i++ {
+		key := fmt.Sprintf("race-key-%d", i)
+		acquired, err := cks.AcquireConcurrencyKey(ctx, key, fmt.Sprintf("wf-other-%d", i), 30*time.Second)
+		if err != nil {
+			t.Fatalf("verify race-key-%d: %v", i, err)
+		}
+		if acquired {
+			t.Errorf("race-key-%d should still be held by original acquirer", i)
+		}
+	}
+}

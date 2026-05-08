@@ -1983,3 +1983,589 @@ func TestGetSourceNoAuth(t *testing.T) {
 		t.Fatalf("expected 401 without auth, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// ===========================================================================
+// Init with nil logger
+// ===========================================================================
+
+func TestWH_Init_NilLogger(t *testing.T) {
+	p := &Plugin{}
+	ctx := context.Background()
+	env := &plugin.Environment{
+		DB:  sql.OpenDB(&fakeConnector{store: newFakeDBStore()}),
+		Mux: http.NewServeMux(),
+	}
+	err := p.Init(ctx, env)
+	if err != nil {
+		t.Fatalf("Init with nil logger: %v", err)
+	}
+	if p.logger == nil {
+		t.Error("expected logger to be set even when nil is provided")
+	}
+}
+
+// ===========================================================================
+// CreateSource no auth
+// ===========================================================================
+
+func TestWH_CreateSource_NoTenant(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := httptest.NewRequest("POST", "/ingest/sources", bytes.NewReader([]byte(`{"name":"test"}`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// CreateSource DB exec error
+// ===========================================================================
+
+func TestWH_CreateSource_ExecError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	store.mu.Lock()
+	store.failNextExec = true
+	store.mu.Unlock()
+
+	body := `{"name":"test-source","source_type":"github"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from exec error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// GetSource invalid ID
+// ===========================================================================
+
+func TestWH_GetSource_InvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := authedRequest("GET", "/ingest/sources/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid UUID, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// GetSource DB query error
+// ===========================================================================
+
+func TestWH_GetSource_QueryError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Create a source first so we have a valid ID.
+	createBody := `{"name":"test-source","source_type":"github"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	sourceID := created["id"].(string)
+
+	// Set fail flag with skip=1 for auth middleware query.
+	store.mu.Lock()
+	store.failNextQuery = true
+	store.querySkip = 1
+	store.mu.Unlock()
+
+	req = authedRequest("GET", "/ingest/sources/"+sourceID, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from query error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// DeleteSource no auth
+// ===========================================================================
+
+func TestWH_DeleteSource_NoTenant(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := httptest.NewRequest("DELETE", "/ingest/sources/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// DeleteSource invalid ID
+// ===========================================================================
+
+func TestWH_DeleteSource_InvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := authedRequest("DELETE", "/ingest/sources/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid UUID, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// DeleteSource not found
+// ===========================================================================
+
+func TestWH_DeleteSource_NotFound(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	// Delete a non-existent source (valid UUID but doesn't exist).
+	req := authedRequest("DELETE", "/ingest/sources/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// DeleteSource DB exec error
+// ===========================================================================
+
+func TestWH_DeleteSource_ExecError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Create a source first.
+	createBody := `{"name":"test-source"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	sourceID := created["id"].(string)
+
+	// Set exec fail flag.
+	store.mu.Lock()
+	store.failNextExec = true
+	store.mu.Unlock()
+
+	req = authedRequest("DELETE", "/ingest/sources/"+sourceID, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from exec error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// ListSources DB query error
+// ===========================================================================
+
+func TestWH_ListSources_QueryError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	store.mu.Lock()
+	store.failNextQuery = true
+	store.querySkip = 1
+	store.mu.Unlock()
+
+	req := authedRequest("GET", "/ingest/sources", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from query error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// ListSources tenant isolation
+// ===========================================================================
+
+func TestWH_ListSources_TenantIsolation(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash1 := sha256.Sum256([]byte("key-tenant-1"))
+	keyHash2 := sha256.Sum256([]byte("key-tenant-2"))
+	tenant1Str := "00000000-0000-0000-0000-000000000001"
+	tenant2Str := "00000000-0000-0000-0000-000000000002"
+	store.apiKeys[fmt.Sprintf("%x", keyHash1)] = tenant1Str
+	store.apiKeys[fmt.Sprintf("%x", keyHash2)] = tenant2Str
+
+	// Add a source for each tenant.
+	store.sources = append(store.sources, webhookSourceRow{
+		id:       uuid.New().String(),
+		tenantID: tenant1Str,
+		name:     "tenant-1-source",
+	})
+	store.sources = append(store.sources, webhookSourceRow{
+		id:       uuid.New().String(),
+		tenantID: tenant2Str,
+		name:     "tenant-2-source",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.Middleware(db)(mux)
+
+	// Tenant 1 lists sources.
+	req := httptest.NewRequest("GET", "/ingest/sources", nil)
+	req.Header.Set("Authorization", "Bearer key-tenant-1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant 1 list: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var sources []webhookSourceJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 source for tenant 1, got %d", len(sources))
+	}
+	if sources[0].Name != "tenant-1-source" {
+		t.Errorf("expected 'tenant-1-source', got %s", sources[0].Name)
+	}
+
+	// Tenant 2 lists sources.
+	req = httptest.NewRequest("GET", "/ingest/sources", nil)
+	req.Header.Set("Authorization", "Bearer key-tenant-2")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant 2 list: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 source for tenant 2, got %d", len(sources))
+	}
+	if sources[0].Name != "tenant-2-source" {
+		t.Errorf("expected 'tenant-2-source', got %s", sources[0].Name)
+	}
+}
+
+// ===========================================================================
+// ListEvents no auth
+// ===========================================================================
+
+func TestWH_ListEvents_NoTenant(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	req := httptest.NewRequest("GET", "/ingest/events", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// ListEvents DB query error
+// ===========================================================================
+
+func TestWH_ListEvents_QueryError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	store.mu.Lock()
+	store.failNextQuery = true
+	store.querySkip = 1
+	store.mu.Unlock()
+
+	req := authedRequest("GET", "/ingest/events", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from query error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Ingest source lookup DB error
+// ===========================================================================
+
+func TestWH_Ingest_SourceLookupError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Create a source so we have a valid source ID to use.
+	createBody := `{"name":"test-source"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	sourceID := created["id"].(string)
+
+	// Set flag to fail the next query (ingest endpoint has no auth middleware query).
+	store.mu.Lock()
+	store.failNextQuery = true
+	store.mu.Unlock()
+
+	// Ingest request should fail during source lookup.
+	payload := `{"action":"opened"}`
+	req = httptest.NewRequest("POST", "/ingest/"+sourceID, bytes.NewReader([]byte(payload)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from source lookup error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Ingest event insert DB error
+// ===========================================================================
+
+func TestWH_Ingest_EventInsertError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Create a source so we have a valid source ID to use.
+	createBody := `{"name":"test-source"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	sourceID := created["id"].(string)
+
+	// Set flag to fail the next exec (event insert after source lookup).
+	store.mu.Lock()
+	store.failNextExec = true
+	store.mu.Unlock()
+
+	// Ingest request should fail during event insert.
+	payload := `{"action":"opened"}`
+	req = httptest.NewRequest("POST", "/ingest/"+sourceID, bytes.NewReader([]byte(payload)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from event insert error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Run with valid DB (immediate cancel)
+// ===========================================================================
+
+func TestWH_Run_WithDB(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately.
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Errorf("Run() with valid DB returned error: %v", err)
+	}
+}
+
+// ===========================================================================
+// processBatch query error
+// ===========================================================================
+
+func TestWH_ProcessBatch_QueryError(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Set fail flag so the query in processBatch fails.
+	store.mu.Lock()
+	store.failNextQuery = true
+	store.mu.Unlock()
+
+	// Should not panic, just log the error.
+	p.processBatch(context.Background())
+}
+
+// ===========================================================================
+// processBatch scan error (row with mismatched types)
+// ===========================================================================
+
+func TestWH_ProcessBatch_ScanError(t *testing.T) {
+	store := newFakeDBStore()
+
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:               sourceID.String(),
+		tenantID:         testTenantStr,
+		name:             "test",
+		sourceType:       "generic",
+		enabled:          true,
+		signalWorkflowID: "wf-123",
+		signalName:       "webhook_received",
+	})
+
+	// Add an unprocessed event that will be picked up by processBatch.
+	eventID := uuid.New()
+	store.events = append(store.events, webhookEventRow{
+		id:         eventID.String(),
+		sourceID:   sourceID.String(),
+		tenantID:   testTenantStr,
+		eventType:  "webhook",
+		payload:    `{"test":true}`,
+		receivedAt: time.Now().Add(-30 * time.Second),
+		processed:  false,
+		status:     "pending",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Should not panic, should process the event via processBatch.
+	p.processBatch(context.Background())
+
+	// Verify the event was processed.
+	store.mu.RLock()
+	evt := store.events[0]
+	store.mu.RUnlock()
+	if !evt.processed {
+		t.Error("expected event to be marked processed after processBatch scan")
+	}
+}
+
+// ===========================================================================
+// AwaitWebhook no tenant context
+// ===========================================================================
+
+func TestWH_AwaitWebhook_NoTenant(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Call awaitWebhook with a context that has no CallContext.
+	_, err := p.awaitWebhook(context.Background(), `{"source_id":"`+uuid.New().String()+`"}`)
+	if err == nil {
+		t.Fatal("expected error for missing tenant context, got nil")
+	}
+	if !strings.Contains(err.Error(), "no tenant context") {
+		t.Errorf("expected 'no tenant context' error, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// AwaitWebhook invalid source ID
+// ===========================================================================
+
+func TestWH_AwaitWebhook_InvalidSourceID(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	ctx := plugin.WithCallContext(context.Background(), callCtx)
+
+	// Call with invalid source_id.
+	_, err := p.awaitWebhook(ctx, `{"source_id":"not-a-uuid"}`)
+	if err == nil {
+		t.Fatal("expected error for invalid source_id, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid source_id") {
+		t.Errorf("expected 'invalid source_id' error, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// AwaitWebhook invalid input JSON
+// ===========================================================================
+
+func TestWH_AwaitWebhook_InvalidJSON(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	ctx := plugin.WithCallContext(context.Background(), callCtx)
+
+	// Call with invalid JSON input.
+	_, err := p.awaitWebhook(ctx, `not valid json`)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid input") {
+		t.Errorf("expected 'invalid input' error, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// RegisterHostFunctions register error
+// ===========================================================================
+
+type errFuncRegistry struct{}
+
+func (r *errFuncRegistry) Register(_ plugin.FuncOptions, _ plugin.PluginFunc) error {
+	return fmt.Errorf("simulated register error")
+}
+
+func TestWH_RegisterHostFunctions_RegisterError(t *testing.T) {
+	p, _, _ := setupTestPlugin(t)
+	err := p.RegisterHostFunctions(&errFuncRegistry{})
+	if err == nil {
+		t.Fatal("expected error from Register, got nil")
+	}
+	if !strings.Contains(err.Error(), "simulated register error") {
+		t.Errorf("expected 'simulated register error', got: %v", err)
+	}
+}

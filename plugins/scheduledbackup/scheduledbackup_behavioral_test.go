@@ -2661,3 +2661,114 @@ func TestSB_RunDueBackups_QueryError(t *testing.T) {
 	p.runDueBackups(context.Background())
 	// No panic = success.
 }
+
+// =========================================================================
+// executeScheduledBackup INSERT error path
+// =========================================================================
+
+func TestSB_ExecuteScheduledBackup_InsertError(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+	p.config.DSN = "postgres://test"
+	p.config.DumpDir = t.TempDir()
+
+	tidStr := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
+	cfgID := "00000000-0000-0000-0000-000000000555"
+	configUUID := uuid.MustParse(cfgID)
+	tenantUUID := uuid.MustParse(tidStr)
+	now := time.Now()
+
+	fdb.mu.Lock()
+	fdb.configs[cfgID] = &sbConfigRow{
+		id: cfgID, tenantID: tidStr, name: "insert-err", cron: "0 9 * * *",
+		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
+		createdAt: now, updatedAt: now,
+	}
+	fdb.forceExecErr = 1
+	fdb.mu.Unlock()
+
+	p.executeScheduledBackup(context.Background(), configUUID, tenantUUID, "insert-err", "0 9 * * *")
+
+	fdb.mu.RLock()
+	histCount := len(fdb.history)
+	cfg := fdb.configs[cfgID]
+	fdb.mu.RUnlock()
+	if histCount != 0 {
+		t.Error("expected 0 history entries after INSERT error")
+	}
+	if cfg == nil {
+		t.Fatal("config should still exist")
+	}
+	if cfg.lastRunAt != nil {
+		t.Error("last_run_at should NOT be set when INSERT fails")
+	}
+}
+
+// =========================================================================
+// Cron parseField edge cases
+// =========================================================================
+
+func TestParseCron_StepRange(t *testing.T) {
+	cronStr := "*/15 * * * *"
+	nxt := nextRun(cronStr, time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC))
+	if nxt.IsZero() {
+		t.Fatal("*/15 should produce a valid next run")
+	}
+	if nxt.Minute() != 15 {
+		t.Errorf("expected next run at minute 15, got minute %d", nxt.Minute())
+	}
+}
+
+func TestParseCron_ComplexStep(t *testing.T) {
+	cronStr := "0 9 1-15 * 1-5"
+	nxt := nextRun(cronStr, time.Date(2025, 6, 10, 10, 0, 0, 0, time.UTC))
+	if nxt.IsZero() {
+		t.Fatal("complex step cron should produce a valid next run")
+	}
+	if nxt.Hour() != 9 || nxt.Day() != 11 {
+		t.Errorf("expected next run at 09:00 on day 11, got %v", nxt)
+	}
+}
+
+func TestParseCron_ListField(t *testing.T) {
+	cronStr := "0 9,15 * * *"
+	nxt := nextRun(cronStr, time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC))
+	if nxt.IsZero() {
+		t.Fatal("list field cron should produce a valid next run")
+	}
+	if nxt.Hour() != 15 {
+		t.Errorf("expected next run at hour 15, got hour %d", nxt.Hour())
+	}
+}
+
+func TestParseCron_StepWithRange(t *testing.T) {
+	cronStr := "0 9 1-15/2 * *"
+	nxt := nextRun(cronStr, time.Date(2025, 6, 10, 10, 0, 0, 0, time.UTC))
+	if nxt.IsZero() {
+		t.Fatal("step-with-range cron should produce a valid next run")
+	}
+	if nxt.Day() != 11 {
+		t.Errorf("expected day 11 (next odd day after 10), got day %d", nxt.Day())
+	}
+}
+
+func TestParseCron_AllWeekdays(t *testing.T) {
+	cronStr := "0 9 * * 1-5"
+	nxt := nextRun(cronStr, time.Date(2025, 6, 14, 10, 0, 0, 0, time.UTC)) // Saturday
+	if nxt.IsZero() {
+		t.Fatal("weekday cron should produce a valid next run")
+	}
+	if nxt.Weekday() != time.Monday {
+		t.Errorf("expected next run on Monday, got %v", nxt.Weekday())
+	}
+	if nxt.Day() != 16 {
+		t.Errorf("expected next run on day 16 (Monday), got day %d", nxt.Day())
+	}
+}
+
+func TestParseCron_EmptyField(t *testing.T) {
+	nxt := nextRun("", time.Now())
+	if !nxt.IsZero() {
+		t.Error("empty cron string should return zero time")
+	}
+}

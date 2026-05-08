@@ -1150,3 +1150,218 @@ func TestAwaitSignalsReplayJustSignalReceived(t *testing.T) {
 		t.Errorf("expected stepCount=1, got %d", replaySession.stepCount)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ChildWorkflow dedup across replays
+// ---------------------------------------------------------------------------
+
+// TestChildWorkflowDedupAcrossReplays verifies that a child_workflow_started
+// event recorded in history during fresh execution is faithfully replayed,
+// returning the same runID instead of generating a new one.
+func TestChildWorkflowDedupAcrossReplays(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Fresh execution: start a child workflow.
+	freshSession := &execSession{
+		engine:     &Engine{caller: &mockCaller{}},
+		history:    make([]EventRecord, 0),
+		workflowID: "wf-parent",
+	}
+
+	result := freshSession.ChildWorkflow(ctx, mod, "child-wf", `{"x":1}`, 0, 64)
+	written := uint32(result >> 32)
+	if written == 0 {
+		t.Fatal("expected child workflow runID written to memory")
+	}
+	mem := mod.Memory()
+	runID1, ok := mem.Read(0, written)
+	if !ok || string(runID1) == "" {
+		t.Fatal("expected non-empty runID")
+	}
+	originalRunID := string(runID1)
+
+	if len(freshSession.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(freshSession.history))
+	}
+	if freshSession.history[0].EventType != EventTypeChildWorkflow {
+		t.Errorf("expected ChildWorkflow event, got %s", freshSession.history[0].EventType)
+	}
+	if freshSession.history[0].RunID != originalRunID {
+		t.Errorf("expected RunID=%q, got %q", originalRunID, freshSession.history[0].RunID)
+	}
+
+	// Replay session with recorded history.
+	mod2 := newTestModule(t, rt)
+	replaySession := &execSession{
+		engine:     &Engine{caller: &mockCaller{}},
+		history:    freshSession.history,
+		isReplay:   true,
+		workflowID: "wf-parent",
+	}
+
+	// On replay, ChildWorkflow should consume the event from history and
+	// return the same runID without creating a new child.
+	result2 := replaySession.ChildWorkflow(ctx, mod2, "child-wf", `{"x":1}`, 0, 64)
+	written2 := uint32(result2 >> 32)
+	if written2 == 0 {
+		t.Fatal("expected child workflow runID written to memory on replay")
+	}
+	mem2 := mod2.Memory()
+	runID2, ok := mem2.Read(0, written2)
+	if !ok || string(runID2) == "" {
+		t.Fatal("expected non-empty runID on replay")
+	}
+
+	if string(runID2) != originalRunID {
+		t.Errorf("expected same runID %q on replay, got %q", originalRunID, string(runID2))
+	}
+	if replaySession.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after replay, got %d", replaySession.stepCount)
+	}
+	if !replaySession.isReplay {
+		t.Error("expected isReplay to remain true after consuming child from history")
+	}
+
+	// Calling ChildWorkflow again exhausts history and falls through to fresh
+	// execution, generating a different runID.
+	result3 := replaySession.ChildWorkflow(ctx, mod2, "child-wf", `{"x":2}`, 0, 64)
+	written3 := uint32(result3 >> 32)
+	mem3 := mod2.Memory()
+	runID3, ok := mem3.Read(0, written3)
+	if ok && string(runID3) == originalRunID {
+		t.Error("expected different runID for fresh child after history exhausted")
+	}
+	if replaySession.stepCount != 2 {
+		t.Errorf("expected stepCount=2 after 2 children (1 replayed + 1 fresh), got %d", replaySession.stepCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitChild replay from recorded history
+// ---------------------------------------------------------------------------
+
+// TestAwaitChildReplay verifies that an await_child event with a completed
+// result in the recorded history is correctly replayed, returning the cached
+// response without re-checking the child workflow store.
+func TestAwaitChildReplay(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Record a fresh execution that starts a child and awaits its result.
+	freshSession := &execSession{
+		engine:     &Engine{caller: &mockCaller{}},
+		history:    make([]EventRecord, 0),
+		workflowID: "wf-parent",
+	}
+	_ = freshSession.ChildWorkflow(ctx, mod, "child-wf", `{"x":1}`, 0, 64)
+	// Record an await_child with a completed result (simulating the child
+	// completing in the original execution).
+	freshSession.history = append(freshSession.history, EventRecord{
+		Step:      1,
+		EventType: EventTypeAwaitChild,
+		RunID:     freshSession.history[0].RunID,
+		Response:  `{"result":"child-done"}`,
+	})
+	freshSession.stepCount = 2
+
+	// Replay session with recorded history.
+	mod2 := newTestModule(t, rt)
+	replaySession := &execSession{
+		engine:     &Engine{caller: &mockCaller{}},
+		history:    freshSession.history,
+		isReplay:   true,
+		workflowID: "wf-parent",
+	}
+
+	// Replay the child workflow start — should consume from history.
+	_ = replaySession.ChildWorkflow(ctx, mod2, "child-wf", `{"x":1}`, 0, 64)
+
+	// Replay the await_child — should return the cached result.
+	result := replaySession.AwaitChild(ctx, mod2, freshSession.history[0].RunID, 0, 4096)
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected success (errCode=0), got errCode=%d", errCode)
+	}
+	responseLen := uint32((result >> 32) & 0xFFFFFFFF)
+	if responseLen == 0 {
+		t.Error("expected response written to memory")
+	}
+	if replaySession.stepCount != 2 {
+		t.Errorf("expected stepCount=2 after replaying child + await_child, got %d", replaySession.stepCount)
+	}
+	if !replaySession.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+
+	// Verify the cached response was written into WASM memory.
+	mem := mod2.Memory()
+	data, ok := mem.Read(0, responseLen)
+	if !ok || string(data) != `{"result":"child-done"}` {
+		t.Errorf("expected cached response %q, got %q", `{"result":"child-done"}`, string(data))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SendSignalAndWait replay from recorded history
+// ---------------------------------------------------------------------------
+
+// TestSendSignalAndWaitReplay verifies that a send_signal_and_wait event
+// recorded in history is correctly replayed, returning the cached response
+// without re-sending the signal.
+func TestSendSignalAndWaitReplay(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Build a synthetic history: send_signal_and_wait followed by a signal
+	// received response.
+	history := []EventRecord{
+		{Step: 0, EventType: EventTypeSignalReceived, SignalName: "response", SignalPayload: `{"done":true}`, RunID: "target-wf"},
+	}
+
+	replaySession := &execSession{
+		engine:   &Engine{caller: &mockCaller{}},
+		history:  history,
+		isReplay: true,
+	}
+
+	// SendSignalAndWait should consume the signal_received event from history
+	// and return the cached response payload.
+	result := replaySession.SendSignalAndWait(ctx, mod, "target-wf", "response", `{}`, 10000, 0, 4096)
+	extra := uint32((result >> 32) & 0xFFFFFFFF)
+	errCode := byte(result & 0xFF)
+	if errCode != 0 {
+		t.Fatalf("expected success, got errCode=%d", errCode)
+	}
+	if extra == 0 {
+		t.Error("expected signal payload written to memory")
+	}
+	if replaySession.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after replay, got %d", replaySession.stepCount)
+	}
+	if !replaySession.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+
+	// Verify the cached payload was written into WASM memory.
+	mem := mod.Memory()
+	data, ok := mem.Read(0, extra)
+	if !ok || string(data) != `{"done":true}` {
+		t.Errorf("expected cached payload %q, got %q", `{"done":true}`, string(data))
+	}
+}

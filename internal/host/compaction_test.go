@@ -998,6 +998,129 @@ func TestCompactWorkflowHistory_OpenChildrenInState(t *testing.T) {
 
 // TestCompactWorkflowHistory_DefersInState verifies that defers are captured
 // in the compaction state by CompactWorkflowHistory.
+// TestCompactWorkflowHistoryWithSideEffects verifies that side_effect events
+// survive compaction through CompactWorkflowHistory and are correctly
+// reconstructed by buildFullHistoryFromCompaction.
+func TestCompactWorkflowHistoryWithSideEffects(t *testing.T) {
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "start", Request: `{}`, Response: `{"ok":true}`},
+		{Step: 1, EventType: EventTypeSideEffect, SideEffectResult: `{"random":42,"nonce":"abc"}`},
+		{Step: 2, EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup"},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-side", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("unmarshal compaction state: %v", err)
+	}
+
+	// Verify the side_effect event is present in compacted events.
+	foundSideEffect := false
+	for _, e := range cs.Events {
+		if e.Type == EventCodeSideEffect {
+			foundSideEffect = true
+			break
+		}
+	}
+	if !foundSideEffect {
+		t.Error("expected SideEffect event in compacted state")
+	}
+
+	// Verify full round-trip: reconstruct and compare with original.
+	tail := events[store.keepStep:]
+	reconstructed := buildFullHistoryFromCompaction(tail, &cs)
+	if len(reconstructed) != len(events) {
+		t.Fatalf("expected %d events, got %d", len(events), len(reconstructed))
+	}
+	for i := range events {
+		if !eventFieldsMatch(events[i], reconstructed[i]) {
+			t.Errorf("event %d (%s) mismatch after round-trip", i, events[i].EventType)
+			dumpEventDiff(t, events[i], reconstructed[i])
+		}
+	}
+}
+
+// TestCompactWorkflowHistoryWithDefers verifies that defer events survive
+// compaction through CompactWorkflowHistory and that the full round-trip
+// (extract → compact → reconstruct) preserves all defer fields.
+func TestCompactWorkflowHistoryWithDefers(t *testing.T) {
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup resources"},
+		{Step: 1, EventType: EventTypeDefer, DeferID: "d2", DeferDescription: "close db connection"},
+		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "work", Request: `{}`, Response: `{"ok":true}`},
+		{Step: 3, EventType: EventTypeDefer, DeferID: "d3", DeferDescription: "notify completion"},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-defers-roundtrip", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("unmarshal compaction state: %v", err)
+	}
+
+	// keepStep = 4 - 1 = 3, so steps 0,1,2 are compacted, step 3 is tail.
+	if store.keepStep != 3 {
+		t.Fatalf("expected keepStep=3, got %d", store.keepStep)
+	}
+	if len(cs.Events) != 3 {
+		t.Errorf("expected 3 compacted events, got %d", len(cs.Events))
+	}
+
+	// Verify that both defers (d1, d2) are in the PendingDefers list.
+	deferIDs := make(map[string]bool)
+	for _, d := range cs.PendingDefers {
+		deferIDs[d.ID] = true
+	}
+	if !deferIDs["d1"] {
+		t.Error("defer d1 not found in PendingDefers")
+	}
+	if !deferIDs["d2"] {
+		t.Error("defer d2 not found in PendingDefers")
+	}
+	if len(cs.PendingDefers) != 2 {
+		t.Errorf("expected 2 pending defers, got %d", len(cs.PendingDefers))
+	}
+
+	// Verify the defer events are present as CompactedEvents.
+	deferEventCount := 0
+	for _, e := range cs.Events {
+		if e.Type == EventCodeDefer {
+			deferEventCount++
+		}
+	}
+	if deferEventCount != 2 {
+		t.Errorf("expected 2 defer CompactedEvents, got %d", deferEventCount)
+	}
+
+	// Verify full round-trip produces all original events.
+	tail := events[store.keepStep:]
+	reconstructed := buildFullHistoryFromCompaction(tail, &cs)
+	if len(reconstructed) != len(events) {
+		t.Fatalf("expected %d events, got %d", len(events), len(reconstructed))
+	}
+	for i := range events {
+		if !eventFieldsMatch(events[i], reconstructed[i]) {
+			t.Errorf("event %d (%s) mismatch after round-trip", i, events[i].EventType)
+			dumpEventDiff(t, events[i], reconstructed[i])
+		}
+	}
+}
+
 func TestCompactWorkflowHistory_DefersInState(t *testing.T) {
 	threshold := 2
 	events := []EventRecord{

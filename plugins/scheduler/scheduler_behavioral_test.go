@@ -41,10 +41,12 @@ type fakeScheduleRow struct {
 }
 
 type fakeDBStore struct {
-	mu        sync.RWMutex
-	apiKeys   map[string]string               // key_hash -> tenant_id
-	schedules map[string]*fakeScheduleRow     // "tenant:id" -> row
-	now       func() time.Time
+	mu            sync.RWMutex
+	apiKeys       map[string]string           // key_hash -> tenant_id
+	schedules     map[string]*fakeScheduleRow // "tenant:id" -> row
+	now           func() time.Time
+	forceQueryErr int // decrementing counter; fail QueryContext when > 0
+	forceExecErr  int // decrementing counter; fail ExecContext when > 0
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -147,6 +149,14 @@ func aAny(args []driver.NamedValue, ordinal int) (driver.Value, error) {
 
 func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
 	c.store.mu.Lock()
+	forceErr := c.store.forceExecErr > 0
+	if forceErr {
+		c.store.forceExecErr--
+	}
+	if forceErr {
+		c.store.mu.Unlock()
+		return nil, fmt.Errorf("fakeConn: forced exec error")
+	}
 	defer c.store.mu.Unlock()
 
 	switch {
@@ -311,6 +321,17 @@ func (c *fakeConn) execDeleteSchedule(args []driver.NamedValue) (driver.Result, 
 // ---------------------------------------------------------------------------
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.store.mu.Lock()
+	forceErr := c.store.forceQueryErr > 0
+	if forceErr {
+		c.store.forceQueryErr--
+	}
+	if forceErr {
+		c.store.mu.Unlock()
+		return nil, fmt.Errorf("fakeConn: forced query error")
+	}
+	c.store.mu.Unlock()
+
 	c.store.mu.RLock()
 	defer c.store.mu.RUnlock()
 
@@ -1628,5 +1649,256 @@ func TestRunWithDBAndCancelledContext(t *testing.T) {
 	err := p.Run(ctx)
 	if err != nil {
 		t.Fatalf("Run() returned error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: RegisterCommands (0% coverage)
+// ---------------------------------------------------------------------------
+
+func TestRegisterCommands(t *testing.T) {
+	p := &Plugin{}
+	cmds := p.RegisterCommands()
+	if len(cmds) == 0 {
+		t.Fatal("expected at least one command")
+	}
+	for _, cmd := range cmds {
+		if cmd.Name == "" {
+			t.Error("command name must be non-empty")
+		}
+		if cmd.Description == "" {
+			t.Errorf("command %q description must be non-empty", cmd.Name)
+		}
+		if cmd.Run == nil {
+			t.Errorf("command %q Run must not be nil", cmd.Name)
+		}
+	}
+}
+
+func TestRegisterCommands_RunError(t *testing.T) {
+	p := &Plugin{}
+	cmds := p.RegisterCommands()
+	for _, cmd := range cmds {
+		if cmd.Run != nil {
+			// Each command requires --dsn; calling with no args should error.
+			err := cmd.Run([]string{})
+			if err == nil {
+				t.Errorf("command %q Run with no args: expected error", cmd.Name)
+			}
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Route handler DB error paths
+// ---------------------------------------------------------------------------
+
+func TestScheduleCreate_ExecError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+
+	store.mu.Lock()
+	store.forceExecErr = 1
+	store.mu.Unlock()
+
+	body := `{"name":"test","cron":"*/5 * * * *","workflow_name":"wf"}`
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("POST /schedules with exec error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleList_QueryError(t *testing.T) {
+	p, _, store := setupTestPlugin(t, nil)
+	ctx := auth.WithTenantID(context.Background(), testTenantID)
+
+	store.mu.Lock()
+	store.forceQueryErr = 1
+	store.mu.Unlock()
+
+	// Bypass middleware: register routes directly on a fresh mux and inject tenant ID via context.
+	p.mux = http.NewServeMux()
+	if err := p.RegisterRoutes(p.mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/schedules", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("GET /schedules with query error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleGet_QueryError(t *testing.T) {
+	p, _, store := setupTestPlugin(t, nil)
+	ctx := auth.WithTenantID(context.Background(), testTenantID)
+
+	store.mu.Lock()
+	store.forceQueryErr = 1
+	store.mu.Unlock()
+
+	// Bypass middleware: register routes directly on a fresh mux and inject tenant ID via context.
+	p.mux = http.NewServeMux()
+	if err := p.RegisterRoutes(p.mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/schedules/"+uuid.New().String(), nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("GET /schedules/{id} with query error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleUpdate_InvalidCron(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	// Create a schedule first.
+	createBody := `{"name":"cron-test","cron":"*/5 * * * *","workflow_name":"wf"}`
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	schedID := created["id"].(string)
+
+	// Update with invalid cron while enabled = true -> should get 400.
+	updateBody := `{"cron":"not-a-cron","enabled":true}`
+	req = authedRequest("PUT", "/schedules/"+schedID, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("update with invalid cron: want 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleUpdate_ExecError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+
+	// Create a schedule first.
+	createBody := `{"name":"exec-err-test","cron":"*/5 * * * *","workflow_name":"wf"}`
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	schedID := created["id"].(string)
+
+	// Set forceExecErr so the UPDATE fails.
+	store.mu.Lock()
+	store.forceExecErr = 1
+	store.mu.Unlock()
+
+	updateBody := `{"name":"updated"}`
+	req = authedRequest("PUT", "/schedules/"+schedID, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("PUT with exec error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleDelete_ExecError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+
+	// Create a schedule first.
+	createBody := `{"name":"del-err-test","cron":"*/5 * * * *","workflow_name":"wf"}`
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	schedID := created["id"].(string)
+
+	// Set forceExecErr so the DELETE fails.
+	store.mu.Lock()
+	store.forceExecErr = 1
+	store.mu.Unlock()
+
+	req = authedRequest("DELETE", "/schedules/"+schedID, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("DELETE with exec error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleTrigger_QueryError(t *testing.T) {
+	p, _, store := setupTestPlugin(t, nil)
+	ctx := auth.WithTenantID(context.Background(), testTenantID)
+	tid := testTenantStr
+
+	// Create a schedule directly in the store.
+	schedID := uuid.New()
+	store.mu.Lock()
+	store.schedules[tid+":"+schedID.String()] = &fakeScheduleRow{
+		tenantID: tid, id: schedID.String(), name: "trig-err", cron: "*/5 * * * *",
+		workflowName: "wf", input: []byte("{}"), enabled: true,
+		createdAt: time.Now(), updatedAt: time.Now(),
+	}
+	// forceQueryErr = 1 makes the trigger's QueryRowContext fail.
+	store.forceQueryErr = 1
+	store.mu.Unlock()
+
+	// Bypass middleware: inject tenant ID and call plugin directly.
+	p.mux = http.NewServeMux()
+	if err := p.RegisterRoutes(p.mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/schedules/"+schedID.String()+"/trigger", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	p.mux.ServeHTTP(rec, req)
+
+	if rec.Code != 500 {
+		t.Errorf("POST trigger with query error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleUpdate_FetchError(t *testing.T) {
+	p, _, store := setupTestPlugin(t, nil)
+	ctx := auth.WithTenantID(context.Background(), testTenantID)
+	tid := testTenantStr
+
+	schedID := uuid.New()
+	store.mu.Lock()
+	store.schedules[tid+":"+schedID.String()] = &fakeScheduleRow{
+		tenantID: tid, id: schedID.String(), name: "fetch-err", cron: "*/5 * * * *",
+		workflowName: "wf", input: []byte("{}"), enabled: true,
+		createdAt: time.Now(), updatedAt: time.Now(),
+	}
+	store.forceQueryErr = 1
+	store.mu.Unlock()
+
+	p.mux = http.NewServeMux()
+	if err := p.RegisterRoutes(p.mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	updateBody := `{"name":"updated"}`
+	req := httptest.NewRequest("PUT", "/schedules/"+schedID.String(), bytes.NewReader([]byte(updateBody))).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Errorf("PUT with fetch error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleUpdate_NotFound(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+	body := `{"name":"nope"}`
+	req := authedRequest("PUT", "/schedules/"+uuid.New().String(), bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

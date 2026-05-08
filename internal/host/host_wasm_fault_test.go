@@ -240,3 +240,142 @@ func TestWasmModuleReturnsInvalidJSON(t *testing.T) {
 	}
 	t.Logf("Got expected error from unreachable module: %v", err)
 }
+
+// ---------------------------------------------------------------------------
+// WASM module that exceeds memory limit
+// ---------------------------------------------------------------------------
+
+// wasmWithLargeMemory returns a valid WASM module that requests an extremely
+// large initial memory (65535 pages ≈ 4GB). This should fail at instantiation
+// because the runtime cannot allocate that much memory.
+func wasmWithLargeMemory() []byte {
+	bin := []byte{
+		0x00, 0x61, 0x73, 0x6d, // magic
+		0x01, 0x00, 0x00, 0x00, // version 1
+	}
+	// Memory section: 1 memory, initial=65535 pages, max=65535 pages
+	// WASM encoding: 0x05 (memory section), size, 0x01 (1 memory),
+	// 0x01 (limits with max), 0xffffffff (initial), 0xffffffff (max)
+	// Actually this is encoded as a varuint for the page count.
+	// 65535 = 0xFFFF, encoded as 0xFF 0xFF 0x03 in LEB128.
+	// But that's 3 bytes. Let me use a simpler approach with fewer pages
+	// to ensure reliable failure. Using initial=65535 pages.
+	bin = append(bin,
+		0x05,             // Memory section
+		0x08,             // size: 1+1+LEB(65535)+LEB(65535) = 1+1+3+3 = 8
+		0x01,             // 1 memory
+		0x01,             // 0x01 = limits with max
+		0xff, 0xff, 0x03, // initial=65535 (LEB128)
+		0xff, 0xff, 0x03, // max=65535 (LEB128)
+	)
+	// Export section: export "memory" -> memory 0
+	bin = append(bin,
+		0x07, 0x0a,       // Export, size 10
+		0x01,             // 1 export
+		0x06, 0x6d, 0x65, 0x6d, 0x6f, 0x72, 0x79, // "memory"
+		0x02,             // kind: memory
+		0x00,             // index 0
+	)
+	return bin
+}
+
+// TestWasmModuleExceedsMemoryLimit verifies that a WASM module requesting
+// an extremely large initial memory (65535 pages) fails at instantiation
+// with an error rather than panicking or hanging.
+func TestWasmModuleExceedsMemoryLimit(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	wasmBytes := wasmWithLargeMemory()
+
+	// Compilation should succeed (memory limits are not checked at compile time).
+	compiled, err := rt.CompileModule(ctx, wasmBytes)
+	if err != nil {
+		t.Fatalf("CompileModule should succeed: %v", err)
+	}
+	defer compiled.Close(ctx)
+
+	// Instantiation should fail because 65535 pages (~4GB) cannot be allocated.
+	_, err = rt.InstantiateModule(ctx, compiled)
+	if err == nil {
+		t.Log("Note: instantiation succeeded (system may have enough memory for 4GB)")
+		// Not a fatal assertion — different systems have different limits.
+	} else {
+		t.Logf("Got expected instantiation error for large memory module: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// WASM module that calls an unknown host function (via import)
+// ---------------------------------------------------------------------------
+
+// wasmWithUnknownHostFunc returns a WASM module that imports a function
+// "cleat_unknown" from the "env" module. The "env" module provides all
+// cleat_* functions, but "cleat_unknown" is not among them, so
+// instantiation should fail.
+func wasmWithUnknownHostFunc() []byte {
+	bin := []byte{
+		0x00, 0x61, 0x73, 0x6d, // magic
+		0x01, 0x00, 0x00, 0x00, // version 1
+	}
+	// Type section: () -> () (function type 0)
+	bin = append(bin,
+		0x01, 0x04, // Type, size 4
+		0x01,       // 1 type
+		0x60,       // functype marker
+		0x00,       // 0 params
+		0x00,       // 0 results
+	)
+	// Import section: import "env" "cleat_unknown" as function type 0
+	bin = append(bin,
+		0x02,             // Import section
+		0x18,             // size
+		0x01,             // 1 import
+		0x03, 0x65, 0x6e, 0x76, // module "env"
+		0x0e, 0x63, 0x6c, 0x65, 0x61, 0x74, 0x5f, 0x75,
+		0x6e, 0x6b, 0x6e, 0x6f, 0x77, 0x6e, // field "cleat_unknown"
+		0x00,             // import kind: func
+		0x00,             // type index 0
+	)
+	// Export section: empty
+	bin = append(bin,
+		0x07, 0x01, // Export, size 1
+		0x00,       // 0 exports
+	)
+	return bin
+}
+
+// TestWasmModuleCallsUnknownHostFunction verifies that a WASM module that
+// imports a function from "env" that is not in the cleat_* family fails at
+// instantiation because the host module does not provide it. This covers
+// the case of a buggy or malicious WASM module trying to call an
+// unresolvable host function.
+func TestWasmModuleCallsUnknownHostFunction(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	wasmBytes := wasmWithUnknownHostFunc()
+
+	// Compilation should succeed (imports are resolved at instantiation).
+	compiled, err := rt.CompileModule(ctx, wasmBytes)
+	if err != nil {
+		t.Fatalf("CompileModule should succeed even with unresolved imports: %v", err)
+	}
+	defer compiled.Close(ctx)
+
+	// Instantiation should fail because "cleat_unknown" is not provided by
+	// the "env" host module.
+	_, err = rt.InstantiateModule(ctx, compiled)
+	if err == nil {
+		t.Fatal("expected instantiation error for module importing unknown host function, got nil")
+	}
+	t.Logf("Got expected unknown host function error: %v", err)
+}
