@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/auth"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -598,6 +599,13 @@ func TestEvaluateRuleUnknownOperator(t *testing.T) {
 	}
 }
 
+func TestParseRulesInvalidJSON(t *testing.T) {
+	_, err := parseRules(json.RawMessage("not valid json"))
+	if err == nil {
+		t.Error("expected error for invalid JSON in parseRules")
+	}
+}
+
 // ---- Empty evaluation context edge cases ----
 
 func TestEvaluateFlagEmptyAttributes(t *testing.T) {
@@ -697,5 +705,194 @@ func TestEvaluateFlagHostMissingKey(t *testing.T) {
 	_, err := p.evaluateFlag(ctx, `{"context":{"user_id":"u1"}}`)
 	if err == nil {
 		t.Fatal("expected error for missing key")
+	}
+}
+
+// ---- Route handler error path tests (pre-DB) ----
+
+func TestHandleCreateMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("POST", "/features/flags", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+func TestHandleCreateInvalidBody(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	body := strings.NewReader(`not json`)
+	req := httptest.NewRequest("POST", "/features/flags", body).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid body, got %d", rec.Code)
+	}
+}
+
+func TestHandleCreateMissingKey(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	body := strings.NewReader(`{}`)
+	req := httptest.NewRequest("POST", "/features/flags", body).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for missing key, got %d", rec.Code)
+	}
+}
+
+func TestHandleGetMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/features/flags/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+func TestHandleGetInvalidID(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/features/flags/not-a-uuid", nil).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid id, got %d", rec.Code)
+	}
+}
+
+func TestHandleUpdateMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("PUT", "/features/flags/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+func TestHandleUpdateInvalidID(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("PUT", "/features/flags/not-a-uuid", nil).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid id, got %d", rec.Code)
+	}
+}
+
+func TestHandleUpdateInvalidBody(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	body := strings.NewReader(`not json`)
+	req := httptest.NewRequest("PUT", "/features/flags/11111111-1111-1111-1111-111111111111", body).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid body, got %d", rec.Code)
+	}
+}
+
+func TestHandleDeleteMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("DELETE", "/features/flags/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+func TestHandleDeleteInvalidID(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("DELETE", "/features/flags/not-a-uuid", nil).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid id, got %d", rec.Code)
+	}
+}
+
+func TestHandleEvaluateMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("POST", "/features/evaluate", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+func TestHandleEvaluateInvalidBody(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	body := strings.NewReader(`not json`)
+	req := httptest.NewRequest("POST", "/features/evaluate", body).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid body, got %d", rec.Code)
+	}
+}
+
+func TestHandleEvaluateMissingKey(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	body := strings.NewReader(`{}`)
+	req := httptest.NewRequest("POST", "/features/evaluate", body).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for missing key, got %d", rec.Code)
 	}
 }

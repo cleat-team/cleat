@@ -37,9 +37,10 @@ type fakeRateLimitRow struct {
 }
 
 type fakeDBStore struct {
-	mu         sync.RWMutex
-	apiKeys    map[string]string          // sha256 hex -> tenant_id uuid string
-	rateLimits map[string]fakeRateLimitRow // key: "tenant_uuid/limit_key"
+	mu              sync.RWMutex
+	apiKeys         map[string]string          // sha256 hex -> tenant_id uuid string
+	rateLimits      map[string]fakeRateLimitRow // key: "tenant_uuid/limit_key"
+	corruptNextScan bool                      // next queryAllRateLimits returns corrupt data
 }
 
 type fakeConnector struct {
@@ -82,6 +83,14 @@ func (*fakeTxStruct) Rollback() error { return nil }
 var _ driver.QueryerContext = (*fakeConn)(nil)
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	// Check fault flags under write lock before acquiring read lock.
+	c.store.mu.Lock()
+	corrupt := c.store.corruptNextScan
+	if corrupt {
+		c.store.corruptNextScan = false
+	}
+	c.store.mu.Unlock()
+
 	c.store.mu.RLock()
 	defer c.store.mu.RUnlock()
 
@@ -90,7 +99,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		return c.queryTenantLookup(args)
 	case strings.Contains(query, "SELECT tenant_id, limit_key, max_requests, window_seconds"):
 		// background.go reload() — no WHERE clause, returns all rows.
-		return c.queryAllRateLimits()
+		return c.queryAllRateLimits(corrupt)
 	case strings.Contains(query, "SELECT limit_key, max_requests, window_seconds, created_at, updated_at"):
 		// routes.go handleList — filtered by tenant.
 		return c.queryRateLimits(args)
@@ -199,7 +208,7 @@ func (c *fakeConn) execDeleteRateLimit(args []driver.NamedValue) (driver.Result,
 
 // queryAllRateLimits returns every row in the rate_limits table (used by
 // background.go's reload()).
-func (c *fakeConn) queryAllRateLimits() (driver.Rows, error) {
+func (c *fakeConn) queryAllRateLimits(corrupt bool) (driver.Rows, error) {
 	var rows []fakeRateLimitRow
 	for _, row := range c.store.rateLimits {
 		rows = append(rows, row)
@@ -215,11 +224,21 @@ func (c *fakeConn) queryAllRateLimits() (driver.Rows, error) {
 	columns := []string{"tenant_id", "limit_key", "max_requests", "window_seconds"}
 	data := make([][]driver.Value, len(rows))
 	for i, row := range rows {
-		data[i] = []driver.Value{
-			row.tenantID,
-			row.limitKey,
-			int64(row.maxRequests),
-			int64(row.windowSecs),
+		if corrupt && i == 0 {
+			// Put a string where int64 is expected for max_requests.
+			data[i] = []driver.Value{
+				row.tenantID,
+				row.limitKey,
+				"not-an-int",
+				int64(row.windowSecs),
+			}
+		} else {
+			data[i] = []driver.Value{
+				row.tenantID,
+				row.limitKey,
+				int64(row.maxRequests),
+				int64(row.windowSecs),
+			}
 		}
 	}
 	return &fakeRows{columns: columns, data: data}, nil
@@ -1307,5 +1326,171 @@ func TestRunWithoutDB(t *testing.T) {
 	err := p.Run(ctx)
 	if err != nil {
 		t.Errorf("Run() with cancelled context: expected nil, got %v", err)
+	}
+}
+
+func TestRunWithDBInitialReloadSuccess(t *testing.T) {
+	p, _ := newPluginWithDB(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Errorf("Run() with DB: expected nil, got %v", err)
+	}
+}
+
+
+// ---------------------------------------------------------------------------
+// Reload scan-error path
+// ---------------------------------------------------------------------------
+
+func TestReload_ScanError(t *testing.T) {
+	p, store := newPluginWithDB(t)
+
+	// Add a valid rate limit so there is data to scan.
+	store.mu.Lock()
+	store.rateLimits[testTenantA.String()+"/testkey"] = fakeRateLimitRow{
+		tenantID: testTenantA.String(), limitKey: "testkey",
+		maxRequests: 10, windowSecs: 60,
+		createdAt: time.Now(), updatedAt: time.Now(),
+	}
+	store.mu.Unlock()
+
+	// Set the corrupt flag before calling reload.
+	store.mu.Lock()
+	store.corruptNextScan = true
+	store.mu.Unlock()
+
+	// reload should handle the scan error gracefully (log and continue).
+	n, err := p.reload(context.Background())
+	if err != nil {
+		t.Fatalf("reload() should not return error on scan error, got: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 configs reloaded (scan error skips the row), got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Reload rows.Err() path using a custom driver
+// ---------------------------------------------------------------------------
+
+// rowsErrFakeRows wraps fakeRows and returns a non-EOF error from Next
+// after exhausting data, which triggers Go's sql.Rows.Err().
+type rowsErrFakeRows struct {
+	columns []string
+	data    [][]driver.Value
+	pos     int
+	failOn  int // fail on this Next() call
+}
+
+func (r *rowsErrFakeRows) Columns() []string { return r.columns }
+func (r *rowsErrFakeRows) Close() error      { return nil }
+func (r *rowsErrFakeRows) Next(dest []driver.Value) error {
+	if r.pos >= len(r.data) && r.pos >= r.failOn {
+		return fmt.Errorf("simulated rows iteration error after EOF")
+	}
+	if r.pos >= len(r.data) {
+		return io.EOF
+	}
+	copy(dest, r.data[r.pos])
+	r.pos++
+	return nil
+}
+
+// rowsErrConnector wraps a fakeDBStore and returns a connection whose
+// QueryContext returns rowsErrFakeRows for the reload query.
+type rowsErrConnector struct {
+	store *fakeDBStore
+}
+
+func (c *rowsErrConnector) Connect(_ context.Context) (driver.Conn, error) {
+	return &rowsErrConn{store: c.store}, nil
+}
+
+func (c *rowsErrConnector) Driver() driver.Driver { return &rowsErrDriver{} }
+
+type rowsErrDriver struct{}
+
+func (*rowsErrDriver) Open(_ string) (driver.Conn, error) {
+	return nil, fmt.Errorf("rowsErrDriver: use sql.OpenDB")
+}
+
+type rowsErrConn struct {
+	store *fakeDBStore
+}
+
+func (*rowsErrConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("rowsErrConn: unexpected Prepare")
+}
+func (*rowsErrConn) Close() error  { return nil }
+func (*rowsErrConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("rowsErrConn: no tx") }
+
+var _ driver.QueryerContext = (*rowsErrConn)(nil)
+
+func (c *rowsErrConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.store.mu.RLock()
+	defer c.store.mu.RUnlock()
+
+	if strings.Contains(query, "SELECT tenant_id, limit_key, max_requests, window_seconds") {
+		var rows []fakeRateLimitRow
+		for _, r := range c.store.rateLimits {
+			rows = append(rows, r)
+		}
+		columns := []string{"tenant_id", "limit_key", "max_requests", "window_seconds"}
+		data := make([][]driver.Value, len(rows))
+		for i, r := range rows {
+			data[i] = []driver.Value{r.tenantID, r.limitKey, int64(r.maxRequests), int64(r.windowSecs)}
+		}
+		return &rowsErrFakeRows{columns: columns, data: data, failOn: len(data)}, nil
+	}
+	if strings.Contains(query, "FROM tenant_api_keys") {
+		keyHash, err := argBytes(args, 1)
+		if err != nil {
+			return nil, err
+		}
+		hashHex := fmt.Sprintf("%x", keyHash)
+		tid, ok := c.store.apiKeys[hashHex]
+		if !ok {
+			return &fakeRows{columns: []string{"tenant_id"}}, nil
+		}
+		return &fakeRows{
+			columns: []string{"tenant_id"},
+			data:    [][]driver.Value{{tid}},
+		}, nil
+	}
+	return nil, fmt.Errorf("rowsErrConn: unexpected query: %s", query)
+}
+
+func TestReload_RowsErr(t *testing.T) {
+	store := &fakeDBStore{
+		apiKeys:    make(map[string]string),
+		rateLimits: make(map[string]fakeRateLimitRow),
+	}
+	keyHash := sha256.Sum256([]byte(testAPIKey))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantA.String()
+
+	store.rateLimits[testTenantA.String()+"/errkey"] = fakeRateLimitRow{
+		tenantID: testTenantA.String(), limitKey: "errkey",
+		maxRequests: 5, windowSecs: 30,
+		createdAt: time.Now(), updatedAt: time.Now(),
+	}
+
+	fakeDB := sql.OpenDB(&rowsErrConnector{store: store})
+	defer fakeDB.Close()
+
+	p := &Plugin{}
+	if err := p.Init(context.Background(), &plugin.Environment{DB: fakeDB}); err != nil {
+		t.Fatalf("Init(): %v", err)
+	}
+
+	_, err := p.reload(context.Background())
+	if err == nil {
+		t.Fatal("expected error from rows.Err() in reload, got nil")
+	}
+	if !strings.Contains(err.Error(), "rows iteration") {
+		t.Errorf("expected 'rows iteration' error, got: %v", err)
 	}
 }

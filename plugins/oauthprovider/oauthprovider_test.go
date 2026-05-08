@@ -133,6 +133,30 @@ func TestGenerateSessionTokenUnique(t *testing.T) {
 	}
 }
 
+func TestTenantIDNoSession(t *testing.T) {
+	p := &Plugin{}
+	req := httptest.NewRequest("GET", "/test", nil)
+	tid := p.tenantID(req)
+	if tid != uuid.Nil {
+		t.Errorf("expected nil UUID when no session in context, got %v", tid)
+	}
+}
+
+func TestTenantIDWithSession(t *testing.T) {
+	p := &Plugin{}
+	session := &SessionInfo{
+		TenantID:  uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		SessionID: uuid.New(),
+		UserEmail: "test@example.com",
+	}
+	ctx := context.WithValue(context.Background(), sessionContextKey{}, session)
+	req := httptest.NewRequest("GET", "/test", nil).WithContext(ctx)
+	tid := p.tenantID(req)
+	if tid != session.TenantID {
+		t.Errorf("expected tenant %v, got %v", session.TenantID, tid)
+	}
+}
+
 func TestSessionFromContext(t *testing.T) {
 	info := &SessionInfo{
 		TenantID:  uuid.MustParse("00000000-0000-0000-0000-000000000001"),
@@ -365,5 +389,143 @@ func TestExtractSessionInvalidToken(t *testing.T) {
 	session := p.extractSession(req)
 	if session != nil {
 		t.Error("expected nil session for invalid token")
+	}
+}
+
+// ---- Route handler error path tests (pre-DB) ----
+
+func TestHandleLoginInvalidProvider(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/oauth/invalid/login", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid provider, got %d", rec.Code)
+	}
+}
+
+func TestHandleLoginMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/oauth/google/login", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for missing tenant, got %d", rec.Code)
+	}
+}
+
+func TestHandleLoginInvalidTenantQuery(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/oauth/google/login?tenant_id=not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid tenant_id query, got %d", rec.Code)
+	}
+}
+
+func TestHandleCallbackInvalidProvider(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/oauth/invalid/callback?code=abc&state=def", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid provider, got %d", rec.Code)
+	}
+}
+
+func TestHandleCallbackMissingCode(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/oauth/google/callback?state=def", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for missing code, got %d", rec.Code)
+	}
+}
+
+func TestHandleCallbackMissingState(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/oauth/google/callback?code=abc", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for missing state, got %d", rec.Code)
+	}
+}
+
+func TestHandleListSessionsUnauthorized(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/oauth/sessions", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for unauthorized, got %d", rec.Code)
+	}
+}
+
+func TestHandleDeleteSessionUnauthorized(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("DELETE", "/oauth/sessions/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for unauthorized, got %d", rec.Code)
+	}
+}
+
+func TestHandleDeleteSessionInvalidID(t *testing.T) {
+	store := newFakeSessionStore()
+	db := sql.OpenDB(&fakeSessionConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{db: db}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	// Pre-populate a valid session so extractSession succeeds.
+	tenantID := uuid.New()
+	token := "valid-session-token"
+	tokenHash := sha256Hex(token)
+	store.mu.Lock()
+	store.sessions[tokenHash] = &testSessionRow{
+		id:        uuid.New(),
+		tenantID:  tenantID,
+		userEmail: sql.NullString{String: "test@example.com", Valid: true},
+		expiresAt: sql.NullTime{Time: time.Now().Add(1 * time.Hour), Valid: true},
+	}
+	store.mu.Unlock()
+
+	// Request with valid Authorization header but invalid session ID in path.
+	req := httptest.NewRequest("DELETE", "/oauth/sessions/not-a-uuid", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid session id, got %d", rec.Code)
 	}
 }

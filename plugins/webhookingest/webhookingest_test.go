@@ -2,6 +2,7 @@ package webhookingest
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -35,6 +36,20 @@ func TestInit(t *testing.T) {
 	}
 	if p.logger == nil {
 		t.Error("expected logger to be set")
+	}
+}
+
+func TestInitWithEnvLogger(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.Default(),
+	}
+	err := p.Init(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if p.logger == nil {
+		t.Error("expected logger to be set after Init")
 	}
 }
 

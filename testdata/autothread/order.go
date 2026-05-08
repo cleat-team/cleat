@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // h is the package-level context object. Functions in the durable closure

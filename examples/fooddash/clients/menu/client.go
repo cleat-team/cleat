@@ -2,7 +2,7 @@
 
 package menu
 
-import "github.com/rcownie/cleat/durable"
+import "github.com/rcownie/cleat/cleat"
 
 type LookupItemRequest struct {
 	RestaurantID string `json:"restaurant_id"`

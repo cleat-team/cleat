@@ -1293,3 +1293,4 @@ func TestGenerateImportsDeduplicates(t *testing.T) {
 	}
 	syntaxCheck(t, "GenerateImports(dedup)", code)
 }
+

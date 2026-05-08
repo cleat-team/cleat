@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/rcownie/cleat/durable/embedded"
+	"github.com/rcownie/cleat/cleat/embedded"
 )
 
 // This main function demonstrates running the fileprocessing workflow using

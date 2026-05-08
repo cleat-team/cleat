@@ -3,7 +3,7 @@ package e003
 import (
 	"time"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // Workflow triggers E003 by using time.Now().

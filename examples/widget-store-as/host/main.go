@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rcownie/cleat/durable"
-	"github.com/rcownie/cleat/durable/localdev"
+	"github.com/rcownie/cleat/cleat"
+	"github.com/rcownie/cleat/cleat/localdev"
 )
 
 // ---------------------------------------------------------------------------

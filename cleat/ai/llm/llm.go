@@ -20,7 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // Message represents a chat message in a conversation.

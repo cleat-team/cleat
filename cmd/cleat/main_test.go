@@ -2,8 +2,13 @@ package main
 
 import (
 	"flag"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
 	"testing"
 
+	"github.com/rcownie/cleat/internal/analyzer"
 	"github.com/rcownie/cleat/internal/closure"
 )
 
@@ -233,6 +238,149 @@ func TestCommandFlags(t *testing.T) {
 			t.Errorf("default target = %q", *target)
 		}
 	})
+}
+
+func TestVetJSONOutput_Empty(t *testing.T) {
+	out := vetJSONOutput(
+		&analyzer.AnalysisResult{
+			Funcs:             map[string]*analyzer.FuncDecl{},
+			NumFuncs:          5,
+			NumDurableLeaves:  3,
+			NumDurableClosure: 1,
+			NumPure:           1,
+		},
+		&closure.Result{
+			DurableLeaves:  map[string]bool{},
+			DurableClosure: map[string]bool{},
+			Pure:           map[string]bool{},
+			Errors:         map[string][]closure.ValidationError{},
+			Warnings:       map[string][]closure.ValidationWarning{},
+		},
+		[]closure.ThreadingError{},
+	)
+	if len(out.Errors) != 0 {
+		t.Errorf("expected 0 errors, got %d", len(out.Errors))
+	}
+	if len(out.Warnings) != 0 {
+		t.Errorf("expected 0 warnings, got %d", len(out.Warnings))
+	}
+	if out.Summary.Functions != 5 {
+		t.Errorf("expected 5 functions, got %d", out.Summary.Functions)
+	}
+	if out.Summary.DurableLeaves != 3 {
+		t.Errorf("expected 3 durable leaves, got %d", out.Summary.DurableLeaves)
+	}
+	if out.Summary.Pure != 1 {
+		t.Errorf("expected 1 pure, got %d", out.Summary.Pure)
+	}
+}
+
+func TestVetJSONOutput_WithErrors(t *testing.T) {
+	out := vetJSONOutput(
+		&analyzer.AnalysisResult{
+			Funcs: map[string]*analyzer.FuncDecl{},
+		},
+		&closure.Result{
+			Errors: map[string][]closure.ValidationError{
+				"pkg.FuncA": {{Code: "E001", Message: "err1"}},
+			},
+			Warnings: map[string][]closure.ValidationWarning{
+				"pkg.FuncB": {{Code: "W001", Message: "warn1"}},
+			},
+			DurableLeaves:  map[string]bool{},
+			DurableClosure: map[string]bool{},
+			Pure:           map[string]bool{},
+		},
+		[]closure.ThreadingError{
+			{FuncName: "pkg.FuncC", Message: "threading issue", Chain: []string{"main", "FuncC"}},
+		},
+	)
+	if len(out.Errors) != 2 {
+		t.Errorf("expected 2 errors, got %d", len(out.Errors))
+	}
+	if len(out.Warnings) != 1 {
+		t.Errorf("expected 1 warning, got %d", len(out.Warnings))
+	}
+	// Threading errors are appended first, then closure errors.
+	if out.Errors[0].Message != "threading issue" {
+		t.Errorf("expected threading issue at [0], got %q", out.Errors[0].Message)
+	}
+	if len(out.Errors[0].Chain) != 2 {
+		t.Errorf("expected chain length 2 at [0], got %d", len(out.Errors[0].Chain))
+	}
+	if out.Errors[1].Code != "E001" {
+		t.Errorf("expected E001 at [1], got %q", out.Errors[1].Code)
+	}
+	if out.Warnings[0].Code != "W001" {
+		t.Errorf("expected W001, got %q", out.Warnings[0].Code)
+	}
+}
+
+func TestLookupFile_KnownFunc(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "/some/path/workflow.go", "package main\nfunc Foo() {}\n", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	funcDecl := f.Decls[0].(*ast.FuncDecl)
+	result := &analyzer.AnalysisResult{
+		Funcs: map[string]*analyzer.FuncDecl{
+			"pkg.Foo": {
+				Pkg: &analyzer.Package{
+					Fset: fset,
+					Path: "pkg",
+				},
+				Ast: funcDecl,
+			},
+		},
+	}
+	got := lookupFile(result, "pkg.Foo")
+	want := filepath.Base("/some/path/workflow.go")
+	if got != want {
+		t.Errorf("lookupFile = %q, want %q", got, want)
+	}
+}
+
+func TestLookupFile_UnknownFunc(t *testing.T) {
+	result := &analyzer.AnalysisResult{
+		Funcs: map[string]*analyzer.FuncDecl{},
+	}
+	got := lookupFile(result, "pkg.Unknown")
+	if got != "" {
+		t.Errorf("lookupFile = %q, want empty", got)
+	}
+}
+
+func TestLookupFile_NilPackage(t *testing.T) {
+	result := &analyzer.AnalysisResult{
+		Funcs: map[string]*analyzer.FuncDecl{
+			"pkg.Bad": {
+				Pkg: nil,
+				Ast: &ast.FuncDecl{},
+			},
+		},
+	}
+	got := lookupFile(result, "pkg.Bad")
+	if got != "" {
+		t.Errorf("lookupFile = %q, want empty", got)
+	}
+}
+
+func TestLookupFile_NilFset(t *testing.T) {
+	result := &analyzer.AnalysisResult{
+		Funcs: map[string]*analyzer.FuncDecl{
+			"pkg.NoFset": {
+				Pkg: &analyzer.Package{
+					Fset: nil,
+				},
+				Ast: &ast.FuncDecl{},
+			},
+		},
+	}
+	got := lookupFile(result, "pkg.NoFset")
+	if got != "" {
+		t.Errorf("lookupFile = %q, want empty", got)
+	}
 }
 
 func TestHelpDoesNotPanic(t *testing.T) {

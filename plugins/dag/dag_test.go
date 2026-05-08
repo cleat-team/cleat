@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -601,5 +602,104 @@ func TestExecuteMultipleLevels(t *testing.T) {
 	}
 	if !strings.Contains(out, "level0") {
 		t.Errorf("d output should transitively contain level0: %s", out)
+	}
+}
+
+func TestInitWithLogger(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.Default(),
+	}
+	err := p.Init(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if p.logger == nil {
+		t.Error("expected logger to be set after Init")
+	}
+}
+
+func TestExecuteWithOptionsAwaitAllChildrenError(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("a", nil, nil)
+
+	h := cleat.NewHostCalls(cleat.HostCallsOptions{
+		ChildWorkflow: func(name, inputJSON string) (string, error) {
+			return "run-a", nil
+		},
+		AwaitAllChildren: func(runIDs []string) ([]cleat.ChildResult, error) {
+			return nil, fmt.Errorf("simulated await failure")
+		},
+		DurableLog: func(msg string) {},
+		Now:        func() int64 { return 1000 },
+		Random:     func() int64 { return 42 },
+	})
+
+	err := d.ExecuteWithOptions(h, nil, ExecuteOptions{})
+	if err == nil {
+		t.Fatal("expected await error")
+	}
+	if !strings.Contains(err.Error(), "await") {
+		t.Errorf("expected error mentioning await, got: %v", err)
+	}
+}
+
+func TestExecuteWithOptionsTaskResultError(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("a", nil, nil)
+
+	h := cleat.NewHostCalls(cleat.HostCallsOptions{
+		ChildWorkflow: func(name, inputJSON string) (string, error) {
+			return "run-a", nil
+		},
+		AwaitAllChildren: func(runIDs []string) ([]cleat.ChildResult, error) {
+			return []cleat.ChildResult{
+				{RunID: "run-a", Result: "", Error: "simulated task result error"},
+			}, nil
+		},
+		DurableLog: func(msg string) {},
+		Now:        func() int64 { return 1000 },
+		Random:     func() int64 { return 42 },
+	})
+
+	err := d.ExecuteWithOptions(h, nil, ExecuteOptions{})
+	if err == nil {
+		t.Fatal("expected task result error")
+	}
+	if !strings.Contains(err.Error(), "a") {
+		t.Errorf("expected error mentioning task a, got: %v", err)
+	}
+}
+
+func TestStartLevelSequentialBuildInputError(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("a", nil, nil)
+
+	h := dagTestHost(d)
+	err := d.ExecuteWithOptions(h, make(chan int), ExecuteOptions{})
+	if err == nil {
+		t.Fatal("expected JSON marshal error for channel input")
+	}
+	if !strings.Contains(err.Error(), "json") && !strings.Contains(err.Error(), "marshal") {
+		t.Errorf("expected error mentioning json or marshal, got: %v", err)
+	}
+}
+
+func TestExecuteMaxParallelismTaskError(t *testing.T) {
+	d := NewDAG()
+	d.AddTask("a", nil, func(ctx *TaskContext) (string, error) {
+		return `"ok"`, nil
+	})
+	d.AddTask("b", nil, func(ctx *TaskContext) (string, error) {
+		return "", fmt.Errorf("task b failed")
+	})
+
+	h := dagTestHost(d)
+	err := d.ExecuteWithOptions(h, nil, ExecuteOptions{MaxParallelism: 2})
+	if err == nil {
+		t.Fatal("expected task b error")
+	}
+	if !strings.Contains(err.Error(), "b") {
+		t.Errorf("expected error mentioning task b, got: %v", err)
 	}
 }

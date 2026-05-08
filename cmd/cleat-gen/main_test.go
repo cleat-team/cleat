@@ -218,7 +218,7 @@ func TestGenerateCode(t *testing.T) {
 	// Check key elements are present.
 	checks := []string{
 		"package payments",
-		`import "github.com/rcownie/cleat/durable"`,
+		`import "github.com/rcownie/cleat/cleat"`,
 		"type ChargeRequest struct",
 		`json:"user_id"`,
 		"type ChargeResponse struct",
@@ -521,4 +521,196 @@ func mustParseType(t *testing.T, src string) (*token.FileSet, []ast.Decl) {
 // formatSource is a test-only formatting check.
 func formatSource(src []byte) ([]byte, error) {
 	return format.Source(src)
+}
+
+func TestParseSpecDir_EmbeddedField(t *testing.T) {
+	dir := t.TempDir()
+	content := `package spec
+
+type Base struct {
+	X string ` + "`json:\"x\"`" + `
+}
+
+type Derived struct {
+	Base
+	Y int ` + "`json:\"y\"`" + `
+}
+
+type Client interface {
+	Do(req struct{ X string }) error
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "spec.go"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := parseSpecDir(dir)
+	if err != nil {
+		t.Fatalf("parseSpecDir: %v", err)
+	}
+
+	// Derived struct should have 1 field (Y) — embedded Base is skipped.
+	if len(spec.Types) != 2 {
+		t.Fatalf("expected 2 types, got %d", len(spec.Types))
+	}
+	derivedType := spec.Types[1]
+	if derivedType.Name != "Derived" {
+		t.Errorf("expected Derived, got %q", derivedType.Name)
+	}
+	if len(derivedType.Fields) != 1 {
+		t.Errorf("expected 1 visible field (Base is embedded), got %d", len(derivedType.Fields))
+	}
+	if len(derivedType.Fields) > 0 && derivedType.Fields[0].Name != "Y" {
+		t.Errorf("expected field Y, got %q", derivedType.Fields[0].Name)
+	}
+}
+
+func TestParseSpecDir_NonGenDecl(t *testing.T) {
+	// Verify that non-GenDecl declarations (e.g., func decls) don't cause issues.
+	dir := t.TempDir()
+	content := `package spec
+
+func helper() {}
+
+type Client interface {
+	Call(req struct{}) error
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "spec.go"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := parseSpecDir(dir)
+	if err != nil {
+		t.Fatalf("parseSpecDir: %v", err)
+	}
+	if len(spec.Methods) != 1 {
+		t.Errorf("expected 1 method, got %d", len(spec.Methods))
+	}
+}
+
+func TestGenerateCode_FormatFallback(t *testing.T) {
+	// generateCode should fall back to unformatted output when format.Source fails.
+	// Use a spec that generates syntactically invalid Go to trigger the fallback.
+	spec := &SpecInfo{
+		ServiceName: "test",
+		Types: []TypeInfo{
+			{
+				Name: "BadType",
+				Fields: []FieldInfo{
+					{Name: "X", Type: "invalid@type"},
+				},
+			},
+		},
+		Methods: []MethodInfo{
+			{Name: "Do", RequestType: "BadType"},
+		},
+	}
+
+	code, err := generateCode(spec, "test")
+	if err != nil {
+		t.Fatalf("generateCode should not return error on format failure, got: %v", err)
+	}
+	if len(code) == 0 {
+		t.Fatal("expected non-empty output even with formatting failure")
+	}
+}
+
+func TestGenerateCode_EmptyTypesMethods(t *testing.T) {
+	spec := &SpecInfo{
+		ServiceName: "empty",
+	}
+	code, err := generateCode(spec, "empty")
+	if err != nil {
+		t.Fatalf("generateCode: %v", err)
+	}
+	if len(code) == 0 {
+		t.Fatal("expected non-empty output")
+	}
+	if !strings.Contains(string(code), "package empty") {
+		t.Errorf("expected 'package empty' in output, got %q", string(code))
+	}
+}
+
+func TestExprToString_ArrayWithConstLen(t *testing.T) {
+	src := `package test
+	const N = 5
+	type _ [N]int
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "test.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range f.Decls {
+		if genDecl, ok := decl.(*ast.GenDecl); ok && genDecl.Tok == token.TYPE {
+			for _, spec := range genDecl.Specs {
+				if typeSpec, ok := spec.(*ast.TypeSpec); ok {
+					got := exprToString(typeSpec.Type)
+					if got != "[N]int" {
+						t.Errorf("exprToString([N]int) = %q, want %q", got, "[N]int")
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("no type spec found")
+}
+
+func TestParseSpecDir_WithImport(t *testing.T) {
+	// Import spec should be skipped (not a type spec).
+	dir := t.TempDir()
+	content := `package spec
+
+import "fmt"
+
+type Client interface {
+	Call(req struct{ X string }) error
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "spec.go"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := parseSpecDir(dir)
+	if err != nil {
+		t.Fatalf("parseSpecDir: %v", err)
+	}
+	if spec.PackageName != "spec" {
+		t.Errorf("PackageName = %q, want %q", spec.PackageName, "spec")
+	}
+	if len(spec.Methods) != 1 {
+		t.Errorf("expected 1 method, got %d", len(spec.Methods))
+	}
+}
+
+func TestParseSpecDir_EmbeddedInterface(t *testing.T) {
+	// Embedded interface in Client should be skipped (no names).
+	dir := t.TempDir()
+	content := `package spec
+
+type Logger interface {
+	Log(msg string)
+}
+
+type Client interface {
+	Logger
+	Call(req struct{ X string }) error
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "spec.go"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	spec, err := parseSpecDir(dir)
+	if err != nil {
+		t.Fatalf("parseSpecDir: %v", err)
+	}
+	if len(spec.Methods) != 1 {
+		t.Errorf("expected 1 method (Logger is embedded, should be skipped), got %d", len(spec.Methods))
+	}
+	if spec.Methods[0].Name != "Call" {
+		t.Errorf("expected method name 'Call', got %q", spec.Methods[0].Name)
+	}
 }

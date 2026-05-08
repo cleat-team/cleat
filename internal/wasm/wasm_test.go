@@ -182,7 +182,7 @@ func TestGenerateHostAdapterBasic(t *testing.T) {
 	usage := AnalyzeUsage(result, cr)
 	code := string(GenerateHostAdapter("basic", usage))
 	for _, c := range []string{"//go:build wasip1", "package basic",
-		`"fmt"`, `"unsafe"`, `"github.com/rcownie/cleat/durable"`,
+		`"fmt"`, `"unsafe"`, `"github.com/rcownie/cleat/cleat"`,
 		"func makeHostCalls() cleat.HostCalls {",
 		"DurableCall: func(", "responseBuf := make([]byte, _cleatOutBufSize)",
 	} {

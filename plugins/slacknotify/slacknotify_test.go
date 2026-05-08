@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -172,5 +173,113 @@ func TestHandleUpdateConfigInvalidID(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != 400 {
 		t.Errorf("expected 400 for invalid config id, got %d", rec.Code)
+	}
+}
+
+// TestHandleCreateConfigMissingTenant verifies that a POST without tenant returns 401.
+func TestHandleCreateConfigMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("POST", "/slack/configs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleListConfigsMissingTenant verifies that a GET without tenant returns 401.
+func TestHandleListConfigsMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/slack/configs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleGetConfigMissingTenant verifies that a GET by ID without tenant returns 401.
+func TestHandleGetConfigMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/slack/configs/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleUpdateConfigMissingTenant verifies that a PUT without tenant returns 401.
+func TestHandleUpdateConfigMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("PUT", "/slack/configs/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleDeleteConfigMissingTenant verifies that a DELETE without tenant returns 401.
+func TestHandleDeleteConfigMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("DELETE", "/slack/configs/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleCreateConfigInvalidBody verifies that invalid JSON returns 400.
+func TestHandleCreateConfigInvalidBody(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(nil, nil)),
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	body := strings.NewReader(`not json`)
+	req := httptest.NewRequest("POST", "/slack/configs", body).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid body, got %d", rec.Code)
+	}
+}
+
+// TestHandleCreateConfigMissingName verifies that a POST without name returns 400.
+func TestHandleCreateConfigMissingName(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(nil, nil)),
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	body := strings.NewReader(`{}`)
+	req := httptest.NewRequest("POST", "/slack/configs", body).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for missing name, got %d", rec.Code)
 	}
 }

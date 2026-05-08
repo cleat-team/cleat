@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,6 +148,40 @@ func TestPluginRegistration(t *testing.T) {
 	}
 	if !found {
 		t.Error("scheduler plugin not found after Discover")
+	}
+}
+
+func TestInitWithConfig(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		DB:     &sql.DB{},
+		Logger: slog.Default(),
+		Config: []byte(`{}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() with config returned error: %v", err)
+	}
+	if p.db == nil {
+		t.Error("expected db to be set after Init")
+	}
+	if p.logger == nil {
+		t.Error("expected logger to be set after Init")
+	}
+}
+
+func TestInitInvalidConfig(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		DB:     &sql.DB{},
+		Logger: slog.Default(),
+		Config: []byte(`not valid json`),
+	}
+	err := p.Init(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error for invalid config, got nil")
+	}
+	if !strings.Contains(err.Error(), "config") {
+		t.Errorf("expected error mentioning config, got: %v", err)
 	}
 }
 

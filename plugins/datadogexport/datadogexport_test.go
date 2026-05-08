@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -164,5 +165,113 @@ func TestHandleUpdateConfigInvalidID(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != 400 {
 		t.Errorf("expected 400 for invalid config id, got %d", rec.Code)
+	}
+}
+
+// TestHandleCreateMissingTenant verifies that a POST without tenant returns 401.
+func TestHandleCreateMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("POST", "/datadog/configs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleListMissingTenant verifies that a GET without tenant returns 401.
+func TestHandleListMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/datadog/configs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleGetMissingTenant verifies that a GET by ID without tenant returns 401.
+func TestHandleGetMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("GET", "/datadog/configs/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleUpdateMissingTenant verifies that a PUT without tenant returns 401.
+func TestHandleUpdateMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("PUT", "/datadog/configs/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleDeleteMissingTenant verifies that a DELETE without tenant returns 401.
+func TestHandleDeleteMissingTenant(t *testing.T) {
+	p := &Plugin{}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	req := httptest.NewRequest("DELETE", "/datadog/configs/11111111-1111-1111-1111-111111111111", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("expected 401 for missing tenant, got %d", rec.Code)
+	}
+}
+
+// TestHandleCreateInvalidBody verifies that invalid JSON returns 400.
+func TestHandleCreateInvalidBody(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(nil, nil)),
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	body := strings.NewReader(`not json`)
+	req := httptest.NewRequest("POST", "/datadog/configs", body).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for invalid body, got %d", rec.Code)
+	}
+}
+
+// TestHandleCreateMissingAPIKey verifies that a POST without api_key returns 400.
+func TestHandleCreateMissingAPIKey(t *testing.T) {
+	p := &Plugin{
+		logger: slog.New(slog.NewTextHandler(nil, nil)),
+	}
+	mux := http.NewServeMux()
+	p.RegisterRoutes(mux)
+
+	body := strings.NewReader(`{}`)
+	req := httptest.NewRequest("POST", "/datadog/configs", body).WithContext(
+		auth.WithTenantID(context.Background(), uuid.New()))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Errorf("expected 400 for missing api_key, got %d", rec.Code)
 	}
 }

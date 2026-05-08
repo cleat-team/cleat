@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,8 +41,10 @@ type fakeDBStore struct {
 	mu       sync.RWMutex
 	apiKeys  map[string]string               // key_hash -> tenant_id
 	pdConfig map[string]*fakePDConfigRow     // "tenant:id" -> row
-	failNextExec  bool                       // next ExecContext returns error
-	failNextQuery bool                       // next QueryContext returns error
+	failNextExec     bool                    // next ExecContext returns error
+	failNextQuery    bool                    // next QueryContext returns error
+	failNextRefetch  int32                   // atomic: next queryPDConfigByID returns error
+	failNextScanOnList bool                  // next queryPDConfigList returns corrupt data
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -248,11 +251,15 @@ func (c *fakeConn) execDeletePDConfig(args []driver.NamedValue) (driver.Result, 
 // ---------------------------------------------------------------------------
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	// Check fail flag under write lock before acquiring read lock for the query.
+	// Check fault flags under write lock before acquiring read lock for the query.
 	c.store.mu.Lock()
 	shouldFail := c.store.failNextQuery
 	if shouldFail {
 		c.store.failNextQuery = false
+	}
+	corruptList := c.store.failNextScanOnList
+	if corruptList {
+		c.store.failNextScanOnList = false
 	}
 	c.store.mu.Unlock()
 
@@ -270,9 +277,10 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	case strings.Contains(q, "SELECT routing_key FROM pd_config") || (strings.Contains(q, "routing_key") && strings.Contains(q, "FROM pd_config") && strings.Contains(q, "enabled = true")):
 		return c.queryRoutingKey(args)
 	case strings.Contains(q, "FROM pd_config") && strings.Contains(q, "ORDER BY"):
-		return c.queryPDConfigList(args)
+		return c.queryPDConfigList(args, corruptList)
 	case strings.Contains(q, "FROM pd_config") && strings.Contains(q, "WHERE id ="):
-		return c.queryPDConfigByID(args)
+		refetchFail := atomic.CompareAndSwapInt32(&c.store.failNextRefetch, 1, 0)
+		return c.queryPDConfigByID(args, refetchFail)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Query query: %s", query[:min(len(query), 80)])
 	}
@@ -316,7 +324,7 @@ func (c *fakeConn) queryRoutingKey(args []driver.NamedValue) (driver.Rows, error
 	}, nil
 }
 
-func (c *fakeConn) queryPDConfigList(args []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) queryPDConfigList(args []driver.NamedValue, corruptData bool) (driver.Rows, error) {
 	tid, err := argS(args, 1)
 	if err != nil {
 		return nil, err
@@ -328,15 +336,26 @@ func (c *fakeConn) queryPDConfigList(args []driver.NamedValue) (driver.Rows, err
 		if row.tenantID != tid {
 			continue
 		}
-		data = append(data, []driver.Value{
-			row.id, row.name, row.routingKey, row.enabled,
-			row.createdAt, row.updatedAt,
-		})
+		if corruptData {
+			data = append(data, []driver.Value{
+				row.id, row.name, row.routingKey, "not-a-bool",
+				row.createdAt, row.updatedAt,
+			})
+		} else {
+			data = append(data, []driver.Value{
+				row.id, row.name, row.routingKey, row.enabled,
+				row.createdAt, row.updatedAt,
+			})
+		}
 	}
 	return &fakeRows{columns: columns, data: data}, nil
 }
 
-func (c *fakeConn) queryPDConfigByID(args []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) queryPDConfigByID(args []driver.NamedValue, refetchFail bool) (driver.Rows, error) {
+	if refetchFail {
+		return nil, fmt.Errorf("simulated re-fetch error")
+	}
+
 	id, err := argS(args, 1)
 	if err != nil {
 		return nil, err
@@ -1325,5 +1344,165 @@ func TestResolveIncident_ConfigNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "config not found") && !strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected 'not found' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional edge-case tests for remaining uncovered code paths
+// ---------------------------------------------------------------------------
+
+// errReadCloser simulates a body read error for testing error paths.
+type errReadCloser struct{}
+
+func (*errReadCloser) Read(_ []byte) (int, error) { return 0, fmt.Errorf("simulated read error") }
+func (*errReadCloser) Close() error                { return nil }
+
+func TestPDCreateConfig_BodyReadError(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	req := authedRequest("POST", "/pagerduty/configs", &errReadCloser{})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for body read error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "read body") {
+		t.Errorf("expected 'read body' error, got: %s", rec.Body.String())
+	}
+}
+
+func TestPDListConfigs_Empty(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	req := authedRequest("GET", "/pagerduty/configs", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var configs []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &configs); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if len(configs) != 0 {
+		t.Errorf("expected 0 configs, got %d", len(configs))
+	}
+}
+
+func TestPDUpdateConfig_InvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	body := `{"name":"updated"}`
+	req := authedRequest("PUT", "/pagerduty/configs/not-a-uuid", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for invalid ID, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPDUpdateConfig_WithRoutingKey(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	createBody := `{"name":"orig","routing_key":"rk_orig"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	configID := created["id"].(string)
+
+	updateBody := `{"routing_key":"rk_updated"}`
+	req = authedRequest("PUT", "/pagerduty/configs/"+configID, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT with routing_key: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fault injection for re-fetch error after update
+// ---------------------------------------------------------------------------
+
+func (s *fakeDBStore) triggerRefetchError() {
+	atomic.StoreInt32(&s.failNextRefetch, 1)
+}
+
+
+func TestPDUpdateConfig_RefetchError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+
+	createBody := `{"name":"refetch-test","routing_key":"rk_refetch"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	configID := created["id"].(string)
+
+	store.triggerRefetchError()
+
+	updateBody := `{"name":"refetch-updated"}`
+	req = authedRequest("PUT", "/pagerduty/configs/"+configID, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for re-fetch error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "retrieve updated config") {
+		t.Errorf("expected 'retrieve updated config' error, got: %s", rec.Body.String())
+	}
+}
+
+
+
+func (s *fakeDBStore) triggerListScanError() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failNextScanOnList = true
+}
+
+func TestPDListConfigs_ScanError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+
+	createBody := `{"name":"scan-test","routing_key":"rk_scan"}`
+	req := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	configID := created["id"].(string)
+
+	createBody2 := `{"name":"scan-test-2","routing_key":"rk_scan2"}`
+	req2 := authedRequest("POST", "/pagerduty/configs", bytes.NewReader([]byte(createBody2)))
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("create 2: expected 201, got %d", rec2.Code)
+	}
+	_ = configID
+
+	store.triggerListScanError()
+
+	req = authedRequest("GET", "/pagerduty/configs", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 even with corrupt row, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

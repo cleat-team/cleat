@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	dagexample "github.com/rcownie/cleat/examples/dag"
-	"github.com/rcownie/cleat/durable/cleattest"
+	"github.com/rcownie/cleat/cleat/cleattest"
 
 	dagplugin "github.com/rcownie/cleat/plugins/dag"
 )

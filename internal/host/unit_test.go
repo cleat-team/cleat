@@ -2000,3 +2000,244 @@ func TestPurgeVersions_SkippedActiveInstances(t *testing.T) {
 		t.Errorf("VersionsSkipped = %d, want 1", result.VersionsSkipped)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PluginRegistry RegisterIdempotent duplicate error
+// ---------------------------------------------------------------------------
+
+func TestPluginRegistry_RegisterIdempotent_Duplicate(t *testing.T) {
+	pr := NewPluginRegistry()
+	fn := func(ctx context.Context, inputJSON string) (string, error) {
+		return `{"result":"ok"}`, nil
+	}
+
+	if err := pr.RegisterIdempotent("my-plugin", "my-func", fn); err != nil {
+		t.Fatalf("first registration should succeed: %v", err)
+	}
+	// Second registration with same name+func should fail.
+	if err := pr.RegisterIdempotent("my-plugin", "my-func", fn); err == nil {
+		t.Error("expected error for duplicate registration")
+	} else if !strings.Contains(err.Error(), "already registered") {
+		t.Errorf("expected 'already registered' error, got: %v", err)
+	}
+}
+
+func TestPluginRegistry_RegisterIdempotent_SameFuncDiffPlugin(t *testing.T) {
+	pr := NewPluginRegistry()
+	fn := func(ctx context.Context, inputJSON string) (string, error) {
+		return `{}`, nil
+	}
+
+	if err := pr.Register("plugin-a", "some-func", fn); err != nil {
+		t.Fatalf("register on plugin-a: %v", err)
+	}
+	// Same function name under a different plugin is fine.
+	if err := pr.RegisterIdempotent("plugin-b", "some-func", fn); err != nil {
+		t.Errorf("same func name under different plugin should succeed: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// releaseHeldScopes tests
+// ---------------------------------------------------------------------------
+
+// releaseErrorStore wraps the existing mockConcurrencyKeyStore and injects
+// errors on ReleaseConcurrencyKey.
+type releaseErrorStore struct {
+	mockConcurrencyKeyStore
+}
+
+func (r *releaseErrorStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+	return fmt.Errorf("simulated release failure")
+}
+
+func TestReleaseHeldScopes_NilStore(t *testing.T) {
+	// When concurrencyKeyStore is nil, releaseHeldScopes should return
+	// immediately without iterating heldScopes. heldScopes is NOT cleared
+	// in this path because there's nothing to release.
+	e := &Engine{}
+	s := &execSession{
+		engine:     e,
+		heldScopes: []string{"vo:obj-type:inst-key"},
+	}
+	// Should not panic or block.
+	s.releaseHeldScopes(context.Background())
+	// heldScopes is still set because the early return path does not clear it.
+	if len(s.heldScopes) != 1 {
+		t.Errorf("heldScopes should be preserved when store is nil, got %v", s.heldScopes)
+	}
+}
+
+func TestReleaseHeldScopes_EmptyList(t *testing.T) {
+	store := newMockConcurrencyKeyStore()
+	e := &Engine{concurrencyKeyStore: store}
+	s := &execSession{
+		engine:     e,
+		heldScopes: []string{},
+	}
+	s.releaseHeldScopes(context.Background())
+	if s.heldScopes != nil {
+		t.Error("heldScopes should be nil after release")
+	}
+}
+
+func TestReleaseHeldScopes_Success(t *testing.T) {
+	ctx := context.Background()
+	store := newMockConcurrencyKeyStore()
+
+	// Pre-acquire keys as if a workflow had set scopes.
+	store.AcquireConcurrencyKey(ctx, "vo:obj-a:key-1", "wf-1", time.Hour)
+	store.AcquireConcurrencyKey(ctx, "vo:obj-b:key-2", "wf-1", time.Hour)
+
+	e := &Engine{concurrencyKeyStore: store}
+	s := &execSession{
+		engine:     e,
+		heldScopes: []string{"vo:obj-a:key-1", "vo:obj-b:key-2"},
+	}
+	s.releaseHeldScopes(ctx)
+
+	if s.heldScopes != nil {
+		t.Error("heldScopes should be nil after release")
+	}
+
+	// Keys should now be releasable (re-acquirable by a different workflow).
+	acquired, err := store.AcquireConcurrencyKey(ctx, "vo:obj-a:key-1", "wf-2", time.Hour)
+	if err != nil {
+		t.Fatalf("re-acquire key-1: %v", err)
+	}
+	if !acquired {
+		t.Error("expected key-1 to be released and acquirable by different workflow")
+	}
+}
+
+func TestReleaseHeldScopes_ReleaseError(t *testing.T) {
+	// When ReleaseConcurrencyKey returns an error, releaseHeldScopes should
+	// log the error and continue with the remaining scopes.
+	store := &releaseErrorStore{}
+	e := &Engine{concurrencyKeyStore: store}
+	s := &execSession{
+		engine:     e,
+		heldScopes: []string{"vo:obj-a:key-1", "vo:obj-b:key-2"},
+	}
+	// Should not panic despite the error -- the error is only logged.
+	s.releaseHeldScopes(context.Background())
+	if s.heldScopes != nil {
+		t.Error("heldScopes should be nil after release")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PluginStreamRegistry tests
+// ---------------------------------------------------------------------------
+
+func TestPluginStreamRegistry_RegisterAndHas(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	fn := func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		return nil, nil
+	}
+
+	if err := psr.Register("plugin-a", "stream-func", fn); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if !psr.Has("plugin-a", "stream-func") {
+		t.Error("Has should return true after Register")
+	}
+	if psr.Has("plugin-a", "nonexistent") {
+		t.Error("Has should return false for nonexistent function")
+	}
+}
+
+func TestPluginStreamRegistry_RegisterDuplicate(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	fn := func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		return nil, nil
+	}
+
+	if err := psr.Register("plugin", "func", fn); err != nil {
+		t.Fatalf("first Register: %v", err)
+	}
+	if err := psr.Register("plugin", "func", fn); err == nil {
+		t.Error("expected error for duplicate registration")
+	}
+}
+
+func TestPluginStreamRegistry_Lookup(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	fn := func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		return nil, nil
+	}
+
+	psr.Register("plugin", "func", fn)
+	got, ok := psr.Lookup("plugin", "func")
+	if !ok {
+		t.Fatal("Lookup should return true for registered function")
+	}
+	if got == nil {
+		t.Error("Lookup should return non-nil function")
+	}
+
+	// Lookup nonexistent.
+	_, ok = psr.Lookup("plugin", "missing")
+	if ok {
+		t.Error("Lookup should return false for missing function")
+	}
+}
+
+func TestPluginStreamRegistry_RegisterStream(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	fn := plugin.PluginStreamFunc(func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		return nil, nil
+	})
+
+	opts := plugin.FuncOptions{Name: "test-func"}
+	if err := psr.RegisterStream("plugin", opts, fn); err != nil {
+		t.Fatalf("RegisterStream: %v", err)
+	}
+	if !psr.Has("plugin", "test-func") {
+		t.Error("Has should return true after RegisterStream")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PluginRegistry basic tests
+// ---------------------------------------------------------------------------
+
+func TestPluginRegistry_Lookup(t *testing.T) {
+	pr := NewPluginRegistry()
+	fn := func(ctx context.Context, inputJSON string) (string, error) {
+		return "result", nil
+	}
+
+	pr.Register("plugin", "func", fn)
+
+	f, idempotent, ok := pr.Lookup("plugin", "func")
+	if !ok {
+		t.Fatal("Lookup should return ok=true for registered func")
+	}
+	if f == nil {
+		t.Error("Lookup should return non-nil function")
+	}
+	if idempotent {
+		t.Error("Lookup should return idempotent=false for non-idempotent func")
+	}
+
+	// Lookup missing.
+	_, _, ok = pr.Lookup("plugin", "missing")
+	if ok {
+		t.Error("Lookup should return ok=false for missing func")
+	}
+}
+
+func TestPluginRegistry_RegisterAlreadyExists(t *testing.T) {
+	pr := NewPluginRegistry()
+	fn := func(ctx context.Context, inputJSON string) (string, error) {
+		return "", nil
+	}
+
+	if err := pr.Register("p", "f", fn); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	if err := pr.Register("p", "f", fn); err == nil || !strings.Contains(err.Error(), "already registered") {
+		t.Errorf("expected 'already registered' error, got: %v", err)
+	}
+}

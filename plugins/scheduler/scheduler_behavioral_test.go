@@ -47,6 +47,7 @@ type fakeDBStore struct {
 	now           func() time.Time
 	forceQueryErr int // decrementing counter; fail QueryContext when > 0
 	forceExecErr  int // decrementing counter; fail ExecContext when > 0
+	forceScanErr  int // decrementing counter; next list/scan returns corrupt data when > 0
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -330,6 +331,10 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.Unlock()
 		return nil, fmt.Errorf("fakeConn: forced query error")
 	}
+	scanErr := c.store.forceScanErr > 0
+	if scanErr {
+		c.store.forceScanErr--
+	}
 	c.store.mu.Unlock()
 
 	c.store.mu.RLock()
@@ -341,7 +346,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	case strings.Contains(q, "SELECT tenant_id FROM tenant_api_keys"):
 		return c.queryTenantByKeyHash(args)
 	case strings.Contains(q, "next_run_at <= now()") || strings.Contains(q, "FOR UPDATE SKIP LOCKED"):
-		return c.queryDueSchedules(args)
+		return c.queryDueSchedules(args, scanErr)
 	case strings.Contains(q, "SELECT cron, enabled FROM schedules"):
 		return c.queryScheduleForUpdate(args)
 	case strings.Contains(q, "SELECT name, cron, workflow_name, input FROM schedules"):
@@ -349,7 +354,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	case strings.Contains(q, "FROM schedules") && strings.Contains(q, "WHERE id ="):
 		return c.queryScheduleByID(args)
 	case strings.Contains(q, "FROM schedules") && strings.Contains(q, "ORDER BY"):
-		return c.queryScheduleList(args)
+		return c.queryScheduleList(args, scanErr)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Query query: %s", query[:min(len(query), 80)])
 	}
@@ -406,7 +411,7 @@ func (c *fakeConn) queryScheduleByID(args []driver.NamedValue) (driver.Rows, err
 	}, nil
 }
 
-func (c *fakeConn) queryScheduleList(args []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) queryScheduleList(args []driver.NamedValue, corrupt bool) (driver.Rows, error) {
 	tid, err := aStr(args, 1)
 	if err != nil {
 		return nil, err
@@ -414,6 +419,7 @@ func (c *fakeConn) queryScheduleList(args []driver.NamedValue) (driver.Rows, err
 
 	columns := []string{"id", "name", "cron", "workflow_name", "input", "enabled", "last_run_at", "next_run_at", "created_at", "updated_at"}
 	var data [][]driver.Value
+	first := true
 	for _, s := range c.store.schedules {
 		if s.tenantID != tid {
 			continue
@@ -425,9 +431,14 @@ func (c *fakeConn) queryScheduleList(args []driver.NamedValue) (driver.Rows, err
 		if s.nextRunAt != nil {
 			nr = *s.nextRunAt
 		}
+		enabled := driver.Value(s.enabled)
+		if corrupt && first {
+			enabled = "not-a-bool"
+		}
+		first = false
 		data = append(data, []driver.Value{
 			s.id, s.name, s.cron, s.workflowName, s.input,
-			s.enabled, lr, nr, s.createdAt, s.updatedAt,
+			enabled, lr, nr, s.createdAt, s.updatedAt,
 		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil
@@ -477,11 +488,12 @@ func (c *fakeConn) queryScheduleForTrigger(args []driver.NamedValue) (driver.Row
 	}, nil
 }
 
-func (c *fakeConn) queryDueSchedules(args []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) queryDueSchedules(args []driver.NamedValue, corrupt bool) (driver.Rows, error) {
 	// Find schedules where enabled=true AND next_run_at <= now()
 	now := c.store.now()
 	columns := []string{"id", "tenant_id", "name", "cron", "workflow_name", "input", "next_run_at"}
 	var data [][]driver.Value
+	first := true
 	for _, s := range c.store.schedules {
 		if !s.enabled {
 			continue
@@ -493,6 +505,15 @@ func (c *fakeConn) queryDueSchedules(args []driver.NamedValue) (driver.Rows, err
 		if s.nextRunAt != nil {
 			nr = *s.nextRunAt
 		}
+		if corrupt && first {
+			first = false
+			// Return a row with a wrong type for next_run_at (should be time.Time)
+			return &fakeRows{
+				columns: []string{"id", "tenant_id", "name", "cron", "workflow_name", "input", "next_run_at"},
+				data: [][]driver.Value{{s.id, s.tenantID, s.name, s.cron, s.workflowName, s.input, "not-a-time"}},
+			}, nil
+		}
+		first = false
 		data = append(data, []driver.Value{
 			s.id, s.tenantID, s.name, s.cron, s.workflowName, s.input, nr,
 		})
@@ -1653,7 +1674,7 @@ func TestRunWithDBAndCancelledContext(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Tests: RegisterCommands (0% coverage)
+// Tests: RegisterCommands
 // ---------------------------------------------------------------------------
 
 func TestRegisterCommands(t *testing.T) {
@@ -1900,5 +1921,314 @@ func TestScheduleUpdate_NotFound(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Rows error fake types for rows.Err() testing
+// ===========================================================================
+
+type rowsErrFakeRows struct{ pos int }
+
+func (*rowsErrFakeRows) Columns() []string { return []string{"id"} }
+func (*rowsErrFakeRows) Close() error      { return nil }
+func (r *rowsErrFakeRows) Next(_ []driver.Value) error {
+	if r.pos > 0 {
+		return io.EOF
+	}
+	r.pos++
+	return fmt.Errorf("simulated rows iteration error")
+}
+func (*rowsErrFakeRows) Err() error { return fmt.Errorf("simulated rows iteration error") }
+
+type rowsErrConnector struct{ store *fakeDBStore }
+
+func (c *rowsErrConnector) Connect(_ context.Context) (driver.Conn, error) { return &rowsErrConn{store: c.store}, nil }
+func (c *rowsErrConnector) Driver() driver.Driver { return &rowsErrDrv{} }
+
+type rowsErrConn struct{ store *fakeDBStore }
+
+func (*rowsErrConn) Prepare(_ string) (driver.Stmt, error) { return nil, fmt.Errorf("rowsErrConn: unexpected Prepare") }
+func (*rowsErrConn) Close() error                           { return nil }
+func (*rowsErrConn) Begin() (driver.Tx, error)              { return nil, fmt.Errorf("rowsErrConn: no tx") }
+func (c *rowsErrConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if strings.Contains(query, "FOR UPDATE SKIP LOCKED") || strings.Contains(query, "next_run_at <= now()") {
+		return &rowsErrFakeRows{}, nil
+	}
+	return nil, fmt.Errorf("rowsErrConn: unexpected query: %s", query)
+}
+
+type rowsErrDrv struct{}
+
+func (*rowsErrDrv) Open(_ string) (driver.Conn, error) { return nil, fmt.Errorf("use sql.OpenDB") }
+
+// ===========================================================================
+// Test: ScheduleList scan error
+// ===========================================================================
+
+func TestScheduleList_ScanError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t, nil)
+
+	// Create a schedule so there's data to scan.
+	createBody := `{"name":"test","cron":"*/5 * * * *","workflow_name":"wf"}`
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+
+	// Set scan error flag with skip=2 for auth middleware query.
+	store.mu.Lock()
+	store.forceScanErr = 2
+	store.mu.Unlock()
+
+	req = authedRequest("GET", "/schedules", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	// Should still return 200 — corrupt row is skipped and logged.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 despite scan error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Test: runDueSchedules scan error
+// ===========================================================================
+
+func TestRunDueSchedules_ScanError(t *testing.T) {
+	clock := newControllableClock()
+	clock.now = time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+
+	p, _, store := setupTestPlugin(t, clock)
+	p.env = &plugin.Environment{
+		DB: p.db,
+		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+			return uuid.New().String(), nil
+		},
+	}
+
+	// Create a schedule due now.
+	schedID := uuid.New().String()
+	nextRunAt := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	store.mu.Lock()
+	store.schedules[testTenantStr+":"+schedID] = &fakeScheduleRow{
+		tenantID:     testTenantStr,
+		id:           schedID,
+		name:         "due",
+		cron:         "*/5 * * * *",
+		workflowName: "wf",
+		input:        []byte(`{}`),
+		enabled:      true,
+		nextRunAt:    &nextRunAt,
+		createdAt:    clock.now,
+		updatedAt:    clock.now,
+	}
+	// Set scan error for the query.
+	store.forceScanErr = 1
+	store.mu.Unlock()
+
+	// Should not panic — corrupt row is skipped and logged.
+	schedulesDue, workflowsStarted, workflowsFailed := p.runDueSchedules(context.Background())
+	if schedulesDue != 0 {
+		t.Errorf("expected 0 due schedules (scan error skipped), got %d", schedulesDue)
+	}
+	if workflowsStarted != 0 {
+		t.Errorf("expected 0 workflows started, got %d", workflowsStarted)
+	}
+	if workflowsFailed != 0 {
+		t.Errorf("expected 0 workflows failed, got %d", workflowsFailed)
+	}
+}
+
+// ===========================================================================
+// Test: runDueSchedules query error
+// ===========================================================================
+
+func TestRunDueSchedules_QueryError(t *testing.T) {
+	clock := newControllableClock()
+	p, _, store := setupTestPlugin(t, clock)
+	p.env = &plugin.Environment{
+		DB: p.db,
+	}
+
+	store.mu.Lock()
+	store.forceQueryErr = 1
+	store.mu.Unlock()
+
+	// Query fails, should return 0 for all counts.
+	due, started, failed := p.runDueSchedules(context.Background())
+	if due != 0 {
+		t.Errorf("expected 0 due, got %d", due)
+	}
+	if started != 0 {
+		t.Errorf("expected 0 started, got %d", started)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed, got %d", failed)
+	}
+}
+
+// ===========================================================================
+// Test: runDueSchedules exec error (update after trigger)
+// ===========================================================================
+
+func TestRunDueSchedules_ExecError(t *testing.T) {
+	clock := newControllableClock()
+	clock.now = time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+
+	p, _, store := setupTestPlugin(t, clock)
+	p.env = &plugin.Environment{
+		DB: p.db,
+		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+			return uuid.New().String(), nil
+		},
+	}
+
+	schedID := uuid.New().String()
+	nextRunAt := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	store.mu.Lock()
+	store.schedules[testTenantStr+":"+schedID] = &fakeScheduleRow{
+		tenantID:     testTenantStr,
+		id:           schedID,
+		name:         "due",
+		cron:         "*/5 * * * *",
+		workflowName: "wf",
+		input:        []byte(`{}`),
+		enabled:      true,
+		nextRunAt:    &nextRunAt,
+		createdAt:    clock.now,
+		updatedAt:    clock.now,
+	}
+	// Set exec error so the UPDATE after trigger fails.
+	store.forceExecErr = 1
+	store.mu.Unlock()
+
+	schedulesDue, workflowsStarted, workflowsFailed := p.runDueSchedules(context.Background())
+	// Schedule is due and workflow starts, but update fails
+	if schedulesDue != 1 {
+		t.Errorf("expected 1 due schedule, got %d", schedulesDue)
+	}
+	if workflowsStarted != 1 {
+		t.Errorf("expected 1 workflow started, got %d", workflowsStarted)
+	}
+	if workflowsFailed != 0 {
+		t.Errorf("expected 0 workflow failures, got %d", workflowsFailed)
+	}
+}
+
+// ===========================================================================
+// Test: runDueSchedules rows.Err() error
+// ===========================================================================
+
+func TestRunDueSchedules_RowsErr(t *testing.T) {
+	store := newFakeDBStore()
+	store.now = func() time.Time {
+		return time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	}
+
+	db := sql.OpenDB(&rowsErrConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.Default(),
+		env: &plugin.Environment{DB: db},
+	}
+
+	// Should not panic — rows.Err() is logged but not returned.
+	due, started, failed := p.runDueSchedules(context.Background())
+	if due != 0 {
+		t.Errorf("expected 0 due, got %d", due)
+	}
+	if started != 0 {
+		t.Errorf("expected 0 started, got %d", started)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed, got %d", failed)
+	}
+}
+
+// ===========================================================================
+// Test: ScheduleUpdate update cron
+// ===========================================================================
+
+func TestScheduleUpdate_Cron(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	createBody := `{"name":"test","cron":"0 9 * * *","workflow_name":"wf"}`
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	schedID := created["id"].(string)
+
+	// Update cron only.
+	updateBody := `{"cron":"0 10 * * *"}`
+	req = authedRequest("PUT", "/schedules/"+schedID, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Test: ScheduleUpdate update workflow_name
+// ===========================================================================
+
+func TestScheduleUpdate_WorkflowName(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	createBody := `{"name":"test","cron":"0 9 * * *","workflow_name":"wf"}`
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	schedID := created["id"].(string)
+
+	// Update workflow_name only.
+	updateBody := `{"workflow_name":"new-wf"}`
+	req = authedRequest("PUT", "/schedules/"+schedID, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Test: ScheduleUpdate update input
+// ===========================================================================
+
+func TestScheduleUpdate_Input(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	createBody := `{"name":"test","cron":"0 9 * * *","workflow_name":"wf"}`
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	schedID := created["id"].(string)
+
+	// Update input only.
+	updateBody := `{"input":{"key":"new-value"}}`
+	req = authedRequest("PUT", "/schedules/"+schedID, bytes.NewReader([]byte(updateBody)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

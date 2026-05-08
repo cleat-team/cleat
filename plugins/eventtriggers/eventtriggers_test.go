@@ -886,3 +886,18 @@ func TestFilterParseTrailing(t *testing.T) {
 		t.Error("expected error for trailing tokens")
 	}
 }
+
+// TestExprMarkerTrueExpr verifies the trueExpr marker method.
+func TestExprMarkerTrueExpr(t *testing.T) {
+	trueExpr{}.exprMarker()
+}
+
+// TestExprMarkerComparisonExpr verifies the comparisonExpr marker method.
+func TestExprMarkerComparisonExpr(t *testing.T) {
+	comparisonExpr{}.exprMarker()
+}
+
+// TestExprMarkerMembershipExpr verifies the membershipExpr marker method.
+func TestExprMarkerMembershipExpr(t *testing.T) {
+	membershipExpr{}.exprMarker()
+}

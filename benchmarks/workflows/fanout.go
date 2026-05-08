@@ -1,7 +1,7 @@
 package workflows
 
 import (
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // FanOutInput configures the fan-out workflow.

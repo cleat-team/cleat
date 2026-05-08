@@ -2,8 +2,14 @@ package pagerdutyalert
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rcownie/cleat/internal/plugin"
@@ -178,6 +184,21 @@ func (m *mockRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) e
 	return nil
 }
 
+// callCountRegistry fails Register on the Nth call (1-indexed).
+type callCountRegistry struct {
+	count  int
+	failOn int
+	err    error
+}
+
+func (r *callCountRegistry) Register(_ plugin.FuncOptions, _ plugin.PluginFunc) error {
+	r.count++
+	if r.count >= r.failOn {
+		return r.err
+	}
+	return nil
+}
+
 // ---- helpers ----
 
 func contains(s, substr string) bool {
@@ -191,4 +212,119 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Health test — minimal fake SQL driver returning COUNT(*) = 1
+// ---------------------------------------------------------------------------
+
+type healthFakeConn struct{}
+
+func (*healthFakeConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("healthFakeConn: unexpected Prepare")
+}
+func (*healthFakeConn) Close() error                                     { return nil }
+func (*healthFakeConn) Begin() (driver.Tx, error)                        { return nil, fmt.Errorf("healthFakeConn: no tx") }
+
+func (c *healthFakeConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
+	return &healthFakeRows{}, nil
+}
+
+var _ driver.QueryerContext = (*healthFakeConn)(nil)
+
+type healthFakeRows struct{ pos int }
+
+func (r *healthFakeRows) Columns() []string { return []string{"count"} }
+func (r *healthFakeRows) Close() error      { return nil }
+func (r *healthFakeRows) Next(dest []driver.Value) error {
+	if r.pos > 0 {
+		return io.EOF
+	}
+	r.pos++
+	dest[0] = int64(1)
+	return nil
+}
+
+type healthFakeConnector struct{}
+
+func (*healthFakeConnector) Connect(_ context.Context) (driver.Conn, error) { return &healthFakeConn{}, nil }
+func (*healthFakeConnector) Driver() driver.Driver                          { return &healthFakeDrv{} }
+
+type healthFakeDrv struct{}
+
+func (*healthFakeDrv) Open(_ string) (driver.Conn, error) { return nil, fmt.Errorf("use sql.OpenDB") }
+
+func TestInitWithEnvLogger(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.Default(),
+	}
+	err := p.Init(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if p.httpClient == nil {
+		t.Error("expected httpClient to be set")
+	}
+	if p.logger == nil {
+		t.Error("expected logger to be set after Init")
+	}
+}
+
+func TestRegisterHostFunctionsSecondError(t *testing.T) {
+	p := &Plugin{}
+	scope := &callCountRegistry{failOn: 2, err: fmt.Errorf("second register failed")}
+	err := p.RegisterHostFunctions(scope)
+	if err == nil {
+		t.Fatal("expected error from second register call")
+	}
+	if !strings.Contains(err.Error(), "second register failed") {
+		t.Errorf("expected 'second register failed', got: %v", err)
+	}
+}
+
+func TestHealthSuccess(t *testing.T) {
+	fakeDB := sql.OpenDB(&healthFakeConnector{})
+	defer fakeDB.Close()
+
+	p := &Plugin{db: fakeDB, logger: slog.Default()}
+	err := p.Health()
+	if err != nil {
+		t.Errorf("Health() returned unexpected error: %v", err)
+	}
+}
+
+type healthErrorFakeConn struct{}
+
+func (*healthErrorFakeConn) Prepare(_ string) (driver.Stmt, error) { return nil, fmt.Errorf("unexpected Prepare") }
+func (*healthErrorFakeConn) Close() error                          { return nil }
+func (*healthErrorFakeConn) Begin() (driver.Tx, error)             { return nil, fmt.Errorf("no tx") }
+
+func (c *healthErrorFakeConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
+	return nil, fmt.Errorf("db connection failed")
+}
+
+var _ driver.QueryerContext = (*healthErrorFakeConn)(nil)
+
+type healthErrorFakeConnector struct{}
+
+func (*healthErrorFakeConnector) Connect(_ context.Context) (driver.Conn, error) { return &healthErrorFakeConn{}, nil }
+func (*healthErrorFakeConnector) Driver() driver.Driver                          { return &healthErrorFakeDrv{} }
+
+type healthErrorFakeDrv struct{}
+
+func (*healthErrorFakeDrv) Open(_ string) (driver.Conn, error) { return nil, fmt.Errorf("use sql.OpenDB") }
+
+func TestHealthDBError(t *testing.T) {
+	fakeDB := sql.OpenDB(&healthErrorFakeConnector{})
+	defer fakeDB.Close()
+
+	p := &Plugin{db: fakeDB, logger: slog.Default()}
+	err := p.Health()
+	if err == nil {
+		t.Fatal("expected error from Health() with failing DB")
+	}
+	if !strings.Contains(err.Error(), "health check") {
+		t.Errorf("expected health check error, got: %v", err)
+	}
 }

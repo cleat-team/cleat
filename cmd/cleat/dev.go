@@ -135,7 +135,7 @@ func generateDevMain(result *analyzer.AnalysisResult, funcName string, params []
 		buf.WriteString("\t\"time\"\n")
 	}
 	buf.WriteString("\n")
-	buf.WriteString("\t\"github.com/rcownie/cleat/durable/localdev\"\n")
+	buf.WriteString("\t\"github.com/rcownie/cleat/cleat/localdev\"\n")
 	fmt.Fprintf(&buf, "\t%q\n", pkgPath)
 	buf.WriteString(")\n\n")
 

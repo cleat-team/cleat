@@ -17,7 +17,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rcownie/cleat/durable/ai/llm"
+	"github.com/rcownie/cleat/cleat/ai/llm"
 )
 
 // AgentConfig configures the agent loop.

@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 

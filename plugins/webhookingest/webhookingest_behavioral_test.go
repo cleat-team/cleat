@@ -62,10 +62,13 @@ type fakeDBStore struct {
 	sources []webhookSourceRow
 	events  []webhookEventRow
 	apiKeys map[string]string // key_hash_hex -> tenant_id
-	failNextQuery bool
-	failNextExec  bool
-	querySkip     int
-	execSkip      int
+	failNextQuery    bool
+	failNextExec     bool
+	querySkip        int
+	execSkip         int
+	corruptNextScan  bool
+	corruptScanSkip  int
+	failNextRowsErr  bool
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -155,10 +158,26 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	if failed {
 		c.store.failNextQuery = false
 	}
+	corrupt := c.store.corruptNextScan
+	if corrupt && c.store.corruptScanSkip > 0 {
+		c.store.corruptScanSkip--
+		corrupt = false
+	}
+	if corrupt {
+		c.store.corruptNextScan = false
+	}
+	failRowsErr := c.store.failNextRowsErr
+	if failRowsErr {
+		c.store.failNextRowsErr = false
+	}
 	c.store.mu.Unlock()
 
 	if failed {
 		return nil, fmt.Errorf("simulated query error")
+	}
+
+	if failRowsErr {
+		return &rowsErrFakeRows{}, nil
 	}
 
 	switch {
@@ -179,11 +198,11 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		}
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
-		return c.queryListSources(args)
+		return c.queryListSources(args, corrupt)
 	case strings.Contains(query, "SELECT id, source_id, tenant_id, event_type, headers, payload, received_at, processed"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
-		return c.queryListEvents(query, args)
+		return c.queryListEvents(query, args, corrupt)
 	case strings.Contains(query, "SELECT id, event_type, payload, received_at"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
@@ -191,7 +210,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	case strings.Contains(query, "SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
-		return c.queryProcessBatch(args)
+		return c.queryProcessBatch(args, corrupt)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Query query: %s", query)
 	}
@@ -398,7 +417,7 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 	}, nil
 }
 
-func (c *fakeConn) queryListSources(args []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) queryListSources(args []driver.NamedValue, corrupt bool) (driver.Rows, error) {
 	tid, err := argString(args, 1)
 	if err != nil {
 		return nil, err
@@ -413,10 +432,14 @@ func (c *fakeConn) queryListSources(args []driver.NamedValue) (driver.Rows, erro
 
 	columns := []string{"id", "tenant_id", "name", "source_type", "secret", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}
 	var data [][]driver.Value
-	for _, s := range results {
+	for i, s := range results {
+		enabled := driver.Value(s.enabled)
+		if corrupt && i == 0 {
+			enabled = "not-a-bool"
+		}
 		data = append(data, []driver.Value{
 			s.id, s.tenantID, s.name, s.sourceType, s.secret,
-			s.enabled, s.signalWorkflowID, s.signalName,
+			enabled, s.signalWorkflowID, s.signalName,
 			s.createdAt, s.updatedAt,
 		})
 	}
@@ -469,7 +492,7 @@ func (c *fakeConn) queryGetSource(args []driver.NamedValue) (driver.Rows, error)
 	return &fakeRows{columns: []string{"id", "tenant_id", "name", "source_type", "secret", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}}, nil
 }
 
-func (c *fakeConn) queryListEvents(query string, args []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) queryListEvents(query string, args []driver.NamedValue, corrupt bool) (driver.Rows, error) {
 	tid, err := argString(args, 1)
 	if err != nil {
 		return nil, err
@@ -555,7 +578,7 @@ func (c *fakeConn) queryListEvents(query string, args []driver.NamedValue) (driv
 		}
 	}
 
-	rows, err := c.buildEventRows(results)
+	rows, err := c.buildEventRows(results, corrupt)
 	if err != nil {
 		return nil, err
 	}
@@ -630,7 +653,7 @@ func (c *fakeConn) queryAwaitEvents(query string, args []driver.NamedValue) (dri
 	return &fakeRows{columns: columns, data: data}, nil
 }
 
-func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue, corrupt bool) (driver.Rows, error) {
 	// Find unprocessed events older than ~10 seconds.
 	var results []webhookEventRow
 	cutoff := time.Now().Add(-10 * time.Second)
@@ -656,7 +679,7 @@ func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue) (driver.Rows, error)
 
 	columns := []string{"id", "source_id", "event_type", "payload", "received_at", "signal_workflow_id", "signal_name", "retry_count"}
 	var data [][]driver.Value
-	for _, e := range results {
+	for i, e := range results {
 		// Find the source for this event.
 		signalWorkflowID := ""
 		signalName := "webhook_received"
@@ -671,21 +694,29 @@ func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue) (driver.Rows, error)
 			}
 		}
 
+		retryCountVal := driver.Value(int64(e.retryCount))
+		if corrupt && i == 0 {
+			retryCountVal = "not-an-int"
+		}
 		data = append(data, []driver.Value{
 			e.id, e.sourceID, e.eventType, []byte(e.payload), e.receivedAt,
-			signalWorkflowID, signalName, int64(e.retryCount),
+			signalWorkflowID, signalName, retryCountVal,
 		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil
 }
 
-func (c *fakeConn) buildEventRows(events []webhookEventRow) (driver.Rows, error) {
+func (c *fakeConn) buildEventRows(events []webhookEventRow, corrupt bool) (driver.Rows, error) {
 	columns := []string{"id", "source_id", "tenant_id", "event_type", "headers", "payload", "received_at", "processed"}
 	var data [][]driver.Value
-	for _, e := range events {
+	for i, e := range events {
+		processed := driver.Value(e.processed)
+		if corrupt && i == 0 {
+			processed = "not-a-bool"
+		}
 		data = append(data, []driver.Value{
 			e.id, e.sourceID, e.tenantID, e.eventType,
-			[]byte(e.headers), []byte(e.payload), e.receivedAt, e.processed,
+			[]byte(e.headers), []byte(e.payload), e.receivedAt, processed,
 		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil
@@ -854,6 +885,48 @@ func (r *fakeFuncRegistry) Has(name string) bool {
 	_, ok := r.funcs[name]
 	return ok
 }
+
+// errReadCloser simulates an io.ReadCloser that fails on Read.
+type errReadCloser struct{}
+
+func (*errReadCloser) Read(_ []byte) (int, error) { return 0, fmt.Errorf("simulated read error") }
+func (*errReadCloser) Close() error               { return nil }
+
+// rowsErrFakeRows returns a non-EOF error from Next() and non-nil from Err().
+type rowsErrFakeRows struct{ pos int }
+
+func (*rowsErrFakeRows) Columns() []string { return []string{"id"} }
+func (*rowsErrFakeRows) Close() error      { return nil }
+func (r *rowsErrFakeRows) Next(_ []driver.Value) error {
+	if r.pos > 0 {
+		return io.EOF
+	}
+	r.pos++
+	return fmt.Errorf("simulated rows iteration error")
+}
+func (*rowsErrFakeRows) Err() error { return fmt.Errorf("simulated rows iteration error") }
+
+type rowsErrConnector struct{ store *fakeDBStore }
+
+func (c *rowsErrConnector) Connect(_ context.Context) (driver.Conn, error) { return &rowsErrConn{store: c.store}, nil }
+func (c *rowsErrConnector) Driver() driver.Driver { return &rowsErrDrv{} }
+
+type rowsErrConn struct{ store *fakeDBStore }
+
+func (*rowsErrConn) Prepare(_ string) (driver.Stmt, error) { return nil, fmt.Errorf("rowsErrConn: unexpected Prepare") }
+func (*rowsErrConn) Close() error                           { return nil }
+func (*rowsErrConn) Begin() (driver.Tx, error)              { return nil, fmt.Errorf("rowsErrConn: no tx") }
+func (c *rowsErrConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	// For processBatch query, return rows that fail with rows.Err().
+	if strings.Contains(query, "SELECT e.id, e.source_id, e.event_type") {
+		return &rowsErrFakeRows{}, nil
+	}
+	return nil, fmt.Errorf("rowsErrConn: unexpected query: %s", query)
+}
+
+type rowsErrDrv struct{}
+
+func (*rowsErrDrv) Open(_ string) (driver.Conn, error) { return nil, fmt.Errorf("use sql.OpenDB") }
 
 // ===========================================================================
 // RegisterHostFunctions
@@ -2568,4 +2641,498 @@ func TestWH_RegisterHostFunctions_RegisterError(t *testing.T) {
 	if !strings.Contains(err.Error(), "simulated register error") {
 		t.Errorf("expected 'simulated register error', got: %v", err)
 	}
+}
+
+// ===========================================================================
+// Ingest body read error
+// ===========================================================================
+
+func TestWH_Ingest_BodyReadError(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:         sourceID.String(),
+		tenantID:   testTenantStr,
+		name:       "test",
+		sourceType: "generic",
+		enabled:    true,
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.Middleware(db)(mux)
+
+	// Send request with a body that fails on Read.
+	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), &errReadCloser{})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for body read error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// CreateSource body read error
+// ===========================================================================
+
+func TestWH_CreateSource_BodyReadError(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	// Send request with a body that fails on Read.
+	req := authedRequest("POST", "/ingest/sources", &errReadCloser{})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for body read error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Ingest with SignalWorkflow error
+// ===========================================================================
+
+func TestWH_Ingest_SignalWorkflowError(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:               sourceID.String(),
+		tenantID:         testTenantStr,
+		name:             "signal-source",
+		sourceType:       "generic",
+		enabled:          true,
+		signalWorkflowID: "wf-signal-error",
+		signalName:       "my_signal",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		env: &plugin.Environment{
+			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
+				return fmt.Errorf("simulated signal failure")
+			},
+		},
+	}
+
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.Middleware(db)(mux)
+
+	// Ingest a payload.
+	payload := `{"action":"test"}`
+	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(payload)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	// Should still return 201 even though signal delivery fails.
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 even with signal error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Ingest with empty signal name (should default to webhook_received)
+// ===========================================================================
+
+func TestWH_Ingest_EmptySignalName(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:               sourceID.String(),
+		tenantID:         testTenantStr,
+		name:             "empty-signal-source",
+		sourceType:       "generic",
+		enabled:          true,
+		signalWorkflowID: "wf-empty-signal",
+		signalName:       "",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	signalNameCh := make(chan string, 1)
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		env: &plugin.Environment{
+			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
+				signalNameCh <- signalName
+				return nil
+			},
+		},
+	}
+
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.Middleware(db)(mux)
+
+	// Ingest a payload.
+	payload := `{"action":"test"}`
+	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(payload)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify signal name defaulted to "webhook_received".
+	select {
+	case signalName := <-signalNameCh:
+		if signalName != "webhook_received" {
+			t.Errorf("expected signal name 'webhook_received', got %s", signalName)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for signal delivery")
+	}
+}
+
+// ===========================================================================
+// Ingest with non-JSON body and signal delivery
+// ===========================================================================
+
+func TestWH_Ingest_NonJSONBodyWithSignal(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:               sourceID.String(),
+		tenantID:         testTenantStr,
+		name:             "nonjson-signal-source",
+		sourceType:       "generic",
+		enabled:          true,
+		signalWorkflowID: "wf-nonjson",
+		signalName:       "my_signal",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	signalPayloadCh := make(chan string, 1)
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		env: &plugin.Environment{
+			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
+				signalPayloadCh <- signalName + "|" + payload
+				return nil
+			},
+		},
+	}
+
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.Middleware(db)(mux)
+
+	// Ingest a non-JSON plain text body.
+	rawText := "plain text body"
+	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(rawText)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify signal was delivered.
+	select {
+	case payload := <-signalPayloadCh:
+		if !strings.Contains(payload, "plain text body") {
+			t.Errorf("expected signal to contain body text, got: %s", payload)
+		}
+		// The signal name should be "my_signal"
+		if !strings.HasPrefix(payload, "my_signal|") {
+			t.Errorf("expected signal name 'my_signal', got prefix: %s", payload)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for signal delivery")
+	}
+}
+
+// ===========================================================================
+// AwaitWebhook query DB error
+// ===========================================================================
+
+func TestWH_AwaitWebhook_QueryError(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	// Add an event so the query doesn't return ErrNoRows.
+	eventID := uuid.New()
+	store.events = append(store.events, webhookEventRow{
+		id:        eventID.String(),
+		tenantID:  testTenantStr,
+		eventType: "push",
+		payload:   `{"ref":"main"}`,
+		processed: false,
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	// Set fail flag for the next query (the events query in awaitWebhook).
+	store.mu.Lock()
+	store.failNextQuery = true
+	store.mu.Unlock()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	ctx := plugin.WithCallContext(context.Background(), callCtx)
+
+	input, _ := json.Marshal(map[string]interface{}{
+		"source_id": uuid.New().String(),
+	})
+	_, err := p.awaitWebhook(ctx, string(input))
+	if err == nil {
+		t.Fatal("expected error from query failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "query events") {
+		t.Errorf("expected error mentioning 'query events', got: %v", err)
+	}
+}
+
+// ===========================================================================
+// AwaitWebhook exec error (mark processed)
+// ===========================================================================
+
+func TestWH_AwaitWebhook_ExecError(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	// Add an event that awaitWebhook will find.
+	eventID := uuid.New()
+	store.events = append(store.events, webhookEventRow{
+		id:        eventID.String(),
+		tenantID:  testTenantStr,
+		eventType: "push",
+		payload:   `{"ref":"main"}`,
+		processed: false,
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	// Set fail flag for the exec (mark processed) after the query succeeds.
+	store.mu.Lock()
+	store.failNextExec = true
+	store.mu.Unlock()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	ctx := plugin.WithCallContext(context.Background(), callCtx)
+
+	input, _ := json.Marshal(map[string]interface{}{
+		"event_type": "push",
+	})
+	output, err := p.awaitWebhook(ctx, string(input))
+	if err != nil {
+		t.Fatalf("expected no error even when exec fails, got: %v", err)
+	}
+	// The event should still be returned even if marking as processed fails.
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("failed to decode output: %v", err)
+	}
+	if result["found"] != true {
+		t.Errorf("expected found=true, got %v", result["found"])
+	}
+}
+
+// ===========================================================================
+// ListEvents empty list (nil to empty slice)
+// ===========================================================================
+
+func TestWH_ListEvents_EmptyList(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	// List events with no events in the store — should return [] not null.
+	req := authedRequest("GET", "/ingest/events", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var events []json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("unmarshal events: %v", err)
+	}
+	if events == nil {
+		t.Error("expected non-nil empty slice, got null")
+	}
+}
+
+// ===========================================================================
+// ListSources scan error (corrupt data)
+// ===========================================================================
+
+func TestWH_ListSources_ScanError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Create a source so there's data to scan.
+	createBody := `{"name":"test-source"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source: expected 201, got %d", rec.Code)
+	}
+
+	// Set corrupt flag to cause scan error on the next list query.
+	store.mu.Lock()
+	store.corruptNextScan = true
+	store.corruptScanSkip = 1 // skip the auth middleware query (tenant lookup)
+	store.mu.Unlock()
+
+	req = authedRequest("GET", "/ingest/sources", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	// Should still return 200 — corrupt row is skipped and logged.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 despite scan error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// ListEvents scan error (corrupt data)
+// ===========================================================================
+
+func TestWH_ListEvents_ScanError(t *testing.T) {
+	_, handler, store := setupTestPlugin(t)
+
+	// Create a source to accept webhook events.
+	createBody := `{"name":"test-source","source_type":"github"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create source: expected 201, got %d", rec.Code)
+	}
+	var created map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	sourceID := created["id"].(string)
+
+	// Ingest a webhook payload to create an event.
+	payload := `{"event":"test"}`
+	req = httptest.NewRequest("POST", "/ingest/"+sourceID, bytes.NewReader([]byte(payload)))
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("ingest: expected 201, got %d", rec.Code)
+	}
+
+	// Set corrupt flag for the events list query.
+	store.mu.Lock()
+	store.corruptNextScan = true
+	store.corruptScanSkip = 1 // skip auth middleware query
+	store.mu.Unlock()
+
+	req = authedRequest("GET", "/ingest/events", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	// Should still return 200 — corrupt row is skipped and logged.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 despite scan error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// ProcessBatch scan error
+// ===========================================================================
+
+func TestWH_ProcessBatch_RowsErr(t *testing.T) {
+	store := newFakeDBStore()
+
+	db := sql.OpenDB(&rowsErrConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Should not panic — rows.Err() is logged but not returned.
+	p.processBatch(context.Background())
+}
+
+// ===========================================================================
+// ProcessBatch corrupt scan error
+// ===========================================================================
+
+func TestWH_ProcessBatch_CorruptScan(t *testing.T) {
+	store := newFakeDBStore()
+
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:               sourceID.String(),
+		tenantID:         testTenantStr,
+		name:             "test",
+		sourceType:       "generic",
+		enabled:          true,
+		signalWorkflowID: "wf-scan-err",
+	})
+
+	// Add an unprocessed event older than 10 seconds.
+	store.events = append(store.events, webhookEventRow{
+		id:         uuid.New().String(),
+		sourceID:   sourceID.String(),
+		tenantID:   testTenantStr,
+		eventType:  "webhook",
+		payload:    `{"test":true}`,
+		receivedAt: time.Now().Add(-30 * time.Second),
+		processed:  false,
+		status:     "pending",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	// Set corrupt flag so the processBatch query returns corrupt data.
+	store.mu.Lock()
+	store.corruptNextScan = true
+	store.mu.Unlock()
+
+	p := &Plugin{
+		db:     db,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	// Should not panic — corrupt row is skipped and logged.
+	p.processBatch(context.Background())
 }

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"go/types"
 	"os"
 	"os/exec"
@@ -1634,5 +1637,221 @@ func TestBuildParams_CancelOrder(t *testing.T) {
 	}
 	if params[0].JSONTag != "orderID" {
 		t.Errorf("expected JSON tag 'orderID', got %q", params[0].JSONTag)
+	}
+}
+
+// ============================================================================
+// main.go — vetJSONOutput
+// ============================================================================
+
+func TestVetJSONOutput(t *testing.T) {
+	result := &analyzer.AnalysisResult{
+		NumFuncs:          5,
+		NumExported:       3,
+		NumDurableLeaves:  2,
+		NumDurableClosure: 3,
+		NumPure:           1,
+	}
+
+	cr := &closure.Result{
+		DurableLeaves:  map[string]bool{"pkg.F1": true},
+		DurableClosure: map[string]bool{"pkg.F2": true},
+		Errors: map[string][]closure.ValidationError{
+			"pkg.F1": {
+				{Code: "E001", FuncName: "pkg.F1", Message: "test error", Line: 10, Suggestion: "fix it"},
+			},
+		},
+		Warnings: map[string][]closure.ValidationWarning{
+			"pkg.F2": {
+				{Code: "W001", FuncName: "pkg.F2", Message: "test warning", Line: 20},
+			},
+		},
+	}
+
+	threadingErrs := []closure.ThreadingError{
+		{FuncName: "pkg.F3", Message: "missing HostCalls", Line: 30, Chain: []string{"F1", "F2"}},
+	}
+
+	out := vetJSONOutput(result, cr, threadingErrs)
+
+	if len(out.Errors) != 2 {
+		t.Errorf("expected 2 errors (1 threading + 1 validation), got %d: %+v", len(out.Errors), out.Errors)
+	}
+
+	if len(out.Warnings) != 1 {
+		t.Errorf("expected 1 warning, got %d: %+v", len(out.Warnings), out.Warnings)
+	}
+
+	if out.Summary.Functions != 5 {
+		t.Errorf("expected Functions=5, got %d", out.Summary.Functions)
+	}
+	if out.Summary.DurableLeaves != 2 {
+		t.Errorf("expected DurableLeaves=2, got %d", out.Summary.DurableLeaves)
+	}
+	if out.Summary.DurableClosure != 3 {
+		t.Errorf("expected DurableClosure=3, got %d", out.Summary.DurableClosure)
+	}
+	if out.Summary.Pure != 1 {
+		t.Errorf("expected Pure=1, got %d", out.Summary.Pure)
+	}
+}
+
+// ============================================================================
+// main.go — lookupFile
+// ============================================================================
+
+func TestLookupFile(t *testing.T) {
+	fset := token.NewFileSet()
+	tmpFile := filepath.Join(t.TempDir(), "workflow.go")
+	content := "package test\nfunc F() {}\n"
+	if err := os.WriteFile(tmpFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := parser.ParseFile(fset, tmpFile, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var funcDecl *ast.FuncDecl
+	for _, decl := range f.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok {
+			funcDecl = fd
+			break
+		}
+	}
+	if funcDecl == nil {
+		t.Fatal("no FuncDecl found in parsed file")
+	}
+
+	result := &analyzer.AnalysisResult{
+		Funcs: map[string]*analyzer.FuncDecl{
+			"pkg.F": {
+				Pkg: &analyzer.Package{
+					Fset: fset,
+				},
+				Ast: funcDecl,
+			},
+		},
+	}
+
+	got := lookupFile(result, "pkg.F")
+	if got != "workflow.go" {
+		t.Errorf("lookupFile = %q, want %q", got, "workflow.go")
+	}
+
+	if got := lookupFile(result, "pkg.Unknown"); got != "" {
+		t.Errorf("expected empty for unknown func, got %q", got)
+	}
+
+	resultNoPkg := &analyzer.AnalysisResult{
+		Funcs: map[string]*analyzer.FuncDecl{
+			"pkg.G": {
+				Pkg: nil,
+				Ast: funcDecl,
+			},
+		},
+	}
+	if got := lookupFile(resultNoPkg, "pkg.G"); got != "" {
+		t.Errorf("expected empty when Pkg is nil, got %q", got)
+	}
+}
+
+// ============================================================================
+// init.go — scaffoldAgent
+// ============================================================================
+
+func TestScaffoldAgent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "my-agent")
+	scaffoldAgent(dir)
+
+	expectedFiles := []string{
+		"workflow.go",
+		"tools.go",
+		"docker-compose.yml",
+		"README.md",
+		"cleat.yaml",
+	}
+	for _, f := range expectedFiles {
+		path := filepath.Join(dir, f)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("expected %s to be created by scaffoldAgent", f)
+		} else {
+			data, _ := os.ReadFile(path)
+			if len(data) == 0 {
+				t.Errorf("%s is empty", f)
+			}
+		}
+	}
+
+	yamlPath := filepath.Join(dir, "cleat.yaml")
+	data, err := os.ReadFile(yamlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "my-agent") {
+		t.Errorf("expected 'my-agent' in cleat.yaml, got %q", string(data))
+	}
+}
+
+// ============================================================================
+// dag.go — readSpec
+// ============================================================================
+
+func TestReadSpec(t *testing.T) {
+	t.Run("valid spec", func(t *testing.T) {
+		dir := t.TempDir()
+		specPath := filepath.Join(dir, "spec.json")
+		content := `{"name":"test-flow","tasks":[{"name":"task1","fn":"task1Func"}]}`
+		if err := os.WriteFile(specPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		spec, err := readSpec(specPath)
+		if err != nil {
+			t.Fatalf("readSpec: %v", err)
+		}
+		if spec.Name != "test-flow" {
+			t.Errorf("spec.Name = %q, want %q", spec.Name, "test-flow")
+		}
+		if len(spec.Tasks) != 1 {
+			t.Errorf("expected 1 task, got %d", len(spec.Tasks))
+		}
+		if spec.Tasks[0].Name != "task1" {
+			t.Errorf("task[0].Name = %q, want %q", spec.Tasks[0].Name, "task1")
+		}
+	})
+
+	t.Run("nonexistent file", func(t *testing.T) {
+		_, err := readSpec("/nonexistent/spec-12345.json")
+		if err == nil {
+			t.Fatal("expected error for nonexistent file")
+		}
+	})
+
+	t.Run("invalid JSON", func(t *testing.T) {
+		dir := t.TempDir()
+		specPath := filepath.Join(dir, "bad.json")
+		if err := os.WriteFile(specPath, []byte("{bad json}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := readSpec(specPath)
+		if err == nil {
+			t.Fatal("expected error for invalid JSON")
+		}
+	})
+}
+
+// ============================================================================
+// dag.go — mustMarshalJSON error path
+// ============================================================================
+
+func TestMustMarshalJSON_Error(t *testing.T) {
+	_, err := mustMarshalJSON(make(chan int))
+	if err == nil {
+		t.Fatal("expected error for unmarshalable type (chan)")
+	}
+	if !strings.Contains(err.Error(), "dag:") {
+		t.Errorf("expected error to contain 'dag:', got %v", err)
 	}
 }

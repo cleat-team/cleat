@@ -1,7 +1,7 @@
 package no_errors
 
 import (
-	"github.com/rcownie/cleat/durable"
+	"github.com/rcownie/cleat/cleat"
 )
 
 // Workflow is a clean workflow with no forbidden patterns.
