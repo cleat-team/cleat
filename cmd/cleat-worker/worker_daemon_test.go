@@ -84,6 +84,11 @@ type mockStore struct {
 	purgeWorkflowDefFn                func(ctx context.Context, name string, version int) error
 	countActiveInstancesFn            func(ctx context.Context, name string, version int) (int, error)
 	getActiveInstanceCountsByVersionFn func(ctx context.Context) (map[string]int, error)
+	cleanupMemorySamplesFn             func(ctx context.Context, maxSamplesPerDef int) (int64, error)
+	recordWorkflowMemorySampleFn       func(ctx context.Context, defName string, sampleBytes int64) error
+	loadMemoryEstimatesFn              func(ctx context.Context) (map[string]float64, error)
+	loadMemoryStatsFn                  func(ctx context.Context) ([]host.WorkflowMemoryStats, error)
+	queueDepthFn                       func(ctx context.Context) (int64, error)
 }
 
 func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error) {
@@ -488,11 +493,40 @@ func (m *mockStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[s
 	return nil, nil
 }
 
-func (m *mockStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error { return nil }
-func (m *mockStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) { return nil, nil }
-func (m *mockStore) LoadMemoryStats(ctx context.Context) ([]host.WorkflowMemoryStats, error) { return nil, nil }
-func (m *mockStore) QueueDepth(ctx context.Context) (int64, error) { return 0, nil }
-func (m *mockStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
+func (m *mockStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
+	if m.cleanupMemorySamplesFn != nil {
+		return m.cleanupMemorySamplesFn(ctx, maxSamplesPerDef)
+	}
+	return 0, nil
+}
+
+func (m *mockStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error {
+	if m.recordWorkflowMemorySampleFn != nil {
+		return m.recordWorkflowMemorySampleFn(ctx, defName, sampleBytes)
+	}
+	return nil
+}
+
+func (m *mockStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
+	if m.loadMemoryEstimatesFn != nil {
+		return m.loadMemoryEstimatesFn(ctx)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) LoadMemoryStats(ctx context.Context) ([]host.WorkflowMemoryStats, error) {
+	if m.loadMemoryStatsFn != nil {
+		return m.loadMemoryStatsFn(ctx)
+	}
+	return nil, nil
+}
+
+func (m *mockStore) QueueDepth(ctx context.Context) (int64, error) {
+	if m.queueDepthFn != nil {
+		return m.queueDepthFn(ctx)
+	}
+	return 0, nil
+}
 
 // ---- test helpers ----
 

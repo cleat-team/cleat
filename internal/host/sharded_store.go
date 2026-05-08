@@ -851,6 +851,98 @@ func (s *ShardedStore) GetActiveInstanceCountsByVersion(ctx context.Context) (ma
 	return result, err
 }
 
+// CleanupMemorySamples deletes samples beyond maxSamplesPerDef on all shards.
+func (s *ShardedStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
+	var total int64
+	err := s.forEachShard(func(store *PostgresStore) error {
+		n, err := store.CleanupMemorySamples(ctx, maxSamplesPerDef)
+		if err != nil {
+			return err
+		}
+		total += n
+		return nil
+	})
+	return total, err
+}
+
+// RecordWorkflowMemorySample delegates to the appropriate shard.
+func (s *ShardedStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error {
+	shard := s.getShard(defName)
+	if shard == nil {
+		return fmt.Errorf("record_workflow_memory_sample: no shard available")
+	}
+	return shard.Store.RecordWorkflowMemorySample(ctx, defName, sampleBytes)
+}
+
+// LoadMemoryEstimates gathers memory estimates from all shards.
+func (s *ShardedStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
+	result := make(map[string]float64)
+	err := s.forEachShard(func(store *PostgresStore) error {
+		estimates, err := store.LoadMemoryEstimates(ctx)
+		if err != nil {
+			return err
+		}
+		for k, v := range estimates {
+			if existing, ok := result[k]; ok {
+				result[k] = (existing + v) / 2
+			} else {
+				result[k] = v
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// LoadMemoryStats gathers memory stats from all shards.
+func (s *ShardedStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error) {
+	combined := make(map[string]*WorkflowMemoryStats)
+	err := s.forEachShard(func(store *PostgresStore) error {
+		stats, err := store.LoadMemoryStats(ctx)
+		if err != nil {
+			return err
+		}
+		for _, stat := range stats {
+			if existing, ok := combined[stat.DefName]; ok {
+				if stat.MinBytes < existing.MinBytes {
+					existing.MinBytes = stat.MinBytes
+				}
+				if stat.MaxBytes > existing.MaxBytes {
+					existing.MaxBytes = stat.MaxBytes
+				}
+				existing.AvgBytes = (existing.AvgBytes*float64(existing.SampleCount) + stat.AvgBytes*float64(stat.SampleCount)) / float64(existing.SampleCount+stat.SampleCount)
+				existing.SampleCount += stat.SampleCount
+			} else {
+				cp := stat
+				combined[stat.DefName] = &cp
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]WorkflowMemoryStats, 0, len(combined))
+	for _, v := range combined {
+		result = append(result, *v)
+	}
+	return result, nil
+}
+
+// QueueDepth returns the sum of ready workflow counts across all shards.
+func (s *ShardedStore) QueueDepth(ctx context.Context) (int64, error) {
+	var total int64
+	err := s.forEachShard(func(store *PostgresStore) error {
+		n, err := store.QueueDepth(ctx)
+		if err != nil {
+			return err
+		}
+		total += n
+		return nil
+	})
+	return total, err
+}
+
 // ResolveLatestVersion delegates to the shard determined by the workflow name.
 func (s *ShardedStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) {
 	shard := s.getShard(defName)
