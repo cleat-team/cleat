@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -799,11 +801,36 @@ func (c *sbConn) execUpdateConfig(q string, args []driver.NamedValue) (driver.Re
 			return &sbResult{n: 0}, nil
 		}
 		configID, _ := sbArgS(args, n-1)
-		_, ok := c.db.configs[configID]
+		row, ok := c.db.configs[configID]
 		if !ok {
 			return &sbResult{n: 0}, nil
 		}
-		c.db.configs[configID].updatedAt = time.Now()
+
+		// Parse next_run_at = $N from the query (enabled/cron change path)
+		nextRe := regexp.MustCompile(`next_run_at\s*=\s*\$(\d+)`)
+		if m := nextRe.FindStringSubmatch(q); len(m) >= 2 {
+			if ordinal, err := strconv.Atoi(m[1]); err == nil {
+				if val, err := sbArgAny(args, ordinal); err == nil {
+					if t, ok := val.(time.Time); ok {
+						row.nextRunAt = &t
+					}
+				}
+			}
+		}
+
+		// Parse enabled = $N from the query
+		enabledRe := regexp.MustCompile(`enabled\s*=\s*\$(\d+)`)
+		if m := enabledRe.FindStringSubmatch(q); len(m) >= 2 {
+			if ordinal, err := strconv.Atoi(m[1]); err == nil {
+				if val, err := sbArgAny(args, ordinal); err == nil {
+					if b, ok := val.(bool); ok {
+						row.enabled = b
+					}
+				}
+			}
+		}
+
+		row.updatedAt = time.Now()
 		return &sbResult{n: 1}, nil
 	}
 }
@@ -2479,4 +2506,158 @@ func TestSB_DBError_RunBackup_Fetch(t *testing.T) {
 	if rec.Code != 500 {
 		t.Errorf("run backup fetch error: want 500, got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+// =========================================================================
+// UpdateConfig edge: s3_bucket, s3_prefix, retention_days
+// =========================================================================
+
+func TestSB_UpdateConfig_WithS3Fields(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
+	cfgID := "00000000-0000-0000-0000-000000000551"
+	fdb.mu.Lock()
+	fdb.configs[cfgID] = &sbConfigRow{
+		id: cfgID, tenantID: tid, name: "s3-fields", cron: "0 9 * * *",
+		s3Bucket: "old-bucket", s3Prefix: "old/prefix/", retentionDays: 7, enabled: true,
+		createdAt: time.Now(), updatedAt: time.Now(),
+	}
+	fdb.mu.Unlock()
+
+	body := `{"s3_bucket":"new-bucket","s3_prefix":"new/prefix/","retention_days":14}`
+	rec := httptest.NewRecorder()
+	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("update s3 fields: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var m map[string]string
+	sbReadJSON(t, rec, &m)
+	if m["status"] != "updated" {
+		t.Errorf("want status 'updated', got %q", m["status"])
+	}
+}
+
+// =========================================================================
+// ListHistory edge: query error path + completed_at/error_message
+// =========================================================================
+
+func TestSB_ListHistory_QueryError(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	fdb.mu.Lock()
+	fdb.forceQueryErr = 1
+	fdb.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	req := sbRequest(t, "GET", "/backups/history", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Fatalf("list history query error: want 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSB_ListHistory_WithNullableFields(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
+	now := time.Now()
+	completed := now.Add(-time.Hour)
+	sz := int64(2048)
+	hID1 := "00000000-0000-0000-0000-000000000a01"
+	hID2 := "00000000-0000-0000-0000-000000000a02"
+	hID3 := "00000000-0000-0000-0000-000000000a03"
+	cfgID := "00000000-0000-0000-0000-000000000999"
+
+	fdb.mu.Lock()
+	fdb.history[hID1] = &sbHistoryRow{
+		id: hID1, configID: cfgID, tenantID: tid,
+		filename: "completed_err.dump", status: "failed",
+		sizeBytes: &sz, startedAt: now, createdAt: now,
+		completedAt: &completed, errorMessage: strPtr("disk full"),
+	}
+	fdb.history[hID2] = &sbHistoryRow{
+		id: hID2, configID: cfgID, tenantID: tid,
+		filename: "completed_ok.dump", status: "completed",
+		sizeBytes: &sz, startedAt: now, createdAt: now,
+		completedAt: &completed,
+	}
+	fdb.history[hID3] = &sbHistoryRow{
+		id: hID3, configID: cfgID, tenantID: tid,
+		filename: "running.dump", status: "running",
+		startedAt: now, createdAt: now,
+	}
+	fdb.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	req := sbRequest(t, "GET", "/backups/history", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("list history: want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var result []map[string]interface{}
+	sbReadJSON(t, rec, &result)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 history entries, got %d", len(result))
+	}
+	foundCompleted := false
+	foundError := false
+	for _, entry := range result {
+		if entry["completed_at"] != nil {
+			foundCompleted = true
+		}
+		if entry["error_message"] != nil {
+			foundError = true
+		}
+	}
+	if !foundCompleted {
+		t.Error("expected at least one entry with completed_at set")
+	}
+	if !foundError {
+		t.Error("expected at least one entry with error_message set")
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// =========================================================================
+// updateNextRun ExecContext error path
+// =========================================================================
+
+func TestSB_UpdateNextRun_ExecError(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	cfgID := uuid.MustParse("00000000-0000-0000-0000-000000000553")
+	now := time.Now()
+
+	fdb.mu.Lock()
+	fdb.forceExecErr = 1
+	fdb.mu.Unlock()
+
+	// updateNextRun should log the error but not panic/return error.
+	p.updateNextRun(context.Background(), cfgID, "0 9 * * *", now)
+	// No panic = success.
+}
+
+// =========================================================================
+// runDueBackups query error path
+// =========================================================================
+
+func TestSB_RunDueBackups_QueryError(t *testing.T) {
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+
+	fdb.mu.Lock()
+	fdb.forceQueryErr = 1
+	fdb.mu.Unlock()
+
+	// runDueBackups should log the error but not panic.
+	p.runDueBackups(context.Background())
+	// No panic = success.
 }

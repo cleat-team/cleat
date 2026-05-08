@@ -62,6 +62,10 @@ type fakeDBStore struct {
 	sources []webhookSourceRow
 	events  []webhookEventRow
 	apiKeys map[string]string // key_hash_hex -> tenant_id
+	failNextQuery bool
+	failNextExec  bool
+	querySkip     int
+	execSkip      int
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -111,6 +115,15 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	c.store.mu.Lock()
 	defer c.store.mu.Unlock()
 
+	if c.store.failNextExec {
+		if c.store.execSkip > 0 {
+			c.store.execSkip--
+		} else {
+			c.store.failNextExec = false
+			return nil, fmt.Errorf("simulated exec error")
+		}
+	}
+
 	switch {
 	case strings.Contains(query, "INSERT INTO webhook_sources"):
 		return c.execInsertSource(args)
@@ -132,6 +145,22 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 // --- QueryContext ---
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	// Check fail flag under write lock, then proceed.
+	c.store.mu.Lock()
+	failed := c.store.failNextQuery
+	if failed && c.store.querySkip > 0 {
+		c.store.querySkip--
+		failed = false
+	}
+	if failed {
+		c.store.failNextQuery = false
+	}
+	c.store.mu.Unlock()
+
+	if failed {
+		return nil, fmt.Errorf("simulated query error")
+	}
+
 	switch {
 	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
 		c.store.mu.RLock()

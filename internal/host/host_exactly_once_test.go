@@ -907,3 +907,246 @@ func TestContinueAsNewWithEventReplay(t *testing.T) {
 		t.Error("expected isReplay=true (ContinueAsNew consumes from replay, no fresh execution)")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SideEffect with error result: error is recorded and replayed
+// ---------------------------------------------------------------------------
+
+// TestSideEffectWithErrorResult verifies that a SideEffect call whose computed
+// result represents an error is faithfully recorded during fresh execution and
+// returned during replay, preserving the error value instead of re-computing.
+func TestSideEffectWithErrorResult(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Fresh execution: record a side effect with an error-mimicking result.
+	freshSession := &execSession{
+		engine:  &Engine{caller: &mockCaller{}},
+		history: make([]EventRecord, 0),
+	}
+	errorResult := `{"error":"timeout","code":503}`
+	_ = freshSession.SideEffect(ctx, mod, errorResult, 0, 4096)
+
+	if len(freshSession.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(freshSession.history))
+	}
+	rec := freshSession.history[0]
+	if rec.EventType != EventTypeSideEffect {
+		t.Errorf("expected SideEffect event type, got %s", rec.EventType)
+	}
+	if rec.SideEffectResult != errorResult {
+		t.Errorf("expected SideEffectResult=%q, got %q", errorResult, rec.SideEffectResult)
+	}
+
+	// Replay: the cached error result should be returned instead of the new value.
+	mod2 := newTestModule(t, rt)
+	replaySession := &execSession{
+		engine:   &Engine{caller: &mockCaller{}},
+		history:  freshSession.history,
+		isReplay: true,
+	}
+	differentResult := `{"error":"should_not_be_returned"}`
+	result := replaySession.SideEffect(ctx, mod2, differentResult, 0, 4096)
+	errCode, written := decodeSimpleResult(result)
+	if errCode != 0 {
+		t.Fatalf("replay side effect: unexpected errCode=%d", errCode)
+	}
+	mem := mod2.Memory()
+	data, ok := mem.Read(0, written)
+	if !ok {
+		t.Fatal("failed to read WASM memory")
+	}
+	if string(data) != errorResult {
+		t.Errorf("expected cached error result %q, got %q", errorResult, string(data))
+	}
+	if replaySession.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after replaying 1 side effect, got %d", replaySession.stepCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableDefer dedup across replays
+// ---------------------------------------------------------------------------
+
+// TestDurableDeferDedupAcrossReplays verifies that a DurableDefer recorded
+// during fresh execution is replayed from history on subsequent replays,
+// returning the same DeferID instead of generating a new one.
+func TestDurableDeferDedupAcrossReplays(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Fresh execution: register a defer.
+	freshSession := &execSession{
+		engine:    &Engine{caller: &mockCaller{}},
+		history:   make([]EventRecord, 0),
+		deferrals: make(map[string]string),
+	}
+	result := freshSession.DurableDefer(ctx, mod, "cleanup resources", 0, 64)
+	written := uint32(result >> 32)
+	if written == 0 {
+		t.Fatal("expected non-zero written bytes from DurableDefer")
+	}
+	mem := mod.Memory()
+	deferID, ok := mem.Read(0, written)
+	if !ok || len(deferID) == 0 {
+		t.Fatal("expected non-empty DeferID in WASM memory")
+	}
+	originalDeferID := string(deferID)
+
+	if len(freshSession.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(freshSession.history))
+	}
+	if freshSession.history[0].EventType != EventTypeDefer {
+		t.Errorf("expected Defer event type, got %s", freshSession.history[0].EventType)
+	}
+	if freshSession.history[0].DeferID != originalDeferID {
+		t.Errorf("expected DeferID=%q, got %q", originalDeferID, freshSession.history[0].DeferID)
+	}
+	if freshSession.history[0].DeferDescription != "cleanup resources" {
+		t.Errorf("expected DeferDescription='cleanup resources', got %q", freshSession.history[0].DeferDescription)
+	}
+
+	// Replay session with the recorded history.
+	mod2 := newTestModule(t, rt)
+	replaySession := &execSession{
+		engine:    &Engine{caller: &mockCaller{}},
+		history:   freshSession.history,
+		deferrals: make(map[string]string),
+		isReplay:  true,
+	}
+
+	// On replay, the defer should be consumed from history and return the
+	// same DeferID.
+	result2 := replaySession.DurableDefer(ctx, mod2, "cleanup resources", 0, 64)
+	written2 := uint32(result2 >> 32)
+	if written2 == 0 {
+		t.Fatal("expected non-zero written bytes from replayed DurableDefer")
+	}
+	mem2 := mod2.Memory()
+	deferID2, ok := mem2.Read(0, written2)
+	if !ok || string(deferID2) != originalDeferID {
+		t.Errorf("expected same DeferID %q on replay, got %q", originalDeferID, string(deferID2))
+	}
+
+	if replaySession.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after replaying 1 defer, got %d", replaySession.stepCount)
+	}
+	if !replaySession.isReplay {
+		t.Error("expected isReplay to remain true after consuming defer from history")
+	}
+
+	// Calling DurableDefer again should exhaust history and fall through to
+	// fresh execution, generating a new DeferID.
+	result3 := replaySession.DurableDefer(ctx, mod2, "another defer", 0, 64)
+	written3 := uint32(result3 >> 32)
+	mem3 := mod2.Memory()
+	deferID3, ok := mem3.Read(0, written3)
+	if ok && string(deferID3) == originalDeferID {
+		t.Error("expected different DeferID for fresh defer after history exhausted")
+	}
+	if replaySession.stepCount != 2 {
+		t.Errorf("expected stepCount=2 after 2 defers (1 replayed + 1 fresh), got %d", replaySession.stepCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitSignals replay from history
+// ---------------------------------------------------------------------------
+
+// TestAwaitSignalsReplayFromHistory verifies that an await_signals event
+// followed by a signal_received event in the recorded history is correctly
+// replayed, consuming the signal from history without polling the signal store.
+func TestAwaitSignalsReplayFromHistory(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	// Build a synthetic history with an await_signals event followed by a
+	// signal_received event, as would be produced by a fresh execution.
+	history := []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitSignals, SignalNames: "payment", TimeoutMs: 30000},
+		{Step: 1, EventType: EventTypeSignalReceived, SignalName: "payment", SignalPayload: `{"paid":true,"txn_id":"txn-456"}`},
+	}
+
+	replaySession := &execSession{
+		engine:   &Engine{caller: &mockCaller{}},
+		history:  history,
+		isReplay: true,
+	}
+
+	// DurableAwaitSignals should consume the await_signals event from history,
+	// see that it's waiting, then consume the following signal_received event.
+	result := replaySession.DurableAwaitSignals(ctx, mod, "payment", 30000, 0, 4096, 4096, 4096)
+	if result == 0 {
+		t.Fatal("expected non-zero result from signal replay")
+	}
+
+	// The result packs (sigNameLen << 48 | payloadLen << 32 | timedOut << 16 | errCode).
+	sigNameLen := uint32(result >> 48)
+	payloadLen := uint32((result >> 32) & 0xFFFF)
+	if sigNameLen == 0 {
+		t.Error("expected non-zero signal name length")
+	}
+	if payloadLen == 0 {
+		t.Error("expected non-zero payload length")
+	}
+
+	// Verify replay consumed both events (step 0 and step 1).
+	if replaySession.stepCount != 2 {
+		t.Errorf("expected stepCount=2 after consuming both events, got %d", replaySession.stepCount)
+	}
+	if !replaySession.isReplay {
+		t.Error("expected isReplay to remain true (history fully consumed)")
+	}
+}
+
+// TestAwaitSignalsReplayJustSignalReceived verifies that when history contains
+// only a signal_received event (no preceding await_signals), it is consumed
+// directly as a standalone signal delivery.
+func TestAwaitSignalsReplayJustSignalReceived(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	mod := newTestModule(t, rt)
+
+	history := []EventRecord{
+		{Step: 0, EventType: EventTypeSignalReceived, SignalName: "approval", SignalPayload: `{"approved":true}`},
+	}
+
+	replaySession := &execSession{
+		engine:   &Engine{caller: &mockCaller{}},
+		history:  history,
+		isReplay: true,
+	}
+
+	result := replaySession.DurableAwaitSignals(ctx, mod, "approval", 30000, 0, 4096, 4096, 4096)
+	if result == 0 {
+		t.Fatal("expected non-zero result from direct signal_received replay")
+	}
+
+	sigNameLen := uint32(result >> 48)
+	if sigNameLen == 0 {
+		t.Error("expected non-zero signal name length")
+	}
+
+	if replaySession.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", replaySession.stepCount)
+	}
+}

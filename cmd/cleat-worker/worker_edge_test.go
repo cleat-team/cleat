@@ -442,8 +442,7 @@ func TestDispatchLoop_AtCapacitySkipsClaim(t *testing.T) {
 		return nil, nil
 	}
 
-	w := newTestWorker(ms)
-	w.concurrency = 2
+	w := newTestWorkerWithConcurrency(ms, 2)
 	w.inflight.Store("wf-1", &host.WorkflowInstance{ID: "wf-1"})
 	w.inflight.Store("wf-2", &host.WorkflowInstance{ID: "wf-2"})
 

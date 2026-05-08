@@ -552,6 +552,29 @@ func newTestWorker(ms *mockStore) *Worker {
 	}
 }
 
+// newTestWorkerWithConcurrency creates a Worker with the given concurrency,
+// ensuring the memory controller is configured with the same value so that
+// DynamicConcurrency() returns the expected capacity.
+func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
+	ctx, cancel := context.WithCancel(context.Background())
+	monitor := NewMemoryMonitor(5 * time.Second)
+	mc := NewMemoryController(monitor, ms, "test-worker", concurrency, 1<<40, 1<<40)
+	return &Worker{
+		id:                  "test-worker",
+		store:               ms,
+		concurrency:         concurrency,
+		memoryController:    mc,
+		heartbeatInterval:   10 * time.Millisecond,
+		pollInterval:        1 * time.Millisecond,
+		compactionThreshold: host.DefaultCompactionThreshold,
+		compactionInterval:  10 * time.Millisecond,
+		namespace:           "default",
+		ctx:                 ctx,
+		cancel:              cancel,
+		wasmCache:           make(map[string][]byte),
+	}
+}
+
 // waitForCond polls cond until it returns true or the timeout elapses.
 func waitForCond(t *testing.T, timeout time.Duration, cond func() bool) {
 	t.Helper()
@@ -748,8 +771,7 @@ func TestDispatchLoop_AtCapacity(t *testing.T) {
 		return nil, nil
 	}
 
-	w := newTestWorker(ms)
-	w.concurrency = 1
+	w := newTestWorkerWithConcurrency(ms, 1)
 
 	// Fill the inflight map to capacity.
 	w.inflight.Store("wf-busy-1", &host.WorkflowInstance{ID: "wf-busy-1", DefName: "test", DefVersion: 1})

@@ -30,8 +30,7 @@ func TestDispatchLoop_CapacityLimit(t *testing.T) {
 		return nil, nil
 	}
 
-	w := newTestWorker(ms)
-	w.concurrency = 1
+	w := newTestWorkerWithConcurrency(ms, 1)
 
 	// Fill inflight to capacity.
 	w.inflight.Store("wf-busy-1", &host.WorkflowInstance{ID: "wf-busy-1", DefName: "test", DefVersion: 1})

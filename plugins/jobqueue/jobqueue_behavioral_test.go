@@ -53,6 +53,7 @@ type fakeJobQueueStore struct {
 	failNextExec  bool // if true, next ExecContext returns error (cleared after use)
 	failNextQuery bool // if true, next QueryContext returns error (cleared after use)
 	querySkip     int  // number of queries to let succeed before failNextQuery takes effect
+	execSkip      int  // number of execs to let succeed before failNextExec takes effect
 }
 
 func newFakeJobQueueStore() *fakeJobQueueStore {
@@ -114,8 +115,12 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	defer c.store.mu.Unlock()
 
 	if c.store.failNextExec {
-		c.store.failNextExec = false
-		return nil, fmt.Errorf("simulated exec error")
+		if c.store.execSkip > 0 {
+			c.store.execSkip--
+		} else {
+			c.store.failNextExec = false
+			return nil, fmt.Errorf("simulated exec error")
+		}
 	}
 
 	switch {
@@ -1660,5 +1665,497 @@ func TestJQRunWithNoDB(t *testing.T) {
 	err := p.Run(ctx)
 	if err != nil {
 		t.Fatalf("Run() with nil db should return nil, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// Tenant isolation for job listings
+// ===========================================================================
+
+func TestJQ_ListJobs_TenantIsolation(t *testing.T) {
+	_, handler, store, _, _ := setupTestPlugin(t)
+
+	// Add a second tenant API key.
+	tenant2ID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	keyHash2 := sha256.Sum256([]byte("tenant2-key"))
+	store.mu.Lock()
+	store.apiKeys[fmt.Sprintf("%x", keyHash2)] = tenant2ID.String()
+	store.mu.Unlock()
+
+	// Enqueue a job as tenant 1.
+	_ = store // store is used indirectly through the handler
+	body := `{"payload":"tenant1-job"}`
+	req := authedRequest("POST", "/jobqueue/tqueue/jobs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("tenant1 enqueue: expected 201, got %d", rec.Code)
+	}
+
+	// List as tenant 1 — should see 1 job.
+	req = authedRequest("GET", "/jobqueue/tqueue/jobs", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant1 list: expected 200, got %d", rec.Code)
+	}
+	var jobs1 []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &jobs1); err != nil {
+		t.Fatalf("tenant1 decode: %v", err)
+	}
+	if len(jobs1) != 1 {
+		t.Errorf("tenant1 should see 1 job, got %d", len(jobs1))
+	}
+
+	// List as tenant 2 — should see 0 jobs.
+	req2 := httptest.NewRequest("GET", "/jobqueue/tqueue/jobs", nil)
+	req2.Header.Set("Authorization", "Bearer tenant2-key")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("tenant2 list: expected 200, got %d", rec2.Code)
+	}
+	var jobs2 []map[string]interface{}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &jobs2); err != nil {
+		t.Fatalf("tenant2 decode: %v", err)
+	}
+	if len(jobs2) != 0 {
+		t.Errorf("tenant2 should see 0 jobs, got %d", len(jobs2))
+	}
+}
+
+// ===========================================================================
+// Cancel job that is not pending (already cancelled, running, etc.)
+// ===========================================================================
+
+func TestJQ_CancelNonPendingJob(t *testing.T) {
+	_, handler, _, _, _ := setupTestPlugin(t)
+
+	// Enqueue a job.
+	body := `{"payload":"cancel-me"}`
+	req := authedRequest("POST", "/jobqueue/myqueue/jobs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("enqueue: expected 201, got %d", rec.Code)
+	}
+	var enqueueResp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &enqueueResp)
+	jobID := enqueueResp["job_id"].(string)
+
+	// First cancel succeeds.
+	req = authedRequest("DELETE", "/jobqueue/myqueue/jobs/"+jobID, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("first cancel: expected 204, got %d", rec.Code)
+	}
+
+	// Second cancel should return 404 because the job is no longer pending.
+	req = authedRequest("DELETE", "/jobqueue/myqueue/jobs/"+jobID, nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("second cancel: expected 404 (no longer pending), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// handleEnqueue — all fields (def_name and input)
+// ===========================================================================
+
+func TestJQ_Enqueue_AllFields(t *testing.T) {
+	_, handler, store, _, _ := setupTestPlugin(t)
+
+	body := `{"payload":{"key":"value"},"def_name":"test-wf","input":{"x":1}}`
+	req := authedRequest("POST", "/jobqueue/full-queue/jobs", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	jobID := resp["job_id"].(string)
+
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	key := rowKey(testTenantID.String(), "full-queue", jobID)
+	row, ok := store.rows[key]
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+	if row.defName == nil || *row.defName != "test-wf" {
+		t.Errorf("expected def_name 'test-wf', got %v", row.defName)
+	}
+	if string(row.input) != `{"x":1}` {
+		t.Errorf("expected input %q, got %q", `{"x":1}`, string(row.input))
+	}
+}
+
+// ===========================================================================
+// pollPending — QueryContext error path
+// ===========================================================================
+
+func TestJQ_PollPending_QueryError(t *testing.T) {
+	p, _, store, _, _ := setupTestPlugin(t)
+
+	store.failNextQuery = true
+
+	claimed, _, _, err := p.pollPending(context.Background())
+	if err == nil {
+		t.Fatal("expected error from pollPending with DB failure")
+	}
+	if claimed != 0 {
+		t.Errorf("expected 0 claimed on query error, got %d", claimed)
+	}
+}
+
+// ===========================================================================
+// pollPending — Exec error on claim
+// ===========================================================================
+
+func TestJQ_PollPending_ClaimExecError(t *testing.T) {
+	p, _, store, _, _ := setupTestPlugin(t)
+
+	// Insert a pending job.
+	jobID := uuid.New().String()
+	insertPendingJob(store, "q", jobID, []byte(`{}`), nil, nil)
+
+	// Make the claim Exec fail.
+	store.failNextExec = true
+
+	claimed, _, _, err := p.pollPending(context.Background())
+	if err != nil {
+		t.Fatalf("pollPending: %v", err)
+	}
+	if claimed != 0 {
+		t.Errorf("expected 0 claimed when claim Exec fails, got %d", claimed)
+	}
+
+	// Job should still be pending (the claim failed, leaving it unchanged).
+	store.mu.RLock()
+	key := rowKey(testTenantID.String(), "q", jobID)
+	row, ok := store.rows[key]
+	store.mu.RUnlock()
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+	if row.status != "pending" {
+		t.Errorf("expected status 'pending' after failed claim, got %q", row.status)
+	}
+}
+
+// ===========================================================================
+// Init — nil logger defaults to slog.Default
+// ===========================================================================
+
+func TestJQ_Init_NilLogger(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{}
+	err := p.Init(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if p.logger == nil {
+		t.Error("expected logger to be set")
+	}
+}
+
+// ===========================================================================
+// RegisterCommands — missing required flags
+// ===========================================================================
+
+func TestJQ_RegisterCommands_MissingArgs(t *testing.T) {
+	p := &Plugin{}
+	cmds := p.RegisterCommands()
+	if len(cmds) == 0 {
+		t.Fatal("no commands registered")
+	}
+
+	// Missing tenant flag.
+	err := cmds[0].Run([]string{
+		"--queue=test-queue",
+		"--payload={}",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing tenant, got nil")
+	}
+	if !strings.Contains(err.Error(), "tenant and queue are required") {
+		t.Errorf("expected 'tenant and queue are required' error, got: %v", err)
+	}
+
+	// Missing queue flag.
+	err = cmds[0].Run([]string{
+		"--tenant=00000000-0000-0000-0000-000000000001",
+		"--payload={}",
+	})
+	if err == nil {
+		t.Fatal("expected error for missing queue, got nil")
+	}
+	if !strings.Contains(err.Error(), "tenant and queue are required") {
+		t.Errorf("expected 'tenant and queue are required' error, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// RegisterCommands — invalid UUID
+// ===========================================================================
+
+func TestJQ_RegisterCommands_InvalidTenantUUID(t *testing.T) {
+	p := &Plugin{}
+	cmds := p.RegisterCommands()
+	if len(cmds) == 0 {
+		t.Fatal("no commands registered")
+	}
+
+	err := cmds[0].Run([]string{
+		"--tenant=not-a-uuid",
+		"--queue=test-queue",
+		"--payload={}",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid tenant UUID, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid tenant UUID") {
+		t.Errorf("expected 'invalid tenant UUID' error, got: %v", err)
+	}
+}
+
+// ===========================================================================
+// pollPending — mark completed error path (with def_name dispatching)
+// ===========================================================================
+
+func TestJQ_PollPending_MarkCompletedError(t *testing.T) {
+	p, _, store, _, _ := setupTestPlugin(t)
+
+	// Insert a pending job with a def_name.
+	jobID := uuid.New().String()
+	defName := "test-wf"
+	insertPendingJob(store, "q", jobID, []byte(`{"data":"test"}`), &defName, []byte(`{}`))
+
+	// Make the claim succeed but the mark-completed exec fail.
+	// claim is the 1st Exec, mark-completed is the 2nd Exec.
+	store.failNextExec = true
+	store.execSkip = 1 // let the claim succeed
+
+	claimed, dispatched, failed, err := p.pollPending(context.Background())
+	if err != nil {
+		t.Fatalf("pollPending: %v", err)
+	}
+	if claimed != 1 {
+		t.Errorf("expected 1 claimed, got %d", claimed)
+	}
+	if dispatched != 1 {
+		t.Errorf("expected 1 dispatched (StartWorkflow succeeded), got %d", dispatched)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed, got %d", failed)
+	}
+
+	// Job should be 'running' because the mark-completed failed.
+	store.mu.RLock()
+	key := rowKey(testTenantID.String(), "q", jobID)
+	row, ok := store.rows[key]
+	store.mu.RUnlock()
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+	if row.status != "running" {
+		t.Errorf("expected status 'running' (mark-completed failed), got %q", row.status)
+	}
+}
+
+// ===========================================================================
+// pollPending — mark completed error path (without def_name)
+// ===========================================================================
+
+func TestJQ_PollPending_MarkCompletedNoDefNameError(t *testing.T) {
+	p, _, store, _, _ := setupTestPlugin(t)
+
+	// Insert a pending job without def_name.
+	jobID := uuid.New().String()
+	insertPendingJob(store, "q", jobID, []byte(`{}`), nil, nil)
+
+	// Make the claim succeed but the mark-completed exec fail.
+	store.failNextExec = true
+	store.execSkip = 1
+
+	claimed, _, _, err := p.pollPending(context.Background())
+	if err != nil {
+		t.Fatalf("pollPending: %v", err)
+	}
+	if claimed != 1 {
+		t.Errorf("expected 1 claimed, got %d", claimed)
+	}
+
+	// Job should be 'running' because the mark-completed failed.
+	store.mu.RLock()
+	key := rowKey(testTenantID.String(), "q", jobID)
+	row, ok := store.rows[key]
+	store.mu.RUnlock()
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+	if row.status != "running" {
+		t.Errorf("expected status 'running' (mark-completed failed), got %q", row.status)
+	}
+}
+
+// ===========================================================================
+// Run — background with mock DB (start/stop via cancel)
+// ===========================================================================
+
+func TestJQ_Run_Background(t *testing.T) {
+	p, _, store, _, _ := setupTestPlugin(t)
+
+	// Insert a pending job so the poll cycle has work to do.
+	jobID := uuid.New().String()
+	insertPendingJob(store, "bgq", jobID, []byte(`{}`), nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- p.Run(ctx)
+	}()
+
+	// Let it run briefly (ticker fires every 5s, we just verify start/stop).
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after context cancellation")
+	}
+}
+
+// ===========================================================================
+// handleGetJob — no tenant in context (direct handler call)
+// ===========================================================================
+
+func TestJQ_HandleGetJob_NoTenant(t *testing.T) {
+	p, _, _, _, _ := setupTestPlugin(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/jobqueue/q/jobs/00000000-0000-0000-0000-000000000001", nil)
+	p.handleGetJob(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// handleCancelJob — no tenant in context (direct handler call)
+// ===========================================================================
+
+func TestJQ_HandleCancelJob_NoTenant(t *testing.T) {
+	p, _, _, _, _ := setupTestPlugin(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("DELETE", "/jobqueue/q/jobs/00000000-0000-0000-0000-000000000001", nil)
+	p.handleCancelJob(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// handleCancelJob — empty queue_name (direct handler call)
+// ===========================================================================
+
+func TestJQ_HandleCancelJob_EmptyQueueName(t *testing.T) {
+	p, _, _, _, _ := setupTestPlugin(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("DELETE", "/jobqueue//jobs/id", nil)
+	req = req.WithContext(auth.WithTenantID(req.Context(), testTenantID))
+	p.handleCancelJob(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty queue_name, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// handleListJobs — no tenant in context (direct handler call)
+// ===========================================================================
+
+func TestJQ_HandleListJobs_NoTenant(t *testing.T) {
+	p, _, _, _, _ := setupTestPlugin(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/jobqueue/q/jobs", nil)
+	p.handleListJobs(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// handleEnqueue — no tenant in context (direct handler call)
+// ===========================================================================
+
+func TestJQ_HandleEnqueue_NoTenant(t *testing.T) {
+	p, _, _, _, _ := setupTestPlugin(t)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/jobqueue/q/jobs", bytes.NewReader([]byte(`{"payload":"test"}`)))
+	p.handleEnqueue(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// Run — background ticker cycle (waits 5s for one tick)
+// ===========================================================================
+
+func TestJQ_Run_TickerCycle(t *testing.T) {
+	p, _, store, _, _ := setupTestPlugin(t)
+
+	// Insert a pending job so pollPending has work.
+	jobID := uuid.New().String()
+	insertPendingJob(store, "tick-queue", jobID, []byte(`{}`), nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- p.Run(ctx)
+	}()
+
+	// Wait for the ticker to fire once (5s interval).
+	time.Sleep(6 * time.Second)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Run returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not stop after context cancellation")
+	}
+
+	// The pending job should have been claimed and completed by pollPending.
+	store.mu.RLock()
+	key := rowKey(testTenantID.String(), "tick-queue", jobID)
+	row, ok := store.rows[key]
+	store.mu.RUnlock()
+	if !ok {
+		t.Fatal("expected job to exist")
+	}
+	if row.status != "completed" {
+		t.Errorf("expected job to be completed after poll cycle, got %q", row.status)
 	}
 }

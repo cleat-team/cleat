@@ -34,8 +34,11 @@ type esRow struct {
 }
 
 type esDB struct {
-	mu     sync.RWMutex
-	events []esRow
+	mu            sync.RWMutex
+	events        []esRow
+	failNextQuery bool
+	failNextExec  bool
+	querySkip     int
 }
 
 func newESDB() *esDB {
@@ -125,6 +128,11 @@ func (c *esConn) ExecContext(_ context.Context, query string, args []driver.Name
 	c.db.mu.Lock()
 	defer c.db.mu.Unlock()
 
+	if c.db.failNextExec {
+		c.db.failNextExec = false
+		return nil, fmt.Errorf("simulated exec error")
+	}
+
 	q := strings.ReplaceAll(query, "\n", " ")
 	switch {
 	case strings.Contains(q, "DELETE FROM event_stream"):
@@ -159,6 +167,22 @@ func (c *esConn) execDelete(args []driver.NamedValue) (driver.Result, error) {
 // ---- QueryContext ----
 
 func (c *esConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	// Check fail flag briefly under write lock, then proceed with read lock.
+	c.db.mu.Lock()
+	failed := c.db.failNextQuery
+	if failed && c.db.querySkip > 0 {
+		c.db.querySkip--
+		failed = false
+	}
+	if failed {
+		c.db.failNextQuery = false
+	}
+	c.db.mu.Unlock()
+
+	if failed {
+		return nil, fmt.Errorf("simulated query error")
+	}
+
 	q := strings.ReplaceAll(query, "\n", " ")
 	switch {
 	case strings.Contains(q, "INSERT INTO event_stream") && strings.Contains(q, "RETURNING sequence"):
@@ -901,5 +925,288 @@ func TestES_Init_NilLoggerDefaults(t *testing.T) {
 	}
 	if p.logger == nil {
 		t.Error("expected logger to be set to default")
+	}
+}
+
+// ===========================================================================
+// Append — DB query error path (500)
+// ===========================================================================
+
+func TestES_Append_DBError(t *testing.T) {
+	p, esdb, _ := newESPlugin(t)
+	esdb.failNextQuery = true
+
+	rec := httptest.NewRecorder()
+	req := esTenantReq("POST", "/events/test-stream", bytes.NewReader([]byte(`{"key":"value"}`)))
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Fatalf("expected 500 for DB error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var m map[string]string
+	esReadJSON(t, rec, &m)
+	if m["error"] == "" {
+		t.Error("expected error message in response")
+	}
+}
+
+// ===========================================================================
+// Read — DB query error path (500)
+// ===========================================================================
+
+func TestES_Read_DBError(t *testing.T) {
+	p, esdb, _ := newESPlugin(t)
+	esdb.failNextQuery = true
+
+	rec := httptest.NewRecorder()
+	req := esTenantReq("GET", "/events/test-stream", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 500 {
+		t.Fatalf("expected 500 for DB error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var m map[string]string
+	esReadJSON(t, rec, &m)
+	if m["error"] == "" {
+		t.Error("expected error message in response")
+	}
+}
+
+// ===========================================================================
+// Read — pagination edge cases
+// ===========================================================================
+
+func TestES_Read_PaginationEdges(t *testing.T) {
+	p, _, _ := newESPlugin(t)
+
+	// Seed 3 events.
+	for i := 0; i < 3; i++ {
+		body := fmt.Sprintf(`{"n":%d}`, i+1)
+		rec := httptest.NewRecorder()
+		req := esTenantReq("POST", "/events/paginate-stream", bytes.NewReader([]byte(body)))
+		p.mux.ServeHTTP(rec, req)
+		if rec.Code != 201 {
+			t.Fatalf("seed %d: want 201, got %d", i, rec.Code)
+		}
+	}
+
+	// limit=0 should be ignored (default 100).
+	rec := httptest.NewRecorder()
+	req := esTenantReq("GET", "/events/paginate-stream?limit=0", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("limit=0: want 200, got %d", rec.Code)
+	}
+	var events []map[string]interface{}
+	esReadJSON(t, rec, &events)
+	if len(events) != 3 {
+		t.Errorf("limit=0: want 3 events (default limit), got %d", len(events))
+	}
+
+	// limit=-1 should be ignored (default 100).
+	rec = httptest.NewRecorder()
+	req = esTenantReq("GET", "/events/paginate-stream?limit=-1", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("limit=-1: want 200, got %d", rec.Code)
+	}
+	esReadJSON(t, rec, &events)
+	if len(events) != 3 {
+		t.Errorf("limit=-1: want 3 events, got %d", len(events))
+	}
+
+	// limit=1001 should be clamped to 1000.
+	rec = httptest.NewRecorder()
+	req = esTenantReq("GET", "/events/paginate-stream?limit=1001", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("limit=1001: want 200, got %d", rec.Code)
+	}
+	esReadJSON(t, rec, &events)
+	if len(events) != 3 {
+		t.Errorf("limit=1001: want 3 events, got %d", len(events))
+	}
+
+	// limit=2 returns exactly 2.
+	rec = httptest.NewRecorder()
+	req = esTenantReq("GET", "/events/paginate-stream?limit=2", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("limit=2: want 200, got %d", rec.Code)
+	}
+	esReadJSON(t, rec, &events)
+	if len(events) != 2 {
+		t.Errorf("limit=2: want 2 events, got %d", len(events))
+	}
+
+	// from_sequence=0 returns all events (sequence > 0).
+	rec = httptest.NewRecorder()
+	req = esTenantReq("GET", "/events/paginate-stream?from_sequence=0", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("from_sequence=0: want 200, got %d", rec.Code)
+	}
+	esReadJSON(t, rec, &events)
+	if len(events) != 3 {
+		t.Errorf("from_sequence=0: want 3 events, got %d", len(events))
+	}
+
+	// from_sequence=2 returns events with sequence > 2 (i.e., seq 3 only).
+	rec = httptest.NewRecorder()
+	req = esTenantReq("GET", "/events/paginate-stream?from_sequence=2", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("from_sequence=2: want 200, got %d", rec.Code)
+	}
+	esReadJSON(t, rec, &events)
+	if len(events) != 1 {
+		t.Errorf("from_sequence=2: want 1 event, got %d", len(events))
+	}
+	if len(events) > 0 {
+		seq := int(events[0]["sequence"].(float64))
+		if seq != 3 {
+			t.Errorf("from_sequence=2: expected seq 3, got %d", seq)
+		}
+	}
+
+	// Read with non-numeric from_sequence should be ignored.
+	rec = httptest.NewRecorder()
+	req = esTenantReq("GET", "/events/paginate-stream?from_sequence=abc", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("from_sequence=abc: want 200, got %d", rec.Code)
+	}
+	esReadJSON(t, rec, &events)
+	if len(events) != 3 {
+		t.Errorf("from_sequence=abc: want 3 events (ignored), got %d", len(events))
+	}
+}
+
+// ===========================================================================
+// Append — large body at the limit (should succeed)
+// ===========================================================================
+
+func TestES_Append_LargeBodyAtLimit(t *testing.T) {
+	p, _, _ := newESPlugin(t)
+	// MaxEventSize default is 1MB, so construct a ~900KB valid JSON body.
+	largeInner := `{"data":"` + strings.Repeat("x", 900*1024) + `"}`
+	body := `{"payload":` + largeInner + `}`
+
+	rec := httptest.NewRecorder()
+	req := esTenantReq("POST", "/events/large-stream", bytes.NewReader([]byte(body)))
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("large body at limit: want 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ===========================================================================
+// SSE — initial query error (returns 200 with headers, no data)
+// ===========================================================================
+
+func TestES_SSE_InitialQueryError(t *testing.T) {
+	p, esdb, _ := newESPlugin(t)
+	esdb.failNextQuery = true
+
+	rec := httptest.NewRecorder()
+	req := esTenantReq("GET", "/events/test-stream/stream", nil)
+	p.mux.ServeHTTP(rec, req)
+
+	// Handler flushes SSE headers (200) before the query; query error causes
+	// early return but headers are already sent.
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 (SSE headers), got %d", rec.Code)
+	}
+	ct := rec.Header().Get("Content-Type")
+	if !strings.Contains(ct, "event-stream") {
+		t.Errorf("expected event-stream content-type, got %q", ct)
+	}
+}
+
+// ===========================================================================
+// Cleanup — DB exec error path (returns 0)
+// ===========================================================================
+
+func TestES_Cleanup_DBError(t *testing.T) {
+	esdb := newESDB()
+	now := time.Now().UTC()
+	esdb.mu.Lock()
+	esdb.events = append(esdb.events, esRow{
+		tenantID:  uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		streamID:  "test",
+		sequence:  1,
+		event:     `{"test":true}`,
+		createdAt: now.Add(-72 * time.Hour),
+	})
+	esdb.mu.Unlock()
+
+	rawDB := sql.OpenDB(&esConnector{db: esdb})
+	defer rawDB.Close()
+
+	p := &Plugin{
+		db:     rawDB,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		config: Config{RetentionDays: 1, MaxEventSize: 1 * 1024 * 1024},
+	}
+
+	esdb.failNextExec = true
+	n := p.cleanup(context.Background())
+	if n != 0 {
+		t.Errorf("expected 0 deletions on DB error, got %d", n)
+	}
+
+	// Event should still exist after failed cleanup.
+	esdb.mu.RLock()
+	remaining := len(esdb.events)
+	esdb.mu.RUnlock()
+	if remaining != 1 {
+		t.Errorf("expected 1 event still present after failed cleanup, got %d", remaining)
+	}
+}
+
+// ===========================================================================
+// Init — empty config (no config provided, uses defaults)
+// ===========================================================================
+
+func TestES_Init_EmptyConfig(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		DB:     sql.OpenDB(&esConnector{db: newESDB()}),
+		Mux:    http.NewServeMux(),
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: json.RawMessage(`{}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if p.config.MaxEventSize != 1*1024*1024 {
+		t.Errorf("expected default MaxEventSize 1MB, got %d", p.config.MaxEventSize)
+	}
+}
+
+// ===========================================================================
+// Read — verify tenant isolation returns empty for wrong tenant
+// ===========================================================================
+
+func TestES_Read_TenantIsolation(t *testing.T) {
+	p, _, _ := newESPlugin(t)
+
+	// Append event for tenant 1.
+	rec := httptest.NewRecorder()
+	req := esTenantReq("POST", "/events/iso-stream", bytes.NewReader([]byte(`{"tenant":"A"}`)))
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("tenant A append: want 201, got %d", rec.Code)
+	}
+
+	// Read as tenant 2 from same stream name — should see 0 events.
+	rec = httptest.NewRecorder()
+	req = esTenant2Req("GET", "/events/iso-stream", nil)
+	p.mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("tenant B read: want 200, got %d", rec.Code)
+	}
+	var events []interface{}
+	esReadJSON(t, rec, &events)
+	if len(events) != 0 {
+		t.Errorf("tenant B should see 0 events from iso-stream, got %d", len(events))
 	}
 }

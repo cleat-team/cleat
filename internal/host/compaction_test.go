@@ -1189,3 +1189,163 @@ func TestCompactionThresholdBoundaryLargeThreshold(t *testing.T) {
 		t.Fatal("expected non-empty compaction state")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CompactWorkflowHistory with ContinueAsNew events
+// ---------------------------------------------------------------------------
+
+// TestCompactWorkflowHistoryWithContinueAsNew verifies that ContinueAsNew events
+// survive compaction through CompactWorkflowHistory. The compaction state should
+// correctly capture the NewInput field.
+func TestCompactWorkflowHistoryWithContinueAsNew(t *testing.T) {
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "first", Request: `{}`, Response: `{"phase":1}`},
+		{Step: 1, EventType: EventTypeContinueAsNew, NewInput: `{"phase":2,"restart":true}`},
+		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "extra"},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-continue-asnew", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("unmarshal compaction state: %v", err)
+	}
+
+	// Find the ContinueAsNew event in the compacted events.
+	found := false
+	for _, e := range cs.Events {
+		if e.Type == EventCodeContinueAsNew {
+			found = true
+			if e.NewInput != `{"phase":2,"restart":true}` {
+				t.Errorf("expected NewInput=%q, got %q", `{"phase":2,"restart":true}`, e.NewInput)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected ContinueAsNew event in compacted state")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CompactWorkflowHistory with plugin_call_stream_chunk events
+// ---------------------------------------------------------------------------
+
+// TestCompactWorkflowHistoryWithPluginCallStreamChunk verifies that
+// plugin_call_stream_chunk events survive compaction through
+// CompactWorkflowHistory. The compaction state should correctly capture the
+// stream chunk fields.
+func TestCompactWorkflowHistoryWithPluginCallStreamChunk(t *testing.T) {
+	threshold := 2
+	events := []EventRecord{
+		{Step: 0, EventType: EventTypePluginCall, PluginName: "p", PluginFunc: "f", PluginInput: `{}`, PluginOutput: `{"ok":true}`},
+		{Step: 1, EventType: EventTypePluginCallStreamChunk, PluginName: "p", PluginFunc: "f", PluginOutput: `{"chunk":1}`, StreamChunkIndex: 0, StreamFinish: false},
+		{Step: 2, EventType: EventTypePluginCallStreamChunk, PluginName: "p", PluginFunc: "f", PluginOutput: `{"chunk":2,"finish":true}`, StreamChunkIndex: 1, StreamFinish: true},
+	}
+	store := &mockCompactStore{events: events}
+	err := CompactWorkflowHistory(context.Background(), store, "wf-plugin-chunks", threshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.compactCount != 1 {
+		t.Fatalf("expected 1 compaction, got %d", store.compactCount)
+	}
+
+	var cs CompactionState
+	if err := json.Unmarshal(store.compactState, &cs); err != nil {
+		t.Fatalf("unmarshal compaction state: %v", err)
+	}
+
+	// Find the plugin_call_stream_chunk events in the compacted state.
+	chunkCount := 0
+	for _, e := range cs.Events {
+		if e.Type == EventCodePluginCallStreamChunk {
+			chunkCount++
+		}
+	}
+	if chunkCount < 1 {
+		t.Error("expected at least one PluginCallStreamChunk event in compacted state")
+	}
+
+	// Verify the first chunk is present in the compacted portion (step 1).
+	if len(cs.Events) >= 2 && cs.Events[1].Type == EventCodePluginCallStreamChunk {
+		if cs.Events[1].PluginOutput != `{"chunk":1}` {
+			t.Errorf("expected chunk output %q, got %q", `{"chunk":1}`, cs.Events[1].PluginOutput)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LoadCompactionState for workflow with open children
+// ---------------------------------------------------------------------------
+
+// TestLoadCompactionStateWithOpenChildren verifies that LoadCompactionState
+// correctly returns a CompactionState that includes open children for a
+// workflow that has child workflows still running.
+func TestLoadCompactionStateWithOpenChildren(t *testing.T) {
+	state := &CompactionState{
+		Version:       1,
+		CompactedStep: 5,
+		Events: []CompactedEvent{
+			{Type: EventCodeCall, Service: "svc", Op: "op1"},
+			{Type: EventCodeChildWorkflow, ChildName: "child-a", ChildInput: `{"x":1}`, RunID: "run-a"},
+			{Type: EventCodeChildWorkflow, ChildName: "child-b", ChildInput: `{"y":2}`, RunID: "run-b"},
+		},
+		PendingDefers: []CompactedDefer{
+			{ID: "defer-0", Description: "cleanup"},
+		},
+		OpenChildren: []CompactedChild{
+			{RunID: "run-b", Name: "child-b", Input: `{"y":2}`},
+		},
+	}
+
+	store := &mockCompactStore{loadCompactionStateResult: state}
+	cs, err := store.LoadCompactionState(context.Background(), "wf-with-children")
+	if err != nil {
+		t.Fatalf("LoadCompactionState: %v", err)
+	}
+	if cs == nil {
+		t.Fatal("expected non-nil CompactionState")
+	}
+
+	// Verify version and compacted step.
+	if cs.Version != 1 {
+		t.Errorf("expected Version=1, got %d", cs.Version)
+	}
+	if cs.CompactedStep != 5 {
+		t.Errorf("expected CompactedStep=5, got %d", cs.CompactedStep)
+	}
+
+	// Verify open children.
+	if len(cs.OpenChildren) != 1 {
+		t.Fatalf("expected 1 open child, got %d", len(cs.OpenChildren))
+	}
+	if cs.OpenChildren[0].RunID != "run-b" {
+		t.Errorf("expected RunID 'run-b', got %q", cs.OpenChildren[0].RunID)
+	}
+	if cs.OpenChildren[0].Name != "child-b" {
+		t.Errorf("expected Name 'child-b', got %q", cs.OpenChildren[0].Name)
+	}
+	if cs.OpenChildren[0].Input != `{"y":2}` {
+		t.Errorf("expected Input %q, got %q", `{"y":2}`, cs.OpenChildren[0].Input)
+	}
+
+	// Verify pending defers.
+	if len(cs.PendingDefers) != 1 {
+		t.Fatalf("expected 1 pending defer, got %d", len(cs.PendingDefers))
+	}
+	if cs.PendingDefers[0].ID != "defer-0" {
+		t.Errorf("expected defer ID 'defer-0', got %q", cs.PendingDefers[0].ID)
+	}
+
+	// Verify compacted events count.
+	if len(cs.Events) != 3 {
+		t.Errorf("expected 3 compacted events, got %d", len(cs.Events))
+	}
+}

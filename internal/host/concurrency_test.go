@@ -63,6 +63,31 @@ func (m *mockConcurrencyKeyStore) ReleaseConcurrencyKey(ctx context.Context, key
 	return nil
 }
 
+func (m *mockConcurrencyKeyStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, entry := range m.keys {
+		if entry.workflowID == workflowID {
+			delete(m.keys, k)
+		}
+	}
+	return nil
+}
+
+func (m *mockConcurrencyKeyStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var reaped int64
+	now := time.Now()
+	for k, entry := range m.keys {
+		if now.After(entry.expiresAt) {
+			delete(m.keys, k)
+			reaped++
+		}
+	}
+	return reaped, nil
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency key unit tests using execSession with mock store
 // ---------------------------------------------------------------------------
@@ -976,5 +1001,160 @@ func TestConcurrencyKeyTTLExpiration(t *testing.T) {
 	}
 	if !acquired {
 		t.Error("second workflow should acquire after TTL expiry")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReleaseWorkflowConcurrencyKeys tests
+// ---------------------------------------------------------------------------
+
+// TestReleaseWorkflowConcurrencyKeys verifies that all concurrency keys held
+// by a specific workflow are released when ReleaseWorkflowConcurrencyKeys is
+// called. Other workflows' keys should remain unaffected.
+func TestReleaseWorkflowConcurrencyKeys(t *testing.T) {
+	ctx := context.Background()
+	cks := newMockConcurrencyKeyStore()
+
+	// Acquire keys for two different workflows.
+	_, err := cks.AcquireConcurrencyKey(ctx, "key-wf1-a", "wf-1", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire key-wf1-a: %v", err)
+	}
+	_, err = cks.AcquireConcurrencyKey(ctx, "key-wf1-b", "wf-1", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire key-wf1-b: %v", err)
+	}
+	_, err = cks.AcquireConcurrencyKey(ctx, "key-wf2-a", "wf-2", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire key-wf2-a: %v", err)
+	}
+
+	// Release all keys for wf-1.
+	err = cks.ReleaseWorkflowConcurrencyKeys(ctx, "wf-1")
+	if err != nil {
+		t.Fatalf("ReleaseWorkflowConcurrencyKeys: %v", err)
+	}
+
+	// After release, wf-1 should be able to re-acquire its keys.
+	acquired, err := cks.AcquireConcurrencyKey(ctx, "key-wf1-a", "wf-1", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("re-acquire key-wf1-a: %v", err)
+	}
+	if !acquired {
+		t.Error("wf-1 should be able to re-acquire key-wf1-a after release")
+	}
+
+	// wf-2 should still hold its key.
+	acquired, err = cks.AcquireConcurrencyKey(ctx, "key-wf2-a", "wf-3", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire key-wf2-a with wf-3: %v", err)
+	}
+	if acquired {
+		t.Error("wf-3 should NOT acquire key-wf2-a (wf-2 still holds it)")
+	}
+
+	// Verify wf-1's other key is also free.
+	acquired, err = cks.AcquireConcurrencyKey(ctx, "key-wf1-b", "wf-3", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("re-acquire key-wf1-b: %v", err)
+	}
+	if !acquired {
+		t.Error("key-wf1-b should be free after wf-1's keys were released")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReapExpiredConcurrencyKeys tests
+// ---------------------------------------------------------------------------
+
+// TestReapExpiredConcurrencyKeys verifies that ReapExpiredConcurrencyKeys
+// removes expired keys from the store and returns the count of reaped keys.
+func TestReapExpiredConcurrencyKeys(t *testing.T) {
+	ctx := context.Background()
+	cks := newMockConcurrencyKeyStore()
+
+	// Acquire a key with a normal TTL (should not expire during test).
+	_, err := cks.AcquireConcurrencyKey(ctx, "live-key", "wf-live", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire live-key: %v", err)
+	}
+
+	// Acquire a key with a very short TTL (will expire quickly).
+	_, err = cks.AcquireConcurrencyKey(ctx, "expired-key", "wf-expired", 1*time.Millisecond)
+	if err != nil {
+		t.Fatalf("acquire expired-key: %v", err)
+	}
+
+	// Wait for the short TTL to expire.
+	time.Sleep(5 * time.Millisecond)
+
+	// Reap expired keys.
+	reaped, err := cks.ReapExpiredConcurrencyKeys(ctx)
+	if err != nil {
+		t.Fatalf("ReapExpiredConcurrencyKeys: %v", err)
+	}
+	if reaped < 1 {
+		t.Errorf("expected at least 1 reaped key, got %d", reaped)
+	}
+
+	// The live key should still be present.
+	acquired, err := cks.AcquireConcurrencyKey(ctx, "live-key", "wf-other", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire live-key after reap: %v", err)
+	}
+	if acquired {
+		t.Error("live-key should still be held by wf-live (was not expired)")
+	}
+
+	// The expired key should now be available for acquisition.
+	acquired, err = cks.AcquireConcurrencyKey(ctx, "expired-key", "wf-new", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire expired-key after reap: %v", err)
+	}
+	if !acquired {
+		t.Error("expired-key should be free after reap")
+	}
+}
+
+// TestReapExpiredConcurrencyKeysNoExpiredKeys verifies that ReapExpiredConcurrencyKeys
+// returns 0 when there are no expired keys to reap.
+func TestReapExpiredConcurrencyKeysNoExpiredKeys(t *testing.T) {
+	ctx := context.Background()
+	cks := newMockConcurrencyKeyStore()
+
+	// Acquire several keys with very long TTLs (none will expire during test).
+	_, err := cks.AcquireConcurrencyKey(ctx, "key-1", "wf-1", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("acquire key-1: %v", err)
+	}
+	_, err = cks.AcquireConcurrencyKey(ctx, "key-2", "wf-2", 24*time.Hour)
+	if err != nil {
+		t.Fatalf("acquire key-2: %v", err)
+	}
+
+	// Reap — none should be expired.
+	reaped, err := cks.ReapExpiredConcurrencyKeys(ctx)
+	if err != nil {
+		t.Fatalf("ReapExpiredConcurrencyKeys: %v", err)
+	}
+	if reaped != 0 {
+		t.Errorf("expected 0 reaped keys (none expired), got %d", reaped)
+	}
+
+	// Both keys should still be held.
+	acquired, err := cks.AcquireConcurrencyKey(ctx, "key-1", "wf-other", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire key-1 after reap: %v", err)
+	}
+	if acquired {
+		t.Error("key-1 should still be held by wf-1")
+	}
+
+	acquired, err = cks.AcquireConcurrencyKey(ctx, "key-2", "wf-other", 30*time.Minute)
+	if err != nil {
+		t.Fatalf("acquire key-2 after reap: %v", err)
+	}
+	if acquired {
+		t.Error("key-2 should still be held by wf-2")
 	}
 }
