@@ -181,6 +181,24 @@ var adapterDefs = map[string]adapterDef{
 			"return unsafe.String(&runIDBuf[0], int(runIDLen)), nil",
 		},
 	},
+	"ChildWorkflowWithOptions": {
+		FieldName:  "ChildWorkflowWithOptions",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"name", "string"},
+			{"inputJSON", "string"},
+			{"version", "int64"},
+			{"parentClosePolicy", "string"},
+		},
+		ResultStmts: []string{
+			"runIDLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_child_workflow_with_options: error code %d", errCode)`,
+			"}",
+			"return unsafe.String(&runIDBuf[0], int(runIDLen)), nil",
+		},
+	},
 	"AwaitChild": {
 		FieldName:  "AwaitChild",
 		ReturnType: "(string, error)",

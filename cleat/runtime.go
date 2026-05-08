@@ -610,14 +610,28 @@ type PluginDependency struct {
 //	}
 var WorkflowPluginDeps []PluginDependency
 
-// ChildWorkflowOptions carries version resolution configuration for
-// spawning a child workflow.
+// ParentClosePolicy determines what happens to child workflows when the parent completes or fails.
+type ParentClosePolicy string
+
+const (
+	ParentClosePolicyAbandon       ParentClosePolicy = "ABANDON"        // Children continue running (current default)
+	ParentClosePolicyTerminate     ParentClosePolicy = "TERMINATE"      // Children are terminated
+	ParentClosePolicyRequestCancel ParentClosePolicy = "REQUEST_CANCEL" // Cancellation is requested on children
+)
+
+// ChildWorkflowOptions carries version resolution and parent close policy
+// configuration for spawning a child workflow.
 //
 // Version resolution priority:
 //  1. Version > 0: use that explicit version
 //  2. Version <= 0 (default): child uses the same version as the parent workflow
 type ChildWorkflowOptions struct {
 	Version int // 0 = use default resolution (parent's version)
+
+	// ParentClosePolicy determines what happens to this child workflow when
+	// the parent workflow completes or fails.
+	// Default: ParentClosePolicyAbandon (current behavior, children continue running).
+	ParentClosePolicy ParentClosePolicy
 }
 
 // ---- Call options ----
@@ -632,7 +646,10 @@ type CallOptions struct {
 	Retry              *RetryPolicy
 	MaxResponseSize    int           // 0 = use default (64KB), capped at outBufSize
 	Timeout            time.Duration // 0 = no timeout, per-call deadline
-	StartToCloseTimeout time.Duration // Temporal-compatible alias for Timeout
+	// Overall deadline for the call including all retries.
+	// Unlike Timeout (per-attempt), this caps the total wall-clock time.
+	// Temporal-compatible.
+	StartToCloseTimeout time.Duration
 }
 
 // RetryPolicy configures automatic retry behavior for durable calls.
@@ -706,7 +723,7 @@ type hostCallsImpl struct {
 	continueAsNew             func(newInputJSON string) error
 	continueAsNewWithVersion func(newInputJSON string, newVersion int64) error
 	childWorkflow             func(name, inputJSON string) (string, error)
-	childWorkflowWithOptions  func(name, inputJSON string, version int) (string, error)
+	childWorkflowWithOptions  func(name, inputJSON string, version int, parentClosePolicy string) (string, error)
 	awaitChild                func(runID string) (string, error)
 	awaitAllChildren           func(runIDs []string) ([]ChildResult, error)
 	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
@@ -863,7 +880,7 @@ type HostCallsOptions struct {
 	ContinueAsNew                func(newInputJSON string) error
 	ContinueAsNewWithVersion     func(newInputJSON string, newVersion int64) error
 	ChildWorkflow                func(name, inputJSON string) (string, error)
-	ChildWorkflowWithOptions    func(name, inputJSON string, version int) (string, error)
+	ChildWorkflowWithOptions    func(name, inputJSON string, version int, parentClosePolicy string) (string, error)
 	AwaitChild                   func(runID string) (string, error)
 	AwaitAllChildren              func(runIDs []string) ([]ChildResult, error)
 	DurableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
@@ -993,6 +1010,36 @@ func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 		}
 	}
 
+	// StartToCloseTimeout: overall deadline across all retry attempts.
+	// Unlike Timeout (per-attempt), this caps the total wall-clock time.
+	var overallDeadline time.Time
+	if opts.StartToCloseTimeout > 0 {
+		overallDeadline = time.Now().Add(opts.StartToCloseTimeout)
+
+		if opts.Retry == nil {
+			// No retry: use StartToCloseTimeout as the per-call timeout.
+			type callResult struct {
+				resp string
+				err  error
+			}
+			ch := make(chan callResult, 1)
+			go func() {
+				resp, err := h.DurableCall(service, operation, requestJSON)
+				ch <- callResult{resp, err}
+			}()
+			select {
+			case r := <-ch:
+				return r.resp, r.err
+			case <-time.After(opts.StartToCloseTimeout):
+				return "", &CallTimeoutError{
+					Service:   service,
+					Operation: operation,
+					Timeout:   opts.StartToCloseTimeout,
+				}
+			}
+		}
+	}
+
 	if opts.Retry == nil {
 		return h.DurableCall(service, operation, requestJSON)
 	}
@@ -1019,11 +1066,26 @@ func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 	rp := opts.Retry
 	var lastErr error
 	for attempt := 1; attempt <= rp.MaxAttempts; attempt++ {
+		if !overallDeadline.IsZero() && time.Now().After(overallDeadline) {
+			return "", &CallTimeoutError{
+				Service:   service,
+				Operation: operation,
+				Timeout:   opts.StartToCloseTimeout,
+			}
+		}
 		resp, err := h.DurableCall(service, operation, requestJSON)
 		if err == nil {
 			return resp, nil
 		}
 		lastErr = err
+
+		if !overallDeadline.IsZero() && time.Now().After(overallDeadline) {
+			return "", &CallTimeoutError{
+				Service:   service,
+				Operation: operation,
+				Timeout:   opts.StartToCloseTimeout,
+			}
+		}
 
 		if isNonRetryable(err, rp.NonRetryableErrors) {
 			return "", err
@@ -1033,6 +1095,16 @@ func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 			backoff := time.Duration(float64(rp.InitialInterval) * math.Pow(rp.BackoffCoefficient, float64(attempt-1)))
 			if backoff > rp.MaxInterval {
 				backoff = rp.MaxInterval
+			}
+			if !overallDeadline.IsZero() {
+				remaining := time.Until(overallDeadline)
+				if backoff > remaining {
+					return "", &CallTimeoutError{
+						Service:   service,
+						Operation: operation,
+						Timeout:   opts.StartToCloseTimeout,
+					}
+				}
 			}
 			h.DurableSleep(backoff)
 		}
@@ -1078,6 +1150,44 @@ func (h *hostCallsImpl) DurableCallTypedWithOptions(opts CallOptions, service, o
 				Service:   service,
 				Operation: operation,
 				Timeout:   opts.Timeout,
+			}
+		}
+	}
+
+	// StartToCloseTimeout: overall deadline across all retry attempts.
+	// When there is a retry policy, DurableCallWithOptions handles the deadline.
+	if opts.StartToCloseTimeout > 0 && opts.Retry == nil {
+		// No retry: use StartToCloseTimeout as the per-call timeout.
+		type callResult struct {
+			resp string
+			err  error
+		}
+		ch := make(chan callResult, 1)
+		go func() {
+			reqBytes, marshalErr := json.Marshal(request)
+			if marshalErr != nil {
+				ch <- callResult{"", marshalErr}
+				return
+			}
+			resp, callErr := h.DurableCall(service, operation, string(reqBytes))
+			ch <- callResult{resp, callErr}
+		}()
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				return r.err
+			}
+			if result != nil {
+				if err := json.Unmarshal([]byte(r.resp), result); err != nil {
+					return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
+				}
+			}
+			return nil
+		case <-time.After(opts.StartToCloseTimeout):
+			return &CallTimeoutError{
+				Service:   service,
+				Operation: operation,
+				Timeout:   opts.StartToCloseTimeout,
 			}
 		}
 	}
@@ -1452,9 +1562,10 @@ func (h *hostCallsImpl) ChildWorkflow(name, inputJSON string) (string, error) {
 
 func (h *hostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts ChildWorkflowOptions) (string, error) {
 	if h.childWorkflowWithOptions != nil {
-		return h.childWorkflowWithOptions(name, inputJSON, opts.Version)
+		return h.childWorkflowWithOptions(name, inputJSON, opts.Version, string(opts.ParentClosePolicy))
 	}
 	// Fall back to plain ChildWorkflow if options handler is not available.
+	// ParentClosePolicy defaults to Abandon in this case (current behavior).
 	return h.ChildWorkflow(name, inputJSON)
 }
 

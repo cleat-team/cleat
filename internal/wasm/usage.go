@@ -57,6 +57,7 @@ var hostFunctions = []HostFunction{
 	{"cleat_continue_as_new", "ContinueAsNew"},
 	{"cleat_continue_as_new_versioned", "ContinueAsNewWithVersion"},
 	{"cleat_child_workflow", "ChildWorkflow"},
+	{"cleat_child_workflow_with_options", "ChildWorkflowWithOptions"},
 	{"cleat_child_workflow", "ChildWorkflowTyped"},
 	{"cleat_await_child", "AwaitChild"},
 	{"cleat_await_all_children", "AwaitAllChildren"},

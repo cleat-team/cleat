@@ -32,7 +32,7 @@ type HostHandler interface {
 	ContinueAsNew(ctx context.Context, m api.Module, newInputJSON string) int64
 	ContinueAsNewWithVersion(ctx context.Context, m api.Module, newInputJSON string, newVersion int) int64
 	ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
-	ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int32, runIDPtr, runIDMaxLen uint32) int64
+	ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64
 	AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
 	AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64
 	DurableCallWithRetry(ctx context.Context, m api.Module, service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string, responsePtr, responseMaxLen uint32) int64
@@ -158,6 +158,17 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		wfInput := readWasmString(mem, inputPtr, inputLen)
 		return uint64(handlerFromContext(ctx).ChildWorkflow(ctx, m, wfName, wfInput, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow")
+
+	// cleat_child_workflow_with_options: (ptr,len x3, i32, ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		namePtr, nameLen, inputPtr, inputLen uint32, version int64,
+		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
+		mem := m.Memory()
+		wfName := readWasmString(mem, namePtr, nameLen)
+		wfInput := readWasmString(mem, inputPtr, inputLen)
+		parentClosePolicy := readWasmString(mem, policyPtr, policyLen)
+		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, parentClosePolicy, runIDPtr, runIDMaxLen))
+	}).Export("cleat_child_workflow_with_options")
 
 	// cleat_await_child: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

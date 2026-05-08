@@ -152,7 +152,7 @@ type WorkflowStore interface {
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
 	// defVersion is the explicit workflow definition version to use, or 0 to use
 	// default resolution (SELECT MAX(version)).
-	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int) (runID string, err error)
+	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error)
 
 	// GetChildResult checks whether a child workflow has completed and returns its result.
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
@@ -933,6 +933,9 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	// Best-effort: release all concurrency keys (Feature 5).
 	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
 
+	// Enforce ParentClosePolicy on children.
+	s.enforceParentClosePolicy(context.Background(), workflowID)
+
 	return nil
 }
 
@@ -971,7 +974,32 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, 
 	// Best-effort: release all concurrency keys (Feature 5).
 	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
 
+	// Enforce ParentClosePolicy on children.
+	s.enforceParentClosePolicy(context.Background(), workflowID)
+
 	return nil
+}
+
+// enforceParentClosePolicy applies ParentClosePolicy to all child workflows
+// of the given parent workflow. Runs as a best-effort operation.
+func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
+	// Terminate children with TERMINATE policy.
+	s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'failed', error_msg = 'parent workflow terminated'
+		WHERE parent_workflow_id = $1
+		  AND parent_close_policy = 'TERMINATE'
+		  AND status NOT IN ('done', 'failed')
+	`, parentWorkflowID)
+
+	// Request cancellation for children with REQUEST_CANCEL policy.
+	s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET cancellation_requested = true
+		WHERE parent_workflow_id = $1
+		  AND parent_close_policy = 'REQUEST_CANCEL'
+		  AND status NOT IN ('done', 'failed')
+	`, parentWorkflowID)
 }
 
 // ReleaseWorkflow returns a workflow to the queue with a next wake time.
@@ -1157,17 +1185,18 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 // The child inherits the namespace from the parent.
 // If defVersion > 0, that version is used explicitly; otherwise the latest
 // non-deprecated version is used (SELECT MAX(version)).
-func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int) (string, error) {
+func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
 	var runID string
 	err := s.db.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, namespace, task_queue)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue)
 		VALUES (gen_random_uuid(), $1,
 		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated) END,
 		        'ready', $2, $3,
+		        COALESCE(NULLIF($5, ''), 'ABANDON'),
 		        COALESCE((SELECT namespace FROM workflow_instances WHERE id = $3), 'default'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'))
 		RETURNING id
-	`, defName, inputJSON, parentID, defVersion).Scan(&runID)
+	`, defName, inputJSON, parentID, defVersion, parentClosePolicy).Scan(&runID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}

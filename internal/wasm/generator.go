@@ -15,6 +15,7 @@ const (
 	kindInString  paramKind = iota // input string: (ptr unsafe.Pointer, len uint32)
 	kindOutString                  // output string buffer: (outPtr unsafe.Pointer, maxLen uint32)
 	kindInt64                      // int64
+	kindInt32                      // int32
 )
 
 // importDef defines the signature of a single //go:wasmimport stub.
@@ -98,6 +99,16 @@ var importDefs = map[string]importDef{
 		Params: []paramSpec{
 			{"name", kindInString},
 			{"inputJSON", kindInString},
+			{"runID", kindOutString},
+		},
+	},
+	"cleat_child_workflow_with_options": {
+		ImportName: "cleat_child_workflow_with_options",
+		Params: []paramSpec{
+			{"name", kindInString},
+			{"inputJSON", kindInString},
+			{"version", kindInt64},
+			{"parentClosePolicy", kindInString},
 			{"runID", kindOutString},
 		},
 	},

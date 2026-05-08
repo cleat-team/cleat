@@ -77,6 +77,7 @@ ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS cancellation_reason TEXT
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS result JSONB;
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS error_msg TEXT;
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS parent_workflow_id TEXT;
+ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS parent_close_policy TEXT DEFAULT 'ABANDON';
 ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS query_state JSONB DEFAULT '{}';
 
 -- Migration: add min_version column to workflow_defs

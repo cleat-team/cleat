@@ -84,7 +84,8 @@ type EventRecord struct {
 	ChildName        string `json:"child_name,omitempty"`
 	ChildInput       string `json:"child_input,omitempty"`
 	RunID            string `json:"run_id,omitempty"`
-	ParentWorkflowID string `json:"parent_workflow_id,omitempty"`
+	ParentWorkflowID  string `json:"parent_workflow_id,omitempty"`
+	ParentClosePolicy string `json:"parent_close_policy,omitempty"`
 
 	// ContinueAsNew fields.
 	NewInput   string `json:"new_input,omitempty"`
@@ -208,7 +209,7 @@ type ChildWorkflowStore interface {
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
 	// defVersion is the explicit workflow definition version to use, or 0 to use
 	// default resolution (SELECT MAX(version)).
-	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int) (string, error)
+	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
 }
 
@@ -1342,16 +1343,16 @@ func (s *execSession) ChildWorkflow(ctx context.Context, m api.Module, name, inp
 	if s.engine.state != nil {
 		parentVersion = s.engine.state.Version()
 	}
-	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, parentVersion, runIDPtr, runIDMaxLen)
+	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, parentVersion, "", runIDPtr, runIDMaxLen)
 }
 
-func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int32, runIDPtr, runIDMaxLen uint32) int64 {
-	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), runIDPtr, runIDMaxLen)
+func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
+	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), parentClosePolicy, runIDPtr, runIDMaxLen)
 }
 
 // childWorkflowWithVersion is the shared implementation for creating child workflows.
 // If version <= 0, the parent's version is used as the default.
-func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, runIDPtr, runIDMaxLen uint32) int64 {
+func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
@@ -1382,7 +1383,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 				childVersion = 0
 			}
 		}
-		runID, err = s.engine.childWfStore.StartChildWorkflow(ctx, parentID, name, inputJSON, childVersion)
+		runID, err = s.engine.childWfStore.StartChildWorkflow(ctx, parentID, name, inputJSON, childVersion, parentClosePolicy)
 		if err != nil {
 			runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
 		}
@@ -1397,6 +1398,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		ChildInput:       inputJSON,
 		RunID:            runID,
 		ParentWorkflowID: s.workflowID,
+			ParentClosePolicy: parentClosePolicy,
 	}
 	s.history = append(s.history, rec)
 	s.stepCount++

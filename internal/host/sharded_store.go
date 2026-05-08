@@ -358,12 +358,12 @@ func (s *ShardedStore) StartNewRun(ctx context.Context, defName string, defVersi
 
 // StartChildWorkflow places the child on the same shard as the parent.
 // defVersion is passed through to the underlying store for version resolution.
-func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int) (string, error) {
+func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
 	shard := s.getShard(parentID)
 	if shard == nil {
 		return "", fmt.Errorf("no shard available")
 	}
-	return shard.Store.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion)
+	return shard.Store.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy)
 }
 
 // GetChildResult routes by child run ID.
