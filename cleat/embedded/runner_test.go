@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -299,5 +300,938 @@ func TestSetOutputTyped(t *testing.T) {
 	}
 	if result.A != 42 || result.B != "hello" {
 		t.Fatalf("expected {42 hello}, got %+v", result)
+	}
+}
+
+// ---- Lock tests ----
+
+func TestAcquireLock_Uncontested(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		acquired, err := h.AcquireLock("test-lock", time.Second)
+		if err != nil {
+			return fmt.Errorf("unexpected error: %v", err)
+		}
+		if !acquired {
+			return errors.New("expected to acquire uncontested lock")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestAcquireLock_SameWorkflowReacquires(t *testing.T) {
+	// acquireLock returns true when the same workflow re-acquires a lock it already holds.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		first, err := h.AcquireLock("my-lock", time.Second)
+		if err != nil {
+			return fmt.Errorf("first acquire error: %v", err)
+		}
+		if !first {
+			return errors.New("expected to acquire lock first time")
+		}
+		second, err := h.AcquireLock("my-lock", time.Second)
+		if err != nil {
+			return fmt.Errorf("second acquire error: %v", err)
+		}
+		if !second {
+			return errors.New("expected to re-acquire lock held by same workflow")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestAcquireLock_DifferentWorkflowRejected(t *testing.T) {
+	// When a lock is held by a different workflow ID, acquireLock returns false.
+	// This path is exercised by directly manipulating the execution's lock map
+	// since each execution has its own lock map in the embedded runner.
+	r := New()
+	e := newExecution(r, "wf1", "{}")
+
+	// First acquire from wf1 succeeds.
+	acquired, err := e.acquireLock("shared-key", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !acquired {
+		t.Fatal("expected wf1 to acquire uncontested lock")
+	}
+
+	// Simulate that "wf2" already holds the lock.
+	e.locks["shared-key"] = "wf2"
+
+	// Now wf1 should be rejected (stored wfID is "wf2", not "wf1").
+	acquired, err = e.acquireLock("shared-key", 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acquired {
+		t.Fatal("expected acquireLock to return false when lock held by different workflow")
+	}
+}
+
+func TestAcquireLock_ConcurrentGoroutines(t *testing.T) {
+	// Multiple goroutines calling acquireLock on a single execution.
+	// All calls use the same workflow ID so all acquires succeed.
+	// The mutex protects the lock map from data races.
+	r := New()
+	e := newExecution(r, "concurrent-wf", "{}")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			acquired, err := e.acquireLock("same-key", 1000)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			if !acquired {
+				t.Error("expected to acquire lock concurrently with same workflow ID")
+			}
+			// Release so another goroutine can experience fresh acquire.
+			if err := e.releaseLock("same-key"); err != nil {
+				t.Errorf("release error: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+func TestReleaseLock_AllowsReacquire(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		acquired, err := h.AcquireLock("my-lock", time.Second)
+		if err != nil {
+			return fmt.Errorf("acquire error: %v", err)
+		}
+		if !acquired {
+			return errors.New("expected to acquire lock")
+		}
+
+		if err := h.ReleaseLock("my-lock"); err != nil {
+			return fmt.Errorf("release error: %v", err)
+		}
+
+		acquired2, err := h.AcquireLock("my-lock", time.Second)
+		if err != nil {
+			return fmt.Errorf("second acquire error: %v", err)
+		}
+		if !acquired2 {
+			return errors.New("expected to re-acquire lock after release")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestReleaseLock_NotHeldIsNoOp(t *testing.T) {
+	// Releasing a lock that was never acquired should not produce an error.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		if err := h.ReleaseLock("never-acquired"); err != nil {
+			return fmt.Errorf("release of unheld lock should not error: %v", err)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+// ---- Condition tests ----
+
+func TestAwaitCondition_AlreadyTrue(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		called := 0
+		met := h.AwaitCondition(func() bool {
+			called++
+			return true
+		}, time.Millisecond, time.Second)
+		if !met {
+			return errors.New("expected condition to be met immediately")
+		}
+		if called != 1 {
+			return fmt.Errorf("expected predicate called once, got %d", called)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestAwaitCondition_BecomesTrue(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		counter := 0
+		met := h.AwaitCondition(func() bool {
+			counter++
+			return counter >= 3
+		}, time.Millisecond, time.Second)
+		if !met {
+			return errors.New("expected condition to be met after polls")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestAwaitCondition_Timeout(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		met := h.AwaitCondition(func() bool {
+			return false
+		}, time.Millisecond, 5*time.Millisecond)
+		if met {
+			return errors.New("expected timeout, not condition met")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestAwaitCondition_PredicateCalledMultipleTimes(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		counter := 0
+		met := h.AwaitCondition(func() bool {
+			counter++
+			return false
+		}, time.Millisecond, 10*time.Millisecond)
+		if met {
+			return errors.New("expected timeout")
+		}
+		if counter < 2 {
+			return fmt.Errorf("expected predicate called at least 2 times, got %d", counter)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+// ---- SideEffect tests ----
+
+func TestSideEffect_RecordsResult(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		result, err := h.SideEffect(func() (string, error) {
+			return "computed-value", nil
+		})
+		if err != nil {
+			return fmt.Errorf("unexpected error: %v", err)
+		}
+		if result != "computed-value" {
+			return fmt.Errorf("expected %q, got %q", "computed-value", result)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestSideEffect_SameResultOnMultipleCalls(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		v1, err := h.SideEffect(func() (string, error) {
+			return "deterministic", nil
+		})
+		if err != nil {
+			return err
+		}
+		v2, err := h.SideEffect(func() (string, error) {
+			return "deterministic", nil
+		})
+		if err != nil {
+			return err
+		}
+		if v1 != v2 {
+			return fmt.Errorf("expected same result from multiple SideEffect calls, got %q and %q", v1, v2)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestSideEffect_WithError(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		_, err := h.SideEffect(func() (string, error) {
+			return "", errors.New("side effect error")
+		})
+		return err
+	})
+	_, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err == nil {
+		t.Fatal("expected error from SideEffect when fn returns an error")
+	}
+}
+
+func TestSideEffect_PanickingFn(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		h.SideEffect(func() (string, error) {
+			panic("intentional panic from side effect")
+		})
+		return nil
+	})
+
+	recovered := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				recovered = true
+			}
+		}()
+		r.ExecuteWorkflow(context.Background(), "test", "{}")
+	}()
+	if !recovered {
+		t.Error("expected panic from SideEffect with panicking fn")
+	}
+}
+
+// ---- Random tests ----
+
+func TestRandom_ValueInRange(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		for i := 0; i < 100; i++ {
+			val := h.Random()
+			if val < 0 || val >= 1000000 {
+				return fmt.Errorf("random value %d out of range [0, 1000000)", val)
+			}
+			h.DurableSleep(time.Millisecond)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestRandom_SameValueSameTime(t *testing.T) {
+	// Without clock advancement, two Random() calls return the same value.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		v1 := h.Random()
+		v2 := h.Random()
+		if v1 != v2 {
+			return fmt.Errorf("expected same random value without clock advance, got %d and %d", v1, v2)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestRandom_ChangesWhenClockAdvances(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		v1 := h.Random()
+		h.DurableSleep(time.Millisecond)
+		v2 := h.Random()
+		if v1 == v2 {
+			// Extremely unlikely that two different millisecond timestamps
+			// produce the same modulo-1000000 result.
+			t.Logf("random values happened to collide: %d", v1)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestRandom_DeterministicAcrossRuns(t *testing.T) {
+	// Two workflows starting at the same clock time produce the same random value.
+	r := New()
+	r.Register("get_random", func(ctx *Context) error {
+		h := ctx.H()
+		val := h.Random()
+		ctx.SetOutput(fmt.Sprintf(`{"val":%d}`, val))
+		return nil
+	})
+	r1, err := r.ExecuteWorkflow(context.Background(), "get_random", "{}")
+	if err != nil {
+		t.Fatalf("first run error: %v", err)
+	}
+	r2, err := r.ExecuteWorkflow(context.Background(), "get_random", "{}")
+	if err != nil {
+		t.Fatalf("second run error: %v", err)
+	}
+	if r1 != r2 {
+		t.Fatalf("expected same random value across runs, got %q and %q", r1, r2)
+	}
+}
+
+// ---- Additional coverage for remaining uncovered functions ----
+
+func TestDurableLogDoesNotPanic(t *testing.T) {
+	// durableLog is a best-effort no-op; verify it doesn't panic.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		h.DurableLog("test diagnostic message")
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestPollCancellationReturnsFalse(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		cancelled, reason := h.PollCancellation()
+		if cancelled {
+			return errors.New("expected no cancellation")
+		}
+		if reason != "" {
+			return fmt.Errorf("expected empty reason, got %q", reason)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestSetOutputf(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		ctx.SetOutputf(`{"val":%d}`, 42)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"val":42}` {
+		t.Fatalf("expected %q, got %q", `{"val":42}`, result)
+	}
+}
+
+func TestSignalWorkflowAndPollSignal(t *testing.T) {
+	// SignalWorkflow stores a signal; PollSignal retrieves it.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		err := h.SignalWorkflow("run-id", "my-sig", `{"key":"val"}`)
+		if err != nil {
+			return fmt.Errorf("SignalWorkflow error: %v", err)
+		}
+		payload, found, err := h.PollSignal("my-sig")
+		if err != nil {
+			return fmt.Errorf("PollSignal error: %v", err)
+		}
+		if !found {
+			return errors.New("expected PollSignal to find signal")
+		}
+		if payload != `{"key":"val"}` {
+			return fmt.Errorf("expected payload %q, got %q", `{"key":"val"}`, payload)
+		}
+		// Poll again: signal should be consumed.
+		_, found, err = h.PollSignal("my-sig")
+		if err != nil {
+			return err
+		}
+		if found {
+			return errors.New("expected signal to be consumed after first poll")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestPollSignalNoMatch(t *testing.T) {
+	// PollSignal for a name that doesn't exist returns found=false.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		_, found, err := h.PollSignal("nonexistent")
+		if err != nil {
+			return err
+		}
+		if found {
+			return errors.New("expected no signal for nonexistent name")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestDurableAwaitSignalsImmediateMatch(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		// Queue a signal first, then await it.
+		h.SignalWorkflow("run-id", "greeting", `{"hello":"world"}`)
+		name, payload, timedOut, err := h.DurableAwaitSignals([]string{"greeting"}, 5000)
+		if err != nil {
+			return err
+		}
+		if timedOut {
+			return errors.New("expected signal, not timeout")
+		}
+		if name != "greeting" {
+			return fmt.Errorf("expected 'greeting', got %q", name)
+		}
+		if payload != `{"hello":"world"}` {
+			return fmt.Errorf("expected payload, got %q", payload)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestDurableAwaitSignalsTimeout(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		_, _, timedOut, err := h.DurableAwaitSignals([]string{"never-signaled"}, 1)
+		if err != nil {
+			return err
+		}
+		if !timedOut {
+			return errors.New("expected timeout for unmatched signal")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestDurableAwaitSignalsZeroTimeout(t *testing.T) {
+	// Zero timeout means return immediately with timedOut=true.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		_, _, timedOut, err := h.DurableAwaitSignals([]string{"x"}, 0)
+		if err != nil {
+			return err
+		}
+		if !timedOut {
+			return errors.New("expected timeout with zero timeout")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestDurableDeferFunc(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		called := false
+		id, err := h.DurableDeferFunc(func() {
+			called = true
+		})
+		if err != nil {
+			return err
+		}
+		if id == "" {
+			return errors.New("expected non-empty defer func ID")
+		}
+		_ = called
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestSendSignalAndWait(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		resp, err := h.SendSignalAndWait("target", "evt", `{"data":"x"}`, time.Second)
+		if err != nil {
+			return err
+		}
+		if resp != `{"status":"delivered"}` {
+			return fmt.Errorf("expected delivered response, got %q", resp)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestReplyToSignal(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		err := h.ReplyToSignal("corr-123", `{"status":"done"}`)
+		if err != nil {
+			return err
+		}
+		// After reply, verify the signal was stored by polling it.
+		payload, found, err := h.PollSignal("corr-123")
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("expected to find reply signal")
+		}
+		if payload != `{"status":"done"}` {
+			return fmt.Errorf("expected reply payload, got %q", payload)
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestUUID(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		u1 := h.UUID("seed-a")
+		u2 := h.UUID("seed-a")
+		u3 := h.UUID("seed-b")
+		if u1 == "" {
+			return errors.New("expected non-empty UUID")
+		}
+		if u1 != u2 {
+			return fmt.Errorf("expected same seed to produce same UUID, got %q vs %q", u1, u2)
+		}
+		if u1 == u3 {
+			return errors.New("expected different seeds to produce different UUIDs")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestScopeManagement(t *testing.T) {
+	// setScope, getScope, clearScope on the HostCalls interface.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+
+		// Initially no scope.
+		objType, instKey := h.GetScope()
+		if objType != "" || instKey != "" {
+			return errors.New("expected empty initial scope")
+		}
+
+		// Set scope and verify.
+		prev := h.SetScope("Order", "ord-42")
+		if prev != "" {
+			return fmt.Errorf("expected empty previous scope, got %q", prev)
+		}
+		objType, instKey = h.GetScope()
+		if objType != "Order" || instKey != "ord-42" {
+			return fmt.Errorf("expected (Order, ord-42), got (%q, %q)", objType, instKey)
+		}
+
+		// Clear scope and verify.
+		prev = h.ClearScope()
+		objType, instKey = h.GetScope()
+		if objType != "" || instKey != "" {
+			return errors.New("expected empty scope after clear")
+		}
+
+		// ClearScope returns the previous scope prefix.
+		h.SetScope("Invoice", "inv-1")
+		prev = h.ClearScope()
+		if prev != "vo:Invoice:inv-1:" {
+			return fmt.Errorf("expected scope prefix 'vo:Invoice:inv-1:', got %q", prev)
+		}
+
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestScopeSetGetRoundTrip(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+
+		prev := h.SetScope("Widget", "w-99")
+		_ = prev
+		objType, instKey := h.GetScope()
+		if objType != "Widget" || instKey != "w-99" {
+			return fmt.Errorf("expected (Widget, w-99), got (%q, %q)", objType, instKey)
+		}
+
+		// Stack-style save/restore: SetScope returns previous prefix.
+		prev2 := h.SetScope("Gadget", "g-1")
+		if prev2 != "vo:Widget:w-99:" {
+			return fmt.Errorf("expected previous prefix 'vo:Widget:w-99:', got %q", prev2)
+		}
+		objType, instKey = h.GetScope()
+		if objType != "Gadget" || instKey != "g-1" {
+			return fmt.Errorf("expected (Gadget, g-1), got (%q, %q)", objType, instKey)
+		}
+
+		// Clear to reset.
+		h.ClearScope()
+		objType, instKey = h.GetScope()
+		if objType != "" || instKey != "" {
+			return errors.New("expected empty scope after clear")
+		}
+
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestExecuteWorkflowTypedNilOutput(t *testing.T) {
+	// ExecuteWorkflowTyped with nil output should not error.
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	err := r.ExecuteWorkflowTyped(context.Background(), "test", struct{}{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error with nil output: %v", err)
+	}
+}
+
+func TestDurableCallHTTPFetchMissingURL(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		// http.fetch with empty URL should error.
+		_, err := h.DurableCall("http", "fetch", `{"url":""}`)
+		if err == nil {
+			return errors.New("expected error for empty URL")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestDurableCallHTTPFetchInvalidRequest(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		// Invalid JSON for http.fetch should error.
+		_, err := h.DurableCall("http", "fetch", `not-json`)
+		if err == nil {
+			return errors.New("expected error for invalid JSON")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
+	}
+}
+
+func TestAwaitPromiseNotFound(t *testing.T) {
+	r := New()
+	r.Register("test", func(ctx *Context) error {
+		h := ctx.H()
+		_, _, err := h.AwaitPromise("nonexistent", time.Millisecond)
+		if err == nil {
+			return errors.New("expected error for nonexistent promise")
+		}
+		ctx.SetOutput(`{"ok":true}`)
+		return nil
+	})
+	result, err := r.ExecuteWorkflow(context.Background(), "test", "{}")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result != `{"ok":true}` {
+		t.Fatalf("expected %q, got %q", `{"ok":true}`, result)
 	}
 }

@@ -94,11 +94,11 @@ coverage-report:
 	go tool cover -func=coverage.out
 
 # Thresholds (enforced via prefix matching):
-#   cleat/            10%     (lowest: localdev  15%)
-#   internal/         50%     (lowest: wasm      57%)
-#   internal/host/     5%     (lowest: host       7%)
-#   internal/plugin/  50%     (current: plugin   56%)
-#   plugins/          15%     (lowest: kafkaconnect  24%)
+#   cleat/            15%     (lowest: localdev  15.4%)
+#   internal/         50%     (lowest: wasm      77.3%)
+#   internal/host/    15%     (lowest: host      22.5%)
+#   internal/plugin/  50%     (current: plugin   56.3%)
+#   plugins/          20%     (lowest: kafkaconnect  24.2%)
 #   cmd/               0%     (entry points, no gating)
 .PHONY: coverage-check
 coverage-check: coverage-go
@@ -107,11 +107,11 @@ coverage-check: coverage-go
 	    printf "=== Coverage by Package ===\n"; \
 	    printf "%-40s %8s\n\n", "Package", "Coverage"; \
 	    n = split("internal/host internal/plugin internal cleat plugins cmd", prefixes, " "); \
-	    thresh["internal/host"] = 5; \
+	    thresh["internal/host"] = 15; \
 	    thresh["internal/plugin"] = 50; \
 	    thresh["internal"] = 50; \
-	    thresh["cleat"] = 10; \
-	    thresh["plugins"] = 15; \
+	    thresh["cleat"] = 15; \
+	    thresh["plugins"] = 20; \
 	    thresh["cmd"] = 0; \
 	} \
 	/^total:/ { next } \

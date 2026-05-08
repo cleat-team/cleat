@@ -1,0 +1,910 @@
+package cleattest
+
+import (
+	"encoding/json"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/rcownie/cleat/cleat"
+)
+
+// ---------------------------------------------------------------------------
+// 2a: Child Workflow Tests
+// ---------------------------------------------------------------------------
+
+func TestOnChildWorkflowWithReturn(t *testing.T) {
+	env := NewTestEnv()
+	env.OnChildWorkflow("my-child").Return(`{"status":"ok"}`, nil)
+
+	runID, err := env.H().ChildWorkflow("my-child", `{"input":"data"}`)
+	if err != nil {
+		t.Fatalf("ChildWorkflow failed: %v", err)
+	}
+	if runID == "" {
+		t.Fatal("expected non-empty runID")
+	}
+
+	result, err := env.H().AwaitChild(runID)
+	if err != nil {
+		t.Fatalf("AwaitChild failed: %v", err)
+	}
+	if result != `{"status":"ok"}` {
+		t.Fatalf("expected %q, got %q", `{"status":"ok"}`, result)
+	}
+}
+
+func TestRegisterChildStub(t *testing.T) {
+	env := NewTestEnv()
+	env.RegisterChildStub("my-child", "stub-result")
+
+	runID, err := env.H().ChildWorkflow("my-child", "input")
+	if err != nil {
+		t.Fatalf("ChildWorkflow failed: %v", err)
+	}
+
+	result, err := env.H().AwaitChild(runID)
+	if err != nil {
+		t.Fatalf("AwaitChild failed: %v", err)
+	}
+	if result != "stub-result" {
+		t.Fatalf("expected %q, got %q", "stub-result", result)
+	}
+}
+
+func TestChildWorkflowCallHistory(t *testing.T) {
+	env := NewTestEnv()
+	env.OnChildWorkflow("child-a").Return("result-a", nil)
+	env.OnChildWorkflow("child-b").Return("result-b", nil)
+
+	env.H().ChildWorkflow("child-a", `{"req":"a"}`)
+	env.H().ChildWorkflow("child-b", `{"req":"b"}`)
+
+	history := env.ChildWorkflowCallHistory()
+	if len(history) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(history))
+	}
+	if history[0].Name != "child-a" || history[0].InputJSON != `{"req":"a"}` {
+		t.Fatalf("unexpected first record: %+v", history[0])
+	}
+	if history[1].Name != "child-b" || history[1].InputJSON != `{"req":"b"}` {
+		t.Fatalf("unexpected second record: %+v", history[1])
+	}
+}
+
+func TestChildWorkflowWithHandler(t *testing.T) {
+	env := NewTestEnv()
+
+	// Register a handler (takes priority over stubs).
+	env.RegisterChildWorkflow("my-child", func(inputJSON string) (string, error) {
+		return `{"handler":"processed"}`, nil
+	})
+
+	// Register a stub (should be overridden by handler above).
+	env.OnChildWorkflow("my-child").Return(`{"stub":"value"}`, nil)
+
+	runID, err := env.H().ChildWorkflow("my-child", "input")
+	if err != nil {
+		t.Fatalf("ChildWorkflow failed: %v", err)
+	}
+
+	result, err := env.H().AwaitChild(runID)
+	if err != nil {
+		t.Fatalf("AwaitChild failed: %v", err)
+	}
+	if result != `{"handler":"processed"}` {
+		t.Fatalf("expected handler result %q, got %q", `{"handler":"processed"}`, result)
+	}
+}
+
+func TestChildWorkflowHandlerReturnsError(t *testing.T) {
+	env := NewTestEnv()
+
+	env.RegisterChildWorkflow("my-child", func(inputJSON string) (string, error) {
+		return "", fmt.Errorf("child failed")
+	})
+
+	runID, err := env.H().ChildWorkflow("my-child", "input")
+	if err != nil {
+		t.Fatalf("ChildWorkflow failed: %v", err)
+	}
+
+	_, err = env.H().AwaitChild(runID)
+	if err == nil {
+		t.Fatal("expected error from AwaitChild")
+	}
+	if err.Error() != "child failed" {
+		t.Fatalf("expected 'child failed', got %q", err.Error())
+	}
+}
+
+func TestChildWorkflowStubReturnsError(t *testing.T) {
+	env := NewTestEnv()
+
+	env.OnChildWorkflow("failing-child").Return("", fmt.Errorf("stub-error"))
+
+	runID, err := env.H().ChildWorkflow("failing-child", "input")
+	if err != nil {
+		t.Fatalf("ChildWorkflow failed: %v", err)
+	}
+
+	_, err = env.H().AwaitChild(runID)
+	if err == nil {
+		t.Fatal("expected error from AwaitChild")
+	}
+	if err.Error() != "stub-error" {
+		t.Fatalf("expected 'stub-error', got %q", err.Error())
+	}
+}
+
+func TestAwaitAllChildren(t *testing.T) {
+	env := NewTestEnv()
+	env.OnChildWorkflow("child-a").Return("result-a", nil)
+	env.OnChildWorkflow("child-b").Return("result-b", nil)
+
+	runID1, _ := env.H().ChildWorkflow("child-a", "in1")
+	runID2, _ := env.H().ChildWorkflow("child-b", "in2")
+
+	results, err := env.H().AwaitAllChildren([]string{runID1, runID2})
+	if err != nil {
+		t.Fatalf("AwaitAllChildren failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+	if results[0].Result != "result-a" {
+		t.Fatalf("expected result-a, got %q", results[0].Result)
+	}
+	if results[1].Result != "result-b" {
+		t.Fatalf("expected result-b, got %q", results[1].Result)
+	}
+}
+
+func TestChildWorkflowTyped(t *testing.T) {
+	env := NewTestEnv()
+	env.OnChildWorkflow("my-child").Return(`{"status":"ok"}`, nil)
+
+	type inputType struct {
+		Value string `json:"value"`
+	}
+
+	runID, err := env.H().ChildWorkflowTyped("my-child", inputType{Value: "test"})
+	if err != nil {
+		t.Fatalf("ChildWorkflowTyped failed: %v", err)
+	}
+	if runID == "" {
+		t.Fatal("expected non-empty runID")
+	}
+}
+
+func TestAwaitChildTyped(t *testing.T) {
+	env := NewTestEnv()
+	env.OnChildWorkflow("my-child").Return(`{"status":"ok","count":42}`, nil)
+
+	runID, _ := env.H().ChildWorkflow("my-child", "input")
+
+	type resultType struct {
+		Status string `json:"status"`
+		Count  int    `json:"count"`
+	}
+	var result resultType
+	err := env.H().AwaitChildTyped(runID, &result)
+	if err != nil {
+		t.Fatalf("AwaitChildTyped failed: %v", err)
+	}
+	if result.Status != "ok" {
+		t.Fatalf("expected status=ok, got %q", result.Status)
+	}
+	if result.Count != 42 {
+		t.Fatalf("expected count=42, got %d", result.Count)
+	}
+}
+
+func TestAwaitChildNeverRegistered(t *testing.T) {
+	env := NewTestEnv()
+
+	runID, err := env.H().ChildWorkflow("unregistered", "input")
+	if err != nil {
+		t.Fatalf("ChildWorkflow failed: %v", err)
+	}
+
+	// awaitChildImpl returns default result for unregistered children.
+	result, err := env.H().AwaitChild(runID)
+	if err != nil {
+		t.Fatalf("AwaitChild failed: %v", err)
+	}
+	if result != `{"status":"completed"}` {
+		t.Fatalf("expected default result %q, got %q", `{"status":"completed"}`, result)
+	}
+}
+
+func TestChildWorkflowWithOptions(t *testing.T) {
+	env := NewTestEnv()
+	env.OnChildWorkflow("my-child").Return("opts-result", nil)
+
+	runID, err := env.H().ChildWorkflowWithOptions("my-child", "input", cleat.ChildWorkflowOptions{
+		Version:           2,
+		ParentClosePolicy: cleat.ParentClosePolicyTerminate,
+	})
+	if err != nil {
+		t.Fatalf("ChildWorkflowWithOptions failed: %v", err)
+	}
+
+	result, err := env.H().AwaitChild(runID)
+	if err != nil {
+		t.Fatalf("AwaitChild failed: %v", err)
+	}
+	if result != "opts-result" {
+		t.Fatalf("expected %q, got %q", "opts-result", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2b: Promise Tests
+// ---------------------------------------------------------------------------
+
+func TestCreatePromiseResolveAwait(t *testing.T) {
+	env := NewTestEnv()
+
+	promiseID, err := env.H().CreatePromise("test-promise")
+	if err != nil {
+		t.Fatalf("CreatePromise failed: %v", err)
+	}
+	if promiseID == "" {
+		t.Fatal("expected non-empty promise ID")
+	}
+
+	env.ResolvePromise(promiseID, "resolved-value")
+
+	result, timedOut, err := env.H().AwaitPromise(promiseID, 0)
+	if err != nil {
+		t.Fatalf("AwaitPromise failed: %v", err)
+	}
+	if timedOut {
+		t.Fatal("unexpected timeout for resolved promise")
+	}
+	if result != "resolved-value" {
+		t.Fatalf("expected %q, got %q", "resolved-value", result)
+	}
+}
+
+func TestCreatePromiseRejectAwait(t *testing.T) {
+	env := NewTestEnv()
+
+	promiseID, err := env.H().CreatePromise("test-promise")
+	if err != nil {
+		t.Fatalf("CreatePromise failed: %v", err)
+	}
+
+	env.RejectPromise(promiseID, "something went wrong")
+
+	_, timedOut, err := env.H().AwaitPromise(promiseID, 0)
+	if err == nil {
+		t.Fatal("expected error for rejected promise")
+	}
+	if timedOut {
+		t.Fatal("unexpected timeout for rejected promise")
+	}
+	if err.Error() != "promise rejected: something went wrong" {
+		t.Fatalf("expected 'promise rejected: something went wrong', got %v", err)
+	}
+}
+
+func TestAwaitPromiseTimeout(t *testing.T) {
+	env := NewTestEnv()
+
+	promiseID, err := env.H().CreatePromise("pending-promise")
+	if err != nil {
+		t.Fatalf("CreatePromise failed: %v", err)
+	}
+
+	// A pending promise with timeout should advance the clock and return timedOut.
+	result, timedOut, err := env.H().AwaitPromise(promiseID, 5*time.Second)
+	if err != nil {
+		t.Fatalf("AwaitPromise failed: %v", err)
+	}
+	if !timedOut {
+		t.Fatal("expected timeout for pending promise")
+	}
+	if result != "" {
+		t.Fatalf("expected empty result, got %q", result)
+	}
+}
+
+func TestAwaitPromiseNotFound(t *testing.T) {
+	env := NewTestEnv()
+
+	_, _, err := env.H().AwaitPromise("non-existent", 0)
+	if err == nil {
+		t.Fatal("expected error for non-existent promise")
+	}
+	if err.Error() != "cleattest: promise non-existent not found" {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+}
+
+func TestResolvePromiseNoOpForMissing(t *testing.T) {
+	env := NewTestEnv()
+
+	// ResolvePromise on a non-existent promise should be a no-op (no panic).
+	env.ResolvePromise("non-existent", "value")
+	env.RejectPromise("non-existent", "err")
+}
+
+// ---------------------------------------------------------------------------
+// 2c: Update/Query Tests
+// ---------------------------------------------------------------------------
+
+func TestHandleQuery(t *testing.T) {
+	env := NewTestEnv()
+
+	env.H().RegisterQueryHandler("my_query", func(payload string) (string, error) {
+		return `{"result":"queried"}`, nil
+	})
+
+	result, err := env.HandleQuery("my_query", `{"input":"data"}`)
+	if err != nil {
+		t.Fatalf("HandleQuery failed: %v", err)
+	}
+	if result != `{"result":"queried"}` {
+		t.Fatalf("expected %q, got %q", `{"result":"queried"}`, result)
+	}
+}
+
+func TestHandleUpdate(t *testing.T) {
+	env := NewTestEnv()
+
+	env.H().RegisterUpdateHandler("my_update", func(payload string) (string, error) {
+		return `{"result":"updated"}`, nil
+	}, func(payload string) error {
+		return nil
+	})
+
+	result, err := env.HandleUpdate("my_update", `{"input":"data"}`)
+	if err != nil {
+		t.Fatalf("HandleUpdate failed: %v", err)
+	}
+	if result != `{"result":"updated"}` {
+		t.Fatalf("expected %q, got %q", `{"result":"updated"}`, result)
+	}
+}
+
+func TestHandleQueryWithoutHandler(t *testing.T) {
+	env := NewTestEnv()
+
+	_, err := env.HandleQuery("nonexistent", "payload")
+	if err == nil {
+		t.Fatal("expected error for unregistered query handler")
+	}
+}
+
+func TestHandleUpdateWithoutHandler(t *testing.T) {
+	env := NewTestEnv()
+
+	_, err := env.HandleUpdate("nonexistent", "payload")
+	if err == nil {
+		t.Fatal("expected error for unregistered update handler")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2d: Signal Tests
+// ---------------------------------------------------------------------------
+
+func TestSendSignalAndWaitWithReply(t *testing.T) {
+	env := NewTestEnv()
+
+	type signalResult struct {
+		resp string
+		err  error
+	}
+	resultCh := make(chan signalResult)
+
+	go func() {
+		resp, err := env.H().SendSignalAndWait("target", "sig", `{"key":"val"}`, 5*time.Second)
+		resultCh <- signalResult{resp, err}
+	}()
+
+	// Spin until the signal is available in the pending queue.
+	var payload string
+	for i := 0; i < 100; i++ {
+		var found bool
+		payload, found, _ = env.H().PollSignal("sig")
+		if found {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if payload == "" {
+		t.Fatal("signal not delivered within timeout")
+	}
+
+	// Parse the correlation ID embedded by sendSignalAndWaitImpl.
+	var sp struct {
+		CorrelationID string `json:"_correlation_id"`
+	}
+	if err := json.Unmarshal([]byte(payload), &sp); err != nil {
+		t.Fatalf("failed to parse signal payload: %v", err)
+	}
+	if sp.CorrelationID == "" {
+		t.Fatal("expected correlation ID in signal payload")
+	}
+
+	// Reply through the HostCalls interface.
+	err := env.H().ReplyToSignal(sp.CorrelationID, "reply-response")
+	if err != nil {
+		t.Fatalf("ReplyToSignal failed: %v", err)
+	}
+
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("SendSignalAndWait failed: %v", result.err)
+	}
+	if result.resp != "reply-response" {
+		t.Fatalf("expected %q, got %q", "reply-response", result.resp)
+	}
+}
+
+func TestSendSignalAndWaitTimeout(t *testing.T) {
+	env := NewTestEnv()
+
+	// A very short timeout should cause SendSignalAndWait to time out.
+	_, err := env.H().SendSignalAndWait("target", "sig", "{}", 10*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+}
+
+func TestSignalWorkflow(t *testing.T) {
+	env := NewTestEnv()
+
+	err := env.H().SignalWorkflow("target", "test-signal", "test-payload")
+	if err != nil {
+		t.Fatalf("SignalWorkflow failed: %v", err)
+	}
+
+	payload, found, err := env.H().PollSignal("test-signal")
+	if err != nil {
+		t.Fatalf("PollSignal failed: %v", err)
+	}
+	if !found {
+		t.Fatal("expected signal to be delivered")
+	}
+	if payload != "test-payload" {
+		t.Fatalf("expected %q, got %q", "test-payload", payload)
+	}
+}
+
+func TestReplyToSignalUnknownCorrelationID(t *testing.T) {
+	env := NewTestEnv()
+
+	err := env.H().ReplyToSignal("nonexistent-corr", "response")
+	if err == nil {
+		t.Fatal("expected error for unknown correlation ID")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2e: Lock / Condition Tests
+// ---------------------------------------------------------------------------
+
+func TestAcquireLockRelease(t *testing.T) {
+	env := NewTestEnv()
+
+	acquired, err := env.H().AcquireLock("my-key", time.Minute)
+	if err != nil {
+		t.Fatalf("AcquireLock failed: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected lock to be acquired")
+	}
+
+	err = env.H().ReleaseLock("my-key")
+	if err != nil {
+		t.Fatalf("ReleaseLock failed: %v", err)
+	}
+}
+
+func TestAcquireLockIdempotent(t *testing.T) {
+	env := NewTestEnv()
+
+	acquired, err := env.H().AcquireLock("my-key", time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("first acquire: acquired=%v err=%v", acquired, err)
+	}
+
+	// Same workflow acquiring the same key again should succeed (idempotent
+	// because acquireLockImpl passes "" as workflowID to AcquireConcurrencyKey).
+	acquired, err = env.H().AcquireLock("my-key", time.Minute)
+	if err != nil {
+		t.Fatalf("second acquire failed: %v", err)
+	}
+	if !acquired {
+		t.Fatal("second acquire should succeed (idempotent)")
+	}
+}
+
+func TestAwaitConditionMetImmediately(t *testing.T) {
+	env := NewTestEnv()
+
+	met := env.H().AwaitCondition(func() bool { return true }, time.Second, time.Minute)
+	if !met {
+		t.Fatal("expected condition to be met immediately")
+	}
+}
+
+func TestAwaitConditionTimeout(t *testing.T) {
+	env := NewTestEnv()
+
+	resultCh := make(chan bool)
+	go func() {
+		met := env.H().AwaitCondition(func() bool { return false }, 10*time.Millisecond, 100*time.Millisecond)
+		resultCh <- met
+	}()
+
+	// Give the goroutine time to enter durableSleepImpl.
+	time.Sleep(20 * time.Millisecond)
+
+	// Advance time past the deadline.
+	env.AdvanceTime(200 * time.Millisecond)
+
+	select {
+	case met := <-resultCh:
+		if met {
+			t.Fatal("expected condition to time out")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for AwaitCondition goroutine")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2f: Other Primitives
+// ---------------------------------------------------------------------------
+
+func TestContinueAsNew(t *testing.T) {
+	env := NewTestEnv()
+
+	err := env.H().ContinueAsNew(`{"input":"data"}`)
+	if err != nil {
+		t.Fatalf("ContinueAsNew failed: %v", err)
+	}
+}
+
+func TestSideEffect(t *testing.T) {
+	env := NewTestEnv()
+
+	result, err := env.H().SideEffect(func() (string, error) {
+		return "computed-value", nil
+	})
+	if err != nil {
+		t.Fatalf("SideEffect failed: %v", err)
+	}
+	if result != "computed-value" {
+		t.Fatalf("expected %q, got %q", "computed-value", result)
+	}
+}
+
+func TestSideEffectFnError(t *testing.T) {
+	env := NewTestEnv()
+
+	_, err := env.H().SideEffect(func() (string, error) {
+		return "", fmt.Errorf("fn-error")
+	})
+	if err == nil {
+		t.Fatal("expected error from SideEffect when fn returns error")
+	}
+	if err.Error() != "fn-error" {
+		t.Fatalf("expected 'fn-error', got %v", err)
+	}
+}
+
+func TestRunDetached(t *testing.T) {
+	env := NewTestEnv()
+
+	called := false
+	err := env.H().RunDetached(func(h cleat.HostCalls) error {
+		called = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunDetached failed: %v", err)
+	}
+	if !called {
+		t.Fatal("expected RunDetached to execute the function")
+	}
+}
+
+func TestOnPluginCallReturn(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("test-plugin", "test-func").Return(`{"result":"plugin-ok"}`, nil)
+
+	result, err := env.H().PluginCall("test-plugin", "test-func", `{"input":"data"}`)
+	if err != nil {
+		t.Fatalf("PluginCall failed: %v", err)
+	}
+	if result != `{"result":"plugin-ok"}` {
+		t.Fatalf("expected %q, got %q", `{"result":"plugin-ok"}`, result)
+	}
+}
+
+func TestOnPluginCallReturnWithError(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("test-plugin", "test-func").Return("", fmt.Errorf("plugin-error"))
+
+	_, err := env.H().PluginCall("test-plugin", "test-func", "input")
+	if err == nil {
+		t.Fatal("expected error from PluginCall")
+	}
+	if err.Error() != "plugin-error" {
+		t.Fatalf("expected 'plugin-error', got %v", err)
+	}
+}
+
+func TestPluginCallWithoutStub(t *testing.T) {
+	env := NewTestEnv()
+
+	_, err := env.H().PluginCall("unknown", "unknown", "input")
+	if err == nil {
+		t.Fatal("expected error for unregistered plugin call")
+	}
+}
+
+func TestDurableLog(t *testing.T) {
+	env := NewTestEnv()
+
+	// durableLogImpl is a no-op; verify it doesn't panic.
+	env.H().DurableLog("test log message")
+}
+
+func TestPollCancellation(t *testing.T) {
+	env := NewTestEnv()
+
+	cancelled, reason := env.H().PollCancellation()
+	if cancelled {
+		t.Fatal("expected no cancellation")
+	}
+	if reason != "" {
+		t.Fatalf("expected empty reason, got %q", reason)
+	}
+}
+
+func TestSetRetryBehavior(t *testing.T) {
+	env := NewTestEnv()
+	env.SetRetryBehavior("svc", "op", 2, "final")
+	env.OnCall("svc", "op", nil).Return("success-after-retries", nil)
+
+	// First call should fail (per-service/operation retry behavior).
+	_, err := env.H().DurableCall("svc", "op", "req")
+	if err == nil {
+		t.Fatal("expected retry failure on first call")
+	}
+
+	// Second call should also fail.
+	_, err = env.H().DurableCall("svc", "op", "req")
+	if err == nil {
+		t.Fatal("expected retry failure on second call")
+	}
+
+	// Third call should succeed (falls through to stub matching).
+	resp, err := env.H().DurableCall("svc", "op", "req")
+	if err != nil {
+		t.Fatalf("expected success on third call: %v", err)
+	}
+	if resp != "success-after-retries" {
+		t.Fatalf("expected %q, got %q", "success-after-retries", resp)
+	}
+}
+
+func TestDurableCallTypedWithHeartbeat(t *testing.T) {
+	env := NewTestEnv()
+	env.OnCall("svc", "op", nil).Return(`{"result":"heartbeat-ok"}`, nil)
+
+	type reqType struct {
+		Input string `json:"input"`
+	}
+	type respType struct {
+		Result string `json:"result"`
+	}
+
+	var resp respType
+	err := env.H().DurableCallTypedWithHeartbeat("svc", "op", reqType{Input: "data"}, &resp, time.Second, nil)
+	if err != nil {
+		t.Fatalf("DurableCallTypedWithHeartbeat failed: %v", err)
+	}
+	if resp.Result != "heartbeat-ok" {
+		t.Fatalf("expected result=heartbeat-ok, got %q", resp.Result)
+	}
+}
+
+func TestDurableCallTypedWithHeartbeatNoResultPtr(t *testing.T) {
+	env := NewTestEnv()
+	env.OnCall("svc", "op", nil).Return(`{"result":"ok"}`, nil)
+
+	// When result is nil, the call should succeed without unmarshaling.
+	err := env.H().DurableCallTypedWithHeartbeat("svc", "op", struct{}{}, nil, time.Second, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Additional: TestEnv options and edge coverage
+// ---------------------------------------------------------------------------
+
+func TestNewTestEnvWithOptions(t *testing.T) {
+	env := NewTestEnv(WithRetrySimulation(3))
+	// Verify WithRetrySimulation was applied by checking retry behavior.
+	env.OnCall("svc", "op", nil).Return("ok", nil)
+
+	_, err := env.H().DurableCall("svc", "op", "req")
+	if err == nil {
+		t.Fatal("expected retry from WithRetrySimulation(3)")
+	}
+}
+
+func TestChildWorkflowFromOnChildWorkflowBuilder(t *testing.T) {
+	// This test exercises the OnChildWorkflow builder path (line 696-702).
+	env := NewTestEnv()
+	builder := env.OnChildWorkflow("builder-child")
+	if builder == nil {
+		t.Fatal("OnChildWorkflow returned nil")
+	}
+	builder.Return("builder-result", nil)
+
+	runID, _ := env.H().ChildWorkflow("builder-child", "input")
+	result, _ := env.H().AwaitChild(runID)
+	if result != "builder-result" {
+		t.Fatalf("expected %q, got %q", "builder-result", result)
+	}
+}
+
+func TestChildWorkflowCallHistoryErrorRecord(t *testing.T) {
+	env := NewTestEnv()
+
+	env.RegisterChildWorkflow("err-child", func(inputJSON string) (string, error) {
+		return "", fmt.Errorf("wf-error")
+	})
+
+	env.H().ChildWorkflow("err-child", "input")
+	history := env.ChildWorkflowCallHistory()
+	if len(history) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(history))
+	}
+	if history[0].Err == nil {
+		t.Fatal("expected non-nil error in call history")
+	}
+	if history[0].Err.Error() != "wf-error" {
+		t.Fatalf("expected error 'wf-error', got %v", history[0].Err)
+	}
+}
+
+func TestAwaitConditionViaHostCalls(t *testing.T) {
+	// Test the hostCallsImpl.AwaitCondition path calling through to
+	// awaitConditionImpl.
+	env := NewTestEnv()
+
+	// Condition that is immediately true.
+	var mu sync.Mutex
+	state := false
+
+	ch := make(chan bool)
+	go func() {
+		met := env.H().AwaitCondition(func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return state
+		}, 10*time.Millisecond, 5*time.Second)
+		ch <- met
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	mu.Lock()
+	state = true
+	mu.Unlock()
+
+	env.AdvanceTime(50 * time.Millisecond)
+
+	select {
+	case met := <-ch:
+		if !met {
+			t.Fatal("expected condition to be met")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for AwaitCondition")
+	}
+}
+
+func TestAcquireLockAcquireConcurrencyKey(t *testing.T) {
+	// Test acquireLockImpl via H().AcquireLockMs (alternate entry point).
+	env := NewTestEnv()
+
+	acquired, err := env.H().AcquireLockMs("lock-key", 30000)
+	if err != nil {
+		t.Fatalf("AcquireLockMs failed: %v", err)
+	}
+	if !acquired {
+		t.Fatal("expected lock to be acquired")
+	}
+}
+
+func TestRegisterChildWorkflowThenChildWorkflow(t *testing.T) {
+	env := NewTestEnv()
+	env.RegisterChildWorkflow("handler-child", func(inputJSON string) (string, error) {
+		return "handler-output", nil
+	})
+
+	runID, err := env.H().ChildWorkflow("handler-child", "input")
+	if err != nil {
+		t.Fatalf("ChildWorkflow failed: %v", err)
+	}
+
+	result, err := env.H().AwaitChild(runID)
+	if err != nil {
+		t.Fatalf("AwaitChild failed: %v", err)
+	}
+	if result != "handler-output" {
+		t.Fatalf("expected 'handler-output', got %q", result)
+	}
+}
+
+func TestPluginCallMultipleStubs(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("plugin-a", "func-a").Return("result-a", nil)
+	env.OnPluginCall("plugin-b", "func-b").Return("result-b", nil)
+
+	r1, _ := env.H().PluginCall("plugin-a", "func-a", "in")
+	r2, _ := env.H().PluginCall("plugin-b", "func-b", "in")
+
+	if r1 != "result-a" {
+		t.Fatalf("expected result-a, got %q", r1)
+	}
+	if r2 != "result-b" {
+		t.Fatalf("expected result-b, got %q", r2)
+	}
+}
+
+// durableCallTypedWithHeartbeatImpl is never reached through hostCallsImpl
+// (which always takes a fallback path), so we test it directly.
+func TestDurableCallTypedWithHeartbeatImplDirect(t *testing.T) {
+	env := NewTestEnv()
+	env.OnCall("svc", "op", nil).Return(`{"result":"direct-ok"}`, nil)
+
+	type reqType struct {
+		X int `json:"x"`
+	}
+	type respType struct {
+		Result string `json:"result"`
+	}
+
+	var resp respType
+	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", reqType{X: 42}, &resp, time.Second, nil)
+	if err != nil {
+		t.Fatalf("durableCallTypedWithHeartbeatImpl failed: %v", err)
+	}
+	if resp.Result != "direct-ok" {
+		t.Fatalf("expected result=direct-ok, got %q", resp.Result)
+	}
+}
+
+func TestDurableCallTypedWithHeartbeatImplDirectNilResult(t *testing.T) {
+	env := NewTestEnv()
+	env.OnCall("svc", "op", nil).Return("ignored", nil)
+
+	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", struct{}{}, nil, 0, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDurableCallTypedWithHeartbeatImplDirectMarshalError(t *testing.T) {
+	env := NewTestEnv()
+
+	// An un-marshalable request should cause an error.
+	err := env.durableCallTypedWithHeartbeatImpl("svc", "op", func() {}, nil, 0, nil)
+	if err == nil {
+		t.Fatal("expected marshal error")
+	}
+}

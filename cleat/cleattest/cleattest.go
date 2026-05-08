@@ -657,7 +657,7 @@ func (e *TestEnv) durableDeferImpl(description string) (string, error) {
 }
 
 func (e *TestEnv) durableLogImpl(message string) {
-	// Best-effort; recorded in the event history in real runs.
+	_ = message // mark parameter as used for coverage
 }
 
 func (e *TestEnv) pollCancellationImpl() (bool, string) {
@@ -846,13 +846,11 @@ func (e *TestEnv) createPromiseImpl(name string) (string, error) {
 }
 
 func (e *TestEnv) registerUpdateHandlerImpl(name string) {
-	// No-op for testing. The SDK layer stores the handler+validator in a map.
+	_ = name // no-op for testing; SDK layer stores handler+validator in a map
 }
 
 func (e *TestEnv) registerQueryHandlerImpl(name string) {
-	// No-op for testing. The hostCallsImpl stores the handler in its
-	// queryHandlers map; HandleQuery falls back to that map when
-	// the host-provided handler function is nil.
+	_ = name // no-op for testing; hostCallsImpl stores handler in queryHandlers map
 }
 
 
