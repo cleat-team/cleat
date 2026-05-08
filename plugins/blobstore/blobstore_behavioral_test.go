@@ -3,13 +3,20 @@ package blobstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -587,4 +594,561 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ---------------------------------------------------------------------------
+// Error injection infrastructure
+// ---------------------------------------------------------------------------
+
+// failBackend is a Backend implementation that always returns errors.
+type failBackend struct{}
+
+func (b *failBackend) Put(_ context.Context, _ string, _ []byte, _ string) error {
+	return fmt.Errorf("backend error")
+}
+
+func (b *failBackend) Get(_ context.Context, _ string) ([]byte, error) {
+	return nil, fmt.Errorf("backend error")
+}
+
+func (b *failBackend) Delete(_ context.Context, _ string) error {
+	return fmt.Errorf("backend error")
+}
+
+// selectiveErrorConn wraps a fakeConn and injects errors for SQL statements
+// matching the configured patterns; all other queries pass through.
+type selectiveErrorConn struct {
+	*fakeConn
+	failExecPatterns   []string
+	failQueryPatterns  []string
+}
+
+func (c *selectiveErrorConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	for _, pattern := range c.failExecPatterns {
+		if strings.Contains(query, pattern) {
+			return nil, fmt.Errorf("injected exec error: %s", pattern)
+		}
+	}
+	return c.fakeConn.ExecContext(ctx, query, args)
+}
+
+func (c *selectiveErrorConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	for _, pattern := range c.failQueryPatterns {
+		if strings.Contains(query, pattern) {
+			return nil, fmt.Errorf("injected query error: %s", pattern)
+		}
+	}
+	return c.fakeConn.QueryContext(ctx, query, args)
+}
+
+type selectiveErrorConnector struct {
+	store             *fakeDBStore
+	failExecPatterns  []string
+	failQueryPatterns []string
+}
+
+func (c *selectiveErrorConnector) Connect(_ context.Context) (driver.Conn, error) {
+	return &selectiveErrorConn{
+		fakeConn:          &fakeConn{store: c.store},
+		failExecPatterns:  c.failExecPatterns,
+		failQueryPatterns: c.failQueryPatterns,
+	}, nil
+}
+
+func (c *selectiveErrorConnector) Driver() driver.Driver {
+	return &fakeDrv{}
+}
+
+// ---------------------------------------------------------------------------
+// Plugin.Init tests
+// ---------------------------------------------------------------------------
+
+func TestPluginInitDefaults(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{}
+	ctx := context.Background()
+
+	env := &plugin.Environment{
+		DB:     db,
+		Mux:    http.NewServeMux(),
+		Logger: slog.Default(),
+	}
+
+	err := p.Init(ctx, env)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if p.config.Backend != "memory" {
+		t.Errorf("expected default backend 'memory', got %q", p.config.Backend)
+	}
+	if p.logger == nil {
+		t.Error("expected logger to be set")
+	}
+}
+
+func TestPluginInitWithConfig(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{}
+	ctx := context.Background()
+
+	env := &plugin.Environment{
+		DB:     db,
+		Mux:    http.NewServeMux(),
+		Logger: slog.Default(),
+		Config: []byte(`{"backend":"memory"}`),
+	}
+
+	err := p.Init(ctx, env)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if p.config.Backend != "memory" {
+		t.Errorf("expected backend 'memory', got %q", p.config.Backend)
+	}
+	if p.backend == nil {
+		t.Error("expected backend to be set")
+	}
+}
+
+func TestPluginInitInvalidConfig(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{}
+	ctx := context.Background()
+
+	env := &plugin.Environment{
+		DB:     db,
+		Mux:    http.NewServeMux(),
+		Logger: slog.Default(),
+		Config: []byte(`{bad json`),
+	}
+
+	err := p.Init(ctx, env)
+	if err == nil {
+		t.Fatal("expected error for invalid config")
+	}
+	if !strings.Contains(err.Error(), "invalid config") {
+		t.Errorf("expected 'invalid config' error, got: %v", err)
+	}
+}
+
+func TestPluginInitNilLogger(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{}
+	ctx := context.Background()
+
+	env := &plugin.Environment{
+		DB:  db,
+		Mux: http.NewServeMux(),
+		// Logger is nil — Init should use slog.Default()
+	}
+
+	err := p.Init(ctx, env)
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if p.logger == nil {
+		t.Error("expected logger to be non-nil after Init with nil env.Logger")
+	}
+}
+
+func TestPluginInitS3Backend(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{}
+	ctx := context.Background()
+
+	env := &plugin.Environment{
+		DB:     db,
+		Mux:    http.NewServeMux(),
+		Logger: slog.Default(),
+		Config: []byte(`{"backend":"s3","bucket":"test-bucket","region":"us-east-1","endpoint":"localhost:9000"}`),
+	}
+
+	// newS3Backend constructs a client without making HTTP calls,
+	// so this should succeed even with a local endpoint.
+	err := p.Init(ctx, env)
+	if err != nil {
+		t.Fatalf("Init with s3 config: %v", err)
+	}
+	if p.config.Backend != "s3" {
+		t.Errorf("expected backend 's3', got %q", p.config.Backend)
+	}
+	if p.backend == nil {
+		t.Error("expected backend to be set")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Route handler backend error paths
+// ---------------------------------------------------------------------------
+
+func TestHandlePutBackendError(t *testing.T) {
+	p, handler, _, _ := setupTestPlugin(t)
+
+	// Replace backend with a failing one so that backend.Put fails.
+	p.backend = &failBackend{}
+
+	req := authedRequest("PUT", "/blobs/test-key", bytes.NewReader([]byte("data")))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for backend error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to store content") {
+		t.Errorf("expected 'failed to store content', got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleGetBackendError(t *testing.T) {
+	p, handler, _, _ := setupTestPlugin(t)
+
+	// PUT a blob first with the working backend.
+	req := authedRequest("PUT", "/blobs/test-key", bytes.NewReader([]byte("data")))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT: expected 201, got %d", rec.Code)
+	}
+
+	// Swap backend to failBackend so that backend.Get fails.
+	p.backend = &failBackend{}
+
+	// GET should fail with 500.
+	req = authedRequest("GET", "/blobs/test-key", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for backend error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to retrieve blob data") {
+		t.Errorf("expected 'failed to retrieve blob data', got: %s", rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Route handler DB error paths
+// ---------------------------------------------------------------------------
+
+func TestHandlePutDBExecError(t *testing.T) {
+	// Fail on blob_content INSERT.
+	_, handler, _, _ := setupSelectiveErrorDB(t,
+		[]string{"INSERT INTO blob_content"},
+		nil,
+	)
+
+	req := authedRequest("PUT", "/blobs/test-key", bytes.NewReader([]byte("data")))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB exec error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to store content") {
+		t.Errorf("expected 'failed to store content', got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleGetDBQueryError(t *testing.T) {
+	// Fail on blob metadata SELECT.
+	_, handler, _, _ := setupSelectiveErrorDB(t,
+		nil,
+		[]string{"SELECT c.sha256, i.content_type, i.size, i.expires_at"},
+	)
+
+	req := authedRequest("GET", "/blobs/test-key", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB query error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to retrieve blob") {
+		t.Errorf("expected 'failed to retrieve blob', got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleHeadDBQueryError(t *testing.T) {
+	// Fail on blob metadata SELECT.
+	_, handler, _, _ := setupSelectiveErrorDB(t,
+		nil,
+		[]string{"SELECT c.sha256, i.content_type, i.size, i.expires_at"},
+	)
+
+	req := authedRequest("HEAD", "/blobs/test-key", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB query error, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "failed to retrieve metadata") {
+		t.Errorf("expected 'failed to retrieve metadata', got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleDeleteDBExecError(t *testing.T) {
+	// Fail on blob_index UPDATE (soft delete).
+	_, handler, store, _ := setupSelectiveErrorDB(t,
+		[]string{"UPDATE blob_index SET deleted_at"},
+		nil,
+	)
+
+	// Manually insert a blob so the delete has something to act on.
+	hash := sha256.Sum256([]byte("data"))
+	store.mu.Lock()
+	blobIdxKey := indexKey(testTenantStr, "del-key")
+	store.blobIndex[blobIdxKey] = &fiRow{
+		key:         "del-key",
+		tenantID:    testTenantStr,
+		sha256Bytes: hash[:],
+		size:        4,
+		contentType: "application/octet-stream",
+		tags:        "{}",
+		createdAt:   time.Now(),
+	}
+	store.mu.Unlock()
+
+	req := authedRequest("DELETE", "/blobs/del-key", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB exec error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to delete blob") {
+		t.Errorf("expected 'failed to delete blob', got: %s", rec.Body.String())
+	}
+}
+
+func TestHandleListDBQueryError(t *testing.T) {
+	// Fail on list SELECT.
+	_, handler, _, _ := setupSelectiveErrorDB(t,
+		nil,
+		[]string{"SELECT i.key, i.sha256, i.size"},
+	)
+
+	req := authedRequest("GET", "/blobs", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 for DB query error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to list blobs") {
+		t.Errorf("expected 'failed to list blobs', got: %s", rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Host function backend error paths
+// ---------------------------------------------------------------------------
+
+func TestBlobPutBackendError(t *testing.T) {
+	p := &Plugin{
+		backend: &failBackend{},
+		logger:  slog.Default(),
+		config:  Config{Backend: "memory"},
+	}
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{
+		Key:  "fail-key",
+		Data: []byte("data"),
+	}
+	inputJSON, _ := json.Marshal(input)
+
+	_, err := p.blobPut(ctx, string(inputJSON))
+	if err == nil {
+		t.Fatal("expected error for backend failure")
+	}
+	if !strings.Contains(err.Error(), "store content") {
+		t.Errorf("expected 'store content' error, got: %v", err)
+	}
+}
+
+func TestBlobGetBackendError(t *testing.T) {
+	p, store, _ := setupHostFuncTest(t)
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	// Put a blob with the working setup first.
+	input := blobPutInput{
+		Key:  "get-fail-key",
+		Data: []byte("data"),
+	}
+	inputJSON, _ := json.Marshal(input)
+	_, err := p.blobPut(ctx, string(inputJSON))
+	if err != nil {
+		t.Fatalf("blobPut: %v", err)
+	}
+
+	// Replace backend with failBackend after the put.
+	p.backend = &failBackend{}
+
+	// Get should fail because backend.Get returns error.
+	_, err = p.blobGet(ctx, string(inputJSON))
+	if err == nil {
+		t.Fatal("expected error for backend failure")
+	}
+	if !strings.Contains(err.Error(), "get data") {
+		t.Errorf("expected 'get data' error, got: %v", err)
+	}
+
+	_ = store
+}
+
+// ---------------------------------------------------------------------------
+// Tag handling
+// ---------------------------------------------------------------------------
+
+func TestHandlePutWithTags(t *testing.T) {
+	_, handler, store, _ := setupTestPlugin(t)
+
+	body := "tagged content"
+	req := authedRequest("PUT", "/blobs/tagged-key?tag=env:prod&tag=owner:team-a", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT with tags: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify tags are stored.
+	store.mu.RLock()
+	row, ok := store.blobIndex[indexKey(testTenantStr, "tagged-key")]
+	store.mu.RUnlock()
+	if !ok {
+		t.Fatal("expected blob_index entry")
+	}
+	if !strings.Contains(row.tags, "env") || !strings.Contains(row.tags, "owner") {
+		t.Errorf("expected tags to include env and owner, got: %s", row.tags)
+	}
+}
+
+func TestHandleListWithTagFilter(t *testing.T) {
+	_, handler, _, _ := setupTestPlugin(t)
+
+	// The fake DB does not filter on tags, but this still exercises the
+	// code path in handleList where tag filter SQL is constructed.
+	req := authedRequest("GET", "/blobs?tag=env:prod", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST with tag: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	// Verify the response is a valid JSON array.
+	var results []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+		t.Fatalf("LIST decode: %v", err)
+	}
+}
+
+func TestHandleListInvalidLimit(t *testing.T) {
+	_, handler, _, _ := setupTestPlugin(t)
+
+	// Invalid limit should fall back to default limit of 50.
+	req := authedRequest("GET", "/blobs?limit=invalid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("LIST with invalid limit: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var results []map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
+		t.Fatalf("LIST decode: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HEAD and GET with expired blobs (via controllable clock)
+// ---------------------------------------------------------------------------
+
+func TestHandleHeadExpiredBlob(t *testing.T) {
+	_, handler, _, clock := setupTestPlugin(t)
+
+	// PUT with a short TTL.
+	body := "expiring"
+	req := authedRequest("PUT", "/blobs/head-ttl?ttl=1s", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("PUT: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// HEAD before expiry should succeed.
+	req = authedRequest("HEAD", "/blobs/head-ttl", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HEAD before TTL: expected 200, got %d", rec.Code)
+	}
+
+	// Advance clock past TTL.
+	clock.Advance(2 * time.Second)
+
+	// HEAD after TTL should return 404.
+	req = authedRequest("HEAD", "/blobs/head-ttl", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("HEAD after TTL: expected 404, got %d", rec.Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// setupSelectiveErrorDB helper
+// ---------------------------------------------------------------------------
+
+// setupSelectiveErrorDB is like setupTestPlugin but with selective error
+// injection on the DB connection. Auth middleware still works because the
+// tenant lookup query does not match the configured failure patterns.
+func setupSelectiveErrorDB(t *testing.T, failExecPatterns, failQueryPatterns []string) (*Plugin, http.Handler, *fakeDBStore, *fakeClock) {
+	t.Helper()
+
+	clock := newFakeClock()
+	store := newFakeDBStore()
+	store.now = clock.Now
+
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	errConn := &selectiveErrorConnector{
+		store:             store,
+		failExecPatterns:  failExecPatterns,
+		failQueryPatterns: failQueryPatterns,
+	}
+	errDB := sql.OpenDB(errConn)
+	t.Cleanup(func() { errDB.Close() })
+
+	p := &Plugin{
+		db:      errDB,
+		backend: newTestMemBackend(),
+		logger:  slog.Default(),
+		config:  Config{Backend: "memory"},
+	}
+
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+
+	handler := auth.Middleware(errDB)(mux)
+	return p, handler, store, clock
 }
