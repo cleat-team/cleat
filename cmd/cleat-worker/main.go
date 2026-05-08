@@ -994,11 +994,63 @@ type dbServiceCaller struct {
 	workerID string
 }
 
+// fetchRequest is the JSON payload for DurableFetch calls.
+type fetchRequest struct {
+	URL     string            `json:"url"`
+	Method  string            `json:"method"`
+	Headers map[string]string `json:"headers"`
+	Body    string            `json:"body"`
+}
+
 func (c *dbServiceCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
-	// In production, this would make actual HTTP/gRPC calls to the target services.
-	// For now, this is a placeholder — it returns an error indicating the service
-	// endpoint needs to be configured.
+	if service == "http" && operation == "fetch" {
+		return c.handleHTTPFetch(ctx, requestJSON)
+	}
 	return "", fmt.Errorf("service %s.%s not configured: no endpoint registered", service, operation)
+}
+
+func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON string) (string, error) {
+	var req fetchRequest
+	if err := json.Unmarshal([]byte(requestJSON), &req); err != nil {
+		return "", fmt.Errorf("http.fetch: invalid request JSON: %w", err)
+	}
+	if req.URL == "" {
+		return "", fmt.Errorf("http.fetch: url is required")
+	}
+	if req.Method == "" {
+		req.Method = "GET"
+	}
+	var body io.Reader
+	if req.Body != "" {
+		body = strings.NewReader(req.Body)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, req.Method, req.URL, body)
+	if err != nil {
+		return "", fmt.Errorf("http.fetch: %w", err)
+	}
+	for k, v := range req.Headers {
+		httpReq.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("http.fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("http.fetch: reading response: %w", err)
+	}
+	respHeaders := make(map[string]string)
+	for k := range resp.Header {
+		respHeaders[k] = resp.Header.Get(k)
+	}
+	result, _ := json.Marshal(map[string]interface{}{
+		"status":  resp.StatusCode,
+		"headers": respHeaders,
+		"body":    string(respBody),
+	})
+	return string(result), nil
 }
 
 // dbWorkflowState implements host.WorkflowState.

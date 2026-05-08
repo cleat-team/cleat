@@ -87,6 +87,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -329,6 +332,9 @@ func (e *execution) random() int64 {
 }
 
 func (e *execution) durableCall(service, operation, requestJSON string) (string, error) {
+	if service == "http" && operation == "fetch" {
+		return e.handleHTTPFetch(requestJSON)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	rec := cleat.CallResult{
@@ -339,6 +345,74 @@ func (e *execution) durableCall(service, operation, requestJSON string) (string,
 	}
 	e.calls = append(e.calls, rec)
 	return rec.Response, nil
+}
+
+func (e *execution) handleHTTPFetch(requestJSON string) (string, error) {
+	var req struct {
+		URL     string            `json:"url"`
+		Method  string            `json:"method"`
+		Headers map[string]string `json:"headers"`
+		Body    string            `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(requestJSON), &req); err != nil {
+		return "", fmt.Errorf("http.fetch: invalid request JSON: %w", err)
+	}
+	if req.URL == "" {
+		return "", fmt.Errorf("http.fetch: url is required")
+	}
+	if req.Method == "" {
+		req.Method = "GET"
+	}
+	var body io.Reader
+	if req.Body != "" {
+		body = strings.NewReader(req.Body)
+	}
+	httpReq, err := http.NewRequest(req.Method, req.URL, body)
+	if err != nil {
+		return "", fmt.Errorf("http.fetch: %w", err)
+	}
+	for k, v := range req.Headers {
+		httpReq.Header.Set(k, v)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		rec := cleat.CallResult{
+			Service:   "http",
+			Operation: "fetch",
+			Request:   requestJSON,
+			Err:       err.Error(),
+		}
+		e.mu.Lock()
+		e.calls = append(e.calls, rec)
+		e.mu.Unlock()
+		return "", fmt.Errorf("http.fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", fmt.Errorf("http.fetch: reading response: %w", err)
+	}
+	respHeaders := make(map[string]string)
+	for k := range resp.Header {
+		respHeaders[k] = resp.Header.Get(k)
+	}
+	result, _ := json.Marshal(map[string]interface{}{
+		"status":  resp.StatusCode,
+		"headers": respHeaders,
+		"body":    string(respBody),
+	})
+	responseJSON := string(result)
+	rec := cleat.CallResult{
+		Service:   "http",
+		Operation: "fetch",
+		Request:   requestJSON,
+		Response:  responseJSON,
+	}
+	e.mu.Lock()
+	e.calls = append(e.calls, rec)
+	e.mu.Unlock()
+	return responseJSON, nil
 }
 
 func (e *execution) durableSleep(ms int64) {

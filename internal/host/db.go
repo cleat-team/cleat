@@ -1384,21 +1384,39 @@ func (s *PostgresStore) CreatePromise(ctx context.Context, workflowID, promiseNa
 }
 
 // ResolvePromise marks a promise as resolved with the given result.
+// Also wakes the workflow instance so it can pick up the resolved promise
+// on the next poll cycle instead of waiting for the original timeout.
 func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = $3, result = $4, resolved_at = now()
 		WHERE workflow_id = $1 AND promise_id = $2
 	`, workflowID, promiseID, "resolved", result)
-	return err
+	if err != nil {
+		return err
+	}
+	_, _ = s.db.ExecContext(ctx, `
+		UPDATE workflow_instances SET next_wake_at = now()
+		WHERE id = $1 AND status = 'ready'
+	`, workflowID)
+	return nil
 }
 
 // RejectPromise marks a promise as rejected with the given error message.
+// Also wakes the workflow instance so it can pick up the rejected promise
+// on the next poll cycle instead of waiting for the original timeout.
 func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = $3, error_msg = $4, resolved_at = now()
 		WHERE workflow_id = $1 AND promise_id = $2
 	`, workflowID, promiseID, "rejected", errMsg)
-	return err
+	if err != nil {
+		return err
+	}
+	_, _ = s.db.ExecContext(ctx, `
+		UPDATE workflow_instances SET next_wake_at = now()
+		WHERE id = $1 AND status = 'ready'
+	`, workflowID)
+	return nil
 }
 
 // GetPromise returns the current status and result of a promise.
