@@ -31,6 +31,9 @@ import (
 	"github.com/rcownie/cleat/internal/host"
 )
 
+// osExit is replaced in tests to intercept os.Exit calls.
+var osExit = os.Exit
+
 func main() {
 	dsn := flag.String("db", "", "PostgreSQL DSN (default: $CLEAT_DB_URL)")
 	flag.Parse()
@@ -41,13 +44,13 @@ func main() {
 	if *dsn == "" {
 		fmt.Fprintln(os.Stderr, "error: --db flag or CLEAT_DB_URL environment variable is required")
 		flag.Usage()
-		os.Exit(1)
+		osExit(1)
 	}
 
 	args := flag.Args()
 	if len(args) < 1 {
 		printUsage()
-		os.Exit(1)
+		osExit(1)
 	}
 
 	db, err := sql.Open("postgres", *dsn)
@@ -72,7 +75,7 @@ func main() {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
-		os.Exit(1)
+		osExit(1)
 	}
 }
 

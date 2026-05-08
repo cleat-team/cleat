@@ -15,7 +15,7 @@ import (
 func runDeploy(ctx context.Context, store host.WorkflowStore, db *sql.DB, args []string) {
 	if len(args) < 1 {
 		printDeployUsage()
-		os.Exit(1)
+		osExit(1)
 	}
 
 	sub := args[0]
@@ -27,7 +27,7 @@ func runDeploy(ctx context.Context, store host.WorkflowStore, db *sql.DB, args [
 	default:
 		fmt.Fprintf(os.Stderr, "unknown deploy subcommand: %s\n\n", sub)
 		printDeployUsage()
-		os.Exit(1)
+		osExit(1)
 	}
 }
 
@@ -48,7 +48,7 @@ Subcommands:
 func deployWorkflow(ctx context.Context, store host.WorkflowStore, db *sql.DB, args []string) {
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy workflow <name> <wasm-file>")
-		os.Exit(1)
+		osExit(1)
 	}
 
 	name := args[0]
@@ -58,11 +58,11 @@ func deployWorkflow(ctx context.Context, store host.WorkflowStore, db *sql.DB, a
 	wasmBytes, err := os.ReadFile(wasmPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", wasmPath, err)
-		os.Exit(1)
+		osExit(1)
 	}
 	if len(wasmBytes) == 0 {
 		fmt.Fprintln(os.Stderr, "error: empty WASM file")
-		os.Exit(1)
+		osExit(1)
 	}
 
 	// Compute SHA256 hash for dedup.
@@ -120,7 +120,7 @@ func deployWorkflow(ctx context.Context, store host.WorkflowStore, db *sql.DB, a
 
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {
 		fmt.Fprintf(os.Stderr, "error deploying %s v%d: %v\n", name, nextVersion, err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	fmt.Printf("Deployed %s v%d (ABI v%d, minVersion=%d, %d bytes, SHA256=%x)\n",
@@ -132,7 +132,7 @@ func deployWorkflow(ctx context.Context, store host.WorkflowStore, db *sql.DB, a
 func deployPlugin(ctx context.Context, db *sql.DB, args []string) {
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy plugin <name> <wasm-file>")
-		os.Exit(1)
+		osExit(1)
 	}
 
 	name := args[0]
@@ -141,7 +141,7 @@ func deployPlugin(ctx context.Context, db *sql.DB, args []string) {
 	wasmBytes, err := os.ReadFile(wasmPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error reading %s: %v\n", wasmPath, err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	hash := sha256.Sum256(wasmBytes)
@@ -154,7 +154,7 @@ func deployPlugin(ctx context.Context, db *sql.DB, args []string) {
 		_, err = db.ExecContext(ctx, `UPDATE plugin_registry SET wasm_bytes = $1, updated_at = now() WHERE name = $2`, wasmBytes, name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error updating plugin %s: %v\n", name, err)
-			os.Exit(1)
+			osExit(1)
 		}
 		fmt.Printf("Updated plugin %s (%d bytes, SHA256=%x)\n", name, len(wasmBytes), hash[:8])
 		return
@@ -168,7 +168,7 @@ func deployPlugin(ctx context.Context, db *sql.DB, args []string) {
 	`, name, wasmBytes, meta)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error deploying plugin %s: %v\n", name, err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	fmt.Printf("Deployed plugin %s (%d bytes, SHA256=%x)\n", name, len(wasmBytes), hash[:8])

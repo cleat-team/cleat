@@ -14,7 +14,7 @@ import (
 func runVersions(ctx context.Context, store host.WorkflowStore, args []string) {
 	if len(args) < 1 {
 		printVersionsUsage()
-		os.Exit(1)
+		osExit(1)
 	}
 
 	sub := args[0]
@@ -34,7 +34,7 @@ func runVersions(ctx context.Context, store host.WorkflowStore, args []string) {
 	default:
 		fmt.Fprintf(os.Stderr, "unknown versions subcommand: %s\n\n", sub)
 		printVersionsUsage()
-		os.Exit(1)
+		osExit(1)
 	}
 }
 
@@ -61,7 +61,7 @@ func listVersions(ctx context.Context, store host.WorkflowStore, args []string) 
 	defs, err := store.ListWorkflowDefs(ctx, name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	if name == "" {
@@ -69,7 +69,7 @@ func listVersions(ctx context.Context, store host.WorkflowStore, args []string) 
 		summary, err := host.CollectVersionMetrics(ctx, store)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			osExit(1)
 		}
 
 		fmt.Printf("Total versions: %d | Active: %d | Deprecated: %d | Active instances: %d\n\n",
@@ -118,18 +118,18 @@ func listVersions(ctx context.Context, store host.WorkflowStore, args []string) 
 func deprecateVersion(ctx context.Context, store host.WorkflowStore, args []string, deprecated bool) {
 	if len(args) < 2 {
 		fmt.Fprintf(os.Stderr, "usage: cleatctl versions %s <name> <version>\n", map[bool]string{true: "deprecate", false: "restore"}[deprecated])
-		os.Exit(1)
+		osExit(1)
 	}
 	name := args[0]
 	version, err := strconv.Atoi(args[1])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid version %q\n", args[1])
-		os.Exit(1)
+		osExit(1)
 	}
 
 	if err := store.MarkVersionDeprecated(ctx, name, version, deprecated); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	action := "deprecated"
@@ -142,13 +142,13 @@ func deprecateVersion(ctx context.Context, store host.WorkflowStore, args []stri
 func purgeVersion(ctx context.Context, store host.WorkflowStore, args []string) {
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: cleatctl versions purge <name> <version>")
-		os.Exit(1)
+		osExit(1)
 	}
 	name := args[0]
 	version, err := strconv.Atoi(args[1])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: invalid version %q\n", args[1])
-		os.Exit(1)
+		osExit(1)
 	}
 
 	// Confirm.
@@ -162,7 +162,7 @@ func purgeVersion(ctx context.Context, store host.WorkflowStore, args []string) 
 
 	if err := store.PurgeWorkflowDef(ctx, name, version); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		osExit(1)
 	}
 	fmt.Printf("%s v%d purged\n", name, version)
 }
@@ -178,7 +178,7 @@ func activeInstances(ctx context.Context, store host.WorkflowStore, args []strin
 		defs, err := store.ListWorkflowDefs(ctx, name)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+			osExit(1)
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 		fmt.Fprintln(w, "Version\tActive Instances\tDeprecated")
@@ -205,7 +205,7 @@ func activeInstances(ctx context.Context, store host.WorkflowStore, args []strin
 	counts, err := store.GetActiveInstanceCountsByVersion(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		osExit(1)
 	}
 	if len(counts) == 0 {
 		fmt.Println("No active instances")
@@ -237,7 +237,7 @@ func gcVersions(ctx context.Context, store host.WorkflowStore, args []string) {
 	result, err := host.GarbageCollectVersions(ctx, store, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		osExit(1)
 	}
 
 	mode := ""
