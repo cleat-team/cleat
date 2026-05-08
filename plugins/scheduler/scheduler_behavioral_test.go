@@ -1034,3 +1034,435 @@ func TestRunDueSchedulesDisabled(t *testing.T) {
 		t.Errorf("expected 0 workflows failed, got %d", workflowsFailed)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Tests: Host functions (RegisterHostFunctions)
+// ---------------------------------------------------------------------------
+
+func TestRegisterHostFunctions_NilRegistry(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterHostFunctions(nil)
+	if err == nil {
+		t.Error("expected error for nil FuncRegistry")
+	}
+	if !strings.Contains(err.Error(), "nil FuncRegistry") {
+		t.Errorf("expected error about nil FuncRegistry, got: %v", err)
+	}
+}
+
+func TestRegisterHostFunctions_Valid(t *testing.T) {
+	p := &Plugin{}
+	mockReg := &mockFuncRegistry{}
+	err := p.RegisterHostFunctions(mockReg)
+	if err != nil {
+		t.Fatalf("RegisterHostFunctions with valid registry: %v", err)
+	}
+}
+
+// mockFuncRegistry implements plugin.FuncRegistry for testing.
+type mockFuncRegistry struct{}
+
+func (m *mockFuncRegistry) Register(_ plugin.FuncOptions, _ plugin.PluginFunc) error {
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Migrations
+// ---------------------------------------------------------------------------
+
+func TestMigrations(t *testing.T) {
+	p := &Plugin{}
+	migrations := p.Migrations()
+
+	if len(migrations) == 0 {
+		t.Fatal("expected at least one migration")
+	}
+
+	for i, m := range migrations {
+		if m.Version <= 0 {
+			t.Errorf("migration %d: expected Version > 0, got %d", i, m.Version)
+		}
+		if m.Up == "" {
+			t.Errorf("migration %d: expected non-empty Up SQL", i)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: RegisterRoutes nil mux
+// ---------------------------------------------------------------------------
+
+func TestRegisterRoutesNilMux(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterRoutes(nil)
+	if err == nil {
+		t.Fatal("expected error for nil mux")
+	}
+	if !strings.Contains(err.Error(), "nil mux") {
+		t.Errorf("expected error mentioning nil mux, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Unauthorized (missing tenant) for all endpoints
+// ---------------------------------------------------------------------------
+
+func TestScheduleCreateUnauthorized(t *testing.T) {
+	mux := http.NewServeMux()
+	p := &Plugin{logger: slog.Default()}
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	// No auth middleware -> no tenant in context
+	req := httptest.NewRequest("POST", "/schedules", bytes.NewReader([]byte(`{"name":"n","cron":"* * * * *","workflow_name":"w"}`)))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleListUnauthorized(t *testing.T) {
+	mux := http.NewServeMux()
+	p := &Plugin{logger: slog.Default()}
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/schedules", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleGetUnauthorized(t *testing.T) {
+	mux := http.NewServeMux()
+	p := &Plugin{logger: slog.Default()}
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/schedules/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleUpdateUnauthorized(t *testing.T) {
+	mux := http.NewServeMux()
+	p := &Plugin{logger: slog.Default()}
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	body := `{"name":"updated"}`
+	req := httptest.NewRequest("PUT", "/schedules/"+uuid.New().String(), bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleDeleteUnauthorized(t *testing.T) {
+	mux := http.NewServeMux()
+	p := &Plugin{logger: slog.Default()}
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	req := httptest.NewRequest("DELETE", "/schedules/"+uuid.New().String(), nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleTriggerUnauthorized(t *testing.T) {
+	mux := http.NewServeMux()
+	p := &Plugin{logger: slog.Default()}
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/schedules/"+uuid.New().String()+"/trigger", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Invalid schedule ID (non-UUID)
+// ---------------------------------------------------------------------------
+
+func TestScheduleGetInvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	req := authedRequest("GET", "/schedules/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleUpdateInvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	body := `{"name":"updated"}`
+	req := authedRequest("PUT", "/schedules/not-a-uuid", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleDeleteInvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	req := authedRequest("DELETE", "/schedules/not-a-uuid", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleTriggerInvalidID(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	req := authedRequest("POST", "/schedules/not-a-uuid/trigger", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Cron edge cases - DST, boundaries
+// ---------------------------------------------------------------------------
+
+func TestCronDSTTransition(t *testing.T) {
+	// Simulate a "spring forward" DST transition.
+	// In US/Eastern, clocks spring forward at 2:00 AM on the second Sunday
+	// of March. On March 9, 2025, 2:00 AM becomes 3:00 AM.
+	loc, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("timezone data not available:", err)
+	}
+
+	// 1:59 AM just before the DST transition - this time does not exist
+	// in US/Eastern on that date (2:00 AM jumps to 3:00 AM).
+	beforeDST := time.Date(2025, 3, 9, 1, 59, 0, 0, loc)
+
+	// A cron that fires every 30 minutes should find the next match.
+	next := nextRun("*/30 * * * *", beforeDST)
+	if next.IsZero() {
+		t.Fatal("expected non-zero nextRun after DST transition")
+	}
+	t.Logf("before DST: %v, next: %v", beforeDST, next)
+}
+
+func TestCronYearBoundary(t *testing.T) {
+	// Last hour of the year: next run should flip to January 1 of next year.
+	base := time.Date(2025, 12, 31, 23, 30, 0, 0, time.UTC)
+	next := nextRun("0 0 1 1 *", base) // Jan 1 midnight
+	expected := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("year boundary: expected %v, got %v", expected, next)
+	}
+}
+
+func TestCronMonthBoundary(t *testing.T) {
+	// Last day of January: next run on Feb 1.
+	base := time.Date(2025, 1, 31, 23, 30, 0, 0, time.UTC)
+	next := nextRun("0 0 1 * *", base) // 1st of each month at midnight
+	expected := time.Date(2025, 2, 1, 0, 0, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("month boundary: expected %v, got %v", expected, next)
+	}
+}
+
+func TestCronEndOfMonthFeb(t *testing.T) {
+	// Feb 28 of non-leap year, next run on March 1.
+	base := time.Date(2025, 2, 28, 12, 0, 0, 0, time.UTC)
+	next := nextRun("0 0 1 * *", base)
+	expected := time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC)
+	if !next.Equal(expected) {
+		t.Errorf("feb end: expected %v, got %v", expected, next)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Parse cron error paths
+// ---------------------------------------------------------------------------
+
+func TestParseCronErrorPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		expr    string
+		wantErr bool
+	}{
+		{"empty", "", true},
+		{"3 fields", "* * *", true},
+		{"6 fields", "* * * * * *", true},
+		{"invalid minute", "60 * * * *", true},
+		{"invalid hour", "* 24 * * *", true},
+		{"invalid dayOfMonth", "* * 0 * *", true},
+		{"invalid month", "* * * 13 *", true},
+		{"invalid dayOfWeek", "* * * * 7", true},
+		{"negative step", "*/0 * * * *", true},
+		{"invalid range step", "1-10/0 * * * *", true},
+		{"invalid range end", "10-5 * * * *", true},
+		{"valid standard", "*/5 * * * *", false},
+		{"valid specific", "30 9 * * 1-5", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseCron(tt.expr)
+			if tt.wantErr && err == nil {
+				t.Errorf("parseCron(%q): expected error, got nil", tt.expr)
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("parseCron(%q): unexpected error: %v", tt.expr, err)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Run() with nil db
+// ---------------------------------------------------------------------------
+
+func TestRunWithNilDB(t *testing.T) {
+	p := &Plugin{
+		logger: slog.Default(),
+		// db is nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately so Run returns quickly
+
+	err := p.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run() with nil db returned error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Background loop - workflow start failure
+// ---------------------------------------------------------------------------
+
+func TestRunDueSchedules_WorkflowFailure(t *testing.T) {
+	clock := newControllableClock()
+	clock.now = time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+
+	p, _, store := setupTestPlugin(t, clock)
+
+	startWorkflowCalls := 0
+	p.env = &plugin.Environment{
+		DB: p.db,
+		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+			startWorkflowCalls++
+			return "", fmt.Errorf("workflow deployment not found")
+		},
+	}
+
+	schedID := uuid.New().String()
+	nextRunAt := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC) // due now
+
+	store.mu.Lock()
+	store.schedules[testTenantStr+":"+schedID] = &fakeScheduleRow{
+		tenantID:     testTenantStr,
+		id:           schedID,
+		name:         "failing-schedule",
+		cron:         "*/5 * * * *",
+		workflowName: "wf-fail",
+		input:        []byte(`{}`),
+		enabled:      true,
+		nextRunAt:    &nextRunAt,
+		createdAt:    clock.now,
+		updatedAt:    clock.now,
+	}
+	store.mu.Unlock()
+
+	schedulesDue, workflowsStarted, workflowsFailed := p.runDueSchedules(context.Background())
+	if schedulesDue != 1 {
+		t.Errorf("expected 1 due schedule, got %d", schedulesDue)
+	}
+	if workflowsStarted != 0 {
+		t.Errorf("expected 0 workflows started, got %d", workflowsStarted)
+	}
+	if workflowsFailed != 1 {
+		t.Errorf("expected 1 workflow failure, got %d", workflowsFailed)
+	}
+	if startWorkflowCalls != 1 {
+		t.Errorf("expected 1 StartWorkflow call, got %d", startWorkflowCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Create schedule with explicit input and disabled
+// ---------------------------------------------------------------------------
+
+func TestScheduleCreateWithInput(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	body := `{"name":"input-test","cron":"0 9 * * *","workflow_name":"wf","input":{"key":"value"},"enabled":false}`
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /schedules: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["enabled"] != false {
+		t.Error("expected enabled=false")
+	}
+	if resp["name"] != "input-test" {
+		t.Errorf("expected name 'input-test', got %q", resp["name"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Create schedule with bad JSON body
+// ---------------------------------------------------------------------------
+
+func TestScheduleCreateBadJSON(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	req := authedRequest("POST", "/schedules", bytes.NewReader([]byte(`{invalid`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for bad JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestScheduleUpdateBadJSON(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t, nil)
+
+	req := authedRequest("PUT", "/schedules/"+uuid.New().String(), bytes.NewReader([]byte(`{invalid`)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for bad JSON, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
