@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"os"
 	"os/exec"
@@ -161,6 +162,144 @@ func TestMain_InvalidManifest(t *testing.T) {
 	out := runHelper(t, "--manifest", badPath)
 	if !strings.Contains(out, "error validating manifest") && !strings.Contains(out, "error building IR") {
 		t.Errorf("expected validation error in output, got: %s", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Direct main() tests — call main() in-process so coverage counters count.
+// These exercise the success paths (no os.Exit) for each target language.
+// ---------------------------------------------------------------------------
+
+// runMainDirect sets up global state so that main() can be called directly.
+// It returns any stdout output captured during the call.
+func runMainDirect(t *testing.T, args []string) string {
+	t.Helper()
+
+	prevArgs := os.Args
+	prevCmdLine := flag.CommandLine
+	prevManifest := manifestPath
+	prevLang := lang
+	prevOutput := output
+
+	// Restore after test.
+	t.Cleanup(func() {
+		os.Args = prevArgs
+		flag.CommandLine = prevCmdLine
+		manifestPath = prevManifest
+		lang = prevLang
+		output = prevOutput
+	})
+
+	os.Args = append([]string{"cleat-gen-plugin.test"}, args...)
+	flag.CommandLine = flag.NewFlagSet("cleat-gen-plugin.test", flag.ContinueOnError)
+	manifestPath = flag.String("manifest", "", "")
+	lang = flag.String("lang", "typescript", "")
+	output = flag.String("out", "", "")
+
+	// Capture stdout.
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	done := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		done <- buf.String()
+	}()
+
+	main()
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	return <-done
+}
+
+func TestMain_DirectSuccess_FileOutput(t *testing.T) {
+	dir := t.TempDir()
+	mf := filepath.Join(dir, "plugin.json")
+	writePluginManifest(t, mf)
+	outFile := filepath.Join(dir, "output.ts")
+
+	stdout := runMainDirect(t, []string{"--manifest", mf, "--lang", "typescript", "--out", outFile})
+	if stdout != "" {
+		t.Logf("unexpected stdout: %s", stdout)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("expected output file: %v", err)
+	}
+	if !strings.Contains(string(data), "Auto-generated") {
+		t.Errorf("expected TypeScript output to contain header, got: %s", string(data))
+	}
+}
+
+func TestMain_DirectPythonOutput(t *testing.T) {
+	dir := t.TempDir()
+	mf := filepath.Join(dir, "plugin.json")
+	writePluginManifest(t, mf)
+	outFile := filepath.Join(dir, "output.py")
+
+	stdout := runMainDirect(t, []string{"--manifest", mf, "--lang", "python", "--out", outFile})
+	if stdout != "" {
+		t.Logf("unexpected stdout: %s", stdout)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("expected output file: %v", err)
+	}
+	if !strings.Contains(string(data), "Auto-generated") {
+		t.Errorf("expected Python output to contain header, got: %s", string(data))
+	}
+}
+
+func TestMain_DirectRustOutput(t *testing.T) {
+	dir := t.TempDir()
+	mf := filepath.Join(dir, "plugin.json")
+	writePluginManifest(t, mf)
+	outFile := filepath.Join(dir, "output.rs")
+
+	stdout := runMainDirect(t, []string{"--manifest", mf, "--lang", "rust", "--out", outFile})
+	if stdout != "" {
+		t.Logf("unexpected stdout: %s", stdout)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("expected output file: %v", err)
+	}
+	if !strings.Contains(string(data), "Auto-generated") {
+		t.Errorf("expected Rust output to contain header, got: %s", string(data))
+	}
+}
+
+func TestMain_DirectGoOutput(t *testing.T) {
+	dir := t.TempDir()
+	mf := filepath.Join(dir, "plugin.json")
+	writePluginManifest(t, mf)
+	outFile := filepath.Join(dir, "output.go")
+
+	stdout := runMainDirect(t, []string{"--manifest", mf, "--lang", "go", "--out", outFile})
+	if stdout != "" {
+		t.Logf("unexpected stdout: %s", stdout)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatalf("expected output file: %v", err)
+	}
+	if !strings.Contains(string(data), "Auto-generated") {
+		t.Errorf("expected Go output to contain header, got: %s", string(data))
+	}
+}
+
+func TestMain_DirectStdoutOutput(t *testing.T) {
+	// When --out is not specified, output goes to stdout.
+	dir := t.TempDir()
+	mf := filepath.Join(dir, "plugin.json")
+	writePluginManifest(t, mf)
+
+	stdout := runMainDirect(t, []string{"--manifest", mf, "--lang", "typescript"})
+	if !strings.Contains(stdout, "Auto-generated") {
+		t.Errorf("expected TypeScript output in stdout, got: %s", stdout)
 	}
 }
 

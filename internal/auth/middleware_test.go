@@ -485,3 +485,35 @@ func TestExtractAPIKey_BearerWithExtraSpaces(t *testing.T) {
 		t.Errorf("expected ' key-with-leading-space' (with leading space), got %q", key)
 	}
 }
+
+// --- WithTenantID / TenantIDFromContext direct tests ------------------------
+
+func TestWithTenantID(t *testing.T) {
+	tid := uuid.MustParse("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+	ctx := WithTenantID(context.Background(), tid)
+
+	got, ok := TenantIDFromContext(ctx)
+	if !ok {
+		t.Fatal("TenantIDFromContext: expected ok")
+	}
+	if got != tid {
+		t.Errorf("TenantIDFromContext = %v, want %v", got, tid)
+	}
+}
+
+func TestWithTenantID_Override(t *testing.T) {
+	// Calling WithTenantID twice should use the latest value.
+	first := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	second := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+
+	ctx := WithTenantID(context.Background(), first)
+	ctx = WithTenantID(ctx, second)
+
+	got, ok := TenantIDFromContext(ctx)
+	if !ok {
+		t.Fatal("TenantIDFromContext: expected ok")
+	}
+	if got != second {
+		t.Errorf("TenantIDFromContext = %v, want %v (the latest)", got, second)
+	}
+}

@@ -497,6 +497,46 @@ func TestRegisterHostFunctionsNilScope(t *testing.T) {
 	}
 }
 
+// failOnRegisterScope returns an error from Register when called with specific
+// function names, simulating registration failures.
+type failOnRegisterScope struct {
+	funcs map[string]plugin.FuncOptions
+}
+
+func newFailOnRegisterScope() *failOnRegisterScope {
+	return &failOnRegisterScope{funcs: make(map[string]plugin.FuncOptions)}
+}
+
+func (s *failOnRegisterScope) Register(opts plugin.FuncOptions, _ plugin.PluginFunc) error {
+	if opts.Name == "" {
+		return fmt.Errorf("fake: name required")
+	}
+	if _, exists := s.funcs[opts.Name]; exists {
+		return fmt.Errorf("fake: already registered: %s", opts.Name)
+	}
+	s.funcs[opts.Name] = opts
+	return nil
+}
+
+// Register returns an error for any registration — testing the "registration
+// failed" branch in RegisterHostFunctions.
+type alwaysFailScope struct{}
+
+func (s *alwaysFailScope) Register(_ plugin.FuncOptions, _ plugin.PluginFunc) error {
+	return fmt.Errorf("scope: registration failed")
+}
+
+func TestRegisterHostFunctionsRegisterFail(t *testing.T) {
+	p := &Plugin{}
+	err := p.RegisterHostFunctions(&alwaysFailScope{})
+	if err == nil {
+		t.Fatal("expected error when scope.Register fails")
+	}
+	if !strings.Contains(err.Error(), "registration failed") {
+		t.Errorf("expected 'registration failed', got: %v", err)
+	}
+}
+
 func TestRegisterRoutes(t *testing.T) {
 	_ = &Plugin{}
 	_ = http.NewServeMux()
@@ -782,6 +822,127 @@ func TestVectorLiteral(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("vectorLiteral(%v) = %q, want %q", tt.input, got, tt.expected)
 		}
+	}
+}
+
+func TestSearchNoResults(t *testing.T) {
+	db, fc := fakeDB(t)
+	fc.addCollection("empty", 1536)
+
+	p := &Plugin{db: db}
+	input, _ := json.Marshal(searchInput{
+		Collection:  "empty",
+		QueryVector: []float64{0.1, 0.2},
+	})
+	out, err := p.search(tenantCtx(), string(input))
+	if err != nil {
+		t.Fatalf("search() returned error: %v", err)
+	}
+	var result searchOutput
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Results == nil {
+		t.Error("expected non-nil empty results slice")
+	}
+	if len(result.Results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(result.Results))
+	}
+}
+
+func TestSearchNoVectorNoResults(t *testing.T) {
+	db, fc := fakeDB(t)
+	fc.addCollection("empty", 1536)
+
+	p := &Plugin{db: db}
+	input, _ := json.Marshal(searchInput{
+		Collection: "empty",
+		TopK:       5,
+	})
+	out, err := p.search(tenantCtx(), string(input))
+	if err != nil {
+		t.Fatalf("search() returned error: %v", err)
+	}
+	var result searchOutput
+	json.Unmarshal([]byte(out), &result)
+	if len(result.Results) != 0 {
+		t.Errorf("expected 0 results, got %d", len(result.Results))
+	}
+}
+
+func TestUpsertWithExternalIDWithoutEmbedding(t *testing.T) {
+	db, fc := fakeDB(t)
+	fc.addCollection("docs", 1536)
+
+	p := &Plugin{db: db}
+	input, _ := json.Marshal(upsertInput{
+		Collection: "docs",
+		ExternalID: "ext-no-vec",
+		Content:    "content without embedding vector",
+		Metadata:   map[string]any{"key": "value"},
+	})
+	out, err := p.upsert(tenantCtx(), string(input))
+	if err != nil {
+		t.Fatalf("upsert() returned error: %v", err)
+	}
+	var result upsertOutput
+	json.Unmarshal([]byte(out), &result)
+	if result.ID == "" {
+		t.Error("expected non-empty ID")
+	}
+}
+
+func TestUpsertWithoutExternalIDWithEmbedding(t *testing.T) {
+	db, fc := fakeDB(t)
+	fc.addCollection("docs", 1536)
+
+	p := &Plugin{db: db}
+	input, _ := json.Marshal(upsertInput{
+		Collection: "docs",
+		Content:    "new vector",
+		Embedding:  []float64{0.5, 0.6, 0.7},
+	})
+	out, err := p.upsert(tenantCtx(), string(input))
+	if err != nil {
+		t.Fatalf("upsert() returned error: %v", err)
+	}
+	var result upsertOutput
+	json.Unmarshal([]byte(out), &result)
+	if result.ID == "" {
+		t.Error("expected non-empty ID")
+	}
+}
+
+func TestDeleteByExternalID(t *testing.T) {
+	db, fc := fakeDB(t)
+	fc.addCollection("docs", 1536)
+
+	p := &Plugin{db: db}
+	input, _ := json.Marshal(deleteInput{
+		Collection: "docs",
+		ExternalID: "ext-to-delete",
+	})
+	out, err := p.delete(tenantCtx(), string(input))
+	if err != nil {
+		t.Fatalf("delete() returned error: %v", err)
+	}
+	var result deleteOutput
+	json.Unmarshal([]byte(out), &result)
+	_ = result.Deleted
+}
+
+func TestInitNilLogger(t *testing.T) {
+	db, _ := fakeDB(t)
+
+	p := &Plugin{}
+	env := &plugin.Environment{
+		DB: db,
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if p.logger == nil {
+		t.Error("expected logger to be non-nil after Init")
 	}
 }
 

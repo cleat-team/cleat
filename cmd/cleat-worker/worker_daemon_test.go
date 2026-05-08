@@ -2180,3 +2180,728 @@ func TestReleaseOrFail_WithoutError(t *testing.T) {
 func TestMockStoreImplementsInterface(t *testing.T) {
 	var _ host.WorkflowStore = (*mockStore)(nil)
 }
+
+// ---------------------------------------------------------------------------
+// API handler tests for remaining handlers (0% coverage)
+// ---------------------------------------------------------------------------
+
+func TestAPIHealthz_Degraded(t *testing.T) {
+	ms := &mockStore{}
+	// Create a worker whose memory controller reports pressure > 0.
+	w := newTestWorker(ms)
+	w.memoryController = &MemoryController{pressure: 0.75}
+	api := &apiServer{store: ms, worker: w}
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	resp := httptest.NewRecorder()
+	api.handleHealthz(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.Code)
+	}
+	var body map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&body)
+	if body["degraded"] != true {
+		t.Error("expected degraded=true in healthz response under memory pressure")
+	}
+	if body["reason"] != "memory_pressure" {
+		t.Errorf("expected reason=memory_pressure, got %v", body["reason"])
+	}
+}
+
+func TestAPIStartWorkflow(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return []int{1}, nil
+	}
+	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+		return "wf-new-1", false, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	reqBody := `{"input":{"order_id":"abc"},"entry_point":"place_order"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleStartWorkflow(w, req, "my-wf")
+
+	if w.Code != 201 {
+		t.Errorf("expected 201, got %d", w.Code)
+	}
+	var result map[string]string
+	json.NewDecoder(w.Body).Decode(&result)
+	if result["id"] != "wf-new-1" {
+		t.Errorf("expected id wf-new-1, got %s", result["id"])
+	}
+}
+
+func TestAPIStartWorkflow_MemoryPressure(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.memoryController = &MemoryController{pressure: 1.0}
+	api := &apiServer{store: ms, worker: w}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", nil)
+	resp := httptest.NewRecorder()
+	api.handleStartWorkflow(resp, req, "my-wf")
+
+	if resp.Code != 503 {
+		t.Errorf("expected 503, got %d", resp.Code)
+	}
+}
+
+func TestAPIStartWorkflow_DefNotFound(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"input":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/no-such-wf/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleStartWorkflow(w, req, "no-such-wf")
+
+	if w.Code != 404 {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPIStartWorkflow_WithIdempotencyKey(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return []int{1}, nil
+	}
+	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+		return "wf-existing", true, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"input":{}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(body))
+	req.Header.Set("Idempotency-Key", "idem-123")
+	w := httptest.NewRecorder()
+	api.handleStartWorkflow(w, req, "my-wf")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200 (already started), got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	// Body is bytes.Buffer; no Close needed.
+	if resp["already_started"] != "true" {
+		t.Error("expected already_started=true in response")
+	}
+}
+
+func TestAPIStartWorkflow_WithConcurrencyKey(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return []int{1}, nil
+	}
+	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+		return "wf-cc-1", false, nil
+	}
+	ms.acquireConcurrencyKeyFn = func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
+		return true, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"input":{},"concurrency_key":"my-key"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleStartWorkflow(w, req, "my-wf")
+
+	if w.Code != 201 {
+		t.Errorf("expected 201, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPISignal(t *testing.T) {
+	ms := &mockStore{}
+	ms.deliverSignalFn = func(ctx context.Context, workflowID, signalName, payload string) error {
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"signal_name":"my-signal","payload":"hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/signal", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleSignal(w, req, "wf-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	// Body is bytes.Buffer; no Close needed.
+	if resp["status"] != "delivered" {
+		t.Errorf("expected delivered, got %s", resp["status"])
+	}
+}
+
+func TestAPISignal_MissingName(t *testing.T) {
+	ms := &mockStore{}
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"payload":"hello"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/signal", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleSignal(w, req, "wf-1")
+
+	if w.Code != 400 {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPICancel(t *testing.T) {
+	ms := &mockStore{}
+	ms.requestCancellationFn = func(ctx context.Context, workflowID, reason string) error {
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"reason":"user requested"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/cancel", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleCancel(w, req, "wf-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	// Body is bytes.Buffer; no Close needed.
+	if resp["status"] != "cancellation_requested" {
+		t.Errorf("expected cancellation_requested, got %s", resp["status"])
+	}
+}
+
+func TestAPIGetHistory(t *testing.T) {
+	ms := &mockStore{}
+	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]host.EventRecord, error) {
+		return []host.EventRecord{
+			{Step: 1, EventType: "call", Service: "my_svc", Op: "my_func"},
+		}, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/history", nil)
+	w := httptest.NewRecorder()
+	api.handleGetHistory(w, req, "wf-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var history []host.EventRecord
+	json.NewDecoder(w.Body).Decode(&history)
+	// Body is bytes.Buffer; no Close needed.
+	if len(history) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(history))
+	}
+	if history[0].Service != "my_svc" {
+		t.Errorf("expected my_svc, got %s", history[0].Service)
+	}
+}
+
+func TestAPIGetHistory_Nil(t *testing.T) {
+	// When store returns nil, handler should return an empty array.
+	ms := &mockStore{}
+	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]host.EventRecord, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/history", nil)
+	w := httptest.NewRecorder()
+	api.handleGetHistory(w, req, "wf-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var history []host.EventRecord
+	json.NewDecoder(w.Body).Decode(&history)
+	// Body is bytes.Buffer; no Close needed.
+	if history == nil {
+		t.Error("expected non-nil empty array for nil history")
+	}
+	if len(history) != 0 {
+		t.Errorf("expected empty array, got %d", len(history))
+	}
+}
+
+func TestAPIGetQueryState(t *testing.T) {
+	ms := &mockStore{}
+	ms.getQueryStateFn = func(ctx context.Context, workflowID, key string) (string, error) {
+		return "state-value-42", nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/query?key=mykey", nil)
+	w := httptest.NewRecorder()
+	api.handleGetQueryState(w, req, "wf-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	// Body is bytes.Buffer; no Close needed.
+	if resp["key"] != "mykey" {
+		t.Errorf("expected key mykey, got %s", resp["key"])
+	}
+	if resp["value"] != "state-value-42" {
+		t.Errorf("expected value state-value-42, got %s", resp["value"])
+	}
+}
+
+func TestAPIGetDAG(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-dag-1", DefName: "dag-workflow", DefVersion: 1}, nil
+	}
+	ms.loadDAGSpecFn = func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+		return json.RawMessage(`{"nodes":[{"name":"step1"}]}`), nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-dag-1/dag", nil)
+	w := httptest.NewRecorder()
+	api.handleGetDAG(w, req, "wf-dag-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&resp)
+	// Body is bytes.Buffer; no Close needed.
+	if resp["workflow_id"] != "wf-dag-1" {
+		t.Errorf("expected workflow_id wf-dag-1, got %v", resp["workflow_id"])
+	}
+}
+
+func TestAPIGetDAG_WorkflowNotFound(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-missing/dag", nil)
+	w := httptest.NewRecorder()
+	api.handleGetDAG(w, req, "wf-missing")
+
+	if w.Code != 404 {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPIGetDAG_SpecNotFound(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-dag-2", DefName: "test", DefVersion: 1}, nil
+	}
+	ms.loadDAGSpecFn = func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-dag-2/dag", nil)
+	w := httptest.NewRecorder()
+	api.handleGetDAG(w, req, "wf-dag-2")
+
+	if w.Code != 404 {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPIListPromises(t *testing.T) {
+	ms := &mockStore{}
+	ms.listPromisesFn = func(ctx context.Context, workflowID string) ([]host.PromiseInfo, error) {
+		return []host.PromiseInfo{
+			{PromiseID: "prom-1", Status: "pending"},
+		}, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/promises", nil)
+	w := httptest.NewRecorder()
+	api.handleListPromises(w, req, "wf-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var promises []host.PromiseInfo
+	json.NewDecoder(w.Body).Decode(&promises)
+	// Body is bytes.Buffer; no Close needed.
+	if len(promises) != 1 {
+		t.Fatalf("expected 1 promise, got %d", len(promises))
+	}
+	if promises[0].PromiseID != "prom-1" {
+		t.Errorf("expected prom-1, got %s", promises[0].PromiseID)
+	}
+}
+
+func TestAPIListPromises_Nil(t *testing.T) {
+	ms := &mockStore{}
+	ms.listPromisesFn = func(ctx context.Context, workflowID string) ([]host.PromiseInfo, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/promises", nil)
+	w := httptest.NewRecorder()
+	api.handleListPromises(w, req, "wf-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var promises []host.PromiseInfo
+	json.NewDecoder(w.Body).Decode(&promises)
+	// Body is bytes.Buffer; no Close needed.
+	if promises == nil {
+		t.Error("expected non-nil empty slice for nil promises")
+	}
+}
+
+func TestAPIResolvePromise(t *testing.T) {
+	ms := &mockStore{}
+	ms.resolvePromiseFn = func(ctx context.Context, workflowID, promiseID, result string) error {
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"result":"success"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/resolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleResolvePromise(w, req, "wf-1", "prom-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	// Body is bytes.Buffer; no Close needed.
+	if resp["status"] != "resolved" {
+		t.Errorf("expected resolved, got %s", resp["status"])
+	}
+}
+
+func TestAPIResolvePromise_InvalidJSON(t *testing.T) {
+	ms := &mockStore{}
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `not-json`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/resolve", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleResolvePromise(w, req, "wf-1", "prom-1")
+
+	if w.Code != 400 {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPIRejectPromise(t *testing.T) {
+	ms := &mockStore{}
+	ms.rejectPromiseFn = func(ctx context.Context, workflowID, promiseID, errMsg string) error {
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"reason":"something went wrong"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/reject", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleRejectPromise(w, req, "wf-1", "prom-1")
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	// Body is bytes.Buffer; no Close needed.
+	if resp["status"] != "rejected" {
+		t.Errorf("expected rejected, got %s", resp["status"])
+	}
+}
+
+func TestAPIRejectPromise_InvalidJSON(t *testing.T) {
+	ms := &mockStore{}
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-1/promises/prom-1/reject", nil)
+	w := httptest.NewRecorder()
+	api.handleRejectPromise(w, req, "wf-1", "prom-1")
+
+	if w.Code != 400 {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPIWorkflowUpdate(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-upd-1"}, nil
+	}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error) {
+		return nil, nil
+	}
+	ms.createUpdateRequestFn = func(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+		return nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"status":"new"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-upd-1/update/my-update", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflowUpdate(w, req, "wf-upd-1", "my-update")
+
+	if w.Code != 202 {
+		t.Errorf("expected 202, got %d", w.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	// Body is bytes.Buffer; no Close needed.
+	if resp["promise_id"] == "" {
+		t.Error("expected non-empty promise_id in response")
+	}
+	if !strings.HasPrefix(resp["promise_id"], "upd-") {
+		t.Errorf("expected promise_id starting with upd-, got %s", resp["promise_id"])
+	}
+}
+
+func TestAPIWorkflowUpdate_NotFound(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"status":"new"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-missing/update/my-update", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflowUpdate(w, req, "wf-missing", "my-update")
+
+	if w.Code != 404 {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPIWorkflowUpdate_Duplicate(t *testing.T) {
+	ms := &mockStore{}
+	ms.getWorkflowByIDFn = func(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+		return &host.WorkflowInstance{ID: "wf-upd-2"}, nil
+	}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error) {
+		return []host.UpdateRequestInfo{
+			{UpdateName: "my-update"},
+		}, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	body := `{"status":"new"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/wf-upd-2/update/my-update", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleWorkflowUpdate(w, req, "wf-upd-2", "my-update")
+
+	if w.Code != 409 {
+		t.Errorf("expected 409, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPIDefinitions(t *testing.T) {
+	ms := &mockStore{}
+	ms.listWorkflowDefsFn = func(ctx context.Context, name string) ([]host.WorkflowDef, error) {
+		return []host.WorkflowDef{
+			{Name: "wf-a", Version: 1, ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-b", Version: 2, ABIVersion: 1, MinVersion: 1},
+		}, nil
+	}
+	ms.loadMemoryStatsFn = func(ctx context.Context) ([]host.WorkflowMemoryStats, error) {
+		return nil, nil
+	}
+	ms.countActiveInstancesFn = func(ctx context.Context, name string, version int) (int, error) {
+		return 0, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/definitions", nil)
+	w := httptest.NewRecorder()
+	api.handleDefinitions(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var defs []map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&defs)
+	// Body is bytes.Buffer; no Close needed.
+	if len(defs) != 2 {
+		t.Fatalf("expected 2 definitions, got %d", len(defs))
+	}
+	if defs[0]["name"] != "wf-a" {
+		t.Errorf("expected wf-a, got %s", defs[0]["name"])
+	}
+}
+
+func TestAPIDefinitions_MethodNotAllowed(t *testing.T) {
+	ms := &mockStore{}
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/definitions", nil)
+	w := httptest.NewRecorder()
+	api.handleDefinitions(w, req)
+
+	if w.Code != 405 {
+		t.Errorf("expected 405, got %d", w.Code)
+	}
+	// Body is bytes.Buffer; no Close needed.
+}
+
+func TestAPIDefinitions_Empty(t *testing.T) {
+	ms := &mockStore{}
+	ms.listWorkflowDefsFn = func(ctx context.Context, name string) ([]host.WorkflowDef, error) {
+		return nil, nil
+	}
+	ms.loadMemoryStatsFn = func(ctx context.Context) ([]host.WorkflowMemoryStats, error) {
+		return nil, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/definitions", nil)
+	w := httptest.NewRecorder()
+	api.handleDefinitions(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var defs []map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&defs)
+	// Body is bytes.Buffer; no Close needed.
+	if defs == nil {
+		t.Error("expected non-nil empty array for nil definitions")
+	}
+}
+
+func TestAPIDefinitions_WithMemoryStats(t *testing.T) {
+	ms := &mockStore{}
+	ms.listWorkflowDefsFn = func(ctx context.Context, name string) ([]host.WorkflowDef, error) {
+		return []host.WorkflowDef{
+			{Name: "wf-mem", Version: 1, ABIVersion: 1, MinVersion: 1},
+		}, nil
+	}
+	ms.loadMemoryStatsFn = func(ctx context.Context) ([]host.WorkflowMemoryStats, error) {
+		return []host.WorkflowMemoryStats{
+			{DefName: "wf-mem", SampleCount: 10, AvgBytes: 42},
+		}, nil
+	}
+	ms.countActiveInstancesFn = func(ctx context.Context, name string, version int) (int, error) {
+		return 3, nil
+	}
+
+	api := &apiServer{store: ms, worker: newTestWorker(ms)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/definitions", nil)
+	w := httptest.NewRecorder()
+	api.handleDefinitions(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	var defs []map[string]interface{}
+	json.NewDecoder(w.Body).Decode(&defs)
+	// Body is bytes.Buffer; no Close needed.
+	if len(defs) != 1 {
+		t.Fatalf("expected 1 definition, got %d", len(defs))
+	}
+	if defs[0]["active_instances"].(float64) != 3 {
+		t.Errorf("expected active_instances 3, got %v", defs[0]["active_instances"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Memory controller tests
+// ---------------------------------------------------------------------------
+
+func TestCanAcceptAPIWorkflows(t *testing.T) {
+	mc := &MemoryController{pressure: 0.5}
+	if !mc.CanAcceptAPIWorkflows() {
+		t.Error("CanAcceptAPIWorkflows() = false, want true when pressure < 1.0")
+	}
+}
+
+func TestCanAcceptAPIWorkflows_UnderPressure(t *testing.T) {
+	mc := &MemoryController{pressure: 1.0}
+	if mc.CanAcceptAPIWorkflows() {
+		t.Error("CanAcceptAPIWorkflows() = true, want false when pressure >= 1.0")
+	}
+}
+
+func TestCanAcceptAPIWorkflows_Default(t *testing.T) {
+	// Default zero-valued pressure should still allow acceptance.
+	mc := &MemoryController{}
+	if !mc.CanAcceptAPIWorkflows() {
+		t.Error("CanAcceptAPIWorkflows() = false, want true with default pressure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// readMemTotal tests
+// ---------------------------------------------------------------------------
+
+func TestReadMemTotal(t *testing.T) {
+	total, ok := readMemTotal()
+	if !ok {
+		t.Fatal("readMemTotal() returned false — /proc/meminfo may not be available")
+	}
+	if total == 0 {
+		t.Error("readMemTotal() returned 0 bytes, expected > 0")
+	}
+	// Reasonable minimum: 16 MB
+	if total < 16*1024*1024 {
+		t.Errorf("readMemTotal() = %d bytes, seems unreasonably small", total)
+	}
+	// Sanity check: less than 64 TB
+	if total > 64*1024*1024*1024*1024 {
+		t.Errorf("readMemTotal() = %d bytes, seems unreasonably large", total)
+	}
+}

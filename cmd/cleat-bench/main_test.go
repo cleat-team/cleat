@@ -3,9 +3,58 @@ package main
 import (
 	"context"
 	"flag"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestHelperProcess is not a real test. It is invoked as a subprocess to
+// test os.Exit and log.Fatalf behavior in main().
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_HELPER_PROCESS") != "1" {
+		t.Skip("not a helper process")
+	}
+	extra := os.Getenv("RUNHELPERARGS")
+	os.Args = []string{"cleat-bench.test"}
+	if extra != "" {
+		os.Args = append(os.Args, strings.Fields(extra)...)
+	}
+	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	main()
+}
+
+// runHelper executes the test binary as a subprocess with the given extra
+// args and returns combined stdout+stderr.
+func runHelper(t *testing.T, extraArgs ...string) string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=TestHelperProcess$")
+	cmd.Env = append(os.Environ(),
+		"GO_HELPER_PROCESS=1",
+		"RUNHELPERARGS="+strings.Join(extraArgs, " "),
+	)
+	out, _ := cmd.CombinedOutput()
+	return string(out)
+}
+
+func TestMain_MissingArgs(t *testing.T) {
+	out := runHelper(t)
+	if !strings.Contains(out, "Usage:") {
+		t.Errorf("expected 'Usage:' in output, got: %s", out)
+	}
+}
+
+func TestMain_MissingWorkflow(t *testing.T) {
+	out := runHelper(t, "--db", "postgres://localhost/bench")
+	if !strings.Contains(out, "Usage:") {
+		t.Errorf("expected 'Usage:' in output, got: %s", out)
+	}
+}
 
 func TestBenchCallerCall(t *testing.T) {
 	c := &benchCaller{}

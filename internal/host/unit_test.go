@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -487,8 +488,9 @@ func TestLogStaleAlerts_Empty(t *testing.T) {
 func TestLogStaleAlerts_WithAlerts(t *testing.T) {
 	// Capture log output.
 	var buf bytes.Buffer
+	orig := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(nil) // restore
+	defer log.SetOutput(orig)
 
 	alerts := []StaleVersionAlert{
 		{Name: "test-workflow", Version: 1, Message: "test alert"},
@@ -1320,5 +1322,681 @@ func TestWorkflowLoader_CacheUpdateExisting(t *testing.T) {
 	stats2 := l.CacheStats()
 	if stats2.Size != 1 {
 		t.Errorf("expected size still 1 after update, got %d", stats2.Size)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SuspendError.Error() test
+// ---------------------------------------------------------------------------
+
+func TestSuspendError_Error(t *testing.T) {
+	// Without Until set.
+	e1 := &SuspendError{Reason: "workflow suspended for signal"}
+	got1 := e1.Error()
+	want1 := "cleat: suspend: workflow suspended for signal"
+	if got1 != want1 {
+		t.Errorf("SuspendError.Error() = %q, want %q", got1, want1)
+	}
+
+	// With Until set.
+	until := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
+	e2 := &SuspendError{Reason: "sleeping", Until: until}
+	got2 := e2.Error()
+	want2 := "cleat: suspend until 2026-05-10 12:00:00 +0000 UTC: sleeping"
+	if got2 != want2 {
+		t.Errorf("SuspendError.Error() = %q, want %q", got2, want2)
+	}
+
+	// Zero Until (time.Time{} has IsZero() true).
+	zeroTime := time.Time{}
+	e3 := &SuspendError{Reason: "no until", Until: zeroTime}
+	got3 := e3.Error()
+	want3 := "cleat: suspend: no until"
+	if got3 != want3 {
+		t.Errorf("SuspendError.Error() with zero Until = %q, want %q", got3, want3)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mock WorkflowStore for version metrics and GC tests
+// ---------------------------------------------------------------------------
+
+// stubWorkflowStore implements WorkflowStore with all methods returning zero
+// values. Embed this in a more specific mock and override only the methods
+// you need for a given test.
+type stubWorkflowStore struct{}
+
+func (s *stubWorkflowStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error {
+	return nil
+}
+func (s *stubWorkflowStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error {
+	return nil
+}
+func (s *stubWorkflowStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
+	return false, nil
+}
+func (s *stubWorkflowStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
+	return nil
+}
+func (s *stubWorkflowStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg string, queryState map[string]string) error {
+	return nil
+}
+func (s *stubWorkflowStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+	return nil
+}
+func (s *stubWorkflowStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
+	return nil
+}
+func (s *stubWorkflowStore) CheckCancellation(ctx context.Context, workflowID string) (bool, string, error) {
+	return false, "", nil
+}
+func (s *stubWorkflowStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
+	return nil
+}
+func (s *stubWorkflowStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+	return "", false, nil
+}
+func (s *stubWorkflowStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+	return "", false, nil
+}
+func (s *stubWorkflowStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
+	return "", nil
+}
+func (s *stubWorkflowStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+	return "", false, nil
+}
+func (s *stubWorkflowStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+	return "", false, nil
+}
+func (s *stubWorkflowStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
+	return false, "", nil
+}
+func (s *stubWorkflowStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
+	return "", nil
+}
+func (s *stubWorkflowStore) ListWorkflows(ctx context.Context, status string, limit int) ([]WorkflowInstance, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) CreateSchedule(ctx context.Context, sch Schedule) error {
+	return nil
+}
+func (s *stubWorkflowStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) DeleteSchedule(ctx context.Context, name string) error {
+	return nil
+}
+func (s *stubWorkflowStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error {
+	return nil
+}
+func (s *stubWorkflowStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
+	return nil
+}
+func (s *stubWorkflowStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
+	return nil
+}
+func (s *stubWorkflowStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
+	return nil
+}
+func (s *stubWorkflowStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+	return nil
+}
+func (s *stubWorkflowStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+	return nil
+}
+func (s *stubWorkflowStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
+	return "", "", "", nil
+}
+func (s *stubWorkflowStore) ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+	return nil
+}
+func (s *stubWorkflowStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+	return nil
+}
+func (s *stubWorkflowStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
+	return false, nil
+}
+func (s *stubWorkflowStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+	return nil
+}
+func (s *stubWorkflowStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
+	return nil
+}
+func (s *stubWorkflowStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
+	return nil
+}
+func (s *stubWorkflowStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
+	return nil
+}
+func (s *stubWorkflowStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
+	return nil
+}
+func (s *stubWorkflowStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
+	return nil
+}
+func (s *stubWorkflowStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
+	return false, nil
+}
+func (s *stubWorkflowStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error {
+	return nil
+}
+func (s *stubWorkflowStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) QueueDepth(ctx context.Context) (int64, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// CollectVersionMetrics tests
+// ---------------------------------------------------------------------------
+
+type mockCollectMetricsStore struct {
+	*stubWorkflowStore
+	defs   []WorkflowDef
+	counts map[string]int
+}
+
+func (m *mockCollectMetricsStore) ListWorkflowDefs(_ context.Context, name string) ([]WorkflowDef, error) {
+	return m.defs, nil
+}
+
+func (m *mockCollectMetricsStore) GetActiveInstanceCountsByVersion(_ context.Context) (map[string]int, error) {
+	return m.counts, nil
+}
+
+func TestCollectVersionMetrics_Empty(t *testing.T) {
+	store := &mockCollectMetricsStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs:              []WorkflowDef{},
+		counts:            map[string]int{},
+	}
+	summary, err := CollectVersionMetrics(context.Background(), store)
+	if err != nil {
+		t.Fatalf("CollectVersionMetrics: %v", err)
+	}
+	if summary.TotalVersions != 0 {
+		t.Errorf("TotalVersions = %d, want 0", summary.TotalVersions)
+	}
+	if summary.TotalActiveInstances != 0 {
+		t.Errorf("TotalActiveInstances = %d, want 0", summary.TotalActiveInstances)
+	}
+	if summary.ActiveVersions != 0 {
+		t.Errorf("ActiveVersions = %d, want 0", summary.ActiveVersions)
+	}
+}
+
+func TestCollectVersionMetrics_WithData(t *testing.T) {
+	now := time.Now()
+	store := &mockCollectMetricsStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf-alpha", Version: 2, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-alpha", Version: 1, Deprecated: true, CreatedAt: now.Add(-72 * time.Hour), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-beta", Version: 1, Deprecated: false, CreatedAt: now.Add(-48 * time.Hour), ABIVersion: 2, MinVersion: 2},
+		},
+		counts: map[string]int{
+			"wf-alpha:2": 5,
+			"wf-alpha:1": 2,
+			"wf-beta:1":  3,
+		},
+	}
+	summary, err := CollectVersionMetrics(context.Background(), store)
+	if err != nil {
+		t.Fatalf("CollectVersionMetrics: %v", err)
+	}
+	if summary.TotalVersions != 3 {
+		t.Errorf("TotalVersions = %d, want 3", summary.TotalVersions)
+	}
+	if summary.TotalActiveInstances != 10 {
+		t.Errorf("TotalActiveInstances = %d, want 10", summary.TotalActiveInstances)
+	}
+	if summary.ActiveVersions != 2 {
+		t.Errorf("ActiveVersions = %d, want 2", summary.ActiveVersions)
+	}
+	if summary.Deprecated != 1 {
+		t.Errorf("Deprecated = %d, want 1", summary.Deprecated)
+	}
+	if len(summary.Workflows) != 3 {
+		t.Errorf("len(Workflows) = %d, want 3", len(summary.Workflows))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckStaleVersions tests
+// ---------------------------------------------------------------------------
+
+type mockCheckStaleStore struct {
+	*stubWorkflowStore
+	defs   []WorkflowDef
+	counts map[string]int
+}
+
+func (m *mockCheckStaleStore) ListWorkflowDefs(_ context.Context, name string) ([]WorkflowDef, error) {
+	return m.defs, nil
+}
+
+func (m *mockCheckStaleStore) GetActiveInstanceCountsByVersion(_ context.Context) (map[string]int, error) {
+	return m.counts, nil
+}
+
+func TestCheckStaleVersions_NoAlerts(t *testing.T) {
+	store := &mockCheckStaleStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf-fresh", Version: 1, Deprecated: false, CreatedAt: time.Now()},
+		},
+		counts: map[string]int{"wf-fresh:1": 0},
+	}
+	alerts, err := CheckStaleVersions(context.Background(), store, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("CheckStaleVersions: %v", err)
+	}
+	if len(alerts) != 0 {
+		t.Errorf("expected 0 alerts, got %d", len(alerts))
+	}
+}
+
+func TestCheckStaleVersions_StaleNonDeprecated(t *testing.T) {
+	store := &mockCheckStaleStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf-old", Version: 1, Deprecated: false, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
+		},
+		counts: map[string]int{"wf-old:1": 3},
+	}
+	alerts, err := CheckStaleVersions(context.Background(), store, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("CheckStaleVersions: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(alerts))
+	}
+	if alerts[0].Deprecated {
+		t.Error("expected non-deprecated alert")
+	}
+	if alerts[0].ActiveInstances != 3 {
+		t.Errorf("ActiveInstances = %d, want 3", alerts[0].ActiveInstances)
+	}
+}
+
+func TestCheckStaleVersions_DeprecatedWithInstances(t *testing.T) {
+	store := &mockCheckStaleStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf-dep", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
+		},
+		counts: map[string]int{"wf-dep:1": 2},
+	}
+	alerts, err := CheckStaleVersions(context.Background(), store, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("CheckStaleVersions: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(alerts))
+	}
+	if !alerts[0].Deprecated {
+		t.Error("expected deprecated alert")
+	}
+	if alerts[0].ActiveInstances != 2 {
+		t.Errorf("ActiveInstances = %d, want 2", alerts[0].ActiveInstances)
+	}
+}
+
+func TestCheckStaleVersions_DeprecatedNoInstancesGC(t *testing.T) {
+	store := &mockCheckStaleStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf-gc", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
+		},
+		counts: map[string]int{"wf-gc:1": 0},
+	}
+	alerts, err := CheckStaleVersions(context.Background(), store, 7*24*time.Hour, 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("CheckStaleVersions: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(alerts))
+	}
+	if !alerts[0].Deprecated {
+		t.Error("expected deprecated alert")
+	}
+	if alerts[0].ActiveInstances != 0 {
+		t.Errorf("ActiveInstances = %d, want 0", alerts[0].ActiveInstances)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GarbageCollectVersions tests
+// ---------------------------------------------------------------------------
+
+type mockGCStore struct {
+	*stubWorkflowStore
+	defs     []WorkflowDef
+	counts   map[string]int
+	purged   []string
+}
+
+func (m *mockGCStore) ListWorkflowDefs(_ context.Context, name string) ([]WorkflowDef, error) {
+	return m.defs, nil
+}
+
+func (m *mockGCStore) GetActiveInstanceCountsByVersion(_ context.Context) (map[string]int, error) {
+	return m.counts, nil
+}
+
+func (m *mockGCStore) PurgeWorkflowDef(_ context.Context, name string, version int) error {
+	m.purged = append(m.purged, fmt.Sprintf("%s:%d", name, version))
+	return nil
+}
+
+func TestGarbageCollectVersions_NothingToGC(t *testing.T) {
+	store := &mockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 1, Deprecated: false, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
+		},
+		counts: map[string]int{},
+	}
+	result, err := GarbageCollectVersions(context.Background(), store, DefaultGCOptions())
+	if err != nil {
+		t.Fatalf("GarbageCollectVersions: %v", err)
+	}
+	if result.VersionsRemoved != 0 {
+		t.Errorf("VersionsRemoved = %d, want 0", result.VersionsRemoved)
+	}
+}
+
+func TestGarbageCollectVersions_RemovesDeprecatedOld(t *testing.T) {
+	store := &mockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 3, Deprecated: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
+			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
+		},
+		counts: map[string]int{},
+	}
+	opts := GCOptions{
+		MinVersionsToKeep: 1,
+		MaxVersionAge:     30 * 24 * time.Hour,
+		Now:               time.Now(),
+	}
+	result, err := GarbageCollectVersions(context.Background(), store, opts)
+	if err != nil {
+		t.Fatalf("GarbageCollectVersions: %v", err)
+	}
+	if result.VersionsRemoved != 2 {
+		t.Errorf("VersionsRemoved = %d, want 2 (v1 and v2), got purged=%v", result.VersionsRemoved, store.purged)
+	}
+}
+
+func TestGarbageCollectVersions_ProtectedByMinKeep(t *testing.T) {
+	now := time.Now()
+	store := &mockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 3, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour)},
+			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
+		},
+		counts: map[string]int{},
+	}
+	opts := GCOptions{
+		MinVersionsToKeep: 3,
+		MaxVersionAge:     30 * 24 * time.Hour,
+		Now:               now,
+	}
+	result, err := GarbageCollectVersions(context.Background(), store, opts)
+	if err != nil {
+		t.Fatalf("GarbageCollectVersions: %v", err)
+	}
+	if result.VersionsRemoved != 0 {
+		t.Errorf("VersionsRemoved = %d, want 0 (all protected by MinVersionsToKeep)", result.VersionsRemoved)
+	}
+}
+
+func TestGarbageCollectVersions_SkippedActiveInstances(t *testing.T) {
+	now := time.Now()
+	store := &mockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 2, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour)},
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+		},
+		counts: map[string]int{"wf:1": 3},
+	}
+	opts := GCOptions{
+		MinVersionsToKeep: 1,
+		MaxVersionAge:     30 * 24 * time.Hour,
+		Now:               now,
+	}
+	result, err := GarbageCollectVersions(context.Background(), store, opts)
+	if err != nil {
+		t.Fatalf("GarbageCollectVersions: %v", err)
+	}
+	if result.VersionsRemoved != 0 {
+		t.Errorf("VersionsRemoved = %d, want 0 (v1 has active instances)", result.VersionsRemoved)
+	}
+	if result.VersionsSkipped != 1 {
+		t.Errorf("VersionsSkipped = %d, want 1", result.VersionsSkipped)
+	}
+}
+
+func TestGarbageCollectVersions_DryRun(t *testing.T) {
+	now := time.Now()
+	store := &mockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 2, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour)},
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+		},
+		counts: map[string]int{},
+	}
+	opts := GCOptions{
+		MinVersionsToKeep: 1,
+		MaxVersionAge:     30 * 24 * time.Hour,
+		DryRun:            true,
+		Now:               now,
+	}
+	result, err := GarbageCollectVersions(context.Background(), store, opts)
+	if err != nil {
+		t.Fatalf("GarbageCollectVersions: %v", err)
+	}
+	if result.VersionsRemoved != 1 {
+		t.Errorf("VersionsRemoved = %d, want 1 (dry run counts v1)", result.VersionsRemoved)
+	}
+	if len(store.purged) != 0 {
+		t.Errorf("expected no purges in dry run, got %v", store.purged)
+	}
+}
+
+func TestGarbageCollectVersions_DefaultsApplied(t *testing.T) {
+	store := &mockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs:              []WorkflowDef{},
+		counts:            map[string]int{},
+	}
+	result, err := GarbageCollectVersions(context.Background(), store, GCOptions{})
+	if err != nil {
+		t.Fatalf("GarbageCollectVersions with zero opts: %v", err)
+	}
+	if result.VersionsRemoved != 0 {
+		t.Errorf("VersionsRemoved = %d, want 0", result.VersionsRemoved)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PurgeVersions tests
+// ---------------------------------------------------------------------------
+
+type mockPurgeStore struct {
+	*stubWorkflowStore
+	defs     []WorkflowDef
+	counts   map[string]int
+	purged   []string
+}
+
+func (m *mockPurgeStore) ListWorkflowDefs(_ context.Context, name string) ([]WorkflowDef, error) {
+	return m.defs, nil
+}
+
+func (m *mockPurgeStore) CountActiveInstances(_ context.Context, name string, version int) (int, error) {
+	return m.counts[fmt.Sprintf("%s:%d", name, version)], nil
+}
+
+func (m *mockPurgeStore) PurgeWorkflowDef(_ context.Context, name string, version int) error {
+	m.purged = append(m.purged, fmt.Sprintf("%s:%d", name, version))
+	return nil
+}
+
+func TestPurgeVersions_RemovesOldDeprecated(t *testing.T) {
+	now := time.Now()
+	store := &mockPurgeStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
+		},
+		counts: map[string]int{"wf:1": 0, "wf:2": 0},
+	}
+	result, err := PurgeVersions(context.Background(), store, "wf", 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("PurgeVersions: %v", err)
+	}
+	if result.VersionsRemoved != 2 {
+		t.Errorf("VersionsRemoved = %d, want 2", result.VersionsRemoved)
+	}
+}
+
+func TestPurgeVersions_NotOldEnough(t *testing.T) {
+	now := time.Now()
+	store := &mockPurgeStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-10 * 24 * time.Hour)},
+		},
+		counts: map[string]int{"wf:1": 0},
+	}
+	result, err := PurgeVersions(context.Background(), store, "wf", 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("PurgeVersions: %v", err)
+	}
+	if result.VersionsRemoved != 0 {
+		t.Errorf("VersionsRemoved = %d, want 0 (not old enough)", result.VersionsRemoved)
+	}
+}
+
+func TestPurgeVersions_NotDeprecated(t *testing.T) {
+	now := time.Now()
+	store := &mockPurgeStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 1, Deprecated: false, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+		},
+		counts: map[string]int{"wf:1": 0},
+	}
+	result, err := PurgeVersions(context.Background(), store, "wf", 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("PurgeVersions: %v", err)
+	}
+	if result.VersionsRemoved != 0 {
+		t.Errorf("VersionsRemoved = %d, want 0 (not deprecated)", result.VersionsRemoved)
+	}
+}
+
+func TestPurgeVersions_SkippedActiveInstances(t *testing.T) {
+	now := time.Now()
+	store := &mockPurgeStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+		},
+		counts: map[string]int{"wf:1": 5},
+	}
+	result, err := PurgeVersions(context.Background(), store, "wf", 30*24*time.Hour)
+	if err != nil {
+		t.Fatalf("PurgeVersions: %v", err)
+	}
+	if result.VersionsRemoved != 0 {
+		t.Errorf("VersionsRemoved = %d, want 0", result.VersionsRemoved)
+	}
+	if result.VersionsSkipped != 1 {
+		t.Errorf("VersionsSkipped = %d, want 1", result.VersionsSkipped)
 	}
 }

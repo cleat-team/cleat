@@ -318,8 +318,12 @@ func (c *fakeConn) execUpdateWebhookConfig(args []driver.NamedValue, query strin
 				cfg.events = v
 			}
 		case strings.Contains(query, "enabled = $"+ordStr):
-			if v, err := argString(args, ord); err == nil {
-				cfg.enabled = v == "true"
+			for _, a := range args {
+				if a.Ordinal == ord {
+					if v, ok := a.Value.(bool); ok {
+						cfg.enabled = v
+					}
+				}
 			}
 		}
 	}

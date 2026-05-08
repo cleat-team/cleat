@@ -175,6 +175,8 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	switch {
 	case strings.Contains(query, "INSERT INTO kafka_config"):
 		return c.execInsertKafkaConfig(args)
+	case strings.Contains(query, "INSERT INTO ingested_events"):
+		return &fakeResult{rowsAffected: 1}, nil
 	case strings.Contains(query, "DELETE FROM kafka_config"):
 		return c.execDeleteKafkaConfig(args)
 	default:
@@ -284,6 +286,14 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		return c.queryKafkaConfigByID(args)
 	case strings.Contains(query, "FROM kafka_config") && strings.Contains(query, "ORDER BY"):
 		return c.queryKafkaConfigList(args)
+	case strings.Contains(query, "FROM event_subscriptions"):
+		return &fakeRows{
+			columns: []string{"id", "tenant_id", "event_type", "def_name", "entry_point", "input_template", "filter_expr", "enabled", "created_at", "max_retries"},
+		}, nil
+	case strings.Contains(query, "FROM event_awaiters"):
+		return &fakeRows{
+			columns: []string{"workflow_id"},
+		}, nil
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Query query: %s", query[:min(len(query), 80)])
 	}
@@ -1305,4 +1315,130 @@ func TestKafkaDeleteConfigExecError(t *testing.T) {
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 for DB exec error, got %d: %s", rec.Code, rec.Body.String())
 	}
+}
+
+
+// ===========================================================================
+// publishRecord — coverage for the 0% function
+// ===========================================================================
+
+func TestKafkaPublishRecord(t *testing.T) {
+		p, _, _ := setupTestPlugin(t)
+
+		cfg := configRow{
+			ID:            uuid.New(),
+			TenantID:      testTenantID,
+			Name:          "test-publish",
+			Brokers:       "broker:9092",
+			Topic:         "test-topic",
+			ConsumerGroup: "cleat-consumer",
+			EventType:     "test-event",
+		}
+
+		record := kafkaRecord{
+			Topic:     "test-topic",
+			Key:       "my-key",
+			Value:     "hello",
+			Partition: 0,
+			Offset:    1,
+		}
+
+		err := p.publishRecord(context.Background(), cfg, record)
+		if err != nil {
+			t.Fatalf("publishRecord: %v", err)
+		}
+}
+
+// ===========================================================================
+// pollConfig — with REST Proxy URL set but consume failing
+// ===========================================================================
+
+func TestKafkaPollConfigConsumeError(t *testing.T) {
+		p, _, store := setupTestPlugin(t)
+
+		// Set RestProxyURL to an unreachable address so consumeViaRestProxy fails.
+		p.config.RestProxyURL = "http://127.0.0.1:1"
+		p.httpClient = &http.Client{Timeout: 100 * time.Millisecond}
+
+		// Insert an enabled config.
+		cfgID := uuid.New().String()
+		store.mu.Lock()
+		store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
+			tenantID:      testTenantStr,
+			id:            cfgID,
+			name:          "consume-error",
+			brokers:       "broker:9092",
+			topic:         "error-topic",
+			consumerGroup: "cleat-consumer",
+			eventType:     "error-topic",
+			enabled:       true,
+			createdAt:     time.Now(),
+			updatedAt:     time.Now(),
+		}
+		store.mu.Unlock()
+
+		// pollConfigs should query enabled configs and fail at consumeViaRestProxy.
+		// The error is logged but pollConfigs should not return an error.
+		err := p.pollConfigs(context.Background())
+		if err != nil {
+			t.Fatalf("pollConfigs: %v", err)
+		}
+}
+
+// ===========================================================================
+// pollConfig — RestProxyURL set, consume succeeds, publishRecord called
+// ===========================================================================
+
+func TestKafkaPollConfigConsumeAndPublish(t *testing.T) {
+		var proxySrv *httptest.Server
+		proxySrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == "POST" && strings.Contains(r.URL.Path, "/consumers/"):
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode(map[string]string{
+					"instance_id": "test-instance",
+					"base_uri":    proxySrv.URL + "/consumers/test-instance",
+				})
+			case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/subscription"):
+				w.WriteHeader(http.StatusNoContent)
+			case r.Method == "GET" && strings.Contains(r.URL.Path, "/records"):
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				json.NewEncoder(w).Encode([]map[string]interface{}{
+					{"topic": "publish-topic", "key": nil, "value": "hello-world", "partition": 0, "offset": int64(42)},
+				})
+			case r.Method == "DELETE":
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer proxySrv.Close()
+
+		p, _, store := setupTestPlugin(t)
+		p.config.RestProxyURL = proxySrv.URL
+		p.httpClient = &http.Client{Timeout: 5 * time.Second}
+
+		// Insert an enabled config.
+		cfgID := uuid.New().String()
+		store.mu.Lock()
+		store.kafkaCfgs[testTenantStr+":"+cfgID] = &fakeKafkaConfigRow{
+			tenantID:      testTenantStr,
+			id:            cfgID,
+			name:          "consume-publish",
+			brokers:       "broker:9092",
+			topic:         "publish-topic",
+			consumerGroup: "cleat-consumer",
+			eventType:     "publish-event",
+			enabled:       true,
+			createdAt:     time.Now(),
+			updatedAt:     time.Now(),
+		}
+		store.mu.Unlock()
+
+		err := p.pollConfigs(context.Background())
+		if err != nil {
+			t.Fatalf("pollConfigs: %v", err)
+		}
 }

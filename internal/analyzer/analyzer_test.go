@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"go/token"
 	"go/types"
 	"testing"
 )
@@ -91,6 +92,55 @@ func TestFullyQualifiedNameMethod(t *testing.T) {
 	}
 }
 
+func TestFullyQualifiedNameWithReceiver(t *testing.T) {
+	// When RecvType is set, FullyQualifiedName uses types.TypeString with the
+	// qualifier function, producing a receiver-qualified name.
+	otherPkg := types.NewPackage("other/pkg", "other")
+	recvType := types.NewNamed(
+		types.NewTypeName(token.Pos(0), otherPkg, "MyStruct", nil),
+		types.Typ[types.Int],
+		nil,
+	)
+	fd := &FuncDecl{
+		Name: "Process",
+		Pkg: &Package{
+			Name: "workflow",
+			Path: "github.com/rcownie/cleat/workflow",
+		},
+		RecvType: recvType,
+	}
+	fq := fd.FullyQualifiedName()
+	// "other" from the package name of the receiver type + ".MyStruct.Process"
+	expected := "other.MyStruct.Process"
+	if fq != expected {
+		t.Errorf("FullyQualifiedName() = %q, want %q", fq, expected)
+	}
+}
+
+func TestFullyQualifiedNameWithSamePackageReceiver(t *testing.T) {
+	// When the receiver type belongs to the same package as the function,
+	// the qualifier returns "" (no package prefix).
+	samePkg := types.NewPackage("github.com/rcownie/cleat/workflow", "workflow")
+	recvType := types.NewNamed(
+		types.NewTypeName(token.Pos(0), samePkg, "MyStruct", nil),
+		types.Typ[types.Int],
+		nil,
+	)
+	fd := &FuncDecl{
+		Name: "Process",
+		Pkg: &Package{
+			Name: "workflow",
+			Path: "github.com/rcownie/cleat/workflow",
+		},
+		RecvType: recvType,
+	}
+	fq := fd.FullyQualifiedName()
+	expected := "MyStruct.Process"
+	if fq != expected {
+		t.Errorf("FullyQualifiedName() = %q, want %q", fq, expected)
+	}
+}
+
 func TestLastComponentEdgeCases(t *testing.T) {
 	tests := []struct {
 		path string
@@ -142,5 +192,64 @@ func TestShortNameEdgeCases(t *testing.T) {
 				t.Errorf("ShortName(%q) = %q, want %q", tc.fqname, got, tc.want)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IsHostCallsType -- pointer type (backward compatibility) paths
+// ---------------------------------------------------------------------------
+
+func TestIsHostCallsTypeWithPointerToHostCalls(t *testing.T) {
+	pkg := types.NewPackage("github.com/rcownie/cleat", "cleat")
+	obj := types.NewTypeName(token.Pos(0), pkg, "HostCalls", nil)
+	named := types.NewNamed(obj, types.Typ[types.Int], nil)
+	ptr := types.NewPointer(named)
+	if !IsHostCallsType(ptr) {
+		t.Error("IsHostCallsType(*cleat.HostCalls) should return true for backward compat")
+	}
+}
+
+func TestIsHostCallsTypeWithPointerToNonHostCalls(t *testing.T) {
+	ptr := types.NewPointer(types.Typ[types.Int])
+	if IsHostCallsType(ptr) {
+		t.Error("IsHostCallsType(*int) should return false")
+	}
+}
+
+func TestIsHostCallsTypeWithPointerToWrongNamedType(t *testing.T) {
+	pkg := types.NewPackage("my/workflow", "workflow")
+	obj := types.NewTypeName(token.Pos(0), pkg, "OrderProcessor", nil)
+	named := types.NewNamed(obj, types.Typ[types.Int], nil)
+	ptr := types.NewPointer(named)
+	if IsHostCallsType(ptr) {
+		t.Error("IsHostCallsType(*workflow.OrderProcessor) should return false")
+	}
+}
+
+func TestIsHostCallsTypeWithHostCallsNameWrongPackage(t *testing.T) {
+	pkg := types.NewPackage("other/cleat", "workflow")
+	obj := types.NewTypeName(token.Pos(0), pkg, "HostCalls", nil)
+	named := types.NewNamed(obj, types.Typ[types.Int], nil)
+	if IsHostCallsType(named) {
+		t.Error("IsHostCallsType(workflow.HostCalls) should return false for non-cleat pkg")
+	}
+}
+
+func TestIsHostCallsTypeWithNamedNonHostCalls(t *testing.T) {
+	pkg := types.NewPackage("my/workflow", "workflow")
+	obj := types.NewTypeName(token.Pos(0), pkg, "SomeType", nil)
+	named := types.NewNamed(obj, types.Typ[types.Int], nil)
+	if IsHostCallsType(named) {
+		t.Error("IsHostCallsType(workflow.SomeType) should return false")
+	}
+}
+
+func TestIsHostCallsTypeWithPointerToNamedHostCallsWrongPkg(t *testing.T) {
+	pkg := types.NewPackage("other/cleat", "workflow")
+	obj := types.NewTypeName(token.Pos(0), pkg, "HostCalls", nil)
+	named := types.NewNamed(obj, types.Typ[types.Int], nil)
+	ptr := types.NewPointer(named)
+	if IsHostCallsType(ptr) {
+		t.Error("IsHostCallsType(*workflow.HostCalls) should return false for non-cleat pkg")
 	}
 }
