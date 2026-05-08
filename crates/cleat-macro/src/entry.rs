@@ -9,7 +9,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     if input_fn.sig.asyncness.is_some() {
         return syn::Error::new_spanned(
             &input_fn.sig.ident,
-            "#[cleat_entry] does not support async functions",
+            "#[cleat_entry] does not support async functions: async functions export Futures which cannot be used as WASM exports. Remove the 'async' keyword and use synchronous code with cleat_sdk calls.",
         )
         .to_compile_error()
         .into();
@@ -34,7 +34,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     if !return_type_is_result {
         return syn::Error::new_spanned(
             &input_fn.sig.output,
-            "#[cleat_entry] function must return Result<T, E>",
+            "#[cleat_entry] function must return Result<T, E>: must return Result to allow the macro to format success and error values for the WASM ABI. Change return type to Result<T, E>.",
         )
         .to_compile_error()
         .into();
@@ -51,7 +51,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     if all_args.is_empty() {
         return syn::Error::new_spanned(
             &input_fn.sig.ident,
-            "#[cleat_entry] function must have at least a &HostCalls parameter",
+            "#[cleat_entry] function must have at least a &HostCalls parameter: must have &HostCalls as first parameter to access the cleat runtime (logging, sleep, state, etc.). Add 'h: &HostCalls' as the first parameter.",
         )
         .to_compile_error()
         .into();
@@ -68,7 +68,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
         if !is_hostcalls {
             return syn::Error::new_spanned(
                 &first_pt.ty,
-                "first parameter must be &HostCalls",
+                "first parameter must be &HostCalls: must be &HostCalls. Replace the current type with 'h: &HostCalls' to access the cleat runtime API.",
             )
             .to_compile_error()
             .into();
@@ -83,7 +83,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
         return syn::Error::new_spanned(
             &all_args[1],
             format!(
-                "`#[cleat_entry]` functions must have exactly one input parameter (beyond `&HostCalls`). Found {} extra parameters.",
+                "`#[cleat_entry]` functions must have exactly one input parameter (beyond `&HostCalls`). Found {} extra parameters. Reason: WASM exports receive a single JSON payload, so only one user parameter is supported. Combine parameters into a struct with #[derive(Deserialize)].",
                 all_args.len()
             ),
         )
@@ -103,6 +103,8 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     };
 
     // Build the call arguments for the inner function.
+    // Also collect any compile errors (e.g. for destructuring patterns).
+    let mut compile_errors = proc_macro2::TokenStream::new();
     let inner_call_args: Vec<_> = {
         let mut args = vec![quote! { &h }];
         for a in &all_args {
@@ -111,8 +113,13 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
                     let name = &pi.ident;
                     args.push(quote! { #name });
                 } else {
-                    // A1: Warn about destructuring patterns that are silently ignored.
-                    eprintln!("warning: destructuring patterns in #[cleat_entry] parameters are silently ignored");
+                    // A1: Reject destructuring patterns — emit a compile error with span.
+                    compile_errors.extend(
+                        syn::Error::new_spanned(
+                            &pt.pat,
+                            "destructuring patterns in #[cleat_entry] parameters are not supported; use a plain variable name instead",
+                        ).into_compile_error()
+                    );
                 }
             }
         }
@@ -147,6 +154,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
+        #compile_errors
         #[allow(non_snake_case)]
         #fn_vis fn #inner_name(#(#inner_params),*) #fn_ret #fn_block
 

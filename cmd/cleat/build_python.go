@@ -51,6 +51,7 @@ func runBuildPython(pattern, outDir string) {
 				entries, err := os.ReadDir(pyDir)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: could not read directory %s: %v\n", pyDir, err)
+					fmt.Fprintf(os.Stderr, "Check that the directory exists and is readable.\n")
 					os.Exit(1)
 				}
 				for _, entry := range entries {
@@ -62,6 +63,7 @@ func runBuildPython(pattern, outDir string) {
 				if pyFile == "" {
 					fmt.Fprintf(os.Stderr, "Error: no .py file found in %s\n", pyDir)
 					fmt.Fprintf(os.Stderr, "Python workflows require a .py file with workflow code.\n")
+					fmt.Fprintf(os.Stderr, "Create a workflow.py file or specify the file path explicitly.\n")
 					os.Exit(1)
 				}
 			}
@@ -99,6 +101,7 @@ func runBuildPython(pattern, outDir string) {
 	if err := wasm.BuildPythonWasm(entry, wasmOutput, false); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: componentize-py failed: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Make sure the Python file has a @cleat_entry decorated function.\n")
+		fmt.Fprintf(os.Stderr, "Check that (1) the Python file has valid syntax, (2) the @cleat_entry function exists and is not async, (3) all imports are available.\n")
 		os.Exit(1)
 	}
 
@@ -114,6 +117,7 @@ func runBuildPython(pattern, outDir string) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: could not read WASM output: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Looked in: %s\n", srcWasm)
+		fmt.Fprintf(os.Stderr, "Check file permissions and disk space.\n")
 		os.Exit(1)
 	}
 
@@ -157,7 +161,7 @@ func detectEntryFunction(pyFile string) (string, error) {
 		if stderr != "" {
 			return "", fmt.Errorf("in %s: %s", pyFile, stderr)
 		}
-		return "", fmt.Errorf("python AST analysis failed for %s: %v", pyFile, err)
+		return "", fmt.Errorf("Python file analysis failed for %s: %v. Check that the file is valid Python.", pyFile, err)
 	}
 
 	name := strings.TrimSpace(string(out))

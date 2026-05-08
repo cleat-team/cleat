@@ -81,7 +81,7 @@ public class CleatEntryProcessor extends AbstractProcessor {
                 if (!element.getModifiers().contains(javax.lang.model.element.Modifier.STATIC)) {
                     processingEnv.getMessager().printMessage(
                         Diagnostic.Kind.ERROR,
-                        "@CleatEntry method must be static",
+                        "@CleatEntry method must be static: WASM exports are top-level functions without a 'this' reference. Add the 'static' modifier.",
                         element);
                     continue;
                 }
@@ -90,7 +90,7 @@ public class CleatEntryProcessor extends AbstractProcessor {
                 if (!element.getModifiers().contains(javax.lang.model.element.Modifier.PUBLIC)) {
                     processingEnv.getMessager().printMessage(
                         Diagnostic.Kind.ERROR,
-                        "@CleatEntry method must be public",
+                        "@CleatEntry method must be public: The generated export wrapper class must be able to invoke this method. Add the 'public' modifier.",
                         element);
                     continue;
                 }
@@ -141,7 +141,8 @@ public class CleatEntryProcessor extends AbstractProcessor {
             processingEnv.getMessager().printMessage(
                 Diagnostic.Kind.ERROR,
                 "@CleatEntry method first parameter must be cleat.HostCalls, got "
-                    + (params.isEmpty() ? "none" : params.get(0).asType().toString()),
+                    + (params.isEmpty() ? "none" : params.get(0).asType().toString())
+                    + ". The first parameter provides the HostCalls runtime API. Change it to 'cleat.HostCalls h'.",
                 method);
             return;
         }
@@ -201,7 +202,8 @@ public class CleatEntryProcessor extends AbstractProcessor {
             processingEnv.getMessager().printMessage(
                 Diagnostic.Kind.ERROR,
                 "Failed to generate export wrapper for " + className + "."
-                    + methodName + ": " + e.getMessage());
+                    + methodName + ": " + e.getMessage(),
+                method);
         }
     }
 
@@ -435,7 +437,8 @@ public class CleatEntryProcessor extends AbstractProcessor {
         } catch (IOException e) {
             processingEnv.getMessager().printMessage(
                 Diagnostic.Kind.ERROR,
-                "Failed to generate CleatEntryIndex: " + e.getMessage());
+                "Failed to generate CleatEntryIndex: " + e.getMessage(),
+            (Element) null);
         }
     }
 
@@ -480,7 +483,8 @@ public class CleatEntryProcessor extends AbstractProcessor {
         } catch (IOException e) {
             processingEnv.getMessager().printMessage(
                 Diagnostic.Kind.ERROR,
-                "Failed to generate WorkflowEntry: " + e.getMessage());
+                "Failed to generate WorkflowEntry: " + e.getMessage(),
+            (Element) null);
         }
     }
 }

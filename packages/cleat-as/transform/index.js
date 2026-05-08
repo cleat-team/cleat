@@ -97,10 +97,14 @@ class CleatEntryTransformer {
         // Validate: must have at least one parameter (HostCalls)
         const params = stmt.signature.parameters || [];
         if (params.length === 0) {
+          const sourceName = source.internalPath || source.name || "unknown";
+          const loc = this._getSourceLocation(stmt, sourceName);
           console.error(
             "[@cleat/transform] Warning: @cleatEntry function '" +
             (stmt.name ? stmt.name.text : "unknown") +
-            "' has no parameters. The first parameter must be HostCalls."
+            "' at " + loc + " has no parameters." +
+            " The first parameter must be HostCalls to access SDK methods." +
+            " Without HostCalls, the workflow cannot make durable calls."
           );
           continue;
         }
@@ -223,25 +227,25 @@ class CleatEntryTransformer {
 
         if (objName === "Math" && (propName === "random" || propName === "seedRandom")) {
           const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E001: Math." + propName + "() in durable function '" + funcName + "' at " + loc + "\n  → Use h.Random() for deterministic randomness.");
+          console.error("[cleat/transform] E001: Math." + propName + "() in durable function '" + funcName + "' at " + loc + "\n  → Math.random() produces different values on each replay, breaking workflow determinism.\n  → Use h.Random() for deterministic randomness.");
           return;
         }
 
         if (objName === "Date" && propName === "now") {
           const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E002: Date.now() in durable function '" + funcName + "' at " + loc + "\n  → Use h.Now() for deterministic time.");
+          console.error("[cleat/transform] E002: Date.now() in durable function '" + funcName + "' at " + loc + "\n  → Date.now() returns wall-clock time which differs across replays, breaking determinism.\n  → Use h.Now() for deterministic time.");
           return;
         }
 
         if (objName === "console" && propName === "log") {
           const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E003: console.log() in durable function '" + funcName + "' at " + loc + "\n  → Use h.DurableLog() for durable logging.");
+          console.error("[cleat/transform] E003: console.log() in durable function '" + funcName + "' at " + loc + "\n  → console.log() output is not recorded in workflow event history and is lost on replay.\n  → Use h.DurableLog() for durable logging.");
           return;
         }
 
         if (objName === "process") {
           const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E004: process." + propName + " in durable function '" + funcName + "' at " + loc + "\n  → Process access is not allowed in workflow code.");
+          console.error("[cleat/transform] E004: process." + propName + " in durable function '" + funcName + "' at " + loc + "\n  → Process/environment access differs across replays, breaking determinism.\n  → Pass configuration as workflow input instead of reading from process.env.");
           return;
         }
       }
@@ -508,7 +512,7 @@ class CleatEntryTransformer {
           }
         }
       } catch (e) {
-        console.error("[@cleat/transform] Failed to inject wrappers: " + e.message + ". Falling back to file output.");
+        console.error("[@cleat/transform] Failed to inject wrappers: " + e.message + ". The generated wrapper code will be written to a file instead. See the next message for the file path.");
         this._writeFallback(wrapperCode);
       }
     }
@@ -542,20 +546,27 @@ class CleatEntryTransformer {
   // Fallback: write wrapper code to a file on disk
   // ---------------------------------------------------------------
   _writeFallback(code) {
+    let outPath = "";
     try {
       const cwd = process.cwd();
       const outDir = path.join(cwd, "assembly", "generated");
       if (!fs.existsSync(outDir)) {
         fs.mkdirSync(outDir, { recursive: true });
       }
-      const outPath = path.join(outDir, "cleat-wrappers.ts");
+      outPath = path.join(outDir, "cleat-wrappers.ts");
       fs.writeFileSync(outPath, code, "utf-8");
       console.error(
         "[@cleat/transform] Wrote wrapper file to " + outPath +
-        ". Add it to your asconfig.json entries."
+        ". Add \"assembly/generated/cleat-wrappers.ts\" to the \"entries\" array in asconfig.json."
       );
     } catch (_e) {
-      console.error("[@cleat/transform] Could not write fallback wrapper file.");
+      console.error(
+        "[@cleat/transform] Could not write fallback wrapper file" +
+        (outPath ? " to " + outPath : "") + "." +
+        " Both AST injection and file output have failed." +
+        " Check that the output directory is writable and there is disk space." +
+        " Try running 'npx asc' directly without the transform."
+      );
     }
   }
 
@@ -658,7 +669,7 @@ class CleatEntryTransformer {
       code += `  }\n\n`;
       code += `  // Extract named params\n`;
       for (let i = 0; i < paramNames.length; i++) {
-        code += this._getDeserializeCode(paramNames[i], paramTypes[i]);
+        code += this._getDeserializeCode(paramNames[i], paramTypes[i], funcName);
       }
       if (isVoid) {
         code += `  let _result: string = "";\n`;
@@ -718,7 +729,7 @@ class CleatEntryTransformer {
   // Generate deserialization code for a single parameter based on type
   // Used by the multi-parameter branch to select the correct JSON getter
   // ---------------------------------------------------------------
-  _getDeserializeCode(pname, ptype) {
+  _getDeserializeCode(pname, ptype, funcName) {
     // Map AS types to the correct JsonParser getter
     if (ptype === "string" || ptype === "String") {
       return `  let ${pname}: string = _parser.getString(_parsed, "${pname}");\n`;
@@ -740,7 +751,7 @@ class CleatEntryTransformer {
       // Unknown type — throw a compile-time error from the transformer
       throw new Error(
         "[@cleat/transform] Unsupported type '" + ptype +
-        "' for multi-parameter entry function parameter '" + pname +
+        "' for parameter '" + pname + "' in function '" + funcName +
         "'. Supported types: string, i32, u32, i64, u64, f64, f32, bool"
       );
     }

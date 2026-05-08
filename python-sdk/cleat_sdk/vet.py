@@ -92,52 +92,52 @@ DURABLE_LEAVES: Set[str] = {
 FORBIDDEN_API_RULES: Dict[Tuple[Optional[str], str], Tuple[str, str, str]] = {
     (None, "open"): (
         "PY002",
-        "File I/O is not allowed in workflow code",
+        "File I/O is not allowed in workflow code: file system operations produce non-deterministic side effects across replays.",
         "Use cleat_fetch() or HostCalls instead",
     ),
     (None, "print"): (
         "PY010",
-        "print() is not allowed in workflow code",
+        "print() is not allowed in workflow code: output is lost on replay and not recorded in workflow history.",
         "Use h.cleat_log() instead",
     ),
     ("time", "sleep"): (
         "PY004",
-        "time.sleep() is not allowed in durable functions",
+        "time.sleep() is not allowed in durable functions: real-time sleep advances differently on each replay, breaking determinism.",
         "Use h.cleat_sleep() instead",
     ),
     ("time", "time"): (
         "PY005",
-        "time.time() is not allowed in durable functions",
+        "time.time() is not allowed in durable functions: wall-clock time differs across replays, causing divergent behavior.",
         "Use h.Now() or the workflow clock instead",
     ),
     ("random", "random"): (
         "PY006",
-        "random.random() is not allowed in durable functions",
+        "random.random() is not allowed in durable functions: default random seeding depends on system time, which differs across replays.",
         "Use h.Random() instead",
     ),
     ("random", "randint"): (
         "PY006",
-        "random.randint() is not allowed in durable functions",
+        "random.randint() is not allowed in durable functions: default random seeding depends on system time, which differs across replays.",
         "Use h.Random() instead",
     ),
     ("random", "uniform"): (
         "PY006",
-        "random.uniform() is not allowed in durable functions",
+        "random.uniform() is not allowed in durable functions: default random seeding depends on system time, which differs across replays.",
         "Use h.Random() instead",
     ),
     ("random", "choice"): (
         "PY006",
-        "random.choice() is not allowed in durable functions",
+        "random.choice() is not allowed in durable functions: default random seeding depends on system time, which differs across replays.",
         "Use h.Random() instead",
     ),
     ("random", "shuffle"): (
         "PY006",
-        "random.shuffle() is not allowed in durable functions",
+        "random.shuffle() is not allowed in durable functions: default random seeding depends on system time, which differs across replays.",
         "Use h.Random() instead",
     ),
     ("os", "open"): (
         "PY007",
-        "os.open() is not allowed in workflow code",
+        "os.open() is not allowed in workflow code: OS operations produce side effects that cannot be replayed.",
         "Use cleat_fetch() or HostCalls instead",
     ),
     ("os", "popen"): (
@@ -232,13 +232,13 @@ FORBIDDEN_API_RULES: Dict[Tuple[Optional[str], str], Tuple[str, str, str]] = {
     ),
     ("socket", "socket"): (
         "PY009",
-        "socket.socket() is not allowed in workflow code",
-        "Raw socket access is not permitted. Use cleat_fetch() or cleat_call() instead.",
+        "socket.socket() is not allowed in workflow code: raw sockets produce non-replayable network side effects.",
+        "Use cleat_fetch() or cleat_call() instead.",
     ),
     ("socket", "create_connection"): (
         "PY009",
-        "socket.create_connection() is not allowed in workflow code",
-        "Raw socket access is not permitted. Use cleat_fetch() or cleat_call() instead.",
+        "socket.create_connection() is not allowed in workflow code: raw sockets produce non-replayable network side effects.",
+        "Use cleat_fetch() or cleat_call() instead.",
     ),
 }
 
@@ -498,7 +498,7 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
                     "file": self.filepath,
                     "line": node.lineno,
                     "column": getattr(node, "col_offset", 0),
-                    "message": "requests library is not allowed in workflow code",
+                    "message": "requests library is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
                     "suggestion": "Use cleat_fetch() or cleat_call() instead",
                 })
             elif name == "urllib" or name.startswith("urllib."):
@@ -507,7 +507,7 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
                     "file": self.filepath,
                     "line": node.lineno,
                     "column": getattr(node, "col_offset", 0),
-                    "message": "urllib is not allowed in workflow code",
+                    "message": "urllib is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
                     "suggestion": "Use cleat_fetch() or cleat_call() instead",
                 })
             elif name == "http" or name.startswith("http."):
@@ -516,7 +516,7 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
                     "file": self.filepath,
                     "line": node.lineno,
                     "column": getattr(node, "col_offset", 0),
-                    "message": "http.client is not allowed in workflow code",
+                    "message": "http.client is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
                     "suggestion": "Use cleat_fetch() or cleat_call() instead",
                 })
             elif name == "socket" or name.startswith("socket."):
@@ -525,7 +525,7 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
                     "file": self.filepath,
                     "line": node.lineno,
                     "column": getattr(node, "col_offset", 0),
-                    "message": "socket module is not allowed in workflow code",
+                    "message": "socket module is not allowed in workflow code: raw sockets produce non-replayable network side effects.",
                     "suggestion": "Use cleat_fetch() or cleat_call() instead",
                 })
             elif name in ("threading", "asyncio", "multiprocessing"):
@@ -559,7 +559,7 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
                 "file": self.filepath,
                 "line": node.lineno,
                 "column": getattr(node, "col_offset", 0),
-                "message": "requests library is not allowed in workflow code",
+                "message": "requests library is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
                 "suggestion": "Use cleat_fetch() or cleat_call() instead",
             })
         elif module == "urllib" or module.startswith("urllib."):
@@ -568,7 +568,7 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
                 "file": self.filepath,
                 "line": node.lineno,
                 "column": getattr(node, "col_offset", 0),
-                "message": "urllib is not allowed in workflow code",
+                "message": "urllib is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
                 "suggestion": "Use cleat_fetch() or cleat_call() instead",
             })
         elif module == "socket":
@@ -577,7 +577,7 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
                 "file": self.filepath,
                 "line": node.lineno,
                 "column": getattr(node, "col_offset", 0),
-                "message": "socket module is not allowed in workflow code",
+                "message": "socket module is not allowed in workflow code: raw sockets produce non-replayable network side effects.",
                 "suggestion": "Use cleat_fetch() or cleat_call() instead",
             })
         elif module in ("threading", "asyncio", "multiprocessing"):
@@ -749,10 +749,10 @@ def analyze_file(filepath: str) -> AnalysisResult:
         with open(filepath) as f:
             source = f.read()
     except FileNotFoundError:
-        result.add_error("E001", 0, f"File not found: {filepath}")
+        result.add_error("E001", 0, f"File not found: {filepath}", suggestion="Check that the file path is correct.")
         return result
     except IOError as e:
-        result.add_error("E001", 0, f"Error reading file: {e}")
+        result.add_error("E001", 0, f"Error reading file: {e}", suggestion="Check file permissions and that the file is readable.")
         return result
 
     try:
@@ -761,6 +761,7 @@ def analyze_file(filepath: str) -> AnalysisResult:
         result.add_error(
             "E001", getattr(e, "lineno", 0),
             f"Syntax error: {e.msg}",
+            suggestion="Fix the Python syntax error and re-run.",
         )
         return result
 
@@ -779,7 +780,8 @@ def analyze_file(filepath: str) -> AnalysisResult:
                     f"'{name}' is an async function. "
                     "Async functions cannot be compiled to WASM."
                 ),
-                "Use cleat's synchronous durable execution model instead",
+                "Remove the 'async' keyword. Cleat workflows run synchronously "
+                "use h.cleat_call(), h.cleat_sleep(), etc. for durable operations.",
                 getattr(func_node, "col_offset", 0),
             )
 
@@ -864,7 +866,8 @@ def detect_entry(filepath: str) -> Tuple[Optional[str], Optional[str]]:
         return None, (
             f"'{name}' in {filepath} is an async function (line {func_node.lineno}). "
             "Async functions cannot be compiled to WASM. "
-            "Use cleat's synchronous durable execution model instead."
+            "Remove the 'async' keyword. "
+            "Cleat workflows run synchronously -- use h.cleat_call(), h.cleat_sleep(), etc."
         )
 
     return name, None

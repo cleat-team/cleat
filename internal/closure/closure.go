@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"fmt"
 	"strings"
 
 	"github.com/rcownie/cleat/internal/analyzer"
@@ -116,15 +117,23 @@ type ValidationError struct {
 
 // ValidationWarning represents a validation warning.
 type ValidationWarning struct {
-	Code     string
-	FuncName string
-	Message  string
-	Line     int
+	Code       string
+	FuncName   string
+	Message    string
+	Suggestion string
+	Line       int
 }
 
 // Error returns a string with the error code prefix and message.
 func (e ValidationError) Error() string {
-	return e.Code + ": " + e.Message
+	s := e.Code + ": " + e.Message
+	if e.Suggestion != "" {
+		s += " (suggestion: " + e.Suggestion + ")"
+	}
+	if e.Line > 0 {
+		s += fmt.Sprintf(" (line %d)", e.Line)
+	}
+	return s
 }
 
 // NumErrors returns the total number of validation errors.
@@ -167,7 +176,7 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 			cr.Errors[name] = append(cr.Errors[name], ValidationError{
 				Code:       "E001",
 				FuncName:   name,
-				Message:    "goroutines are not allowed in cleat functions",
+				Message:    "goroutines introduce non-deterministic scheduling across replays",
 				Suggestion: "Use child workflows (h.ChildWorkflow) for parallelism.",
 				Line:       line,
 			})
@@ -180,7 +189,7 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 			cr.Errors[name] = append(cr.Errors[name], ValidationError{
 				Code:       "E002",
 				FuncName:   name,
-				Message:    "channel send operations are not allowed in cleat functions",
+				Message:    "channel send operations are non-deterministic across replays; goroutine state is not replayed",
 				Suggestion: "Use signals (h.AwaitSignals) instead of channels.",
 				Line:       line,
 			})
@@ -194,7 +203,7 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 				cr.Errors[name] = append(cr.Errors[name], ValidationError{
 					Code:       "E002",
 					FuncName:   name,
-					Message:    "channel receive operations are not allowed in cleat functions",
+					Message:    "channel receive operations are non-deterministic across replays; goroutine state is not replayed",
 					Suggestion: "Use signals (h.PollSignal) instead of channels.",
 					Line:       line,
 				})
@@ -267,7 +276,7 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 		cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
 			Code:       "E012",
 			FuncName:   funcName,
-			Message:    "close() is not allowed in cleat functions",
+			Message:    "close() on channels signals goroutine state that does not exist during replay",
 			Suggestion: "Channel operations are non-deterministic; use signals instead.",
 			Line:       line,
 		})
@@ -294,7 +303,7 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 						Code:       "E013",
 						FuncName:   funcName,
 						Message:    "sync." + innerSel.Sel.Name + " operations are non-deterministic across replays",
-						Suggestion: "Use h.DurableCall() for coordination.",
+						Suggestion: "Workflow code is single-threaded by design. Remove the synchronization primitive -- it is not needed.",
 						Line:       line,
 					})
 				}
@@ -323,7 +332,7 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 						Code:       "E013",
 						FuncName:   funcName,
 						Message:    "sync." + named.Obj().Name() + " operations are non-deterministic across replays",
-						Suggestion: "Use h.DurableCall() for coordination.",
+						Suggestion: "Workflow code is single-threaded by design. Remove the synchronization primitive -- it is not needed.",
 						Line:       line,
 					})
 				}
@@ -336,55 +345,55 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 	switch {
 	case pkgPath == "time" && selName == "Now":
 		code, msg, suggestion = "E003",
-			"time.Now() is not allowed in cleat functions",
+			"time.Now() returns wall-clock time which differs across replays, breaking determinism",
 			"Use h.Now() for deterministic time."
 
 	case pkgPath == "time" && selName == "Sleep":
 		code, msg, suggestion = "E004",
-			"time.Sleep() is not allowed in cleat functions",
+			"time.Sleep() uses real wall-clock time; use h.DurableSleep() for replay-safe delays",
 			"Use h.DurableSleep() instead."
 
 	case pkgPath == "time" && (selName == "After" || selName == "NewTicker" || selName == "NewTimer"):
 		code, msg, suggestion = "E014",
-			"time."+selName+"() is not allowed in cleat functions",
+			"time.After/NewTicker/NewTimer create goroutines internally, which are non-deterministic",
 			"Use h.DurableSleep() for deterministic delays."
 
 	case pkgPath == "net/http" || strings.HasPrefix(pkgPath, "net/http/"):
 		code, msg, suggestion = "E005",
-			"direct net/http calls are not allowed in cleat functions",
+			"direct net/http calls are non-deterministic (network failures, DNS, timeouts vary)",
 			"Use h.DurableCall() with a service name instead."
 
 	case pkgPath == "database/sql":
 		code, msg, suggestion = "E006",
-			"direct database/sql calls are not allowed in cleat functions",
+			"direct database/sql calls produce non-replayable side effects",
 			"Use h.DurableCall() with a service name instead."
 
 	case pkgPath == "math/rand":
 		code, msg, suggestion = "E007",
-			"math/rand calls are not allowed in cleat functions",
+			"math/rand default seed depends on wall-clock time, producing different results on replay",
 			"Use h.Random() for deterministic randomness."
 
 	case pkgPath == "math/rand/v2":
 		code, msg, suggestion = "E018",
-			"math/rand/v2 calls are not allowed in cleat functions",
+			"math/rand/v2 default seeding is time-based, producing different sequences on replay",
 			"Use h.Random() for deterministic randomness."
 
 	case pkgPath == "sync/atomic":
 		code, msg, suggestion = "E013",
 			"sync/atomic operations are non-deterministic across replays",
-			"Use h.DurableCall() for coordination."
+			"Workflow code is single-threaded by design. Use local variables instead of atomic operations."
 
 	case pkgPath == "fmt" && (selName == "Print" || selName == "Printf" || selName == "Println" ||
 		selName == "Fprint" || selName == "Fprintf" || selName == "Fprintln"):
 		code, msg, suggestion = "E015",
-			"fmt."+selName+"() is not allowed in cleat functions",
+			"fmt/log output goes to stdout/stderr which is not captured reliably during replay",
 			"Use h.DurableLog() for deterministic logging."
 
 	case pkgPath == "log" && (selName == "Print" || selName == "Printf" || selName == "Println" ||
 		selName == "Fatal" || selName == "Fatalf" || selName == "Fatalln" ||
 		selName == "Panic" || selName == "Panicf" || selName == "Panicln"):
 		code, msg, suggestion = "E015",
-			"log."+selName+"() is not allowed in cleat functions",
+			"fmt/log output goes to stdout/stderr which is not captured reliably during replay",
 			"Use h.DurableLog() for deterministic logging."
 
 	case pkgPath == "os" && (selName == "Getenv" || selName == "Environ"):
@@ -399,7 +408,7 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 
 	case pkgPath == "crypto/rand":
 		code, msg, suggestion = "E017",
-			"crypto/rand calls are not allowed in cleat functions",
+			"crypto/rand reads from OS entropy sources, producing non-deterministic values",
 			"Use h.Random() for deterministic randomness."
 	}
 
@@ -451,7 +460,7 @@ func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName 
 	cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
 		Code:       "E008",
 		FuncName:   funcName,
-		Message:    "unresolvable function call through interface dispatch",
+		Message:    "calls through interfaces cannot be statically resolved, so the analyzer cannot verify the callee",
 		Suggestion: "Use concrete types or refactor to avoid interface dispatch in cleat functions.",
 		Line:       line,
 	})
@@ -486,7 +495,7 @@ func checkFuncValueCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 	cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
 		Code:       "E009",
 		FuncName:   funcName,
-		Message:    "function value call cannot be statically resolved",
+		Message:    "function-value calls cannot be statically resolved; the analyzer cannot trace the call chain",
 		Suggestion: "Replace with a direct function call or inline the logic.",
 		Line:       line,
 	})
@@ -510,11 +519,11 @@ func checkForbiddenPackageRef(sel *ast.SelectorExpr, fd *analyzer.FuncDecl, func
 	switch {
 	case pkgPath == "os":
 		code, msg, suggestion = "E010",
-			"direct os package usage is not allowed in cleat functions",
+			"os package operations (files, env, processes) differ across replays and are not allowed",
 			"Use h.DurableCall() with a service name instead of direct OS operations."
 	case pkgPath == "reflect":
 		code, msg, suggestion = "E011",
-			"direct reflect package usage is not allowed in cleat functions",
+			"reflect results can differ across Go versions or build targets, breaking determinism",
 			"Avoid runtime type introspection; use compile-time generics where possible."
 	}
 
@@ -568,10 +577,11 @@ func checkFloatInExpr(expr ast.Expr, fd *analyzer.FuncDecl, funcName string, cr 
 			line = fset.Position(expr.Pos()).Line
 		}
 		cr.Warnings[funcName] = append(cr.Warnings[funcName], ValidationWarning{
-			Code:     "W002",
-			FuncName: funcName,
-			Message:  "floating-point value in control flow condition may cause non-deterministic replay",
-			Line:     line,
+			Code:       "W002",
+			FuncName:   funcName,
+			Message:    "floating-point value in control flow condition may cause non-deterministic replay",
+			Suggestion: "Replace float comparisons with integer arithmetic, or compare using math.Float64bits() for exact bitwise equality.",
+			Line:       line,
 		})
 	}
 }

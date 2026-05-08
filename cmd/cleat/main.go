@@ -68,6 +68,7 @@ func main() {
 		return
 	}
 	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "Error: missing command or package argument\n")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -164,6 +165,7 @@ func main() {
 		runPlugin(flag.Args()[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
+		fmt.Fprintf(os.Stderr, "Valid commands: build, vet, deploy, versions, rollback, dev, schedule, run, dag, plugin, init\n")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -241,8 +243,12 @@ func runBuild(pattern, outDir, target string, jsonOut bool) {
 			fmt.Println()
 			for funcName, warns := range cr.Warnings {
 				for _, w := range warns {
-					fmt.Printf("  Warning: %s:%d: %s [%s]\n",
+					msg := fmt.Sprintf("  Warning: %s:%d: %s [%s]",
 						analyzer.ShortName(funcName), w.Line, w.Message, w.Code)
+					fmt.Println(msg)
+					if w.Suggestion != "" {
+						fmt.Printf("    suggestion: %s\n", w.Suggestion)
+					}
 				}
 			}
 		}
@@ -451,7 +457,11 @@ func runVet(pattern string, jsonOut bool) int {
 	}
 	for funcName, warns := range cr.Warnings {
 		for _, w := range warns {
-			fmt.Printf("  %s:%d: %s: %s\n", analyzer.ShortName(funcName), w.Line, w.Code, w.Message)
+			msg := fmt.Sprintf("  %s:%d: %s: %s", analyzer.ShortName(funcName), w.Line, w.Code, w.Message)
+			fmt.Println(msg)
+			if w.Suggestion != "" {
+				fmt.Printf("    suggestion: %s\n", w.Suggestion)
+			}
 		}
 	}
 
@@ -755,13 +765,13 @@ func runDeploy(args []string) {
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error pinging database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
 	}
 
@@ -887,11 +897,12 @@ func logBuildProgress(format string, jsonOut bool, args ...interface{}) {
 		for funcName, warns := range cr.Warnings {
 			for _, w := range warns {
 				out.Warnings = append(out.Warnings, VetResult{
-					Code:    w.Code,
-					File:    lookupFile(result, funcName),
-					Line:    w.Line,
-					Column:  0,
-					Message: w.Message,
+					Code:       w.Code,
+					File:       lookupFile(result, funcName),
+					Line:       w.Line,
+					Column:     0,
+					Message:    w.Message,
+					Suggestion: w.Suggestion,
 				})
 			}
 		}
@@ -987,13 +998,13 @@ func runVersions(name string) {
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error pinging database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
 	}
 
@@ -1034,13 +1045,13 @@ func runRollback(name string, version int) {
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error pinging database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
 	}
 
@@ -1051,7 +1062,7 @@ func runRollback(name string, version int) {
 		os.Exit(1)
 	}
 	if !exists {
-		fmt.Fprintf(os.Stderr, "Error: workflow %q version %d not found\n", name, version)
+		fmt.Fprintf(os.Stderr, "Error: workflow %q version %d not found\nUse 'cleat versions <name>' to list available versions.\n", name, version)
 		os.Exit(1)
 	}
 
@@ -1076,13 +1087,13 @@ func runSchedule(args []string) {
 
 	db, err := sql.Open("postgres", connStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error pinging database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
 		os.Exit(1)
 	}
 

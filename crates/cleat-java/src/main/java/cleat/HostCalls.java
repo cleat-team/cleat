@@ -496,7 +496,7 @@ public class HostCalls {
         int deferIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("defer failed with code " + errCode);
+            return CleatResult.err("defer(description=\"" + description + "\") failed: host returned error code " + errCode + ". Check that the defer description is valid.");
         }
 
         String deferId = readOutput(deferIdLen);
@@ -571,7 +571,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("continueAsNew failed with code " + errCode);
+            return CleatResult.err("continueAsNew(...) failed: host returned error code " + errCode + ". Check that the input JSON is valid and continue-as-new is available.");
         }
         return CleatResult.ok(null);
     }
@@ -598,7 +598,7 @@ public class HostCalls {
         int idLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("createPromise failed with code " + errCode);
+            return CleatResult.err("createPromise(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the promise name is valid.");
         }
 
         String promiseId = readOutput(idLen);
@@ -630,7 +630,7 @@ public class HostCalls {
         int runIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("childWorkflow failed with code " + errCode);
+            return CleatResult.err("childWorkflow(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the child workflow name is correct and the workflow definition exists.");
         }
 
         String runId = readOutput(runIdLen);
@@ -665,7 +665,7 @@ public class HostCalls {
         int runIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("childWorkflowWithOptions failed with code " + errCode);
+            return CleatResult.err("childWorkflowWithOptions(name=\"" + name + "\", version=" + version + ") failed: host returned error code " + errCode + ". Check that the child workflow name is correct.");
         }
 
         String runId = readOutput(runIdLen);
@@ -694,7 +694,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitChild failed with code " + errCode);
+            return CleatResult.err("awaitChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid.");
         }
 
         String childResult = readOutput(resultLen);
@@ -729,7 +729,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitPromise failed with code " + errCode);
+            return CleatResult.err("awaitPromise(promiseId=\"" + promiseId + "\") failed: host returned error code " + errCode + ". Check that the promise ID is valid.");
         }
 
         String promiseResult = readOutput(resultLen);
@@ -807,7 +807,7 @@ public class HostCalls {
         int payloadLen = Memory.decodeAwaitPayloadLen(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitSignals failed with code " + errCode);
+            return CleatResult.err("awaitSignals(names=" + namesJSON + ") failed: host returned error code " + errCode + ". Check that the signal names are valid.");
         }
 
         String sigName = Memory.readString(Memory.OUTPUT_OFFSET,
@@ -1172,7 +1172,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("replyToSignal failed with code " + errCode);
+            return CleatResult.err("replyToSignal(correlationId=\"" + correlationId + "\") failed: host returned error code " + errCode + ". Check that the correlation ID is valid.");
         }
         return CleatResult.ok(null);
     }
@@ -1205,17 +1205,17 @@ public class HostCalls {
             long remainingMs = deadline - System.currentTimeMillis();
             if (remainingMs <= 0) {
                 return CleatResult.err(
-                    "quorum timeout: got " + results.size() + "/" + minCount + " signals");
+                    "quorum timeout waiting for signals [" + String.join(", ", signalNames) + "]: got " + results.size() + "/" + minCount + " signals");
             }
 
             CleatResult<AwaitSignalsResult> signalResult = this.awaitSignalsMs(signalNames, remainingMs);
             if (signalResult.isErr()) {
-                return CleatResult.err("quorum signal error: " + signalResult.getError());
+                return CleatResult.err("quorum signal error waiting for signals [" + String.join(", ", signalNames) + "]: " + signalResult.getError());
             }
             AwaitSignalsResult asr = signalResult.getValue();
             if (asr.timedOut) {
                 return CleatResult.err(
-                    "quorum timeout: got " + results.size() + "/" + minCount + " signals");
+                    "quorum timeout waiting for signals [" + String.join(", ", signalNames) + "]: got " + results.size() + "/" + minCount + " signals");
             }
 
             results.add(asr);
@@ -1229,7 +1229,7 @@ public class HostCalls {
                         rejectionCount++;
                         if (rejectionCount > maxRejections) {
                             return CleatResult.err(
-                                "quorum exceeded max rejections (" + maxRejections + ")");
+                                "quorum exceeded max rejections (" + maxRejections + ") while waiting for signals [" + String.join(", ", signalNames) + "]");
                         }
                     }
                 } catch (Exception e) {
@@ -1286,7 +1286,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("signalWorkflow failed with code " + errCode);
+            return CleatResult.err("signalWorkflow(targetRunId=\"" + targetRunId + "\", signalName=\"" + signalName + "\") failed: host returned error code " + errCode + ". Check that the target run ID and signal name are valid.");
         }
         return CleatResult.ok(null);
     }
@@ -1312,7 +1312,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("resolvePromise failed with code " + errCode);
+            return CleatResult.err("resolvePromise(id=\"" + id + "\") failed: host returned error code " + errCode + ". Check that the promise ID is valid.");
         }
         return CleatResult.ok(null);
     }
@@ -1334,7 +1334,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("rejectPromise failed with code " + errCode);
+            return CleatResult.err("rejectPromise(id=\"" + id + "\") failed: host returned error code " + errCode + ". Check that the promise ID is valid.");
         }
         return CleatResult.ok(null);
     }
@@ -1364,7 +1364,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("cleatSend failed with code " + errCode);
+            return CleatResult.err("cleatSend(service=\"" + service + "\", operation=\"" + operation + "\") failed: host returned error code " + errCode + ". Check that the service and operation names are valid.");
         }
         return CleatResult.ok(null);
     }
@@ -1394,7 +1394,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("scheduleInvoke failed with code " + errCode);
+            return CleatResult.err("scheduleInvoke(service=\"" + service + "\", operation=\"" + operation + "\") failed: host returned error code " + errCode + ". Check that the service and operation are valid.");
         }
         return CleatResult.ok(null);
     }
@@ -1454,7 +1454,7 @@ public class HostCalls {
         int scheduleIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("scheduleCron failed with code " + errCode);
+            return CleatResult.err("scheduleCron(workflowName=\"" + workflowName + "\", cronExpr=\"" + cronExpr + "\") failed: host returned error code " + errCode + ". Check that the cron expression is valid.");
         }
 
         String scheduleId = readOutput(scheduleIdLen);
@@ -1474,7 +1474,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("deleteCron failed with code " + errCode);
+            return CleatResult.err("deleteCron(scheduleId=\"" + scheduleId + "\") failed: host returned error code " + errCode + ". Check that the schedule ID is valid.");
         }
         return CleatResult.ok(null);
     }
@@ -1492,7 +1492,7 @@ public class HostCalls {
         int scheduleListLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("listCrons failed with code " + errCode);
+            return CleatResult.err("listCrons() failed: host returned error code " + errCode + ". Check that cron operations are available.");
         }
 
         String scheduleList = readOutput(scheduleListLen);
@@ -1591,7 +1591,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("setState failed with code " + errCode);
+            return CleatResult.err("setState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key is valid and state operations are available.");
         }
         return CleatResult.ok(null);
     }
@@ -1615,7 +1615,7 @@ public class HostCalls {
         int valueLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("getState failed with code " + errCode);
+            return CleatResult.err("getState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key exists and state operations are available.");
         }
 
         String value = readOutput(valueLen);
@@ -1638,7 +1638,7 @@ public class HostCalls {
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
-            return CleatResult.err("deleteState failed with code " + errCode);
+            return CleatResult.err("deleteState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key is valid and state operations are available.");
         }
         return CleatResult.ok(null);
     }
@@ -1662,7 +1662,7 @@ public class HostCalls {
 
         int errCode = (int) (result & 0xFFL);
         if (errCode != 0) {
-            return CleatResult.err("incrState failed with code " + errCode);
+            return CleatResult.err("incrState(key=\"" + key + "\", delta=" + delta + ") failed: host returned error code " + errCode + ". Check that the key is valid for numeric operations.");
         }
 
         long newValue = result >>> 8;
@@ -1710,7 +1710,7 @@ public class HostCalls {
         int listLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("listState failed with code " + errCode);
+            return CleatResult.err("listState(prefix=\"" + prefix + "\") failed: host returned error code " + errCode + ". Check that state operations are available.");
         }
 
         String listJson = readOutput(listLen);
@@ -1754,7 +1754,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitAllChildren failed with code " + errCode);
+            return CleatResult.err("awaitAllChildren(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid.");
         }
 
         String response = readOutput(resultLen);
@@ -1805,7 +1805,9 @@ public class HostCalls {
             T value = JsonHelper.parse(result.getValue(), clazz);
             return CleatResult.ok(value);
         } catch (Exception e) {
-            return CleatResult.err("awaitChildTyped: failed to parse result: " + e.getMessage());
+            String jsonStr = result.getValue();
+            String truncatedJson = jsonStr.substring(0, Math.min(jsonStr.length(), 200));
+            return CleatResult.err("awaitChildTyped: failed to parse result: " + e.getMessage() + ". JSON: " + truncatedJson);
         }
     }
 
@@ -1841,7 +1843,9 @@ public class HostCalls {
             R response = JsonHelper.parse(result.getValue(), responseClass);
             return CleatResult.ok(response);
         } catch (Exception e) {
-            return CleatResult.err("cleatCallTyped: failed to parse response: " + e.getMessage());
+            String respJson = result.getValue();
+            String truncatedJson = respJson.substring(0, Math.min(respJson.length(), 200));
+            return CleatResult.err("cleatCallTyped: failed to parse response: " + e.getMessage() + ". JSON: " + truncatedJson);
         }
     }
 
@@ -1892,12 +1896,13 @@ public class HostCalls {
             return CleatResult.err(errMsg);
         }
 
+        String response = readOutput(responseLen);
         try {
-            String response = readOutput(responseLen);
             R parsed = JsonHelper.parse(response, responseClass);
             return CleatResult.ok(parsed);
         } catch (Exception e) {
-            return CleatResult.err("cleatCallWithRetry: failed to parse response: " + e.getMessage());
+            String truncatedJson = response.substring(0, Math.min(response.length(), 200));
+            return CleatResult.err("cleatCallWithRetry: failed to parse response: " + e.getMessage() + ". JSON: " + truncatedJson);
         }
     }
 
@@ -1967,7 +1972,8 @@ public class HostCalls {
 
             return CleatResult.ok(new FetchResult(statusCode, respHeaders, respBody));
         } catch (Exception e) {
-            return CleatResult.err("cleatFetch: failed to parse response: " + e.getMessage());
+            String truncatedJson = responseJson.substring(0, Math.min(responseJson.length(), 200));
+            return CleatResult.err("cleatFetch: failed to parse response: " + e.getMessage() + ". JSON: " + truncatedJson);
         }
     }
 
@@ -2050,7 +2056,7 @@ public class HostCalls {
 
         int errCode = (int) (result & 0xFFL);
         if (errCode != 0) {
-            throw new RuntimeException("acquireLock failed with code " + errCode);
+            throw new RuntimeException("acquireLock(key=\"" + key + "\", ttlMs=" + ttlMs + ") failed: host returned error code " + errCode + ". Check that the lock key is valid.");
         }
 
         return ((result >> 8) & 0x1L) != 0;
@@ -2087,7 +2093,7 @@ public class HostCalls {
 
         int errCode = (int) (result & 0xFFL);
         if (errCode != 0) {
-            throw new RuntimeException("releaseLock failed with code " + errCode);
+            throw new RuntimeException("releaseLock(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the lock key is valid and the lock is held.");
         }
     }
 

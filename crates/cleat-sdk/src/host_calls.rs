@@ -336,7 +336,7 @@ impl HostCalls {
         };
         let (id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return (String::new(), Some(format!("defer error code: {}", err_code)));
+            return (String::new(), Some(format!("defer(description=\"{}\") failed: host error code {}. Check that the defer description is valid.", description, err_code)));
         }
         let id = unsafe { memory::read_string(id_buf.as_ptr(), id_len) };
         (id, None)
@@ -370,7 +370,7 @@ impl HostCalls {
         };
         let (payload_len, found, err_code) = memory::decode_poll_signal_result(result);
         if err_code != 0 {
-            return (String::new(), false, Some(format!("signal error code: {}", err_code)));
+            return (String::new(), false, Some(format!("poll_signal(name=\"{}\") failed: host error code {}. Check that the signal name is valid.", name, err_code)));
         }
         let payload = if found && payload_len > 0 {
             unsafe { memory::read_string(payload_buf.as_ptr(), payload_len) }
@@ -389,7 +389,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("continue_as_new error code: {}", err_code));
+            return Err(format!("continue_as_new(...) failed: host error code {}. Check that the input JSON is valid and continue-as-new is available.", err_code));
         }
         Ok(())
     }
@@ -406,7 +406,7 @@ impl HostCalls {
         };
         let (run_id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return (String::new(), Some(format!("child_workflow error code: {}", err_code)));
+            return (String::new(), Some(format!("child_workflow(name=\"{}\") failed: host error code {}. Check that the child workflow name is correct and the workflow definition exists.", name, err_code)));
         }
         let run_id = unsafe { memory::read_string(run_id_buf.as_ptr(), run_id_len) };
         (run_id, None)
@@ -427,7 +427,7 @@ impl HostCalls {
         };
         let (run_id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return (String::new(), Some(format!("child_workflow_with_options error code: {}", err_code)));
+            return (String::new(), Some(format!("child_workflow_with_options(name=\"{}\", version={}) failed: host error code {}. Check that the child workflow name is correct.", name, version, err_code)));
         }
         let run_id = unsafe { memory::read_string(run_id_buf.as_ptr(), run_id_len) };
         (run_id, None)
@@ -449,7 +449,7 @@ impl HostCalls {
         }
         let (result_len, err_code) = memory::decode_simple_result(r);
         if err_code != 0 {
-            return (String::new(), Some(format!("await_child error code: {}", err_code)));
+            return (String::new(), Some(format!("await_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code)));
         }
         let result = unsafe { memory::read_string(result_buf.as_ptr(), result_len) };
         (result, None)
@@ -464,7 +464,7 @@ impl HostCalls {
     /// Returns (signal_name, payload, timed_out, error).
     pub fn await_signals_ms(&self, signal_names: &[&str], timeout_ms: i64) -> (String, String, bool, Option<String>) {
         // JSON-marshal the signal names array, matching Go's adapter.go behavior.
-        let names_json = serde_json::to_string(signal_names).unwrap_or_else(|_| "[]".to_string());
+        let names_json = serde_json::to_string(signal_names).unwrap_or_else(|e| { eprintln!("warning: failed to serialize signal names: {}", e); "[]".to_string() });
         let mut sig_name_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let mut payload_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
@@ -482,7 +482,7 @@ impl HostCalls {
         }
         let (sig_name_len, payload_len, timed_out, err_code) = memory::decode_await_signals_result(result);
         if err_code != 0 {
-            return (String::new(), String::new(), false, Some(format!("await_signals error code: {}", err_code)));
+            return (String::new(), String::new(), false, Some(format!("await_signals(names={}, timeout_ms={}) failed: host error code {}. Check that the signal names are valid.", names_json, timeout_ms, err_code)));
         }
         let sig_name = unsafe { memory::read_string(sig_name_buf.as_ptr(), sig_name_len as u32) };
         let payload = if !timed_out && payload_len > 0 {
@@ -515,7 +515,7 @@ impl HostCalls {
         };
         let (id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return (String::new(), Some(format!("create_promise error code: {}", err_code)));
+            return (String::new(), Some(format!("create_promise(name=\"{}\") failed: host error code {}. Check that the promise name is valid.", name, err_code)));
         }
         let id = unsafe { memory::read_string(id_buf.as_ptr(), id_len) };
         (id, None)
@@ -539,7 +539,7 @@ impl HostCalls {
         };
         let (result_len, timed_out, err_code) = memory::decode_await_promise_result(result);
         if err_code != 0 {
-            return (String::new(), timed_out, Some(format!("await_promise error code: {}", err_code)));
+            return (String::new(), timed_out, Some(format!("await_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code)));
         }
         let result = if result_len > 0 {
             unsafe { memory::read_string(result_buf.as_ptr(), result_len) }
@@ -620,7 +620,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("reply_to_signal error code: {}", err_code));
+            return Err(format!("reply_to_signal(correlation_id=\"{}\") failed: host error code {}. Check that the correlation ID is valid.", correlation_id, err_code));
         }
         Ok(())
     }
@@ -685,7 +685,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("signal_workflow error code: {}", err_code));
+            return Err(format!("signal_workflow(target_run_id=\"{}\", signal_name=\"{}\") failed: host error code {}. Check that the target run ID and signal name are valid.", target_run_id, signal_name, err_code));
         }
         Ok(())
     }
@@ -810,7 +810,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("resolve_promise error code: {}", err_code));
+            return Err(format!("resolve_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code));
         }
         Ok(())
     }
@@ -825,7 +825,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("reject_promise error code: {}", err_code));
+            return Err(format!("reject_promise(promise_id=\"{}\") failed: host error code {}. Check that the promise ID is valid.", promise_id, err_code));
         }
         Ok(())
     }
@@ -841,7 +841,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("cleat_send error code: {}", err_code));
+            return Err(format!("cleat_send(service=\"{}\", operation=\"{}\") failed: host error code {}. Check that the service and operation names are valid.", service, operation, err_code));
         }
         Ok(())
     }
@@ -863,7 +863,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("schedule_invoke error code: {}", err_code));
+            return Err(format!("schedule_invoke(service=\"{}\", operation=\"{}\") failed: host error code {}. Check that the service and operation are valid.", service, operation, err_code));
         }
         Ok(())
     }
@@ -877,7 +877,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("register_query_handler error code: {}", err_code));
+            return Err(format!("register_query_handler(name=\"{}\") failed: host error code {}. Check that the query handler name is valid.", name, err_code));
         }
         Ok(())
     }
@@ -892,7 +892,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("run_detached error code: {}", err_code));
+            return Err(format!("run_detached(name=\"{}\") failed: host error code {}. Check that the workflow name is correct.", name, err_code));
         }
         Ok(())
     }
@@ -907,7 +907,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("set_state error code: {}", err_code));
+            return Err(format!("set_state(key=\"{}\", ...) failed: host error code {}. Check that the key is valid and state operations are available.", key, err_code));
         }
         Ok(())
     }
@@ -923,7 +923,7 @@ impl HostCalls {
         };
         let (val_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("get_state error code: {}", err_code));
+            return Err(format!("get_state(key=\"{}\") failed: host error code {}. Check that the key exists and state operations are available.", key, err_code));
         }
         let val = unsafe { memory::read_string(buf.as_ptr(), val_len) };
         Ok(val)
@@ -938,7 +938,7 @@ impl HostCalls {
         };
         let (_extra, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("delete_state error code: {}", err_code));
+            return Err(format!("delete_state(key=\"{}\") failed: host error code {}. Check that the key is valid and state operations are available.", key, err_code));
         }
         Ok(())
     }
@@ -953,7 +953,7 @@ impl HostCalls {
         };
         let (new_value, err_code) = memory::decode_incr_state_result(result);
         if err_code != 0 {
-            return Err(format!("incr_state error code: {}", err_code));
+            return Err(format!("incr_state(key=\"{}\", delta={}) failed: host error code {}. Check that the key is valid for numeric operations.", key, delta, err_code));
         }
         Ok(new_value)
     }
@@ -979,7 +979,7 @@ impl HostCalls {
         };
         let (data_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("list_state error code: {}", err_code));
+            return Err(format!("list_state(prefix=\"{}\") failed: host error code {}. Check that state operations are available.", prefix, err_code));
         }
         let json_str = unsafe { memory::read_string(buf.as_ptr(), data_len) };
         serde_json::from_str(&json_str).map_err(|e| format!("list_state parse error: {}", e))
@@ -1000,7 +1000,7 @@ impl HostCalls {
         }
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return Err(format!("await_all_children error code: {}", err_code));
+            return Err(format!("await_all_children(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code));
         }
         let resp = unsafe { memory::read_string(buf.as_ptr(), result_len) };
         Ok(resp)
@@ -1109,7 +1109,7 @@ impl HostCalls {
         let err_code = (result as u64 & 0xFF) as u8;
         let acquired = ((result as u64 >> 8) & 0x1) != 0;
         if err_code != 0 {
-            return (false, Some(format!("acquire_lock error code: {}", err_code)));
+            return (false, Some(format!("acquire_lock(key=\"{}\", ttl_ms={}) failed: host error code {}. Check that the lock key is valid.", key, ttl_ms, err_code)));
         }
         (acquired, None)
     }
@@ -1125,7 +1125,7 @@ impl HostCalls {
         };
         let err_code = (result as u64 & 0xFF) as u8;
         if err_code != 0 {
-            return Some(format!("release_lock error code: {}", err_code));
+            return Some(format!("release_lock(key=\"{}\") failed: host error code {}. Check that the lock key is valid and the lock is held.", key, err_code));
         }
         None
     }

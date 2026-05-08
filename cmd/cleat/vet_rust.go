@@ -15,18 +15,18 @@ var forbiddenRustPatterns = []struct {
 	message    string
 	suggestion string
 }{
-	{`use std::fs`, "R001", "filesystem access is not allowed in durable functions", "Use h.DurableCall() to interact with external storage"},
-	{`std::fs::`, "R001", "filesystem access is not allowed in durable functions", "Use h.DurableCall() to interact with external storage"},
-	{`use std::net`, "R002", "network access is not allowed in durable functions", "Use h.DurableCall() to communicate with external services"},
-	{`std::net::`, "R002", "network access is not allowed in durable functions", "Use h.DurableCall() to communicate with external services"},
-	{`use std::process`, "R003", "process spawning is not allowed in durable functions", "Use h.DurableCall() for side effects"},
-	{`std::process::Command`, "R003", "process spawning is not allowed in durable functions", "Use h.DurableCall() for side effects"},
+	{`use std::fs`, "R001", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
+	{`std::fs::`, "R001", "filesystem access is non-deterministic across replays (file contents differ between runs)", "Use h.DurableCall() to interact with external storage"},
+	{`use std::net`, "R002", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
+	{`std::net::`, "R002", "network access is non-deterministic across replays (network conditions differ between runs)", "Use h.DurableCall() to communicate with external services"},
+	{`use std::process`, "R003", "process spawning is non-deterministic across replays (OS process state differs between runs)", "Use h.DurableCall() for side effects"},
+	{`std::process::Command`, "R003", "process spawning is non-deterministic across replays (OS process state differs between runs)", "Use h.DurableCall() for side effects"},
 	{`use rand`, "R004", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness"},
 	{`rand::`, "R004", "non-deterministic random number generation is not allowed", "Use h.Random() for deterministic randomness"},
 	{`std::time::SystemTime::now`, "R005", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time"},
 	{`std::time::Instant::now`, "R005", "wall-clock time is non-deterministic across replays", "Use h.Now() for deterministic time"},
-	{`use std::thread`, "R006", "threading is not allowed in durable functions", "Workflow code is single-threaded by design"},
-	{`std::thread::`, "R006", "threading is not allowed in durable functions", "Workflow code is single-threaded by design"},
+	{`use std::thread`, "R006", "threading is non-deterministic across replays (thread scheduling differs between runs)", "Workflow code is single-threaded by design"},
+	{`std::thread::`, "R006", "threading is non-deterministic across replays (thread scheduling differs between runs)", "Workflow code is single-threaded by design"},
 	{`use std::sync`, "R007", "synchronization primitives are non-deterministic across replays", "Workflow code is single-threaded by design"},
 	{`std::sync::`, "R007", "synchronization primitives are non-deterministic across replays", "Workflow code is single-threaded by design"},
 	{`use std::time::Duration`, "", "", ""}, // Allowed — used for h.DurableSleep()
@@ -136,7 +136,7 @@ func runVetRust(crateDir string) int {
 		output.Warnings = append(output.Warnings, VetResult{
 			Code:       "R100",
 			Message:    "no #[cleat_entry] attribute found in any source file",
-			Suggestion: "Add #[cleat_entry] to at least one function to define a workflow entry point",
+			Suggestion: "Add 'use cleat_sdk::cleat_entry;' and '#[cleat_entry]' above a public function, e.g.:\n    #[cleat_entry]\n    pub fn my_workflow(h: &mut HostCalls, input: &str) -> Result<String, Error>",
 		})
 	}
 

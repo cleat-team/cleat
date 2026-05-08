@@ -119,8 +119,8 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 			Chain:    chain,
 			Line:     line,
 			Message: fmt.Sprintf(
-				"%s is in the cleat closure but has no access to cleat.HostCalls. "+
-					"Add 'h cleat.HostCalls' as the first parameter.",
+				"%s is reachable from a workflow entry point (it calls durable SDK methods) but does not have a HostCalls parameter. "+
+					"Add 'h cleat.HostCalls' as the first parameter, or declare a package-level 'var h cleat.HostCalls' that this function can reference.",
 				analyzer.ShortName(name)),
 		})
 	}

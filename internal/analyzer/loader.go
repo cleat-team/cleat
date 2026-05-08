@@ -36,7 +36,7 @@ func LoadPackages(pattern string, fset *token.FileSet) (*AnalysisResult, error) 
 	}
 
 	if len(pkgs) == 0 {
-		return nil, fmt.Errorf("no packages found matching %q", pattern)
+		return nil, fmt.Errorf("no packages found matching %q. Check that the path is a valid Go package in the current module.", pattern)
 	}
 
 	// Check for package load errors.
@@ -48,7 +48,7 @@ func LoadPackages(pattern string, fset *token.FileSet) (*AnalysisResult, error) 
 		return true
 	}, nil)
 	if len(loadErrs) > 0 {
-		return nil, fmt.Errorf("package load errors: %v", loadErrs)
+		return nil, fmt.Errorf("package load errors: %v. Check imports, dependencies, and syntax in the listed packages.", loadErrs)
 	}
 
 	// Identify the target module.
@@ -121,7 +121,7 @@ func LoadPackages(pattern string, fset *token.FileSet) (*AnalysisResult, error) 
 	}
 
 	if len(result.EntryPoints) == 0 {
-		return nil, fmt.Errorf("no workflow entry points found in %s (entry points must be exported functions with cleat.HostCalls as first parameter)", pattern)
+		return nil, fmt.Errorf("no workflow entry points found in %s. Entry points must be exported functions with cleat.HostCalls as the first parameter (e.g., func MyWorkflow(h cleat.HostCalls, arg string) error)", pattern)
 	}
 
 	return result, nil
