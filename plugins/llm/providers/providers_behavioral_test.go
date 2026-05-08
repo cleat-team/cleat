@@ -361,14 +361,9 @@ func TestOpenAIChatEmptyAPIKey(t *testing.T) {
 		t.Fatalf("OpenAIChat() with empty key returned error: %v", err)
 	}
 	// The request should still be sent with "Bearer" prefix and empty key value.
-	// Note: Go HTTP trims trailing whitespace from header values.
+	// Note: Go's HTTP server trims trailing whitespace from header values.
 	if capturedKey != "Bearer" {
-		t.Errorf("expected \Bearer\\, got %q", capturedKey)
-	}
-		// The request should still be sent with "Bearer" prefix and empty key value.
-		// Note: Go's HTTP server trims trailing whitespace from header values.
-		if capturedKey != "Bearer" {
-			t.Errorf("expected Bearer, got %q", capturedKey)
+			t.Errorf("expected 'Bearer', got %q", capturedKey)
 	}
 }
 

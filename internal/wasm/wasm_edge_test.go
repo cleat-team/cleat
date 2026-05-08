@@ -957,3 +957,339 @@ func TestMetadataCurrentABIVersion(t *testing.T) {
 		t.Errorf("expected CurrentABIVersion=1, got %d", CurrentABIVersion)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// importParamDecl — default case (kindInt32 is defined but never used)
+// ---------------------------------------------------------------------------
+
+func TestImportParamDeclKindInt32(t *testing.T) {
+	spec := paramSpec{Name: "unused", Kind: kindInt32}
+	got := importParamDecl(spec)
+	if got != "" {
+		t.Errorf("expected empty string for kindInt32, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GenerateHostAdapter — additional usage types covering generateField branches
+// ---------------------------------------------------------------------------
+
+func TestGenerateHostAdapterWithHeartbeat(t *testing.T) {
+	// DurableCallWithHeartbeat has time.Duration and func(string) params.
+	usage := &UsageInfo{
+		Used:  map[string]bool{"cleat_call_heartbeat": true},
+		Funcs: []HostFunction{{ImportName: "cleat_call_heartbeat", FieldName: "DurableCallWithHeartbeat"}},
+	}
+	code := string(GenerateHostAdapter("mypkg", usage))
+	for _, c := range []string{
+		"heartbeatInterval time.Duration",
+		"onProgress func(string)",
+		"heartbeatIntervalMs := heartbeatInterval.Milliseconds()",
+	} {
+		if !strings.Contains(code, c) {
+			t.Errorf("expected heartbeat pattern: %s", c)
+		}
+	}
+	syntaxCheck(t, "GenerateHostAdapter(heartbeat)", code)
+}
+
+func TestGenerateHostAdapterWithAwaitAllChildren(t *testing.T) {
+	// AwaitAllChildren has []string param.
+	usage := &UsageInfo{
+		Used:  map[string]bool{"cleat_await_all_children": true},
+		Funcs: []HostFunction{{ImportName: "cleat_await_all_children", FieldName: "AwaitAllChildren"}},
+	}
+	code := string(GenerateHostAdapter("mypkg", usage))
+	for _, c := range []string{
+		`"encoding/json"`,
+		"runIDs []string",
+		"json.Marshal(runIDs)",
+	} {
+		if !strings.Contains(code, c) {
+			t.Errorf("expected []string pattern: %s", c)
+		}
+	}
+	syntaxCheck(t, "GenerateHostAdapter(awaitall)", code)
+}
+
+func TestGenerateHostAdapterWithSideEffect(t *testing.T) {
+	// SideEffect has func() (string, error) param.
+	usage := &UsageInfo{
+		Used:  map[string]bool{"cleat_side_effect": true},
+		Funcs: []HostFunction{{ImportName: "cleat_side_effect", FieldName: "SideEffect"}},
+	}
+	code := string(GenerateHostAdapter("mypkg", usage))
+	if !strings.Contains(code, "fn func() (string, error)") {
+		t.Errorf("expected func() param pattern")
+	}
+	if !strings.Contains(code, "_computedResult, _sideEffectErr := fn()") {
+		t.Errorf("expected sideEffect call pattern")
+	}
+	syntaxCheck(t, "GenerateHostAdapter(sideeffect)", code)
+}
+
+func TestGenerateHostAdapterWithSleep(t *testing.T) {
+	// DurableSleep has no return value in the adapter (no result vars).
+	usage := &UsageInfo{
+		Used:  map[string]bool{"cleat_sleep": true},
+		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleep"}},
+	}
+	code := string(GenerateHostAdapter("mypkg", usage))
+	// Should not have fmt or unsafe since DurableSleep doesn't use them.
+	if strings.Contains(code, `"fmt"`) {
+		t.Error("DurableSleep should not import fmt")
+	}
+	if strings.Contains(code, `"unsafe"`) {
+		t.Error("DurableSleep should not import unsafe")
+	}
+	syntaxCheck(t, "GenerateHostAdapter(sleep)", code)
+}
+
+func TestGenerateHostAdapterWithMultiple(t *testing.T) {
+	// Multiple host functions of different types to exercise the loop.
+	usage := &UsageInfo{
+		Used: map[string]bool{
+			"cleat_call":              true,
+			"cleat_sleep":             true,
+			"cleat_await_signals":     true,
+			"cleat_log":               true,
+			"cleat_now":               true,
+			"set_query_state":         true,
+			"cleat_acquire_lock":      true,
+			"cleat_release_lock":      true,
+		},
+		Funcs: []HostFunction{
+			{ImportName: "cleat_call", FieldName: "DurableCall"},
+			{ImportName: "cleat_sleep", FieldName: "DurableSleep"},
+			{ImportName: "cleat_await_signals", FieldName: "DurableAwaitSignals"},
+			{ImportName: "cleat_log", FieldName: "DurableLog"},
+			{ImportName: "cleat_now", FieldName: "Now"},
+			{ImportName: "set_query_state", FieldName: "SetQueryState"},
+			{ImportName: "cleat_acquire_lock", FieldName: "AcquireLock"},
+			{ImportName: "cleat_release_lock", FieldName: "ReleaseLock"},
+		},
+	}
+	code := string(GenerateHostAdapter("multi", usage))
+	for _, c := range []string{
+		"DurableCall: func(",
+		"DurableSleep: func(",
+		"DurableAwaitSignals: func(",
+		"DurableLog: func(",
+		"Now: func(",
+		"SetQueryState: func(",
+		"AcquireLock: func(",
+		"ReleaseLock: func(",
+	} {
+		if !strings.Contains(code, c) {
+			t.Errorf("expected %s in output", c)
+		}
+	}
+	syntaxCheck(t, "GenerateHostAdapter(multi)", code)
+}
+
+// ---------------------------------------------------------------------------
+// needsFmt / needsJSON — remaining branch coverage
+// ---------------------------------------------------------------------------
+
+func TestNeedsFmtEdgeCases(t *testing.T) {
+	t.Run("version does not need fmt", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_version", FieldName: "Version"},
+			},
+		}
+		if needsFmt(usage) {
+			t.Error("Version should not need fmt")
+		}
+	})
+
+	t.Run("release lock needs fmt", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_release_lock", FieldName: "ReleaseLock"},
+			},
+		}
+		if !needsFmt(usage) {
+			t.Error("ReleaseLock uses fmt.Errorf in ResultStmts")
+		}
+	})
+
+	t.Run("defer needs fmt (uses fmt.Errorf)", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_defer", FieldName: "DurableDefer"},
+			},
+		}
+		if !needsFmt(usage) {
+			t.Error("DurableDefer should need fmt (uses fmt.Errorf)")
+		}
+	})
+}
+
+func TestNeedsJSONEdgeCases(t *testing.T) {
+	t.Run("await signals needs json", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_await_signals", FieldName: "DurableAwaitSignals"},
+			},
+		}
+		if !needsJSON(usage) {
+			t.Error("DurableAwaitSignals should need json ([]string params)")
+		}
+	})
+
+	t.Run("log does not need json", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_log", FieldName: "DurableLog"},
+			},
+		}
+		if needsJSON(usage) {
+			t.Error("DurableLog should not need json")
+		}
+	})
+
+	t.Run("await child does not need json", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_await_child", FieldName: "AwaitChild"},
+			},
+		}
+		if needsJSON(usage) {
+			t.Error("AwaitChild result stmts don't reference json.Unmarshal/json.Marshal")
+		}
+	})
+}
+
+func TestNeedsUnsafeEdgeCases(t *testing.T) {
+	t.Run("call needs unsafe", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_call", FieldName: "DurableCall"},
+			},
+		}
+		if !needsUnsafe(usage) {
+			t.Error("DurableCall should need unsafe")
+		}
+	})
+
+	t.Run("sleep does not need unsafe", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_sleep", FieldName: "DurableSleep"},
+			},
+		}
+		if needsUnsafe(usage) {
+			t.Error("DurableSleep should not need unsafe")
+		}
+	})
+
+	t.Run("log does not need unsafe", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_log", FieldName: "DurableLog"},
+			},
+		}
+		if needsUnsafe(usage) {
+			t.Error("DurableLog should not need unsafe")
+		}
+	})
+
+	t.Run("version does not need unsafe", func(t *testing.T) {
+		usage := &UsageInfo{
+			Funcs: []HostFunction{
+				{ImportName: "cleat_version", FieldName: "Version"},
+			},
+		}
+		if needsUnsafe(usage) {
+			t.Error("Version should not need unsafe")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// outBufNames — remaining coverage
+// ---------------------------------------------------------------------------
+
+func TestOutBufNamesEdgeCases(t *testing.T) {
+	tests := []struct {
+		name     string
+		wantLen  int
+		wantFirst string
+	}{
+		{"cleat_call_retry", 1, "responseBuf"},
+		{"cleat_await_signals", 2, "signalNameBuf"},
+		{"cleat_poll_cancellation", 1, "reasonBuf"},
+		// Note: outBufNames uses the raw param name from importDefs (snake_case).
+		{"cleat_create_promise", 1, "promise_id_outBuf"},
+		{"cleat_await_promise", 1, "result_outBuf"},
+		{"cleat_side_effect", 1, "cachedResultBuf"},
+		{"plugin_call_streaming", 1, "responseBuf"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			names := outBufNames(tt.name)
+			if len(names) != tt.wantLen {
+				t.Errorf("outBufNames(%q) len=%d, want %d", tt.name, len(names), tt.wantLen)
+			}
+			if tt.wantLen > 0 && names[0] != tt.wantFirst {
+				t.Errorf("outBufNames(%q)[0]=%q, want %q", tt.name, names[0], tt.wantFirst)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GenerateExports — edge cases (requires loaded analysis result)
+// ---------------------------------------------------------------------------
+
+func TestGenerateExportsEmptyEntryPoints(t *testing.T) {
+	// With EntryPoints cleared, GenerateExports should still produce valid Go
+	// with the header and utility functions.
+	result, _ := loadBasic(t)
+	ep := result.EntryPoints
+	result.EntryPoints = nil
+	defer func() { result.EntryPoints = ep }()
+
+	code := string(GenerateExports("mypkg", result))
+	for _, c := range []string{
+		"//go:build wasip1",
+		"package mypkg",
+		"func writeJSONOut",
+		"func writeErrorOut",
+		"func writeSuspendOut",
+	} {
+		if !strings.Contains(code, c) {
+			t.Errorf("expected: %s", c)
+		}
+	}
+	// Should NOT contain any //go:wasmexport since there are no entry points.
+	if strings.Contains(code, "//go:wasmexport") {
+		t.Error("expected no wasmexport directives with empty entry points")
+	}
+	syntaxCheck(t, "GenerateExports(empty)", code)
+}
+
+// ---------------------------------------------------------------------------
+// GenerateImports — edge cases
+// ---------------------------------------------------------------------------
+
+func TestGenerateImportsDeduplicates(t *testing.T) {
+	// Multiple HostFunctions sharing the same ImportName should produce
+	// only one import stub.
+	usage := &UsageInfo{
+		Used: map[string]bool{"cleat_call": true},
+		Funcs: []HostFunction{
+			{ImportName: "cleat_call", FieldName: "DurableCall"},
+			{ImportName: "cleat_call", FieldName: "DurableCallTyped"},
+			{ImportName: "cleat_call", FieldName: "DurableFetch"},
+		},
+	}
+	code := string(GenerateImports("mypkg", usage))
+	// Should have exactly one cleatCallImport.
+	count := strings.Count(code, "cleatCallImport")
+	if count != 1 {
+		t.Errorf("expected 1 cleatCallImport, got %d", count)
+	}
+	syntaxCheck(t, "GenerateImports(dedup)", code)
+}
