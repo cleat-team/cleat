@@ -35,7 +35,7 @@ func setupTelemetry(ctx context.Context, endpoint string, disabled bool, workerI
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			attribute.String("service.name", "durable-worker"),
+			attribute.String("service.name", "cleat-worker"),
 			attribute.String("worker.id", workerID),
 		),
 	)

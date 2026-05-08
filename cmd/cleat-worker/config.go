@@ -2,7 +2,7 @@ package main
 
 import "time"
 
-// Config holds structured configuration for the durable worker.
+// Config holds structured configuration for the cleat worker.
 type Config struct {
 	DBURL                string
 	Concurrency          int
