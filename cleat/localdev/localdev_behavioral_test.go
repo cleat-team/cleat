@@ -2,9 +2,15 @@ package localdev
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/rcownie/cleat/cleat"
 )
+
 // =========================================================================
 // Helpers
 // =========================================================================
@@ -297,5 +303,424 @@ func TestLR_ReleaseConcurrencyKeys(t *testing.T) {
 	}
 	if !acquired {
 		t.Error("expected re-acquisition to succeed after release")
+	}
+}
+
+// =========================================================================
+// DurableSleepMs
+// =========================================================================
+
+func TestLR_DurableSleepMs_RecordsEvent(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	r.durableSleepMs(1)
+	events := r.Events()
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	if events[0].Type != "sleep" {
+		t.Errorf("event type: want sleep, got %q", events[0].Type)
+	}
+	if !strings.Contains(events[0].Message, "1ms") {
+		t.Errorf("message should mention duration: %q", events[0].Message)
+	}
+}
+
+// =========================================================================
+// DurableAwaitSignals
+// =========================================================================
+
+func TestLR_DurableAwaitSignals_Timeout(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	name, payload, timedOut, err := r.durableAwaitSignals([]string{"s1"}, 1)
+	if err != nil {
+		t.Fatalf("durableAwaitSignals: %v", err)
+	}
+	if !timedOut {
+		t.Error("expected timeout")
+	}
+	if name != "" || payload != "" {
+		t.Errorf("expected empty name/payload on timeout, got %q / %q", name, payload)
+	}
+}
+
+func TestLR_DurableAwaitSignals_SignalArrives(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(5 * time.Millisecond)
+		r.SendSignal("s1", "p1")
+		close(done)
+	}()
+	name, payload, timedOut, err := r.durableAwaitSignals([]string{"s1"}, 5000)
+	if err != nil {
+		t.Fatalf("durableAwaitSignals: %v", err)
+	}
+	if timedOut {
+		t.Fatal("expected signal, got timeout")
+	}
+	if name != "s1" {
+		t.Errorf("want s1, got %q", name)
+	}
+	if payload != "p1" {
+		t.Errorf("want p1, got %q", payload)
+	}
+	<-done
+}
+
+// =========================================================================
+// Child workflow stubs
+// =========================================================================
+
+type stubChildRunner struct {
+	fn func(ctx context.Context, name, input string) (string, error)
+}
+
+func (s *stubChildRunner) RunChild(ctx context.Context, name, input string) (string, error) {
+	return s.fn(ctx, name, input)
+}
+
+var _ ChildWorkflowRunner = (*stubChildRunner)(nil)
+
+func TestLR_ChildWorkflow_WithRunner(t *testing.T) {
+	called := false
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		called = true
+		return `{"result":"ok"}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	runID, err := r.childWorkflow("my-child", `{"in":1}`)
+	if err != nil {
+		t.Fatalf("childWorkflow: %v", err)
+	}
+	if !called {
+		t.Error("child runner was not invoked")
+	}
+	if runID == "" {
+		t.Error("expected non-empty runID")
+	}
+	r.mu.RLock()
+	cr, ok := r.childResults[runID]
+	r.mu.RUnlock()
+	if !ok {
+		t.Fatal("child result not stored")
+	}
+	if cr.err != nil {
+		t.Errorf("unexpected error: %v", cr.err)
+	}
+	if cr.result != `{"result":"ok"}` {
+		t.Errorf("want result, got %q", cr.result)
+	}
+}
+
+func TestLR_ChildWorkflow_WithoutRunner(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	runID, err := r.childWorkflow("orphan", `{}`)
+	if err != nil {
+		t.Fatalf("childWorkflow: %v", err)
+	}
+	r.mu.RLock()
+	_, ok := r.childResults[runID]
+	r.mu.RUnlock()
+	if ok {
+		t.Error("expected no child result without runner")
+	}
+	events := r.Events()
+	if len(events) == 0 {
+		t.Error("expected events to be recorded")
+	}
+}
+
+func TestLR_ChildWorkflowTyped_Marshals(t *testing.T) {
+	var capturedInput string
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		capturedInput = input
+		return `{"result":"ok"}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	runID, err := r.childWorkflowTyped("typed-child", map[string]string{"key": "val"})
+	if err != nil {
+		t.Fatalf("childWorkflowTyped: %v", err)
+	}
+	if runID == "" {
+		t.Error("expected non-empty runID")
+	}
+	if !strings.Contains(capturedInput, `"key"`) || !strings.Contains(capturedInput, `"val"`) {
+		t.Errorf("marshaled input should contain key/val, got %q", capturedInput)
+	}
+}
+
+// =========================================================================
+// DurableDefer
+// =========================================================================
+
+func TestLR_DurableDefer_ReturnsID(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	id, err := r.durableDefer("task1")
+	if err != nil {
+		t.Fatalf("durableDefer: %v", err)
+	}
+	if id != "defer-1" {
+		t.Errorf("want defer-1, got %q", id)
+	}
+	id2, _ := r.durableDefer("task2")
+	if id2 != "defer-2" {
+		t.Errorf("want defer-2, got %q", id2)
+	}
+	events := r.Events()
+	found := false
+	for _, e := range events {
+		if e.Type == "defer" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected defer event")
+	}
+}
+
+// =========================================================================
+// DurableCallWithOptions
+// =========================================================================
+
+func TestLR_DurableCallWithOptions_NoRetry(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return "ok", nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	resp, err := r.durableCallWithOptions(cleat.CallOptions{}, "svc", "op", `{}`)
+	if err != nil {
+		t.Fatalf("durableCallWithOptions: %v", err)
+	}
+	if resp != "ok" {
+		t.Errorf("want ok, got %q", resp)
+	}
+}
+
+func TestLR_DurableCallWithOptions_WithRetry(t *testing.T) {
+	attempt := 0
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		attempt++
+		if attempt == 1 {
+			return "", fmt.Errorf("transient")
+		}
+		return "ok", nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	opts := cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
+			MaxAttempts:        2,
+			InitialInterval:    1,
+			BackoffCoefficient: 1.0,
+			MaxInterval:        1,
+		},
+	}
+	resp, err := r.durableCallWithOptions(opts, "svc", "op", `{}`)
+	if err != nil {
+		t.Fatalf("durableCallWithOptions: %v", err)
+	}
+	if resp != "ok" {
+		t.Errorf("want ok, got %q", resp)
+	}
+	if attempt != 2 {
+		t.Errorf("expected 2 attempts, got %d", attempt)
+	}
+}
+
+// =========================================================================
+// DurableCallWithHeartbeat
+// =========================================================================
+
+func TestLR_DurableCallWithHeartbeat(t *testing.T) {
+	caller := &stubCaller{fn: func(ctx context.Context, svc, op, req string) (string, error) {
+		return "heartbeat-resp", nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithServiceCaller(caller))
+	resp, err := r.durableCallWithHeartbeat("svc", "op", `{}`, 0, nil)
+	if err != nil {
+		t.Fatalf("durableCallWithHeartbeat: %v", err)
+	}
+	if resp != "heartbeat-resp" {
+		t.Errorf("want heartbeat-resp, got %q", resp)
+	}
+}
+
+// =========================================================================
+// AwaitChild / AwaitAllChildren
+// =========================================================================
+
+func TestLR_AwaitChild_Found(t *testing.T) {
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		return `{"status":"ok"}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	runID, _ := r.childWorkflow("good", `{}`)
+	result, err := r.awaitChild(runID)
+	if err != nil {
+		t.Fatalf("awaitChild: %v", err)
+	}
+	if result != `{"status":"ok"}` {
+		t.Errorf("want result, got %q", result)
+	}
+}
+
+func TestLR_AwaitChild_Error(t *testing.T) {
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		return "", fmt.Errorf("child error")
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	runID, _ := r.childWorkflow("fail", `{}`)
+	result, err := r.awaitChild(runID)
+	if err == nil {
+		t.Fatal("expected error from awaitChild")
+	}
+	if !strings.Contains(err.Error(), "child error") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if result != "" {
+		t.Errorf("expected empty result, got %q", result)
+	}
+}
+
+func TestLR_AwaitChild_NotFound(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	result, err := r.awaitChild("nonexistent-run-id")
+	if err != nil {
+		t.Fatalf("awaitChild: %v", err)
+	}
+	if result != `{"status":"completed"}` {
+		t.Errorf("want default result, got %q", result)
+	}
+}
+
+func TestLR_AwaitAllChildren(t *testing.T) {
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		return `{"out":1}`, nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	id1, _ := r.childWorkflow("c1", `{}`)
+	id2, _ := r.childWorkflow("c2", `{}`)
+
+	results, err := r.awaitAllChildren([]string{id1, id2})
+	if err != nil {
+		t.Fatalf("awaitAllChildren: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("want 2 results, got %d", len(results))
+	}
+	if results[0].Result != `{"out":1}` {
+		t.Errorf("want result for child 0, got %q", results[0].Result)
+	}
+	if results[0].Error != "" {
+		t.Errorf("unexpected error for child 0: %s", results[0].Error)
+	}
+}
+
+// =========================================================================
+// CreatePromise / RegisterUpdateHandler
+// =========================================================================
+
+func TestLR_CreatePromiseImpl(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	id, err := r.createPromiseImpl("my-promise")
+	if err != nil {
+		t.Fatalf("createPromiseImpl: %v", err)
+	}
+	if id == "" {
+		t.Error("expected non-empty promise ID")
+	}
+	r.mu.RLock()
+	lp, ok := r.promises[id]
+	r.mu.RUnlock()
+	if !ok {
+		t.Fatal("promise not found")
+	}
+	if lp.name != "my-promise" {
+		t.Errorf("want my-promise, got %q", lp.name)
+	}
+	if lp.status != "pending" {
+		t.Errorf("want pending, got %q", lp.status)
+	}
+	events := r.Events()
+	found := false
+	for _, e := range events {
+		if e.Type == "create_promise" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected create_promise event")
+	}
+}
+
+func TestLR_RegisterUpdateHandler(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	r.registerUpdateHandler("my-update")
+	events := r.Events()
+	found := false
+	for _, e := range events {
+		if e.Type == "register_update_handler" && e.Message == "my-update" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected register_update_handler event")
+	}
+}
+
+// =========================================================================
+// Options
+// =========================================================================
+
+func TestLR_WithSignalChannel(t *testing.T) {
+	ch := make(chan Signal, 10)
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithSignalChannel(ch))
+	if r.signalCh != ch {
+		t.Error("signalCh was not configured")
+	}
+}
+
+func TestLR_WithVersion(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithVersion(7, 3))
+	if r.versionVal != 7 {
+		t.Errorf("versionVal: want 7, got %d", r.versionVal)
+	}
+	if r.minVersionVal != 3 {
+		t.Errorf("minVersionVal: want 3, got %d", r.minVersionVal)
+	}
+}
+
+func TestLR_WithConcurrencyKey(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithConcurrencyKey("ck-1"))
+	if r.concurrencyKey != "ck-1" {
+		t.Errorf("concurrencyKey: want ck-1, got %q", r.concurrencyKey)
+	}
+}
+
+func TestLR_WithChildWorkflowRunner(t *testing.T) {
+	runner := &stubChildRunner{fn: func(ctx context.Context, name, input string) (string, error) {
+		return "", nil
+	}}
+	r := NewLocalRunner(WithLogWriter(io.Discard), WithChildWorkflowRunner(runner))
+	if r.childRunner != runner {
+		t.Error("childRunner was not configured")
+	}
+}
+
+// =========================================================================
+// Marshal error path for childWorkflowTyped
+// =========================================================================
+
+func TestLR_ChildWorkflowTyped_MarshalError(t *testing.T) {
+	r := NewLocalRunner(WithLogWriter(io.Discard))
+	// A channel cannot be marshaled to JSON.
+	_, err := r.childWorkflowTyped("bad", make(chan int))
+	if err == nil {
+		t.Error("expected marshaling error")
+	}
+	if !strings.Contains(err.Error(), "marshaling") {
+		t.Errorf("expected marshaling error, got: %v", err)
 	}
 }
