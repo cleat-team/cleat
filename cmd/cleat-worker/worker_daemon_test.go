@@ -534,10 +534,13 @@ func (m *mockStore) QueueDepth(ctx context.Context) (int64, error) {
 // using very short intervals so loop tests complete quickly.
 func newTestWorker(ms *mockStore) *Worker {
 	ctx, cancel := context.WithCancel(context.Background())
+	monitor := NewMemoryMonitor(5 * time.Second)
+	mc := NewMemoryController(monitor, ms, "test-worker", 5, 1<<40, 1<<40)
 	return &Worker{
 		id:                  "test-worker",
 		store:               ms,
 		concurrency:         5,
+		memoryController:    mc,
 		heartbeatInterval:   10 * time.Millisecond,
 		pollInterval:        1 * time.Millisecond,
 		compactionThreshold: host.DefaultCompactionThreshold,
