@@ -44,8 +44,27 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 
 	rt := wazero.NewRuntime(ctx)
 
-	// WASI is required by Go wasip1 modules for goroutine/stack management.
-	wasi_snapshot_preview1.MustInstantiate(ctx, rt)
+	// Build a custom WASI snapshot preview1 module with stubs for non-deterministic
+	// imports. clock_time_get returns a fixed timestamp (epoch 0) for deterministic
+	// replay. random_get returns ENOSYS — workflow code must use cleat.Random().
+	wasiBuilder := rt.NewHostModuleBuilder(wasi_snapshot_preview1.ModuleName)
+	wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
+
+	wasiBuilder.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, id uint32, precision uint64, resultTimestamp uint32) uint32 {
+		if mod != nil && mod.Memory() != nil {
+			mod.Memory().Write(resultTimestamp, []byte{0, 0, 0, 0, 0, 0, 0, 0})
+		}
+		return 0
+	}).Export("clock_time_get")
+
+	wasiBuilder.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, buf uint32, bufLen uint32) uint32 {
+		return 52 // ENOSYS
+	}).Export("random_get")
+
+	if _, err := wasiBuilder.Instantiate(ctx); err != nil {
+		rt.Close(ctx)
+		return nil, fmt.Errorf("host: instantiating wasi module: %w", err)
+	}
 
 	// Build the "env" host module that provides cleat_* imports.
 	envBuilder := rt.NewHostModuleBuilder("env")
@@ -218,6 +237,13 @@ func (r *Runtime) CallExport(ctx context.Context, mod api.Module, exportName str
 
 // CallExportWithSuspend invokes an exported WASM function and detects suspension.
 func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exportName string, inputJSON []byte) (result string, suspended bool, err error) {
+	// Recover from WASM panics/traps so the caller (Engine.run) can invoke registered defers.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("host: export %q panicked: %v", exportName, r)
+		}
+	}()
+
 	fn := mod.ExportedFunction(exportName)
 	if fn == nil {
 		return "", false, fmt.Errorf("host: export %q not found", exportName)
@@ -291,6 +317,12 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	}
 
 	errCode, actualLen := decodeExportResult(results[0])
+
+	// Detect output overflow: if WASM wrote more bytes than the buffer can hold,
+	// the output was silently truncated. Return an error instead of partial data.
+	if actualLen > outBufSize {
+		return "", false, fmt.Errorf("host: %s: output overflow: wrote %d bytes, buffer is %d bytes", exportName, actualLen, outBufSize)
+	}
 
 	if errCode != 0 {
 		errMsg := readWasmString(mem, outputOffset, minU32(actualLen, outBufSize))

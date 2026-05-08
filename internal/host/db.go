@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -1914,9 +1915,9 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 	case "call":
 		payload["service"] = rec.Service
 		payload["operation"] = rec.Op
-		payload["request"] = rec.Request
+		payload["request_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Request))
 		if rec.Response != "" {
-			payload["response"] = rec.Response
+			payload["response_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Response))
 		}
 		if rec.Err != "" {
 			payload["error"] = rec.Err
@@ -2046,24 +2047,25 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	}
 	switch rec.EventType {
 	case "call":
-		if v, ok := m["service"].(string); ok {
-			rec.Service = v
-		}
-		if v, ok := m["operation"].(string); ok {
-			rec.Op = v
-		}
-		if v, ok := m["request"].(string); ok {
+		if v, ok := m["service"].(string); ok { rec.Service = v }
+		if v, ok := m["operation"].(string); ok { rec.Op = v }
+		// Try base64-encoded fields first, fall back to raw strings for backward compat.
+		if v, ok := m["request_b64"].(string); ok {
+			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+				rec.Request = string(decoded)
+			}
+		} else if v, ok := m["request"].(string); ok {
 			rec.Request = v
 		}
-		if v, ok := m["response"].(string); ok {
+		if v, ok := m["response_b64"].(string); ok {
+			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+				rec.Response = string(decoded)
+			}
+		} else if v, ok := m["response"].(string); ok {
 			rec.Response = v
 		}
-		if v, ok := m["error"].(string); ok {
-			rec.Err = v
-		}
-		if v, ok := m["duration_ms"].(float64); ok {
-			rec.DurationMs = int64(v)
-		}
+		if v, ok := m["error"].(string); ok { rec.Err = v }
+		if v, ok := m["duration_ms"].(float64); ok { rec.DurationMs = int64(v) }
 	case "sleep":
 		if v, ok := m["duration_ms"].(float64); ok {
 			rec.DurationMs = int64(v)

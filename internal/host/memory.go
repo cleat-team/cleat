@@ -17,7 +17,7 @@ import (
 	"github.com/tetratelabs/wazero/api"
 )
 
-const outBufSize = 65536
+const outBufSize = 1048576 // 1 MB; increased to reduce truncation risk
 
 // readWasmString reads a Go string from WASM linear memory at (ptr, length).
 func readWasmString(mem api.Memory, ptr, length uint32) string {

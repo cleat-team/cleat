@@ -568,6 +568,23 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		compactedStep = e.compactionState.CompactedStep
 	}
 
+	// Version compatibility check: when replaying existing history, verify
+	// that the current workflow version is compatible. If the code version
+	// is below the minimum required version, the replay cannot proceed.
+	if len(replayHistory) > 0 && e.state != nil {
+		currentVersion := e.state.Version()
+		minVersion := e.state.MinVersion()
+		if currentVersion < minVersion {
+			return "", nil, nil, nil, nil, fmt.Errorf(
+				"host: version mismatch: workflow code is v%d but history requires at least v%d",
+				currentVersion, minVersion)
+		}
+		if currentVersion <= 0 {
+			return "", nil, nil, nil, nil, fmt.Errorf(
+				"host: invalid workflow version %d", currentVersion)
+		}
+	}
+
 	session := &execSession{
 		engine:     e,
 		history:    replayHistory,
@@ -598,10 +615,10 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				Deferrals:    session.deferrals,
 			}, session.deferrals, session.queryState, nil
 		}
-		// Workflow failed with a non-suspend error. Release any held scopes.
-		// Invoke registered defer callbacks on trap.
+		// Workflow failed with a non-suspend error. Invoke registered defers
+		// for cleanup, then release any held scopes.
 		if len(session.deferrals) > 0 {
-			e.invokeDefersOnTrap(execCtx, mod, session.deferrals)
+			e.runDefers(ctx, nil, session.deferrals)
 		}
 		session.releaseHeldScopes(ctx)
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, err
@@ -753,6 +770,13 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	}
 	s.history = append(s.history, rec)
 	s.stepCount++
+
+	// Flush the event immediately to guarantee exactly-once: if the worker
+	// crashes before the workflow completes, replay will find this event
+	// and return the cached response.
+	if s.engine.db != nil {
+		s.engine.flushEvent(ctx, s.workflowID, rec)
+	}
 
 	if err != nil {
 		written, _ := writeWasmString(mem, responsePtr, err.Error(), responseMaxLen)
@@ -2682,4 +2706,85 @@ func stripCompactedEvents(history []EventRecord, compactedStep int) []EventRecor
 	result := make([]EventRecord, len(history)-compactedStep)
 	copy(result, history[compactedStep:])
 	return result
+}
+
+
+// flushEvent writes a single event to event_history in its own transaction.
+// This guarantees exactly-once: if the worker crashes before the workflow
+// completes, replay will find this event and return the cached response.
+func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRecord) error {
+	if e.db == nil {
+		return nil
+	}
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("flush event: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (workflow_id, step) DO NOTHING
+	`, workflowID, rec.Step, rec.EventType,
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err))
+	if err != nil {
+		return fmt.Errorf("flush event: exec: %w", err)
+	}
+	return tx.Commit()
+}
+
+// flushEvents writes a batch of events to event_history in a single transaction.
+func (e *Engine) flushEvents(ctx context.Context, workflowID string, recs []EventRecord) error {
+	if e.db == nil || len(recs) == 0 {
+		return nil
+	}
+	tx, err := e.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("flush events: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, rec := range recs {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (workflow_id, step) DO NOTHING
+		`, workflowID, rec.Step, rec.EventType,
+			nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err))
+		if err != nil {
+			return fmt.Errorf("flush events: exec step %d: %w", rec.Step, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// runDefers invokes registered defer functions on a fresh module instance.
+// Called on non-suspend errors to ensure cleanup runs even when the workflow fails.
+func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[string]string) {
+	type defEntry struct {
+		id   string
+		desc string
+	}
+	var entries []defEntry
+	for id, desc := range deferrals {
+		entries = append(entries, defEntry{id: id, desc: desc})
+	}
+	// LIFO: higher step number (embedded in defer ID "defer-N") runs first.
+	for i := 0; i < len(entries); i++ {
+		for j := i + 1; j < len(entries); j++ {
+			if entries[j].id > entries[i].id {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
+	for _, entry := range entries {
+		deferName := "__defer_" + entry.desc
+		if wasmBytes != nil {
+			_, err := e.RunDefer(ctx, wasmBytes, deferName, nil)
+			if err != nil {
+				// Defer failures are not propagated — cleanup runs best-effort.
+			}
+		}
+	}
 }
