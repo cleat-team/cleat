@@ -45,6 +45,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
 	"github.com/rcownie/cleat/internal/host"
+	"github.com/rcownie/cleat/internal/migration"
 	"github.com/rcownie/cleat/internal/plugin"
 	"golang.org/x/time/rate"
 
@@ -259,6 +260,12 @@ func main() {
 		log.Fatalf("[worker %s] plugin: %v", workerID, err)
 	}
 
+		// Run core schema migrations before plugin migrations.
+		migrator := migration.NewRunner(db, "migrations")
+		if err := migrator.Run(ctx); err != nil {
+			log.Fatalf("[worker %s] core migrations: %v", workerID, err)
+		}
+
 	if err := plugin.RunMigrations(ctx, db, nil, plugList); err != nil {
 		log.Fatalf("[worker %s] plugin migrations: %v", workerID, err)
 	}
@@ -403,6 +410,7 @@ func main() {
 
 		// Workflow definitions endpoint.
 		mux.HandleFunc("/api/definitions", api.handleDefinitions)
+		mux.HandleFunc("/api/admin/drain", api.handleAdminDrain)
 
 		// Plugin discovery endpoint.
 		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
@@ -609,6 +617,7 @@ type Worker struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+		draining atomic.Bool
 	wg     sync.WaitGroup
 
 	inflight    sync.Map // map[workflowID]*host.WorkflowInstance
@@ -699,6 +708,19 @@ func (w *Worker) dispatchLoop() {
 		default:
 		}
 
+
+		// If draining and no in-flight work, exit cleanly.
+		if w.draining.Load() {
+			inflight := 0
+			w.inflight.Range(func(_, _ interface{}) bool { inflight++; return true })
+			if inflight == 0 {
+				log.Printf("[worker %s] drain complete, exiting", w.id)
+				w.cancel()
+				return
+			}
+			time.Sleep(w.pollInterval)
+			continue
+		}
 		// Memory-aware tick: read system memory, compute pressure, adjust concurrency.
 		w.memoryController.Tick(w.ctx)
 		state := w.memoryController.State()
@@ -2464,6 +2486,24 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 		response = []defResponse{}
 	}
 	s.writeJSON(w, 200, response)
+}
+
+// handleAdminDrain handles GET and POST /api/admin/drain.
+func (s *apiServer) handleAdminDrain(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		s.worker.draining.Store(true)
+	}
+	inFlight := s.inflightCount()
+	s.writeJSON(w, 200, map[string]interface{}{
+		"draining":  s.worker.draining.Load(),
+		"in_flight": inFlight,
+	})
+}
+
+func (s *apiServer) inflightCount() int {
+	count := 0
+	s.worker.inflight.Range(func(_, _ interface{}) bool { count++; return true })
+	return count
 }
 
 // handleMetrics serves Prometheus-format metrics.

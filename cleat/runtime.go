@@ -276,44 +276,34 @@ type Lifecycle interface {
 	// workflow replays against newer code than it started with, the runtime
 	// can detect version skew.
 	MinVersion() int
+
+	// RegisterUpdateHandler registers a handler for the named update.
+	// handler receives payload JSON and returns result JSON.
+	// validator runs first (read-only). Called during workflow init, before durable ops.
+	RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error)
+
+	// RegisterQueryHandler registers a read-only query handler that can be
+	// invoked on-demand by external callers without journaling.
+	// Queries are deterministic, read-only, and do not record events.
+	RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
+
+	// ScheduleCron creates a recurring workflow trigger from a cron expression.
+	// cronExpr is a standard 5-field cron expression, timezone is an IANA timezone
+	// name (e.g. "America/New_York"), inputJSON is the workflow input.
+	// Returns the schedule ID on success.
+	ScheduleCron(workflowName, cronExpr, timezone, inputJSON string) (scheduleID string, err error)
+
+	// DeleteCron removes a recurring workflow trigger by schedule ID.
+	DeleteCron(scheduleID string) error
+
+	// ListCrons returns all recurring workflow triggers as a JSON array of
+	// CronSchedule entries.
+	ListCrons() (string, error)
 }
 
-// HostCalls is the composite interface that workflow code programs against.
-// It provides durable, deterministic access to external services, time, signals,
-// workflow lifecycle, state, promises, randomness, and more.
-//
-// The interface is composed from capability-grouped sub-interfaces:
-//   - Caller: durable service calls, plugins, HTTP, side effects
-//   - Timer: deterministic time and sleep
-//   - Signaler: signal communication between workflows
-//   - Lifecycle: versioning, child workflows, cancellation, logging, defer
-//
-// Remaining methods (promises, state, registration, cron, locks, etc.)
-// are declared directly on HostCalls.
-//
-// Entry points receive a HostCalls as their first parameter. Helper functions
-// in the durable closure can thread it through their call chains (manually or
-// via the auto-threading transformer).
-//
-// The concrete implementation is *hostCallsImpl, created by the WASM host
-// adapter at runtime. For tests, mock implementations of individual group
-// interfaces (e.g., Caller, Timer) can be used where the full HostCalls
-// is not needed.
-type HostCalls interface {
-	Caller
-	Timer
-	Signaler
-	Lifecycle
-
-	// CreatePromise creates a named durable promise and returns its ID.
-	// The promise can be resolved or rejected by an external caller via the REST API.
-	CreatePromise(name string) (promiseID string, err error)
-
-	// AwaitPromise waits for a promise to be resolved by an external caller.
-	// Returns the result, whether it timed out, and any error.
-	// Blocks the workflow until resolved or timeout expires.
-	AwaitPromise(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
-
+// StateAccessor provides durable state read/write operations and promise management
+// for workflow execution.
+type StateAccessor interface {
 	// SetQueryState records state that can be read by query handlers.
 	SetQueryState(key, value string)
 
@@ -338,33 +328,21 @@ type HostCalls interface {
 	// ListState returns all state keys matching the given prefix.
 	ListState(prefix string) []string
 
-	// RegisterUpdateHandler registers a handler for the named update.
-	// handler receives payload JSON and returns result JSON.
-	// validator runs first (read-only). Called during workflow init, before durable ops.
-	RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error)
+	// CreatePromise creates a named durable promise and returns its ID.
+	// The promise can be resolved or rejected by an external caller via the REST API.
+	CreatePromise(name string) (promiseID string, err error)
 
-	// RegisterQueryHandler registers a read-only query handler that can be
-	// invoked on-demand by external callers without journaling.
-	// Queries are deterministic, read-only, and do not record events.
-	RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
+	// AwaitPromise waits for a promise to be resolved by an external caller.
+	// Returns the result, whether it timed out, and any error.
+	// Blocks the workflow until resolved or timeout expires.
+	AwaitPromise(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
+}
 
-	// ScheduleCron creates a recurring workflow trigger from a cron expression.
-	// cronExpr is a standard 5-field cron expression, timezone is an IANA timezone
-	// name (e.g. "America/New_York"), inputJSON is the workflow input.
-	// Returns the schedule ID on success.
-	ScheduleCron(workflowName, cronExpr, timezone, inputJSON string) (scheduleID string, err error)
-
-	// DeleteCron removes a recurring workflow trigger by schedule ID.
-	DeleteCron(scheduleID string) error
-
-	// ListCrons returns all recurring workflow triggers as a JSON array of
-	// CronSchedule entries.
-	ListCrons() (string, error)
-
-	// Random returns a deterministic random number seeded from the event
-	// history. Use instead of math/rand for deterministic replay.
-	Random() int64
-
+// Scoper provides virtual object instance scoping and concurrency lock operations.
+// Scope methods control the state key prefix for virtual object instances, ensuring
+// that state operations are isolated to the current virtual object. Lock methods
+// provide distributed concurrency control.
+type Scoper interface {
 	// SetScope sets the state key prefix for virtual object instances.
 	// All subsequent SetState/GetState/etc calls are automatically prefixed
 	// with "vo:<objectType>:<instanceKey>:". Returns the previous scope
@@ -378,6 +356,53 @@ type HostCalls interface {
 	// ClearScope removes the current scope and returns the previous scope
 	// prefix (empty string if none was set).
 	ClearScope() (previousScope string)
+
+	// AcquireLock attempts to acquire a concurrency lock for the given key.
+	// Returns true if the lock was acquired, false if already held.
+	// The ttl controls how long the lock is held before auto-release.
+	AcquireLock(key string, ttl time.Duration) (acquired bool, err error)
+
+	// ReleaseLock releases a concurrency lock previously acquired by this workflow.
+	ReleaseLock(key string) error
+
+	// AcquireLockMs is like AcquireLock but takes TTL in milliseconds.
+	AcquireLockMs(key string, ttlMs int64) (acquired bool, err error)
+}
+
+// HostCalls is the composite interface that workflow code programs against.
+// It provides durable, deterministic access to external services, time, signals,
+// workflow lifecycle, state, scoping, randomness, and more.
+//
+// The interface is composed from capability-grouped sub-interfaces:
+//   - Caller: durable service calls, plugins, HTTP, side effects
+//   - Timer: deterministic time and sleep
+//   - Signaler: signal communication between workflows
+//   - Lifecycle: versioning, child workflows, cancellation, logging, defers, cron, handler registration
+//   - StateAccessor: state read/write, promises
+//   - Scoper: virtual object scoping, concurrency locks
+//
+// Remaining methods (randomness, UUID generation, condition waiting) that don't
+// fit neatly into a capability group are declared directly on HostCalls.
+//
+// Entry points receive a HostCalls as their first parameter. Helper functions
+// in the durable closure can thread it through their call chains (manually or
+// via the auto-threading transformer).
+//
+// The concrete implementation is *hostCallsImpl, created by the WASM host
+// adapter at runtime. For tests, mock implementations of individual group
+// interfaces (e.g., Caller, Timer) can be used where the full HostCalls
+// is not needed.
+type HostCalls interface {
+	Caller
+	Timer
+	Signaler
+	Lifecycle
+	StateAccessor
+	Scoper
+
+	// Random returns a deterministic random number seeded from the event
+	// history. Use instead of math/rand for deterministic replay.
+	Random() int64
 
 	// UUID returns a deterministic UUID scoped to the current workflow
 	// and the given seed. Same seed always produces the same UUID for
@@ -394,17 +419,6 @@ type HostCalls interface {
 	// The timestamp comes from Now() (deterministic on replay). The random
 	// portion comes from Random() (also deterministic). Safe without SideEffect.
 	NewUUIDv7() string
-
-	// AcquireLock attempts to acquire a concurrency lock for the given key.
-	// Returns true if the lock was acquired, false if already held.
-	// The ttl controls how long the lock is held before auto-release.
-	AcquireLock(key string, ttl time.Duration) (acquired bool, err error)
-
-	// ReleaseLock releases a concurrency lock previously acquired by this workflow.
-	ReleaseLock(key string) error
-
-	// AcquireLockMs is like AcquireLock but takes TTL in milliseconds.
-	AcquireLockMs(key string, ttlMs int64) (acquired bool, err error)
 
 	// AwaitCondition blocks until the predicate returns true or the timeout expires.
 	// Polls the predicate at pollInterval, using AwaitSignals as the blocking primitive
