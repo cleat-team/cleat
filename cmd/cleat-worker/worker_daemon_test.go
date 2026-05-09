@@ -37,6 +37,7 @@ type mockStore struct {
 	loadWASMFn                        func(ctx context.Context, defName string, defVersion int) ([]byte, error)
 	listVersionsFn                    func(ctx context.Context, defName string) ([]int, error)
 	heartbeatFn                       func(ctx context.Context, workflowID, workerID string) (bool, error)
+	batchHeartbeatFn                 func(ctx context.Context, workerID string) (int64, error)
 	completeWorkflowFn                func(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
 	failWorkflowFn                    func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error
 	releaseWorkflowFn                 func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error
@@ -49,7 +50,7 @@ type mockStore struct {
 	getChildResultFn                  func(ctx context.Context, runID string) (string, bool, error)
 	reapStaleInstancesFn              func(ctx context.Context, timeout time.Duration) (int, error)
 	getQueryStateFn                   func(ctx context.Context, workflowID, key string) (string, error)
-	listWorkflowsFn                   func(ctx context.Context, status string, limit int) ([]host.WorkflowInstance, error)
+	listWorkflowsFn                   func(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error)
 	getWorkflowByIDFn                 func(ctx context.Context, id string) (*host.WorkflowInstance, error)
 	createScheduleFn                  func(ctx context.Context, s host.Schedule) error
 	listSchedulesFn                   func(ctx context.Context) ([]host.Schedule, error)
@@ -164,7 +165,7 @@ func (m *mockStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, 
 
 func (m *mockStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	if m.failWorkflowFn != nil {
-		return m.failWorkflowFn(ctx, workflowID, workerID, errMsg, errorCode, errorOp, errorCode, errorOp, queryState)
+		return m.failWorkflowFn(ctx, workflowID, workerID, errMsg, errorCode, errorOp, queryState)
 	}
 	return nil
 }
@@ -249,9 +250,9 @@ func (m *mockStore) GetQueryState(ctx context.Context, workflowID, key string) (
 	return "", nil
 }
 
-func (m *mockStore) ListWorkflows(ctx context.Context, status string, limit int) ([]host.WorkflowInstance, error) {
+func (m *mockStore) ListWorkflows(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error) {
 	if m.listWorkflowsFn != nil {
-		return m.listWorkflowsFn(ctx, status, limit)
+		return m.listWorkflowsFn(ctx, filter)
 	}
 	return nil, nil
 }
@@ -1329,7 +1330,7 @@ func TestAPIHealthz(t *testing.T) {
 
 func TestAPIWorkflowsList(t *testing.T) {
 	ms := &mockStore{}
-	ms.listWorkflowsFn = func(ctx context.Context, status string, limit int) ([]host.WorkflowInstance, error) {
+	ms.listWorkflowsFn = func(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error) {
 		return []host.WorkflowInstance{
 			{ID: "wf-1", DefName: "test", DefVersion: 1, Status: "running"},
 		}, nil
@@ -2879,3 +2880,8 @@ func TestReadMemTotal(t *testing.T) {
 		t.Errorf("readMemTotal() = %d bytes, seems unreasonably large", total)
 	}
 }
+func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) { if m.batchHeartbeatFn != nil { return m.batchHeartbeatFn(ctx, workerID) }; return 0, nil }
+
+func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error) { return nil, nil }
+func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
+func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error { return nil }

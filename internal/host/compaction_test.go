@@ -379,7 +379,7 @@ func (m *mockCompactStore) StartChildWorkflow(ctx context.Context, parentID, def
 func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) { return "", false, nil }
 func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) { return 0, nil }
 func (m *mockCompactStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) { return "", nil }
-func (m *mockCompactStore) ListWorkflows(ctx context.Context, status string, limit int) ([]WorkflowInstance, error) { return nil, nil }
+func (m *mockCompactStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) { return nil, nil }
 func (m *mockCompactStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) { return nil, nil }
 func (m *mockCompactStore) CreateSchedule(ctx context.Context, s Schedule) error { return nil }
 func (m *mockCompactStore) ListSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
@@ -1473,3 +1473,8 @@ func TestLoadCompactionStateWithOpenChildren(t *testing.T) {
 		t.Errorf("expected 3 compacted events, got %d", len(cs.Events))
 	}
 }
+func (m *mockCompactStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) { return 0, nil }
+
+func (m *mockCompactStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) { return nil, nil }
+func (m *mockCompactStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
+func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error { return nil }
