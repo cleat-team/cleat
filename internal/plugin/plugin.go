@@ -29,6 +29,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -186,3 +187,40 @@ type HasHealth interface {
 	Plugin
 	Health() error // nil = healthy
 }
+
+// ReadOnlyDB wraps a *sql.DB and restricts it to read-only operations.
+// Write methods (ExecContext, Exec, BeginTx) return an error.
+// Used to enforce plugin DatabaseAccess restrictions.
+type ReadOnlyDB struct{ db *sql.DB }
+
+var _ DB = (*ReadOnlyDB)(nil)
+
+// NewReadOnlyDB creates a read-only wrapper around db.
+func NewReadOnlyDB(db *sql.DB) *ReadOnlyDB { return &ReadOnlyDB{db: db} }
+
+func (r *ReadOnlyDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return nil, fmt.Errorf("read-only: BeginTx denied")
+}
+func (r *ReadOnlyDB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return nil, fmt.Errorf("read-only: ExecContext denied")
+}
+func (r *ReadOnlyDB) Exec(query string, args ...interface{}) (sql.Result, error) {
+	return nil, fmt.Errorf("read-only: Exec denied")
+}
+func (r *ReadOnlyDB) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return r.db.QueryContext(ctx, query, args...)
+}
+func (r *ReadOnlyDB) Query(query string, args ...interface{}) (*sql.Rows, error) {
+	return r.db.Query(query, args...)
+}
+func (r *ReadOnlyDB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return r.db.QueryRowContext(ctx, query, args...)
+}
+func (r *ReadOnlyDB) QueryRow(query string, args ...interface{}) *sql.Row {
+	return r.db.QueryRow(query, args...)
+}
+func (r *ReadOnlyDB) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+	return r.db.PrepareContext(ctx, query)
+}
+func (r *ReadOnlyDB) Close() error  { return nil }
+func (r *ReadOnlyDB) PingContext(ctx context.Context) error { return r.db.PingContext(ctx) }

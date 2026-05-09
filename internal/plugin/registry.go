@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"sync"
@@ -70,11 +71,30 @@ func Discover() ([]*LoadedPlugin, error) {
 // InitAll calls Init on each loaded plugin in order. Plugins that panic
 // or return an error during Init are marked unhealthy but do not halt
 // initialization of remaining plugins.
+//
+// Each plugin receives an Environment whose DB field is restricted based
+// on the plugin's declared DatabaseAccess: None gets nil, ReadOnly gets
+// a ReadOnlyDB wrapper, ReadWrite gets the raw *sql.DB.
 func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
 	for _, lp := range plugins {
 		if !lp.Healthy {
 			continue
 		}
+
+		// Create a per-plugin environment with database access restricted
+		// to the level declared by the plugin.
+		pluginEnv := env
+		access := lp.Plugin.Info().DatabaseAccess
+		if access == DatabaseAccessNone || access == "" {
+			pluginEnv = env.withDB(nil)
+		} else if access == DatabaseAccessReadOnly {
+			if db, ok := env.DB.(*sql.DB); ok {
+				pluginEnv = env.withDB(NewReadOnlyDB(db))
+			} else {
+				pluginEnv = env.withDB(nil)
+			}
+		}
+		// ReadWrite: use the raw Environment as-is.
 
 		func() {
 			defer func() {
@@ -87,7 +107,7 @@ func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
 				}
 			}()
 
-			if err := lp.Plugin.Init(ctx, env); err != nil {
+			if err := lp.Plugin.Init(ctx, pluginEnv); err != nil {
 				lp.Healthy = false
 				lp.Error = err
 				if env != nil && env.Logger != nil {
@@ -96,6 +116,13 @@ func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
 			}
 		}()
 	}
+}
+
+// withDB returns a shallow copy of env with DB replaced by db.
+func (env *Environment) withDB(db DB) *Environment {
+	copy := *env
+	copy.DB = db
+	return &copy
 }
 
 // LoadAll instantiates all registered plugins in dependency order,
