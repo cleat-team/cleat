@@ -566,6 +566,10 @@ type Worker struct {
 }
 
 func (w *Worker) Run() {
+	// Initialize the global time seed so the first workflow execution
+	// (before the dispatch loop updates it) sees a real wall clock.
+	host.UpdateNowMs()
+
 	// Background heartbeat goroutine.
 	w.wg.Add(1)
 	go w.heartbeatLoop()
@@ -611,6 +615,9 @@ func (w *Worker) Run() {
 
 func (w *Worker) dispatchLoop() {
 	defer w.wg.Done()
+
+	// Keep the global time seed fresh for workflow sessions.
+	host.UpdateNowMs()
 
 	const maxBatchSize = 20 // cap claims per query to avoid oversized batches
 	idleTicks := 0

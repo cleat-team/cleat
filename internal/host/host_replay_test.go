@@ -197,7 +197,7 @@ func TestReplayCall_Divergence_WrongEventType(t *testing.T) {
 	session := &execSession{
 		engine:   &Engine{caller: &mockCaller{}},
 		history:  []EventRecord{
-			{Step: 0, EventType: EventTypeSleep, DurationMs: 5000}, // not a call event!
+			{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: "{}"}, // not a matching call!
 		},
 		isReplay: true,
 	}
@@ -409,11 +409,11 @@ func TestReplaySleep_Completed(t *testing.T) {
 	mod := newTestModule(t, rt)
 
 	session := &execSession{
-		engine:   &Engine{caller: &mockCaller{}},
-		history:  []EventRecord{
-			{Step: 0, EventType: EventTypeSleep, DurationMs: 5000},
-		},
-		isReplay: true,
+		engine:          &Engine{caller: &mockCaller{}},
+		history:         []EventRecord{},
+		isReplay:        true,
+		replayJustEnded: true,
+		nowMs:            1000000,
 	}
 
 	result := session.DurableSleep(ctx, mod, 5000)
@@ -422,10 +422,13 @@ func TestReplaySleep_Completed(t *testing.T) {
 		t.Errorf("expected sleep status completed (%d), got %d", sleepStatusCompleted, status)
 	}
 	if duration != 0 {
-		t.Errorf("expected duration 0 on replay, got %d", duration)
+		t.Errorf("expected duration 0 on resume, got %d", duration)
 	}
-	if session.stepCount != 1 {
-		t.Errorf("expected stepCount=1, got %d", session.stepCount)
+	if session.replayJustEnded {
+		t.Error("expected replayJustEnded to be cleared after sleep")
+	}
+	if session.nowMs != 1000000+5000 {
+		t.Errorf("expected nowMs to advance, got %d", session.nowMs)
 	}
 }
 

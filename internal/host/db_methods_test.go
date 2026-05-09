@@ -1758,6 +1758,7 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					"",               // promise_id
 					"",               // promise_result
 					"",               // promise_error
+					int64(0),         // timestamp_ms
 				},
 				{
 					int64(1), // step
@@ -1771,6 +1772,7 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					"", "", "", "", "",
 					[]byte(`{"duration_ms":5000}`), // payload
 					"", "", "", "",
+					int64(0), // timestamp_ms
 				},
 			},
 		},

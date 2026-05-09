@@ -198,7 +198,7 @@ func TestCompactionOfCompletedWorkflow(t *testing.T) {
 		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "start", Request: `{}`, Response: `{"id":"1"}`},
 		{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "process", Request: `{}`, Response: `{"done":true}`},
 		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "finish", Request: `{}`, Response: `{"ok":true}`},
-		{Step: 3, EventType: EventTypeSleep, DurationMs: 5000},
+		{Step: 3, EventType: EventTypeCall},
 		{Step: 4, EventType: EventTypeSignalReceived, SignalName: "payment", SignalPayload: `{"paid":true}`},
 		{Step: 5, EventType: EventTypeDefer, DeferID: "defer-0", DeferDescription: "cleanup"},
 	}
@@ -231,7 +231,7 @@ func TestCompactionOfRunningWorkflow(t *testing.T) {
 		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "start", Request: `{}`, Response: `{"id":"1"}`},
 		{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "prepare", Request: `{}`, Response: `{"done":true}`},
 		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "process", Request: `{}`, Response: `{"ok":true}`},
-		{Step: 3, EventType: EventTypeSleep, DurationMs: 30000},
+		{Step: 3, EventType: EventTypeCall},
 	}
 	recentEvents := []EventRecord{
 		{Step: 4, EventType: EventTypeAwaitSignals, SignalNames: "payment,approval", TimeoutMs: 60000},
@@ -274,7 +274,7 @@ func TestCompactionRoundTripThenReplay(t *testing.T) {
 	events := []EventRecord{
 		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "do", Request: `{}`, Response: `{"ok":true}`},
 		{Step: 1, EventType: EventTypeCall, Service: "svc", Op: "fail", Request: `{}`, Response: ``, Err: "timeout"},
-		{Step: 2, EventType: EventTypeSleep, DurationMs: 5000},
+		{Step: 2, EventType: EventTypeCall},
 		{Step: 3, EventType: EventTypeAwaitSignals, SignalNames: "sig1,sig2", TimeoutMs: 10000},
 		{Step: 4, EventType: EventTypeSignalReceived, SignalName: "sig1", SignalPayload: `{"data":"hello"}`},
 		{Step: 5, EventType: EventTypeDefer, DeferID: "defer-0", DeferDescription: "cleanup DB"},
@@ -715,7 +715,7 @@ func TestCompactWorkflowHistory_MultipleEventTypes(t *testing.T) {
 	threshold := 2
 	events := []EventRecord{
 		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "start", Request: `{}`, Response: `{"ok":true}`},
-		{Step: 1, EventType: EventTypeSleep, DurationMs: 5000},
+		{Step: 1, EventType: EventTypeCall},
 		{Step: 2, EventType: EventTypeSignalReceived, SignalName: "payment", SignalPayload: `{"paid":true}`},
 		{Step: 3, EventType: EventTypeAwaitSignals, SignalNames: "payment", TimeoutMs: 30000},
 	}
@@ -768,7 +768,7 @@ func TestCompactWorkflowHistory_VerifyCompactionStateContent(t *testing.T) {
 	threshold := 2
 	events := []EventRecord{
 		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op1", Request: `{}`, Response: `{"ok":true}`},
-		{Step: 1, EventType: EventTypeSleep, DurationMs: 1000},
+		{Step: 1, EventType: EventTypeAwaitSignals, TimeoutMs: 1000},
 		{Step: 2, EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup"},
 	}
 	store := &mockCompactStore{events: events}
@@ -797,11 +797,11 @@ func TestCompactWorkflowHistory_VerifyCompactionStateContent(t *testing.T) {
 	}
 
 	// Check second event.
-	if cs.Events[1].Type != EventCodeSleep {
-		t.Errorf("expected EventCodeSleep (%d), got %d", EventCodeSleep, cs.Events[1].Type)
+	if cs.Events[1].Type != EventCodeAwaitSignals {
+		t.Errorf("expected EventCodeAwaitSignals (%d), got %d", EventCodeAwaitSignals, cs.Events[1].Type)
 	}
-	if cs.Events[1].DurationMs != 1000 {
-		t.Errorf("expected DurationMs=1000, got %d", cs.Events[1].DurationMs)
+	if cs.Events[1].TimeoutMs != 1000 {
+		t.Errorf("expected TimeoutMs=1000, got %d", cs.Events[1].TimeoutMs)
 	}
 }
 

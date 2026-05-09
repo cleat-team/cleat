@@ -535,14 +535,14 @@ func TestEventRecordToPayloadRoundTrip_StandardEventTypes(t *testing.T) {
 		{
 			name: "sleep",
 			rec: EventRecord{
-				Step: 3, EventType: EventTypeSleep,
+				Step: 3, EventType: EventTypeCall,
 				DurationMs: 5000,
 			},
 		},
 		{
 			name: "sleep_zero",
 			rec: EventRecord{
-				Step: 4, EventType: EventTypeSleep,
+				Step: 4, EventType: EventTypeCall,
 				DurationMs: 0,
 			},
 		},
@@ -963,13 +963,13 @@ func TestEventFieldsMatch_AllEventTypes(t *testing.T) {
 		{
 			name: "Type mismatch",
 			a:    EventRecord{Step: 0, EventType: EventTypeCall},
-			b:    EventRecord{Step: 0, EventType: EventTypeSleep},
+			b:    EventRecord{Step: 0, EventType: EventTypeAwaitSignals},
 			want: false,
 		},
 		{
-			name: "Sleep match",
-			a:    EventRecord{Step: 0, EventType: EventTypeSleep, DurationMs: 5000},
-			b:    EventRecord{Step: 0, EventType: EventTypeSleep, DurationMs: 5000},
+			name: "AwaitSignals timeout match",
+			a:    EventRecord{Step: 0, EventType: EventTypeAwaitSignals, TimeoutMs: 5000},
+			b:    EventRecord{Step: 0, EventType: EventTypeAwaitSignals, TimeoutMs: 5000},
 			want: true,
 		},
 		{

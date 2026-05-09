@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/tetratelabs/wazero"
@@ -44,26 +45,34 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 
 	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler())
 
-	// Build a custom WASI snapshot preview1 module with stubs for non-deterministic
-	// imports. clock_time_get returns a fixed timestamp (epoch 0) for deterministic
-	// replay. random_get returns ENOSYS — workflow code must use cleat.Random().
+	// WASI is required by Go wasip1 modules for goroutine/stack management.
+	// We build WASI with clock_time_get and random_get stubbed out so that
+	// workflow code calling time.Now() or crypto/rand through WASI panics
+	// instead of silently breaking determinism. Workflows must use h.Now()
+	// and h.Random() (imported as cleat_now / cleat_random).
 	wasiBuilder := rt.NewHostModuleBuilder(wasi_snapshot_preview1.ModuleName)
 	wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
 
-	wasiBuilder.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, id uint32, precision uint64, resultTimestamp uint32) uint32 {
-		if mod != nil && mod.Memory() != nil {
-			mod.Memory().Write(resultTimestamp, []byte{0, 0, 0, 0, 0, 0, 0, 0})
-		}
-		return 0
-	}).Export("clock_time_get")
+	// Stub clock_time_get: return ENOSYS to force workflows to use cleat_now.
+	wasiBuilder.NewFunctionBuilder().
+		WithFunc(func(_ context.Context, _ api.Module, _ uint32, _ uint64, _ uint32) syscall.Errno {
+			return syscall.ENOSYS
+		}).Export("clock_time_get")
 
-	wasiBuilder.NewFunctionBuilder().WithFunc(func(ctx context.Context, mod api.Module, buf uint32, bufLen uint32) uint32 {
-		return 52 // ENOSYS
-	}).Export("random_get")
+	// Stub clock_res_get: return ENOSYS.
+	wasiBuilder.NewFunctionBuilder().
+		WithFunc(func(_ context.Context, _ api.Module, _ uint32, _ uint32) syscall.Errno {
+			return syscall.ENOSYS
+		}).Export("clock_res_get")
+
+	// Stub random_get: return ENOSYS to force workflows to use cleat_random.
+	wasiBuilder.NewFunctionBuilder().
+		WithFunc(func(_ context.Context, _ api.Module, _ uint32, _ uint32) syscall.Errno {
+			return syscall.ENOSYS
+		}).Export("random_get")
 
 	if _, err := wasiBuilder.Instantiate(ctx); err != nil {
-		rt.Close(ctx)
-		return nil, fmt.Errorf("host: instantiating wasi module: %w", err)
+		return nil, fmt.Errorf("host: instantiating WASI module: %w", err)
 	}
 
 	// Build the "env" host module that provides cleat_* imports.

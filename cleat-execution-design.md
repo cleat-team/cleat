@@ -460,6 +460,28 @@ When a workflow function needs an operation that interacts with the outside worl
 
 These replacements ensure that every observable side effect is recorded in the event history and replayed deterministically during recovery.
 
+##### 5.4.1.1 Durable time semantics in detail
+
+`h.Now()` does **not** return the system wall-clock time. It returns the timestamp of the most recent durable event in the workflow's execution history. This is the mechanism that makes time deterministic across replays.
+
+**How it works during original execution.** Each durable event (a call, a sleep, a signal, etc.) is timestamped with the wall-clock time when it is recorded. `h.Now()` always returns the timestamp of the last recorded event. Between durable events, time stands still — CPU-bound work like computation, string processing, or conditional branching takes zero virtual time.
+
+**How it works with DurableSleep.** `h.DurableSleep(d)` is a durable event. Its recorded timestamp is the pre-sleep time *plus* the sleep duration, encoding the post-sleep virtual time. After `h.DurableSleep(5*time.Second)`, `h.Now()` returns the time after the 5-second sleep. The workflow is then suspended; when it resumes (via replay), the replay framework reads this timestamp from history, so `h.Now()` returns the same post-sleep time deterministically.
+
+**How it works during replay.** Each event in the workflow's history carries its original timestamp. During replay, `h.Now()` returns the timestamp of the last replayed event — exactly the same values returned during the original execution. This is what makes replay deterministic even when workflow code branches on time.
+
+**The replay frontier.** Replay consumes history events until none remain. At this point, the workflow transitions back to forward progress. `h.Now()` jumps to the current wall-clock time, and new events get fresh wall-clock timestamps. This "time skip" is correct: the workflow was suspended waiting for an external event (a timer, a signal, an activity result), and the new wall-clock time represents when that event actually arrived.
+
+**Example.** Consider a workflow that:
+1. Calls `h.Now()` → returns 1000 (the start time)
+2. Calls `h.DurableCall("stripe", "charge", req)` → event timestamped at 1010; Now() returns 1010
+3. Calls `h.DurableSleep(5000)` → event timestamped at 1010+5000=6010; Now() returns 6010; workflow suspends
+4. [5 seconds pass in the real world]
+5. Workflow resumes; replays the sleep event; Now() returns 6010
+6. Calls `h.DurableCall("email", "send", req)` → event timestamped at ~6010 wall clock; Now() returns 6010
+
+If this workflow is later replayed from the beginning (e.g., after a worker crash), all six steps produce identical `h.Now()` values: 1000, 1010, 6010, 6010, 6010, 6010.
+
 #### 5.4.2 Prohibited packages and constructs
 
 The following are PROHIBITED inside workflow functions (functions in the durable closure):

@@ -120,20 +120,45 @@ type Caller interface {
 }
 
 // Timer provides durable, deterministic time operations.
-// Use instead of time.Now() and time.Sleep() for replay-safe workflow code.
+// Use instead of time.Now() and time.Sleep() in workflow code.
+//
+// Durable time semantics:
+//
+// Now() returns the timestamp of the most recent durable event in the
+// workflow's execution history. On first execution, durable events are
+// timestamped with wall-clock time. During replay, the recorded timestamps
+// are played back identically, so Now() returns the same values it returned
+// during the original execution.
+//
+// Between durable events (e.g., between two DurableCall operations),
+// Now() returns the timestamp of the last event — virtual time does not
+// advance during non-durable CPU work. Only DurableSleep advances the
+// virtual clock: after DurableSleep(5*time.Second), Now() returns the
+// pre-sleep time plus 5 seconds.
+//
+// At the replay frontier — where recorded history ends and the workflow
+// resumes forward progress — Now() jumps to the current wall-clock time.
+// This "time skip" is expected: the workflow was suspended waiting for
+// an external event, and Now() reflects when that event arrived.
+//
+// Never call time.Now() or time.Sleep() in workflow code. These read the
+// real system clock, which differs across replays and breaks determinism.
+// The cleat vet tool (E003 check) catches this at build time. In WASM
+// mode, host time functions are disabled at the WASI level.
 type Timer interface {
 	// DurableSleep suspends the workflow for the given duration.
+	// After resuming, Now() reflects the time after the sleep.
 	DurableSleep(d time.Duration)
 
 	// DurableSleepMs suspends the workflow for the given milliseconds.
 	// Prefer DurableSleep(time.Duration) for readability.
 	DurableSleepMs(ms int64)
 
-	// Now returns the current wall-clock time. Use instead of time.Now()
-	// for deterministic replay.
+	// Now returns the deterministic current time. See Timer doc for
+	// the full durable time semantics.
 	Now() time.Time
 
-	// NowMs returns the current wall-clock time in milliseconds since epoch.
+	// NowMs returns Now() in milliseconds since Unix epoch.
 	// Prefer Now() for readability.
 	NowMs() int64
 }

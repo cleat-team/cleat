@@ -23,17 +23,6 @@ type CallEvent struct {
 func (e CallEvent) Step() int       { return e.step }
 func (e CallEvent) Type() EventType { return EventTypeCall }
 
-// ---- Sleep event ----
-
-// SleepEvent records a DurableSleep call.
-type SleepEvent struct {
-	step       int
-	DurationMs int64
-}
-
-func (e SleepEvent) Step() int       { return e.step }
-func (e SleepEvent) Type() EventType { return EventTypeSleep }
-
 // ---- AwaitSignals event ----
 
 // AwaitSignalsEvent records the start of a signal-waiting period.
@@ -259,11 +248,6 @@ func EventRecordFromEvent(e Event) EventRecord {
 			Service: ev.Service, Op: ev.Op,
 			Request: ev.Request, Response: ev.Response, Err: ev.Err,
 		}
-	case SleepEvent:
-		return EventRecord{
-			Step: e.Step(), EventType: EventTypeSleep,
-			DurationMs: ev.DurationMs,
-		}
 	case AwaitSignalsEvent:
 		return EventRecord{
 			Step: e.Step(), EventType: EventTypeAwaitSignals,
@@ -366,10 +350,6 @@ func EventFromRecord(r EventRecord) Event {
 		return CallEvent{
 			step: r.Step, Service: r.Service, Op: r.Op,
 			Request: r.Request, Response: r.Response, Err: r.Err,
-		}
-	case EventTypeSleep:
-		return SleepEvent{
-			step: r.Step, DurationMs: r.DurationMs,
 		}
 	case EventTypeAwaitSignals:
 		return AwaitSignalsEvent{

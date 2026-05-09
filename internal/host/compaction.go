@@ -47,7 +47,6 @@ const (
 
 var eventTypeToCode = map[EventType]int{
 	EventTypeCall:             EventCodeCall,
-	EventTypeSleep:            EventCodeSleep,
 	EventTypeAwaitSignals:     EventCodeAwaitSignals,
 	EventTypeSignalReceived:   EventCodeSignalReceived,
 	EventTypeDefer:            EventCodeDefer,
@@ -73,7 +72,6 @@ var eventTypeToCode = map[EventType]int{
 
 var codeToEventType = map[int]EventType{
 	EventCodeCall:             EventTypeCall,
-	EventCodeSleep:            EventTypeSleep,
 	EventCodeAwaitSignals:     EventTypeAwaitSignals,
 	EventCodeSignalReceived:   EventTypeSignalReceived,
 	EventCodeDefer:            EventTypeDefer,
@@ -230,7 +228,6 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.Request = ev.Request
 			ce.Response = ev.Response
 			ce.Error = ev.Err
-		case EventTypeSleep:
 			ce.DurationMs = ev.DurationMs
 		case EventTypeAwaitSignals:
 			ce.SignalNames = ev.SignalNames
@@ -364,7 +361,6 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.Request = ce.Request
 			rec.Response = ce.Response
 			rec.Err = ce.Error
-		case EventCodeSleep:
 			rec.DurationMs = ce.DurationMs
 		case EventCodeAwaitSignals:
 			rec.SignalNames = ce.SignalNames

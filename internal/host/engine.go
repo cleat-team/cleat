@@ -30,7 +30,6 @@ type EventType string
 
 const (
 	EventTypeCall             EventType = "call"
-	EventTypeSleep            EventType = "sleep"
 	EventTypeAwaitSignals     EventType = "await_signals"
 	EventTypeSignalReceived   EventType = "signal_received"
 	EventTypeDefer            EventType = "defer"
@@ -62,6 +61,13 @@ const (
 type EventRecord struct {
 	Step      int       `json:"step"`
 	EventType EventType `json:"type"`
+
+	// TimestampMs is the virtual time (ms since Unix epoch) that Now()
+	// should return after this event completes. For non-sleep events it
+	// is the wall-clock time when the event was recorded. For sleep
+	// events it is the pre-sleep time plus the sleep duration, encoding
+	// the post-sleep virtual time for deterministic replay.
+	TimestampMs int64 `json:"timestamp_ms"`
 
 	// Call fields.
 	Service  string `json:"service,omitempty"`
@@ -580,28 +586,17 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		compactedStep = e.compactionState.CompactedStep
 	}
 
-	// Version compatibility check: when replaying existing history, verify
-	// that the current workflow version is compatible. If the code version
-	// is below the minimum required version, the replay cannot proceed.
-	if len(replayHistory) > 0 && e.state != nil {
-		currentVersion := e.state.Version()
-		minVersion := e.state.MinVersion()
-		if currentVersion < minVersion {
-			return "", nil, nil, nil, nil, fmt.Errorf(
-				"host: version mismatch: workflow code is v%d but history requires at least v%d",
-				currentVersion, minVersion)
-		}
-		if currentVersion <= 0 {
-			return "", nil, nil, nil, nil, fmt.Errorf(
-				"host: invalid workflow version %d", currentVersion)
-		}
+
+	now := nowMs.Load()
+	if len(replayHistory) > 0 && replayHistory[0].TimestampMs > 0 {
+		now = replayHistory[0].TimestampMs
 	}
 
 	session := &execSession{
 		engine:     e,
 		history:    replayHistory,
 		isReplay:   len(replayHistory) > 0,
-		nowMs:      nowMs.Load(),
+		nowMs:      now,
 		deferrals:  make(map[string]string),
 		workflowID: e.workflowID,
 		execRunID:  e.workflowID,
@@ -720,6 +715,7 @@ type execSession struct {
 	history    []EventRecord
 	stepCount  int
 	isReplay   bool
+	replayJustEnded bool // true when replay just ended (first sleep after replay completes)
 	nowMs      int64
 	randomSeq  int64 // monotonic counter for deterministic Random()
 	suspendErr *SuspendError
@@ -783,8 +779,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 		Response:  resp,
 		Err:       callErr,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	// Flush the event immediately to guarantee exactly-once: if the worker
 	// crashes before the workflow completes, replay will find this event
@@ -834,7 +829,7 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 	}
 
 	// Past recorded history — switch to fresh execution.
-	s.isReplay = false
+	s.exitReplay()
 	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
 }
 
@@ -896,7 +891,7 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 	}
 
 	// Past recorded history -- switch to fresh execution.
-	s.isReplay = false
+	s.exitReplay()
 	return s.freshPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 }
 
@@ -980,8 +975,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			PluginError:  errStr,
 			Idempotent:   idempotent,
 		}
-		s.history = append(s.history, rec)
-		s.stepCount++
+		s.recordEvent(rec)
 	}
 
 	if err != nil {
@@ -1086,8 +1080,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 				StreamChunkIndex: index,
 				StreamFinish:     chunk.Finish,
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 			index++
 		}
 	}
@@ -1184,8 +1177,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 				Service:   service,
 				Op:        operation,
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 
 			// Check for cancellation on each heartbeat tick.
 			if s.engine.signalStore != nil {
@@ -1210,8 +1202,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 				Response:  res.resp,
 				Err:       callErr,
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 
 			if res.err != nil {
 				written, _ := writeWasmString(mem, responsePtr, res.err.Error(), responseMaxLen)
@@ -1264,7 +1255,7 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 	}
 
 	// Past recorded history — switch to fresh execution.
-	s.isReplay = false
+	s.exitReplay()
 	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
 }
 
@@ -1274,30 +1265,29 @@ const (
 )
 
 func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs int64) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if rec.EventType == EventTypeSleep {
-				s.stepCount++
-				return packSleepResult(sleepStatusCompleted, 0)
-			}
-		}
-		// Past history, switch to fresh.
-		s.isReplay = false
+	// Sleep is local (not recorded in event history).
+	// It advances virtual time by the duration and either suspends
+	// (forward execution) or completes immediately (first sleep
+	// after replay, which is the resume-from-sleep case).
+	//
+	// Local model rationale: if the worker crashes during a sequence
+	// of sleeps before the next durable event, replay re-executes
+	// them from scratch — which is correct because they had no
+	// external side effects.
+	s.nowMs += durationMs
+
+	if s.replayJustEnded {
+		// This is the sleep that originally suspended the workflow.
+		// The real wait already happened (the timer fired).
+		// Just advance virtual time and continue.
+		s.replayJustEnded = false
+		return packSleepResult(sleepStatusCompleted, 0)
 	}
 
-	// Fresh execution: record sleep event and signal suspend.
-	rec := EventRecord{
-		Step:       s.stepCount,
-		EventType:  EventTypeSleep,
-		DurationMs: durationMs,
-	}
-	s.history = append(s.history, rec)
-	s.stepCount++
-
+	// Forward execution: suspend until the sleep duration elapses.
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("cleat_sleep(%dms)", durationMs),
-		Until:  time.UnixMilli(s.nowMs).Add(time.Duration(durationMs) * time.Millisecond),
+		Until:  time.UnixMilli(s.nowMs),
 	}
 
 	return packSleepResult(sleepStatusSuspend, durationMs)
@@ -1333,7 +1323,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				return packAwaitSignalsResult(0, 0, true, 0)
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	// Fresh execution: check signal store first.
@@ -1348,8 +1338,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 					SignalName:    name,
 					SignalPayload: payload,
 				}
-				s.history = append(s.history, rec)
-				s.stepCount++
+				s.recordEvent(rec)
 
 				written, _ := writeWasmString(mem, sigNamePtr, name, sigNameMaxLen)
 				writeWasmStringOrTrap(mem, payloadPtr, payload, payloadMaxLen)
@@ -1365,8 +1354,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 		SignalNames: signalNames,
 		TimeoutMs:   timeoutMs,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("await_signals(%s, %dms)", signalNames, timeoutMs),
@@ -1387,7 +1375,7 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 				return int64(uint64(written)<<32 | 0)
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	deferID := fmt.Sprintf("defer-%d", s.stepCount)
@@ -1398,8 +1386,7 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 		DeferDescription: description,
 		DeferID:          deferID,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	s.deferrals[deferID] = description
 
@@ -1490,7 +1477,7 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 				return 0
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	rec := EventRecord{
@@ -1498,8 +1485,7 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 		EventType: EventTypeContinueAsNew,
 		NewInput:  newInputJSON,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	s.suspendErr = &SuspendError{
 		Reason:   "continue_as_new",
@@ -1524,7 +1510,7 @@ func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module
 				return 0
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	rec := EventRecord{
@@ -1533,8 +1519,7 @@ func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module
 		NewInput:   newInputJSON,
 		NewVersion: newVersion,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	s.suspendErr = &SuspendError{
 		Reason:     "continue_as_new",
@@ -1571,7 +1556,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 				return int64(uint64(written)<<32 | 0)
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	// Fresh execution: create child workflow via store or generate synthetic ID.
@@ -1608,8 +1593,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		ParentWorkflowID: s.workflowID,
 			ParentClosePolicy: parentClosePolicy,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	mem := m.Memory()
 	written, _ := writeWasmString(mem, runIDPtr, runID, runIDMaxLen)
@@ -1635,10 +1619,10 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 				}
 				// No cached result yet — fall through to fresh to re-check.
 				s.stepCount++
-				s.isReplay = false
+				s.exitReplay()
 			}
 		} else {
-			s.isReplay = false
+			s.exitReplay()
 		}
 	}
 
@@ -1652,8 +1636,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 				RunID:     runID,
 				Response:  result,
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 
 			written, _ := writeWasmString(mem, resultPtr, result, resultMaxLen)
 			return packAwaitChildResult(uint32(written), 0)
@@ -1665,8 +1648,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 				RunID:     runID,
 				Err:       err.Error(),
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 
 			written, _ := writeWasmString(mem, resultPtr, err.Error(), resultMaxLen)
 			return packAwaitChildResult(uint32(written), 1)
@@ -1679,8 +1661,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 		EventType: EventTypeAwaitChild,
 		RunID:     runID,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("await_child(%s)", runID),
@@ -1743,8 +1724,7 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 		Request:   runIDsJSON,
 		Response:  string(outcomesJSON),
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	written, _ := writeWasmString(mem, resultsPtr, string(outcomesJSON), resultsMaxLen)
 	return packAwaitChildResult(uint32(written), 0)
@@ -1767,7 +1747,7 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 		return packAwaitChildResult(uint32(written), 0)
 	}
 
-	s.isReplay = false
+	s.exitReplay()
 	return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
 }
 
@@ -1825,8 +1805,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 				Request:   requestJSON,
 				Response:  resp,
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 
 			written, _ := writeWasmString(mem, responsePtr, resp, responseMaxLen)
 			return packDurableCallResult(int(written), 0, 0)
@@ -1865,8 +1844,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 		Request:   requestJSON,
 		Err:       errMsg,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 	return packDurableCallResult(int(written), 1, 1)
@@ -1903,7 +1881,7 @@ func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, n
 				return 0
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	// Fresh execution: record the handler registration event.
@@ -1912,13 +1890,41 @@ func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, n
 		EventType:         EventTypeUpdateHandler,
 		UpdateHandlerName: name,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 	return 0
 }
 
 
+// exitReplay transitions from replay to forward execution.
+// It sets replayJustEnded so that the first DurableSleep after replay
+// can detect the resume-from-sleep case and complete without suspending.
+func (s *execSession) exitReplay() {
+	s.isReplay = false
+	s.replayJustEnded = true
+}
+
+// recordEvent timestamps a fresh event, advances the session clock,
+// and appends it to the history. It must only be called during fresh
+// execution (not replay).
+func (s *execSession) recordEvent(rec EventRecord) {
+	if rec.TimestampMs == 0 {
+		rec.TimestampMs = time.Now().UnixMilli()
+	}
+	s.nowMs = rec.TimestampMs
+	s.history = append(s.history, rec)
+	s.stepCount++
+}
+
 func (s *execSession) Now(ctx context.Context) int64 {
+	// During replay, read the timestamp from the last consumed event
+	// to produce deterministic Now() values matching the original
+	// execution. Before any event is consumed (stepCount==0), s.nowMs
+	// is seeded from the first history event or wall clock.
+	if s.stepCount > 0 && s.stepCount <= len(s.history) {
+		if ts := s.history[s.stepCount-1].TimestampMs; ts > 0 {
+			return ts
+		}
+	}
 	return s.nowMs
 }
 
@@ -1943,7 +1949,7 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 				return packSimpleResult(0, written)
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	// Fresh execution: generate promise ID.
@@ -1961,8 +1967,7 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 		PromiseName: name,
 		PromiseID:   promiseID,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	// Also persist to promise store if available.
 	if s.engine.promiseStore != nil {
@@ -1995,10 +2000,10 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 			if rec.EventType == EventTypeAwaitPromise {
 				s.stepCount++
 				// Promise was pending in original execution. Check if resolved now.
-				s.isReplay = false
+				s.exitReplay()
 			}
 		} else {
-			s.isReplay = false
+			s.exitReplay()
 		}
 	}
 
@@ -2012,8 +2017,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 				PromiseID:     promiseID,
 				PromiseResult: result,
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 			written, _ := writeWasmString(mem, resultPtr, result, resultMaxLen)
 			return packAwaitPromiseResult(uint32(written), false, 0)
 		}
@@ -2024,8 +2028,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 				PromiseID:    promiseID,
 				PromiseError: errMsg,
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 			written, _ := writeWasmString(mem, resultPtr, errMsg, resultMaxLen)
 			return packAwaitPromiseResult(uint32(written), false, 1)
 		}
@@ -2037,8 +2040,7 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 		EventType: EventTypeAwaitPromise,
 		PromiseID: promiseID,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("await_promise(%s)", promiseID),
@@ -2059,7 +2061,7 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 				return packSimpleResult(0, written)
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	// Fresh execution: check if target has responded via signal store.
@@ -2072,8 +2074,7 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 				SignalName:    signalName,
 				SignalPayload: payload,
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 
 			mem := m.Memory()
 			written, _ := writeWasmString(mem, responsePtr, payload, responseMaxLen)
@@ -2088,8 +2089,7 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 		SignalNames: signalName,
 		TimeoutMs: timeoutMs,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	s.suspendErr = &SuspendError{
 		Reason: fmt.Sprintf("send_signal_and_wait(%s, %s)", targetRunID, signalName),
@@ -2109,7 +2109,7 @@ func (s *execSession) ReplyToSignal(ctx context.Context, m api.Module, correlati
 				return 0
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	rec := EventRecord{
@@ -2118,8 +2118,7 @@ func (s *execSession) ReplyToSignal(ctx context.Context, m api.Module, correlati
 		SignalName:    correlationID,
 		SignalPayload: response,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	return 0
 }
@@ -2134,7 +2133,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 				return 0
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	rec := EventRecord{
@@ -2144,8 +2143,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 		SignalPayload: payload,
 		RunID:         targetRunID,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	// Deliver to target via signal store if available.
 	if s.engine.signalStore != nil {
@@ -2228,8 +2226,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 				ScopeKey:  scopeKey,
 				Err:       err.Error(),
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 			return packSimpleResult(1, 0)
 		}
 		if !acquired {
@@ -2239,8 +2236,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 				ScopeKey:  scopeKey,
 				Err:       "scope held by another workflow",
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 			s.suspendErr = &SuspendError{
 				Reason: fmt.Sprintf("virtual object scope %s held by another workflow", scopeKey),
 				Until:   time.UnixMilli(s.nowMs).Add(5 * time.Second),
@@ -2256,8 +2252,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 		EventType: EventTypeScopeAcquired,
 		ScopeKey:  scopeKey,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	s.scopeSet = true
 	s.scopeObjType = objectType
@@ -2295,7 +2290,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 		if rec.Err != "" {
 			// Previous attempt failed.
 			// Do not set scope fields; switch to fresh to retry acquisition.
-			s.isReplay = false
+			s.exitReplay()
 			return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
 		}
 
@@ -2309,7 +2304,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 	}
 
 	// Past recorded history -- switch to fresh execution.
-	s.isReplay = false
+	s.exitReplay()
 	return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
 }
 
@@ -2377,8 +2372,7 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 				LockAcquired: 0,
 				Err:          err.Error(),
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 			return packAcquireLockResult(false, 1)
 		}
 	}
@@ -2394,8 +2388,7 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 		LockTTLMs:    ttlMs,
 		LockAcquired: a,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	return packAcquireLockResult(acquired, 0)
 }
@@ -2413,7 +2406,7 @@ func (s *execSession) replayAcquireLock(ctx context.Context, m api.Module, key s
 		}
 		return packAcquireLockResult(rec.LockAcquired != 0, 0)
 	}
-	s.isReplay = false
+	s.exitReplay()
 	return s.freshAcquireLock(ctx, m, key, ttlMs)
 }
 
@@ -2434,8 +2427,7 @@ func (s *execSession) freshReleaseLock(ctx context.Context, m api.Module, key st
 				LockKey:   key,
 				Err:       err.Error(),
 			}
-			s.history = append(s.history, rec)
-			s.stepCount++
+			s.recordEvent(rec)
 			return int64(1)
 		}
 	}
@@ -2445,8 +2437,7 @@ func (s *execSession) freshReleaseLock(ctx context.Context, m api.Module, key st
 		EventType: EventTypeReleaseLock,
 		LockKey:   key,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	return 0
 }
@@ -2464,7 +2455,7 @@ func (s *execSession) replayReleaseLock(ctx context.Context, m api.Module, key s
 		}
 		return 0
 	}
-	s.isReplay = false
+	s.exitReplay()
 	return s.freshReleaseLock(ctx, m, key)
 }
 
@@ -2485,8 +2476,7 @@ func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, compute
 		EventType:        EventTypeSideEffect,
 		SideEffectResult: computedResult,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	written, _ := writeWasmString(mem, respPtr, computedResult, respMaxLen)
 	return packSimpleResult(0, written)
@@ -2507,7 +2497,7 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, respPt
 		return packSimpleResult(0, written)
 	}
 
-	s.isReplay = false
+	s.exitReplay()
 	return s.freshSideEffect(ctx, m, "", respPtr, respMaxLen)
 }
 
@@ -2540,7 +2530,7 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 				return 0
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	// Fresh execution: record and dispatch.
@@ -2550,8 +2540,7 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 		PromiseID:     promiseID,
 		PromiseResult: value,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	if s.engine.promiseStore != nil {
 		if err := s.engine.promiseStore.ResolvePromise(ctx, s.workflowID, promiseID, value); err != nil {
@@ -2570,7 +2559,7 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 				return 0
 			}
 		}
-		s.isReplay = false
+		s.exitReplay()
 	}
 
 	// Fresh execution: record and dispatch.
@@ -2580,8 +2569,7 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 		PromiseID:    promiseID,
 		PromiseError: errMsg,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	if s.engine.promiseStore != nil {
 		if err := s.engine.promiseStore.RejectPromise(ctx, s.workflowID, promiseID, errMsg); err != nil {
@@ -2607,8 +2595,7 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 		Op:        operation,
 		Request:   requestJSON,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	// Execute the fire-and-forget call through the caller.
 	if s.engine.caller != nil {
@@ -2638,8 +2625,7 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 		Request:    requestJSON,
 		DurationMs: delayMs,
 	}
-	s.history = append(s.history, rec)
-	s.stepCount++
+	s.recordEvent(rec)
 
 	// Schedule the call. For now, run in a goroutine after the delay.
 	if s.engine.caller != nil {

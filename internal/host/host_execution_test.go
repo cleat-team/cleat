@@ -163,6 +163,7 @@ func TestDurableSleep_Fresh(t *testing.T) {
 		engine:    &Engine{caller: &mockCaller{}},
 		history:   make([]EventRecord, 0),
 		deferrals: make(map[string]string),
+		nowMs:     1000000,
 	}
 
 	result := session.DurableSleep(ctx, mod, 5000)
@@ -177,15 +178,13 @@ func TestDurableSleep_Fresh(t *testing.T) {
 		t.Fatal("expected suspendErr to be set")
 	}
 
-	// Verify the sleep event was recorded.
-	if len(session.history) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(session.history))
+	// Sleep is local: no event recorded in history.
+	if len(session.history) != 0 {
+		t.Fatalf("expected 0 events (sleep is local), got %d", len(session.history))
 	}
-	if session.history[0].EventType != EventTypeSleep {
-		t.Errorf("expected Sleep event, got %s", session.history[0].EventType)
-	}
-	if session.history[0].DurationMs != 5000 {
-		t.Errorf("expected DurationMs=5000, got %d", session.history[0].DurationMs)
+	// nowMs should advance by the sleep duration.
+	if session.nowMs != 1000000+5000 {
+		t.Errorf("expected nowMs=%d, got %d", 1000000+5000, session.nowMs)
 	}
 }
 
@@ -1274,7 +1273,7 @@ func TestSplitSignalNames(t *testing.T) {
 func TestEventTypeConstants(t *testing.T) {
 	// Verify all event type constants are non-empty and unique.
 	types := []EventType{
-		EventTypeCall, EventTypeSleep, EventTypeAwaitSignals, EventTypeSignalReceived,
+		EventTypeCall, EventTypeAwaitSignals, EventTypeSignalReceived,
 		EventTypeDefer, EventTypeChildWorkflow, EventTypeAwaitChild, EventTypeContinueAsNew,
 		EventTypeHeartbeat, EventTypeAwaitAllChildren, EventTypePluginCall,
 		EventTypeCreatePromise, EventTypeAwaitPromise, EventTypePromiseResolved,

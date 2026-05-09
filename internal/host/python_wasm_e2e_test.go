@@ -115,7 +115,7 @@ func TestPythonWasmEndToEnd(t *testing.T) {
 				t.Errorf("expected operation 'SendNotification', got %q", rec.Op)
 			}
 		}
-		if rec.EventType == EventTypeSleep {
+		if false /* sleep events no longer recorded */ {
 			t.Errorf("unexpected sleep event: %+v", rec)
 		}
 	}

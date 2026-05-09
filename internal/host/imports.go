@@ -466,11 +466,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 // nowMs is the global time provider, atomically settable for tests.
 var nowMs atomic.Int64
 
-func init() {
+// UpdateNowMs sets the global Now() seed to the current wall-clock time.
+// Call this at worker startup and periodically (e.g., on each poll cycle)
+// so that fresh workflow execution sessions see a reasonable wall-clock time.
+// During replay, the seed is overridden from event history timestamps.
+func UpdateNowMs() {
 	nowMs.Store(time.Now().UnixMilli())
-}
-
-// SetNowMsForReplay sets the global time provider for deterministic replay.
-func SetNowMsForReplay(ms int64) {
-	nowMs.Store(ms)
 }

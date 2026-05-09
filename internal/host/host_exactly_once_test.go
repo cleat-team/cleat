@@ -331,10 +331,10 @@ func TestSideEffectRoundTrip(t *testing.T) {
 // DurableSleep deduplication test
 // ---------------------------------------------------------------------------
 
-// TestDurableSleepDeduplication verifies that duplicate DurableSleep calls
-// are deduplicated on replay: the recorded sleep event is consumed from history
-// and the function returns completed immediately without re-suspending.
-func TestDurableSleepDeduplication(t *testing.T) {
+// TestDurableSleepLocal verifies the local sleep model: DurableSleep does not
+// record a history event. On fresh execution it suspends. When resumed (signaled
+// by replayJustEnded=true), the first sleep completes without re-suspending.
+func TestDurableSleepLocal(t *testing.T) {
 	ctx := context.Background()
 	rt, err := NewRuntime(ctx)
 	if err != nil {
@@ -357,33 +357,53 @@ func TestDurableSleepDeduplication(t *testing.T) {
 	if freshSession.suspendErr == nil {
 		t.Fatal("expected suspendErr after fresh sleep")
 	}
-	if len(freshSession.history) != 1 {
-		t.Fatalf("expected 1 sleep event in history, got %d", len(freshSession.history))
+	// Sleep is local: no event recorded in history.
+	if len(freshSession.history) != 0 {
+		t.Fatalf("expected 0 sleep events in history, got %d", len(freshSession.history))
+	}
+	// nowMs should have advanced by the sleep duration.
+	if freshSession.nowMs != 1000000+5000 {
+		t.Errorf("expected nowMs=%d, got %d", 1000000+5000, freshSession.nowMs)
 	}
 
-	// Replay session with the recorded history.
+	// Resumed session (replayJustEnded=true): sleep should complete without suspending.
 	mod2 := newTestModule(t, rt)
-	replaySession := &execSession{
-		engine:   &Engine{caller: &mockCaller{}},
-		history:  freshSession.history,
-		isReplay: true,
-		nowMs:    1005000, // later time
+	resumedSession := &execSession{
+		engine:          &Engine{caller: &mockCaller{}},
+		history:         make([]EventRecord, 0),
+		isReplay:        true,
+		replayJustEnded: true, // set by exitReplay at the frontier
+		nowMs:            1000000,
 	}
 
-	// On replay, the sleep should be resolved from history without re-suspending.
-	result2 := replaySession.DurableSleep(ctx, mod2, 5000)
+	result2 := resumedSession.DurableSleep(ctx, mod2, 5000)
 	status2, duration2 := decodeSleepResult(result2)
 	if status2 != sleepStatusCompleted {
-		t.Errorf("expected sleep status completed (%d) on replay, got %d", sleepStatusCompleted, status2)
+		t.Errorf("expected sleep status completed (%d), got %d", sleepStatusCompleted, status2)
 	}
 	if duration2 != 0 {
-		t.Errorf("expected duration 0 on replay, got %d", duration2)
+		t.Errorf("expected duration 0, got %d", duration2)
 	}
-	if replaySession.suspendErr != nil {
-		t.Error("expected no suspendErr on replay sleep")
+	if resumedSession.suspendErr != nil {
+		t.Error("expected no suspendErr on resume sleep")
 	}
-	if replaySession.stepCount != 1 {
-		t.Errorf("expected stepCount=1, got %d", replaySession.stepCount)
+	// nowMs should still advance.
+	if resumedSession.nowMs != 1000000+5000 {
+		t.Errorf("expected nowMs=%d, got %d", 1000000+5000, resumedSession.nowMs)
+	}
+	// replayJustEnded should be cleared after the sleep completes.
+	if resumedSession.replayJustEnded {
+		t.Error("expected replayJustEnded to be cleared after sleep")
+	}
+
+	// Second sleep after resume should suspend (forward execution).
+	result3 := resumedSession.DurableSleep(ctx, mod2, 1000)
+	status3, _ := decodeSleepResult(result3)
+	if status3 != sleepStatusSuspend {
+		t.Errorf("expected second sleep to suspend, got status %d", status3)
+	}
+	if resumedSession.suspendErr == nil {
+		t.Fatal("expected suspendErr on second sleep")
 	}
 }
 
@@ -563,7 +583,7 @@ func TestReplayWithMissingEventsDivergence(t *testing.T) {
 
 	// History has a sleep event, but replay attempts a call.
 	history := []EventRecord{
-		{Step: 0, EventType: EventTypeSleep, DurationMs: 5000},
+		{Step: 0, EventType: EventTypeCall, Service: "svc", Op: "op", Request: "{}"},
 	}
 
 	session := &execSession{
@@ -756,48 +776,52 @@ func TestDurableSleepMsDedupAcrossReplays(t *testing.T) {
 	defer rt.Close(ctx)
 	mod := newTestModule(t, rt)
 
-	// Fresh execution records a sleep event.
+	// Fresh execution: sleep is local, suspends, no history event.
 	freshSession := &execSession{
 		engine:  &Engine{caller: &mockCaller{}},
 		history: make([]EventRecord, 0),
 		nowMs:   1000000,
 	}
 	_ = freshSession.DurableSleep(ctx, mod, 5000)
-	if len(freshSession.history) != 1 {
-		t.Fatalf("expected 1 sleep event, got %d", len(freshSession.history))
+	if len(freshSession.history) != 0 {
+		t.Fatalf("expected 0 sleep events (sleep is local), got %d", len(freshSession.history))
 	}
 	if freshSession.suspendErr == nil {
 		t.Fatal("expected suspendErr after fresh sleep")
 	}
-
-	// Replay the sleep event — should complete without re-suspending.
-	mod2 := newTestModule(t, rt)
-	replaySession := &execSession{
-		engine:   &Engine{caller: &mockCaller{}},
-		history:  freshSession.history,
-		isReplay: true,
-		nowMs:    1005000,
+	if freshSession.nowMs != 1000000+5000 {
+		t.Errorf("expected nowMs=%d, got %d", 1000000+5000, freshSession.nowMs)
 	}
-	result := replaySession.DurableSleep(ctx, mod2, 5000)
+
+	// Resume from sleep: replayJustEnded=true simulates the frontier transition.
+	mod2 := newTestModule(t, rt)
+	resumedSession := &execSession{
+		engine:          &Engine{caller: &mockCaller{}},
+		history:         freshSession.history,
+		isReplay:        true,
+		replayJustEnded: true,
+		nowMs:            1000000,
+	}
+	result := resumedSession.DurableSleep(ctx, mod2, 5000)
 	status, _ := decodeSleepResult(result)
 	if status != sleepStatusCompleted {
-		t.Errorf("expected sleep completed (%d) on replay, got %d", sleepStatusCompleted, status)
+		t.Errorf("expected sleep completed (%d) on resume, got %d", sleepStatusCompleted, status)
 	}
-	if replaySession.suspendErr != nil {
-		t.Error("expected no suspendErr on replay sleep")
+	if resumedSession.suspendErr != nil {
+		t.Error("expected no suspendErr on resume sleep")
 	}
-	if replaySession.stepCount != 1 {
-		t.Errorf("expected stepCount=1 after replay, got %d", replaySession.stepCount)
+	if resumedSession.replayJustEnded {
+		t.Error("expected replayJustEnded to be cleared")
 	}
 
-	// Calling DurableSleep again without history should suspend.
-	result2 := replaySession.DurableSleep(ctx, mod2, 3000)
+	// Second sleep should suspend (forward execution after resume).
+	result2 := resumedSession.DurableSleep(ctx, mod2, 3000)
 	status2, duration2 := decodeSleepResult(result2)
 	if status2 != sleepStatusSuspend {
-		t.Errorf("expected sleep suspend (%d) when history exhausted, got %d", sleepStatusSuspend, status2)
+		t.Errorf("expected sleep suspend (%d) on second sleep, got %d", sleepStatusSuspend, status2)
 	}
 	if duration2 != 3000 {
-		t.Errorf("expected duration 3000 on fresh sleep, got %d", duration2)
+		t.Errorf("expected duration 3000 on second sleep, got %d", duration2)
 	}
 }
 

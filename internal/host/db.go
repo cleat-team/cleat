@@ -575,7 +575,8 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
-		       promise_name, promise_id, promise_result, promise_error
+		       promise_name, promise_id, promise_result, promise_error,
+		       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms
 		FROM event_history
 		WHERE workflow_id = $1
 		ORDER BY step
@@ -603,7 +604,8 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
-			&promiseName, &promiseID, &promiseResult, &promiseError); err != nil {
+			&promiseName, &promiseID, &promiseResult, &promiseError,
+			&rec.TimestampMs); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
@@ -753,8 +755,9 @@ if err := s.setRLSOnTx(tx); err != nil {
 			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 			defer_description, defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
-			promise_name, promise_id, promise_result, promise_error, payload)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
+			promise_name, promise_id, promise_result, promise_error, payload,
+			created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
 		ON CONFLICT (workflow_id, step) DO NOTHING
 	`)
 	if err != nil {
@@ -776,7 +779,8 @@ if err := s.setRLSOnTx(tx); err != nil {
 			nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
-			payloadArg)
+			payloadArg,
+			time.UnixMilli(rec.TimestampMs))
 		if err != nil {
 			return fmt.Errorf("append history batch: exec step %d: %w", rec.Step, err)
 		}

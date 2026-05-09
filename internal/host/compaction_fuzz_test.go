@@ -26,8 +26,6 @@ func FuzzCompactionEquivalence(f *testing.F) {
 
 	// Single Call event with realistic fields.
 	f.Add(fuzzSeed(EventCodeCall, []string{"catalog", "LookupItem", `{"sku":"ABC"}`, `{"price":999}`, ""}))
-	// Single Sleep.
-	f.Add(fuzzSeed(EventCodeSleep, nil, 42))
 	// Single AwaitSignals.
 	f.Add(fuzzSeed(EventCodeAwaitSignals, []string{"payment,shipping"}, 30000))
 	// Single SignalReceived.
@@ -66,7 +64,6 @@ func FuzzCompactionEquivalence(f *testing.F) {
 	// Pair: Call + Sleep (tests split at 1-halfway).
 	f.Add(append(
 		fuzzSeed(EventCodeCall, []string{"svc", "op", `{}`, `{}`, ""}),
-		fuzzSeed(EventCodeSleep, nil, 99)...,
 	))
 
 	// Pair: ChildWorkflow + child completing AwaitChild (tests open-children
@@ -197,6 +194,9 @@ func parseFuzzEvents(data []byte) []EventRecord {
 			Step:      step,
 			EventType: codeToEventType[typeCode],
 		}
+		if ev.EventType == "" {
+			ev.EventType = EventTypeCall // unknown code, default to call
+		}
 
 		switch typeCode {
 		case EventCodeCall: // svc, op, req, resp, err (5 strings)
@@ -205,8 +205,6 @@ func parseFuzzEvents(data []byte) []EventRecord {
 			ev.Request = r.readString()
 			ev.Response = r.readString()
 			ev.Err = r.readString()
-		case EventCodeSleep: // durMs (1 int64)
-			ev.DurationMs = r.readInt64()
 		case EventCodeAwaitSignals: // sigNames (string), timeoutMs (int64)
 			ev.SignalNames = r.readString()
 			ev.TimeoutMs = r.readInt64()
@@ -322,8 +320,6 @@ func eventFieldsMatch(a, b EventRecord) bool {
 			a.Response == b.Response &&
 			a.Err == b.Err
 
-	case EventTypeSleep:
-		return a.DurationMs == b.DurationMs
 
 	case EventTypeAwaitSignals:
 		return a.SignalNames == b.SignalNames &&
@@ -429,8 +425,6 @@ func eventSummary(ev EventRecord) string {
 		return fmt.Sprintf("Call{svc=%s op=%s req=%s resp=%s err=%q}",
 			trunc(ev.Service, 12), trunc(ev.Op, 12),
 			trunc(ev.Request, 12), trunc(ev.Response, 12), ev.Err)
-	case EventTypeSleep:
-		return fmt.Sprintf("Sleep{dur=%d}", ev.DurationMs)
 	case EventTypeAwaitSignals:
 		return fmt.Sprintf("AwaitSignals{sigs=%s timeout=%d}", trunc(ev.SignalNames, 16), ev.TimeoutMs)
 	case EventTypeSignalReceived:
@@ -488,8 +482,6 @@ func dumpEventDiff(t *testing.T, a, b EventRecord) {
 		mismatchStr("Request", a.Request, b.Request, t)
 		mismatchStr("Response", a.Response, b.Response, t)
 		mismatchStr("Err", a.Err, b.Err, t)
-	case EventTypeSleep:
-		mismatchInt("DurationMs", a.DurationMs, b.DurationMs, t)
 	case EventTypeAwaitSignals:
 		mismatchStr("SignalNames", a.SignalNames, b.SignalNames, t)
 		mismatchInt("TimeoutMs", a.TimeoutMs, b.TimeoutMs, t)
