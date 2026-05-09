@@ -839,8 +839,8 @@ func TestSagaTypedReturnsTransientErrorWithoutCompensation(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 
-	// Only step1, step2, step3 executed (no compensation for transient error).
-	expected := []string{"step1", "step2", "step3"}
+	// All completed steps are compensated on any error (not just TerminalError).
+	expected := []string{"step1", "step2", "step3", "comp2", "comp1"}
 	if len(order) != len(expected) {
 		t.Fatalf("expected %v, got %v", expected, order)
 	}

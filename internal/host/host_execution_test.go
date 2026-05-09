@@ -663,15 +663,21 @@ func TestEngineExecuteWithRustWasm(t *testing.T) {
 		t.Fatal("expected non-empty event history")
 	}
 
-	// Verify the expected service calls.
+	// Filter durable_log events; verify the expected service calls.
+	var callHistory []EventRecord
+	for _, rec := range history {
+		if rec.EventType != EventTypeDurableLog {
+			callHistory = append(callHistory, rec)
+		}
+	}
 	expectedCalls := []string{"inventory", "payments", "shipping", "notifications"}
 	for i, svc := range expectedCalls {
-		if i >= len(history) {
+		if i >= len(callHistory) {
 			t.Errorf("step %d: missing (expected %s)", i, svc)
 			continue
 		}
-		if history[i].Service != svc {
-			t.Errorf("step %d: expected service %s, got %s", i, svc, history[i].Service)
+		if callHistory[i].Service != svc {
+			t.Errorf("step %d: expected service %s, got %s", i, svc, callHistory[i].Service)
 		}
 	}
 
@@ -786,9 +792,12 @@ func TestEngineDivergenceWithRustWasm(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	// Tamper with the first event's service name.
-	if len(history) > 0 {
-		history[0].Service = "tampered_service"
+	// Tamper with the first call event's service name (skip durable_log events).
+	for i := range history {
+		if history[i].EventType == EventTypeCall {
+			history[i].Service = "tampered_service"
+			break
+		}
 	}
 
 	caller2 := &mockCaller{}

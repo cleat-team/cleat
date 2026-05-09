@@ -36,7 +36,7 @@ func TestReplayProducesIdenticalHistory(t *testing.T) {
 		{Step: 0, EventType: host.EventTypeCall, Service: "catalog", Op: "LookupItem", Request: `{"sku":"ABC"}`, Response: `{"price":999}`},
 		{Step: 1, EventType: host.EventTypeCall, Service: "inventory", Op: "Reserve", Request: `{"sku":"ABC","qty":1}`, Response: `{"ok":true}`},
 		{Step: 2, EventType: host.EventTypeCall, Service: "payments", Op: "Charge", Request: `{"amount":999}`, Response: `{"charge_id":"ch_123"}`},
-		{Step: 3, EventType: host.EventTypeSleep, DurationMs: 5000},
+		{Step: 3, EventType: host.EventTypeCall, Service: "shipping", Op: "CreateShipment", Request: `{"order_id":1}`, Response: `{"tracking":"TRACK-1"}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -236,7 +236,7 @@ func TestReplayHashMismatch(t *testing.T) {
 	events := []host.EventRecord{
 		{Step: 0, EventType: host.EventTypeCall, Service: "a", Op: "op1", Request: `{"x":1}`, Response: `{"ok":true}`},
 		{Step: 1, EventType: host.EventTypeCall, Service: "b", Op: "op2", Request: `{"y":2}`, Response: `{"ok":true}`},
-		{Step: 2, EventType: host.EventTypeSleep, DurationMs: 1000},
+		{Step: 2, EventType: host.EventTypeCall, Service: "c", Op: "op3", Request: `{"z":3}`, Response: `{"ok":true}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)

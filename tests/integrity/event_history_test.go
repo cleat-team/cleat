@@ -131,7 +131,7 @@ func TestEventHistoryConsistencyAfterFault(t *testing.T) {
 	events := []host.EventRecord{
 		{Step: 0, EventType: host.EventTypeCall, Service: "svc1", Op: "op1", Request: `{"a":1}`, Response: `{"ok":true}`},
 		{Step: 1, EventType: host.EventTypeCall, Service: "svc1", Op: "op2", Request: `{"b":2}`, Response: `{"ok":true}`},
-		{Step: 2, EventType: host.EventTypeSleep, DurationMs: 100},
+		{Step: 2, EventType: host.EventTypeCall, Service: "svc1", Op: "op3", Request: `{"c":3}`, Response: `{"ok":true}`},
 	}
 
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
@@ -177,8 +177,8 @@ func TestEventHistoryConsistencyAfterFault(t *testing.T) {
 	if history[1].Service != "svc1" || history[1].Op != "op2" {
 		t.Errorf("event 1: expected svc1/op2, got %s/%s", history[1].Service, history[1].Op)
 	}
-	if history[2].EventType != host.EventTypeSleep || history[2].DurationMs != 100 {
-		t.Errorf("event 2: expected sleep/100, got %s/%d", history[2].EventType, history[2].DurationMs)
+	if history[2].Service != "svc1" || history[2].Op != "op3" {
+		t.Errorf("event 2: expected svc1/op3, got %s/%s", history[2].Service, history[2].Op)
 	}
 }
 

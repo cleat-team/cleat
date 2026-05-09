@@ -392,6 +392,25 @@ func (s *ShardedStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID
 	return shard.Store.ReleaseWorkflow(ctx, workflowID, workerID, nextWakeAt)
 }
 
+// ContinueAsNew routes by current run ID so that both the new-run insert and
+// the old-run completion land on the same shard.
+func (s *ShardedStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+	shard := s.getShard(currentRunID)
+	if shard == nil {
+		return "", fmt.Errorf("continue_as_new: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.ContinueAsNew(ctx, currentRunID, workerID, defName, defVersion, newInput, result, queryState)
+}
+
+// FinalizeWorkflowSegment routes by workflow ID.
+func (s *ShardedStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	shard := s.getShard(runID)
+	if shard == nil {
+		return fmt.Errorf("finalize_workflow_segment: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.FinalizeWorkflowSegment(ctx, runID, workerID, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
+}
+
 // RequestCancellation routes by workflow ID.
 func (s *ShardedStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
 	shard := s.getShard(workflowID)

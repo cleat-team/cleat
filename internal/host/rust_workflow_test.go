@@ -82,15 +82,22 @@ func TestRustWorkflowExecute(t *testing.T) {
 		t.Error("expected non-empty history from Rust workflow")
 	}
 
-	// The Rust workflow calls: inventory.Reserve -> payments.Charge -> shipping.CreateShipment -> notifications.SendEmail
+	// Filter durable_log events; the Rust workflow calls:
+	// inventory.Reserve -> payments.Charge -> shipping.CreateShipment -> notifications.SendEmail
+	var callHistory []EventRecord
+	for _, rec := range history {
+		if rec.EventType != EventTypeDurableLog {
+			callHistory = append(callHistory, rec)
+		}
+	}
 	expectedCalls := []string{"inventory", "payments", "shipping", "notifications"}
 	for i, svc := range expectedCalls {
-		if i >= len(history) {
+		if i >= len(callHistory) {
 			t.Errorf("step %d: missing (expected %s)", i, svc)
 			continue
 		}
-		if history[i].Service != svc {
-			t.Errorf("step %d: expected service %s, got %s", i, svc, history[i].Service)
+		if callHistory[i].Service != svc {
+			t.Errorf("step %d: expected service %s, got %s", i, svc, callHistory[i].Service)
 		}
 	}
 

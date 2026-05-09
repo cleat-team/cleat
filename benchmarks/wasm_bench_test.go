@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/durable/internal/host"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // ---------------------------------------------------------------------------

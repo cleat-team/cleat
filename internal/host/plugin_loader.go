@@ -1,6 +1,7 @@
 package host
 
 import (
+	"container/list"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -38,6 +39,18 @@ type pluginCacheKey struct {
 	Version string
 }
 
+// pluginCacheEntry holds a compiled module in the LRU cache.
+type pluginCacheEntry struct {
+	key    pluginCacheKey
+	module wazero.CompiledModule
+	elem   *list.Element // back-reference for O(1) removal
+}
+
+// pluginLRUEntry is stored in container/list for LRU ordering.
+type pluginLRUEntry struct {
+	key pluginCacheKey
+}
+
 // PluginLoader loads plugin WASM modules from the plugin_defs table and
 // resolves semver constraints to find the best matching plugin version.
 //
@@ -50,7 +63,8 @@ type PluginLoader struct {
 
 	// LRU cache for compiled plugin modules (keyed by name+version).
 	mu       sync.Mutex
-	cache    map[pluginCacheKey]wazero.CompiledModule
+	cache    map[pluginCacheKey]*pluginCacheEntry
+	lruList  *list.List
 	maxSize  int
 
 	// limits defines the maximum capabilities for WASM plugins loaded
@@ -70,7 +84,8 @@ func NewPluginLoader(db *sql.DB, rt *Runtime, maxSize ...int) *PluginLoader {
 	return &PluginLoader{
 		db:      db,
 		rt:      rt,
-		cache:   make(map[pluginCacheKey]wazero.CompiledModule),
+		cache:   make(map[pluginCacheKey]*pluginCacheEntry),
+		lruList: list.New(),
 		maxSize: sz,
 	}
 }
@@ -272,12 +287,9 @@ func (l *PluginLoader) LoadPlugin(ctx context.Context, name string, version stri
 	key := pluginCacheKey{Name: name, Version: version}
 
 	// Fast path: check cache.
-	l.mu.Lock()
-	if cm, ok := l.cache[key]; ok {
-		l.mu.Unlock()
+	if cm, ok := l.cacheGet(key); ok {
 		return cm, nil
 	}
-	l.mu.Unlock()
 
 	// Slow path: query database.
 	var wasmBytes []byte
@@ -303,16 +315,7 @@ func (l *PluginLoader) LoadPlugin(ctx context.Context, name string, version stri
 	}
 
 	// Cache the compiled module.
-	l.mu.Lock()
-	if len(l.cache) >= l.maxSize {
-		// Evict a random entry if at capacity.
-		for k := range l.cache {
-			delete(l.cache, k)
-			break
-		}
-	}
-	l.cache[key] = compiled
-	l.mu.Unlock()
+	l.cachePut(key, compiled)
 
 	return compiled, nil
 }
@@ -398,9 +401,7 @@ func (l *PluginLoader) DeprecatePlugin(ctx context.Context, name string, version
 	}
 
 	// Remove from cache.
-	l.mu.Lock()
-	delete(l.cache, pluginCacheKey{Name: name, Version: version})
-	l.mu.Unlock()
+	l.cacheRemove(pluginCacheKey{Name: name, Version: version})
 
 	log.Printf("[plugin-loader] Deprecated %s v%s", name, version)
 	return nil
@@ -442,4 +443,79 @@ func (l *PluginLoader) ListPluginVersions(ctx context.Context, name string) ([]P
 	})
 
 	return plugins, nil
+}
+
+// ---------------------------------------------------------------------------
+// Internal cache methods
+// ---------------------------------------------------------------------------
+
+// cacheGet retrieves a compiled module from the LRU cache, promoting it
+// to the front. Returns false on miss.
+func (l *PluginLoader) cacheGet(key pluginCacheKey) (wazero.CompiledModule, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	entry, ok := l.cache[key]
+	if !ok {
+		return nil, false
+	}
+
+	// Move to front (most recently used).
+	l.lruList.MoveToFront(entry.elem)
+	return entry.module, true
+}
+
+// cachePut inserts a compiled module into the LRU cache, evicting the
+// least recently used entry if at capacity.
+func (l *PluginLoader) cachePut(key pluginCacheKey, module wazero.CompiledModule) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// If already in cache, update and move to front.
+	if existing, ok := l.cache[key]; ok {
+		l.lruList.MoveToFront(existing.elem)
+		existing.module.Close(context.Background())
+		existing.module = module
+		return
+	}
+
+	// Evict if at capacity.
+	for l.lruList.Len() >= l.maxSize {
+		l.evictLocked()
+	}
+
+	// Insert new entry.
+	elem := l.lruList.PushFront(&pluginLRUEntry{key: key})
+	l.cache[key] = &pluginCacheEntry{
+		key:    key,
+		module: module,
+		elem:   elem,
+	}
+}
+
+// cacheRemove removes an entry from the cache if present.
+func (l *PluginLoader) cacheRemove(key pluginCacheKey) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if entry, ok := l.cache[key]; ok {
+		l.lruList.Remove(entry.elem)
+		delete(l.cache, key)
+		entry.module.Close(context.Background())
+	}
+}
+
+// evictLocked removes the least recently used entry from the cache.
+// Must be called with l.mu held.
+func (l *PluginLoader) evictLocked() {
+	elem := l.lruList.Back()
+	if elem == nil {
+		return
+	}
+	le := elem.Value.(*pluginLRUEntry)
+	l.lruList.Remove(elem)
+	if entry, ok := l.cache[le.key]; ok {
+		delete(l.cache, le.key)
+		entry.module.Close(context.Background())
+	}
 }

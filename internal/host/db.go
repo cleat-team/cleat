@@ -180,6 +180,18 @@ type WorkflowStore interface {
 	// Used when a workflow suspends (sleep/await signals).
 	ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error
 
+	// ContinueAsNew atomically creates a new workflow run AND completes the
+	// current one in a single database transaction.  If the transaction fails
+	// neither operation takes effect.  Returns the new run ID on success.
+	ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (newRunID string, err error)
+
+	// FinalizeWorkflowSegment atomically appends new events and updates the
+	// workflow status in a single database transaction.  finalStatus is one of
+	// "done", "failed" or "ready" (suspend).  Fields not relevant to the chosen
+	// status are ignored.  If the transaction fails neither events nor status
+	// are written.
+	FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
+
 	// RequestCancellation sets the cancellation flag on a workflow.
 	RequestCancellation(ctx context.Context, workflowID, reason string) error
 
@@ -742,8 +754,22 @@ func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID 
 	}
 	defer tx.Rollback()
 
-if err := s.setRLSOnTx(tx); err != nil {
+	if err := s.setRLSOnTx(tx); err != nil {
 		return fmt.Errorf("append history batch: set rls: %w", err)
+	}
+
+	if err := s.appendEventsInTx(ctx, tx, workflowID, recs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// appendEventsInTx inserts event records using an already-open transaction.
+// This is shared by AppendEventHistoryBatch and FinalizeWorkflowSegment so
+// that both can insert events atomically alongside other operations.
+func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowID string, recs []EventRecord) error {
+	if len(recs) == 0 {
+		return nil
 	}
 
 	// TODO: Include checksum column once migration is run:
@@ -761,7 +787,7 @@ if err := s.setRLSOnTx(tx); err != nil {
 		ON CONFLICT (workflow_id, step) DO NOTHING
 	`)
 	if err != nil {
-		return fmt.Errorf("append history batch: prepare: %w", err)
+		return fmt.Errorf("append events in tx: prepare: %w", err)
 	}
 	defer stmt.Close()
 
@@ -782,10 +808,151 @@ if err := s.setRLSOnTx(tx); err != nil {
 			payloadArg,
 			time.UnixMilli(rec.TimestampMs))
 		if err != nil {
-			return fmt.Errorf("append history batch: exec step %d: %w", rec.Step, err)
+			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
 	}
-	return tx.Commit()
+	return nil
+}
+
+// ContinueAsNew atomically creates a new workflow run and completes the current
+// one in a single database transaction.  If the transaction fails, neither
+// operation takes effect.  Returns the new run ID on success.
+func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Create the new workflow run.
+	var newRunID string
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
+		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
+		        COALESCE((SELECT namespace FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'))
+		RETURNING id
+	`, defName, defVersion, newInput).Scan(&newRunID)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: start new run: %w", err)
+	}
+
+	// Complete the current run.
+	qsJSON, _ := json.Marshal(queryState)
+	if qsJSON == nil {
+		qsJSON = []byte("{}")
+	}
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
+		WHERE id = $1 AND assigned_to = $2
+	`, currentRunID, workerID, result, qsJSON)
+	if err != nil {
+		return "", fmt.Errorf("continue as new: complete old run: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+
+	// Best-effort cleanup after commit.
+	s.ClearStickyWorker(context.Background(), currentRunID)
+	s.ReleaseWorkflowConcurrencyKeys(context.Background(), currentRunID)
+	s.enforceParentClosePolicy(context.Background(), currentRunID)
+
+	return newRunID, nil
+}
+
+// FinalizeWorkflowSegment atomically appends new events and updates the
+// workflow status in a single database transaction.  This eliminates the
+// race between AppendEventHistoryBatch and the subsequent CompleteWorkflow /
+// FailWorkflow / ReleaseWorkflow call.
+//
+// finalStatus must be one of:
+//   - "done"   — marks the workflow as completed with the given result
+//   - "failed" — marks the workflow as failed with the given error info
+//   - "ready"  — returns the workflow to the ready queue (suspend)
+// Fields not relevant to the chosen status are ignored.
+func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("finalize workflow: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.setRLSOnTx(tx); err != nil {
+		return fmt.Errorf("finalize workflow: set rls: %w", err)
+	}
+
+	// Append new events within the same transaction.
+	if err := s.appendEventsInTx(ctx, tx, runID, newEvents); err != nil {
+		return fmt.Errorf("finalize workflow: append events: %w", err)
+	}
+
+	// Update workflow status based on finalStatus.
+	switch finalStatus {
+	case "done":
+		qsJSON, _ := json.Marshal(queryState)
+		if qsJSON == nil {
+			qsJSON = []byte("{}")
+		}
+		_, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
+			WHERE id = $1 AND assigned_to = $2
+		`, runID, workerID, result, qsJSON)
+	case "failed":
+		qsJSON, _ := json.Marshal(queryState)
+		if qsJSON == nil {
+			qsJSON = []byte("{}")
+		}
+		_, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = 'failed',
+			    error_msg = $3,
+			    error_code = $4,
+			    error_op = $5,
+			    completed_at = now(),
+			    assigned_to = NULL,
+			    query_state = $6
+			WHERE id = $1 AND assigned_to = $2
+		`, runID, workerID, result, errorCode, errorOp, qsJSON)
+	case "ready":
+		_, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = 'ready', assigned_to = NULL, next_wake_at = $3
+			WHERE id = $1 AND assigned_to = $2
+		`, runID, workerID, nextWakeAt)
+	default:
+		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
+	}
+	if err != nil {
+		return fmt.Errorf("finalize workflow: update status: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Best-effort cleanup for terminal statuses.
+	if finalStatus == "done" || finalStatus == "failed" {
+		// Record result/error in idempotency_keys if this workflow was started with a key.
+		switch finalStatus {
+		case "done":
+			s.db.ExecContext(ctx,
+				`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1`,
+				runID, result)
+		case "failed":
+			s.db.ExecContext(ctx,
+				`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
+				runID, result)
+		}
+		s.ClearStickyWorker(context.Background(), runID)
+		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
+		s.enforceParentClosePolicy(context.Background(), runID)
+	}
+
+	return nil
 }
 
 // AppendEventHistory appends a single event to the history.

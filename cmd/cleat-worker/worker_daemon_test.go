@@ -91,6 +91,8 @@ type mockStore struct {
 	loadMemoryStatsFn                  func(ctx context.Context) ([]host.WorkflowMemoryStats, error)
 	queueDepthFn                       func(ctx context.Context) (int64, error)
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
+	continueAsNewFn             func(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error)
+	finalizeWorkflowSegmentFn   func(ctx context.Context, runID, workerID string, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 }
 
 func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error) {
@@ -535,6 +537,20 @@ func (m *mockStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time
 		return m.deleteExpiredEventsFn(ctx, olderThan)
 	}
 	return 0, nil
+}
+
+func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+	if m.continueAsNewFn != nil {
+		return m.continueAsNewFn(ctx, currentRunID, workerID, defName, defVersion, newInput, result, queryState)
+	}
+	return "new-run-id", nil
+}
+
+func (m *mockStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	if m.finalizeWorkflowSegmentFn != nil {
+		return m.finalizeWorkflowSegmentFn(ctx, runID, workerID, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
+	}
+	return nil
 }
 
 // ---- test helpers ----

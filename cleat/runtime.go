@@ -2186,11 +2186,6 @@ func (s *Saga) Run(h HostCalls) error {
 		h.LogKV("saga: executing step", "step", i, "description", step.Description)
 		_, err := step.Forward(h)
 		if err != nil {
-			// Only compensate on TerminalError (non-retryable). For retryable
-			// errors, the caller should retry the entire saga.
-			if !IsTerminalError(err) {
-				return fmt.Errorf("saga: %w", err)
-			}
 			h.LogKV("saga: step failed, compensating",
 				"step", i,
 				"description", step.Description,
@@ -2348,9 +2343,6 @@ func (s *SagaTyped[T]) Run(h HostCalls) ([]T, error) {
 		h.LogKV("saga: executing typed step", "step", i, "description", step.Description)
 		result, err := step.Forward(h)
 		if err != nil {
-			if !IsTerminalError(err) {
-				return results, fmt.Errorf("saga: %w", err)
-			}
 			h.LogKV("saga: typed step failed, compensating",
 				"step", i, "description", step.Description,
 				"error", err.Error(), "completed_count", completed)

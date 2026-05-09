@@ -1419,19 +1419,17 @@ func (s *execSession) DurableLog(ctx context.Context, m api.Module, message stri
 	}
 
 	if s.isReplay {
-		// Consume matching event from history.
-		if len(s.history) > 0 {
-			next := s.history[0]
+		if s.stepCount < len(s.history) {
+			next := s.history[s.stepCount]
 			if next.EventType == EventTypeDurableLog {
-				s.history = s.history[1:]
+				s.stepCount++
 				return 0
 			}
 		}
 		return 0
 	}
 
-	// Fresh execution: append to history batch.
-	s.history = append(s.history, rec)
+	s.recordEvent(rec)
 	return 0
 }
 

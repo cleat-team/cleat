@@ -1566,6 +1566,14 @@ func (s *stubWorkflowStore) PurgeWorkflowDef(ctx context.Context, name string, v
 	return nil
 }
 
+func (s *stubWorkflowStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+	return "", nil
+}
+
+func (s *stubWorkflowStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // CollectVersionMetrics tests
 // ---------------------------------------------------------------------------

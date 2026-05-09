@@ -88,3 +88,4 @@ ports-round2/*/build/
 # Benchmark baseline files (CI artifacts, not committed)
 .benchmarks/
 .claude/worktrees/
+/cleatctl

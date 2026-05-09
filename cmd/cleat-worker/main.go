@@ -897,9 +897,13 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 
 	// ---- Handle result ----
-	// Persist any new events.
+	// Determine the final status before any DB writes so we can use the
+	// appropriate atomic method for each path.
+
+	// Collect new events (if any) so the same slice is available to all branches.
+	var newEvents []host.EventRecord
 	if len(resultHistory) > len(history) {
-		newEvents := resultHistory[len(history):]
+		newEvents = resultHistory[len(history):]
 		// Redact sensitive fields in new events before persisting.
 		if w.redactionEnabled {
 			for i := range newEvents {
@@ -907,73 +911,100 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				newEvents[i].Response = host.Redact(newEvents[i].Response)
 			}
 		}
-		queryStart := time.Now()
-		if err := w.store.AppendEventHistoryBatch(w.ctx, wf.ID, newEvents); err != nil {
-			dbQueryDuration.WithLabelValues("append_events").Observe(time.Since(queryStart).Seconds())
-			if isConnectionError(err) {
-				log.Printf("[worker %s] DB down saving events for %s — releasing", w.id, wf.ID)
-				w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
-				return
-			}
-			log.Printf("[worker %s] %s: save events error: %v", w.id, wf.ID, err)
-			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-			var ce *host.CleatError
-			errorCode := host.ErrUnknown.String()
-			errorOp := ""
-			if errors.As(err, &ce) {
-				errorCode = ce.Code.String()
-				errorOp = ce.Op
-			}
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), errorCode, errorOp, nil)
-			return
-		}
-		dbQueryDuration.WithLabelValues("append_events").Observe(time.Since(queryStart).Seconds())
 	}
 
-	if suspended != nil {
-		if suspended.Reason == "continue_as_new" {
-			// ContinueAsNew: create a new run and complete the current one.
-			log.Printf("[worker %s] %s: continue_as_new → starting new run", w.id, wf.ID)
-			newRunID, _, err := w.store.StartNewRun(w.ctx, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), "")
-			if err != nil {
-				log.Printf("[worker %s] %s: continue_as_new start failed: %v", w.id, wf.ID, err)
+	if suspended != nil && suspended.Reason == "continue_as_new" {
+		// ContinueAsNew: persist events first, then atomically create a new run
+		// AND complete the current one in a single transaction.
+		if len(newEvents) > 0 {
+			queryStart := time.Now()
+			if err := w.store.AppendEventHistoryBatch(w.ctx, wf.ID, newEvents); err != nil {
+				dbQueryDuration.WithLabelValues("append_events").Observe(time.Since(queryStart).Seconds())
+				if isConnectionError(err) {
+					log.Printf("[worker %s] DB down saving events for %s — releasing", w.id, wf.ID)
+					w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
+					return
+				}
+				log.Printf("[worker %s] %s: save events error: %v", w.id, wf.ID, err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("continue_as_new: %v", err), host.ErrUnknown.String(), "", nil)
+				var ce *host.CleatError
+				errorCode := host.ErrUnknown.String()
+				errorOp := ""
+				if errors.As(err, &ce) {
+					errorCode = ce.Code.String()
+					errorOp = ce.Op
+				}
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), errorCode, errorOp, nil)
 				return
 			}
-			log.Printf("[worker %s] %s: continued as new run %s", w.id, wf.ID, newRunID)
-			continueAsNewResult, _ := json.Marshal(map[string]interface{}{"continue_as_new": true, "new_run_id": newRunID})
-			workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
-			workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(time.Since(workflowStartTime).Seconds())
-			w.store.CompleteWorkflow(context.Background(), wf.ID, w.id, string(continueAsNewResult), nil)
-			return
+			dbQueryDuration.WithLabelValues("append_events").Observe(time.Since(queryStart).Seconds())
 		}
 
-		// Persist suspend state.
-		log.Printf("[worker %s] %s: suspended (%s), waking at %s",
-			w.id, wf.ID, suspended.Reason, suspended.SuspendUntil)
-		if err := w.store.ReleaseWorkflow(w.ctx, wf.ID, w.id, suspended.SuspendUntil); err != nil {
-			if isConnectionError(err) {
-				log.Printf("[worker %s] DB down releasing %s", w.id, wf.ID)
-				return
-			}
-			log.Printf("[worker %s] %s: release error: %v", w.id, wf.ID, err)
+		// Atomically create the new run and complete the current one.
+		log.Printf("[worker %s] %s: continue_as_new → starting new run", w.id, wf.ID)
+		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), result, queryState)
+		if err != nil {
+			log.Printf("[worker %s] %s: continue_as_new failed: %v", w.id, wf.ID, err)
+			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("continue_as_new: %v", err), host.ErrUnknown.String(), "", nil)
+			return
 		}
+		log.Printf("[worker %s] %s: continued as new run %s", w.id, wf.ID, newRunID)
+		workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
+		workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(time.Since(workflowStartTime).Seconds())
 		return
 	}
 
-	// Workflow completed. Run any registered defer callbacks in LIFO order.
-	if len(deferrals) > 0 {
-		w.runDefers(wasmBytes, deferrals)
+	// Non-ContinueAsNew: atomically append events and finalize the workflow status
+	// in a single database transaction.
+	finalStatus := "done"
+	var nextWakeAt time.Time
+	if suspended != nil {
+		finalStatus = "ready"
+		nextWakeAt = suspended.SuspendUntil
 	}
 
-	duration := time.Since(workflowStartTime)
-	workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(duration.Seconds())
-	workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
-	log.Printf("[worker %s] %s: completed (duration=%v)", w.id, wf.ID, duration)
-	w.store.CompleteWorkflow(context.Background(), wf.ID, w.id, result, queryState)
+	queryStart := time.Now()
+	err = w.store.FinalizeWorkflowSegment(w.ctx, wf.ID, w.id, newEvents, finalStatus, result, "", "", queryState, nextWakeAt)
+	if err != nil {
+		dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
+		if isConnectionError(err) {
+			log.Printf("[worker %s] DB down finalizing %s — releasing", w.id, wf.ID)
+			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
+			return
+		}
+		log.Printf("[worker %s] %s: finalize error: %v", w.id, wf.ID, err)
+		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		var ce *host.CleatError
+		errorCode := host.ErrUnknown.String()
+		errorOp := ""
+		if errors.As(err, &ce) {
+			errorCode = ce.Code.String()
+			errorOp = ce.Op
+		}
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), errorCode, errorOp, nil)
+		return
+	}
+	dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
+
+	// Post-finalization: logging and non-DB side effects.
+	if finalStatus == "done" {
+		// Workflow completed. Run any registered defer callbacks in LIFO order.
+		if len(deferrals) > 0 {
+			w.runDefers(wasmBytes, deferrals)
+		}
+
+		duration := time.Since(workflowStartTime)
+		workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(duration.Seconds())
+		workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
+		log.Printf("[worker %s] %s: completed (duration=%v)", w.id, wf.ID, duration)
+	} else {
+		log.Printf("[worker %s] %s: suspended (%s), waking at %s",
+			w.id, wf.ID, suspended.Reason, suspended.SuspendUntil)
+	}
 }
 
 func (w *Worker) heartbeatLoop() {
@@ -1017,8 +1048,11 @@ func (w *Worker) heartbeatLoop() {
 
 func (w *Worker) reaperLoop() {
 	defer w.wg.Done()
-	// Reap stale instances every 30 seconds.
-	ticker := time.NewTicker(30 * time.Second)
+	// Reap stale instances on a configurable interval derived from the
+	// heartbeat interval so that the reaper never runs more often than
+	// the heartbeat (but at least every 10s).
+	interval := max(w.heartbeatInterval, 10*time.Second)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
@@ -1027,7 +1061,11 @@ func (w *Worker) reaperLoop() {
 			return
 		case <-ticker.C:
 			reaperStart := time.Now()
-			reaped, err := w.store.ReapStaleInstances(w.ctx, 30*time.Second)
+			// A workflow must miss at least two consecutive heartbeats
+			// before it is considered stale — otherwise a slow heartbeat
+			// could cause false-positive reaping.
+			staleTimeout := max(w.heartbeatInterval*2, 10*time.Second)
+			reaped, err := w.store.ReapStaleInstances(w.ctx, staleTimeout)
 			if err != nil {
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Reaper: DB appears down", w.id)
