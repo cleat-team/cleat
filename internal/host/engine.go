@@ -436,6 +436,12 @@ type Engine struct {
 	tenantID             string
 	db                   *sql.DB // tenant-scoped database connection for plugin host functions
 	maxRetries           int     // worker-configured ceiling for retry attempts; 0 means use MaxRetryAttempts
+
+	// versionValidateFn is an optional hook called at the start of replay
+	// to validate version compatibility. If non-nil and the workflow is
+	// replaying (history is non-nil), the engine calls this before execution.
+	// If it returns an error, execution is aborted.
+	versionValidateFn func() error
 }
 
 // EngineOption configures an Engine.
@@ -513,6 +519,13 @@ func WithDB(db *sql.DB) EngineOption {
 // positive value less than the constant.
 func WithMaxRetryAttempts(n int) EngineOption {
 	return func(e *Engine) { e.maxRetries = n }
+}
+
+// WithVersionValidation sets an optional function called at the start of
+// replay (when event history is non-nil) to validate version compatibility.
+// If the function returns an error, execution is aborted.
+func WithVersionValidation(fn func() error) EngineOption {
+	return func(e *Engine) { e.versionValidateFn = fn }
 }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
@@ -605,6 +618,13 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 
 	execCtx := withHandler(ctx, session)
 
+	// If replaying and a version validation hook is set, run it now.
+	if len(replayHistory) > 0 && e.versionValidateFn != nil {
+		if err := e.versionValidateFn(); err != nil {
+			return "", nil, nil, nil, nil, fmt.Errorf("host: version validation failed: %w", err)
+		}
+	}
+
 	result, err := e.rt.CallExport(execCtx, mod, entryPoint, input)
 	if err != nil {
 		if errors.Is(err, ErrSuspended) || session.suspendErr != nil {
@@ -622,9 +642,10 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				Deferrals:    session.deferrals,
 			}, session.deferrals, session.queryState, nil
 		}
-		// Workflow failed with a non-suspend error. Invoke registered defers
-		// for cleanup, then release any held scopes.
+		// Workflow failed with a non-suspend error. Try running defers on the
+		// still-live module first, then fall back to fresh-module defers.
 		if len(session.deferrals) > 0 {
+			e.invokeDefersOnTrap(execCtx, mod, session.deferrals)
 			e.runDefers(ctx, wasmBytes, session.deferrals)
 		}
 		session.releaseHeldScopes(ctx)
@@ -1302,7 +1323,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 			if rec.EventType == EventTypeSignalReceived {
 				s.stepCount++
 				written, _ := writeWasmString(mem, sigNamePtr, rec.SignalName, sigNameMaxLen)
-				writeWasmStringOrTrap(mem, payloadPtr, rec.SignalPayload, payloadMaxLen)
+				_, _ = writeWasmStringOrTrap(mem, payloadPtr, rec.SignalPayload, payloadMaxLen)
 				return packAwaitSignalsResult(uint32(written), uint32(len(rec.SignalPayload)), false, 0)
 			}
 			if rec.EventType == EventTypeAwaitSignals {
@@ -1313,7 +1334,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 					if nextRec.EventType == EventTypeSignalReceived {
 						s.stepCount++
 						written, _ := writeWasmString(mem, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
-						writeWasmStringOrTrap(mem, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
+						_, _ = writeWasmStringOrTrap(mem, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
 						return packAwaitSignalsResult(uint32(written), uint32(len(nextRec.SignalPayload)), false, 0)
 			}
 				}
@@ -1341,7 +1362,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				s.recordEvent(rec)
 
 				written, _ := writeWasmString(mem, sigNamePtr, name, sigNameMaxLen)
-				writeWasmStringOrTrap(mem, payloadPtr, payload, payloadMaxLen)
+				_, _ = writeWasmStringOrTrap(mem, payloadPtr, payload, payloadMaxLen)
 				return packAwaitSignalsResult(uint32(written), uint32(len(payload)), false, 0)
 			}
 		}
@@ -1442,7 +1463,7 @@ func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reason
 		cancelled, reason, err := s.engine.signalStore.PollCancellation(ctx, "")
 		if err == nil && cancelled {
 			mem := m.Memory()
-			writeWasmStringOrTrap(mem, reasonPtr, reason, reasonMaxLen)
+			_, _ = writeWasmStringOrTrap(mem, reasonPtr, reason, reasonMaxLen)
 			return int64(uint64(len(reason))<<32 | 1) // cancelled=true
 		}
 	}
@@ -2189,7 +2210,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 	prevScope := ""
 	if s.scopeSet && s.scopePrefix != "" {
 		prevScope = s.scopePrefix
-		writeWasmStringOrTrap(mem, prevScopePtr, prevScope, prevScopeMaxLen)
+		_, _ = writeWasmStringOrTrap(mem, prevScopePtr, prevScope, prevScopeMaxLen)
 	}
 
 	if objectType == "" && instanceKey == "" {
@@ -2266,7 +2287,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 	prevScope := ""
 	if s.scopeSet && s.scopePrefix != "" {
 		prevScope = s.scopePrefix
-		writeWasmStringOrTrap(mem, prevScopePtr, prevScope, prevScopeMaxLen)
+		_, _ = writeWasmStringOrTrap(mem, prevScopePtr, prevScope, prevScopeMaxLen)
 	}
 
 	if objectType == "" && instanceKey == "" {
@@ -2754,12 +2775,14 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	}
 	defer tx.Rollback()
 
+	checksum := computeEventChecksum(rec)
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error, checksum)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (workflow_id, step) DO NOTHING
 	`, workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err))
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err),
+		checksum)
 	if err != nil {
 		return fmt.Errorf("flush event: exec: %w", err)
 	}

@@ -124,13 +124,14 @@ func TestDispatchLoop_StickyErrorContinuesLoop(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHeartbeatLoop_ConnectionErrorPreservesInflight(t *testing.T) {
-	// When Heartbeat returns an error AND it is a connection error, the loop
-	// logs the event but does NOT remove the workflow from inflight.
+	// When BatchHeartbeat returns a connection error, the loop
+	// logs the event but does NOT touch the inflight map.
+	// Ownership recovery is handled by the reaper loop.
 	ms := &mockStore{}
 	calls := 0
-	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
+	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
 		calls++
-		return false, errors.New("connection refused")
+		return 0, errors.New("connection refused")
 	}
 
 	w := newTestWorker(ms)
@@ -153,19 +154,19 @@ func TestHeartbeatLoop_ConnectionErrorPreservesInflight(t *testing.T) {
 	}
 	_, stillInflight := w.inflight.Load("wf-1")
 	if !stillInflight {
-		t.Error("expected wf-1 to remain in inflight when heartbeat returns connection error")
+		t.Error("expected wf-1 to remain in inflight on BatchHeartbeat connection error")
 	}
 }
 
-func TestHeartbeatLoop_NonConnectionErrorRemovesInflight(t *testing.T) {
-	// When Heartbeat returns an error that is NOT a connection error,
-	// the else-if branch evaluates !alive (which is true since alive is false),
-	// and removes the workflow from inflight.
+func TestHeartbeatLoop_NonConnectionErrorPreservesInflight(t *testing.T) {
+	// When BatchHeartbeat returns a non-connection error, the loop
+	// logs the event but does NOT remove workflows from inflight.
+	// Ownership recovery is handled by the reaper loop.
 	ms := &mockStore{}
 	calls := 0
-	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
+	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
 		calls++
-		return false, errors.New("unexpected error: operation failed")
+		return 0, errors.New("unexpected error: operation failed")
 	}
 
 	w := newTestWorker(ms)
@@ -187,8 +188,8 @@ func TestHeartbeatLoop_NonConnectionErrorRemovesInflight(t *testing.T) {
 		t.Error("expected at least one heartbeat call")
 	}
 	_, stillInflight := w.inflight.Load("wf-1")
-	if stillInflight {
-		t.Error("expected wf-1 to be removed from inflight when heartbeat returns non-connection error")
+	if !stillInflight {
+		t.Error("expected wf-1 to remain in inflight on BatchHeartbeat non-connection error")
 	}
 }
 

@@ -46,10 +46,9 @@ func writeWasmString(mem api.Memory, ptr uint32, s string, maxLen uint32) (uint3
 	return uint32(len(data)), nil
 }
 
-// writeWasmStringOrTrap calls writeWasmString and returns 0 on error.
-func writeWasmStringOrTrap(mem api.Memory, ptr uint32, s string, maxLen uint32) uint32 {
-	n, _ := writeWasmString(mem, ptr, s, maxLen)
-	return n
+// writeWasmStringOrTrap calls writeWasmString and returns the error on failure.
+func writeWasmStringOrTrap(mem api.Memory, ptr uint32, s string, maxLen uint32) (uint32, error) {
+	return writeWasmString(mem, ptr, s, maxLen)
 }
 
 // packDurableCallResult matches adapter.go DurableCall result encoding:

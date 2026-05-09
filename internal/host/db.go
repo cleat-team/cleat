@@ -623,8 +623,8 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = request.String
-		rec.Response = response.String
+		rec.Request = tryDecodeBase64(request.String)
+		rec.Response = tryDecodeBase64(response.String)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
@@ -706,8 +706,8 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = request.String
-		rec.Response = response.String
+		rec.Request = tryDecodeBase64(request.String)
+		rec.Response = tryDecodeBase64(response.String)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
@@ -772,18 +772,16 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 		return nil
 	}
 
-	// TODO: Include checksum column once migration is run:
-	//   ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT;
-	// Until then, checksums are computed in Go but the column is omitted
-	// from the INSERT to avoid breaking existing databases.
+	// Compute SHA-256 checksum for each event and include it in the INSERT.
+	// Requires migration 011: ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT;
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 			defer_description, defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error, payload,
-			created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
+			created_at, checksum)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
 		ON CONFLICT (workflow_id, step) DO NOTHING
 	`)
 	if err != nil {
@@ -797,8 +795,9 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 		if err == nil && len(payload) > 0 {
 			payloadArg = sql.NullString{String: string(payload), Valid: true}
 		}
+		checksum := computeEventChecksum(rec)
 		_, err = stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
-			nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err),
+			nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
 			nullStr(rec.SignalName), nullStr(rec.SignalPayload),
 			nullStr(rec.DeferDescription), nullStr(rec.DeferID),
@@ -806,7 +805,8 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
 			payloadArg,
-			time.UnixMilli(rec.TimestampMs))
+			time.UnixMilli(rec.TimestampMs),
+			checksum)
 		if err != nil {
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
@@ -2794,4 +2794,19 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 	}
 
 	return totalDeleted, nil
+}
+
+// tryDecodeBase64 attempts to base64-decode s. If decoding fails (e.g. the
+// value is a legacy plaintext that was never encoded), it returns s as-is.
+// This provides backward compatibility for events stored before base64
+// encoding was introduced.
+func tryDecodeBase64(s string) string {
+	if s == "" {
+		return s
+	}
+	decoded, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return s // not base64-encoded, return raw string
+	}
+	return string(decoded)
 }

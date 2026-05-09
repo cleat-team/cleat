@@ -14,6 +14,7 @@
 package main
 
 import (
+	"container/list"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -90,6 +91,8 @@ func main() {
 	maxRetries := flag.Int("max-retries", 100, "Maximum retry attempts for DurableCallWithRetry")
 	redact := flag.Bool("redact", false, "Enable redaction of sensitive fields in event history (auto-enabled when --require-auth is set)")
 	retentionDays := flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables)")
+	wasmCacheMaxEntries := flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
+	wasmCacheMaxMB := flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
 	flag.Parse()
 
 	// Auto-enable redaction when --require-auth is set (authentication implies
@@ -358,7 +361,7 @@ func main() {
 		ctx:                 ctx,
 		cancel:              cancel,
 		namespace:           *namespace,
-		wasmCache:           make(map[string][]byte),
+		wasmCache:           newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
 		scheduleInterval:    15 * time.Second,
 		compactionThreshold: *compactionThreshold,
 		compactionInterval:  *compactionInterval,
@@ -526,6 +529,73 @@ func main() {
 	log.Printf("[worker %s] Shutdown complete", workerID)
 }
 
+// wasmLRUEntry is stored in container/list for LRU ordering.
+type wasmLRUEntry struct {
+	key   string
+	bytes []byte
+}
+
+// wasmLRUCache is a bounded LRU cache for WASM byte slices keyed by
+// "defName:version". Evicts LRU when entry count or total bytes exceeded.
+type wasmLRUCache struct {
+	mu      sync.Mutex
+	list    *list.List
+	index   map[string]*list.Element
+	maxBytes int64
+	maxEnts  int
+}
+
+func newWasmLRUCache(maxEntries, maxMB int) *wasmLRUCache {
+	return &wasmLRUCache{
+		list:     list.New(),
+		index:    make(map[string]*list.Element),
+		maxEnts:  maxEntries,
+		maxBytes: int64(maxMB) * 1024 * 1024,
+	}
+}
+
+func (c *wasmLRUCache) get(key string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.index[key]; ok {
+		c.list.MoveToFront(elem)
+		return elem.Value.(*wasmLRUEntry).bytes, true
+	}
+	return nil, false
+}
+
+func (c *wasmLRUCache) put(key string, data []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.index[key]; ok {
+		c.list.MoveToFront(elem)
+		elem.Value.(*wasmLRUEntry).bytes = data
+		return
+	}
+	for c.list.Len() >= c.maxEnts || c.sizeBytesLocked()+int64(len(data)) > c.maxBytes {
+		c.evictLocked()
+	}
+	entry := &wasmLRUEntry{key: key, bytes: data}
+	elem := c.list.PushFront(entry)
+	c.index[key] = elem
+}
+
+func (c *wasmLRUCache) sizeBytesLocked() int64 {
+	var total int64
+	for e := c.list.Front(); e != nil; e = e.Next() {
+		total += int64(len(e.Value.(*wasmLRUEntry).bytes))
+	}
+	return total
+}
+
+func (c *wasmLRUCache) evictLocked() {
+	if elem := c.list.Back(); elem != nil {
+		entry := elem.Value.(*wasmLRUEntry)
+		delete(c.index, entry.key)
+		c.list.Remove(elem)
+	}
+}
+
 type Worker struct {
 	id                string
 	store             host.WorkflowStore
@@ -543,8 +613,7 @@ type Worker struct {
 
 	inflight    sync.Map // map[workflowID]*host.WorkflowInstance
 	execEngines sync.Map // map[workflowID]*host.Engine
-	wasmCache   map[string][]byte
-	wasmMu    sync.RWMutex
+	wasmCache   *wasmLRUCache
 
 	scheduleMu       sync.Mutex
 	scheduleInterval time.Duration
@@ -1018,26 +1087,14 @@ func (w *Worker) heartbeatLoop() {
 			return
 		case <-ticker.C:
 			hbStart := time.Now()
-			var failures int64
-			w.inflight.Range(func(key, value interface{}) bool {
-				wfID := key.(string)
-				alive, err := w.store.Heartbeat(w.ctx, wfID, w.id)
-				if err != nil {
-					failures++
-					if isConnectionError(err) {
-						log.Printf("[worker %s] Heartbeat failed for %s — DB appears down", w.id, wfID)
-					} else {
-						log.Printf("[worker %s] %s: lost ownership via heartbeat error", w.id, wfID)
-						w.inflight.Delete(key)
-					}
-				} else if !alive {
-					log.Printf("[worker %s] %s: lost ownership via heartbeat", w.id, wfID)
-					w.inflight.Delete(key)
-				}
-				return true
-				})
-			if failures > 0 {
+			_, err := w.store.BatchHeartbeat(w.ctx, w.id)
+			if err != nil {
 				backgroundLoopsTotal.WithLabelValues("heartbeat", "error").Inc()
+				if isConnectionError(err) {
+					log.Printf("[worker %s] BatchHeartbeat failed — DB appears down", w.id)
+				} else {
+					log.Printf("[worker %s] BatchHeartbeat error: %v", w.id, err)
+				}
 			} else {
 				backgroundLoopsTotal.WithLabelValues("heartbeat", "ok").Inc()
 			}
@@ -1380,10 +1437,7 @@ func (w *Worker) dispatchPendingUpdates() {
 func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 	key := fmt.Sprintf("%s:%d", defName, defVersion)
 
-	w.wasmMu.RLock()
-	cached, ok := w.wasmCache[key]
-	w.wasmMu.RUnlock()
-	if ok {
+	if cached, ok := w.wasmCache.get(key); ok {
 		wasmCacheHits.Inc()
 		return cached, nil
 	}
@@ -1394,10 +1448,7 @@ func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 		return nil, err
 	}
 
-	w.wasmMu.Lock()
-	w.wasmCache[key] = wasmBytes
-	w.wasmMu.Unlock()
-
+	w.wasmCache.put(key, wasmBytes)
 	return wasmBytes, nil
 }
 

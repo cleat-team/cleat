@@ -573,7 +573,7 @@ func newTestWorker(ms *mockStore) *Worker {
 		namespace:           "default",
 		ctx:                 ctx,
 		cancel:              cancel,
-		wasmCache:           make(map[string][]byte),
+		wasmCache:           newWasmLRUCache(100, 500),
 	}
 }
 
@@ -596,7 +596,7 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 		namespace:           "default",
 		ctx:                 ctx,
 		cancel:              cancel,
-		wasmCache:           make(map[string][]byte),
+		wasmCache:           newWasmLRUCache(100, 500),
 	}
 }
 
@@ -940,13 +940,13 @@ func TestHeartbeatLoop_UpdatesHeartbeats(t *testing.T) {
 	ms := &mockStore{}
 	var (
 		mu       sync.Mutex
-		heartbeats []string
+		callCount int64
 	)
-	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
+	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
 		mu.Lock()
-		heartbeats = append(heartbeats, workflowID)
+		callCount++
 		mu.Unlock()
-		return true, nil
+		return 2, nil
 	}
 
 	w := newTestWorker(ms)
@@ -970,13 +970,13 @@ func TestHeartbeatLoop_UpdatesHeartbeats(t *testing.T) {
 	wg.Wait()
 
 	mu.Lock()
-	count := len(heartbeats)
+	count := callCount
 	mu.Unlock()
 
-	// Over ~45ms with 10ms interval: ~4 cycles × 2 workflows = ~8 heartbeats.
-	// Minimum: at least 1 complete cycle = 2 heartbeats.
-	if count < 2 {
-		t.Errorf("expected at least 2 heartbeats, got %d", count)
+	// Over ~45ms with 10ms interval: ~4 batch heartbeat calls.
+	// Minimum: at least 1 call.
+	if count < 1 {
+		t.Errorf("expected at least 1 batch heartbeat, got %d", count)
 	}
 }
 
@@ -1001,16 +1001,14 @@ func TestHeartbeatLoop_StopsOnCancel(t *testing.T) {
 	}
 }
 
-func TestHeartbeatLoop_RemovesLostOwnership(t *testing.T) {
+func TestHeartbeatLoop_DoesNotRemoveFromInflight(t *testing.T) {
+	// With BatchHeartbeat, the heartbeat loop does not remove workflows from
+	// inflight — ownership recovery is handled by the reaper loop.
 	ms := &mockStore{}
-	// Simulate losing ownership of wf-1 on the second heartbeat.
 	callCount := 0
-	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
+	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
 		callCount++
-		if workflowID == "wf-lost" && callCount >= 2 {
-			return false, nil
-		}
-		return true, nil
+		return 0, nil
 	}
 
 	w := newTestWorker(ms)
@@ -1031,12 +1029,15 @@ func TestHeartbeatLoop_RemovesLostOwnership(t *testing.T) {
 	w.cancel()
 	wg.Wait()
 
-	// wf-lost should have been removed from inflight.
-	_, stillInflight := w.inflight.Load("wf-lost")
-	if stillInflight {
-		t.Error("expected wf-lost to be removed from inflight after heartbeat failure")
+	if callCount == 0 {
+		t.Error("expected at least one batch heartbeat call")
 	}
-	// wf-alive should still be there.
+
+	// Both workflows should remain in inflight.
+	_, stillInflight := w.inflight.Load("wf-lost")
+	if !stillInflight {
+		t.Error("expected wf-lost to remain in inflight (reaper handles ownership)")
+	}
 	_, alive := w.inflight.Load("wf-alive")
 	if !alive {
 		t.Error("expected wf-alive to remain in inflight")
@@ -1045,8 +1046,8 @@ func TestHeartbeatLoop_RemovesLostOwnership(t *testing.T) {
 
 func TestHeartbeatLoop_DBErrorNoCrash(t *testing.T) {
 	ms := &mockStore{}
-	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
-		return false, errors.New("connection refused")
+	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+		return 0, errors.New("connection refused")
 	}
 
 	w := newTestWorker(ms)
@@ -1941,12 +1942,13 @@ func TestDispatchLoop_BatchSizeCap(t *testing.T) {
 }
 
 func TestHeartbeatLoop_EmptyInflight(t *testing.T) {
-	// When inflight is empty, heartbeatLoop should not call Heartbeat on the store.
+	// With BatchHeartbeat, the heartbeat loop always calls the store
+	// regardless of inflight state — the DB tracks ownership.
 	ms := &mockStore{}
 	heartbeatCalled := false
-	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
+	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
 		heartbeatCalled = true
-		return true, nil
+		return 0, nil
 	}
 
 	w := newTestWorker(ms)
@@ -1966,8 +1968,8 @@ func TestHeartbeatLoop_EmptyInflight(t *testing.T) {
 
 	<-done
 
-	if heartbeatCalled {
-		t.Error("expected no heartbeats when inflight is empty")
+	if !heartbeatCalled {
+		t.Error("expected batch heartbeat to be called even when inflight is empty")
 	}
 }
 

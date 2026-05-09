@@ -116,15 +116,15 @@ func TestDispatchLoop_StickyReclaim(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHeartbeatLoop_SuccessPreservesInflight(t *testing.T) {
-	// When Heartbeat returns alive=true, the workflow remains in inflight.
+	// When BatchHeartbeat succeeds, the workflow remains in inflight.
 	ms := &mockStore{}
 	var mu sync.Mutex
 	heartbeatCount := 0
-	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
+	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
 		mu.Lock()
 		heartbeatCount++
 		mu.Unlock()
-		return true, nil
+		return 1, nil
 	}
 
 	w := newTestWorker(ms)
@@ -162,16 +162,13 @@ func TestHeartbeatLoop_SuccessPreservesInflight(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHeartbeatLoop_LostOwnership(t *testing.T) {
-	// When Heartbeat returns alive=false (non-connection error), the workflow
-	// is removed from inflight.
+	// With BatchHeartbeat, the heartbeat loop does not track per-workflow
+	// ownership. Ownership recovery is handled by the reaper loop instead.
 	ms := &mockStore{}
 	callCount := 0
-	ms.heartbeatFn = func(ctx context.Context, workflowID, workerID string) (bool, error) {
+	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
 		callCount++
-		if workflowID == "wf-lost-own" {
-			return false, nil
-		}
-		return true, nil
+		return 0, nil
 	}
 
 	w := newTestWorker(ms)
@@ -194,9 +191,11 @@ func TestHeartbeatLoop_LostOwnership(t *testing.T) {
 		t.Error("expected at least one heartbeat call")
 	}
 
+	// Both workflows should remain in inflight because the heartbeat loop
+	// does not perform per-workflow ownership tracking anymore.
 	_, lost := w.inflight.Load("wf-lost-own")
-	if lost {
-		t.Error("expected wf-lost-own to be removed from inflight after lost ownership")
+	if !lost {
+		t.Error("expected wf-lost-own to remain in inflight (reaper handles ownership)")
 	}
 
 	_, kept := w.inflight.Load("wf-keep-1")
