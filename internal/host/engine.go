@@ -649,6 +649,14 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 			e.runDefers(ctx, wasmBytes, session.deferrals)
 		}
 		session.releaseHeldScopes(ctx)
+		// Attempt to resolve the WASM trap to a source location using
+		// DWARF debug info. wazero v1.9.0 already embeds DWARF-resolved
+		// file:line locations in trap errors; resolveWasmTrap ensures
+		// consistent formatting and serves as a hook for future custom
+		// DWARF parsing from the raw wasm binary.
+		if enriched := resolveWasmTrap(wasmBytes, err.Error()); enriched != "" {
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("%s", enriched)
+		}
 		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, err
 	}
 

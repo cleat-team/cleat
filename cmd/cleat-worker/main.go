@@ -378,6 +378,7 @@ func main() {
 			retentionDays:       *retentionDays,
 			maxRetries:          *maxRetries,
 			redactionEnabled:    *redact,
+			drainCh:             make(chan struct{}),
 		}
 
 	// Initialize memory-aware concurrency controller.
@@ -402,6 +403,7 @@ func main() {
 
 		mux.HandleFunc("/healthz", api.handleHealthz)
 		mux.HandleFunc("/metrics", handleMetrics)
+		mux.HandleFunc("/api/admin/drain", api.handleDrain)
 		// Schedule API routes (registered before workflows so /api/schedules is not caught by /api/workflows/).
 		mux.HandleFunc("/api/schedules/", api.handleSchedules)
 		mux.HandleFunc("/api/schedules", api.handleSchedulesList)
@@ -410,7 +412,6 @@ func main() {
 
 		// Workflow definitions endpoint.
 		mux.HandleFunc("/api/definitions", api.handleDefinitions)
-		mux.HandleFunc("/api/admin/drain", api.handleAdminDrain)
 
 		// Plugin discovery endpoint.
 		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
@@ -641,6 +642,15 @@ type Worker struct {
 	redactionEnabled    bool
 	memorySampleRetention int
 	retentionDays        int
+
+	drainCh    chan struct{}
+	drainOnce  sync.Once
+}
+
+// DrainComplete returns a channel that is closed when the drain completes
+// (all in-flight workflows have finished).
+func (w *Worker) DrainComplete() <-chan struct{} {
+	return w.drainCh
 }
 
 func (w *Worker) Run() {
@@ -740,6 +750,12 @@ func (w *Worker) dispatchLoop() {
 
 		free := w.memoryController.DynamicConcurrency() - count
 		if free <= 0 {
+			time.Sleep(w.pollInterval)
+			continue
+		}
+
+		// If draining, stop claiming new work.
+		if w.draining.Load() {
 			time.Sleep(w.pollInterval)
 			continue
 		}
@@ -1872,15 +1888,74 @@ func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
+// handleDrain handles POST and GET /api/admin/drain for graceful worker drain.
+func (s *apiServer) handleDrain(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		s.handleDrainStart(w, r)
+	case http.MethodGet:
+		s.handleDrainStatus(w, r)
+	default:
+		s.writeError(w, 405, "method not allowed")
+	}
+}
+
+// handleDrainStart initiates a worker drain.
+func (s *apiServer) handleDrainStart(w http.ResponseWriter, r *http.Request) {
+	s.worker.draining.Store(true)
+
+	count := 0
+	s.worker.inflight.Range(func(_, _ interface{}) bool {
+		count++
+		return true
+	})
+
+	s.writeJSON(w, 202, map[string]interface{}{
+		"draining":  true,
+		"in_flight": count,
+	})
+}
+
+// handleDrainStatus returns the current drain status.
+func (s *apiServer) handleDrainStatus(w http.ResponseWriter, r *http.Request) {
+	draining := s.worker.draining.Load()
+
+	count := 0
+	s.worker.inflight.Range(func(_, _ interface{}) bool {
+		count++
+		return true
+	})
+
+	resp := map[string]interface{}{
+		"draining":  draining,
+		"in_flight": count,
+	}
+
+	if draining && count == 0 {
+		s.worker.drainOnce.Do(func() {
+			close(s.worker.drainCh)
+		})
+		resp["complete"] = true
+	}
+
+	s.writeJSON(w, 200, resp)
+}
+
 // handleWorkflowsList handles GET /api/workflows (without trailing path).
 func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
-	status := r.URL.Query().Get("status")
-	limit := 100
-	workflows, err := s.store.ListWorkflows(r.Context(), host.WorkflowFilter{Status: status, Limit: limit})
+	q := r.URL.Query()
+	filter := host.WorkflowFilter{
+		Status:        q.Get("status"),
+		InputContains: q.Get("input_contains"),
+		ErrorContains: q.Get("error_contains"),
+		Search:        q.Get("search"),
+		Limit:         100,
+	}
+	workflows, err := s.store.ListWorkflows(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -2488,17 +2563,6 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, 200, response)
 }
 
-// handleAdminDrain handles GET and POST /api/admin/drain.
-func (s *apiServer) handleAdminDrain(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodPost {
-		s.worker.draining.Store(true)
-	}
-	inFlight := s.inflightCount()
-	s.writeJSON(w, 200, map[string]interface{}{
-		"draining":  s.worker.draining.Load(),
-		"in_flight": inFlight,
-	})
-}
 
 func (s *apiServer) inflightCount() int {
 	count := 0

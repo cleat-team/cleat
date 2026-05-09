@@ -60,15 +60,8 @@ func (c *simClock) After(d time.Duration) <-chan time.Time {
 	c.env.mu.Unlock()
 
 	go func() {
-		// Wait for AdvanceTime to trigger the wake, OR fall back to real time.
-		realTimer := time.NewTimer(d)
-		select {
-		case <-wake:
-			realTimer.Stop()
-			ch <- time.Now()
-		case <-realTimer.C:
-			ch <- time.Now()
-		}
+		<-wake
+		ch <- time.Now()
 	}()
 	return ch
 }

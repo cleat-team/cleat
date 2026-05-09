@@ -449,8 +449,20 @@ func TestSendSignalAndWaitWithReply(t *testing.T) {
 func TestSendSignalAndWaitTimeout(t *testing.T) {
 	env := NewTestEnv()
 
-	// A very short timeout should cause SendSignalAndWait to time out.
-	_, err := env.H().SendSignalAndWait("target", "sig", "{}", 10*time.Millisecond)
+	// SendSignalAndWait blocks until timeout or response.
+	// Use AdvanceTime to trigger the simulated timeout.
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := env.H().SendSignalAndWait("target", "sig", "{}", 10*time.Millisecond)
+		errCh <- err
+	}()
+
+	// Give the goroutine time to reach the select and create the sleep record
+	// before advancing time.
+	time.Sleep(50 * time.Millisecond)
+	env.AdvanceTime(20 * time.Millisecond)
+
+	err := <-errCh
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}

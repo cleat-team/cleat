@@ -301,88 +301,82 @@ type Lifecycle interface {
 	ListCrons() (string, error)
 }
 
-// StateAccessor provides durable state read/write operations and promise management
-// for workflow execution.
-type StateAccessor interface {
-	// SetQueryState records state that can be read by query handlers.
-	SetQueryState(key, value string)
-
-	// SetState stores a typed value in the workflow's state.
-	// value is marshaled to JSON for persistence.
-	SetState(key string, value interface{})
-
-	// GetState retrieves a typed value from the workflow's state.
-	// result must be a pointer; the stored value is unmarshaled into it.
-	GetState(key string, result interface{}) error
-
-	// DeleteState removes a key from the workflow's state.
-	DeleteState(key string)
-
-	// HasState returns true if the key exists in the workflow's state.
-	HasState(key string) bool
-
-	// IncrState atomically increments a numeric state value by delta.
-	// Returns the new value after increment.
-	IncrState(key string, delta int64) int64
-
-	// ListState returns all state keys matching the given prefix.
-	ListState(prefix string) []string
-
-	// CreatePromise creates a named durable promise and returns its ID.
-	// The promise can be resolved or rejected by an external caller via the REST API.
+// Promises provides durable promise operations for external caller interaction.
+type Promises interface {
 	CreatePromise(name string) (promiseID string, err error)
-
-	// AwaitPromise waits for a promise to be resolved by an external caller.
-	// Returns the result, whether it timed out, and any error.
-	// Blocks the workflow until resolved or timeout expires.
 	AwaitPromise(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
 }
 
-// Scoper provides virtual object instance scoping and concurrency lock operations.
-// Scope methods control the state key prefix for virtual object instances, ensuring
-// that state operations are isolated to the current virtual object. Lock methods
-// provide distributed concurrency control.
+// StateManager provides durable key-value state operations scoped to the workflow.
+type StateManager interface {
+	SetQueryState(key, value string)
+	SetState(key string, value interface{})
+	GetState(key string, result interface{}) error
+	DeleteState(key string)
+	HasState(key string) bool
+	IncrState(key string, delta int64) int64
+	ListState(prefix string) []string
+}
+
+// QueryHandlers provides workflow handler registration.
+type QueryHandlers interface {
+	RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error)
+	RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error))
+}
+
+// CronScheduler provides durable cron schedule operations.
+type CronScheduler interface {
+	ScheduleCron(workflowName, cronExpr, timezone, inputJSON string) (scheduleID string, err error)
+	DeleteCron(scheduleID string) error
+	ListCrons() (string, error)
+}
+
+// Scoper provides virtual object instance scoping.
 type Scoper interface {
-	// SetScope sets the state key prefix for virtual object instances.
-	// All subsequent SetState/GetState/etc calls are automatically prefixed
-	// with "vo:<objectType>:<instanceKey>:". Returns the previous scope
-	// prefix for stack-style save/restore.
 	SetScope(objectType, instanceKey string) (previousScope string)
-
-	// GetScope returns the current (objectType, instanceKey) or ("", "")
-	// if no scope is set.
 	GetScope() (objectType, instanceKey string)
-
-	// ClearScope removes the current scope and returns the previous scope
-	// prefix (empty string if none was set).
 	ClearScope() (previousScope string)
+}
 
-	// AcquireLock attempts to acquire a concurrency lock for the given key.
-	// Returns true if the lock was acquired, false if already held.
-	// The ttl controls how long the lock is held before auto-release.
+// UUIDGenerator provides deterministic UUID generation.
+type UUIDGenerator interface {
+	UUID(seed string) string
+	NewUUID() string
+	NewUUIDv7() string
+}
+
+// Locker provides distributed concurrency lock operations.
+type Locker interface {
 	AcquireLock(key string, ttl time.Duration) (acquired bool, err error)
-
-	// ReleaseLock releases a concurrency lock previously acquired by this workflow.
 	ReleaseLock(key string) error
-
-	// AcquireLockMs is like AcquireLock but takes TTL in milliseconds.
 	AcquireLockMs(key string, ttlMs int64) (acquired bool, err error)
+	AwaitCondition(predicate func() bool, pollInterval, timeout time.Duration) (met bool)
+}
+
+// RandomSource provides a deterministic random number generator.
+type RandomSource interface {
+	Random() int64
 }
 
 // HostCalls is the composite interface that workflow code programs against.
 // It provides durable, deterministic access to external services, time, signals,
-// workflow lifecycle, state, scoping, randomness, and more.
+// HostCalls is the composite interface that workflow code programs against.
+// It provides durable, deterministic access to external services, time, signals,
+// workflow lifecycle, state, promises, randomness, and more.
 //
 // The interface is composed from capability-grouped sub-interfaces:
 //   - Caller: durable service calls, plugins, HTTP, side effects
 //   - Timer: deterministic time and sleep
 //   - Signaler: signal communication between workflows
-//   - Lifecycle: versioning, child workflows, cancellation, logging, defers, cron, handler registration
-//   - StateAccessor: state read/write, promises
-//   - Scoper: virtual object scoping, concurrency locks
-//
-// Remaining methods (randomness, UUID generation, condition waiting) that don't
-// fit neatly into a capability group are declared directly on HostCalls.
+//   - Lifecycle: versioning, child workflows, cancellation, logging, defer
+//   - Promises: durable promise operations
+//   - StateManager: durable key-value state
+//   - QueryHandlers: workflow handler registration
+//   - CronScheduler: durable cron schedule operations
+//   - Scoper: virtual object instance scoping
+//   - UUIDGenerator: deterministic UUID generation
+//   - Locker: distributed concurrency lock operations
+//   - RandomSource: deterministic random number generation
 //
 // Entry points receive a HostCalls as their first parameter. Helper functions
 // in the durable closure can thread it through their call chains (manually or
@@ -397,34 +391,14 @@ type HostCalls interface {
 	Timer
 	Signaler
 	Lifecycle
-	StateAccessor
+	Promises
+	StateManager
+	QueryHandlers
+	CronScheduler
 	Scoper
-
-	// Random returns a deterministic random number seeded from the event
-	// history. Use instead of math/rand for deterministic replay.
-	Random() int64
-
-	// UUID returns a deterministic UUID scoped to the current workflow
-	// and the given seed. Same seed always produces the same UUID for
-	// this workflow instance. Useful for generating predictable IDs
-	// (e.g. entity IDs, correlation IDs) that are stable across replays.
-	UUID(seed string) string
-
-	// NewUUID generates a random UUID (v4) deterministically. On first
-	// execution produces a fresh UUID from Random(). On replay returns the
-	// same value. No SideEffect needed — determinism is built into Random().
-	NewUUID() string
-
-	// NewUUIDv7 generates a time-sortable UUID (v7) deterministically.
-	// The timestamp comes from Now() (deterministic on replay). The random
-	// portion comes from Random() (also deterministic). Safe without SideEffect.
-	NewUUIDv7() string
-
-	// AwaitCondition blocks until the predicate returns true or the timeout expires.
-	// Polls the predicate at pollInterval, using AwaitSignals as the blocking primitive
-	// so the workflow is responsive to external signals between checks.
-	// Returns true if the condition was met, false if the timeout expired.
-	AwaitCondition(predicate func() bool, pollInterval, timeout time.Duration) (met bool)
+	UUIDGenerator
+	Locker
+	RandomSource
 }
 
 // ---- Streaming types ----

@@ -89,3 +89,5 @@ ports-round2/*/build/
 .benchmarks/
 .claude/worktrees/
 /cleatctl
+
+.go-cache/
