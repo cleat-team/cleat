@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -38,7 +40,7 @@ func newMockIdempotencyStore() *mockIdempotencyStore {
 
 // StartNewRun starts a new workflow run or returns an existing one if the
 // idempotencyKey was already used.
-func (m *mockIdempotencyStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (runID string, alreadyExisted bool, err error) {
+func (m *mockIdempotencyStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -67,6 +69,8 @@ func (m *mockIdempotencyStore) StartNewRun(ctx context.Context, defName string, 
 	return runID, false, nil
 }
 
+func (m *mockIdempotencyStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -79,7 +83,7 @@ func TestExactlyOnceDuplicateWorkflowID(t *testing.T) {
 	input := json.RawMessage(`{"user":"test"}`)
 
 	// First start with idempotency key.
-	runID1, alreadyExisted, err := store.StartNewRun(ctx, "test-workflow", 1, input, "idem-key-001")
+	runID1, alreadyExisted, err := store.StartNewRun(ctx, "", "test-workflow", 1, input, "idem-key-001")
 	if err != nil {
 		t.Fatalf("first StartNewRun: %v", err)
 	}
@@ -91,7 +95,7 @@ func TestExactlyOnceDuplicateWorkflowID(t *testing.T) {
 	}
 
 	// Second start with same key should return same runID.
-	runID2, alreadyExisted, err := store.StartNewRun(ctx, "test-workflow", 1, input, "idem-key-001")
+	runID2, alreadyExisted, err := store.StartNewRun(ctx, "", "test-workflow", 1, input, "idem-key-001")
 	if err != nil {
 		t.Fatalf("second StartNewRun: %v", err)
 	}
@@ -110,11 +114,11 @@ func TestExactlyOnceDifferentKeys(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{}`)
 
-	runID1, _, err := store.StartNewRun(ctx, "wf", 1, input, "key-a")
+	runID1, _, err := store.StartNewRun(ctx, "", "wf", 1, input, "key-a")
 	if err != nil {
 		t.Fatalf("key-a: %v", err)
 	}
-	runID2, _, err := store.StartNewRun(ctx, "wf", 1, input, "key-b")
+	runID2, _, err := store.StartNewRun(ctx, "", "wf", 1, input, "key-b")
 	if err != nil {
 		t.Fatalf("key-b: %v", err)
 	}
@@ -131,11 +135,11 @@ func TestExactlyOnceNoKey(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{}`)
 
-	runID1, _, err := store.StartNewRun(ctx, "wf", 1, input, "")
+	runID1, _, err := store.StartNewRun(ctx, "", "wf", 1, input, "")
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
-	runID2, alreadyExisted, err := store.StartNewRun(ctx, "wf", 1, input, "")
+	runID2, alreadyExisted, err := store.StartNewRun(ctx, "", "wf", 1, input, "")
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -164,7 +168,7 @@ func TestExactlyOnceIdempotencyKeyExpiration(t *testing.T) {
 	store.mu.Unlock()
 
 	// Starting with the expired key should create a new run (not return the old).
-	runID, alreadyExisted, err := store.StartNewRun(ctx, "wf", 1, input, "expired-key")
+	runID, alreadyExisted, err := store.StartNewRun(ctx, "", "wf", 1, input, "expired-key")
 	if err != nil {
 		t.Fatalf("StartNewRun with expired key: %v", err)
 	}
@@ -187,7 +191,7 @@ func TestExactlyOnceIdempotencyKeyCollision(t *testing.T) {
 	runIDs := make(map[string]string)
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("unique-key-%d", i)
-		runID, alreadyExisted, err := store.StartNewRun(ctx, "wf", 1, input, key)
+		runID, alreadyExisted, err := store.StartNewRun(ctx, "", "wf", 1, input, key)
 		if err != nil {
 			t.Fatalf("key %q: %v", key, err)
 		}
@@ -204,7 +208,7 @@ func TestExactlyOnceIdempotencyKeyCollision(t *testing.T) {
 
 	// Verify each key returns its own runID on replay.
 	for key, expectedRunID := range runIDs {
-		runID, alreadyExisted, err := store.StartNewRun(ctx, "wf", 1, input, key)
+		runID, alreadyExisted, err := store.StartNewRun(ctx, "", "wf", 1, input, key)
 		if err != nil {
 			t.Fatalf("replay key %q: %v", key, err)
 		}

@@ -24,6 +24,10 @@
   "license": "MIT",
   "files": [
     "assembly/",
+    "index.ts",
+    "scripts/",
+    "test_runner/",
+    "transform/",
     "README.md"
   ],
   "peerDependencies": {

@@ -8,9 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
 
@@ -201,6 +203,12 @@ type WorkflowStore interface {
 	// DeliverSignal stores a signal for a workflow.
 	DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error
 
+	// PollSignal checks for a delivered signal.
+	PollSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
+
+	// PollCancellation checks whether the workflow has been cancelled.
+	PollCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error)
+
 	// PollAndClaimSignal atomically checks for and claims a pending signal.
 	PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
 
@@ -208,12 +216,16 @@ type WorkflowStore interface {
 	// If idempotencyKey is non-empty, provides exactly-once semantics: a
 	// subsequent call with the same key returns the existing workflow ID
 	// without creating a duplicate.
-	StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (runID string, alreadyExisted bool, err error)
+	StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
 
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
 	// defVersion is the explicit workflow definition version to use, or 0 to use
 	// default resolution (SELECT MAX(version)).
 	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error)
+
+	// StartChildWorkflowAtomic creates a child workflow and records the parent's
+	// child_workflow event in a single transaction, guaranteeing exactly-once creation.
+	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error)
 
 	// GetChildResult checks whether a child workflow has completed and returns its result.
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
@@ -259,7 +271,7 @@ type WorkflowStore interface {
 	LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error)
 
 	// TraceWorkflow sets the W3C trace_id on a workflow instance.
-	TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error)
+	TraceWorkflow(ctx context.Context, workflowID, traceID string) error
 
 	// GetCompactionCandidates returns up to limit workflow IDs whose event
 	// history exceeds the threshold and could benefit from compaction.
@@ -348,6 +360,12 @@ type WorkflowStore interface {
 	// CountActiveInstances returns the number of running/ready instances for a version.
 	CountActiveInstances(ctx context.Context, name string, version int) (int, error)
 
+	// ResolveLatestVersion resolves the latest version for a named definition.
+	ResolveLatestVersion(ctx context.Context, defName string) (int, error)
+
+	// ValidateVersion checks whether the given version is valid (exists and not deprecated).
+	ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error)
+
 	// GetActiveInstanceCountsByVersion returns a map of "name:version" -> count for
 	// all workflow definitions that have active instances.
 	GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error)
@@ -372,6 +390,10 @@ type WorkflowStore interface {
 	// cutoff time.  It also deletes associated compaction states.
 	// Returns the number of event rows deleted.
 	DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error)
+
+	// ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.
+	// Returns uuid.Nil if the key is not found or revoked.
+	ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error)
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
@@ -976,10 +998,23 @@ func (s *PostgresStore) LoadWASM(ctx context.Context, defName string, defVersion
 }
 
 // TraceWorkflow sets the W3C trace_id on a workflow instance.
-func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
-	return s.db.ExecContext(ctx, `
+func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error {
+	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET trace_id = $2 WHERE id = $1
 	`, workflowID, traceID)
+	return err
+}
+
+// ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.
+func (s *PostgresStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	var tenantID uuid.UUID
+	err := s.db.QueryRowContext(ctx,
+		`SELECT tenant_id FROM tenant_api_keys
+		 WHERE key_hash = $1 AND revoked_at IS NULL`, keyHash).Scan(&tenantID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return tenantID, nil
 }
 
 // LoadWorkflowConfig returns configuration for a workflow definition.
@@ -1473,7 +1508,10 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 // If idempotencyKey is non-empty, provides exactly-once semantics: a subsequent
 // call with the same key returns the existing workflow ID without creating a
 // duplicate. Returns the workflow ID, whether it already existed, and any error.
-func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+	if runID == "" {
+		runID = uuid.New().String()
+	}
 	if idempotencyKey != "" {
 		keyHash := sha256.Sum256([]byte(idempotencyKey))
 
@@ -1490,11 +1528,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 			return "", false, err
 		}
 
-		// Generate workflow ID early so we can insert into both tables atomically.
-		var workflowID string
-		if err := s.db.QueryRowContext(ctx, `SELECT gen_random_uuid()`).Scan(&workflowID); err != nil {
-			return "", false, fmt.Errorf("generate id: %w", err)
-		}
+		// Use the provided runID (already generated above).
 
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -1508,7 +1542,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at)
 			 VALUES ($1, $2, now() + INTERVAL '7 days')
 			 ON CONFLICT (key_hash) DO NOTHING`,
-			keyHash[:], workflowID)
+			keyHash[:], runID)
 		if err != nil {
 			return "", false, err
 		}
@@ -1532,18 +1566,17 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 		}
 
 		// Insert the workflow instance.
-		err = tx.QueryRowContext(ctx, `
+		_, err = tx.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
 			VALUES ($1, $2, $3, 'ready', $4,
 			        COALESCE((SELECT namespace FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'))
-			RETURNING id
-		`, workflowID, defName, defVersion, input).Scan(&workflowID)
+		`, runID, defName, defVersion, input)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
 
-		return workflowID, false, tx.Commit()
+		return runID, false, tx.Commit()
 	}
 
 	// No idempotency key — normal flow.
@@ -1553,14 +1586,12 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, defName string, defVers
 	}
 	defer tx.Rollback()
 
-	var runID string
-	err = tx.QueryRowContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
-		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
-		        COALESCE((SELECT namespace FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'))
-		RETURNING id
-	`, defName, defVersion, input).Scan(&runID)
+		VALUES ($1, $2, $3, 'ready', $4,
+		        COALESCE((SELECT namespace FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'))
+	`, runID, defName, defVersion, input)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -1589,6 +1620,57 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	return runID, nil
 }
 
+// StartChildWorkflowAtomic creates a child workflow and records the parent's
+// child_workflow event in a single transaction, guaranteeing exactly-once creation.
+func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (string, error) {
+	if childID == "" {
+		childID = uuid.New().String()
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow atomic: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.setRLSOnTx(tx); err != nil {
+		return "", fmt.Errorf("start child workflow atomic: set rls: %w", err)
+	}
+
+	// 1. INSERT child workflow instance.
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue)
+		VALUES ($1, $2,
+		        CASE WHEN $5 > 0 THEN $5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $2 AND NOT deprecated) END,
+		        'ready', $3, $4,
+		        COALESCE(NULLIF($6, ''), 'ABANDON'),
+		        COALESCE((SELECT namespace FROM workflow_instances WHERE id = $4), 'default'),
+		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'))
+	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
+	}
+
+	// 2. INSERT child_workflow event into the parent's event_history.
+	event.RunID = childID
+	checksum := computeEventChecksum(event)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (workflow_id, step) DO NOTHING
+	`, parentID, event.Step, string(event.EventType),
+		nullStr(event.ChildName), nullStr(event.ChildInput), nullStr(childID),
+		time.UnixMilli(event.TimestampMs), checksum)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("start child workflow atomic: commit: %w", err)
+	}
+	return childID, nil
+}
+
 // GetChildResult checks whether a child workflow has completed (status 'done' or 'failed').
 func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
 	var result string
@@ -1601,6 +1683,45 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (strin
 	}
 	if err != nil {
 		return "", false, fmt.Errorf("get child result: %w", err)
+	}
+	if status == "done" || status == "failed" {
+		return result, true, nil
+	}
+	return "", false, nil
+}
+
+// StartChildWorkflowInSchema creates a child workflow in the given target schema.
+// Implements CrossSchemaChildStore for cross-instance workflow cooperation.
+func (s *PostgresStore) StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
+	var runID string
+	q := fmt.Sprintf(`
+		INSERT INTO %s.workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue)
+		VALUES (gen_random_uuid(), $1,
+		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM %s.workflow_defs WHERE name = $1 AND NOT deprecated) END,
+		        'ready', $2, $3,
+		        COALESCE(NULLIF($5, ''), 'ABANDON'),
+		        COALESCE((SELECT namespace FROM %s.workflow_instances WHERE id = $3), 'default'),
+		        COALESCE((SELECT task_queue FROM %s.workflow_instances WHERE id = $3), 'default'))
+		RETURNING id
+	`, pq.QuoteIdentifier(targetSchema), pq.QuoteIdentifier(targetSchema), pq.QuoteIdentifier(targetSchema), pq.QuoteIdentifier(targetSchema))
+	if err := s.db.QueryRowContext(ctx, q, defName, inputJSON, parentID, defVersion, parentClosePolicy).Scan(&runID); err != nil {
+		return "", fmt.Errorf("start child workflow in schema %q: %w", targetSchema, err)
+	}
+	return runID, nil
+}
+
+// GetChildResultInSchema polls a child workflow in the given target schema.
+func (s *PostgresStore) GetChildResultInSchema(ctx context.Context, targetSchema, runID string) (string, bool, error) {
+	var result string
+	var status string
+	q := fmt.Sprintf(`SELECT COALESCE(result, '{}'), status FROM %s.workflow_instances WHERE id = $1`,
+		pq.QuoteIdentifier(targetSchema))
+	err := s.db.QueryRowContext(ctx, q, runID).Scan(&result, &status)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get child result in schema %q: %w", targetSchema, err)
 	}
 	if status == "done" || status == "failed" {
 		return result, true, nil
@@ -2810,3 +2931,45 @@ func tryDecodeBase64(s string) string {
 	}
 	return string(decoded)
 }
+
+// PostgresStoreFactory implements StoreFactory for PostgreSQL.
+type PostgresStoreFactory struct {
+	db         *sql.DB
+	schemaName string
+}
+
+// NewPostgresStoreFactory creates a PostgresStoreFactory.
+// The db connection must already be open. schemaName is the PostgreSQL
+// schema for cleat tables (defaults to "public").
+func NewPostgresStoreFactory(db *sql.DB, schemaName string) *PostgresStoreFactory {
+	if schemaName == "" {
+		schemaName = "public"
+	}
+	return &PostgresStoreFactory{
+		db:         db,
+		schemaName: schemaName,
+	}
+}
+
+// OpenStore creates a PostgresStore scoped to the given tenant and task queues.
+func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
+	// Ensure the schema exists.
+	if f.schemaName != "" && f.schemaName != "public" {
+		if _, err := f.db.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+pq.QuoteIdentifier(f.schemaName)); err != nil {
+			return nil, nil, fmt.Errorf("create schema %s: %w", f.schemaName, err)
+		}
+	}
+	store := NewPostgresStore(f.db, taskQueues...)
+	store.tenantID = tenantID
+	return store, nopCloser{}, nil
+}
+
+// DriverName returns "postgres".
+func (f *PostgresStoreFactory) DriverName() string { return "postgres" }
+
+// Dialect returns DialectPostgres.
+func (f *PostgresStoreFactory) Dialect() Dialect { return DialectPostgres }
+
+type nopCloser struct{}
+
+func (nopCloser) Close() error { return nil }

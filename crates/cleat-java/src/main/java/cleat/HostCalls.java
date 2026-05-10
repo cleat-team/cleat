@@ -219,12 +219,21 @@ public class HostCalls {
     @Import(module = "env", name = "cleat_await_all_children")
     private static native long cleatAwaitAllChildrenRaw(int idsPtr, int idsLen, int outPtr, int maxLen);
 
-    @Import(module = "env", name = "cleat_call_with_retry")
-    private static native long cleatCallWithRetryRaw(
+    @Import(module = "env", name = "cleat_call_retry")
+    private static native long cleatCallRetryRaw(
         int svcPtr, int svcLen,
         int opPtr, int opLen,
         int reqPtr, int reqLen,
-        int retryPtr, int retryLen,
+        long maxAttempts, long initialIntervalMs, long backoffCoefficient100x, long maxIntervalMs,
+        int nonRetryableErrorsPtr, int nonRetryableErrorsLen,
+        int respPtr, int respMaxLen);
+
+    @Import(module = "env", name = "cleat_call_heartbeat")
+    private static native long cleatCallHeartbeatRaw(
+        int svcPtr, int svcLen,
+        int opPtr, int opLen,
+        int reqPtr, int reqLen,
+        long heartbeatIntervalMs,
         int respPtr, int respMaxLen);
 
     @Import(module = "env", name = "cleat_fetch")
@@ -690,6 +699,11 @@ public class HostCalls {
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        // Check for suspension sentinel before decoding the result.
+        if (result == Memory.SUSPEND_SENTINEL) {
+            return CleatResult.err("child workflow not yet complete; workflow must suspend");
+        }
+
         int errCode = Memory.decodeSimpleErrCode(result);
         int resultLen = Memory.decodeSimpleExtra(result);
 
@@ -901,7 +915,7 @@ public class HostCalls {
     // ========================================================================
 
     /**
-     * Call a plugin host function and return the response JSON string.
+     * Call a plugin host function and return the response.
      * <p>
      * Plugins extend the host runtime with custom functionality beyond the
      * standard host imports.  Unlike {@link #cleatCall(String, String, String)},
@@ -913,11 +927,10 @@ public class HostCalls {
      * @param functionName name of the function within the plugin
      *                     (e.g. {@code "put"}, {@code "send_message"})
      * @param inputJson    input JSON for the plugin function
-     * @return the plugin function's response as a JSON string
-     * @throws RuntimeException if the host reports an error from the plugin
-     *                          call
+     * @return a result containing the plugin function's response JSON on
+     *         success, or an error description on failure
      */
-    public String pluginCall(String pluginName, String functionName, String inputJson) {
+    public CleatResult<String> pluginCall(String pluginName, String functionName, String inputJson) {
         int[] p = packStrings(pluginName, functionName, inputJson);
         int pnOff = p[0], fnOff = p[1], inOff = p[2];
         int pnLen = p[3], fnLen = p[4], inLen = p[5];
@@ -933,10 +946,10 @@ public class HostCalls {
 
         if (errCode != 0) {
             String errMsg = readOutput(responseLen);
-            throw new RuntimeException("plugin_call failed: " + errMsg);
+            return CleatResult.err(errMsg);
         }
 
-        return readOutput(responseLen);
+        return CleatResult.ok(readOutput(responseLen));
     }
 
     /**
@@ -1198,11 +1211,11 @@ public class HostCalls {
     public CleatResult<java.util.List<AwaitSignalsResult>> awaitSignalsWithQuorumMs(
         String[] signalNames, int minCount, int maxRejections, long timeoutMs) {
         java.util.List<AwaitSignalsResult> results = new java.util.ArrayList<>();
-        long deadline = System.currentTimeMillis() + timeoutMs;
+        long deadline = this.now() + timeoutMs;
         int rejectionCount = 0;
 
         while (results.size() < minCount) {
-            long remainingMs = deadline - System.currentTimeMillis();
+            long remainingMs = deadline - this.now();
             if (remainingMs <= 0) {
                 return CleatResult.err(
                     "quorum timeout waiting for signals [" + String.join(", ", signalNames) + "]: got " + results.size() + "/" + minCount + " signals");
@@ -1811,6 +1824,46 @@ public class HostCalls {
         }
     }
 
+    /**
+     * Make a durable (deterministically replayed) call to an external service
+     * with periodic heartbeat progress updates.
+     * <p>
+     * The host sends periodic heartbeat updates during the call.  This is
+     * useful for long-running operations where the caller needs progress
+     * visibility or to detect stalled calls.
+     *
+     * @param service            the service name (e.g. {@code "orders"})
+     * @param operation          the operation name (e.g. {@code "create"})
+     * @param requestJSON        the JSON request payload
+     * @param heartbeatIntervalMs interval between heartbeat progress updates
+     *                            in milliseconds
+     * @return a result containing the JSON response on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> cleatCallHeartbeat(String service, String operation, String requestJSON, long heartbeatIntervalMs) {
+        int[] p = packStrings(service, operation, requestJSON);
+        int svcOff = p[0], opOff = p[1], reqOff = p[2];
+        int svcLen = p[3], opLen = p[4], reqLen = p[5];
+
+        long result = cleatCallHeartbeatRaw(
+            svcOff, svcLen,
+            opOff, opLen,
+            reqOff, reqLen,
+            heartbeatIntervalMs,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return CleatResult.err(errMsg);
+        }
+
+        String response = readOutput(responseLen);
+        return CleatResult.ok(response);
+    }
+
     // ========================================================================
     // Typed cleatCall wrappers
     // ========================================================================
@@ -1871,21 +1924,33 @@ public class HostCalls {
             Class<R> responseClass, RetryPolicy retryPolicy) {
         String requestJson = JsonHelper.stringify(request);
 
-        // Serialize the retry policy as JSON.
-        String retryJson = "{\"max_attempts\":" + retryPolicy.maxAttempts
-            + ",\"initial_interval_ms\":" + retryPolicy.initialIntervalMs
-            + ",\"backoff_multiplier\":" + retryPolicy.backoffMultiplier
-            + ",\"maximum_interval_ms\":" + retryPolicy.maximumIntervalMs + "}";
+        // Serialize nonRetryableErrors as a JSON array string.
+        String nonRetryableErrorsJson = retryPolicy.nonRetryableErrorsToJson();
 
-        int[] p = packStrings(service, operation, requestJson, retryJson);
-        int svcOff = p[0], opOff = p[1], reqOff = p[2], retryOff = p[3];
-        int svcLen = p[4], opLen = p[5], reqLen = p[6], retryLen = p[7];
+        // Pack service, operation, requestJson into scratch memory (three strings).
+        int[] p = packStrings(service, operation, requestJson);
+        int svcOff = p[0], opOff = p[1], reqOff = p[2];
+        int svcLen = p[3], opLen = p[4], reqLen = p[5];
 
-        long result = cleatCallWithRetryRaw(
+        // Write nonRetryableErrorsJson into scratch memory after the packed strings.
+        int current = Memory.SCRATCH_BASE + svcLen + opLen + reqLen;
+        byte[] nreBytes = nonRetryableErrorsJson.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        int nreLen = Math.min(nreBytes.length, Memory.OUT_BUF_SIZE);
+        for (int i = 0; i < nreLen; i++) {
+            org.teavm.interop.Address.fromInt(current + i).putByte(nreBytes[i]);
+        }
+        int nreOff = current;
+
+        // Compute backoffCoefficient100x from backoffMultiplier.
+        long backoffCoefficient100x = (long) (retryPolicy.backoffMultiplier * 100.0);
+
+        long result = cleatCallRetryRaw(
             svcOff, svcLen,
             opOff, opLen,
             reqOff, reqLen,
-            retryOff, retryLen,
+            retryPolicy.maxAttempts, retryPolicy.initialIntervalMs,
+            backoffCoefficient100x, retryPolicy.maximumIntervalMs,
+            nreOff, nreLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
         int errCode = Memory.decodeCallErrCode(result);
@@ -2045,10 +2110,10 @@ public class HostCalls {
      *
      * @param key   the lock key
      * @param ttlMs time-to-live in milliseconds
-     * @return {@code true} if the lock was acquired
-     * @throws RuntimeException if the host reports an error
+     * @return a result containing {@code true} if the lock was acquired,
+     *         {@code false} if already held; or an error description on failure
      */
-    public boolean acquireLockMs(String key, long ttlMs) {
+    public CleatResult<Boolean> acquireLockMs(String key, long ttlMs) {
         int[] p = packStrings(key);
         int keyOff = p[0], keyLen = p[1];
 
@@ -2056,10 +2121,10 @@ public class HostCalls {
 
         int errCode = (int) (result & 0xFFL);
         if (errCode != 0) {
-            throw new RuntimeException("acquireLock(key=\"" + key + "\", ttlMs=" + ttlMs + ") failed: host returned error code " + errCode + ". Check that the lock key is valid.");
+            return CleatResult.err("acquireLock(key=\"" + key + "\", ttlMs=" + ttlMs + ") failed: host returned error code " + errCode + ". Check that the lock key is valid.");
         }
 
-        return ((result >> 8) & 0x1L) != 0;
+        return CleatResult.ok(((result >> 8) & 0x1L) != 0);
     }
 
     /**
@@ -2071,11 +2136,11 @@ public class HostCalls {
      *
      * @param key         the lock key
      * @param ttlSeconds  time-to-live in seconds
-     * @return {@code true} if the lock was acquired
-     * @throws RuntimeException if the host reports an error
+     * @return a result containing {@code true} if the lock was acquired,
+     *         {@code false} if already held; or an error description on failure
      * @see #acquireLockMs(String, long)
      */
-    public boolean acquireLock(String key, long ttlSeconds) {
+    public CleatResult<Boolean> acquireLock(String key, long ttlSeconds) {
         return acquireLockMs(key, ttlSeconds * 1000);
     }
 
@@ -2083,9 +2148,9 @@ public class HostCalls {
      * Release a concurrency lock previously acquired by this workflow.
      *
      * @param key the lock key to release
-     * @throws RuntimeException if the host reports an error
+     * @return a result indicating success, or an error description on failure
      */
-    public void releaseLock(String key) {
+    public CleatResult<Void> releaseLock(String key) {
         int[] p = packStrings(key);
         int keyOff = p[0], keyLen = p[1];
 
@@ -2093,8 +2158,9 @@ public class HostCalls {
 
         int errCode = (int) (result & 0xFFL);
         if (errCode != 0) {
-            throw new RuntimeException("releaseLock(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the lock key is valid and the lock is held.");
+            return CleatResult.err("releaseLock(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the lock key is valid and the lock is held.");
         }
+        return CleatResult.ok(null);
     }
 
     // ========================================================================
@@ -2268,20 +2334,53 @@ public class HostCalls {
         /** Maximum backoff interval in milliseconds. */
         public final long maximumIntervalMs;
 
+        /** List of non-retryable error codes (serialized as JSON array). */
+        public final String[] nonRetryableErrors;
+
         /**
          * Construct a new retry policy.
          *
-         * @param maxAttempts        maximum number of retry attempts
-         * @param initialIntervalMs  initial backoff interval in milliseconds
-         * @param backoffMultiplier  backoff multiplier (> 1.0 for exponential backoff)
-         * @param maximumIntervalMs  maximum backoff interval in milliseconds
+         * @param maxAttempts         maximum number of retry attempts
+         * @param initialIntervalMs   initial backoff interval in milliseconds
+         * @param backoffMultiplier   backoff multiplier (> 1.0 for exponential backoff)
+         * @param maximumIntervalMs   maximum backoff interval in milliseconds
+         * @param nonRetryableErrors  list of non-retryable error codes (may be null or empty)
          */
         public RetryPolicy(int maxAttempts, long initialIntervalMs,
-                           double backoffMultiplier, long maximumIntervalMs) {
+                           double backoffMultiplier, long maximumIntervalMs,
+                           String[] nonRetryableErrors) {
             this.maxAttempts = maxAttempts;
             this.initialIntervalMs = initialIntervalMs;
             this.backoffMultiplier = backoffMultiplier;
             this.maximumIntervalMs = maximumIntervalMs;
+            this.nonRetryableErrors = nonRetryableErrors != null ? nonRetryableErrors : new String[0];
+        }
+
+        /**
+         * Construct a new retry policy with no non-retryable errors.
+         */
+        public RetryPolicy(int maxAttempts, long initialIntervalMs,
+                           double backoffMultiplier, long maximumIntervalMs) {
+            this(maxAttempts, initialIntervalMs, backoffMultiplier, maximumIntervalMs, null);
+        }
+
+        /**
+         * Serialize {@link #nonRetryableErrors} as a JSON array string.
+         * Returns {@code "[]"} if the array is null or empty.
+         */
+        String nonRetryableErrorsToJson() {
+            if (nonRetryableErrors == null || nonRetryableErrors.length == 0) {
+                return "[]";
+            }
+            StringBuilder sb = new StringBuilder("[");
+            for (int i = 0; i < nonRetryableErrors.length; i++) {
+                if (i > 0) {
+                    sb.append(",");
+                }
+                sb.append("\"").append(JsonHelper.escapeJson(nonRetryableErrors[i])).append("\"");
+            }
+            sb.append("]");
+            return sb.toString();
         }
     }
 

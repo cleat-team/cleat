@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -71,18 +72,18 @@ type updateWebhookRequest struct {
 }
 
 type deliveryJSON struct {
-	ID            uuid.UUID  `json:"id"`
-	WebhookID     uuid.UUID  `json:"webhook_id"`
-	EventType     string     `json:"event_type"`
+	ID            uuid.UUID       `json:"id"`
+	WebhookID     uuid.UUID       `json:"webhook_id"`
+	EventType     string          `json:"event_type"`
 	Payload       json.RawMessage `json:"payload"`
-	Status        string     `json:"status"`
-	AttemptCount  int        `json:"attempt_count"`
-	LastAttemptAt *time.Time `json:"last_attempt_at,omitempty"`
-	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
-	DeliveredAt   *time.Time `json:"delivered_at,omitempty"`
-	ResponseCode  *int       `json:"response_code,omitempty"`
-	ResponseBody  *string    `json:"response_body,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
+	Status        string          `json:"status"`
+	AttemptCount  int             `json:"attempt_count"`
+	LastAttemptAt *time.Time      `json:"last_attempt_at,omitempty"`
+	NextAttemptAt *time.Time      `json:"next_attempt_at,omitempty"`
+	DeliveredAt   *time.Time      `json:"delivered_at,omitempty"`
+	ResponseCode  *int            `json:"response_code,omitempty"`
+	ResponseBody  *string         `json:"response_body,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
 }
 
 // ---- POST /webhooks ----
@@ -125,10 +126,10 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO webhook_config (tenant_id, id, url, secret, events, enabled, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, true, $6, $6)
-	`, tid, id, req.URL, req.Secret, string(eventsJSON), now)
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+			INSERT INTO webhook_config (tenant_id, id, url, secret, events, enabled, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
+		`, p.dialect), tid, id, req.URL, req.Secret, string(eventsJSON), now)
 	if err != nil {
 		p.logger.Error("notifications: create webhook", "error", err)
 		p.writeError(w, 500, "failed to create webhook")
@@ -158,12 +159,12 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.QueryContext(r.Context(), `
-		SELECT id, url, secret, events, enabled, created_at, updated_at
-		FROM webhook_config
-		WHERE tenant_id = $1
-		ORDER BY created_at DESC
-	`, tid)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+			SELECT id, url, secret, events, enabled, created_at, updated_at
+			FROM webhook_config
+			WHERE tenant_id = $1
+			ORDER BY created_at DESC
+		`, p.dialect), tid)
 	if err != nil {
 		p.logger.Error("notifications: list webhooks", "error", err)
 		p.writeError(w, 500, "failed to list webhooks")
@@ -213,11 +214,11 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 		c         webhookConfigJSON
 		eventsRaw []byte
 	)
-	err = p.db.QueryRowContext(r.Context(), `
-		SELECT id, url, secret, events, enabled, created_at, updated_at
-		FROM webhook_config
-		WHERE id = $1 AND tenant_id = $2
-	`, id, tid).Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT id, url, secret, events, enabled, created_at, updated_at
+			FROM webhook_config
+			WHERE id = $1 AND tenant_id = $2
+		`, p.dialect), id, tid).Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "webhook not found")
 		return
@@ -305,18 +306,17 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 	args = append(args, id, tid)
 
 	query := fmt.Sprintf(`
-		UPDATE webhook_config
-		SET %s
-		WHERE id = $%d AND tenant_id = $%d
-	`, joinSetClauses(setClauses), argIdx, argIdx+1)
+			UPDATE webhook_config
+			SET %s
+			WHERE id = $%d AND tenant_id = $%d
+		`, joinSetClauses(setClauses), argIdx, argIdx+1)
 
-	result, err := p.db.ExecContext(r.Context(), query, args...)
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
 	if err != nil {
 		p.logger.Error("notifications: update webhook", "error", err)
 		p.writeError(w, 500, "failed to update webhook")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "webhook not found")
 		return
@@ -327,11 +327,11 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		c         webhookConfigJSON
 		eventsRaw []byte
 	)
-	err = p.db.QueryRowContext(r.Context(), `
-		SELECT id, url, secret, events, enabled, created_at, updated_at
-		FROM webhook_config
-		WHERE id = $1 AND tenant_id = $2
-	`, id, tid).Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT id, url, secret, events, enabled, created_at, updated_at
+			FROM webhook_config
+			WHERE id = $1 AND tenant_id = $2
+		`, p.dialect), id, tid).Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("notifications: re-fetch webhook", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated webhook")
@@ -360,16 +360,15 @@ func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
-		DELETE FROM webhook_config
-		WHERE id = $1 AND tenant_id = $2
-	`, id, tid)
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+			DELETE FROM webhook_config
+			WHERE id = $1 AND tenant_id = $2
+		`, p.dialect), id, tid)
 	if err != nil {
 		p.logger.Error("notifications: delete webhook", "error", err)
 		p.writeError(w, 500, "failed to delete webhook")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "webhook not found")
 		return
@@ -397,9 +396,9 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 
 	// Verify the webhook belongs to the tenant.
 	var exists bool
-	err = p.db.QueryRowContext(r.Context(), `
-		SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2)
-	`, webhookID, tid).Scan(&exists)
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2)
+		`, p.dialect), webhookID, tid).Scan(&exists)
 	if err != nil {
 		p.logger.Error("notifications: verify webhook", "error", err)
 		p.writeError(w, 500, "failed to verify webhook")
@@ -411,12 +410,12 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := `
-		SELECT id, webhook_id, event_type, payload, status, attempt_count,
-		       last_attempt_at, next_attempt_at, delivered_at,
-		       response_code, response_body, created_at
-		FROM webhook_delivery
-		WHERE webhook_id = $1
-	`
+			SELECT id, webhook_id, event_type, payload, status, attempt_count,
+			       last_attempt_at, next_attempt_at, delivered_at,
+			       response_code, response_body, created_at
+			FROM webhook_delivery
+			WHERE webhook_id = $1
+		`
 	args := []interface{}{webhookID}
 	argIdx := 2
 
@@ -430,7 +429,7 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	query += fmt.Sprintf(" LIMIT $%d", argIdx)
 	args = append(args, 100)
 
-	rows, err := p.db.QueryContext(r.Context(), query, args...)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
 	if err != nil {
 		p.logger.Error("notifications: list deliveries", "error", err)
 		p.writeError(w, 500, "failed to list deliveries")
@@ -441,8 +440,8 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	var deliveries []deliveryJSON
 	for rows.Next() {
 		var (
-			d deliveryJSON
-			payloadRaw []byte
+			d             deliveryJSON
+			payloadRaw    []byte
 			lastAttemptAt sql.NullTime
 			nextAttemptAt sql.NullTime
 			deliveredAt   sql.NullTime

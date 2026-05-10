@@ -11,7 +11,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/rcownie/cleat.svg)](https://pkg.go.dev/github.com/rcownie/cleat)
 [![OpenSSF Best Practices](https://bestpractices.coreinfrastructure.org/projects/XXXX/badge)](https://bestpractices.coreinfrastructure.org/projects/XXXX)
 
-> **Durable workflow engine on PostgreSQL — write in Go, compile to WASM, deploy via INSERT.**
+> **Durable workflow engine — runs on PostgreSQL, MySQL, or SQL Server. Write in Go, compile to WASM, deploy via INSERT.**
 
 ```bash
 brew install cleat/tap/cleat          # or: go install github.com/rcownie/cleat/cmd/cleat@latest
@@ -19,7 +19,45 @@ docker compose up -d postgres         # PostgreSQL 16+ required
 cleat dev start                       # creates and runs a sample workflow locally
 ```
 
-A cleat execution framework for Go and Rust. Workflows are written in near-standard Go (or Rust with `#[cleat_entry]`), compiled to WebAssembly, and stored in PostgreSQL. The framework handles replay, checkpointing, failover, and observability with minimal developer overhead. Includes an embedded Svelte web UI for workflow monitoring and schedule management.
+A cleat execution framework for Go and Rust. Workflows are written in near-standard Go (or Rust with `#[cleat_entry]`), compiled to WebAssembly, and stored in a supported database backend. The framework handles replay, checkpointing, failover, and observability with minimal developer overhead. Includes an embedded Svelte web UI for workflow monitoring and schedule management.
+
+## What Cleat Is (and Is Not)
+
+Cleat is a **worker pool that connects to your database**. It is not a new
+database, not an embedded runtime, and not a server cluster you need to manage.
+
+**Not a new database -- it is a worker pool.** Point cleat at your existing PostgreSQL,
+MySQL, or SQL Server database (RDS, Cloud SQL, Azure SQL, or any managed service). Cleat creates its own tables in a
+configurable schema (`--schema`). You keep full control of your database -- your
+backup policy, your replication, your monitoring, your connection pooling.
+
+- **Your database, your rules.** Cleat does not manage your database. You do. Use your
+  existing RDS, Cloud SQL, or self-hosted cluster. Cleat is just another client.
+- **Multi-instance friendly.** Run multiple completely separate cleat worker pools
+  from different clusters, teams, or deployments, all connected to the same database
+  cluster. Each pool uses its own schema (via `--schema`) and never touches another
+  pool's tables.
+- **Zero new infrastructure.** You already run a supported database. Point cleat at it.
+  Workers are stateless Go binaries that poll the database -- no new state stores,
+  no new clusters, no new operational burden.
+- **Scale independently.** Add or remove cleat workers without touching the database.
+  The database stays under your control; cleat is just another client.
+
+## Database Backends
+
+Cleat supports three production-ready database backends. You can point the CLI and
+worker daemon at any of them by specifying the appropriate `--db` connection URL:
+
+| Backend | Minimum Version | Connection URL |
+|---------|----------------|----------------|
+| **PostgreSQL** | 14+ | `postgres://user:pass@host/db` |
+| **MySQL** | 8.0+ (or MariaDB 10.6+) | `mysql://user:pass@tcp(host:3306)/db` |
+| **SQL Server** | 2017+ (or Azure SQL) | `sqlserver://user:pass@host:1433?database=db` |
+
+All three backends support the full cleat feature set, including workflow
+definitions, event history, signals, scheduling, and tenant isolation. See
+[docs/database-backends.md](docs/database-backends.md) for connection string
+details, dialect-specific notes, and migration instructions.
 
 ## Installation
 
@@ -46,7 +84,7 @@ go install github.com/rcownie/cleat/cmd/cleat-gen@latest
 ### Dependencies
 
 - **Go 1.26+** with `GOOS=wasip1 GOARCH=wasm` target (bundled with Go 1.22+)
-- **PostgreSQL 14+** for the worker daemon and workflow storage
+- **PostgreSQL 14+**, **MySQL 8.0+** (or MariaDB 10.6+), or **SQL Server 2017+** for the worker daemon and workflow storage
 - **TinyGo** (optional) for smaller WASM binaries via `--target tinygo`
 - **Rust toolchain** (optional) for Rust workflows via `--target rust`
 - **Node.js** (optional) to build the web UI for the worker dashboard
@@ -113,8 +151,16 @@ cleat build --target rust -o ./out ./examples/rust-workflow/
 # 3. Validate without compiling
 cleat vet ./testdata/basic/
 
-# 4. Deploy to PostgreSQL
+# 4. Deploy to any supported database
 cleat deploy --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
+    --name place_order ./out/place_order.wasm
+
+#    Or with MySQL:
+cleat deploy --db "mysql://user:pass@tcp(localhost:3306)/cleat" \
+    --name place_order ./out/place_order.wasm
+
+#    Or with SQL Server:
+cleat deploy --db "sqlserver://user:pass@localhost:1433?database=cleat" \
     --name place_order ./out/place_order.wasm
 
 # 5. Run the worker with the web UI
@@ -130,33 +176,53 @@ go test ./...
 
 ## Architecture
 
+Cleat's architecture is built around one simple idea: **your database is the
+source of truth, and cleat workers are stateless clients that connect to it.**
+
 ```
-+------------------+         +-------------------+         +-----------------+
-|  Workflow Author  |         |  CLI (cleat)    |         |  PostgreSQL     |
-|  (Go / Rust)      | ------> |  build / vet /    | ------> |  workflow_defs  |
-|                   |         |  deploy / schedule|         |  (WASM blobs)   |
-+------------------+         +-------------------+         +-----------------+
-        |                            |                              |
-        |  writes                    |  1. Load & analyze           |  stores
-        v                            v                              v
-+------------------+         +-------------------+         +-----------------+
-|  Standard Go      |         |  Transformer       |         |  workflow_inst  |
-|  + HostCalls      |         |  Pipeline:         |         |  (state, queue, |
-|                   |         |  - analyzer.Load   |         |   timers)       |
-|  func PlaceOrder( |         |  - callgraph.Build |         +-----------------+
-|    h HostCalls,   |         |  - closure.Compute |                |
-|    input string,  |         |  - transform       |                |
-|  ) error { ... }  |         |  - wasm.Compile    |                v
-+------------------+         +-------------------+         +-----------------+
-                                                             |  Stateless      |
-                                                             |  Workers        |
-+------------------+                                          |                 |
-|  Web UI (Svelte)  | <-- HTTP -->                           |  SKIP LOCKED    |
-|  embedded in      |                                          |  claim instance |
-|  worker binary    |                                          |  load WASM      |
-|  /api/* endpoints |                                          |  replay / exec  |
-+------------------+                                          +-----------------+
+                          +-------------------------------------+
+                          |   Your Database                     |
+                          |   (PostgreSQL, MySQL, or SQL Server) |
+                          |   schema: cleat (configurable)      |
+                          |                                     |
+                          |   workflow_defs (WASM blobs)        |
+                          |   workflow_instances (state/queue)  |
+                          |   event_history (replay log)        |
+                          |   schedules, workflow_signals       |
+                          +--------+----------------------------+
+                                   |
+                   +---------------+---------------+
+                   |                               |
+            +------+------+                 +------+------+
+            |  CLI        |                 |  Workers    |
+            |  (cleat)    |                 | (cleat-    |
+            |             |                 |  worker)   |
+            |  build      |                 |             |
+            |  deploy     |                 |  SKIP       |
+            |  schedule   |                 |  LOCKED     |
+            |  vet        |                 |  claim +    |
+            |  versions   |                 |  replay     |
+            |  rollback   |                 |  stateless  |
+            +-------------+                 +------+------+
+                                                   |
+                                            +------+------+
+                                            |  Web UI     |
+                                            |  (Svelte)   |
+                                            |  embedded   |
+                                            +-------------+
 ```
+
+Key points:
+- **Your Database** -- run it anywhere (RDS, Cloud SQL, Azure SQL, self-hosted, or a
+  different cluster entirely). Cleat connects to it; it does not manage it.
+- **Workers connect to the database**, not the other way around. Workers poll for
+  work using `SELECT ... FOR UPDATE SKIP LOCKED`.
+- **Multiple worker pools** can connect to the same database, each in its own schema
+  (set via `--schema`). This enables dev/staging/prod isolation on a single cluster.
+- **The CLI deploys to the database** -- `cleat deploy` writes a WASM blob to
+  `workflow_defs` and is immediately available to all connected workers.
+- **No new infrastructure** -- if you already run a supported database, you already have
+  everything cleat needs. No new state stores, no server clusters, no sidecars.
 
 ### Transformer Pipeline
 
@@ -173,12 +239,12 @@ The CLI's `build` command runs a five-stage pipeline:
 The host runtime uses **wazero** (a zero-dependency WebAssembly runtime for Go) to execute compiled WASM modules. Execution follows a checkpoint/replay model:
 
 - WASM modules import 15 host functions from the `env` module (e.g., `cleat_call`, `cleat_sleep`, `cleat_now`, `cleat_call_heartbeat`).
-- On first execution, the host runs the entry point, records every `DurableCall` request/response in the event history, and persists state to PostgreSQL.
+- On first execution, the host runs the entry point, records every `DurableCall` request/response in the event history, and persists state to the database.
 - On replay (e.g., after a worker crash or suspension), the host replays the event history. Completed calls return cached responses instead of re-executing. The workflow resumes from the last incomplete step.
 
 ### Worker Daemon
 
-The worker (`cleat-worker`) polls PostgreSQL for runnable workflow instances using `SELECT ... FOR UPDATE SKIP LOCKED`. Each claimed instance loads its WASM module and event history, replays or executes the workflow, then persists new events. Workers are stateless and can be horizontally scaled.
+The worker (`cleat-worker`) polls the database for runnable workflow instances using `SELECT ... FOR UPDATE SKIP LOCKED`. Each claimed instance loads its WASM module and event history, replays or executes the workflow, then persists new events. Workers are stateless and can be horizontally scaled.
 
 ### WASM Boundary
 
@@ -454,7 +520,7 @@ Reports entry points, cleat leaf functions, threading errors, closure errors, an
 
 ### cleat deploy
 
-Upload a compiled WASM workflow to PostgreSQL.
+Upload a compiled WASM workflow to the database.
 
 ```
 cleat deploy [--name <name>] [--namespace <ns>] <wasm-file>
@@ -464,7 +530,8 @@ Flags:
   --namespace <ns>   Namespace (default: "default")
 
 Common flags:
-  --db <connstr>     PostgreSQL connection string (or CLEAT_DATABASE_URL env)
+  --db <connstr>     Database connection string: postgres://, mysql://, or sqlserver:// (or CLEAT_DATABASE_URL env)
+  --schema <schema>  Database schema for cleat tables (default: "cleat")
 ```
 
 Without `--db` or `CLEAT_DATABASE_URL`, performs a dry run that prints what would be deployed.
@@ -505,11 +572,17 @@ The spec directory contains Go files with request/response structs and a `Client
 
 ## Worker deployment
 
-The `cleat-worker` daemon polls PostgreSQL for runnable workflow instances and drives execution.
+The `cleat-worker` daemon polls the database for runnable workflow instances and drives execution.
 
 ```bash
 # Run with default settings
 cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable"
+
+# With MySQL:
+cleat-worker --db "mysql://user:pass@tcp(localhost:3306)/cleat"
+
+# With SQL Server:
+cleat-worker --db "sqlserver://user:pass@localhost:1433?database=cleat"
 
 # With explicit concurrency and heartbeat
 cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
@@ -522,7 +595,8 @@ cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--db` | `DATABASE_URL` env | PostgreSQL connection URL |
+| `--db` | `DATABASE_URL` env | Database connection URL: postgres://, mysql://, or sqlserver:// |
+| `--schema` | `cleat` | Database schema for cleat tables (use separate schemas per pool for multi-instance setups) |
 | `--api-addr` | (disabled) | HTTP API listen address (e.g., `:8080`) — serves REST API, metrics, and web UI |
 | `--namespace` | `default` | Workflow namespace to claim from |
 | `--concurrency` | 10 | Max concurrent workflow executions |
@@ -550,10 +624,28 @@ The heartbeat interval (`--heartbeat`, default 5s) controls how often the worker
 
 ## Database setup
 
-Run `schema.sql` against a PostgreSQL 14+ database before deploying workflows.
+Cleat creates its own tables in a database you already manage. Point cleat
+at any supported database -- it handles schema creation automatically on first
+worker startup. Schema files for all three backends are available in the
+`migrations/` directory (see [docs/database-backends.md](docs/database-backends.md)
+for dialect-specific configuration).
+
+To create the schema manually (for environments where the worker does not have DDL
+permissions):
 
 ```bash
 psql -U postgres -d cleat -f schema.sql
+```
+
+By default, cleat uses the `cleat` schema. For multi-instance setups, use `--schema`
+to isolate pools:
+
+```bash
+# Worker pool A (dev)
+cleat-worker --db "postgres://..." --schema cleat_dev
+
+# Worker pool B (staging) -- same database, different schema
+cleat-worker --db "postgres://..." --schema cleat_staging
 ```
 
 ### Tables
@@ -754,14 +846,14 @@ Using `TestEnv` avoids the full WASM compilation cycle (seconds, not millisecond
 ## When NOT to Use Cleat
 
 Cleat solves a specific problem: durable workflow orchestration with
-deterministic replay on PostgreSQL. It is not a general-purpose application
+deterministic replay on a supported database backend. It is not a general-purpose application
 framework. Here are cases where cleat is a bad fit.
 
 ### Single-service apps without orchestration needs
 
 If your application is a simple REST API, CRUD service, or batch job that does
 not need multi-step orchestration, durable execution introduces unnecessary
-complexity. The WASM compilation pipeline, replay model, and PostgreSQL round-
+complexity. The WASM compilation pipeline, replay model, and database round-
 trips add overhead that provides no benefit for stateless request-response
 workloads.
 
@@ -790,8 +882,8 @@ DBOS (TypeScript SDK), or Inngest (TypeScript-native).
 ### Teams needing a managed service today
 
 Cleat is self-hosted only. There is no cleat Cloud, no managed hosting, no
-SLA. You operate your own PostgreSQL cluster and worker fleet. This requires
-operational expertise in PostgreSQL administration, capacity planning, and
+SLA. You operate your own database cluster and worker fleet. This requires
+operational expertise in database administration, capacity planning, and
 incident response.
 
 **Use instead**: Temporal Cloud (fully managed), AWS Step Functions (serverless,
@@ -800,7 +892,7 @@ no infrastructure management), or DBOS Cloud (managed PostgreSQL + execution).
 ### Ultra-low-latency requirements (<1ms)
 
 Every DurableCall crosses the WASM boundary (wazero marshalling), is recorded
-in the event history, and involves at least one PostgreSQL round-trip. This
+in the event history, and involves at least one database round-trip. This
 adds inherent latency that makes cleat unsuitable for sub-millisecond
 operations like high-frequency trading, real-time gaming backends, or
 signal-processing pipelines.
@@ -808,13 +900,16 @@ signal-processing pipelines.
 **Use instead**: A custom event-sourced system with in-memory state, or a
 message queue (NATS, Redis Streams, Kafka) for ultra-low-latency messaging.
 
-### Teams that cannot run PostgreSQL
+### Teams that do not use a supported relational database
 
-PostgreSQL is the only supported backend. Cleat does not support SQLite, MySQL,
-DynamoDB, or any other database. If your organization standardizes on a
-different database or uses a serverless database that does not support
-`SKIP LOCKED` (e.g., DynamoDB, Cosmos DB), cleat will not work.
+Cleat connects to your existing PostgreSQL, MySQL, or SQL Server -- it is not a
+database itself. If your organization uses a different database (DynamoDB, Cosmos DB,
+SQLite) or a serverless database that does not support `SKIP LOCKED`, cleat will not
+work.
 
-**Use instead**: Temporal (supports SQLite, PostgreSQL, Cassandra, and
-Temporal Cloud), or a cloud-native workflow service that matches your database
-ecosystem.
+That said, the vast majority of production deployments run one of the supported
+databases (PostgreSQL, MySQL, or SQL Server). If you already have one of these in
+your infrastructure, cleat adds zero additional database operational burden.
+
+**Use instead**: Temporal (supports SQLite, PostgreSQL, Cassandra, and Temporal
+Cloud), or a cloud-native workflow service that matches your database ecosystem.

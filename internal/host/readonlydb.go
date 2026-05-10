@@ -4,79 +4,96 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
-// ReadOnlyDB wraps *sql.DB and ensures all transactions are READ ONLY.
-// This provides a defense-in-depth mechanism for plugins that are only
-// granted DatabaseAccessReadOnly.
+// ReadOnlyDB wraps *sql.DB and implements plugin.PluginDB by enforcing
+// read-only access. Write operations return an error.
 type ReadOnlyDB struct {
 	Inner *sql.DB
 }
 
-func (r *ReadOnlyDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
-	if opts == nil {
-		opts = &sql.TxOptions{}
-	}
-	opts.ReadOnly = true
-	tx, err := r.Inner.BeginTx(ctx, opts)
+var _ plugin.PluginDB = (*ReadOnlyDB)(nil)
+
+func (r *ReadOnlyDB) Begin(ctx context.Context) (plugin.PluginTx, error) {
+	tx, err := r.Inner.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, fmt.Errorf("readOnlyDB begin tx: %w", err)
 	}
-	// Also set the session-level read_only to catch any statement that
-	// bypasses the TxOptions (e.g., multi-statement queries).
 	if _, err := tx.ExecContext(ctx, "SET TRANSACTION READ ONLY"); err != nil {
 		tx.Rollback()
 		return nil, fmt.Errorf("readOnlyDB set transaction read only: %w", err)
 	}
-	return tx, nil
+	return &readOnlyTx{tx: tx}, nil
 }
 
-func (r *ReadOnlyDB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	// For single-statement writes, wrap in a read-only transaction.
-	tx, err := r.BeginTx(ctx, nil)
+func (r *ReadOnlyDB) Exec(ctx context.Context, query string, args ...interface{}) (int64, error) {
+	return 0, fmt.Errorf("read-only: Exec denied")
+}
+
+func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...interface{}) (plugin.Rows, error) {
+	rows, err := r.Inner.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	return result, tx.Commit()
+	return &sqlRowsWrapper{rows: rows}, nil
 }
 
-func (r *ReadOnlyDB) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
-	return r.Inner.QueryContext(ctx, query, args...)
+func (r *ReadOnlyDB) QueryRow(ctx context.Context, query string, args ...interface{}) plugin.RowScanner {
+	row := r.Inner.QueryRowContext(ctx, query, args...)
+	return &rowScanner{row: row}
 }
 
-func (r *ReadOnlyDB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
-	return r.Inner.QueryRowContext(ctx, query, args...)
-}
-
-func (r *ReadOnlyDB) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
-	return r.Inner.PrepareContext(ctx, query)
-}
-
-func (r *ReadOnlyDB) Close() error {
-	return r.Inner.Close()
-}
-
-func (r *ReadOnlyDB) PingContext(ctx context.Context) error {
+func (r *ReadOnlyDB) Ping(ctx context.Context) error {
 	return r.Inner.PingContext(ctx)
 }
 
-// Exec implements the deprecated sql.DB.Exec by routing through ExecContext
-// so that the read-only enforcement applies.
-func (r *ReadOnlyDB) Exec(query string, args ...interface{}) (sql.Result, error) {
-	return r.ExecContext(context.Background(), query, args...)
+type readOnlyTx struct {
+	tx *sql.Tx
 }
 
-// Query implements the deprecated sql.DB.Query by routing through QueryContext.
-func (r *ReadOnlyDB) Query(query string, args ...interface{}) (*sql.Rows, error) {
-	return r.QueryContext(context.Background(), query, args...)
+var _ plugin.PluginTx = (*readOnlyTx)(nil)
+
+func (r *readOnlyTx) Exec(ctx context.Context, query string, args ...interface{}) (int64, error) {
+	return 0, fmt.Errorf("read-only: Exec denied")
 }
 
-// QueryRow implements the deprecated sql.DB.QueryRow by routing through QueryRowContext.
-func (r *ReadOnlyDB) QueryRow(query string, args ...interface{}) *sql.Row {
-	return r.QueryRowContext(context.Background(), query, args...)
+func (r *readOnlyTx) Query(ctx context.Context, query string, args ...interface{}) (plugin.Rows, error) {
+	rows, err := r.tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	return &sqlRowsWrapper{rows: rows}, nil
+}
+
+func (r *readOnlyTx) QueryRow(ctx context.Context, query string, args ...interface{}) plugin.RowScanner {
+	row := r.tx.QueryRowContext(ctx, query, args...)
+	return &rowScanner{row: row}
+}
+
+func (r *readOnlyTx) Commit() error   { return r.tx.Commit() }
+func (r *readOnlyTx) Rollback() error { return r.tx.Rollback() }
+
+// sqlRowsWrapper wraps *sql.Rows to implement plugin.Rows.
+type sqlRowsWrapper struct {
+	rows *sql.Rows
+}
+
+var _ plugin.Rows = (*sqlRowsWrapper)(nil)
+
+func (w *sqlRowsWrapper) Next() bool                    { return w.rows.Next() }
+func (w *sqlRowsWrapper) Scan(dest ...interface{}) error { return w.rows.Scan(dest...) }
+func (w *sqlRowsWrapper) Close() error                   { return w.rows.Close() }
+func (w *sqlRowsWrapper) Err() error                     { return w.rows.Err() }
+
+// rowScanner adapts *sql.Row to plugin.RowScanner.
+type rowScanner struct {
+	row *sql.Row
+}
+
+var _ plugin.RowScanner = (*rowScanner)(nil)
+
+func (r *rowScanner) Scan(dest ...interface{}) error {
+	return r.row.Scan(dest...)
 }

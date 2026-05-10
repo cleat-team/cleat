@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -306,7 +307,7 @@ func newBehPlugin(t *testing.T) (*Plugin, *behStore) {
 	t.Cleanup(func() { fakeDB.Close() })
 
 	p := &Plugin{}
-	if err := p.Init(context.Background(), &plugin.Environment{DB: fakeDB}); err != nil {
+	if err := p.Init(context.Background(), &plugin.Environment{DB: &host.SQLDBAdapter{DB: fakeDB}}); err != nil {
 		t.Fatalf("Init(): %v", err)
 	}
 	return p, store
@@ -327,7 +328,7 @@ func behRouteHandler(t *testing.T) (*Plugin, http.Handler) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	return p, auth.Middleware(p.db.(*sql.DB))(mux)
+	return p, auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(mux)
 }
 
 // ---------------------------------------------------------------------------
@@ -484,7 +485,7 @@ func TestHandlePut_EmptyKey(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handlePut(w, r)
 	})
-	authHandler := auth.Middleware(p.db.(*sql.DB))(handler)
+	authHandler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(handler)
 
 	body := `{"max_requests":10,"window_seconds":60}`
 	req := behAuthedReq("PUT", "/rate-limits/", bytes.NewReader([]byte(body)))
@@ -502,7 +503,7 @@ func TestHandleDelete_EmptyKey(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handleDelete(w, r)
 	})
-	authHandler := auth.Middleware(p.db.(*sql.DB))(handler)
+	authHandler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(handler)
 
 	req := behAuthedReq("DELETE", "/rate-limits/", nil)
 	rec := httptest.NewRecorder()

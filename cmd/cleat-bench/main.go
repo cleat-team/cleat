@@ -22,39 +22,76 @@ import (
 	"sync/atomic"
 	"time"
 
-	_ "github.com/lib/pq"
+	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/microsoft/go-mssqldb"
 
 	"github.com/rcownie/cleat/internal/host"
 )
 
 func main() {
-	dbURL := flag.String("db", "", "PostgreSQL connection URL (required, or set DATABASE_URL)")
+	dbURL := flag.String("db", "", "Database connection URL (required, or set DATABASE_URL)")
 	workflowName := flag.String("workflow", "", "Workflow definition name to benchmark")
 	entryPoint := flag.String("entry-point", "place_order", "Workflow entry point")
 	count := flag.Int("count", 100, "Number of workflow executions")
 	concurrency := flag.Int("concurrency", 10, "Max concurrent executions")
 	taskQueueStr := flag.String("task-queue", "default", "Task queue to poll (e.g. default, gpu, high-memory)")
+	driver := flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
 	flag.Parse()
 
 	if *dbURL == "" {
 		*dbURL = os.Getenv("DATABASE_URL")
 	}
 	if *dbURL == "" || *workflowName == "" {
-		fmt.Fprintf(os.Stderr, "Usage: cleat-bench --db <url> --workflow <name> [--count 100] [--concurrency 10]\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat-bench --db <url> --workflow <name> [--driver postgres] [--count 100] [--concurrency 10]\n")
 		os.Exit(1)
 	}
 
-	db, err := sql.Open("postgres", *dbURL)
-	if err != nil {
-		log.Fatalf("Failed to connect: %v", err)
+	var sqlDriver string
+	switch *driver {
+	case "postgres":
+		sqlDriver = "postgres"
+	case "mysql":
+		sqlDriver = "mysql"
+	case "mssql":
+		sqlDriver = "mssql"
+	default:
+		fmt.Fprintf(os.Stderr, "Error: invalid --driver %q; must be postgres, mysql, or mssql\n", *driver)
+		os.Exit(1)
 	}
-	defer db.Close()
-	db.SetMaxOpenConns(*concurrency + 10)
-	db.SetMaxIdleConns(10)
 
-	taskQueues := strings.Split(*taskQueueStr, ",")
-	store := host.NewPostgresStore(db, taskQueues...)
+	const tenantID = "00000000-0000-0000-0000-000000000000"
+
 	ctx := context.Background()
+	taskQueues := strings.Split(*taskQueueStr, ",")
+
+	var factory host.StoreFactory
+	switch *driver {
+	case "postgres":
+		db, err := sql.Open(sqlDriver, *dbURL)
+		if err != nil {
+			log.Fatalf("Failed to connect: %v", err)
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(*concurrency + 10)
+		db.SetMaxIdleConns(10)
+		factory = host.NewPostgresStoreFactory(db, "public")
+	case "mysql":
+		db, err := sql.Open(sqlDriver, *dbURL)
+		if err != nil {
+			log.Fatalf("Failed to connect: %v", err)
+		}
+		defer db.Close()
+		db.SetMaxOpenConns(*concurrency + 10)
+		db.SetMaxIdleConns(10)
+		factory = host.NewMySQLStoreFactory(db, *dbURL)
+	case "mssql":
+		factory = host.NewMSSQLStoreFactory(*dbURL)
+	}
+	store, closer, err := factory.OpenStore(ctx, tenantID, taskQueues...)
+	if err != nil {
+		log.Fatalf("Failed to open store: %v", err)
+	}
+	defer closer.Close()
 
 	// Find the latest version of the workflow.
 	versions, err := store.ListVersions(ctx, *workflowName)
@@ -80,7 +117,7 @@ func main() {
 	reportStats("replay", replayLatencies)
 }
 
-func runBenchmark(ctx context.Context, store *host.PostgresStore, defName string, defVersion int, entryPoint string, count, concurrency int) []time.Duration {
+func runBenchmark(ctx context.Context, store host.WorkflowStore, defName string, defVersion int, entryPoint string, count, concurrency int) []time.Duration {
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var latenciesMu sync.Mutex
@@ -99,7 +136,7 @@ func runBenchmark(ctx context.Context, store *host.PostgresStore, defName string
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, defName, defVersion, input, "")
+			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "")
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return
@@ -145,7 +182,7 @@ func runBenchmark(ctx context.Context, store *host.PostgresStore, defName string
 	return latencies
 }
 
-func runReplayBenchmark(ctx context.Context, store *host.PostgresStore, defName string, defVersion int, entryPoint string, count, concurrency int) []time.Duration {
+func runReplayBenchmark(ctx context.Context, store host.WorkflowStore, defName string, defVersion int, entryPoint string, count, concurrency int) []time.Duration {
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var latenciesMu sync.Mutex
@@ -164,7 +201,7 @@ func runReplayBenchmark(ctx context.Context, store *host.PostgresStore, defName 
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, defName, defVersion, input, "")
+			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "")
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return
@@ -264,8 +301,9 @@ type benchState struct {
 	minVersion int
 }
 
-func (s *benchState) Version() int    { return s.version }
-func (s *benchState) MinVersion() int { return s.minVersion }
+func (s *benchState) Version() int                  { return s.version }
+func (s *benchState) MinVersion() int               { return s.minVersion }
+func (s *benchState) ChildVersion(name string) (int, bool) { return 0, false }
 
 func init() {
 	_ = math.Sqrt // force math import usage

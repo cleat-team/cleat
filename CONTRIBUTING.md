@@ -62,7 +62,27 @@ To build and test cleat you will need:
 | **Rust toolchain** | Stable | No | For `cleat-macro` / `cleat-sdk` crates and Rust workflows |
 | **Node.js** | 20+ | No | For Svelte web UI and AssemblyScript SDK |
 | **Java** | 17+ | No | For Java SDK |
+| **MySQL** | 8.0+ (Docker) | No | Required only for MySQL backend integration tests (`CLEAT_TEST_MYSQL`) |
+| **SQL Server** | 2017+ (Docker) | No | Required only for MSSQL backend integration tests (`CLEAT_TEST_MSSQL`) |
 | **Docker** | Latest | No | For cluster integration tests |
+
+## Branch naming
+
+cleat uses a gitflow-derived branch naming convention. All branches must follow
+one of these prefixes:
+
+| Prefix | Purpose | Example |
+|--------|---------|---------|
+| `feature/` | New functionality | `feature/multi-db-support` |
+| `bugfix/` | Bug fixes | `bugfix/claim-race-condition` |
+| `release/` | Release preparation | `release/v1.2.0` |
+| `hotfix/` | Critical production fixes | `hotfix/worker-panic-on-nil-input` |
+
+Branch names must be lowercase, use hyphens (not underscores), and be concise
+but descriptive. The prefix must be one of the four listed above.
+
+A CI check validates branch naming on pull requests. Branches opened by
+dependabot or with the `bot` label are exempt.
 
 ## Contribution Process
 
@@ -101,7 +121,9 @@ To build and test cleat you will need:
    Valid scopes: `engine`, `wasm`, `cli`, `worker`, `sdk`, `ui`, `plugins`,
    `docs`, `ci`, `deps`, `build`
 
-6. **CI must pass.** All tests and linters must pass before a PR can be merged.
+6. **CI must pass.** All tests, linters, and checks must pass before a PR can
+   be merged. This includes DCO, semantic PR title, branch naming, CLA check
+   (for first-time contributors), and the AI review gates.
 
 ## Build from source
 
@@ -149,6 +171,16 @@ go test -count=1 -v ./internal/transform/...
 DURABLE_TEST_DB=postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable \
   go test -count=1 -timeout=120s ./internal/host/...
 
+# MySQL backend tests (requires MySQL 8.0+ at localhost:3306)
+# Skipped if CLEAT_TEST_MYSQL is not set
+CLEAT_TEST_MYSQL=root:cleat@tcp(localhost:3306)/cleat \
+  go test -count=1 -timeout=120s ./internal/host/...
+
+# SQL Server backend tests (requires SQL Server 2017+ at localhost:1433)
+# Skipped if CLEAT_TEST_MSSQL is not set
+CLEAT_TEST_MSSQL=sqlserver://sa:CleatTest123!@localhost:1433?database=master \
+  go test -count=1 -timeout=120s ./internal/host/...
+
 # Rust crates
 cd crates/cleat-macro && cargo test
 cd crates/cleat-sdk && cargo test
@@ -158,8 +190,9 @@ cd packages/cleat-as && npm test
 ```
 
 > **Note:** The `DURABLE_TEST_DB` environment variable is used by cluster
-> integration tests. See `docker-compose.cluster.yml` for the default Postgres
-> configuration.
+> integration tests. See `docker-compose.cluster.yml` for the default Postgres,
+> MySQL, and SQL Server configurations. The compose file defines all three
+> database services for local multi-backend development.
 
 ## Svelte UI dev setup
 
@@ -267,14 +300,71 @@ and focus on making the project better.
 
 ## PR process
 
-1. Open a pull request against the `main` branch. Keep PRs small and focused
-   (one PR, one concern).
-2. CI automatically runs linting, tests (Go, Rust, AssemblyScript, Java,
-   Python), and benchmarks. All checks must pass before merge.
-3. A **Developer Certificate of Origin (DCO)** check verifies every commit
-   includes a `Signed-off-by` line. See the DCO section above for setup.
-4. All PRs require review from the project owner or a designated maintainer.
-5. Once approved and passing CI, the PR is squashed and merged into `main`.
+All pull requests go through the same pipeline. The steps are sequential —
+each gate must pass before the next begins.
+
+### 1. Open the PR
+
+Open a pull request against the `main` branch from a branch that follows the
+[branch naming convention](#branch-naming). Use the PR template to describe
+your change. If this is your first PR to cleat, include the CLA statement in
+the description (see [How to sign](#how-to-sign-individuals)).
+
+Keep PRs small and focused. A single concern, a single PR.
+
+### 2. Automated checks
+
+CI runs automatically on every push. The following checks must all pass:
+
+| Check | What it verifies |
+|-------|-----------------|
+| DCO | Every commit has a `Signed-off-by` line |
+| Semantic PR title | Title follows `type(scope): description` format |
+| Branch naming | Branch name follows `feature/`, `bugfix/`, `release/`, or `hotfix/` prefix convention |
+| CLA (first-time only) | First-time contributors have the ICLA statement in the PR description |
+| Lint | `go vet`, `golangci-lint`, `ruff`, `shellcheck`, `clippy` |
+| Test | Go (1.22/1.23/1.24 matrix), Python (3.10–3.12), Java, Rust, AssemblyScript |
+| Vulncheck | `govulncheck` for known vulnerabilities |
+| CodeQL | CodeQL static analysis |
+| Fuzz | Fuzz tests on the WASM runtime |
+| Cross-language E2E | Multi-language WASM round-trip tests |
+| Coverage | Go and Python coverage (informational, non-blocking) |
+
+### 3. AI review
+
+After automated checks pass, an AI code review is posted automatically. The
+AI review is a first-pass filter — it catches obvious issues (missing error
+handling, potential race conditions, API inconsistencies, test gaps) before a
+human spends time on the PR.
+
+The AI review is advisory, not blocking. It exists to save reviewer time, not
+replace human judgment. Contributors may address AI feedback directly or
+respond with a rationale for why the suggestion does not apply.
+
+The PR template includes an [AI disclosure](#ai-disclosure) section. If AI/LLM
+tools assisted in creating the PR, this must be disclosed so the reviewer can
+calibrate accordingly.
+
+### 4. Human review
+
+A maintainer (or the project owner) reviews the PR. Review is about the code,
+not the person. The reviewer considers:
+
+- Correctness: does it do what it claims?
+- Safety: are there security, race, or data-loss concerns?
+- Fit: does it follow project conventions and design principles?
+- Tests: are the right things tested?
+
+The reviewer may approve, request changes, or comment with questions.
+
+### 5. Merge
+
+Once approved and all checks are green, the PR is **squash-merged** into
+`main`. Squash is the only merge method — no merge commits, no rebase merges.
+This keeps the main branch history linear and each commit atomic.
+
+The squash commit message must retain the PR title as its subject line and
+include any `Co-authored-by` trailers for contributors who participated.
 
 ## Release process overview
 

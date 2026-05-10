@@ -1,37 +1,66 @@
 # Cleat Design Principles
 
-Cleat is a durable workflow engine on PostgreSQL: write workflows in Go, compile
-to WASM, deploy via INSERT. These principles guide every design decision. Before
+Cleat is a worker pool that connects to your PostgreSQL database: write workflows
+in Go, compile to WASM, deploy via INSERT. Workers are stateless compute; all
+state lives in your Postgres. These principles guide every design decision. Before
 proposing a change, ask: *does this align with cleat's principles?*
 
 ---
 
-## 1. PostgreSQL is the source of truth
+## 1. Your PostgreSQL is the source of truth — cleat is just a client
 
-Workflow state, event history, schedules, signals, and deployment metadata all
-live in PostgreSQL. There are no external coordination services, no message
-queues, no separate databases for different concerns. This means you can
-back up, restore, inspect, and migrate your entire workflow system with
-standard PostgreSQL tooling -- `pg_dump`, `pg_restore`, `psql`, and any
-PostgreSQL-compatible ORM or dashboard.
+Cleat does not own your data. It connects to YOUR PostgreSQL database and stores
+workflow state, event history, schedules, signals, and deployment metadata there.
+The database you already operate — whether it is RDS, Cloud SQL, Crunchy, or
+self-hosted Patroni — is the single source of truth. There are no external
+coordination services, no message queues, no separate databases for different
+concerns. This means you can back up, restore, inspect, and migrate your entire
+workflow system with standard PostgreSQL tooling — `pg_dump`, `pg_restore`,
+`psql`, and any PostgreSQL-compatible ORM or dashboard. Cleat is just a client
+connecting to that database.
 
-**Do this:** Store workflow state, event history, and schedules in PostgreSQL
-tables. Use `SELECT ... FOR UPDATE SKIP LOCKED` for work claiming. Ensure a
-single `pg_dump` captures the entire system state.
-
-**Not that:** Introduce Redis for queue management, etcd for leader election,
-Kafka for event streaming, or any auxiliary data store that requires separate
-backup procedures, operational expertise, or failure modes.
-
-**How it guides contributions:** A proposed feature that requires a new service
-(e.g., "add RabbitMQ for async delivery") must first exhaust what can be done
-with PostgreSQL features (LISTEN/NOTIFY, pg_notify, polling with SKIP LOCKED).
-If the feature genuinely requires an external service, it belongs in a separate
-plugin or integration -- not in cleat core.
+**Do this:** Point cleat at your existing Postgres with a connection string.
+Store workflow state, event history, and schedules in PostgreSQL tables. Use
+`SELECT ... FOR UPDATE SKIP LOCKED` for work claiming. Ensure a single `pg_dump`
+captures the entire system state.
 
 ---
 
-## 2. WASM-first sandboxing
+## 2. Workers are disposable compute. The database is permanent.
+
+A cleat worker is a stateless Go binary that polls PostgreSQL for work. It can
+crash, be replaced, be scaled up or down, or be redeployed at any time without
+data loss. All durable state — workflow instances, event history, schedules,
+plugin data — lives in the database, not on the worker. If every worker dies
+simultaneously, no data is lost. Restart a worker, and it picks up where things
+left off.
+
+**Scale compute and storage independently.** Need more throughput? Add more
+worker processes or machines. Need more database capacity? Scale Postgres the
+way you always do — read replicas, larger instances, Aurora Serverless. The two
+scaling dimensions are completely decoupled. A single worker can handle thousands
+of concurrent workflows; a hundred workers can share one Postgres connection pool
+via PgBouncer.
+
+**Do this:** Run `cleat-worker --db postgres://...` on any compute substrate —
+a VM, a container, a spot instance, a Raspberry Pi. Kill a worker mid-flight;
+another worker claims its workflows after a heartbeat timeout. Deploy a new
+worker binary without draining; the old workers finish their in-flight workflows
+naturally.
+
+**Not that:** Store workflow state in worker memory (unless ephemeral cache).
+Require graceful shutdown for data safety. Design the system assuming workers
+are long-lived or uniquely identified.
+
+**How it guides contributions:** Any code path that assumes a worker lives
+forever, stores state only in-memory, or requires coordinated shutdown is a
+design smell. New features must survive a worker being killed `-9` at any point.
+If a feature stores data, the storage layer must be PostgreSQL, not the worker's
+filesystem or memory.
+
+---
+
+## 3. WASM-first sandboxing
 
 User workflow code runs inside WebAssembly, not natively. WASM provides
 deterministic execution (no undefined behavior), language flexibility (Go,
@@ -55,7 +84,7 @@ WASM execution are welcome; shortcuts around it are not.
 
 ---
 
-## 3. Boring infrastructure
+## 4. Boring infrastructure
 
 If you have PostgreSQL and can run a Go binary, you can run cleat. No
 ZooKeeper, no etcd, no message queue, no Kubernetes operators. The worker is
@@ -79,7 +108,7 @@ the core.
 
 ---
 
-## 4. Explicit over magic
+## 5. Explicit over magic
 
 The transformer pipeline makes everything visible: call graph analysis, closure
 computation, parameter auto-threading, WASM export generation. You can inspect
@@ -103,7 +132,7 @@ debug, it should be opt-in.
 
 ---
 
-## 5. Workflows as data
+## 6. Workflows as data
 
 Workflows are compiled WASM blobs stored as rows in PostgreSQL tables. You
 deploy a new version with `INSERT INTO workflow_defs ...`. You roll back by
@@ -128,7 +157,7 @@ language.
 
 ---
 
-## 6. Determinism through replay
+## 7. Determinism through replay
 
 Workflow execution is event-sourced. The event history (`event_history` table)
 is the source of truth for what happened during execution. On replay -- after
@@ -156,7 +185,7 @@ rare edge case, it is the primary execution mode after restarts.
 
 ---
 
-## 7. Meet developers where they are
+## 8. Meet developers where they are
 
 Cleat's native SDK is Go -- write standard Go functions, no DSL, no special
 annotations, no framework inheritance. The `cleat build` pipeline handles WASM
@@ -183,7 +212,7 @@ are welcome as community contributions, following the same HostCall boundary.
 
 ---
 
-## 8. Observability is not optional
+## 9. Observability is not optional
 
 Every workflow execution is observable by default. The worker exports
 Prometheus metrics (`/metrics`) covering throughput, latency, error rates,

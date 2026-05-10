@@ -19,6 +19,29 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					PRIMARY KEY (tenant_id, limit_key)
 				);
 			`,
+			UpMySQL: `
+				CREATE TABLE IF NOT EXISTS rate_limits (
+					tenant_id      CHAR(36) NOT NULL,
+					limit_key      VARCHAR(255) NOT NULL,
+					max_requests   INT NOT NULL,
+					window_seconds INT NOT NULL,
+					created_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+					updated_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+					PRIMARY KEY (tenant_id, limit_key)
+				);
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'rate_limits')
+				CREATE TABLE rate_limits (
+					tenant_id      UNIQUEIDENTIFIER NOT NULL,
+					limit_key      NVARCHAR(255) NOT NULL,
+					max_requests   INT NOT NULL,
+					window_seconds INT NOT NULL,
+					created_at     DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+					updated_at     DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+					PRIMARY KEY (tenant_id, limit_key)
+				);
+			`,
 			Down: `
 				DROP TABLE IF EXISTS rate_limits;
 			`,

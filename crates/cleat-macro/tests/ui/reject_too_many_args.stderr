@@ -1,0 +1,13 @@
+error: `#[cleat_entry]` functions must have exactly one input parameter (beyond `&HostCalls`). Found 2 extra parameters. Reason: WASM exports receive a single JSON payload, so only one user parameter is supported. Combine parameters into a struct with #[derive(Deserialize)].
+ --> tests/ui/reject_too_many_args.rs:5:40
+  |
+5 | fn too_many(_h: &HostCalls, a: String, b: String) -> Result<String, String> {
+  |                                        ^^^^^^^^^
+
+warning: unused import: `cleat_sdk::HostCalls`
+ --> tests/ui/reject_too_many_args.rs:2:5
+  |
+2 | use cleat_sdk::HostCalls;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

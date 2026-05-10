@@ -13,6 +13,8 @@ import (
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
+var currentDialect plugin.Dialect
+
 func init() {
 	plugin.Register(plugin.PluginInfo{
 		Name:        "event-triggers",
@@ -25,10 +27,11 @@ func init() {
 // Plugin implements event-driven workflow triggers with tenant-isolated
 // event subscriptions, idempotent event ingestion, and filter expressions.
 type Plugin struct {
-db     plugin.DB
+db     plugin.PluginDB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	env    *plugin.Environment
+	dialect plugin.Dialect
 
 	// Background retry metrics.
 	eventsProcessed  atomic.Int64
@@ -56,6 +59,8 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.db = env.DB
 	p.mux = env.Mux
 	p.env = env
+	p.dialect = env.Dialect
+	currentDialect = env.Dialect
 
 	p.logger.Info("event-triggers: initialized")
 	return nil

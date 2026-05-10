@@ -29,12 +29,13 @@ func init() {
 
 // Plugin implements Kafka publish and consume integration for workflows.
 type Plugin struct {
-db         plugin.DB
+	db         plugin.PluginDB
 	mux        *http.ServeMux
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config
 	env        *plugin.Environment
+	dialect    plugin.Dialect
 }
 
 // Config holds optional configuration for the kafka-connect plugin.
@@ -63,6 +64,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.env = env
+	p.dialect = env.Dialect
 	p.httpClient = &http.Client{
 		Timeout: 10 * time.Second,
 	}

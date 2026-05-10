@@ -215,7 +215,7 @@ func TestFaultNonRetryableClassification(t *testing.T) {
 // returning a cancelled context; attempts to write with that context fail at
 // the transaction level, leaving earlier events intact.
 func TestFaultEventPersistenceWithDBError(t *testing.T) {
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
@@ -286,7 +286,7 @@ func TestFaultEventPersistenceWithDBError(t *testing.T) {
 // FaultInjector simulates unavailability by cancelling the context passed to
 // the store.  This mirrors what a real worker sees during a network partition.
 func TestFaultClaimWithDBError(t *testing.T) {
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
@@ -322,7 +322,7 @@ func TestFaultClaimWithDBError(t *testing.T) {
 // fault is active, store operations fail.  After Cleanup, the same operation
 // succeeds, confirming that the injector is the cause.
 func TestFaultInjectorToggle(t *testing.T) {
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
 
 	store := NewPostgresStore(db)

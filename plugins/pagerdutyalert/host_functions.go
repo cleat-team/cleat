@@ -69,9 +69,9 @@ type pdEventRequest struct {
 }
 
 type pdEventResponse struct {
-	Status      string `json:"status"`
-	DedupKey    string `json:"dedup_key"`
-	Message     string `json:"message,omitempty"`
+	Status      string   `json:"status"`
+	DedupKey    string   `json:"dedup_key"`
+	Message     string   `json:"message,omitempty"`
 	Errors      []string `json:"errors,omitempty"`
 }
 
@@ -114,11 +114,11 @@ func (p *Plugin) triggerIncident(ctx context.Context, inputJSON string) (string,
 
 	// Look up the PagerDuty config, verifying tenant ownership.
 	var routingKey string
-	err := p.db.QueryRowContext(ctx, `
-		SELECT routing_key
-		FROM pd_config
-		WHERE id = $1 AND tenant_id = $2 AND enabled = true
-	`, input.ConfigID, cc.TenantID).Scan(&routingKey)
+	err := p.db.QueryRow(ctx, plugin.Rebind(`
+			SELECT routing_key
+			FROM pd_config
+			WHERE id = $1 AND tenant_id = $2 AND enabled = true
+		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&routingKey)
 	if err != nil {
 		return "", fmt.Errorf("pagerduty: config not found or disabled")
 	}
@@ -171,11 +171,11 @@ func (p *Plugin) resolveIncident(ctx context.Context, inputJSON string) (string,
 
 	// Look up the PagerDuty config, verifying tenant ownership.
 	var routingKey string
-	err := p.db.QueryRowContext(ctx, `
-		SELECT routing_key
-		FROM pd_config
-		WHERE id = $1 AND tenant_id = $2 AND enabled = true
-	`, input.ConfigID, cc.TenantID).Scan(&routingKey)
+	err := p.db.QueryRow(ctx, plugin.Rebind(`
+			SELECT routing_key
+			FROM pd_config
+			WHERE id = $1 AND tenant_id = $2 AND enabled = true
+		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&routingKey)
 	if err != nil {
 		return "", fmt.Errorf("pagerduty: config not found or disabled")
 	}

@@ -317,9 +317,9 @@ func TestConcurrencyKeyAcquireRelease(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
@@ -375,9 +375,9 @@ func TestConcurrencyKeyExpiry(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
@@ -430,9 +430,9 @@ func TestConcurrencyKeyStartAPI(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
@@ -512,9 +512,9 @@ func TestConcurrencyKeyReleaseOnComplete(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
@@ -560,9 +560,9 @@ func TestConcurrencyKeyReleaseOnFail(t *testing.T) {
 		t.Skip("skipping concurrency key test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()

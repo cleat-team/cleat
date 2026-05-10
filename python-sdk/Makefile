@@ -41,7 +41,7 @@ WASM_FILES := $(addprefix $(OUT_DIR)/, $(addsuffix .wasm, $(EXAMPLE_WORKFLOWS)))
 # Stamped WASM targets (post-processed with metadata)
 STAMPED_FILES := $(addsuffix .stamped, $(WASM_FILES))
 
-.PHONY: all wasm stamped test-wasm clean help
+.PHONY: all wasm stamped test test-wasm lint coverage build-dist publish clean help
 
 all: stamped
 
@@ -91,12 +91,41 @@ $(OUT_DIR)/%.stamped.wasm: $(OUT_DIR)/%.wasm
 	@echo "Stamped $< -> $@"
 
 # ------------------------------------------------------------------
+# test — run the full Python test suite
+# ------------------------------------------------------------------
+test:
+	PYTHONPATH=$(PYTHONPATH) python -m pytest tests/ -v
+
+# ------------------------------------------------------------------
+# lint — run ruff linting on the SDK and tests
+# ------------------------------------------------------------------
+lint:
+	python -m ruff check cleat_sdk/ tests/
+
+# ------------------------------------------------------------------
+# coverage — run tests with coverage reporting
+# ------------------------------------------------------------------
+coverage:
+	PYTHONPATH=$(PYTHONPATH) python -m pytest tests/ --cov=cleat_sdk --cov-report=term --cov-report=html:coverage_html
+
+# ------------------------------------------------------------------
+# build-dist — build source and wheel distributions
+# ------------------------------------------------------------------
+build-dist:
+	python -m build
+
+# ------------------------------------------------------------------
+# publish — publish to PyPI (requires twine and credentials)
+# ------------------------------------------------------------------
+publish: build-dist
+	twine upload dist/*
+
+# ------------------------------------------------------------------
 # test-wasm — compile workflow(s) and run WASM-specific tests
 # ------------------------------------------------------------------
 test-wasm: wasm
 	@echo "Running WASM-specific tests..."
-	PYTHONPATH=$(PYTHONPATH) python -m pytest tests/ -v -k "wasm" --tb=short || \
-		echo "No WASM-specific tests found (this is expected if none are written yet)."
+	-PYTHONPATH=$(PYTHONPATH) python -m pytest tests/ -v -k "wasm" --tb=short
 	@echo "Test-wasm complete."
 
 # ------------------------------------------------------------------
@@ -115,6 +144,11 @@ help:
 	@echo "Cleat Python SDK Makefile"
 	@echo ""
 	@echo "Targets:"
+	@echo "  test        Run the full Python test suite (pytest)"
+	@echo "  lint        Run ruff linting on SDK and tests"
+	@echo "  coverage    Run tests with HTML coverage report"
+	@echo "  build-dist  Build source and wheel distributions"
+	@echo "  publish     Publish to PyPI (requires twine)"
 	@echo "  wasm        Compile all example workflows to WASM"
 	@echo "  stamped     Compile and stamp metadata onto all workflows"
 	@echo "  test-wasm   Compile and run WASM-specific tests"

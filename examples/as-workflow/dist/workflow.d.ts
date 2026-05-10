@@ -3,22 +3,23 @@ declare namespace __AdaptedExports {
   export const memory: WebAssembly.Memory;
   /**
    * assembly/index/place_order
-   * @param argsPtr `usize`
-   * @param argsLen `i32`
-   * @param outPtr `usize`
-   * @param maxOutLen `i32`
-   * @returns `i64`
+   * @param h `../../packages/cleat-as/assembly/host-calls/HostCalls`
+   * @param input `~lib/string/String`
+   * @returns `~lib/string/String`
    */
-  export function place_order(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
+  export function place_order(h: __Internref4, input: string): string;
   /**
    * assembly/index/cancel_order
-   * @param argsPtr `usize`
-   * @param argsLen `i32`
-   * @param outPtr `usize`
-   * @param maxOutLen `i32`
-   * @returns `i64`
+   * @param h `../../packages/cleat-as/assembly/host-calls/HostCalls`
+   * @param input `~lib/string/String`
+   * @returns `~lib/string/String`
    */
-  export function cancel_order(argsPtr: number, argsLen: number, outPtr: number, maxOutLen: number): bigint;
+  export function cancel_order(h: __Internref4, input: string): string;
+}
+/** ../../packages/cleat-as/assembly/host-calls/HostCalls */
+declare class __Internref4 extends Number {
+  private __nominal4: symbol;
+  private __nominal0: symbol;
 }
 /** Instantiates the compiled WebAssembly module with the given imports. */
 export declare function instantiate(module: WebAssembly.Module, imports: {

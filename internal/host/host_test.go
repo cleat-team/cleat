@@ -42,6 +42,10 @@ func mockResponse(service, operation string) string {
 		return `{"tracking_id":"TRACK-123456","status":"label_created"}`
 	case "notifications.SendEmail":
 		return `{"status":"sent"}`
+	case "accounts.Withdraw":
+		return `{"ref":"wd_abc123","status":"completed"}`
+	case "accounts.Deposit":
+		return `{"ref":"dep_def456","status":"completed"}`
 	default:
 		return `{}`
 	}

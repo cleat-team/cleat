@@ -178,6 +178,9 @@ type WorkflowState interface {
 	Version() int
 	// MinVersion returns the minimum version this code supports.
 	MinVersion() int
+	// ChildVersion returns the pinned version for a child workflow name
+	// from compile-time WASM metadata. Returns (0, false) if no pin exists.
+	ChildVersion(name string) (int, bool)
 }
 
 // SuspendError signals that the workflow should be suspended.
@@ -230,7 +233,32 @@ type ChildWorkflowStore interface {
 	// defVersion is the explicit workflow definition version to use, or 0 to use
 	// default resolution (SELECT MAX(version)).
 	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
+
+	// StartChildWorkflowAtomic creates a child workflow and records the parent's
+	// child_workflow event in a single database transaction, guaranteeing
+	// exactly-once creation even if the worker crashes mid-execution.
+	// The event is written to event_history atomically with the child row.
+	// The caller should still append the event to the in-memory history for
+	// same-execution replay. The later event flush will skip it via
+	// ON CONFLICT (workflow_id, step) DO NOTHING.
+	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error)
+
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
+}
+
+// CrossSchemaChildStore is an optional extension to ChildWorkflowStore for
+// starting child workflows in a different PostgreSQL schema.  This enables
+// cross-instance workflow cooperation: an instance in schema A can start a
+// child workflow in schema B, and the B worker pool picks it up.
+type CrossSchemaChildStore interface {
+	ChildWorkflowStore
+
+	// StartChildWorkflowInSchema creates a child workflow in the given target schema.
+	// The schema must be part of the engine's configured peerSchemas.
+	StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
+
+	// GetChildResultInSchema polls a child workflow in the given target schema.
+	GetChildResultInSchema(ctx context.Context, targetSchema, runID string) (resultJSON string, completed bool, err error)
 }
 
 // PluginFunc is a plugin host function implementation.
@@ -436,6 +464,8 @@ type Engine struct {
 	tenantID             string
 	db                   *sql.DB // tenant-scoped database connection for plugin host functions
 	maxRetries           int     // worker-configured ceiling for retry attempts; 0 means use MaxRetryAttempts
+	schema               string   // this instance's PostgreSQL schema name
+	peerSchemas          []string // peer cleat schemas for cross-instance child workflows and signals
 
 	// versionValidateFn is an optional hook called at the start of replay
 	// to validate version compatibility. If non-nil and the workflow is
@@ -507,6 +537,17 @@ func WithTenantID(id string) EngineOption {
 // capability restrictions on WASM plugins.
 func WithPluginCallGuard(g *PluginCallGuard) EngineOption {
 	return func(e *Engine) { e.pluginCallGuard = g }
+}
+
+// WithSchema sets the PostgreSQL schema name for this cleat instance.
+func WithSchema(schema string) EngineOption {
+	return func(e *Engine) { e.schema = schema }
+}
+
+// WithPeerSchemas sets the list of peer cleat schemas this engine can
+// interact with for cross-instance child workflows and signals.
+func WithPeerSchemas(schemas []string) EngineOption {
+	return func(e *Engine) { e.peerSchemas = schemas }
 }
 
 // WithDB sets a tenant-scoped database connection for plugin host functions.
@@ -1570,9 +1611,40 @@ func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module
 	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), parentClosePolicy, runIDPtr, runIDMaxLen)
 }
 
+// ChildWorkflowInSchema starts a child workflow in a target PostgreSQL schema.
+// This enables cross-instance cooperation: a workflow in schema A can spawn a
+// child in schema B, where B's worker pool claims and executes it.
+//
+// The target schema MUST be in the engine's configured peerSchemas (or be the
+// engine's own schema).  An empty targetSchema falls back to the local schema.
+func (s *execSession) ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
+	// Validate: target schema must be a peer or our own schema.
+	if targetSchema != "" && targetSchema != s.engine.schema {
+		allowed := false
+		for _, p := range s.engine.peerSchemas {
+			if p == targetSchema {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return packDurableCallResult(0, 0, 0)
+		}
+	}
+
+	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), parentClosePolicy, runIDPtr, runIDMaxLen, targetSchema)
+}
+
 // childWorkflowWithVersion is the shared implementation for creating child workflows.
 // If version <= 0, the parent's version is used as the default.
-func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
+// If targetSchema is non-empty, the child is created in that PostgreSQL schema
+// (cross-instance cooperation); otherwise the child is created locally.
+func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, parentClosePolicy string, runIDPtr, runIDMaxLen uint32, targetSchema ...string) int64 {
+	ts := ""
+	if len(targetSchema) > 0 {
+		ts = targetSchema[0]
+	}
+
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
@@ -1586,41 +1658,84 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		s.exitReplay()
 	}
 
-	// Fresh execution: create child workflow via store or generate synthetic ID.
-	var runID string
-	if s.engine.childWfStore != nil {
-		parentID := s.workflowID
-		if parentID == "" {
-			parentID = fmt.Sprintf("unknown-%s-%d", name, s.stepCount)
-		}
-		var err error
-		// Resolve version: if > 0 use explicit, otherwise use parent's version.
-		childVersion := version
-		if childVersion <= 0 {
-			if s.engine.state != nil {
-				childVersion = s.engine.state.Version()
-			} else {
-				childVersion = 0
+	// Resolve version priority:
+	//   1. Explicit version from ChildWorkflowOptions (version > 0 from WASM ABI)
+	//   2. Pinned child version from WASM metadata (compile-time pin)
+	//   3. Parent's own version (current default)
+	// Cross-schema children skip pinned versions (target schema may differ).
+	childVersion := version
+	if childVersion <= 0 && ts == "" {
+		if s.engine.state != nil {
+			if pinnedVersion, ok := s.engine.state.ChildVersion(name); ok && pinnedVersion > 0 {
+				childVersion = pinnedVersion
 			}
 		}
-		runID, err = s.engine.childWfStore.StartChildWorkflow(ctx, parentID, name, inputJSON, childVersion, parentClosePolicy)
+	}
+	if childVersion <= 0 {
+		if s.engine.state != nil {
+			childVersion = s.engine.state.Version()
+		}
+	}
+
+	// Fresh execution: create child workflow atomically with event.
+	var runID string
+	parentID := s.workflowID
+	if parentID == "" {
+		parentID = fmt.Sprintf("unknown-%s-%d", name, s.stepCount)
+	}
+
+	if s.engine.childWfStore != nil {
+		// Build the event record before the store call so the store can
+		// INSERT it atomically with the child row.
+		rec := EventRecord{
+			Step:              s.stepCount,
+			EventType:         EventTypeChildWorkflow,
+			ChildName:         name,
+			ChildInput:        inputJSON,
+			ParentWorkflowID:  s.workflowID,
+			ParentClosePolicy: parentClosePolicy,
+			TimestampMs:       time.Now().UnixMilli(),
+		}
+
+		var err error
+		if ts != "" {
+			css, ok := s.engine.childWfStore.(CrossSchemaChildStore)
+			if !ok {
+				// Cross-schema requested but store doesn't support it.
+				// Fail loudly rather than silently creating the child in the wrong schema.
+				err := fmt.Errorf("child workflow %q: cross-schema requested (target=%q) but store does not implement CrossSchemaChildStore", name, ts)
+				mem := m.Memory()
+				errWritten, _ := writeWasmString(mem, runIDPtr, err.Error(), runIDMaxLen)
+				return int64(uint64(errWritten)<<32 | 4) // error code 4 = invalid
+			}
+			runID, err = css.StartChildWorkflowInSchema(ctx, ts, parentID, name, inputJSON, childVersion, parentClosePolicy)
+		} else {
+			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(ctx, "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec)
+		}
 		if err != nil {
 			runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
+		} else {
+			// Append event to in-memory history for same-execution replay.
+			// The store already wrote it to event_history atomically;
+			// the later flush will skip it via ON CONFLICT DO NOTHING.
+			rec.RunID = runID
+			s.history = append(s.history, rec)
+			s.nowMs = rec.TimestampMs
+			s.stepCount++
 		}
 	} else {
 		runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
-	}
-
-	rec := EventRecord{
-		Step:             s.stepCount,
-		EventType:        EventTypeChildWorkflow,
-		ChildName:        name,
-		ChildInput:       inputJSON,
-		RunID:            runID,
-		ParentWorkflowID: s.workflowID,
+		rec := EventRecord{
+			Step:              s.stepCount,
+			EventType:         EventTypeChildWorkflow,
+			ChildName:         name,
+			ChildInput:        inputJSON,
+			RunID:             runID,
+			ParentWorkflowID:  s.workflowID,
 			ParentClosePolicy: parentClosePolicy,
+		}
+		s.recordEvent(rec)
 	}
-	s.recordEvent(rec)
 
 	mem := m.Memory()
 	written, _ := writeWasmString(mem, runIDPtr, runID, runIDMaxLen)
@@ -2677,6 +2792,42 @@ func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, na
 
 // QueryHandlers returns the list of registered query handler names.
 func (s *execSession) QueryHandlers() []string { return s.queryHandlers }
+
+// ---- Stream R stubs ----
+// These are placeholder implementations for the Rust SDK host functions.
+// Actual implementations will be filled in later.
+
+func (s *execSession) SetState(ctx context.Context, m api.Module, key, value string) int64 {
+	return 0
+}
+
+func (s *execSession) GetState(ctx context.Context, m api.Module, key string, valuePtr, valueMaxLen uint32) int64 {
+	return 0
+}
+
+func (s *execSession) DeleteState(ctx context.Context, m api.Module, key string) int64 {
+	return 0
+}
+
+func (s *execSession) IncrState(ctx context.Context, m api.Module, key string, delta int64) int64 {
+	return 0
+}
+
+func (s *execSession) HasState(ctx context.Context, m api.Module, key string) int64 {
+	return 0
+}
+
+func (s *execSession) ListState(ctx context.Context, m api.Module, prefix string, keysPtr, keysMaxLen uint32) int64 {
+	return 0
+}
+
+func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, inputJSON string) int64 {
+	return 0
+}
+
+func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64 {
+	return 0
+}
 
 // ---- Result packing helpers ----
 

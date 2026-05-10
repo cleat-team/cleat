@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -592,10 +593,10 @@ func setupTestPlugin(t *testing.T, clock *controllableClock) (*Plugin, http.Hand
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		env: &plugin.Environment{
-			DB: db,
+			DB: &host.SQLDBAdapter{DB: db},
 		},
 	}
 
@@ -604,7 +605,7 @@ func setupTestPlugin(t *testing.T, clock *controllableClock) (*Plugin, http.Hand
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(db)(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
 	return p, handler, store
 }
 
@@ -2131,9 +2132,9 @@ func TestRunDueSchedules_RowsErr(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
-		env: &plugin.Environment{DB: db},
+		env: &plugin.Environment{DB: &host.SQLDBAdapter{DB: db}},
 	}
 
 	// Should not panic — rows.Err() is logged but not returned.

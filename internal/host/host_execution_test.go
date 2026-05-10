@@ -915,6 +915,7 @@ type mockWorkflowState struct {
 
 func (m *mockWorkflowState) Version() int    { return m.version }
 func (m *mockWorkflowState) MinVersion() int { return m.minVersion }
+func (m *mockWorkflowState) ChildVersion(name string) (int, bool) { return 0, false }
 
 // ---------------------------------------------------------------------------
 // Now / Random tests

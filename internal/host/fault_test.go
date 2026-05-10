@@ -16,7 +16,7 @@ import (
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 
 	// Clean up any leftover test data from previous runs.
 	db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE 'test-%' OR workflow_id LIKE 'wf-%' OR workflow_id LIKE 'int-%'`)

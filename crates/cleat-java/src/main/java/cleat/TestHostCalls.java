@@ -455,17 +455,17 @@ public class TestHostCalls {
     /**
      * Call a plugin function via the host runtime.
      */
-    public String pluginCall(String pluginName, String functionName, String inputJson) {
+    public CleatResult<String> pluginCall(String pluginName, String functionName, String inputJson) {
         for (PluginCallStub stub : pluginCallStubs) {
             if (stub.pluginName.equals(pluginName)
                     && stub.functionName.equals(functionName)) {
                 if (stub.error != null) {
-                    throw new RuntimeException("plugin_call(" + pluginName + "." + functionName + ") failed: " + stub.error);
+                    return CleatResult.err("plugin_call(" + pluginName + "." + functionName + ") failed: " + stub.error);
                 }
-                return stub.result;
+                return CleatResult.ok(stub.result);
             }
         }
-        throw new RuntimeException(
+        return CleatResult.err(
             "plugin_call failed: no stub registered for "
             + pluginName + "." + functionName);
     }

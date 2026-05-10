@@ -8,9 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	_ "github.com/lib/pq"
-
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // TestAuthMiddlewareRejectsInvalidKey verifies that when auth middleware is
@@ -56,7 +55,7 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 	mux.HandleFunc("/api/workflows/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := auth.Middleware(db)(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
 
 	t.Run("invalid_api_key_returns_401", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/workflows/my-wf/start", nil)
@@ -89,7 +88,7 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 		mux2.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		handler2 := auth.Middleware(db)(mux2)
+		handler2 := auth.Middleware(host.NewPostgresStore(db))(mux2)
 
 		req := httptest.NewRequest("GET", "/healthz", nil)
 		w := httptest.NewRecorder()

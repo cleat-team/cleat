@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -468,7 +469,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeKVStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		mux:    http.NewServeMux(),
 		logger: slog.Default(),
 		config: Config{MaxValueSize: 1_048_576},
@@ -478,7 +479,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeKVStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(db)(p.mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(p.mux)
 	return p, handler, store
 }
 

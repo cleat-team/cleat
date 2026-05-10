@@ -42,7 +42,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 func (p *Plugin) processBatch(parentCtx context.Context) {
 	start := time.Now()
 
-	rows, err := p.db.QueryContext(parentCtx, `
+	rows, err := p.db.Query(parentCtx, `
 		SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at,
 		       COALESCE(s.signal_workflow_id, ''), COALESCE(s.signal_name, 'webhook_received'),
 		       COALESCE(e.retry_count, 0)
@@ -97,7 +97,7 @@ func (p *Plugin) processBatch(parentCtx context.Context) {
 func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, sourceID uuid.UUID, eventType string, payload []byte, receivedAt time.Time, signalWorkflowID, signalName string, retryCount int) {
 	if signalWorkflowID == "" {
 		// No workflow bound — mark as completed (nothing to retry).
-		p.db.ExecContext(ctx, `
+		p.db.Exec(ctx, `
 			UPDATE webhook_events
 			SET processed = true, status = 'completed', error_msg = 'no signal_workflow_id configured'
 			WHERE id = $1
@@ -120,7 +120,7 @@ func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, sourceID uui
 	}
 
 	// Success — mark the event as processed.
-	p.db.ExecContext(ctx, `
+	p.db.Exec(ctx, `
 		UPDATE webhook_events
 		SET processed = true, status = 'completed', error_msg = NULL
 		WHERE id = $1
@@ -138,7 +138,7 @@ func (p *Plugin) markRetryFailed(ctx context.Context, eventID uuid.UUID, current
 
 	maxRetries := 3
 	if newRetryCount >= maxRetries {
-		p.db.ExecContext(ctx, `
+		p.db.Exec(ctx, `
 			UPDATE webhook_events
 			SET retry_count = $2, error_msg = $3, last_retry_at = NOW(), status = 'dead_letter', processed = true
 			WHERE id = $1
@@ -150,7 +150,7 @@ func (p *Plugin) markRetryFailed(ctx context.Context, eventID uuid.UUID, current
 			"error", errMsg,
 		)
 	} else {
-		p.db.ExecContext(ctx, `
+		p.db.Exec(ctx, `
 			UPDATE webhook_events
 			SET retry_count = $2, error_msg = $3, last_retry_at = NOW(), status = 'pending'
 			WHERE id = $1

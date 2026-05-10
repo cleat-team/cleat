@@ -2,7 +2,15 @@
 
 ## What Cleat Is
 
-Cleat is a durable execution framework for Go and Python. Workflows are written in near-standard Go or Python, compiled to WebAssembly via a transformer pipeline, stored as versioned WASM blobs in PostgreSQL, and executed on stateless wazero-based workers with automatic replay, checkpointing, and failover. The core abstraction is a single `HostCalls` interface — there is no workflow/activity distinction.
+Cleat is a durable execution framework for Go and Python. Workflows are written
+in near-standard Go or Python, compiled to WebAssembly via a transformer pipeline,
+stored as versioned WASM blobs in **your** PostgreSQL database, and executed on
+stateless wazero-based workers that connect to that database. The core abstraction
+is a single `HostCalls` interface — there is no workflow/activity distinction.
+
+Crucially, cleat is **not a database** and **not a server cluster**. It is a
+worker pool that connects to your existing PostgreSQL. You manage the database;
+cleat manages the workers.
 
 ---
 
@@ -30,11 +38,26 @@ DBOS has a similar simplification (`@workflow` and `@step` decorators), but clea
 
 In Temporal, you must explicitly pass context/activity stubs through every level of your call chain. In DBOS, each step function must be separately annotated. In cleat, you can declare `var h cleat.HostCalls` at package level and the transformer automatically propagates `h` as a first parameter through all callers (`testdata/autothread/order.go`). This eliminates boilerplate that both Temporal and DBOS developers deal with daily.
 
-### 4. Single Infrastructure, Cleaner Separation
+### 4. Your Database, Our Workers
 
-Both cleat and DBOS use only PostgreSQL (Temporal requires a full server cluster plus a separate database). This is a significant operational advantage in cost, deployment complexity, and failure modes.
+Cleat is the only option that treats your existing PostgreSQL as a first-class
+citizen rather than requiring you to run new infrastructure.
 
-Cleat's version is architecturally cleaner than DBOS's: DBOS embeds the execution runtime as a library in your application — your app IS the worker. Workflow recovery is tied to application startup, and you can't independently scale workflow execution. Cleat's stateless workers are separate processes that can scale independently from the applications they orchestrate.
+- **Temporal** requires you to run a full server cluster (Temporal Server) plus
+  its own Cassandra/PostgreSQL/SQLite database. You manage Temporal's
+  infrastructure on top of whatever database you already run.
+- **DBOS** embeds the execution runtime as a library in your application — your
+  app IS the worker. This couples your workflow execution to your application
+  deployment, making it impossible to scale independently.
+- **Cleat** connects to your existing PostgreSQL. You already run Postgres
+  (RDS, Cloud SQL, Crunchy, self-hosted). Cleat creates its own tables in a
+  configurable schema and is immediately ready. Workers are stateless processes
+  that can be added or removed without touching the database.
+
+This matters operationally: if you already have a PostgreSQL cluster with
+backups, replication, monitoring, and connection pooling, cleat uses all of it.
+You do not stand up new infrastructure — you just configure a connection
+string.
 
 ### 5. Built-in Observability from Event History
 
@@ -199,7 +222,11 @@ Still missing: Datadog/CloudWatch integrations, a Kubernetes operator, and a com
 
 Cleat's WASM-based versioning is genuinely clever and architecturally unique. The idea of "workflow code as data" — deploy workflows via INSERT, workers as stable runtime — a real insight that neither Temporal nor DBOS has.
 
-The developer model is cleaner than Temporal's (no workflow/activity split) and the static analysis is stronger than DBOS's (build-time validation rather than runtime behavior). For a Go shop that wants a single-infrastructure durability story, cleat's design is coherent and well-motivated.
+The developer model is cleaner than Temporal's (no workflow/activity split) and the
+static analysis is stronger than DBOS's (build-time validation rather than runtime
+behavior). For a Go shop that wants durable execution without new infrastructure,
+cleat's design is coherent and well-motivated -- you already run PostgreSQL, cleat
+just adds workers.
 
 Of the 10 original disadvantages, 6 have been resolved or substantively addressed (build pipeline friction via `cleat dev`, missing features now complete, server-side retry replacing SDK-level retry, task routing implemented, ecosystem partially addressed with Helm/Grafana/OTel, and database sharding implemented). The remaining concerns are maturity, WASM overhead for tight loops, language SDK polish, and TinyGo dependency — none are architectural blockers.
 

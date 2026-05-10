@@ -95,7 +95,7 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 		receivedAt time.Time
 	)
 
-	err := p.db.QueryRowContext(ctx, query, args...).Scan(
+	err := p.db.QueryRow(ctx, plugin.Rebind(query, p.dialect), args...).Scan(
 		&eventID, &eventType, &payloadRaw, &receivedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -108,9 +108,9 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 	}
 
 	// Mark the event as processed.
-	_, err = p.db.ExecContext(ctx, `
+	_, err = p.db.Exec(ctx, plugin.Rebind(`
 		UPDATE webhook_events SET processed = true WHERE id = $1
-	`, eventID)
+	`, p.dialect), eventID)
 	if err != nil {
 		p.logger.Error("webhook-ingest: mark processed", "event_id", eventID, "error", err)
 		// Continue even if marking fails -- the event will be returned and

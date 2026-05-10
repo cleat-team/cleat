@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 func TestInfo(t *testing.T) {
@@ -28,7 +29,7 @@ func TestInfo(t *testing.T) {
 func TestInit(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB:     &sql.DB{},
+		DB:     &host.SQLDBAdapter{DB: &sql.DB{}},
 		Logger: slog.Default(),
 	}
 	if err := p.Init(context.Background(), env); err != nil {
@@ -45,7 +46,7 @@ func TestInit(t *testing.T) {
 func TestInitWithNilLogger(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB: &sql.DB{},
+		DB: &host.SQLDBAdapter{DB: &sql.DB{}},
 	}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() returned error: %v", err)
@@ -154,7 +155,7 @@ func TestPluginRegistration(t *testing.T) {
 func TestInitWithConfig(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB:     &sql.DB{},
+		DB:     &host.SQLDBAdapter{DB: &sql.DB{}},
 		Logger: slog.Default(),
 		Config: []byte(`{}`),
 	}
@@ -172,7 +173,7 @@ func TestInitWithConfig(t *testing.T) {
 func TestInitInvalidConfig(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB:     &sql.DB{},
+		DB:     &host.SQLDBAdapter{DB: &sql.DB{}},
 		Logger: slog.Default(),
 		Config: []byte(`not valid json`),
 	}

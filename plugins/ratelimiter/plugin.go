@@ -27,8 +27,9 @@ func init() {
 // It stores rate limit configurations in PostgreSQL and maintains an
 // in-memory cache of token buckets for fast middleware checks.
 type Plugin struct {
-db      plugin.DB
+db      plugin.PluginDB
 	logger  *slog.Logger
+	dialect plugin.Dialect
 
 	mu      sync.Mutex
 	buckets map[string]*tokenBucket // key: "tenantUUID/limit_key"
@@ -55,6 +56,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	}
 
 	p.db = env.DB
+	p.dialect = env.Dialect
 	p.buckets = make(map[string]*tokenBucket)
 
 	p.logger.Info("rate-limiter: initialized")

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // Run starts the retention cleanup goroutine. It runs once per hour,
@@ -52,19 +54,18 @@ func (p *Plugin) cleanupRetention(ctx context.Context) (int64, error) {
 	retention := time.Duration(p.config.RetentionDays) * 24 * time.Hour
 	cutoff := time.Now().Add(-retention)
 
-	result, err := p.db.ExecContext(ctx, `
-		DELETE FROM audit_events
-		WHERE timestamp < $1
-	`, cutoff)
+	result, err := p.db.Exec(ctx, plugin.Rebind(`
+			DELETE FROM audit_events
+			WHERE timestamp < $1
+		`, p.dialect), cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("delete old events: %w", err)
 	}
-	affected, _ := result.RowsAffected()
-	if affected > 0 {
+	if result > 0 {
 		p.logger.Info("audit-log: deleted expired events",
-			"count", affected,
+			"count", result,
 			"cutoff", cutoff,
 		)
 	}
-	return affected, nil
+	return result, nil
 }

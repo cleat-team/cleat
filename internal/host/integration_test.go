@@ -25,9 +25,9 @@ func TestIntegrationFullPipeline(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-full-%d", time.Now().UnixNano())
@@ -178,9 +178,9 @@ func TestIntegrationMultiStepSleep(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-multistep-%d", time.Now().UnixNano())
@@ -282,9 +282,9 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-signal-%d", time.Now().UnixNano())
@@ -405,9 +405,9 @@ func TestIntegrationReplayDivergence(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-divergence-%d", time.Now().UnixNano())
@@ -512,9 +512,9 @@ func TestIntegrationNewEventTypesPersistenceRoundTrip(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	db := testutil.TestDB(t)
+	db := testutil.TestDB(t, testutil.DialectPostgres)
 	defer db.Close()
-	testutil.SetupFullSchema(t, db)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-new-events-%d", time.Now().UnixNano())

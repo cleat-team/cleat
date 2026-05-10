@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // Run starts the background worker goroutine. It polls the task_queue for
@@ -55,13 +56,13 @@ func (p *Plugin) Run(ctx context.Context) error {
 // referenced workflow. Jobs without a def_name are marked completed immediately.
 // Returns (claimed, dispatched, failed, error).
 func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT tenant_id, queue_name, job_id, payload, def_name, input
-		FROM task_queue
-		WHERE status = 'pending'
-		ORDER BY created_at ASC
-		LIMIT 10
-	`)
+	rows, err := p.db.Query(ctx, `
+			SELECT tenant_id, queue_name, job_id, payload, def_name, input
+			FROM task_queue
+			WHERE status = 'pending'
+			ORDER BY created_at ASC
+			LIMIT 10
+		`)
 	if err != nil {
 		return 0, 0, 0, err
 	}
@@ -85,16 +86,15 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 
 		// Atomically claim the job. Only succeeds if still pending (avoids
 		// double-dispatch when multiple workers poll concurrently).
-		result, err := p.db.ExecContext(ctx, `
-			UPDATE task_queue
-			SET status = 'running', started_at = now()
-			WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3 AND status = 'pending'
-		`, jobID, tenantID, queueName)
+		rowsAffected, err := p.db.Exec(ctx, plugin.Rebind(`
+				UPDATE task_queue
+				SET status = 'running', started_at = now()
+				WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3 AND status = 'pending'
+			`, p.dialect), jobID, tenantID, queueName)
 		if err != nil {
 			p.logger.Error("jobqueue: claim job", "job_id", jobID, "error", err)
 			continue
 		}
-		rowsAffected, _ := result.RowsAffected()
 		if rowsAffected == 0 {
 			// Another worker claimed it; skip.
 			continue
@@ -115,11 +115,11 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 					"error", err,
 				)
 				failed++
-				if _, updateErr := p.db.ExecContext(ctx, `
-					UPDATE task_queue
-					SET status = 'failed', completed_at = now()
-					WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
-				`, jobID, tenantID, queueName); updateErr != nil {
+				if _, updateErr := p.db.Exec(ctx, plugin.Rebind(`
+						UPDATE task_queue
+						SET status = 'failed', completed_at = now()
+						WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
+					`, p.dialect), jobID, tenantID, queueName); updateErr != nil {
 					p.logger.Error("jobqueue: mark failed", "job_id", jobID, "error", updateErr)
 				}
 				continue
@@ -132,11 +132,11 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 				"run_id", runID,
 			)
 
-			if _, updateErr := p.db.ExecContext(ctx, `
-				UPDATE task_queue
-				SET status = 'completed', completed_at = now(), run_id = $4
-				WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
-			`, jobID, tenantID, queueName, runID); updateErr != nil {
+			if _, updateErr := p.db.Exec(ctx, plugin.Rebind(`
+					UPDATE task_queue
+					SET status = 'completed', completed_at = now(), run_id = $4
+					WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
+				`, p.dialect), jobID, tenantID, queueName, runID); updateErr != nil {
 				p.logger.Error("jobqueue: mark completed", "job_id", jobID, "error", updateErr)
 			}
 		} else {
@@ -145,11 +145,11 @@ func (p *Plugin) pollPending(ctx context.Context) (int, int, int, error) {
 				"queue", queueName,
 				"tenant", tenantID,
 			)
-			if _, updateErr := p.db.ExecContext(ctx, `
-				UPDATE task_queue
-				SET status = 'completed', completed_at = now()
-				WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
-			`, jobID, tenantID, queueName); updateErr != nil {
+			if _, updateErr := p.db.Exec(ctx, plugin.Rebind(`
+					UPDATE task_queue
+					SET status = 'completed', completed_at = now()
+					WHERE job_id = $1 AND tenant_id = $2 AND queue_name = $3
+				`, p.dialect), jobID, tenantID, queueName); updateErr != nil {
 				p.logger.Error("jobqueue: mark completed", "job_id", jobID, "error", updateErr)
 			}
 		}

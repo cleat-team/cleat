@@ -24,10 +24,11 @@ func init() {
 
 // Plugin implements OAuth2/OIDC authentication with Google, GitHub, and Okta.
 type Plugin struct {
-db         plugin.DB
+	db         plugin.PluginDB
 	mux        *http.ServeMux
 	logger     *slog.Logger
 	httpClient *http.Client
+	dialect    plugin.Dialect
 }
 
 // Info returns plugin metadata for discovery and documentation.
@@ -51,6 +52,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.mux = env.Mux
+	p.dialect = env.Dialect
 	p.httpClient = &http.Client{
 		Timeout: 30 * time.Second,
 	}

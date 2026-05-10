@@ -2,7 +2,6 @@ package plugin
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sort"
 	"sync"
@@ -74,7 +73,11 @@ func Discover() ([]*LoadedPlugin, error) {
 //
 // Each plugin receives an Environment whose DB field is restricted based
 // on the plugin's declared DatabaseAccess: None gets nil, ReadOnly gets
-// a ReadOnlyDB wrapper, ReadWrite gets the raw *sql.DB.
+// nil (caller must set appropriate read-only adapter), ReadWrite gets
+// the raw env (caller must set a read-write adapter).
+//
+// NOTE: This function is primarily used by tests. In production, the
+// worker sets per-plugin DB wrappers itself.
 func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
 	for _, lp := range plugins {
 		if !lp.Healthy {
@@ -87,14 +90,9 @@ func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
 		access := lp.Plugin.Info().DatabaseAccess
 		if access == DatabaseAccessNone || access == "" {
 			pluginEnv = env.withDB(nil)
-		} else if access == DatabaseAccessReadOnly {
-			if db, ok := env.DB.(*sql.DB); ok {
-				pluginEnv = env.withDB(NewReadOnlyDB(db))
-			} else {
-				pluginEnv = env.withDB(nil)
-			}
 		}
-		// ReadWrite: use the raw Environment as-is.
+		// ReadOnly and ReadWrite: use the raw Environment as-is.
+		// The caller is responsible for wrapping the DB appropriately.
 
 		func() {
 			defer func() {
@@ -119,7 +117,7 @@ func InitAll(ctx context.Context, env *Environment, plugins []*LoadedPlugin) {
 }
 
 // withDB returns a shallow copy of env with DB replaced by db.
-func (env *Environment) withDB(db DB) *Environment {
+func (env *Environment) withDB(db PluginDB) *Environment {
 	copy := *env
 	copy.DB = db
 	return &copy

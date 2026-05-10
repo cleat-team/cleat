@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -100,10 +101,10 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO pd_config (tenant_id, id, name, routing_key, enabled, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, true, $5, $5)
-	`, tid, id, req.Name, req.RoutingKey, now)
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+			INSERT INTO pd_config (tenant_id, id, name, routing_key, enabled, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, true, $5, $5)
+		`, p.dialect), tid, id, req.Name, req.RoutingKey, now)
 	if err != nil {
 		p.logger.Error("pagerduty: create config", "error", err)
 		p.writeError(w, 500, "failed to create config")
@@ -132,12 +133,12 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.QueryContext(r.Context(), `
-		SELECT id, name, routing_key, enabled, created_at, updated_at
-		FROM pd_config
-		WHERE tenant_id = $1
-		ORDER BY created_at DESC
-	`, tid)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+			SELECT id, name, routing_key, enabled, created_at, updated_at
+			FROM pd_config
+			WHERE tenant_id = $1
+			ORDER BY created_at DESC
+		`, p.dialect), tid)
 	if err != nil {
 		p.logger.Error("pagerduty: list configs", "error", err)
 		p.writeError(w, 500, "failed to list configs")
@@ -180,11 +181,11 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var c pdConfigJSON
-	err = p.db.QueryRowContext(r.Context(), `
-		SELECT id, name, routing_key, enabled, created_at, updated_at
-		FROM pd_config
-		WHERE id = $1 AND tenant_id = $2
-	`, id, tid).Scan(&c.ID, &c.Name, &c.RoutingKey, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT id, name, routing_key, enabled, created_at, updated_at
+			FROM pd_config
+			WHERE id = $1 AND tenant_id = $2
+		`, p.dialect), id, tid).Scan(&c.ID, &c.Name, &c.RoutingKey, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "config not found")
 		return
@@ -259,18 +260,17 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	args = append(args, id, tid)
 
 	query := fmt.Sprintf(`
-		UPDATE pd_config
-		SET %s
-		WHERE id = $%d AND tenant_id = $%d
-	`, joinSetClauses(setClauses), argIdx, argIdx+1)
+			UPDATE pd_config
+			SET %s
+			WHERE id = $%d AND tenant_id = $%d
+		`, joinSetClauses(setClauses), argIdx, argIdx+1)
 
-	result, err := p.db.ExecContext(r.Context(), query, args...)
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
 	if err != nil {
 		p.logger.Error("pagerduty: update config", "error", err)
 		p.writeError(w, 500, "failed to update config")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "config not found")
 		return
@@ -278,11 +278,11 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Return the updated config.
 	var c pdConfigJSON
-	err = p.db.QueryRowContext(r.Context(), `
-		SELECT id, name, routing_key, enabled, created_at, updated_at
-		FROM pd_config
-		WHERE id = $1 AND tenant_id = $2
-	`, id, tid).Scan(&c.ID, &c.Name, &c.RoutingKey, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT id, name, routing_key, enabled, created_at, updated_at
+			FROM pd_config
+			WHERE id = $1 AND tenant_id = $2
+		`, p.dialect), id, tid).Scan(&c.ID, &c.Name, &c.RoutingKey, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("pagerduty: re-fetch config", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated config")
@@ -309,16 +309,15 @@ func (p *Plugin) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
-		DELETE FROM pd_config
-		WHERE id = $1 AND tenant_id = $2
-	`, id, tid)
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+			DELETE FROM pd_config
+			WHERE id = $1 AND tenant_id = $2
+		`, p.dialect), id, tid)
 	if err != nil {
 		p.logger.Error("pagerduty: delete config", "error", err)
 		p.writeError(w, 500, "failed to delete config")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "config not found")
 		return

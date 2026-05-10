@@ -9,6 +9,8 @@ buildscript {
 
 apply plugin: "java"
 apply plugin: "org.teavm"
+apply plugin: "maven-publish"
+apply plugin: "signing"
 
 group = "com.cleat"
 version = "0.1.0"
@@ -28,6 +30,8 @@ dependencies {
 java {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
+    withJavadocJar()
+    withSourcesJar()
 }
 
 teavm {
@@ -38,12 +42,89 @@ teavm {
     fileName = "workflow.wasm"
     outputDir = file("build/wasm")
     targetType = "WASM"
-    optimizationLevel = "BALANCED"
+    optimizationLevel = "FULL"
     obfuscated = false   // Debug-friendly; switch to ADVANCED for production
 }
 
 tasks.named("test") {
     useJUnitPlatform()
+}
+
+// =========================================================================
+// Maven Central publishing configuration
+// =========================================================================
+
+// Publish guard: disabled by default to prevent accidental publication
+ext.cleatPublish = false
+
+tasks.named("publish") {
+    doFirst {
+        if (!cleatPublish && !project.hasProperty("cleatPublish")) {
+            throw new GradleException("Publishing is disabled by default. Enable with -PcleatPublish=true or define cleatPublish=true in gradle.properties.")
+        }
+    }
+}
+
+publishing {
+    publications {
+        cleatJava(MavenPublication) {
+            from components.java
+            groupId = project.group
+            artifactId = "cleat-sdk"
+            version = project.version
+
+            pom {
+                name = "Cleat Java SDK"
+                description = "Java SDK for building cleat durable workflow applications"
+                url = "https://github.com/cleat/cleat"
+
+                licenses {
+                    license {
+                        name = "Apache License, Version 2.0"
+                        url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+                    }
+                }
+
+                developers {
+                    developer {
+                        name = "Cleat Contributors"
+                        email = "contributors@cleat.dev"
+                    }
+                }
+
+                scm {
+                    connection = "scm:git:git://github.com/cleat/cleat.git"
+                    developerConnection = "scm:git:ssh://github.com/cleat/cleat.git"
+                    url = "https://github.com/cleat/cleat"
+                }
+            }
+        }
+    }
+
+    repositories {
+        maven {
+            name = "sonatype"
+            url = "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
+            credentials {
+                username = findProperty("ossrhUsername") ?: System.getenv("OSSRH_USERNAME") ?: ""
+                password = findProperty("ossrhPassword") ?: System.getenv("OSSRH_PASSWORD") ?: ""
+            }
+        }
+    }
+}
+
+signing {
+    setRequired {
+        gradle.taskGraph.hasTask(":publishCleatJavaPublicationToSonatypeRepository")
+    }
+
+    def signingKey = findProperty("signingKey") ?: System.getenv("SIGNING_KEY") ?: ""
+    def signingPassword = findProperty("signingPassword") ?: System.getenv("SIGNING_PASSWORD") ?: ""
+
+    if (signingKey) {
+        useInMemoryPgpKeys(signingKey, signingPassword)
+        sign publishing.publications.cleatJava
+    }
 }
 
 // =========================================================================

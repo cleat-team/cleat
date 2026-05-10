@@ -67,11 +67,11 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		rolloutPercentage int
 	)
 
-	err := p.db.QueryRowContext(ctx, `
-		SELECT id, tenant_id, key, name, description, enabled, rules, rollout_percentage
-		FROM feature_flags
-		WHERE tenant_id = $1 AND key = $2
-	`, cc.TenantID, input.Key).Scan(
+	err := p.db.QueryRow(ctx, plugin.Rebind(`
+			SELECT id, tenant_id, key, name, description, enabled, rules, rollout_percentage
+			FROM feature_flags
+			WHERE tenant_id = $1 AND key = $2
+		`, p.dialect), cc.TenantID, input.Key).Scan(
 		&id, &tenantID, &key, &name, &description,
 		&enabled, &rulesJSON, &rolloutPercentage,
 	)

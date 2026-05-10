@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# Publish Python SDK to PyPI
+#
+# Stream P — P2.6: Trusted publisher (OIDC) based PyPI publishing.
+# Triggered on tag push (python-sdk/v*) or when a release is published.
+#
+# Requirements:
+#   - A PyPI trusted publisher must be configured for this repo.
+#     See: https://docs.pypi.org/trusted-publishers/
+# ---------------------------------------------------------------------------
+name: Publish Python SDK to PyPI
+
+on:
+  release:
+    types: [published]
+  push:
+    tags: ["python-sdk/v*"]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        working-directory: python-sdk
+        run: |
+          pip install build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python-sdk/dist/

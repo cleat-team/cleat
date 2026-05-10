@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/host"
 )
 
@@ -45,7 +45,7 @@ type mockStore struct {
 	checkCancellationFn               func(ctx context.Context, workflowID string) (bool, string, error)
 	deliverSignalFn                   func(ctx context.Context, workflowID, signalName, payload string) error
 	pollAndClaimSignalFn              func(ctx context.Context, workflowID, signalName string) (string, bool, error)
-	startNewRunFn                     func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
+	startNewRunFn                     func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
 	startChildWorkflowFn              func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
 	getChildResultFn                  func(ctx context.Context, runID string) (string, bool, error)
 	reapStaleInstancesFn              func(ctx context.Context, timeout time.Duration) (int, error)
@@ -60,7 +60,7 @@ type mockStore struct {
 	updateScheduleNextRunFn           func(ctx context.Context, name string, nextRun time.Time) error
 	loadWorkflowConfigFn              func(ctx context.Context, defName string, defVersion int) (int, error)
 	loadDAGSpecFn                     func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error)
-	traceWorkflowFn                   func(ctx context.Context, workflowID, traceID string) (sql.Result, error)
+	traceWorkflowFn                   func(ctx context.Context, workflowID, traceID string) error
 	getCompactionCandidatesFn         func(ctx context.Context, threshold int, limit int) ([]string, error)
 	loadCompactionStateFn             func(ctx context.Context, workflowID string) (*host.CompactionState, error)
 	compactHistoryFn                  func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
@@ -217,9 +217,9 @@ func (m *mockStore) PollCancellation(ctx context.Context, workflowID string) (bo
 	return m.CheckCancellation(ctx, workflowID)
 }
 
-func (m *mockStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (m *mockStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
 	if m.startNewRunFn != nil {
-		return m.startNewRunFn(ctx, defName, defVersion, input, idempotencyKey)
+		return m.startNewRunFn(ctx, runID, defName, defVersion, input, idempotencyKey)
 	}
 	return "test-run-id", false, nil
 }
@@ -229,6 +229,10 @@ func (m *mockStore) StartChildWorkflow(ctx context.Context, parentID, defName, i
 		return m.startChildWorkflowFn(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy)
 	}
 	return "child-run-id", nil
+}
+
+func (m *mockStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event host.EventRecord) (string, error) {
+	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy)
 }
 
 func (m *mockStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
@@ -322,11 +326,11 @@ func (m *mockStore) LoadDAGSpec(ctx context.Context, defName string, defVersion 
 	return nil, nil
 }
 
-func (m *mockStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
+func (m *mockStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error {
 	if m.traceWorkflowFn != nil {
 		return m.traceWorkflowFn(ctx, workflowID, traceID)
 	}
-	return nil, nil
+	return nil
 }
 
 func (m *mockStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) {
@@ -2207,7 +2211,7 @@ func TestAPIStartWorkflow(t *testing.T) {
 	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
 		return []int{1}, nil
 	}
-	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+	ms.startNewRunFn = func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
 		return "wf-new-1", false, nil
 	}
 
@@ -2269,7 +2273,7 @@ func TestAPIStartWorkflow_WithIdempotencyKey(t *testing.T) {
 	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
 		return []int{1}, nil
 	}
-	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+	ms.startNewRunFn = func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
 		return "wf-existing", true, nil
 	}
 
@@ -2297,7 +2301,7 @@ func TestAPIStartWorkflow_WithConcurrencyKey(t *testing.T) {
 	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
 		return []int{1}, nil
 	}
-	ms.startNewRunFn = func(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+	ms.startNewRunFn = func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
 		return "wf-cc-1", false, nil
 	}
 	ms.acquireConcurrencyKeyFn = func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
@@ -2903,3 +2907,6 @@ func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64,
 func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error) { return nil, nil }
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error { return nil }
+func (m *mockStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) { return 0, nil }
+func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) { return true, nil }
+func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }

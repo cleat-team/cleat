@@ -62,9 +62,9 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 
 	// Verify the webhook belongs to the tenant.
 	var exists bool
-	err := p.db.QueryRowContext(ctx, `
-		SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2)
-	`, input.WebhookID, cc.TenantID).Scan(&exists)
+	err := p.db.QueryRow(ctx, plugin.Rebind(`
+			SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2)
+		`, p.dialect), input.WebhookID, cc.TenantID).Scan(&exists)
 	if err != nil {
 		return "", fmt.Errorf("notifications: verify webhook: %w", err)
 	}
@@ -75,10 +75,10 @@ func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, err
 	deliveryID := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.ExecContext(ctx, `
-		INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
-		VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6)
-	`, deliveryID, input.WebhookID, input.EventType, string(input.Payload), now, now)
+	_, err = p.db.Exec(ctx, plugin.Rebind(`
+			INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
+			VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6)
+		`, p.dialect), deliveryID, input.WebhookID, input.EventType, string(input.Payload), now, now)
 	if err != nil {
 		return "", fmt.Errorf("notifications: create delivery: %w", err)
 	}

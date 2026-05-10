@@ -15,11 +15,12 @@ import (
 // Metadata is embedded in the "cleat.metadata" custom section of compiled
 // WASM binaries. It carries the information needed for deployment.
 type Metadata struct {
-	WorkflowName         string   `json:"workflow_name"`
-	WorkflowVersion      int      `json:"workflow_version"`
-	ABIVersion           int      `json:"abi_version"`
-	MinCompatibleVersion int      `json:"min_compatible_version"`
+	WorkflowName         string            `json:"workflow_name"`
+	WorkflowVersion      int               `json:"workflow_version"`
+	ABIVersion           int               `json:"abi_version"`
+	MinCompatibleVersion int               `json:"min_compatible_version"`
 	PluginDeps           map[string]string `json:"plugin_deps,omitempty"`
+	ChildVersions        map[string]int    `json:"child_versions,omitempty"`
 }
 
 // CurrentABIVersion is the ABI version produced by this version of cleat.

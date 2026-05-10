@@ -27,9 +27,10 @@ func init() {
 
 // Plugin implements scheduled PostgreSQL backups with tenant isolation.
 type Plugin struct {
-db     plugin.DB
+db     plugin.PluginDB
 	mux    *http.ServeMux
 	logger *slog.Logger
+	dialect plugin.Dialect
 	config Config
 }
 
@@ -58,6 +59,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	}
 
 	p.db = env.DB
+	p.dialect = env.Dialect
 	p.mux = env.Mux
 
 	if len(env.Config) > 0 {

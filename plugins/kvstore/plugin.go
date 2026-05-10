@@ -26,10 +26,11 @@ func init() {
 
 // Plugin implements a versioned JSONB key-value store with tenant isolation.
 type Plugin struct {
-db     plugin.DB
+db     plugin.PluginDB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config
+	dialect plugin.Dialect
 }
 
 // Config controls kvstore behaviour.
@@ -58,6 +59,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.mux = env.Mux
+	p.dialect = env.Dialect
 
 	// Parse config. If no config provided, use safe defaults.
 	if len(env.Config) > 0 {

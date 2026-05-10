@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -62,11 +63,11 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	var version int
 	var createdAt, updatedAt time.Time
 
-	err := p.db.QueryRowContext(r.Context(), `
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT value, version, created_at, updated_at
 		FROM kv_store
 		WHERE tenant_id = $1 AND key = $2
-	`, tid, key).Scan(&value, &version, &createdAt, &updatedAt)
+	`, p.dialect), tid, key).Scan(&value, &version, &createdAt, &updatedAt)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "key not found")
 		return
@@ -137,12 +138,24 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var newVersion int
-		err = p.db.QueryRowContext(r.Context(), `
-			UPDATE kv_store
-			SET value = $1, version = version + 1, updated_at = now()
-			WHERE tenant_id = $2 AND key = $3 AND version = $4
-			RETURNING version
-		`, value, tid, key, expectedVersion).Scan(&newVersion)
+		if p.dialect == plugin.DialectMySQL {
+			// MySQL: UPDATE without RETURNING
+			rows, execErr := p.db.Exec(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
+				value, tid, key, expectedVersion)
+			if execErr != nil {
+				p.logger.Error("kvstore: put (update)", "key", key, "error", execErr)
+				p.writeError(w, 500, "failed to update value")
+				return
+			}
+			if rows == 0 {
+				p.writeError(w, 409, "conflict: version mismatch")
+				return
+			}
+			err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND key = $2`, p.dialect), tid, key).Scan(&newVersion)
+		} else {
+			err = p.db.QueryRow(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
+				value, tid, key, expectedVersion).Scan(&newVersion)
+		}
 		if err == sql.ErrNoRows {
 			p.writeError(w, 409, "conflict: version mismatch")
 			return
@@ -163,15 +176,20 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	// No If-Match header: upsert (insert or overwrite unconditionally).
 	var newVersion int
-	err = p.db.QueryRowContext(r.Context(), `
-		INSERT INTO kv_store (tenant_id, key, value)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (tenant_id, key) DO UPDATE
-		SET value = EXCLUDED.value,
-		    version = kv_store.version + 1,
-		    updated_at = now()
-		RETURNING version
-	`, tid, key, value).Scan(&newVersion)
+	if p.dialect == plugin.DialectMySQL {
+		// MySQL: upsert without RETURNING, then select version
+		_, execErr := p.db.Exec(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
+			tid, key, value)
+		if execErr != nil {
+			p.logger.Error("kvstore: put (upsert)", "key", key, "error", execErr)
+			p.writeError(w, 500, "failed to store value")
+			return
+		}
+		err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND key = $2`, p.dialect), tid, key).Scan(&newVersion)
+	} else {
+		err = p.db.QueryRow(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
+			tid, key, value).Scan(&newVersion)
+	}
 	if err != nil {
 		p.logger.Error("kvstore: put (upsert)", "key", key, "error", err)
 		p.writeError(w, 500, "failed to store value")
@@ -207,16 +225,15 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
 		DELETE FROM kv_store
 		WHERE tenant_id = $1 AND key = $2
-	`, tid, key)
+	`, p.dialect), tid, key)
 	if err != nil {
 		p.logger.Error("kvstore: delete", "key", key, "error", err)
 		p.writeError(w, 500, "failed to delete key")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "key not found")
 		return
@@ -248,21 +265,21 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		SELECT key, value, version, created_at, updated_at
 		FROM kv_store
 		WHERE tenant_id = $1
-	`
+		`
 	args := []interface{}{tid}
 	argIdx := 2
 
 	if prefix != "" {
-		query += fmt.Sprintf(" AND key LIKE $%d", argIdx)
+		query += " AND key LIKE " + fmt.Sprintf("$%d", argIdx)
 		args = append(args, prefix+"%")
 		argIdx++
 	}
 
 	query += " ORDER BY key ASC"
-	query += fmt.Sprintf(" LIMIT $%d", argIdx)
+	query += " LIMIT " + fmt.Sprintf("$%d", argIdx)
 	args = append(args, limit)
 
-	rows, err := p.db.QueryContext(r.Context(), query, args...)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
 	if err != nil {
 		p.logger.Error("kvstore: list", "error", err)
 		p.writeError(w, 500, "failed to list keys")

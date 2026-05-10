@@ -1,0 +1,90 @@
+# ---------------------------------------------------------------------------
+# CLA Check — verifies first-time contributors have signed the ICLA
+#
+# Every contributor must sign the cleat Contributor License Agreement before
+# their first PR is merged. The agreement is documented in docs/cla.md.
+#
+# This check runs only for first-time contributors. It verifies the PR
+# description contains the ICLA agreement statement. Return contributors
+# are automatically exempt.
+# ---------------------------------------------------------------------------
+name: CLA Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: read
+
+jobs:
+  cla:
+    name: Contributor License Agreement
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if first-time contributor
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const author = context.payload.pull_request.user.login;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // Search for any merged PR by this author (excluding this PR)
+            const { data: prs } = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${owner}/${repo} type:pr author:${author} is:merged -number:${context.issue.number}`,
+              per_page: 1,
+            });
+
+            const isFirstTime = prs.total_count === 0;
+            core.setOutput('is_first_time', isFirstTime);
+            core.setOutput('author', author);
+
+            if (isFirstTime) {
+              console.log(`${author} is a first-time contributor — CLA required.`);
+            } else {
+              console.log(`${author} has previous merged PRs — CLA check skipped.`);
+            }
+
+      - name: Check CLA statement in PR description
+        if: steps.check.outputs.is_first_time == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.pull_request.body || '';
+
+            // Look for the CLA agreement statement
+            const claPattern = /I hereby agree to the terms of the cleat Contributor License Agreement/i;
+            const dcoPattern = /Signed-off-by:/;
+
+            const hasCLA = claPattern.test(body);
+            const hasDCO = dcoPattern.test(body);
+
+            if (!hasCLA) {
+              const author = '${{ steps.check.outputs.author }}';
+              core.setFailed(
+                `CLA NOT SIGNED\n\n` +
+                `Hi @${author}, this appears to be your first pull request to cleat.\n\n` +
+                `Before we can accept your contribution, you must sign the Individual\n` +
+                `Contributor License Agreement. Add the following statement to your\n` +
+                `PR description:\n\n` +
+                `    I hereby agree to the terms of the cleat Contributor License\n` +
+                `    Agreement (docs/cla.md).\n\n` +
+                `    Signed-off-by: Your Name <your.email@example.com>\n\n` +
+                `Full details: docs/cla.md`
+              );
+            }
+
+            if (!hasDCO) {
+              core.warning(
+                `The CLA statement appears to be present but the Signed-off-by line ` +
+                `was not found. This is required for DCO compliance.`
+              );
+            }
+
+            console.log('CLA statement found in PR description.');

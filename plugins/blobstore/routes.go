@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
+
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -118,12 +120,8 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	if storageBackend == "s3" {
 		s3Key = &sha256Hex
 	}
-	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO blob_content (sha256, size, ref_count, storage_backend, s3_key)
-		VALUES ($1, $2, 1, $3, $4)
-		ON CONFLICT (sha256) DO UPDATE
-		SET ref_count = blob_content.ref_count + 1
-	`, hash[:], len(body), storageBackend, s3Key)
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(upsertBlobContent.For(p.dialect), p.dialect),
+		hash[:], len(body), storageBackend, s3Key)
 	if err != nil {
 		p.logger.Error("blobstore: store content", "key", key, "error", err)
 		p.writeError(w, 500, "failed to store content")
@@ -140,23 +138,11 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	// Insert or update blob_index.
 	if expiresAt != nil {
-		_, err = p.db.ExecContext(r.Context(), `
-			INSERT INTO blob_index (key, tenant_id, sha256, size, content_type, tags, expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (tenant_id, key) DO UPDATE
-			SET sha256 = EXCLUDED.sha256, size = EXCLUDED.size,
-			    content_type = EXCLUDED.content_type, tags = EXCLUDED.tags,
-			    expires_at = EXCLUDED.expires_at
-		`, key, tid, hash[:], len(body), contentType, tagsJSON, *expiresAt)
+		_, err = p.db.Exec(r.Context(), plugin.Rebind(upsertBlobIndexWithTTL.For(p.dialect), p.dialect),
+			key, tid, hash[:], len(body), contentType, tagsJSON, *expiresAt)
 	} else {
-		_, err = p.db.ExecContext(r.Context(), `
-			INSERT INTO blob_index (key, tenant_id, sha256, size, content_type, tags)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (tenant_id, key) DO UPDATE
-			SET sha256 = EXCLUDED.sha256, size = EXCLUDED.size,
-			    content_type = EXCLUDED.content_type, tags = EXCLUDED.tags,
-			    expires_at = NULL
-		`, key, tid, hash[:], len(body), contentType, tagsJSON)
+		_, err = p.db.Exec(r.Context(), plugin.Rebind(upsertBlobIndex.For(p.dialect), p.dialect),
+			key, tid, hash[:], len(body), contentType, tagsJSON)
 	}
 	if err != nil {
 		p.logger.Error("blobstore: store index", "key", key, "error", err)
@@ -198,12 +184,12 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	var size int64
 	var expiresAt sql.NullTime
 
-	err := p.db.QueryRowContext(r.Context(), `
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
 		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+	`, p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -256,12 +242,12 @@ func (p *Plugin) handleHead(w http.ResponseWriter, r *http.Request) {
 	var size int64
 	var expiresAt sql.NullTime
 
-	err := p.db.QueryRowContext(r.Context(), `
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
 		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+	`, p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -301,16 +287,15 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 	// Soft delete: set deleted_at timestamp. Physical deletion is deferred
 	// to the TTL cleanup loop, which only removes bytes from S3 when no
 	// in-flight workflow references the blob.
-	result, err := p.db.ExecContext(r.Context(), `
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
 		UPDATE blob_index SET deleted_at = now()
 		WHERE key = $1 AND tenant_id = $2 AND deleted_at IS NULL
-	`, key, tid)
+	`, p.dialect), key, tid)
 	if err != nil {
 		p.logger.Error("blobstore: soft delete", "key", key, "error", err)
 		p.writeError(w, 500, "failed to delete blob")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -343,7 +328,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		SELECT i.key, i.sha256, i.size, i.content_type, i.tags, i.created_at, i.expires_at
 		FROM blob_index i
 		WHERE i.tenant_id = $1 AND i.deleted_at IS NULL
-	`
+		`
 	args := []interface{}{tid}
 	argIdx := 2
 
@@ -355,7 +340,14 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 
 	if tagFilter != "" {
 		if parts := splitTag(tagFilter); parts != nil {
-			query += fmt.Sprintf(" AND i.tags @> $%d", argIdx)
+			switch p.dialect {
+			case plugin.DialectMySQL:
+				query += fmt.Sprintf(" AND JSON_CONTAINS(i.tags, CAST($%d AS JSON))", argIdx)
+			case plugin.DialectMSSQL:
+				query += fmt.Sprintf(" AND EXISTS (SELECT 1 FROM OPENJSON(i.tags) AS t1 INNER JOIN OPENJSON($%d) AS t2 ON t1.[key] = t2.[key] AND t1.value = t2.value)", argIdx)
+			default:
+				query += fmt.Sprintf(" AND i.tags @> $%d", argIdx)
+			}
 			tagJSON, _ := json.Marshal(map[string]string{parts[0]: parts[1]})
 			args = append(args, string(tagJSON))
 			argIdx++
@@ -363,10 +355,10 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query += " ORDER BY i.created_at DESC"
-	query += fmt.Sprintf(" LIMIT $%d", argIdx)
+	query += " LIMIT " + fmt.Sprintf("$%d", argIdx)
 	args = append(args, limit)
 
-	rows, err := p.db.QueryContext(r.Context(), query, args...)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
 	if err != nil {
 		p.logger.Error("blobstore: list", "error", err)
 		p.writeError(w, 500, "failed to list blobs")

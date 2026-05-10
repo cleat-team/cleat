@@ -1,0 +1,13 @@
+error: #[cleat_entry] function must return Result<T, E>: must return Result to allow the macro to format success and error values for the WASM ABI. Change return type to Result<T, E>.
+ --> tests/ui/reject_non_result.rs:5:31
+  |
+5 | fn bad_return(_h: &HostCalls) -> String {
+  |                               ^^^^^^^^^
+
+warning: unused import: `cleat_sdk::HostCalls`
+ --> tests/ui/reject_non_result.rs:2:5
+  |
+2 | use cleat_sdk::HostCalls;
+  |     ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

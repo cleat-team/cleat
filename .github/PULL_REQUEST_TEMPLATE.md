@@ -1,3 +1,15 @@
+## First-time contributor? (sign the CLA)
+<!-- DELETE THIS SECTION if you have a prior merged PR in this repo. -->
+<!-- First PR? You must sign the ICLA. Read docs/cla.md, then fill in: -->
+
+I hereby agree to the terms of the cleat Contributor License Agreement (docs/cla.md).
+
+Signed-off-by: <!-- Your Name <your.email@example.com> -->
+
+## Branch convention
+<!-- Your branch name must follow gitflow: feature/*, bugfix/*, release/*, or hotfix/* -->
+<!-- Example: feature/multi-db-support -->
+
 ## Change type
 - [ ] `[FEATURE]` - New functionality
 - [ ] `[BUGFIX]` - Bug fix

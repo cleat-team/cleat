@@ -12,18 +12,44 @@ export async function instantiate(module, imports = {}) {
           throw Error(`${message} in ${fileName}:${lineNumber}:${columnNumber}`);
         })();
       },
-      durable_call(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen) {
-        // ../../packages/cleat-as/assembly/host-calls/import_durable_call(i32, i32, i32, i32, i32, i32, i32, i32) => i64
-        return durable_call(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen) || 0n;
+      cleat_call_with_timeout(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, timeoutMs, respPtr, respMaxLen) {
+        // ../../packages/cleat-as/assembly/host-calls/import_cleat_call_with_timeout(i32, i32, i32, i32, i32, i32, i64, i32, i32) => i64
+        return cleat_call_with_timeout(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, timeoutMs, respPtr, respMaxLen) || 0n;
       },
-      durable_poll_cancellation(reasonPtr, reasonMaxLen) {
-        // ../../packages/cleat-as/assembly/host-calls/import_durable_poll_cancellation(i32, i32) => i64
-        return durable_poll_cancellation(reasonPtr, reasonMaxLen) || 0n;
+      cleat_call(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen) {
+        // ../../packages/cleat-as/assembly/host-calls/import_cleat_call(i32, i32, i32, i32, i32, i32, i32, i32) => i64
+        return cleat_call(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen) || 0n;
+      },
+      cleat_poll_cancellation(reasonPtr, reasonMaxLen) {
+        // ../../packages/cleat-as/assembly/host-calls/import_cleat_poll_cancellation(i32, i32) => i64
+        return cleat_poll_cancellation(reasonPtr, reasonMaxLen) || 0n;
       },
     }),
   };
   const { exports } = await WebAssembly.instantiate(module, adaptedImports);
   const memory = exports.memory || imports.env.memory;
+  const adaptedExports = Object.setPrototypeOf({
+    place_order(h, input) {
+      // assembly/index/place_order(../../packages/cleat-as/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      h = __retain(__lowerInternref(h) || __notnull());
+      input = __lowerString(input) || __notnull();
+      try {
+        return __liftString(exports.place_order(h, input) >>> 0);
+      } finally {
+        __release(h);
+      }
+    },
+    cancel_order(h, input) {
+      // assembly/index/cancel_order(../../packages/cleat-as/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+      h = __retain(__lowerInternref(h) || __notnull());
+      input = __lowerString(input) || __notnull();
+      try {
+        return __liftString(exports.cancel_order(h, input) >>> 0);
+      } finally {
+        __release(h);
+      }
+    },
+  }, exports);
   function __liftString(pointer) {
     if (!pointer) return null;
     const
@@ -35,5 +61,40 @@ export async function instantiate(module, imports = {}) {
     while (end - start > 1024) string += String.fromCharCode(...memoryU16.subarray(start, start += 1024));
     return string + String.fromCharCode(...memoryU16.subarray(start, end));
   }
-  return exports;
+  function __lowerString(value) {
+    if (value == null) return 0;
+    const
+      length = value.length,
+      pointer = exports.__new(length << 1, 2) >>> 0,
+      memoryU16 = new Uint16Array(memory.buffer);
+    for (let i = 0; i < length; ++i) memoryU16[(pointer >>> 1) + i] = value.charCodeAt(i);
+    return pointer;
+  }
+  class Internref extends Number {}
+  function __lowerInternref(value) {
+    if (value == null) return 0;
+    if (value instanceof Internref) return value.valueOf();
+    throw TypeError("internref expected");
+  }
+  const refcounts = new Map();
+  function __retain(pointer) {
+    if (pointer) {
+      const refcount = refcounts.get(pointer);
+      if (refcount) refcounts.set(pointer, refcount + 1);
+      else refcounts.set(exports.__pin(pointer), 1);
+    }
+    return pointer;
+  }
+  function __release(pointer) {
+    if (pointer) {
+      const refcount = refcounts.get(pointer);
+      if (refcount === 1) exports.__unpin(pointer), refcounts.delete(pointer);
+      else if (refcount) refcounts.set(pointer, refcount - 1);
+      else throw Error(`invalid refcount '${refcount}' for reference '${pointer}'`);
+    }
+  }
+  function __notnull() {
+    throw TypeError("value must not be null");
+  }
+  return adaptedExports;
 }

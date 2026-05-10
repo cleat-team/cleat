@@ -57,7 +57,7 @@ type configRow struct {
 // messages from each one, publishing them as events through the
 // event-triggers pipeline.
 func (p *Plugin) pollConfigs(ctx context.Context) error {
-	rows, err := p.db.QueryContext(ctx, `
+	rows, err := p.db.Query(ctx, `
 		SELECT id, tenant_id, name, brokers, topic, consumer_group, COALESCE(event_type, topic)
 		FROM kafka_config
 		WHERE enabled = true

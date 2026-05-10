@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
 	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // ---------------------------------------------------------------------------
@@ -335,7 +336,7 @@ func newESPlugin(t *testing.T) (*Plugin, *esDB, *sql.DB) {
 	t.Cleanup(func() { rawDB.Close() })
 
 	p := &Plugin{
-		db:     rawDB,
+		db:     &host.SQLDBAdapter{DB: rawDB},
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{MaxEventSize: 1 * 1024 * 1024},
@@ -806,7 +807,7 @@ func TestES_Cleanup_DeletesOldEvents(t *testing.T) {
 	defer rawDB.Close()
 
 	p := &Plugin{
-		db:     rawDB,
+		db:     &host.SQLDBAdapter{DB: rawDB},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 1, MaxEventSize: 1 * 1024 * 1024},
 	}
@@ -854,7 +855,7 @@ func TestES_Cleanup_RetentionZeroUsesDefault(t *testing.T) {
 	defer rawDB.Close()
 
 	p := &Plugin{
-		db:     rawDB,
+		db:     &host.SQLDBAdapter{DB: rawDB},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 0, MaxEventSize: 1 * 1024 * 1024}, // 0 means use default (30)
 	}
@@ -884,7 +885,7 @@ func TestES_Cleanup_NegativeRetentionSkips(t *testing.T) {
 	defer rawDB.Close()
 
 	p := &Plugin{
-		db:     rawDB,
+		db:     &host.SQLDBAdapter{DB: rawDB},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: -1, MaxEventSize: 1 * 1024 * 1024},
 	}
@@ -902,7 +903,7 @@ func TestES_Cleanup_NegativeRetentionSkips(t *testing.T) {
 func TestES_Init_InvalidConfig(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	env := &plugin.Environment{
-		DB:     sql.OpenDB(&esConnector{db: newESDB()}),
+		DB:     &host.SQLDBAdapter{DB: sql.OpenDB(&esConnector{db: newESDB()})},
 		Mux:    http.NewServeMux(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Config: json.RawMessage(`not json`),
@@ -916,7 +917,7 @@ func TestES_Init_InvalidConfig(t *testing.T) {
 func TestES_Init_NilLoggerDefaults(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB:     sql.OpenDB(&esConnector{db: newESDB()}),
+		DB:     &host.SQLDBAdapter{DB: sql.OpenDB(&esConnector{db: newESDB()})},
 		Mux:    http.NewServeMux(),
 		Logger: nil,
 	}
@@ -1142,7 +1143,7 @@ func TestES_Cleanup_DBError(t *testing.T) {
 	defer rawDB.Close()
 
 	p := &Plugin{
-		db:     rawDB,
+		db:     &host.SQLDBAdapter{DB: rawDB},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 1, MaxEventSize: 1 * 1024 * 1024},
 	}
@@ -1169,7 +1170,7 @@ func TestES_Cleanup_DBError(t *testing.T) {
 func TestES_Init_EmptyConfig(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB:     sql.OpenDB(&esConnector{db: newESDB()}),
+		DB:     &host.SQLDBAdapter{DB: sql.OpenDB(&esConnector{db: newESDB()})},
 		Mux:    http.NewServeMux(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Config: json.RawMessage(`{}`),

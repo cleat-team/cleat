@@ -12,6 +12,8 @@ package wasm
 
 import (
 	"go/ast"
+	"go/token"
+	"strings"
 
 	"github.com/rcownie/cleat/internal/analyzer"
 	"github.com/rcownie/cleat/internal/closure"
@@ -109,13 +111,19 @@ type UsageInfo struct {
 	// Funcs lists the HostFunction descriptors that are actually used,
 	// in a stable order (by ImportName).
 	Funcs []HostFunction
+
+	// Children records child workflow names detected in the AST.
+	// Keys are the first argument string literals of h.ChildWorkflow(name, ...),
+	// h.ChildWorkflowWithOptions(name, ...), and h.ChildWorkflowTyped(name, ...).
+	Children map[string]bool
 }
 
 // AnalyzeUsage scans every function in the cleat closure and returns
 // which HostCalls methods are called.
 func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInfo {
 	info := &UsageInfo{
-		Used: make(map[string]bool),
+		Used:     make(map[string]bool),
+		Children: make(map[string]bool),
 	}
 
 	// Build the set of functions in the cleat closure.
@@ -177,6 +185,16 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 		fieldName := selExpr.Sel.Name
 		if importName, ok := fieldToImport[fieldName]; ok && importName != "" {
 			info.Used[importName] = true
+		}
+
+		// Extract child workflow name from the first string literal argument.
+		if fieldName == "ChildWorkflow" || fieldName == "ChildWorkflowWithOptions" || fieldName == "ChildWorkflowTyped" {
+			if len(call.Args) > 0 {
+				if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+					name := strings.Trim(lit.Value, `"`)
+					info.Children[name] = true
+				}
+			}
 		}
 		return true
 	})

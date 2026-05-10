@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // responseWriter wraps http.ResponseWriter to capture the status code.
@@ -58,10 +59,10 @@ func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, method, pa
 
 	durationMs := int(duration.Milliseconds())
 
-	_, err := p.db.ExecContext(insertCtx, `
-		INSERT INTO audit_events (tenant_id, method, path, status_code, user_id, ip_address, user_agent, duration_ms)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, tenantID, method, path, statusCode, "", ipAddress, userAgent, durationMs)
+	_, err := p.db.Exec(insertCtx, plugin.Rebind(`
+			INSERT INTO audit_events (tenant_id, method, path, status_code, user_id, ip_address, user_agent, duration_ms)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`, p.dialect), tenantID, method, path, statusCode, "", ipAddress, userAgent, durationMs)
 	if err != nil && err != sql.ErrNoRows {
 		p.logger.Error("audit-log: record event", "error", err)
 	}

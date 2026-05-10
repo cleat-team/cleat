@@ -128,7 +128,27 @@ grep -r 'v[0-9]\+\.[0-9]\+\.[0-9]\+' --include="*.go" --include="*.rs" .
 
 If any go.mod or version constants reference the old version, update them.
 
-### 3. Commit and tag
+### 3. Run multi-database tests
+
+Run the WorkflowStore test suite against all three supported backends to verify
+that no regressions were introduced:
+
+```bash
+# Requires MySQL and SQL Server running locally or via Docker.
+make test-all-dbs
+```
+
+Verify that all three migration directories are in sync:
+
+```bash
+ls migrations/postgres/ migrations/mysql/ migrations/mssql/
+```
+
+Each directory should contain the same set of migration files (adapted for
+dialect syntax). If a migration is missing from one backend, add it before
+proceeding with the release.
+
+### 4. Commit and tag
 
 ```bash
 git add CHANGELOG.md
@@ -138,14 +158,14 @@ git commit -m "Release vX.Y.Z"
 git tag -a vX.Y.Z -m "Release vX.Y.Z"
 ```
 
-### 4. Push tag
+### 5. Push tag
 
 ```bash
 git push origin main
 git push origin vX.Y.Z
 ```
 
-### 5. Verify CI
+### 6. Verify CI
 
 Pushing the tag triggers the CI pipeline (GoReleaser), which:
 
@@ -157,7 +177,7 @@ Pushing the tag triggers the CI pipeline (GoReleaser), which:
 Monitor the CI pipeline at:
 https://github.com/rcownie/cleat/actions
 
-### 6. Verify the release
+### 7. Verify the release
 
 Once CI completes:
 
@@ -174,7 +194,7 @@ go install github.com/rcownie/cleat/cmd/cleat@vX.Y.Z
 cleat version  # should show vX.Y.Z
 ```
 
-### 7. Announce
+### 8. Announce
 
 Post in Discord `#announcements`:
 
@@ -199,7 +219,7 @@ be cut outside the normal cadence:
 
 1. Create a branch from the latest tag: `git checkout -b hotfix-vX.Y.Z+1 vX.Y.Z`
 2. Apply the fix and bump the PATCH version
-3. Follow the standard release checklist (steps 1-7)
+3. Follow the standard release checklist (steps 1-8)
 4. Cherry-pick the fix into `main` after release
 
 ## Breaking change policy

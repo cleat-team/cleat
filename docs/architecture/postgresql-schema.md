@@ -306,3 +306,129 @@ shard has its own connection string and tenant assignment. The sharded store
 dispatches workflow operations to the correct shard by tenant ID. See
 `internal/host/sharded_store.go` and `cmd/cleat-worker/main.go` for
 implementation details.
+
+---
+
+## Cross-Database Type Mappings
+
+The project now supports three database backends: PostgreSQL 14+, MySQL 8.0+, and
+SQL Server 2017+. This section documents how types and SQL patterns map between
+them.
+
+### Data Type Mapping
+
+| PostgreSQL | MySQL 8.0+ | SQL Server 2017+ | Notes |
+|---|---|---|---|
+| `UUID` | `CHAR(36)` | `UNIQUEIDENTIFIER` | UUIDs generated in Go via `uuid.New()`. PostgreSQL can also use `gen_random_uuid()`; MSSQL can use `NEWID()`. |
+| `TEXT` (PK or small column) | `VARCHAR(255)` | `NVARCHAR(64)` / `NVARCHAR(255)` | MySQL requires `VARCHAR` (not `TEXT`) for primary keys. MSSQL uses `NVARCHAR(64)` for UUID IDs, `NVARCHAR(255)` for names. |
+| `TEXT` (data column) | `TEXT` | `NVARCHAR(MAX)` | |
+| `JSONB` | `JSON` | `NVARCHAR(MAX)` + `ISJSON` check | MySQL `JSON` is not binary-optimized like PostgreSQL `JSONB`. MSSQL enforces JSON via `CHECK (ISJSON(col) = 1)` constraints. |
+| `BYTEA` | `LONGBLOB` | `VARBINARY(MAX)` | |
+| `BYTEA` (hash/fixed-size) | `VARBINARY(64)` | `VARBINARY(32)` | SHA-256 hash keys use `BYTEA` in PG, `VARBINARY(64)` in MySQL, `VARBINARY(32)` in MSSQL. |
+| `TIMESTAMPTZ` | `TIMESTAMP(6)` | `DATETIMEOFFSET` | MySQL stores UTC without timezone awareness. PostgreSQL and MSSQL preserve timezone offset. |
+| `BOOLEAN` | `TINYINT(1)` | `BIT` | MySQL uses `0`/`1` integers; MSSQL uses `0`/`1` bits. |
+| `TEXT[]` | `JSON` (array) | `NVARCHAR(MAX)` (JSON array) | No native array type in MySQL or MSSQL. Stored as JSON arrays (e.g., `'["place_order","cancel_order"]'`). |
+| `INTEGER` | `INTEGER` | `INT` | Identical semantics across all three. |
+| `BIGINT` | `BIGINT` | `BIGINT` | Identical semantics across all three. |
+| `DOUBLE PRECISION` | `DOUBLE` | `FLOAT(53)` | Not currently used in migration files, but listed for completeness. |
+| `SERIAL` | `INT AUTO_INCREMENT` | `INT IDENTITY(1,1)` | Not currently used — all primary keys are application-generated UUIDs or composite keys. |
+| `BIGSERIAL` | `BIGINT AUTO_INCREMENT` | `BIGINT IDENTITY(1,1)` | Not currently used — all primary keys are application-generated UUIDs or composite keys. |
+
+### Default Value Differences
+
+| PostgreSQL | MySQL 8.0+ | SQL Server 2017+ |
+|---|---|---|
+| `now()` | `NOW(6)` | `SYSUTCDATETIME()` |
+| `gen_random_uuid()` | Go-side `uuid.New().String()` | `NEWID()` or Go-side |
+| `now() + INTERVAL '7 days'` | `NOW(6) + INTERVAL 7 DAY` | `DATEADD(DAY, 7, SYSUTCDATETIME())` |
+| `'{}'::jsonb` | `('{}')` | `'{}'` with `ISJSON` constraints |
+| `'{}'::text[]` | `('[]')` | `'[]'` |
+
+### Key SQL Translation Table
+
+| Operation | PostgreSQL | MySQL 8.0+ | SQL Server 2017+ |
+|---|---|---|---|
+| Claim (skip locked) | `SELECT ... FOR UPDATE SKIP LOCKED` | `SELECT ... FOR UPDATE SKIP LOCKED` | `UPDATE ... SET ... OUTPUT INSERTED.* WHERE id IN (SELECT id FROM ... WITH (READPAST, UPDLOCK, ROWLOCK) ... OFFSET 0 ROWS FETCH NEXT N ROWS ONLY)` |
+| Upsert (no-op on conflict) | `INSERT ... ON CONFLICT DO NOTHING` | `INSERT IGNORE` | `INSERT ... SELECT ... WHERE NOT EXISTS (SELECT 1 FROM ...)` |
+| Upsert (update on conflict) | `INSERT ... ON CONFLICT DO UPDATE SET ...` | `INSERT ... ON DUPLICATE KEY UPDATE ...` | `MERGE target AS t USING source AS s ON ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...` |
+| Return inserted/updated ID | `RETURNING id` | App-generated UUID (two-step: SELECT...FOR UPDATE then UPDATE) [1] | `OUTPUT INSERTED.id` |
+| Case-insensitive match | `ILIKE` | `LOWER(col) LIKE LOWER(?)` | `LOWER(col) LIKE LOWER(?)` |
+| JSON field access | `col->>'field'` | `JSON_EXTRACT(col, '$.field')` | `JSON_VALUE(col, '$.field')` |
+| Hash function | `digest('sha256', ...)` (pgcrypto extension) | Go-side `sha256.Sum256()` | `HASHBYTES('SHA2_256', ...)` (native) or Go-side |
+| UUID generation | `gen_random_uuid()` | Go-side `uuid.New()` | `NEWID()` or Go-side |
+| Pagination | `LIMIT ? OFFSET ?` | `LIMIT ? OFFSET ?` | `OFFSET ? ROWS FETCH NEXT ? ROWS ONLY` |
+| Create if not exists | `CREATE TABLE IF NOT EXISTS` | `CREATE TABLE IF NOT EXISTS` | `IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE ...) CREATE TABLE` |
+| Add column if not exists | `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` | `ALTER TABLE ... ADD COLUMN` (with manual check) | `IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE ...) ALTER TABLE ... ADD` |
+| Drop index if exists | `DROP INDEX IF EXISTS` | `DROP INDEX ... ON ...` (no IF EXISTS) | `IF EXISTS (SELECT 1 FROM sys.indexes WHERE ...) DROP INDEX` |
+| Drop column if exists | `ALTER TABLE ... DROP COLUMN IF EXISTS` | Manual existence check | `IF EXISTS (SELECT 1 FROM sys.columns WHERE ...) ALTER TABLE ... DROP COLUMN` |
+| Make column NOT NULL | `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` | `ALTER TABLE ... MODIFY COLUMN ... NOT NULL` | `ALTER TABLE ... ALTER COLUMN ... NOT NULL` |
+| Duplicate key detection | `ON CONFLICT` (no separate check) | Error code 1062 check in Go (`isDuplicateKeyError`) | Error code 2627 check in Go |
+
+**Footnotes**:
+
+1. MySQL does not support `UPDATE ... RETURNING`. The claim pattern uses a two-step
+   approach: (a) `SELECT id ... FOR UPDATE SKIP LOCKED`, then (b) `UPDATE ... WHERE id IN (...)`.
+   See `internal/host/mysql_store.go`.
+
+### Index Differences
+
+| Feature | PostgreSQL 14+ | MySQL 8.0+ | SQL Server 2017+ |
+|---|---|---|---|
+| Partial indexes (WHERE clause) | Yes | **No** — partial indexes are omitted; application code adds the filter to queries | Yes — filtered indexes with deterministic predicates only |
+| Covering indexes (INCLUDE) | Yes (11+) | **No** — columns must be in the index key | Yes |
+| JSON indexes | GIN index on `JSONB` column | Generated column + index (can't index `JSON` directly) | Computed column + index (can't index `NVARCHAR(MAX)` JSON directly) |
+| DESC in index | Supported | Ignored (direction does not affect B-tree in InnoDB) | Supported |
+| Unique constraints on nullable columns | Multiple NULLs allowed | Multiple NULLs allowed (InnoDB) | Only one NULL allowed (historically; `CREATE UNIQUE INDEX ... WHERE col IS NOT NULL` can work around) |
+
+**Index Migration Notes**:
+
+- PostgreSQL partial indexes (e.g., `WHERE status = 'ready'`) are **omitted** in
+  MySQL. The application layer (`mysql_store.go`) adds the filter condition
+  directly in queries.
+- Indexes on `UUID`/`CHAR(36)` columns use the full column width in MySQL
+  (no prefix length needed for `CHAR`).
+- MSSQL filtered indexes cannot use non-deterministic functions like
+  `SYSUTCDATETIME()` in the predicate. Expiration-cleanup queries use a regular
+  index and filter at query time instead.
+
+### Row-Level Security Comparison
+
+| Aspect | PostgreSQL | MySQL 8.0+ | SQL Server 2017+ |
+|---|---|---|---|
+| Mechanism | `CREATE POLICY ... FOR ALL USING (tenant_id = current_setting('cleat.tenant_id')::uuid)` | Not available — application-layer `WHERE tenant_id = ?` on every query | `CREATE SECURITY POLICY ... ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.<table>` |
+| Session context | `current_setting('cleat.tenant_id', true)` | N/A | `SESSION_CONTEXT(N'tenant_id')` |
+| Predicate function | Inline policy expression | N/A | Inline TVF returning `1` when `SESSION_CONTEXT` matches |
+| Bypass | Superuser | N/A | `IS_MEMBER('db_owner') = 1` |
+| Fail-closed | Yes (NULL context returns no rows) | Yes (queries without tenant filter return no rows for other tenants) | Yes (unset context returns no rows) |
+| Block predicates | Not implemented (filter only) | N/A | Yes — `ADD BLOCK PRECATE` prevents INSERT/UPDATE of wrong-tenant rows |
+
+### Checking Type Equivalents in Migrations
+
+Each backend maintains a parallel set of migration files in:
+
+```
+migrations/postgres/     -- Canonical PostgreSQL DDL
+migrations/mysql/        -- MySQL 8.0+ port (with MySQL differences documented in comments)
+migrations/mssql/        -- SQL Server 2017+ / Azure SQL port (T-SQL)
+```
+
+Each MySQL migration file includes a comment block at the top documenting all
+MySQL-specific deviations from the PostgreSQL original. For example, from
+`migrations/mysql/001_initial_schema.sql`:
+
+```sql
+-- MySQL differences from PostgreSQL:
+--   - TEXT columns used as primary keys are VARCHAR(255)
+--   - JSONB becomes JSON
+--   - BYTEA becomes LONGBLOB
+--   - TIMESTAMPTZ becomes TIMESTAMP(6) (stored as UTC, no timezone)
+--   - BOOLEAN becomes TINYINT(1)
+--   - Partial indexes (WHERE clause) are omitted
+--   - TEXT[] becomes JSON (stored as JSON array)
+```
+
+The Go store implementations that translate queries for each backend are at:
+
+- `internal/host/store.go` — common interface and shared logic
+- `internal/host/mysql_store.go` — MySQL query translations
+- `internal/host/mssql_store.go` — MSSQL query translations

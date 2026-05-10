@@ -3,27 +3,31 @@ package host
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // ShardConfig is a single database shard configuration loaded from JSON.
 type ShardConfig struct {
 	Name    string   `json:"name"`
 	ConnStr string   `json:"conn_str"`
+	Schema  string   `json:"schema,omitempty"` // PostgreSQL schema name; "public" if empty
 	Tenants []string `json:"tenants,omitempty"`
 }
 
-// Shard wraps a database connection and PostgresStore for a single database shard.
+var errNoRows = fmt.Errorf("no rows")
+
+// Shard wraps a WorkflowStore for a single database shard.
 type Shard struct {
 	Config ShardConfig
-	DB     *sql.DB
-	Store  *PostgresStore
+	Store  WorkflowStore
+	Close  func() error
 }
 
 // ShardedStore implements WorkflowStore across multiple PostgreSQL shards.
@@ -38,42 +42,39 @@ type ShardedStore struct {
 	mu     sync.RWMutex
 }
 
-// NewShardedStore creates a ShardedStore from the given shard configs.
-// Each config's ConnStr is used to open a database connection and the
-// optional taskQueues are forwarded to each child PostgresStore.
-func NewShardedStore(ctx context.Context, configs []ShardConfig, taskQueues ...string) (*ShardedStore, error) {
+// NewShardedStore creates a ShardedStore from pre-constructed WorkflowStore
+// instances (one per shard). Each store is already initialized and migrated.
+// The stores slice must be non-empty and have the same length as configs.
+// closers are called when the ShardedStore is closed; one per store.
+func NewShardedStore(configs []ShardConfig, stores []WorkflowStore, closers []func() error) (*ShardedStore, error) {
 	if len(configs) == 0 {
 		return nil, fmt.Errorf("sharded store: at least one shard config is required")
+	}
+	if len(configs) != len(stores) {
+		return nil, fmt.Errorf("sharded store: %d configs but %d stores", len(configs), len(stores))
+	}
+	if len(stores) != len(closers) {
+		return nil, fmt.Errorf("sharded store: %d stores but %d closers", len(stores), len(closers))
 	}
 
 	shards := make([]*Shard, len(configs))
 	for i, cfg := range configs {
-		db, err := sql.Open("postgres", cfg.ConnStr)
-		if err != nil {
-			return nil, fmt.Errorf("sharded store: shard %q open: %w", cfg.Name, err)
-		}
-		if err := db.PingContext(ctx); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("sharded store: shard %q ping: %w", cfg.Name, err)
-		}
-		db.SetMaxOpenConns(15)
-		db.SetMaxIdleConns(5)
-		db.SetConnMaxLifetime(5 * time.Minute)
-
 		shards[i] = &Shard{
 			Config: cfg,
-			DB:     db,
-			Store:  NewPostgresStore(db, taskQueues...),
+			Store:  stores[i],
+			Close:  closers[i],
 		}
 	}
 
 	return &ShardedStore{shards: shards}, nil
 }
 
-// Close closes all database connections.
+// Close closes all shard stores.
 func (s *ShardedStore) Close() {
 	for _, shard := range s.shards {
-		shard.DB.Close()
+		if shard.Close != nil {
+			shard.Close()
+		}
 	}
 }
 
@@ -86,9 +87,21 @@ func (s *ShardedStore) Shards() []*Shard {
 	return out
 }
 
+// stripChildSuffix returns the root ancestor UUID portion of a workflow ID.
+// Child IDs have the form "rootUUID.c{step}" — stripping from ".c" onward
+// yields the root ancestor. Regular UUIDs without ".c" are returned unchanged.
+func stripChildSuffix(key string) string {
+	if idx := strings.Index(key, ".c"); idx >= 0 {
+		return key[:idx]
+	}
+	return key
+}
+
 // getShard returns the shard responsible for the given workflow key using
-// consistent hashing.
+// consistent hashing. Child workflow IDs are stripped to their root ancestor
+// so the entire workflow family lands on the same shard.
 func (s *ShardedStore) getShard(key string) *Shard {
+	key = stripChildSuffix(key)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if len(s.shards) == 0 {
@@ -102,7 +115,7 @@ func (s *ShardedStore) getShard(key string) *Shard {
 // tryEachShard calls fn on every shard in order.  It returns as soon as fn
 // returns done=true (carrying fn's error back).  If no shard claims the
 // workflow and the last error is non-nil, it is returned.
-func (s *ShardedStore) tryEachShard(fn func(*PostgresStore) (done bool, err error)) error {
+func (s *ShardedStore) tryEachShard(fn func(WorkflowStore) (done bool, err error)) error {
 	var lastErr error
 	s.mu.RLock()
 	shards := s.shards
@@ -119,11 +132,11 @@ func (s *ShardedStore) tryEachShard(fn func(*PostgresStore) (done bool, err erro
 	if lastErr != nil {
 		return lastErr
 	}
-	return sql.ErrNoRows
+	return errNoRows
 }
 
 // forEachShard calls fn on every shard and accumulates errors.
-func (s *ShardedStore) forEachShard(fn func(*PostgresStore) error) error {
+func (s *ShardedStore) forEachShard(fn func(WorkflowStore) error) error {
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
@@ -447,15 +460,19 @@ func (s *ShardedStore) PollAndClaimSignal(ctx context.Context, workflowID, signa
 	return shard.Store.PollAndClaimSignal(ctx, workflowID, signalName)
 }
 
-// StartNewRun picks a shard by hashing the definition name so all runs of the
-// same workflow type land on the same shard. The idempotencyKey is forwarded
-// to the underlying store for exactly-once semantics.
-func (s *ShardedStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
-	shard := s.getShard(defName)
+// StartNewRun generates a UUID and routes by it, so the workflow lands on a
+// shard determined by its own ID (not its definition name). This ensures all
+// subsequent operations (LoadEventHistory, child workflows, signals, etc.)
+// route to the same shard.
+func (s *ShardedStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+	if runID == "" {
+		runID = uuid.New().String()
+	}
+	shard := s.getShard(runID)
 	if shard == nil {
 		return "", false, fmt.Errorf("start_new_run: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.StartNewRun(ctx, defName, defVersion, input, idempotencyKey)
+	return shard.Store.StartNewRun(ctx, runID, defName, defVersion, input, idempotencyKey)
 }
 
 // StartChildWorkflow places the child on the same shard as the parent.
@@ -466,6 +483,25 @@ func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName
 		return "", fmt.Errorf("start_child_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy)
+}
+
+// StartChildWorkflowAtomic routes by the root ancestor UUID (stripping .c suffix)
+// so the child lands on the same shard as its family. Generates a shard-aligned
+// ".c{step}.{rand}" child ID if childID is empty. The random suffix guarantees
+// uniqueness across generations (a parent and its child can both be at step 5).
+func (s *ShardedStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (string, error) {
+	if childID == "" {
+		rootID := stripChildSuffix(parentID)
+		// 12 hex chars from the UUID (48 bits) guarantees uniqueness within
+		// the max 1000 children per parent (birthday bound P < 10^-9).
+		randSuffix := strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
+		childID = fmt.Sprintf("%s.c%d.%s", rootID, event.Step, randSuffix)
+	}
+	shard := s.getShard(childID)
+	if shard == nil {
+		return "", fmt.Errorf("start_child_workflow_atomic: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.StartChildWorkflowAtomic(ctx, childID, parentID, defName, inputJSON, defVersion, parentClosePolicy, event)
 }
 
 // GetChildResult routes by child run ID.
@@ -561,7 +597,7 @@ func (s *ShardedStore) GetWorkflowByID(ctx context.Context, id string) (*Workflo
 
 // CreateSchedule registers a schedule on every shard.
 func (s *ShardedStore) CreateSchedule(ctx context.Context, sch Schedule) error {
-	return s.forEachShard(func(store *PostgresStore) error {
+	return s.forEachShard(func(store WorkflowStore) error {
 		return store.CreateSchedule(ctx, sch)
 	})
 }
@@ -590,14 +626,14 @@ func (s *ShardedStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 
 // DeleteSchedule removes a schedule from every shard.
 func (s *ShardedStore) DeleteSchedule(ctx context.Context, name string) error {
-	return s.forEachShard(func(store *PostgresStore) error {
+	return s.forEachShard(func(store WorkflowStore) error {
 		return store.DeleteSchedule(ctx, name)
 	})
 }
 
 // SetScheduleEnabled updates a schedule on every shard.
 func (s *ShardedStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error {
-	return s.forEachShard(func(store *PostgresStore) error {
+	return s.forEachShard(func(store WorkflowStore) error {
 		return store.SetScheduleEnabled(ctx, name, enabled)
 	})
 }
@@ -626,7 +662,7 @@ func (s *ShardedStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) 
 
 // UpdateScheduleNextRun updates a schedule on every shard.
 func (s *ShardedStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return s.forEachShard(func(store *PostgresStore) error {
+	return s.forEachShard(func(store WorkflowStore) error {
 		return store.UpdateScheduleNextRun(ctx, name, nextRun)
 	})
 }
@@ -664,10 +700,10 @@ func (s *ShardedStore) LoadDAGSpec(ctx context.Context, defName string, defVersi
 }
 
 // TraceWorkflow routes by workflow ID.
-func (s *ShardedStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
+func (s *ShardedStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
-		return nil, fmt.Errorf("trace_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+		return fmt.Errorf("trace_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.TraceWorkflow(ctx, workflowID, traceID)
 }
@@ -896,7 +932,7 @@ func (s *ShardedStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) 
 // ListWorkflowDefs queries each shard and aggregates results.
 func (s *ShardedStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
 	var all []WorkflowDef
-	err := s.forEachShard(func(store *PostgresStore) error {
+	err := s.forEachShard(func(store WorkflowStore) error {
 		defs, err := store.ListWorkflowDefs(ctx, name)
 		if err != nil {
 			return err
@@ -946,7 +982,7 @@ func (s *ShardedStore) CountActiveInstances(ctx context.Context, name string, ve
 // GetActiveInstanceCountsByVersion queries each shard and aggregates results.
 func (s *ShardedStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
 	result := make(map[string]int)
-	err := s.forEachShard(func(store *PostgresStore) error {
+	err := s.forEachShard(func(store WorkflowStore) error {
 		counts, err := store.GetActiveInstanceCountsByVersion(ctx)
 		if err != nil {
 			return err
@@ -1073,4 +1109,18 @@ func (s *ShardedStore) DeleteExpiredEvents(ctx context.Context, olderThan time.T
 		return total, fmt.Errorf("DeleteExpiredEvents errors: %s", strings.Join(errs, "; "))
 	}
 	return total, nil
+}
+
+// ResolveTenantFromAPIKey looks up a tenant UUID by API key hash across all shards.
+func (s *ShardedStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		tid, err := shard.Store.ResolveTenantFromAPIKey(ctx, keyHash)
+		if err == nil {
+			return tid, nil
+		}
+	}
+	return uuid.Nil, fmt.Errorf("tenant not found for API key")
 }

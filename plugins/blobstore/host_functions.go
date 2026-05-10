@@ -101,12 +101,8 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 	if storageBackend == "s3" {
 		s3Key = &sha256Hex
 	}
-	_, err := p.db.ExecContext(ctx, `
-		INSERT INTO blob_content (sha256, size, ref_count, storage_backend, s3_key)
-		VALUES ($1, $2, 1, $3, $4)
-		ON CONFLICT (sha256) DO UPDATE
-		SET ref_count = blob_content.ref_count + 1
-	`, hash[:], len(input.Data), storageBackend, s3Key)
+	_, err := p.db.Exec(ctx, plugin.Rebind(upsertBlobContent.For(p.dialect), p.dialect),
+		hash[:], len(input.Data), storageBackend, s3Key)
 	if err != nil {
 		return "", fmt.Errorf("blobstore: store content: %w", err)
 	}
@@ -115,10 +111,8 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 	// while this workflow is still in-flight.
 	wfID := cc.WorkflowID
 	if wfID != "" {
-		if _, err := p.db.ExecContext(ctx, `
-			INSERT INTO workflow_blob_refs (workflow_id, sha256)
-			VALUES ($1, $2) ON CONFLICT DO NOTHING
-		`, wfID, hash[:]); err != nil {
+		if _, err := p.db.Exec(ctx, plugin.Rebind(upsertBlobRef.For(p.dialect), p.dialect),
+			wfID, hash[:]); err != nil {
 			p.logger.Warn("blobstore: record blob ref", "workflow_id", wfID, "sha256", sha256Hex, "error", err)
 		}
 	}
@@ -146,23 +140,11 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 
 	// Insert or update blob_index.
 	if expiresAt != nil {
-		_, err = p.db.ExecContext(ctx, `
-			INSERT INTO blob_index (key, tenant_id, sha256, size, content_type, tags, expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (tenant_id, key) DO UPDATE
-			SET sha256 = EXCLUDED.sha256, size = EXCLUDED.size,
-			    content_type = EXCLUDED.content_type, tags = EXCLUDED.tags,
-			    expires_at = EXCLUDED.expires_at
-		`, input.Key, cc.TenantID, hash[:], len(input.Data), input.ContentType, tagsJSON, *expiresAt)
+		_, err = p.db.Exec(ctx, plugin.Rebind(upsertBlobIndexWithTTL.For(p.dialect), p.dialect),
+			input.Key, cc.TenantID, hash[:], len(input.Data), input.ContentType, tagsJSON, *expiresAt)
 	} else {
-		_, err = p.db.ExecContext(ctx, `
-			INSERT INTO blob_index (key, tenant_id, sha256, size, content_type, tags)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (tenant_id, key) DO UPDATE
-			SET sha256 = EXCLUDED.sha256, size = EXCLUDED.size,
-			    content_type = EXCLUDED.content_type, tags = EXCLUDED.tags,
-			    expires_at = NULL
-		`, input.Key, cc.TenantID, hash[:], len(input.Data), input.ContentType, tagsJSON)
+		_, err = p.db.Exec(ctx, plugin.Rebind(upsertBlobIndex.For(p.dialect), p.dialect),
+			input.Key, cc.TenantID, hash[:], len(input.Data), input.ContentType, tagsJSON)
 	}
 	if err != nil {
 		return "", fmt.Errorf("blobstore: store index: %w", err)
@@ -199,12 +181,12 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 		size        int64
 		expiresAt   sql.NullTime
 	)
-	err := p.db.QueryRowContext(ctx, `
+	err := p.db.QueryRow(ctx, plugin.Rebind(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
 		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, input.Key, cc.TenantID).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+	`, p.dialect), input.Key, cc.TenantID).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if err == sql.ErrNoRows {
 		return "", fmt.Errorf("blobstore: blob not found: %s", input.Key)
 	}
@@ -228,7 +210,7 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 	// while this workflow is still in-flight.
 	wfID := cc.WorkflowID
 	if wfID != "" {
-		if _, err := p.db.ExecContext(ctx, `
+		if _, err := p.db.Exec(ctx, `
 			INSERT INTO workflow_blob_refs (workflow_id, sha256)
 			VALUES ($1, $2) ON CONFLICT DO NOTHING
 		`, wfID, sha256Bytes); err != nil {

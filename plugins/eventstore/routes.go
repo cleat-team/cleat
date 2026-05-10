@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -83,15 +84,8 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 
 	// Insert event with auto-incrementing sequence.
 	var sequence int64
-	err = p.db.QueryRowContext(r.Context(), `
-		INSERT INTO event_stream (tenant_id, stream_id, sequence, event)
-		VALUES ($1, $2, (
-			SELECT COALESCE(MAX(sequence), 0) + 1
-			FROM event_stream
-			WHERE tenant_id = $1 AND stream_id = $2
-		), $3::jsonb)
-		RETURNING sequence
-	`, tid, streamID, string(body)).Scan(&sequence)
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(insertEventReturning.For(p.dialect), p.dialect),
+		tid, streamID, string(body)).Scan(&sequence)
 	if err != nil {
 		p.logger.Error("eventstore: append", "stream", streamID, "error", err)
 		p.writeError(w, 500, "failed to append event")
@@ -140,13 +134,13 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, err := p.db.QueryContext(r.Context(), `
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
 		SELECT sequence, event, created_at
 		FROM event_stream
 		WHERE tenant_id = $1 AND stream_id = $2 AND sequence > $3
 		ORDER BY sequence ASC
 		LIMIT $4
-	`, tid, streamID, fromSeq, limit)
+	`, p.dialect), tid, streamID, fromSeq, limit)
 	if err != nil {
 		p.logger.Error("eventstore: read", "stream", streamID, "error", err)
 		p.writeError(w, 500, "failed to read events")
@@ -208,11 +202,11 @@ func (p *Plugin) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// Get the latest sequence so far so we only stream new events.
 	var lastSeq int64
-	err := p.db.QueryRowContext(r.Context(), `
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT COALESCE(MAX(sequence), 0)
 		FROM event_stream
 		WHERE tenant_id = $1 AND stream_id = $2
-	`, tid, streamID).Scan(&lastSeq)
+	`, p.dialect), tid, streamID).Scan(&lastSeq)
 	if err != nil {
 		p.logger.Error("eventstore: sse initial seq", "stream", streamID, "error", err)
 		return
@@ -229,12 +223,12 @@ func (p *Plugin) handleSSE(w http.ResponseWriter, r *http.Request) {
 			return
 
 		case <-ticker.C:
-			rows, err := p.db.QueryContext(ctx, `
+			rows, err := p.db.Query(ctx, plugin.Rebind(`
 				SELECT sequence, event
 				FROM event_stream
 				WHERE tenant_id = $1 AND stream_id = $2 AND sequence > $3
 				ORDER BY sequence ASC
-			`, tid, streamID, lastSeq)
+			`, p.dialect), tid, streamID, lastSeq)
 			if err != nil {
 				p.logger.Error("eventstore: sse poll", "stream", streamID, "error", err)
 				continue

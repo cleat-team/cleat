@@ -580,6 +580,51 @@ export declare function import_list_crons(
   outMaxLen: i32,
 ): i64;
 
+/**
+ * 42. cleat_call_retry: Server-side retry variant of cleat_call.
+ * (import "env" "cleat_call_retry") (param i32 i32 i32 i32 i32 i32 i64 i64 i64 i64 i32 i32 i32 i32) (result i64)
+ *
+ * Retries happen inside the host; one event is recorded regardless of
+ * attempt count.
+ */
+@external("env", "cleat_call_retry")
+export declare function import_cleat_call_retry(
+  svcPtr: i32,
+  svcLen: i32,
+  opPtr: i32,
+  opLen: i32,
+  reqPtr: i32,
+  reqLen: i32,
+  maxAttempts: i64,
+  initialIntervalMs: i64,
+  backoffCoefficient100x: i64,
+  maxIntervalMs: i64,
+  nonRetryableErrorsPtr: i32,
+  nonRetryableErrorsLen: i32,
+  respPtr: i32,
+  respMaxLen: i32,
+): i64;
+
+/**
+ * 43. cleat_call_heartbeat: Long-running call with progress updates.
+ * (import "env" "cleat_call_heartbeat") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
+ *
+ * The host sends periodic progress updates; the progress callback is
+ * handled at the SDK layer.
+ */
+@external("env", "cleat_call_heartbeat")
+export declare function import_cleat_call_heartbeat(
+  svcPtr: i32,
+  svcLen: i32,
+  opPtr: i32,
+  opLen: i32,
+  reqPtr: i32,
+  reqLen: i32,
+  heartbeatIntervalMs: i64,
+  respPtr: i32,
+  respMaxLen: i32,
+): i64;
+
 // ═══════════════════════════════════════════════
 // High-level result types for HostCalls methods
 // ═══════════════════════════════════════════════
@@ -887,6 +932,149 @@ export class HostCalls {
     if (decoded.errCode !== 0) {
       let errMsg: string =
         responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "cleat_call(service='" + service + "', operation='" + operation + "') failed: unknown error (code " + decoded.errCode.toString() + ")";
+      return new CleatCallOutcome("", errMsg, decoded.callErrorCode);
+    }
+
+    // Success: read the response
+    let resp: string =
+      responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "";
+    return new CleatCallOutcome(resp, null, 0);
+  }
+
+  // ────────────────────────────────────────────
+  // 1b. cleat_call_retry
+  // ────────────────────────────────────────────
+
+  /**
+   * Make a recorded API call with server-side retry.
+   *
+   * Retries happen inside the host; one event is recorded regardless of
+   * attempt count. This is more efficient than client-side retry loops.
+   *
+   * @param service                  - Service name (e.g., "payment", "email").
+   * @param operation                - Operation name (e.g., "charge", "send").
+   * @param requestJson              - Request payload as a JSON string.
+   * @param maxAttempts              - Maximum number of retry attempts (default 3).
+   * @param initialIntervalMs        - Initial retry interval in milliseconds (default 1000).
+   * @param backoffCoefficient100x   - Backoff coefficient scaled by 100x, e.g., 200 = 2.0x (default 200).
+   * @param maxIntervalMs            - Maximum retry interval in milliseconds (default 60000).
+   * @param nonRetryableErrors       - JSON array of non-retryable error codes, e.g., '["INVALID_ARGUMENT"]' (default "[]").
+   * @returns The call outcome containing response JSON or error details.
+   */
+  cleatCallRetry(
+    service: string,
+    operation: string,
+    requestJson: string,
+    maxAttempts: i64 = 3,
+    initialIntervalMs: i64 = 1000,
+    backoffCoefficient100x: i64 = 200,
+    maxIntervalMs: i64 = 60000,
+    nonRetryableErrors: string = "[]",
+  ): CleatCallOutcome {
+    // Encode input strings sequentially into the scratch buffer
+    let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
+    let opOffset: usize = SCRATCH_BASE + svcLen;
+    let remaining: i32 = OUT_BUF_SIZE - svcLen;
+    let opLen: i32 = this.writeScratch(opOffset, remaining, operation, "operation");
+    let reqOffset: usize = opOffset + opLen;
+    remaining -= opLen;
+    let reqLen: i32 = this.writeScratch(reqOffset, remaining, requestJson, "requestJson");
+    let nreOffset: usize = reqOffset + reqLen;
+    remaining -= reqLen;
+    let nreLen: i32 = this.writeScratch(nreOffset, remaining, nonRetryableErrors, "nonRetryableErrors");
+
+    // Call the host import
+    let result: i64 = import_cleat_call_retry(
+      SCRATCH_BASE as i32,
+      svcLen,
+      opOffset as i32,
+      opLen,
+      reqOffset as i32,
+      reqLen,
+      maxAttempts,
+      initialIntervalMs,
+      backoffCoefficient100x,
+      maxIntervalMs,
+      nreOffset as i32,
+      nreLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    // Decode the packed result (same bit layout as cleat_call)
+    let decoded = decodeCallResult(result);
+    let responseLen: i32 = decoded.responseLen as i32;
+
+    // On error, the output buffer contains an error message
+    if (decoded.errCode !== 0) {
+      let errMsg: string =
+        responseLen > 0
+          ? this.memory.readString(OUTPUT_OFFSET, responseLen)
+          : "cleatCallRetry(service='" + service + "', operation='" + operation + "') failed: unknown error (code " + decoded.errCode.toString() + ")";
+      return new CleatCallOutcome("", errMsg, decoded.callErrorCode);
+    }
+
+    // Success: read the response
+    let resp: string =
+      responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "";
+    return new CleatCallOutcome(resp, null, 0);
+  }
+
+  // ────────────────────────────────────────────
+  // 1c. cleat_call_heartbeat
+  // ────────────────────────────────────────────
+
+  /**
+   * Make a long-running API call with progress updates from the host.
+   *
+   * The host sends periodic heartbeat/progress updates; the progress
+   * callback is handled at the SDK layer. The workflow suspends until
+   * the call completes.
+   *
+   * @param service              - Service name (e.g., "payment", "email").
+   * @param operation            - Operation name (e.g., "charge", "send").
+   * @param requestJson          - Request payload as a JSON string.
+   * @param heartbeatIntervalMs  - Interval between progress updates in milliseconds.
+   * @returns The call outcome containing response JSON or error details.
+   */
+  cleatCallHeartbeat(
+    service: string,
+    operation: string,
+    requestJson: string,
+    heartbeatIntervalMs: i64,
+  ): CleatCallOutcome {
+    // Encode input strings sequentially into the scratch buffer
+    let svcLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, service);
+    let opOffset: usize = SCRATCH_BASE + svcLen;
+    let remaining: i32 = OUT_BUF_SIZE - svcLen;
+    let opLen: i32 = this.writeScratch(opOffset, remaining, operation, "operation");
+    let reqOffset: usize = opOffset + opLen;
+    remaining -= opLen;
+    let reqLen: i32 = this.writeScratch(reqOffset, remaining, requestJson, "requestJson");
+
+    // Call the host import
+    let result: i64 = import_cleat_call_heartbeat(
+      SCRATCH_BASE as i32,
+      svcLen,
+      opOffset as i32,
+      opLen,
+      reqOffset as i32,
+      reqLen,
+      heartbeatIntervalMs,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    // Decode the packed result (same bit layout as cleat_call)
+    let decoded = decodeCallResult(result);
+    let responseLen: i32 = decoded.responseLen as i32;
+
+    // On error, the output buffer contains an error message
+    if (decoded.errCode !== 0) {
+      let errMsg: string =
+        responseLen > 0
+          ? this.memory.readString(OUTPUT_OFFSET, responseLen)
+          : "cleatCallHeartbeat(service='" + service + "', operation='" + operation + "') failed: unknown error (code " + decoded.errCode.toString() + ")";
       return new CleatCallOutcome("", errMsg, decoded.callErrorCode);
     }
 
@@ -1337,6 +1525,21 @@ export class HostCalls {
 
     import_set_query_state(SCRATCH_BASE as i32, keyLen, valOffset as i32, valLen);
   }
+
+  // ────────────────────────────────────────────
+  // Note: getQueryState is not available
+  // ────────────────────────────────────────────
+
+  /**
+   * NOTE: There is no corresponding `get_query_state` host import in the
+   * current ABI specification (ABI.md). Query state is write-only from the
+   * workflow's perspective -- external clients read it via the workflow's
+   * query handler mechanism (`registerQueryHandler`).
+   *
+   * If a future ABI version adds a `cleat_get_query_state` import, this
+   * section should be updated to include a corresponding `getQueryState`
+   * method.
+   */
 
   // ────────────────────────────────────────────
   // 16. createPromise
@@ -2350,8 +2553,15 @@ export class HostCalls {
    * let isReplay = !host.cleatSleepMs(1); // 1ms sleep, non-zero
    * ```
    *
-   * **Caveat:** A 1ms sleep is recorded in the event history. Use this
-   * pattern sparingly and only for diagnostics/debugging.
+   * A zero-duration variant also works and does not advance the timer:
+   *
+   * ```ts
+   * let isReplay = !host.cleatSleepMs(0); // 0ms sleep, no-op on both paths
+   * ```
+   *
+   * **Caveat:** Any non-zero sleep (including 1ms) is recorded in the event
+   * history. Use this pattern sparingly and only for diagnostics/debugging.
+   * The zero-duration variant avoids history bloat.
    *
    * This method is a placeholder for future host-side support. When a
    * `cleat_is_replaying` import is added to the ABI, this method will
@@ -2360,7 +2570,16 @@ export class HostCalls {
    * @returns `false` (always — requires future host-side support).
    */
   isReplaying(): bool {
-    // TODO: Replace with import_cleat_is_replaying() when available.
+    // TODO(#as-sdk): Replace body with `return import_cleat_is_replaying();`
+    //                once the Go host exports `cleat_is_replaying` and the
+    //                ABI entry is added in:
+    //                  1. runtime/host.go — add export
+    //                  2. abi/abi.go       — add ABI constant and hook
+    //                  3. This file       — add @external import above
+    //                Target ABI version: 0.2.0
+    //
+    // Until then, consumers should use cleatSleepMs(0) as the workaround
+    // documented in the JSDoc above.
     return false;
   }
 

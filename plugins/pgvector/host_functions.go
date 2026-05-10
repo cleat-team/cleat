@@ -98,7 +98,7 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 	// Look up collection.
 	var collectionID uuid.UUID
 	var dimensions int
-	err := p.db.QueryRowContext(ctx, `
+	err := p.db.QueryRow(ctx, `
 		SELECT id, dimensions
 		FROM pgvector_collections
 		WHERE name = $1
@@ -111,7 +111,7 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 	}
 
 	// Build a query with optional filter on metadata.
-	var rows *sql.Rows
+	var rows plugin.Rows
 	if len(input.QueryVector) > 0 {
 		vectorLit := vectorLiteral(input.QueryVector)
 		query := fmt.Sprintf(`
@@ -122,10 +122,10 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 			ORDER BY e.embedding <=> '%s'::vector
 			LIMIT $3
 		`, vectorLit, vectorLit)
-		rows, err = p.db.QueryContext(ctx, query, cc.TenantID, collectionID, input.TopK)
+		rows, err = p.db.Query(ctx, query, cc.TenantID, collectionID, input.TopK)
 	} else {
 		// No query vector: return most recently added embeddings.
-		rows, err = p.db.QueryContext(ctx, `
+		rows, err = p.db.Query(ctx, `
 			SELECT e.id, e.external_id, e.content, e.metadata, 0.0 AS score
 			FROM pgvector_embeddings e
 			WHERE e.tenant_id = $1 AND e.collection_id = $2
@@ -203,7 +203,7 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 
 	// Look up collection.
 	var collectionID uuid.UUID
-	err := p.db.QueryRowContext(ctx, `
+	err := p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
 	`, input.Collection).Scan(&collectionID)
 	if err == sql.ErrNoRows {
@@ -234,7 +234,7 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 
 	if input.ExternalID != "" && vectorStr != "" {
 		// Upsert by external_id.
-		err = p.db.QueryRowContext(ctx, `
+		err = p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, external_id, content, metadata, embedding)
 			VALUES ($1, $2, $3, $4, $5, $6::vector)
 			ON CONFLICT (tenant_id, collection_id, external_id) DO UPDATE
@@ -246,7 +246,7 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON, vectorStr).Scan(&id)
 	} else if input.ExternalID != "" {
 		// Upsert without embedding.
-		err = p.db.QueryRowContext(ctx, `
+		err = p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, external_id, content, metadata)
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (tenant_id, collection_id, external_id) DO UPDATE
@@ -257,14 +257,14 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON).Scan(&id)
 	} else if vectorStr != "" {
 		// Insert new row with embedding.
-		err = p.db.QueryRowContext(ctx, `
+		err = p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, content, metadata, embedding)
 			VALUES ($1, $2, $3, $4, $5::vector)
 			RETURNING id
 		`, cc.TenantID, collectionID, input.Content, metaJSON, vectorStr).Scan(&id)
 	} else {
 		// Insert new row without embedding.
-		err = p.db.QueryRowContext(ctx, `
+		err = p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, content, metadata)
 			VALUES ($1, $2, $3, $4)
 			RETURNING id
@@ -303,7 +303,7 @@ func (p *Plugin) delete(ctx context.Context, inputJSON string) (string, error) {
 
 	// Look up collection.
 	var collectionID uuid.UUID
-	err := p.db.QueryRowContext(ctx, `
+	err := p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
 	`, input.Collection).Scan(&collectionID)
 	if err == sql.ErrNoRows {
@@ -313,14 +313,14 @@ func (p *Plugin) delete(ctx context.Context, inputJSON string) (string, error) {
 		return "", fmt.Errorf("pgvector: lookup collection: %w", err)
 	}
 
-	var result sql.Result
+	var result int64
 	if input.ID != "" {
-		result, err = p.db.ExecContext(ctx, `
+		result, err = p.db.Exec(ctx, `
 			DELETE FROM pgvector_embeddings
 			WHERE id = $1 AND tenant_id = $2 AND collection_id = $3
 		`, input.ID, cc.TenantID, collectionID)
 	} else {
-		result, err = p.db.ExecContext(ctx, `
+		result, err = p.db.Exec(ctx, `
 			DELETE FROM pgvector_embeddings
 			WHERE external_id = $1 AND tenant_id = $2 AND collection_id = $3
 		`, input.ExternalID, cc.TenantID, collectionID)
@@ -329,8 +329,7 @@ func (p *Plugin) delete(ctx context.Context, inputJSON string) (string, error) {
 		return "", fmt.Errorf("pgvector: delete: %w", err)
 	}
 
-	deleted, _ := result.RowsAffected()
-	output := deleteOutput{Deleted: int(deleted)}
+	output := deleteOutput{Deleted: int(result)}
 	outJSON, err := json.Marshal(output)
 	if err != nil {
 		return "", fmt.Errorf("pgvector: marshal output: %w", err)

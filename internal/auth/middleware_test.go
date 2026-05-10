@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // testTenantID is a well-known UUID used as the test tenant.
@@ -51,7 +52,7 @@ func TestMiddleware_NoAuth_PassesThrough(t *testing.T) {
 
 	var handlerCalled bool
 	var hadTenant bool
-	mw := Middleware(db)
+	mw := Middleware(host.NewPostgresStore(db))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		_, hadTenant = TenantIDFromContext(r.Context())
@@ -82,7 +83,7 @@ func TestMiddleware_BearerToken_Valid_SetsTenantContext(t *testing.T) {
 	var handlerCalled bool
 	var gotTenant uuid.UUID
 	var gotOK bool
-	mw := Middleware(db)
+	mw := Middleware(host.NewPostgresStore(db))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		gotTenant, gotOK = TenantIDFromContext(r.Context())
@@ -117,7 +118,7 @@ func TestMiddleware_XCleatAPIKey_Valid_SetsTenantContext(t *testing.T) {
 	var handlerCalled bool
 	var gotTenant uuid.UUID
 	var gotOK bool
-	mw := Middleware(db)
+	mw := Middleware(host.NewPostgresStore(db))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		gotTenant, gotOK = TenantIDFromContext(r.Context())
@@ -150,7 +151,7 @@ func TestMiddleware_InvalidToken_ReturnsUnauthorized(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(db)
+	mw := Middleware(host.NewPostgresStore(db))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -193,7 +194,7 @@ func TestMiddleware_RevokedToken_ReturnsUnauthorized(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(db)
+	mw := Middleware(host.NewPostgresStore(db))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -221,7 +222,7 @@ func TestMiddleware_MalformedAuthHeader_NotBearer(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(db)
+	mw := Middleware(host.NewPostgresStore(db))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -248,7 +249,7 @@ func TestMiddleware_MalformedAuthHeader_OnlyBearerKeyword(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(db)
+	mw := Middleware(host.NewPostgresStore(db))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -287,7 +288,7 @@ func TestMiddleware_BearerTakesPriorityOverXCleatKey(t *testing.T) {
 	}
 	store.mu.Unlock()
 
-	mw := Middleware(db)
+	mw := Middleware(host.NewPostgresStore(db))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tid, ok := TenantIDFromContext(r.Context())
 		if !ok || tid != parsedTestTenantID {
@@ -316,7 +317,7 @@ func TestMiddleware_TenantIDPropagation(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	outerMW := Middleware(db)
+	outerMW := Middleware(host.NewPostgresStore(db))
 	innerMW := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tid, ok := TenantIDFromContext(r.Context())
@@ -356,7 +357,7 @@ func TestTenantFromAPIKey_Found(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	hash := sha256.Sum256([]byte(testAPIKey))
-	tid, err := TenantFromAPIKey(context.Background(), db, hash[:])
+	tid, err := TenantFromAPIKey(context.Background(), host.NewPostgresStore(db), hash[:])
 	if err != nil {
 		t.Fatalf("TenantFromAPIKey: %v", err)
 	}
@@ -371,7 +372,7 @@ func TestTenantFromAPIKey_NotFound(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	hash := sha256.Sum256([]byte("unknown-key"))
-	_, err := TenantFromAPIKey(context.Background(), db, hash[:])
+	_, err := TenantFromAPIKey(context.Background(), host.NewPostgresStore(db), hash[:])
 	if err == nil {
 		t.Fatal("expected error for unknown key")
 	}

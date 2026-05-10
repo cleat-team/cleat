@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // ---------------------------------------------------------------------------
@@ -33,7 +34,7 @@ func setupHostFuncTest(t *testing.T) (*Plugin, *fakeDBStore, *fakeClock) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:      db,
+		db:      &host.SQLDBAdapter{DB: db},
 		backend: newTestMemBackend(),
 		logger:  slog.Default(),
 		config:  Config{Backend: "memory"},

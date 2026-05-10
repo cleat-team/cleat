@@ -1,0 +1,67 @@
+# ---------------------------------------------------------------------------
+# Branch Naming Check — validates PR source branches follow gitflow convention
+#
+# Expected prefixes: feature/, bugfix/, release/, hotfix/
+# Examples: feature/multi-db-support, bugfix/claim-race, release/v1.2.0
+#
+# Exemptions: branches opened by dependabot, or PRs labeled "bot"
+# ---------------------------------------------------------------------------
+name: Branch Naming Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  pull-requests: read
+
+jobs:
+  branch-name:
+    name: Validate branch name
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch naming convention
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = context.payload.pull_request.head.ref;
+            const author = context.payload.pull_request.user.login;
+            const labels = context.payload.pull_request.labels.map(l => l.name);
+
+            // Exempt bot PRs
+            if (author === 'dependabot[bot]' || labels.includes('bot')) {
+              console.log(`Exempt: ${author} (bot PR)`);
+              return;
+            }
+
+            // Exempt main, master (unlikely but handle gracefully)
+            if (branch === 'main' || branch === 'master') {
+              console.log('Branch is main/master — skipping check.');
+              return;
+            }
+
+            const validPrefixes = ['feature/', 'bugfix/', 'release/', 'hotfix/'];
+            const isValid = validPrefixes.some(p => branch.startsWith(p));
+
+            if (!isValid) {
+              core.setFailed(
+                `BRANCH NAME: ${branch}\n\n` +
+                `Branch names must follow the gitflow convention with one of these prefixes:\n\n` +
+                `  feature/   — new functionality      (e.g. feature/multi-db-support)\n` +
+                `  bugfix/    — bug fixes               (e.g. bugfix/claim-race-condition)\n` +
+                `  release/   — release preparation     (e.g. release/v1.2.0)\n` +
+                `  hotfix/    — critical production fix (e.g. hotfix/worker-panic)\n\n` +
+                `Use lowercase, hyphens (not underscores), and keep names concise.\n\n` +
+                `To rename your branch:\n` +
+                `  git branch -m ${branch} feature/descriptive-name\n` +
+                `  git push origin feature/descriptive-name\n` +
+                `  git push origin --delete ${branch}\n\n` +
+                `See CONTRIBUTING.md#branch-naming for the full convention.`
+              );
+            }
+
+            console.log(`Branch name "${branch}" follows convention.`);

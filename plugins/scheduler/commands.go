@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -54,7 +53,11 @@ func (p *Plugin) cliList(args []string) error {
 		return fmt.Errorf("invalid tenant UUID: %w", err)
 	}
 
-	db, err := sql.Open("postgres", *dsn)
+	driver := os.Getenv("CLEAT_DB_DRIVER")
+	if driver == "" {
+		driver = "postgres"
+	}
+	db, err := sql.Open(driver, *dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -151,7 +154,11 @@ func (p *Plugin) cliAdd(args []string) error {
 		return fmt.Errorf("invalid JSON input: %w", err)
 	}
 
-	db, err := sql.Open("postgres", *dsn)
+	driver := os.Getenv("CLEAT_DB_DRIVER")
+	if driver == "" {
+		driver = "postgres"
+	}
+	db, err := sql.Open(driver, *dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -196,7 +203,11 @@ func (p *Plugin) cliDelete(args []string) error {
 		return fmt.Errorf("invalid schedule UUID: %w", err)
 	}
 
-	db, err := sql.Open("postgres", *dsn)
+	driver := os.Getenv("CLEAT_DB_DRIVER")
+	if driver == "" {
+		driver = "postgres"
+	}
+	db, err := sql.Open(driver, *dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -206,7 +217,7 @@ func (p *Plugin) cliDelete(args []string) error {
 	if err != nil {
 		return fmt.Errorf("delete: %w", err)
 	}
-	rows, _ := result.RowsAffected()
+		rows, _ := result.RowsAffected()
 	if rows == 0 {
 		return fmt.Errorf("schedule not found")
 	}
@@ -216,8 +227,8 @@ func (p *Plugin) cliDelete(args []string) error {
 }
 
 // Ensure the postgres driver is imported. The blank import above is needed for
-// sql.Open("postgres", ...). This function is never called but ensures the
-// compiler sees the import as used.
+// sql.Open(driver, ...) where driver defaults to "postgres". This function is
+// never called but ensures the compiler sees the import as used.
 func init() {
 	_ = strings.HasPrefix
 }

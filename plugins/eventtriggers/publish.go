@@ -19,7 +19,7 @@ import (
 // through the HTTP API.
 func PublishEvent(
 	ctx context.Context,
-db plugin.DB,
+db plugin.PluginDB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	eventID uuid.UUID,
@@ -34,16 +34,12 @@ db plugin.DB,
 
 	// Insert with idempotency — ON CONFLICT DO NOTHING prevents duplicate
 	// processing of the same event ID.
-	result, err := db.ExecContext(ctx, `
-		INSERT INTO ingested_events (id, tenant_id, event_type, event_data, received_at, processed)
-		VALUES ($1, $2, $3, $4, NOW(), false)
-		ON CONFLICT (id) DO NOTHING
-	`, eventID, tenantID, eventType, string(eventDataJSON))
+	rows, err := db.Exec(ctx, plugin.Rebind(insertEventIdempotent.For(currentDialect), currentDialect),
+		eventID, tenantID, eventType, string(eventDataJSON))
 	if err != nil {
 		return 0, fmt.Errorf("store event: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		// Already ingested — idempotent return.
 		logger.Info("event-triggers: duplicate event, skipping",
@@ -63,7 +59,7 @@ db plugin.DB,
 
 	matched, err := triggerMatchingWorkflows(ctx, db, logger, env, eventID, tenantID, eventType, eventData)
 	if err != nil {
-		db.ExecContext(ctx, `UPDATE ingested_events SET error_msg = $1 WHERE id = $2`,
+		db.Exec(ctx, plugin.Rebind(`UPDATE ingested_events SET error_msg = $1 WHERE id = $2`, currentDialect),
 			"failed to query subscriptions: "+err.Error(), eventID)
 	}
 
@@ -80,7 +76,7 @@ db plugin.DB,
 // errors are logged but do not halt processing).
 func triggerMatchingWorkflows(
 	ctx context.Context,
-db plugin.DB,
+db plugin.PluginDB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	eventID uuid.UUID,
@@ -88,11 +84,11 @@ db plugin.DB,
 	eventType string,
 	eventData map[string]interface{},
 ) (int, error) {
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, plugin.Rebind(`
 		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, enabled, created_at, max_retries
 		FROM event_subscriptions
 		WHERE tenant_id = $1 AND event_type = $2 AND enabled = true
-	`, tenantID, eventType)
+		`, currentDialect), tenantID, eventType)
 	if err != nil {
 		return 0, fmt.Errorf("query subscriptions: %w", err)
 	}
@@ -168,7 +164,7 @@ db plugin.DB,
 // an event has been successfully stored.
 func signalAwaiters(
 	ctx context.Context,
-db plugin.DB,
+db plugin.PluginDB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	tenantID uuid.UUID,
@@ -179,11 +175,11 @@ db plugin.DB,
 		return
 	}
 
-	rows, err := db.QueryContext(ctx, `
+	rows, err := db.Query(ctx, plugin.Rebind(`
 		SELECT workflow_id
 		FROM event_awaiters
 		WHERE tenant_id = $1 AND event_type = $2
-	`, tenantID, eventType)
+		`, currentDialect), tenantID, eventType)
 	if err != nil {
 		logger.Error("event-triggers: query awaiters", "error", err)
 		return
@@ -223,14 +219,14 @@ db plugin.DB,
 }
 
 // unregisterAwaiter removes the awaiter record.
-func unregisterAwaiter(ctx context.Context, db plugin.DB, logger *slog.Logger, workflowID, eventType string) {
+func unregisterAwaiter(ctx context.Context, db plugin.PluginDB, logger *slog.Logger, workflowID, eventType string) {
 	if workflowID == "" {
 		return
 	}
-	_, err := db.ExecContext(ctx, `
+	_, err := db.Exec(ctx, plugin.Rebind(`
 		DELETE FROM event_awaiters
 		WHERE workflow_id = $1 AND event_type = $2
-	`, workflowID, eventType)
+		`, currentDialect), workflowID, eventType)
 	if err != nil {
 		logger.Warn("event-triggers: unregister awaiter", "error", err)
 	}

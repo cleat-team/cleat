@@ -34,6 +34,7 @@ type HostHandler interface {
 	ContinueAsNewWithVersion(ctx context.Context, m api.Module, newInputJSON string, newVersion int) int64
 	ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
 	ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64
+	ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64
 	AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
 	AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64
 	DurableCallWithRetry(ctx context.Context, m api.Module, service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string, responsePtr, responseMaxLen uint32) int64
@@ -87,6 +88,20 @@ type HostHandler interface {
 
 	// RegisterQueryHandler registers a read-only query handler.
 	RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64
+
+	// State operations (Stream R)
+	SetState(ctx context.Context, m api.Module, key, value string) int64
+	GetState(ctx context.Context, m api.Module, key string, valuePtr, valueMaxLen uint32) int64
+	DeleteState(ctx context.Context, m api.Module, key string) int64
+	IncrState(ctx context.Context, m api.Module, key string, delta int64) int64
+	HasState(ctx context.Context, m api.Module, key string) int64
+	ListState(ctx context.Context, m api.Module, prefix string, keysPtr, keysMaxLen uint32) int64
+
+	// Detached execution (Stream R)
+	RunDetached(ctx context.Context, m api.Module, name, inputJSON string) int64
+
+	// HTTP fetch (Stream R)
+	Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64
 }
 
 // registerHostFunctions registers all cleat_* imports on the "env" host module.
@@ -191,6 +206,19 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		parentClosePolicy := readWasmString(mem, policyPtr, policyLen)
 		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_with_options")
+
+		// cleat_child_workflow_in_schema: (ptr,len x4, i32, ptr,len, ptr,maxLen) -> i64
+		// Creates a child workflow in a different PostgreSQL schema for cross-instance cooperation.
+		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+			schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64,
+			policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
+			mem := m.Memory()
+			targetSchema := readWasmString(mem, schemaPtr, schemaLen)
+			wfName := readWasmString(mem, namePtr, nameLen)
+			wfInput := readWasmString(mem, inputPtr, inputLen)
+			parentClosePolicy := readWasmString(mem, policyPtr, policyLen)
+			return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, parentClosePolicy, runIDPtr, runIDMaxLen))
+		}).Export("cleat_child_workflow_in_schema")
 
 	// cleat_await_child: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -461,6 +489,84 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		name := readWasmString(mem, namePtr, nameLen)
 		return uint64(h.RegisterQueryHandler(ctx, m, name))
 	}).Export("cleat_register_query_handler")
+
+	// cleat_run_detached: (ptr,len x2) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		namePtr, nameLen, inputPtr, inputLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		name := readWasmString(mem, namePtr, nameLen)
+		inputJSON := readWasmString(mem, inputPtr, inputLen)
+		return uint64(h.RunDetached(ctx, m, name, inputJSON))
+	}).Export("cleat_run_detached")
+
+	// cleat_set_state: (ptr,len x2) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		keyPtr, keyLen, valPtr, valLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		key := readWasmString(mem, keyPtr, keyLen)
+		value := readWasmString(mem, valPtr, valLen)
+		return uint64(h.SetState(ctx, m, key, value))
+	}).Export("cleat_set_state")
+
+	// cleat_get_state: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		keyPtr, keyLen, valuePtr, valueMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		key := readWasmString(mem, keyPtr, keyLen)
+		return uint64(h.GetState(ctx, m, key, valuePtr, valueMaxLen))
+	}).Export("cleat_get_state")
+
+	// cleat_delete_state: (ptr,len) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		keyPtr, keyLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		key := readWasmString(mem, keyPtr, keyLen)
+		return uint64(h.DeleteState(ctx, m, key))
+	}).Export("cleat_delete_state")
+
+	// cleat_incr_state: (ptr,len, i64) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		keyPtr, keyLen uint32, delta int64) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		key := readWasmString(mem, keyPtr, keyLen)
+		return uint64(h.IncrState(ctx, m, key, delta))
+	}).Export("cleat_incr_state")
+
+	// cleat_has_state: (ptr,len) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		keyPtr, keyLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		key := readWasmString(mem, keyPtr, keyLen)
+		return uint64(h.HasState(ctx, m, key))
+	}).Export("cleat_has_state")
+
+	// cleat_list_state: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		prefixPtr, prefixLen, keysPtr, keysMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		prefix := readWasmString(mem, prefixPtr, prefixLen)
+		return uint64(h.ListState(ctx, m, prefix, keysPtr, keysMaxLen))
+	}).Export("cleat_list_state")
+
+	// cleat_fetch: (ptr,len x4, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		methodPtr, methodLen, urlPtr, urlLen, headersPtr, headersLen, bodyPtr, bodyLen uint32,
+		responsePtr, responseMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		method := readWasmString(mem, methodPtr, methodLen)
+		url := readWasmString(mem, urlPtr, urlLen)
+		headersJSON := readWasmString(mem, headersPtr, headersLen)
+		body := readWasmString(mem, bodyPtr, bodyLen)
+		return uint64(h.Fetch(ctx, m, method, url, headersJSON, body, responsePtr, responseMaxLen))
+	}).Export("cleat_fetch")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -672,7 +673,7 @@ func TestPluginInitDefaults(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:     db,
+		DB:     &host.SQLDBAdapter{DB: db},
 		Mux:    http.NewServeMux(),
 		Logger: slog.Default(),
 	}
@@ -698,7 +699,7 @@ func TestPluginInitWithConfig(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:     db,
+		DB:     &host.SQLDBAdapter{DB: db},
 		Mux:    http.NewServeMux(),
 		Logger: slog.Default(),
 		Config: []byte(`{"backend":"memory"}`),
@@ -725,7 +726,7 @@ func TestPluginInitInvalidConfig(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:     db,
+		DB:     &host.SQLDBAdapter{DB: db},
 		Mux:    http.NewServeMux(),
 		Logger: slog.Default(),
 		Config: []byte(`{bad json`),
@@ -749,7 +750,7 @@ func TestPluginInitNilLogger(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:  db,
+		DB:  &host.SQLDBAdapter{DB: db},
 		Mux: http.NewServeMux(),
 		// Logger is nil — Init should use slog.Default()
 	}
@@ -772,7 +773,7 @@ func TestPluginInitS3Backend(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:     db,
+		DB:     &host.SQLDBAdapter{DB: db},
 		Mux:    http.NewServeMux(),
 		Logger: slog.Default(),
 		Config: []byte(`{"backend":"s3","bucket":"test-bucket","region":"us-east-1","endpoint":"localhost:9000"}`),
@@ -1138,7 +1139,7 @@ func setupSelectiveErrorDB(t *testing.T, failExecPatterns, failQueryPatterns []s
 	t.Cleanup(func() { errDB.Close() })
 
 	p := &Plugin{
-		db:      errDB,
+		db:      &host.SQLDBAdapter{DB: errDB},
 		backend: newTestMemBackend(),
 		logger:  slog.Default(),
 		config:  Config{Backend: "memory"},
@@ -1149,6 +1150,6 @@ func setupSelectiveErrorDB(t *testing.T, failExecPatterns, failQueryPatterns []s
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(errDB)(mux)
+	handler := auth.Middleware(host.NewPostgresStore(errDB))(mux)
 	return p, handler, store, clock
 }

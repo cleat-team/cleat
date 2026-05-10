@@ -109,16 +109,13 @@ def run_componentize_py(
     entry_dir = Path(entry_file).resolve().parent
     entry_name = Path(entry_file).stem
 
-    # Build the componentize-py command.
-    # -d specifies WIT directories, -w specifies the world name (top-level flags)
-    # componentize subcommand takes the app module name, -p for python paths, -o for output
-    entry_module = Path(entry_file).stem
+    # Build the componentize-py command using the modern CLI syntax
+    # (compatible with componentize-py >= 0.12.0).
     cmd = [
         "componentize-py",
-        "-d", str(wit_dir),
-        "-w", "cleat-workflow",
-        "componentize",
-        entry_module,
+        "componentize", str(entry_file),
+        "--wit-path", str(wit_dir),
+        "--world", "cleat-workflow",
         "-p", str(sdk_root),
         "-p", str(entry_dir),
         "-o", output,

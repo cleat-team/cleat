@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // Run starts the background metric export loop. Every 60 seconds it queries
@@ -81,11 +82,11 @@ type ddSeriesPayload struct {
 // metrics for each one. Errors for individual configs are logged but do not
 // prevent other configs from being processed.
 func (p *Plugin) exportMetrics(ctx context.Context) error {
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, tenant_id, api_key, site, metrics_prefix
-		FROM dd_config
-		WHERE enabled = true
-	`)
+	rows, err := p.db.Query(ctx, `
+			SELECT id, tenant_id, api_key, site, metrics_prefix
+			FROM dd_config
+			WHERE enabled = true
+		`)
 	if err != nil {
 		return fmt.Errorf("query enabled configs: %w", err)
 	}
@@ -118,12 +119,12 @@ func (p *Plugin) exportMetrics(ctx context.Context) error {
 // them as gauge metrics to the Datadog Metrics API.
 func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
 	// Query workflow counts by status for this tenant.
-	statusRows, err := p.db.QueryContext(ctx, `
-		SELECT status, COUNT(*) AS count
-		FROM workflow_instances
-		WHERE tenant_id = $1
-		GROUP BY status
-	`, cfg.TenantID)
+	statusRows, err := p.db.Query(ctx, plugin.Rebind(`
+			SELECT status, COUNT(*) AS count
+			FROM workflow_instances
+			WHERE tenant_id = $1
+			GROUP BY status
+		`, p.dialect), cfg.TenantID)
 	if err != nil {
 		return fmt.Errorf("query workflow stats: %w", err)
 	}

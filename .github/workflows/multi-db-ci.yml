@@ -1,0 +1,160 @@
+# ---------------------------------------------------------------------------
+# Multi-Database CI — WorkflowStore test suite against MySQL and SQL Server
+#
+# This workflow runs the WorkflowStore test suite (internal/host/...) against
+# MySQL and SQL Server backends using service containers. It does not run the
+# full CI suite — only the database-specific tests that are skipped when those
+# backends are unavailable.
+#
+# It also runs the plugin migration smoke test against all three backends
+# (PostgreSQL, MySQL, SQL Server) in a single job with all service containers.
+#
+# Backend detection (in Go tests):
+#   CLEAT_TEST_POSTGRES — PostgreSQL connection string (fallback CLEAT_TEST_DB)
+#   CLEAT_TEST_MYSQL    — MySQL connection string
+#   CLEAT_TEST_MSSQL    — SQL Server connection string
+# ---------------------------------------------------------------------------
+name: Multi-DB CI
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ===========================================================================
+# JOBS
+# ===========================================================================
+jobs:
+  # -------------------------------------------------------------------------
+  # Test MySQL backend
+  # -------------------------------------------------------------------------
+  test-mysql:
+    name: Test MySQL
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: cleat
+          MYSQL_DATABASE: cleat
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+    env:
+      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Run tests
+        run: go test -race -count=1 -timeout=300s ./internal/host/...
+
+  # -------------------------------------------------------------------------
+  # Test SQL Server backend
+  # -------------------------------------------------------------------------
+  test-mssql:
+    name: Test SQL Server
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+    env:
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Run tests
+        run: go test -race -count=1 -timeout=300s ./internal/host/...
+
+  # -------------------------------------------------------------------------
+  # Plugin migration smoke test (all three backends)
+  #
+  # Runs TestPluginMigrations_AllDialects (and any other
+  # TestPluginMigrations* tests) against PostgreSQL, MySQL, and SQL Server
+  # simultaneously. All three service containers are started and all three
+  # connection-string env vars are set, so the test can exercise every
+  # backend in a single invocation.
+  #
+  # Unlike the per-backend jobs above (test-mysql, test-mssql), this job
+  # does NOT run the full WorkflowStore suite — only plugin migration tests.
+  # -------------------------------------------------------------------------
+  test-plugin-migrations:
+    name: Plugin Migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: cleat
+          MYSQL_DATABASE: cleat
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 30s
+    env:
+      CLEAT_TEST_POSTGRES: postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable
+      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Run plugin migration tests
+        run: go test -race -count=1 -timeout=300s -run TestPluginMigrations ./internal/host/...
+
+      - name: Run plugin behavioral tests (all backends)
+        run: go test -race -count=1 -timeout=600s -run 'MultiBackend' ./plugins/...

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // RegisterRoutes registers HTTP handlers for the event-triggers plugin.
@@ -194,11 +195,20 @@ func (p *Plugin) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 	now := time.Now()
 
 	var subID uuid.UUID
-	err = p.db.QueryRowContext(r.Context(), `
-		INSERT INTO event_subscriptions (tenant_id, event_type, def_name, entry_point, input_template, filter_expr, max_retries, enabled, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 3), true, $8)
-		RETURNING id
-	`, tid, req.EventType, req.DefName, req.EntryPoint, inputTemplateStr, req.FilterExpr, req.MaxRetries, now).Scan(&subID)
+	if p.dialect == plugin.DialectMySQL {
+		// MySQL: generate UUID on Go side, insert without RETURNING
+		subID = uuid.New()
+		_, execErr := p.db.Exec(r.Context(), plugin.Rebind(insertSubscriptionReturning.For(p.dialect), p.dialect),
+			subID, tid, req.EventType, req.DefName, req.EntryPoint, inputTemplateStr, req.FilterExpr, req.MaxRetries, now)
+		if execErr != nil {
+			p.logger.Error("event-triggers: create subscription", "error", execErr)
+			p.writeError(w, 500, "failed to create subscription")
+			return
+		}
+	} else {
+		err = p.db.QueryRow(r.Context(), plugin.Rebind(insertSubscriptionReturning.For(p.dialect), p.dialect),
+			tid, req.EventType, req.DefName, req.EntryPoint, inputTemplateStr, req.FilterExpr, req.MaxRetries, now).Scan(&subID)
+	}
 	if err != nil {
 		p.logger.Error("event-triggers: create subscription", "error", err)
 		p.writeError(w, 500, "failed to create subscription")
@@ -240,7 +250,7 @@ func (p *Plugin) handleListSubscriptions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	rows, err := p.db.QueryContext(r.Context(), `
+	rows, err := p.db.Query(r.Context(), `
 		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, max_retries, enabled, created_at
 		FROM event_subscriptions
 		WHERE tenant_id = $1
@@ -291,7 +301,7 @@ func (p *Plugin) handleDeleteSubscription(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
+	rows, err := p.db.Exec(r.Context(), `
 		DELETE FROM event_subscriptions
 		WHERE id = $1 AND tenant_id = $2
 	`, id, tid)
@@ -300,7 +310,6 @@ func (p *Plugin) handleDeleteSubscription(w http.ResponseWriter, r *http.Request
 		p.writeError(w, 500, "failed to delete subscription")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "subscription not found")
 		return
@@ -340,7 +349,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 		eventType     string
 		eventDataRaw  []byte
 	)
-	err = p.db.QueryRowContext(r.Context(), `
+	err = p.db.QueryRow(r.Context(), `
 		SELECT COALESCE(status, 'pending'), event_type, event_data
 		FROM ingested_events
 		WHERE id = $1 AND tenant_id = $2
@@ -362,7 +371,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Reset processing state.
-	_, err = p.db.ExecContext(r.Context(), `
+	_, err = p.db.Exec(r.Context(), `
 		UPDATE ingested_events
 		SET processed = false, status = 'pending', retry_count = 0, error_msg = NULL, last_retry_at = NULL
 		WHERE id = $1 AND tenant_id = $2
@@ -383,7 +392,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 	matched, err := triggerMatchingWorkflows(r.Context(), p.db, p.logger, p.env, eventID, tid, eventType, eventData)
 	if err != nil {
 		p.logger.Error("event-triggers: retry dispatch", "error", err)
-		p.db.ExecContext(r.Context(), `
+		p.db.Exec(r.Context(), `
 			UPDATE ingested_events SET error_msg = $1 WHERE id = $2
 		`, "retry dispatch failed: "+err.Error(), eventID)
 		p.writeError(w, 500, "retry dispatch failed")
@@ -397,7 +406,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 
 	if matched > 0 {
 		// Mark as completed since at least one workflow was started.
-		p.db.ExecContext(r.Context(), `
+		p.db.Exec(r.Context(), `
 			UPDATE ingested_events
 			SET processed = true, status = 'completed', error_msg = NULL
 			WHERE id = $1

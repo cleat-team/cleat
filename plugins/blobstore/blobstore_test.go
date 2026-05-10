@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // ---------------------------------------------------------------------------
@@ -563,7 +564,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore, *fakeCl
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:      db,
+		db:      &host.SQLDBAdapter{DB: db},
 		backend: newTestMemBackend(),
 		logger:  slog.Default(),
 		config:  Config{Backend: "memory"},
@@ -574,7 +575,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore, *fakeCl
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(db)(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
 	return p, handler, store, clock
 }
 
@@ -617,7 +618,7 @@ func TestInit(t *testing.T) {
 		DB:  sql.OpenDB(&fakeConnector{store: newFakeDBStore()}),
 		Mux: http.NewServeMux(),
 	}
-	p.db = env.DB
+	p.db = &host.SQLDBAdapter{DB: env.DB}
 	p.mux = env.Mux
 	p.logger = env.Logger
 	if p.logger == nil {

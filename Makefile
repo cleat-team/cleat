@@ -56,6 +56,16 @@ test: test-go test-python test-java test-as
 test-go:
 	go test -race -count=1 $(GO_PACKAGES)
 
+.PHONY: test-all-dbs
+test-all-dbs:
+	@echo "=== Testing PostgreSQL ==="
+	@CLEAT_TEST_DB="postgres://localhost:5432/cleat?sslmode=disable" go test -count=1 -timeout=300s ./internal/host/...
+	@echo "=== Testing MySQL ==="
+	@CLEAT_TEST_MYSQL="root:cleat@tcp(127.0.0.1:3306)/cleat" go test -count=1 -timeout=300s ./internal/host/...
+	@echo "=== Testing SQL Server ==="
+	@CLEAT_TEST_MSSQL="sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master" go test -count=1 -timeout=300s ./internal/host/...
+	@echo "All multi-database tests complete."
+
 .PHONY: test-python
 test-python:
 	cd python-sdk && python -m pytest -v

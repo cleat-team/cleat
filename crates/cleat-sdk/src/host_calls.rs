@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// All 18 host function imports from the "env" WASM module.
+/// All host function imports from the "env" WASM module.
 /// Each returns i64 with a bit-packed result. Strings cross as (ptr, len) pairs.
 mod imports {
     #[link(wasm_import_module = "env")]
@@ -58,11 +58,12 @@ mod imports {
             run_id_ptr: *mut u8, run_id_max_len: u32,
         ) -> i64;
 
-        // cleat_child_workflow_with_options - two strings, i32 version, one string out
+        // cleat_child_workflow_with_options - two strings, i32 version, parentClosePolicy string, one string out
         pub fn cleat_child_workflow_with_options(
             name_ptr: *const u8, name_len: u32,
             input_ptr: *const u8, input_len: u32,
             version: i32,
+            policy_ptr: *const u8, policy_len: u32,
             run_id_ptr: *mut u8, run_id_max_len: u32,
         ) -> i64;
 
@@ -207,12 +208,17 @@ mod imports {
         // cleat_await_all_children - ABI 2.43, one string in (JSON run_ids), one string out
         pub fn cleat_await_all_children(run_ids_ptr: *const u8, run_ids_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
 
-        // cleat_call_with_retry - ABI 2.44, 5 strings in (incl retry JSON), 1 string out
+        // cleat_call_retry - 3 string pairs, 4 i64, 1 string pair (nonRetryableErrorsJSON), 1 string out
+        #[link_name = "cleat_call_retry"]
         pub fn cleat_call_with_retry(
             svc_ptr: *const u8, svc_len: u32,
             op_ptr: *const u8, op_len: u32,
             req_ptr: *const u8, req_len: u32,
-            retry_ptr: *const u8, retry_len: u32,
+            max_attempts: i64,
+            initial_interval_ms: i64,
+            backoff_coefficient_100x: i64,
+            max_interval_ms: i64,
+            non_retryable_ptr: *const u8, non_retryable_len: u32,
             resp_ptr: *mut u8, resp_max_len: u32,
         ) -> i64;
 
@@ -230,6 +236,36 @@ mod imports {
 
         // cleat_release_lock - ABI 2.47, one string in
         pub fn cleat_release_lock(key_ptr: *const u8, key_len: u32) -> i64;
+
+        // cleat_continue_as_new_versioned - (ptr,len,i32) -> i64
+        pub fn cleat_continue_as_new_versioned(
+            input_ptr: *const u8, input_len: u32,
+            new_version: i32,
+        ) -> i64;
+
+        // cleat_call_heartbeat - (ptr,len x3, i64, ptr,maxLen) -> i64
+        pub fn cleat_call_heartbeat(
+            svc_ptr: *const u8, svc_len: u32,
+            op_ptr: *const u8, op_len: u32,
+            req_ptr: *const u8, req_len: u32,
+            heartbeat_interval_ms: i64,
+            resp_ptr: *mut u8, resp_max_len: u32,
+        ) -> i64;
+
+        // cleat_side_effect - (ptr,len, ptr,maxLen) -> i64
+        pub fn cleat_side_effect(
+            result_ptr: *const u8, result_len: u32,
+            out_ptr: *mut u8, out_max_len: u32,
+        ) -> i64;
+
+        // plugin_call_streaming - (ptr,len x4, ptr,maxLen) -> i64
+        #[link_name = "plugin_call_streaming"]
+        pub fn cleat_plugin_call_streaming(
+            plugin_name_ptr: *const u8, plugin_name_len: u32,
+            function_name_ptr: *const u8, function_name_len: u32,
+            input_ptr: *const u8, input_len: u32,
+            response_ptr: *mut u8, response_max_len: u32,
+        ) -> i64;
     }
 }
 
@@ -239,11 +275,13 @@ pub struct ChildWorkflowOptions {
     /// Explicit workflow definition version to use.
     /// 0 = default resolution.
     pub version: i32,
+    /// Parent close policy for the child workflow (e.g. "abandon", "terminate", "request_cancel").
+    pub parent_close_policy: String,
 }
 
 impl Default for ChildWorkflowOptions {
     fn default() -> Self {
-        Self { version: 0 }
+        Self { version: 0, parent_close_policy: String::new() }
     }
 }
 
@@ -412,22 +450,23 @@ impl HostCalls {
         (run_id, None)
     }
 
-    /// Start a child workflow with version options. Mirrors Go's ChildWorkflowWithOptions.
+    /// Start a child workflow with options. Mirrors Go's ChildWorkflowWithOptions.
     pub fn child_workflow_with_options(
-        &self, name: &str, input_json: &str, version: i32,
+        &self, name: &str, input_json: &str, opts: &ChildWorkflowOptions,
     ) -> (String, Option<String>) {
         let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
             imports::cleat_child_workflow_with_options(
                 name.as_ptr(), name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
-                version,
+                opts.version,
+                opts.parent_close_policy.as_ptr(), opts.parent_close_policy.len() as u32,
                 run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
         let (run_id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
-            return (String::new(), Some(format!("child_workflow_with_options(name=\"{}\", version={}) failed: host error code {}. Check that the child workflow name is correct.", name, version, err_code)));
+            return (String::new(), Some(format!("child_workflow_with_options(name=\"{}\", version={}) failed: host error code {}. Check that the child workflow name is correct.", name, opts.version, err_code)));
         }
         let run_id = unsafe { memory::read_string(run_id_buf.as_ptr(), run_id_len) };
         (run_id, None)
@@ -1042,14 +1081,20 @@ impl HostCalls {
         &self, service: &str, operation: &str, request: &T, retry_policy: &RetryPolicy,
     ) -> Result<R, String> {
         let request_json = serde_json::to_string(request).map_err(|e| format!("serialize request: {}", e))?;
-        let retry_json = serde_json::to_string(retry_policy).map_err(|e| format!("serialize retry policy: {}", e))?;
+        let non_retryable_json = serde_json::to_string(&retry_policy.non_retryable_errors)
+            .map_err(|e| format!("serialize non-retryable errors: {}", e))?;
+        let backoff_coefficient_100x = (retry_policy.backoff_multiplier * 100.0) as i64;
         let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
             imports::cleat_call_with_retry(
                 service.as_ptr(), service.len() as u32,
                 operation.as_ptr(), operation.len() as u32,
                 request_json.as_ptr(), request_json.len() as u32,
-                retry_json.as_ptr(), retry_json.len() as u32,
+                retry_policy.max_attempts as i64,
+                retry_policy.initial_interval_ms as i64,
+                backoff_coefficient_100x,
+                retry_policy.maximum_interval_ms as i64,
+                non_retryable_json.as_ptr(), non_retryable_json.len() as u32,
                 resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
@@ -1129,6 +1174,127 @@ impl HostCalls {
         }
         None
     }
+
+    // ── R1.1: continue_as_new_versioned ───────────────────────────────────
+
+    /// Continue as new with an explicit version. Mirrors Go's ContinueAsNewWithVersion.
+    pub fn continue_as_new_versioned(&self, input_json: &str, new_version: i32) -> Result<(), String> {
+        let result = unsafe {
+            imports::cleat_continue_as_new_versioned(
+                input_json.as_ptr(), input_json.len() as u32,
+                new_version,
+            )
+        };
+        let (_extra, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("continue_as_new_versioned(...) failed: host error code {}. Check that the input JSON is valid.", err_code));
+        }
+        Ok(())
+    }
+
+    // ── R1.2: cleat_call_heartbeat ────────────────────────────────────────
+
+    /// Durable call with heartbeat. Mirrors Go's DurableCallWithHeartbeat.
+    /// Returns (response_json, error_message).
+    pub fn cleat_call_heartbeat(
+        &self, service: &str, operation: &str, request_json: &str, heartbeat_interval_ms: i64,
+    ) -> (String, Option<String>) {
+        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_call_heartbeat(
+                service.as_ptr(), service.len() as u32,
+                operation.as_ptr(), operation.len() as u32,
+                request_json.as_ptr(), request_json.len() as u32,
+                heartbeat_interval_ms,
+                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
+        if err_code != 0 {
+            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            return (String::new(), Some(err_msg));
+        }
+        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        (resp, None)
+    }
+
+    /// Typed version of cleat_call_heartbeat using serde for serialization/deserialization.
+    pub fn cleat_call_heartbeat_typed<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self, service: &str, operation: &str, request: &T, heartbeat_interval_ms: i64,
+    ) -> Result<R, String> {
+        let request_json = serde_json::to_string(request).map_err(|e| format!("serialize request: {}", e))?;
+        let (resp_json, err) = self.cleat_call_heartbeat(service, operation, &request_json, heartbeat_interval_ms);
+        if let Some(e) = err {
+            return Err(e);
+        }
+        serde_json::from_str(&resp_json).map_err(|e| format!("deserialize response: {}", e))
+    }
+
+    // ── R1.3: cleat_side_effect ──────────────────────────────────────────
+
+    /// Record a non-deterministic computation result in event history on first
+    /// execution, returning the cached result on replay. Mirrors Go's SideEffect.
+    pub fn side_effect(&self, computed_result: &str) -> Result<String, String> {
+        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_side_effect(
+                computed_result.as_ptr(), computed_result.len() as u32,
+                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (out_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("side_effect(...) failed: host error code {}. Check that the input is valid.", err_code));
+        }
+        let out = unsafe { memory::read_string(out_buf.as_ptr(), out_len) };
+        Ok(out)
+    }
+
+    /// Typed version of side_effect using serde for serialization/deserialization.
+    pub fn side_effect_typed<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self, computed: &T,
+    ) -> Result<R, String> {
+        let input_json = serde_json::to_string(computed).map_err(|e| format!("serialize input: {}", e))?;
+        let result_json = self.side_effect(&input_json)?;
+        serde_json::from_str(&result_json).map_err(|e| format!("deserialize result: {}", e))
+    }
+
+    // ── R1.4: plugin_call_streaming ──────────────────────────────────────
+
+    /// Call a plugin function with streaming support. Mirrors Go's PluginCallStreaming.
+    /// Returns (response_json, error_message).
+    pub fn plugin_call_streaming(
+        &self, plugin_name: &str, function_name: &str, input_json: &str,
+    ) -> (String, Option<String>) {
+        let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_plugin_call_streaming(
+                plugin_name.as_ptr(), plugin_name.len() as u32,
+                function_name.as_ptr(), function_name.len() as u32,
+                input_json.as_ptr(), input_json.len() as u32,
+                resp_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (response_len, _call_error_code, err_code) = memory::decode_cleat_call_result(result);
+        if err_code != 0 {
+            let err_msg = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+            return (String::new(), Some(err_msg));
+        }
+        let resp = unsafe { memory::read_string(resp_buf.as_ptr(), response_len) };
+        (resp, None)
+    }
+
+    /// Typed version of plugin_call_streaming using serde for serialization/deserialization.
+    pub fn plugin_call_streaming_typed<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &self, plugin_name: &str, function_name: &str, request: &T,
+    ) -> Result<R, String> {
+        let request_json = serde_json::to_string(request).map_err(|e| format!("serialize request: {}", e))?;
+        let (resp_json, err) = self.plugin_call_streaming(plugin_name, function_name, &request_json);
+        if let Some(e) = err {
+            return Err(e);
+        }
+        serde_json::from_str(&resp_json).map_err(|e| format!("deserialize response: {}", e))
+    }
 }
 
 /// Result of an await_signals call.
@@ -1146,6 +1312,10 @@ pub struct RetryPolicy {
     pub initial_interval_ms: u64,
     pub backoff_multiplier: f64,
     pub maximum_interval_ms: u64,
+    /// List of error messages/substrings that should not be retried.
+    /// Serialized as JSON array when passed to the host.
+    #[serde(default)]
+    pub non_retryable_errors: Vec<String>,
 }
 
 /// Result from an HTTP fetch request.

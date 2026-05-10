@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // OAuth provider endpoints.
@@ -100,12 +101,12 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 
 func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider string) (*oauthConfigRow, error) {
 	var cfg oauthConfigRow
-	err := p.db.QueryRowContext(ctx, `
-		SELECT tenant_id, provider, client_id, client_secret, redirect_url,
-		       COALESCE(domain, '') AS domain, enabled
-		FROM oauth_config
-		WHERE tenant_id = $1 AND provider = $2 AND enabled = true
-	`, tenantID, provider).Scan(
+	err := p.db.QueryRow(ctx, plugin.Rebind(`
+			SELECT tenant_id, provider, client_id, client_secret, redirect_url,
+			       COALESCE(domain, '') AS domain, enabled
+			FROM oauth_config
+			WHERE tenant_id = $1 AND provider = $2 AND enabled = true
+		`, p.dialect), tenantID, provider).Scan(
 		&cfg.TenantID, &cfg.Provider, &cfg.ClientID, &cfg.ClientSecret,
 		&cfg.RedirectURL, &cfg.Domain, &cfg.Enabled,
 	)
@@ -147,11 +148,11 @@ func (p *Plugin) extractSession(r *http.Request) *SessionInfo {
 
 	tokenHash := sha256Hex(token)
 
-	err := p.db.QueryRowContext(r.Context(), `
-		SELECT id, tenant_id, user_email, expires_at
-		FROM oauth_sessions
-		WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
-	`, tokenHash).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT id, tenant_id, user_email, expires_at
+			FROM oauth_sessions
+			WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
+		`, p.dialect), tokenHash).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
 	if err != nil {
 		return nil
 	}
@@ -227,10 +228,10 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Store state + code_verifier in oauth_sessions with 5-minute expiry.
 	sessionID := uuid.New()
 	sessionExpiresAt := time.Now().Add(5 * time.Minute)
-	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO oauth_sessions (id, tenant_id, provider, state, code_verifier, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, sessionID, tid, provider, state, codeVerifier, sessionExpiresAt)
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+			INSERT INTO oauth_sessions (id, tenant_id, provider, state, code_verifier, expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, p.dialect), sessionID, tid, provider, state, codeVerifier, sessionExpiresAt)
 	if err != nil {
 		p.logger.Error("oauth: store state", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to initialize login")
@@ -278,11 +279,11 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var codeVerifier sql.NullString
 	var sessionID uuid.UUID
 
-	err := p.db.QueryRowContext(r.Context(), `
-		SELECT id, tenant_id, provider, code_verifier
-		FROM oauth_sessions
-		WHERE state = $1 AND expires_at > now()
-	`, state).Scan(&sessionID, &tid, &storedProvider, &codeVerifier)
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT id, tenant_id, provider, code_verifier
+			FROM oauth_sessions
+			WHERE state = $1 AND expires_at > now()
+		`, p.dialect), state).Scan(&sessionID, &tid, &storedProvider, &codeVerifier)
 	if err != nil {
 		p.logger.Error("oauth: state lookup", "error", err)
 		p.writeError(w, http.StatusBadRequest, "invalid or expired state")
@@ -405,13 +406,13 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Update the pre-inserted state row with the actual session data and clear
 	// the PKCE fields.
-	_, err = p.db.ExecContext(r.Context(), `
-		UPDATE oauth_sessions
-		SET session_token = $1, token_hash = $2, user_email = $3,
-		    access_token = $4, refresh_token = $5, expires_at = $6,
-		    state = NULL, code_verifier = NULL
-		WHERE id = $7
-	`, sessionToken, tokenHash, email, tokenResult.AccessToken,
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+			UPDATE oauth_sessions
+			SET session_token = $1, token_hash = $2, user_email = $3,
+			    access_token = $4, refresh_token = $5, expires_at = $6,
+			    state = NULL, code_verifier = NULL
+			WHERE id = $7
+		`, p.dialect), sessionToken, tokenHash, email, tokenResult.AccessToken,
 		tokenResult.RefreshToken, expiresAt, sessionID)
 	if err != nil {
 		p.logger.Error("oauth: create session", "error", err)
@@ -441,12 +442,12 @@ func (p *Plugin) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.QueryContext(r.Context(), `
-		SELECT id, provider, user_email, created_at, expires_at
-		FROM oauth_sessions
-		WHERE tenant_id = $1
-		ORDER BY created_at DESC
-	`, session.TenantID)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+			SELECT id, provider, user_email, created_at, expires_at
+			FROM oauth_sessions
+			WHERE tenant_id = $1
+			ORDER BY created_at DESC
+		`, p.dialect), session.TenantID)
 	if err != nil {
 		p.logger.Error("oauth: list sessions", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to list sessions")
@@ -500,17 +501,16 @@ func (p *Plugin) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
-		DELETE FROM oauth_sessions
-		WHERE id = $1 AND tenant_id = $2
-	`, id, session.TenantID)
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+			DELETE FROM oauth_sessions
+			WHERE id = $1 AND tenant_id = $2
+		`, p.dialect), id, session.TenantID)
 	if err != nil {
 		p.logger.Error("oauth: delete session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to delete session")
 		return
 	}
 
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, http.StatusNotFound, "session not found")
 		return

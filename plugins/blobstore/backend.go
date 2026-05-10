@@ -28,11 +28,12 @@ type Backend interface {
 // memoryBackend stores blobs in the PostgreSQL blob_content.data BYTEA column.
 // This is the default backend for dev/testing and requires no external services.
 type memoryBackend struct {
-	db plugin.DB
+	db      plugin.PluginDB
+	dialect plugin.Dialect
 }
 
-func newMemoryBackend(db plugin.DB) *memoryBackend {
-	return &memoryBackend{db: db}
+func newMemoryBackend(db plugin.PluginDB, dialect plugin.Dialect) *memoryBackend {
+	return &memoryBackend{db: db, dialect: dialect}
 }
 
 func (b *memoryBackend) Put(ctx context.Context, sha256Str string, data []byte, _ string) error {
@@ -40,12 +41,8 @@ func (b *memoryBackend) Put(ctx context.Context, sha256Str string, data []byte, 
 	if err != nil {
 		return fmt.Errorf("blobstore: decode sha256: %w", err)
 	}
-	_, err = b.db.ExecContext(ctx, `
-		INSERT INTO blob_content (sha256, size, data, ref_count, storage_backend)
-		VALUES ($1, $2, $3, 0, 'memory')
-		ON CONFLICT (sha256) DO UPDATE
-		SET data = EXCLUDED.data
-	`, sha256Bytes, len(data), data)
+	_, err = b.db.Exec(ctx, plugin.Rebind(upsertBlobContentData.For(b.dialect), b.dialect),
+		sha256Bytes, len(data), data)
 	return err
 }
 
@@ -55,7 +52,7 @@ func (b *memoryBackend) Get(ctx context.Context, sha256Str string) ([]byte, erro
 		return nil, fmt.Errorf("blobstore: decode sha256: %w", err)
 	}
 	var data []byte
-	err = b.db.QueryRowContext(ctx, `SELECT data FROM blob_content WHERE sha256 = $1`, sha256Bytes).Scan(&data)
+	err = b.db.QueryRow(ctx, plugin.Rebind(`SELECT data FROM blob_content WHERE sha256 = $1`, b.dialect), sha256Bytes).Scan(&data)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("blobstore: content not found: %s", sha256Str)
 	}

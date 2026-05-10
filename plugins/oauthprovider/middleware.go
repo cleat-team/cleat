@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // SessionInfo holds user identity extracted from an OAuth session.
@@ -58,11 +59,11 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		var userEmail sql.NullString
 		var expiresAt sql.NullTime
 
-		err := p.db.QueryRowContext(r.Context(), `
-			SELECT id, tenant_id, user_email, expires_at
-			FROM oauth_sessions
-			WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
-		`, tokenHash).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
+		err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+				SELECT id, tenant_id, user_email, expires_at
+				FROM oauth_sessions
+				WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
+			`, p.dialect), tokenHash).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
 		if err != nil {
 			p.logger.Warn("oauth: invalid session token", "error", err)
 			http.Error(w, `{"error":"invalid session"}`, http.StatusUnauthorized)

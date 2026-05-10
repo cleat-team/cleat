@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 	"github.com/rcownie/cleat/plugins/eventtriggers"
 )
 
@@ -99,11 +100,11 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Look up the webhook source.
 	var source webhookSourceJSON
-	err = p.db.QueryRowContext(r.Context(), `
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1
-	`, sourceID).Scan(&source.ID, &source.TenantID, &source.Name, &source.SourceType,
+	`, p.dialect), sourceID).Scan(&source.ID, &source.TenantID, &source.Name, &source.SourceType,
 		&source.Secret, &source.Enabled, &source.SignalWorkflowID, &source.SignalName,
 		&source.CreatedAt, &source.UpdatedAt)
 	if err == sql.ErrNoRows {
@@ -178,10 +179,10 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	eventID := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.ExecContext(r.Context(), `
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
 		INSERT INTO webhook_events (id, source_id, tenant_id, event_type, headers, payload, received_at, processed)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, false)
-	`, eventID, sourceID, source.TenantID, eventType, string(headersJSON), string(payloadJSON), now)
+	`, p.dialect), eventID, sourceID, source.TenantID, eventType, string(headersJSON), string(payloadJSON), now)
 	if err != nil {
 		p.logger.Error("webhook-ingest: store event", "error", err)
 		p.writeError(w, 500, "failed to store event")
@@ -252,9 +253,9 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 					"error", serr,
 				)
 			} else {
-				p.db.ExecContext(r.Context(), `
+				p.db.Exec(r.Context(), plugin.Rebind(`
 					UPDATE webhook_events SET processed = true, status = 'completed' WHERE id = $1
-				`, eventID)
+				`, p.dialect), eventID)
 				p.logger.Info("webhook-ingest: signal delivered",
 					"workflow_id", source.SignalWorkflowID,
 					"event_id", eventID,
@@ -279,12 +280,12 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.QueryContext(r.Context(), `
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
 		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
-	`, tid)
+	`, p.dialect), tid)
 	if err != nil {
 		p.logger.Error("webhook-ingest: list sources", "error", err)
 		p.writeError(w, 500, "failed to list sources")
@@ -353,10 +354,10 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		signalName = "webhook_received"
 	}
 
-	_, err = p.db.ExecContext(r.Context(), `
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
 		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret, enabled, created_at, updated_at, signal_workflow_id, signal_name)
 		VALUES ($1, $2, $3, $4, $5, true, $6, $6, $7, $8)
-	`, tid, id, req.Name, req.SourceType, req.Secret, now, signalWorkflowID, signalName)
+	`, p.dialect), tid, id, req.Name, req.SourceType, req.Secret, now, signalWorkflowID, signalName)
 	if err != nil {
 		p.logger.Error("webhook-ingest: create source", "error", err)
 		p.writeError(w, 500, "failed to create source")
@@ -400,11 +401,11 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var s webhookSourceJSON
-	err = p.db.QueryRowContext(r.Context(), `
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND tenant_id = $2
-	`, id, tid).Scan(&s.ID, &s.TenantID, &s.Name, &s.SourceType,
+	`, p.dialect), id, tid).Scan(&s.ID, &s.TenantID, &s.Name, &s.SourceType,
 		&s.Secret, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
 		&s.CreatedAt, &s.UpdatedAt)
 	if err == sql.ErrNoRows {
@@ -436,16 +437,15 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
 		DELETE FROM webhook_sources
 		WHERE id = $1 AND tenant_id = $2
-	`, id, tid)
+	`, p.dialect), id, tid)
 	if err != nil {
 		p.logger.Error("webhook-ingest: delete source", "error", err)
 		p.writeError(w, 500, "failed to delete source")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "source not found")
 		return
@@ -498,7 +498,7 @@ func (p *Plugin) handleListEvents(w http.ResponseWriter, r *http.Request) {
 	query += fmt.Sprintf(" LIMIT $%d", argIdx)
 	args = append(args, 100)
 
-	rows, err := p.db.QueryContext(r.Context(), query, args...)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
 	if err != nil {
 		p.logger.Error("webhook-ingest: list events", "error", err)
 		p.writeError(w, 500, "failed to list events")

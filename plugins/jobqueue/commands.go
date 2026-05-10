@@ -8,7 +8,6 @@ import (
 	"os"
 
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -47,7 +46,11 @@ func (p *Plugin) RegisterCommands() []plugin.Command {
 				return fmt.Errorf("database URL required: set DATABASE_URL env var or pass --dsn")
 			}
 
-			db, err := sql.Open("postgres", *dsn)
+			driver := os.Getenv("CLEAT_DB_DRIVER")
+			if driver == "" {
+				driver = "postgres"
+			}
+			db, err := sql.Open(driver, *dsn)
 			if err != nil {
 				return fmt.Errorf("connect to database: %w", err)
 			}

@@ -20,7 +20,6 @@ import (
 	"go/token"
 	"time"
 
-	_ "github.com/lib/pq"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,7 +40,7 @@ var dbConnStr string
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|init> [flags] <args>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>\n")
@@ -55,6 +54,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cleat schedule disable <name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat run [--wasm <file>] [--entry-point <name>] [--input <json>] [--api-addr <addr>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat plugin <validate|install|list|update|uninstall> [flags]\n")
+		fmt.Fprintf(os.Stderr, "  cleat lock [--db <conn>] [--update] <package>\n")
 		fmt.Fprintf(os.Stderr, "Common flags:\n")
 		fmt.Fprintf(os.Stderr, "  --db <connstr>  PostgreSQL connection string\n")
 		fmt.Fprintf(os.Stderr, "Example: cleat build -o ./out ./testdata/basic/\n")
@@ -166,9 +166,11 @@ func main() {
 		runDag(flag.Args()[1:])
 	case "plugin":
 		runPlugin(flag.Args()[1:])
+	case "lock":
+		runLock(flag.Args()[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
-		fmt.Fprintf(os.Stderr, "Valid commands: build, vet, deploy, versions, rollback, dev, schedule, run, dag, plugin, init\n")
+		fmt.Fprintf(os.Stderr, "Valid commands: build, vet, deploy, versions, rollback, dev, schedule, run, dag, plugin, lock, init\n")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -392,6 +394,12 @@ func runBuild(pattern, outDir, target string, jsonOut bool) {
 		fmt.Fprintf(os.Stderr, "Error reading WASM binary for metadata: %v\n", err)
 		os.Exit(1)
 	}
+	// Resolve child workflow versions from lock file or database.
+	var childVersions map[string]int
+	if len(usage.Children) > 0 {
+		childVersions = resolveBuildChildVersions(usage.Children, jsonOut)
+	}
+
 	workflowName := wasmOutputName(result)
 	meta := &wasm.Metadata{
 		WorkflowName:         workflowName,
@@ -399,6 +407,7 @@ func runBuild(pattern, outDir, target string, jsonOut bool) {
 		ABIVersion:           wasm.CurrentABIVersion,
 		MinCompatibleVersion: wasm.CurrentABIVersion,
 		PluginDeps:           derivePluginDeps(usage),
+		ChildVersions:        childVersions,
 	}
 	wasmWithMeta, err := wasm.WriteMetadata(wasmBytes, meta)
 	if err != nil {
@@ -1254,5 +1263,144 @@ func formatSize(n int64) string {
 		return fmt.Sprintf("%.1f KB", float64(n)/KB)
 	default:
 		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// resolveBuildChildVersions resolves child workflow versions for a build.
+// Priority: 1) --db flag / CLEAT_DATABASE_URL (queries DB, writes lock file),
+// 2) existing cleat.lock file, 3) warn and return nil (dynamic runtime resolution).
+func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[string]int {
+	connStr := dbConnStr
+	if connStr == "" {
+		connStr = os.Getenv("CLEAT_DATABASE_URL")
+	}
+
+	if connStr != "" {
+		db, err := sql.Open("postgres", connStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot connect to database: %v\n", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		resolved, err := wasm.ResolveChildVersionsFromDB(ctx, db, children)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: resolving child workflow versions: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Write lock file for reproducible builds without DB access.
+		entries := make(map[string]wasm.LockEntry, len(resolved))
+		for name, v := range resolved {
+			entries[name] = wasm.LockEntry{Version: v}
+		}
+		lf := &wasm.LockFile{
+			Version: wasm.LockFileVersion,
+			Entries: entries,
+		}
+		if err := wasm.WriteLockFile(".", lf); err != nil {
+			logBuildProgress("  Warning: could not write %s: %v\n", jsonOut, wasm.LockFileName, err)
+		} else if !jsonOut {
+			fmt.Printf("  Wrote %s (%d child workflow version(s))\n", wasm.LockFileName, len(entries))
+		}
+		return resolved
+	}
+
+	// No DB connection: try existing lock file.
+	if lf, err := wasm.ReadLockFile("."); err == nil && lf.Version == wasm.LockFileVersion {
+		result := make(map[string]int, len(lf.Entries))
+		for name, entry := range lf.Entries {
+			result[name] = entry.Version
+		}
+		if !jsonOut {
+			fmt.Printf("  Read %s (%d child workflow version(s))\n", wasm.LockFileName, len(result))
+		}
+		return result
+	}
+
+	logBuildProgress("  Warning: no %s and no --db flag. Child workflow versions will be resolved dynamically at runtime.\n", jsonOut, wasm.LockFileName)
+	return nil
+}
+
+// runLock implements the "cleat lock" subcommand.
+func runLock(args []string) {
+	fs := flag.NewFlagSet("lock", flag.ExitOnError)
+	lockDB := fs.String("db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
+	lockUpdate := fs.Bool("update", false, "re-resolve all child versions from database")
+	fs.Parse(args)
+
+	connStr := *lockDB
+	if connStr == "" {
+		connStr = os.Getenv("CLEAT_DATABASE_URL")
+	}
+	if connStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: --db flag or CLEAT_DATABASE_URL required\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat lock [--db <conn>] [--update] <package>\n")
+		os.Exit(1)
+	}
+
+	var children map[string]bool
+	if *lockUpdate {
+		// Re-read existing lock file to find child names.
+		lf, err := wasm.ReadLockFile(".")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: no %s found (required with --update)\n", wasm.LockFileName)
+			os.Exit(1)
+		}
+		children = make(map[string]bool, len(lf.Entries))
+		for name := range lf.Entries {
+			children[name] = true
+		}
+	} else {
+		// Run analysis on the package to find child workflow calls.
+		remainder := fs.Args()
+		if len(remainder) < 1 {
+			fmt.Fprintf(os.Stderr, "Usage: cleat lock [--db <conn>] [--update] <package>\n")
+			os.Exit(1)
+		}
+		pattern := remainder[0]
+		_, _, _, _, usage, _ := analyze(pattern)
+		children = usage.Children
+	}
+
+	if len(children) == 0 {
+		fmt.Println("No child workflow calls detected. Nothing to lock.")
+		return
+	}
+
+	db, err := sql.Open("postgres", connStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot connect to database: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resolved, err := wasm.ResolveChildVersionsFromDB(ctx, db, children)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: resolving child workflow versions: %v\n", err)
+		os.Exit(1)
+	}
+
+	entries := make(map[string]wasm.LockEntry, len(resolved))
+	for name, v := range resolved {
+		entries[name] = wasm.LockEntry{Version: v}
+	}
+	lf := &wasm.LockFile{
+		Version: wasm.LockFileVersion,
+		Entries: entries,
+	}
+	if err := wasm.WriteLockFile(".", lf); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: writing %s: %v\n", wasm.LockFileName, err)
+		os.Exit(1)
+	}
+	fmt.Printf("Wrote %s with %d child workflow version(s)\n", wasm.LockFileName, len(entries))
+	for name, v := range resolved {
+		fmt.Printf("  %s: v%d\n", name, v)
 	}
 }

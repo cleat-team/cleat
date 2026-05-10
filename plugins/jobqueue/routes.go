@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // RegisterRoutes registers the job queue HTTP handlers on the given mux.
@@ -100,10 +101,10 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		defName = &req.DefName
 	}
 
-	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO task_queue (tenant_id, queue_name, job_id, payload, def_name, input)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, tid, queueName, jobID, req.Payload, defName, req.Input)
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+			INSERT INTO task_queue (tenant_id, queue_name, job_id, payload, def_name, input)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, p.dialect), tid, queueName, jobID, req.Payload, defName, req.Input)
 	if err != nil {
 		p.logger.Error("jobqueue: enqueue", "error", err)
 		p.writeError(w, 500, "failed to enqueue job")
@@ -149,10 +150,10 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := `
-		SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
-		FROM task_queue
-		WHERE tenant_id = $1 AND queue_name = $2
-	`
+			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
+			FROM task_queue
+			WHERE tenant_id = $1 AND queue_name = $2
+		`
 	args := []interface{}{tid, queueName}
 	argIdx := 3
 
@@ -166,7 +167,7 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	query += fmt.Sprintf(" LIMIT $%d", argIdx)
 	args = append(args, limit)
 
-	rows, err := p.db.QueryContext(r.Context(), query, args...)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
 	if err != nil {
 		p.logger.Error("jobqueue: list jobs", "error", err)
 		p.writeError(w, 500, "failed to list jobs")
@@ -233,11 +234,11 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	var payloadRaw []byte
 	var startedAt, completedAt sql.NullTime
 
-	err = p.db.QueryRowContext(r.Context(), `
-		SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
-		FROM task_queue
-		WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3
-	`, tid, queueName, jobID).Scan(
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
+			FROM task_queue
+			WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3
+		`, p.dialect), tid, queueName, jobID).Scan(
 		&j.JobID, &j.QueueName, &j.Status,
 		&payloadRaw, &j.CreatedAt,
 		&startedAt, &completedAt,
@@ -285,17 +286,16 @@ func (p *Plugin) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
-		UPDATE task_queue
-		SET status = 'failed', completed_at = now()
-		WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3 AND status = 'pending'
-	`, tid, queueName, jobID)
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+			UPDATE task_queue
+			SET status = 'failed', completed_at = now()
+			WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3 AND status = 'pending'
+		`, p.dialect), tid, queueName, jobID)
 	if err != nil {
 		p.logger.Error("jobqueue: cancel job", "job_id", jobIDStr, "error", err)
 		p.writeError(w, 500, "failed to cancel job")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "job not found or not pending")
 		return

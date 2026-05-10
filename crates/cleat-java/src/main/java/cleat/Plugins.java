@@ -917,7 +917,11 @@ public class Plugins {
         }
         sb.append("}");
 
-        String response = host.pluginCall("blobstore", "put", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("blobstore", "put", sb.toString());
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(blobstore.put) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return BlobPutResult.fromJson(response);
     }
 
@@ -930,7 +934,11 @@ public class Plugins {
      */
     public BlobGetResult blobstoreGet(String key) {
         String input = "{\"key\":\"" + JsonHelper.escapeJson(key) + "\"}";
-        String response = host.pluginCall("blobstore", "get", input);
+        CleatResult<String> pluginResult = host.pluginCall("blobstore", "get", input);
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(blobstore.get) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return BlobGetResult.fromJson(response);
     }
 
@@ -949,7 +957,11 @@ public class Plugins {
     public AwaitEventResult awaitEvent(String eventType, long timeoutMs) {
         String input = "{\"event_type\":\"" + JsonHelper.escapeJson(eventType)
             + "\",\"timeout_ms\":" + timeoutMs + "}";
-        String response = host.pluginCall("eventtriggers", "await_event", input);
+        CleatResult<String> pluginResult = host.pluginCall("eventtriggers", "await_event", input);
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(eventtriggers.await_event) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return AwaitEventResult.fromJson(response);
     }
 
@@ -974,7 +986,11 @@ public class Plugins {
         }
         sb.append("}");
 
-        String response = host.pluginCall("featureflags", "evaluate_flag", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("featureflags", "evaluate_flag", sb.toString());
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(featureflags.evaluate_flag) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return EvaluateFlagResult.fromJson(response);
     }
 
@@ -1006,7 +1022,11 @@ public class Plugins {
         }
         sb.append("}");
 
-        String response = host.pluginCall("kafkaconnect", "produce", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("kafkaconnect", "produce", sb.toString());
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(kafkaconnect.produce) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return ProduceResult.fromJson(response);
     }
 
@@ -1036,7 +1056,11 @@ public class Plugins {
         }
         sb.append("}");
 
-        String response = host.pluginCall("notifications", "send_webhook", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("notifications", "send_webhook", sb.toString());
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(notifications.send_webhook) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return SendWebhookResult.fromJson(response);
     }
 
@@ -1069,7 +1093,11 @@ public class Plugins {
         }
         sb.append("}");
 
-        String response = host.pluginCall("pagerdutyalert", "trigger_incident", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("pagerdutyalert", "trigger_incident", sb.toString());
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(pagerdutyalert.trigger_incident) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return TriggerIncidentResult.fromJson(response);
     }
 
@@ -1084,7 +1112,11 @@ public class Plugins {
     public ResolveIncidentResult resolveIncident(String configId, String incidentKey) {
         String input = "{\"config_id\":\"" + JsonHelper.escapeJson(configId)
             + "\",\"incident_key\":\"" + JsonHelper.escapeJson(incidentKey) + "\"}";
-        String response = host.pluginCall("pagerdutyalert", "resolve_incident", input);
+        CleatResult<String> pluginResult = host.pluginCall("pagerdutyalert", "resolve_incident", input);
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(pagerdutyalert.resolve_incident) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return ResolveIncidentResult.fromJson(response);
     }
 
@@ -1119,7 +1151,11 @@ public class Plugins {
         }
         sb.append("}");
 
-        String response = host.pluginCall("slacknotify", "send_message", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("slacknotify", "send_message", sb.toString());
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(slacknotify.send_message) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return SendMessageResult.fromJson(response);
     }
 
@@ -1143,7 +1179,11 @@ public class Plugins {
         }
         sb.append("}");
 
-        String response = host.pluginCall("webhookingest", "await_webhook", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("webhookingest", "await_webhook", sb.toString());
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(webhookingest.await_webhook) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return AwaitWebhookResult.fromJson(response);
     }
 
@@ -1179,7 +1219,11 @@ public class Plugins {
         }
         sb.append("}");
 
-        String response = host.pluginCall("llm", "chat", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("llm", "chat", sb.toString());
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(llm.chat) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
         return LlmChatResult.fromJson(response);
     }
 
@@ -1206,7 +1250,11 @@ public class Plugins {
         }
         sb.append("]}");
 
-        String response = host.pluginCall("llm", "embed", sb.toString());
+        CleatResult<String> pluginResult = host.pluginCall("llm", "embed", sb.toString());
+        if (pluginResult.isErr()) {
+            throw new RuntimeException("plugin_call(llm.embed) failed: " + pluginResult.getError());
+        }
+        String response = pluginResult.getValue();
 
         // Parse response: {"embeddings": [[0.1, 0.2, ...], [0.3, 0.4, ...]]}
         String rawEmbeddings = extractJsonValue(response, "embeddings");

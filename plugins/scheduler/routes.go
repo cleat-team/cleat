@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -122,10 +123,10 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	id := uuid.New()
 
-	_, err := p.db.ExecContext(r.Context(), `
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 		INSERT INTO schedules (tenant_id, id, name, cron, workflow_name, input, enabled, next_run_at, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
-	`, tid, id, req.Name, req.Cron, req.WorkflowName, inputBytes, enabled, next)
+	`, p.dialect), tid, id, req.Name, req.Cron, req.WorkflowName, inputBytes, enabled, next)
 	if err != nil {
 		p.logger.Error("scheduler: create", "error", err)
 		p.writeError(w, 500, "failed to create schedule")
@@ -152,12 +153,12 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.QueryContext(r.Context(), `
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
 		SELECT id, name, cron, workflow_name, input, enabled, last_run_at, next_run_at, created_at, updated_at
 		FROM schedules
 		WHERE tenant_id = $1
 		ORDER BY created_at DESC
-	`, tid)
+	`, p.dialect), tid)
 	if err != nil {
 		p.logger.Error("scheduler: list", "error", err)
 		p.writeError(w, 500, "failed to list schedules")
@@ -200,11 +201,11 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var s schedule
-	err = p.db.QueryRowContext(r.Context(), `
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT id, name, cron, workflow_name, input, enabled, last_run_at, next_run_at, created_at, updated_at
 		FROM schedules
 		WHERE id = $1 AND tenant_id = $2
-	`, id, tid).Scan(
+	`, p.dialect), id, tid).Scan(
 		&s.ID, &s.Name, &s.Cron, &s.WorkflowName,
 		&s.Input, &s.Enabled, &s.LastRunAt, &s.NextRunAt,
 		&s.CreatedAt, &s.UpdatedAt,
@@ -247,9 +248,9 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Fetch the existing schedule to determine the cron expression.
 	var currentCron string
 	var currentEnabled bool
-	err = p.db.QueryRowContext(r.Context(), `
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT cron, enabled FROM schedules WHERE id = $1 AND tenant_id = $2
-	`, id, tid).Scan(&currentCron, &currentEnabled)
+	`, p.dialect), id, tid).Scan(&currentCron, &currentEnabled)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "schedule not found")
 		return
@@ -322,7 +323,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	query += fmt.Sprintf(" WHERE id = $%d AND tenant_id = $%d", argIdx, argIdx+1)
 	args = append(args, id, tid)
 
-	_, err = p.db.ExecContext(r.Context(), query, args...)
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
 	if err != nil {
 		p.logger.Error("scheduler: update", "id", id, "error", err)
 		p.writeError(w, 500, "failed to update schedule")
@@ -349,15 +350,14 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
 		DELETE FROM schedules WHERE id = $1 AND tenant_id = $2
-	`, id, tid)
+	`, p.dialect), id, tid)
 	if err != nil {
 		p.logger.Error("scheduler: delete", "id", id, "error", err)
 		p.writeError(w, 500, "failed to delete schedule")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "schedule not found")
 		return
@@ -385,9 +385,9 @@ func (p *Plugin) handleTrigger(w http.ResponseWriter, r *http.Request) {
 
 	var name, cron, workflowName string
 	var inputBytes []byte
-	err = p.db.QueryRowContext(r.Context(), `
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT name, cron, workflow_name, input FROM schedules WHERE id = $1 AND tenant_id = $2
-	`, id, tid).Scan(&name, &cron, &workflowName, &inputBytes)
+	`, p.dialect), id, tid).Scan(&name, &cron, &workflowName, &inputBytes)
 	if err == sql.ErrNoRows {
 		p.writeError(w, 404, "schedule not found")
 		return

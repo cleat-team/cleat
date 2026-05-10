@@ -50,6 +50,9 @@
 import { HostCalls } from "./host-calls";
 import { isWorkflowSuspended } from "./memory";
 
+/** Function signature for compensate callbacks. */
+type CompensateFn = (h: HostCalls) => void;
+
 /**
  * A single saga step with its forward action and compensation function.
  *
@@ -71,7 +74,7 @@ export class SagaStep {
      * Compensation action. Takes a HostCalls. Called when a later
      * step fails. Pass null for steps with no meaningful compensation.
      */
-    public readonly compensate: (h: HostCalls) => void | null,
+    public readonly compensate: CompensateFn | null,
   ) {}
 }
 
@@ -105,7 +108,7 @@ export class Saga {
   addStep(
     description: string,
     forward: (h: HostCalls) => string,
-    compensate: (h: HostCalls) => void | null,
+    compensate: CompensateFn | null,
   ): Saga {
     this.steps.push(new SagaStep(description, forward, compensate));
     return this;

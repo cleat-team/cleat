@@ -31,10 +31,11 @@ func init() {
 
 // Plugin implements webhook delivery with retry and delivery tracking.
 type Plugin struct {
-db         plugin.DB
+	db         plugin.PluginDB
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config
+	dialect    plugin.Dialect
 }
 
 // Config controls notifications plugin behaviour.
@@ -62,6 +63,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	}
 
 	p.db = env.DB
+	p.dialect = env.Dialect
 	p.httpClient = &http.Client{
 		Timeout: 30 * time.Second,
 	}

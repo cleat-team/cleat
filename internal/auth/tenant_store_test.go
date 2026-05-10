@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // --- TenantStore tests ------------------------------------------------------
@@ -322,7 +323,7 @@ func TestTenantStore_RevokeAPIKey_RevokedKeyCannotAuthenticate(t *testing.T) {
 
 	// Verify the key works before revocation.
 	hash := sha256.Sum256([]byte(rawKey))
-	_, err = TenantFromAPIKey(context.Background(), db, hash[:])
+	_, err = TenantFromAPIKey(context.Background(), host.NewPostgresStore(db), hash[:])
 	if err != nil {
 		t.Fatalf("expected key to work before revoke: %v", err)
 	}
@@ -339,7 +340,7 @@ func TestTenantStore_RevokeAPIKey_RevokedKeyCannotAuthenticate(t *testing.T) {
 	}
 
 	// Verify the key no longer authenticates.
-	_, err = TenantFromAPIKey(context.Background(), db, hash[:])
+	_, err = TenantFromAPIKey(context.Background(), host.NewPostgresStore(db), hash[:])
 	if err == nil {
 		t.Fatal("expected error for revoked key in TenantFromAPIKey")
 	}
@@ -436,7 +437,7 @@ func TestStoreAndMiddleware_EndToEnd(t *testing.T) {
 	// Now use the middleware with the same DB.
 	var gotTenant uuid.UUID
 	var gotOK bool
-	mw := Middleware(db)
+	mw := Middleware(host.NewPostgresStore(db))
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotTenant, gotOK = TenantIDFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)

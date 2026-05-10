@@ -6,7 +6,27 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/rcownie/cleat/internal/plugin"
 )
+
+// dueSchedulesQuery provides dialect-specific FOR UPDATE SKIP LOCKED equivalents.
+var dueSchedulesQuery = plugin.Query{
+	Default: `
+		SELECT id, tenant_id, name, cron, workflow_name, input, next_run_at
+		FROM schedules
+		WHERE enabled = true AND next_run_at <= now()
+		FOR UPDATE SKIP LOCKED`,
+	MySQL: `
+		SELECT id, tenant_id, name, cron, workflow_name, input, next_run_at
+		FROM schedules
+		WHERE enabled = true AND next_run_at <= NOW()
+		FOR UPDATE SKIP LOCKED`,
+	MSSQL: `
+		SELECT id, tenant_id, name, cron, workflow_name, input, next_run_at
+		FROM schedules WITH (UPDLOCK, READPAST, ROWLOCK)
+		WHERE enabled = true AND next_run_at <= now()`,
+}
 
 // Run starts the background scheduler loop. Every 60 seconds it queries the
 // schedules table for enabled schedules whose next_run_at <= now() and
@@ -59,12 +79,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 // the next future run from the cron expression and updates next_run_at and
 // last_run_at. Returns (schedulesDue, workflowsStarted, workflowsFailed).
 func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT id, tenant_id, name, cron, workflow_name, input, next_run_at
-		FROM schedules
-		WHERE enabled = true AND next_run_at <= now()
-		FOR UPDATE SKIP LOCKED
-	`)
+	rows, err := p.db.Query(ctx, plugin.Rebind(dueSchedulesQuery.For(p.dialect), p.dialect))
 	if err != nil {
 		p.logger.Error("scheduler: query due schedules", "error", err)
 		return 0, 0, 0
@@ -131,11 +146,11 @@ func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
 			nextRunAtUpdate = &next
 		}
 
-		_, err := p.db.ExecContext(ctx, `
+		_, err := p.db.Exec(ctx, plugin.Rebind(`
 			UPDATE schedules
 			SET last_run_at = $1, next_run_at = $2, updated_at = now()
 			WHERE id = $3
-		`, now, nextRunAtUpdate, id)
+		`, p.dialect), now, nextRunAtUpdate, id)
 		if err != nil {
 			p.logger.Error("scheduler: update schedule after trigger",
 				"id", id, "error", err)

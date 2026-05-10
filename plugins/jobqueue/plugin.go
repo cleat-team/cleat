@@ -25,10 +25,11 @@ func init() {
 
 // Plugin implements a standalone job queue with tenant isolation.
 type Plugin struct {
-db     plugin.DB
-	mux    *http.ServeMux
-	logger *slog.Logger
-	env    *plugin.Environment
+	db      plugin.PluginDB
+	mux     *http.ServeMux
+	logger  *slog.Logger
+	env     *plugin.Environment
+	dialect plugin.Dialect
 }
 
 // Info returns plugin metadata for discovery and documentation.
@@ -53,6 +54,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.mux = env.Mux
+	p.dialect = env.Dialect
 
 	p.logger.Info("jobqueue: initialized")
 	return nil

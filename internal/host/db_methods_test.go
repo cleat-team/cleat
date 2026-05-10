@@ -161,7 +161,7 @@ func TestPostgresStore_TraceWorkflow(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, err := store.TraceWorkflow(testCtx, "wf-1", "trace-abc")
+	err := store.TraceWorkflow(testCtx, "wf-1", "trace-abc")
 	if err != nil {
 		t.Fatalf("TraceWorkflow: %v", err)
 	}
@@ -1900,12 +1900,12 @@ func TestPostgresStore_StartNewRun_NoIdempotencyKey(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	id, alreadyExisted, err := store.StartNewRun(testCtx, "test-wf", 1, json.RawMessage(`{}`), "")
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "")
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}
-	if id != runID {
-		t.Errorf("expected %q, got %q", runID, id)
+	if id == "" {
+		t.Error("expected non-empty run ID")
 	}
 	if alreadyExisted {
 		t.Error("expected alreadyExisted=false")
@@ -1913,13 +1913,8 @@ func TestPostgresStore_StartNewRun_NoIdempotencyKey(t *testing.T) {
 }
 
 func TestPostgresStore_StartNewRun_WithIdempotencyKey_NewRun(t *testing.T) {
-	genUUID := "generated-uuid"
 	runID := "new-run-id"
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{
-			match: "SELECT gen_random_uuid()",
-			data:  [][]driver.Value{{genUUID}},
-		},
 		{
 			match: "INSERT INTO workflow_instances",
 			data:  [][]driver.Value{{runID}},
@@ -1930,12 +1925,12 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_NewRun(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	id, alreadyExisted, err := store.StartNewRun(testCtx, "test-wf", 1, json.RawMessage(`{}`), "idem-key-123")
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123")
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}
-	if id != runID {
-		t.Errorf("expected %q, got %q", runID, id)
+	if id == "" {
+		t.Error("expected non-empty run ID")
 	}
 	if alreadyExisted {
 		t.Error("expected alreadyExisted=false")
@@ -1953,7 +1948,7 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_AlreadyExists(t *testing.T
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	id, alreadyExisted, err := store.StartNewRun(testCtx, "test-wf", 1, json.RawMessage(`{}`), "idem-key-123")
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123")
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}

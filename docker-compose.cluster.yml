@@ -131,6 +131,46 @@ services:
       - cleat-cluster
     restart: unless-stopped
 
+  mysql:
+    image: mysql:8.4
+    container_name: cleat-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: cleat
+      MYSQL_DATABASE: cleat
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    volumes:
+      - mysqldata:/var/lib/mysql
+    networks:
+      - cleat-cluster
+    ports:
+      - "3306:3306"
+    restart: unless-stopped
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: cleat-mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "CleatTest123!"
+    healthcheck:
+      test: ["CMD", "/opt/mssql-tools18/bin/sqlcmd", "-S", "localhost", "-U", "sa", "-P", "CleatTest123!", "-Q", "SELECT 1", "-C"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+    volumes:
+      - mssqldata:/var/opt/mssql
+    networks:
+      - cleat-cluster
+    ports:
+      - "1433:1433"
+    restart: unless-stopped
+
 networks:
   cleat-cluster:
     name: cleat-cluster
@@ -138,4 +178,8 @@ networks:
 
 volumes:
   pgdata:
+    driver: local
+  mysqldata:
+    driver: local
+  mssqldata:
     driver: local

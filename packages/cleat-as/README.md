@@ -5,7 +5,7 @@ workflows that compile to WebAssembly.  Re-exports from `assembly/index.ts`:
 
 - `memory.ts` -- Memory layout constants, string I/O, bit-packing decoders
 - `host-calls.ts` -- Raw `@external` import declarations and the `HostCalls` class
-- `durable-entry.ts` -- `@durableEntry` marker decorator for workflow entry points
+- `cleat-entry.ts` -- `@cleatEntry` marker decorator for workflow entry points
 - `plugins.ts` -- Typed convenience wrappers for all 8 plugins (18 functions)
 
 ## Unit Differences (Cleat vs. Other Frameworks)
@@ -14,12 +14,12 @@ Cleat uses **milliseconds** for all time-related host calls. This is important w
 
 | Framework | Sleep Unit | Example |
 |-----------|-----------|---------|
-| **Cleat** | milliseconds | `h.durableSleep(5000)` = 5 seconds |
+| **Cleat** | milliseconds | `h.cleatSleep(5000)` = 5 seconds |
 | **Temporal** | Go: `time.Duration`, Java: `Duration` | `sleep(Duration.ofSeconds(5))` |
 | **DBOS** | seconds | `DBOS.sleepSeconds(5)` |
 | **Restate** | SDK-dependent | `Duration.ofSeconds(5)` |
 
-Cleat's `durableSleep(durationMs)` always takes **milliseconds**, consistent with the WASM host ABI which uses `i64` milliseconds for all timing operations.
+Cleat's `cleatSleep(durationMs)` always takes **milliseconds**, consistent with the WASM host ABI which uses `i64` milliseconds for all timing operations.
 
 ## AssemblyScript constraints
 
@@ -49,7 +49,7 @@ Use explicit, concrete types everywhere.
 ### No `try`/`catch`
 
 The stub runtime has no exception handling.  All errors from host functions are
-communicated via return values (`DurableCallOutcome.isError`,
+communicated via return values (`CleatCallOutcome.isError`,
 `DurableResult.isError`, etc.).  Check these instead of using try/catch.
 
 ### Template literal limitations
@@ -116,7 +116,7 @@ See `assembly/json.ts` for the full API reference.
 ### No `async`/`await`
 
 Cleat workflows use a synchronous-but-suspendable execution model.  Instead of
-async/await, call blocking host functions (`durableCall`, `durableSleep`, etc.)
+async/await, call blocking host functions (`cleatCall`, `cleatSleep`, etc.)
 directly.  The host suspends and resumes the WASM instance transparently.
 
 ### String concatenation and memory churn in WASM
@@ -177,12 +177,12 @@ every host call, so save any needed data before making the next call.
 
 Workflows communicate with external systems via the **host service** pattern.
 Services are registered on the host runtime (not in the WASM module) and
-invoked through `durableCall(service, operation, requestJSON)`:
+invoked through `cleatCall(service, operation, requestJSON)`:
 
 ```ts
 // service is the logical service name, operation is the specific action
-let resp = h.durableCall("payment", "charge", paymentJSON);
-let result = h.durableCall("inventory", "reserve", itemsJSON);
+let resp = h.cleatCall("payment", "charge", paymentJSON);
+let result = h.cleatCall("inventory", "reserve", itemsJSON);
 ```
 
 #### Service registration
@@ -194,7 +194,7 @@ service name, operation, and JSON request/response contract:
 ```
 WASM workflow                  host runtime                    service
     |                              |                             |
-    |--- durableCall("inventory",  |                             |
+    |--- cleatCall("inventory",  |                             |
     |    "reserve", requestJSON) -->|                             |
     |                              |--- HTTP/RPC/gRPC ---------->|
     |                              |<--- response JSON ----------|
@@ -218,31 +218,31 @@ function reserveItem(h: HostCalls, sku: string, qty: i32): string {
         + "\"sku\":\"" + sku + "\","
         + "\"quantity\":" + qty.toString()
         + "}";
-    let resp = h.durableCall("inventory", "reserve", req);
+    let resp = h.cleatCall("inventory", "reserve", req);
     return resp; // caller parses the response
 }
 ```
 
 #### Error handling conventions
 
-Services communicate errors through the `DurableCallOutcome` response:
+Services communicate errors through the `CleatCallOutcome` response:
 
 ```ts
-let outcome = h.durableCallWithRetry("payment", "charge", requestJSON);
+let outcome = h.cleatCall("payment", "charge", requestJSON);
 if (outcome.isError) {
     // The error is retryable if the host says so.
     // Check outcome.errCode for structured classification.
-    h.durableLog("payment failed: " + outcome.error + " (code=" + outcome.errCode.toString() + ")");
+    h.log("payment failed: " + outcome.error + " (code=" + outcome.errCode.toString() + ")");
     return "{\"error\": \"payment failed\"}";
 }
 let response = outcome.response;
 ```
 
 Per-call timeouts are available via the `timeoutMs` parameter on
-`durableCall()`:
+`cleatCall()`:
 ```ts
 // Abort after 5 seconds:
-let outcome = h.durableCall("slow-service", "query", requestJSON, 5000);
+let outcome = h.cleatCall("slow-service", "query", requestJSON, 5000);
 ```
 
 When the timeout is exceeded, the host returns an error with a timeout
@@ -326,28 +326,28 @@ export function cancelOrder(argsPtr: usize, argsLen: i32, outPtr: usize, maxOutL
 Each exported function becomes a named WASM export. The host dispatches
 incoming workflow invocations by matching the export name to the workflow name.
 
-### `@durableEntry` decorator pattern
+### `@cleatEntry` decorator pattern
 
-Alternatively, use the `@durableEntry` decorator with the cleat-as transformer
+Alternatively, use the `@cleatEntry` decorator with the cleat-as transformer
 plugin (requires the `--transform` flag in your `asc` command):
 
 ```ts
 // assembly/index.ts
-import { HostCalls, durableEntry } from "@cleat/sdk";
+import { HostCalls, cleatEntry } from "@cleat/sdk";
 
-@durableEntry
+@cleatEntry
 export function placeOrder(h: HostCalls, input: string): string {
   // ... workflow body ...
   return result;
 }
 
-@durableEntry
+@cleatEntry
 export function cancelOrder(h: HostCalls, input: string): string {
   // ... cancellation body ...
   return result;
 }
 
-@durableEntry
+@cleatEntry
 export function getOrderStatus(h: HostCalls, input: string): string {
   // ... query logic ...
   return result;
@@ -362,10 +362,10 @@ the ABI-compatible wrapper code.
 
 When `asc` runs with `--transform ./node_modules/@cleat/transform/index.js`, the
 cleat transform plugin performs the following steps for each function decorated
-with `@durableEntry`:
+with `@cleatEntry`:
 
 1. **Parsing** -- The transform parses the AssemblyScript AST to find all exported
-   functions annotated with `@durableEntry`.
+   functions annotated with `@cleatEntry`.
 
 2. **Wrapper generation** -- For each decorated function, the transform generates
    an ABI export wrapper with the correct signature. The wrapper:
@@ -380,7 +380,7 @@ with `@durableEntry`:
 
 4. **Suspension handling** -- The wrapper wraps the function call in a
    `catch_unwind`-like mechanism. If the workflow suspends (via
-   `durableSleep`/`durableSignal` on a first execution), the wrapper returns
+   `cleatSleep`/`cleatCall` on a first execution), the wrapper returns
    the `SUSPEND_SENTINEL` value to the host runtime.
 
 For the transform to run, your `asc` command must include the `--transform` flag:
@@ -483,10 +483,10 @@ relative paths shown above for maximum compatibility.
 ## Per-call timeout limitations
 
 Per-call timeouts are **under development** and not yet enforced on the host
-side during WASM execution. The `durableCallWithRetry` host import does not
+side during WASM execution. The `cleatCall` host import does not
 accept a timeout parameter.
 
-**Workaround:** Use `durableSleep` + polling for timeout-aware patterns:
+**Workaround:** Use `cleatSleep` + polling for timeout-aware patterns:
 
 ```ts
 import { HostCalls } from "./host-calls";
@@ -502,12 +502,12 @@ function callWithTimeout(
     let lastError: string = "";
 
     while (h.now() < deadline) {
-        let result = h.durableCall(service, operation, requestJSON);
+        let result = h.cleatCall(service, operation, requestJSON);
         if (!result.isError) {
             return result.response;
         }
         lastError = result.error;
-        h.durableSleep(1000); // poll interval
+        h.cleatSleep(1000); // poll interval
     }
 
     throw new Error("timed out: " + lastError);

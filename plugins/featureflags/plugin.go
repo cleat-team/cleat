@@ -22,10 +22,11 @@ func init() {
 // Plugin implements feature flag evaluation with targeting rules and
 // gradual rollout for the cleat durable execution engine.
 type Plugin struct {
-db     plugin.DB
-	mux    *http.ServeMux
-	logger *slog.Logger
-	config Config
+	db      plugin.PluginDB
+	mux     *http.ServeMux
+	logger  *slog.Logger
+	config  Config
+	dialect plugin.Dialect
 }
 
 // Config controls feature flag plugin behavior.
@@ -54,6 +55,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.mux = env.Mux
+	p.dialect = env.Dialect
 
 	// Parse config. If no config provided, use safe defaults.
 	if len(env.Config) > 0 {

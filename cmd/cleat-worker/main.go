@@ -40,13 +40,12 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/lib/pq"
-
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
 	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/migration"
 	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/rcownie/cleat/internal/wasm"
 	"golang.org/x/time/rate"
 
 	// Plugins
@@ -94,6 +93,8 @@ func main() {
 	retentionDays := flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables)")
 	wasmCacheMaxEntries := flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
 	wasmCacheMaxMB := flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
+	schemaName := flag.String("schema", "public", "PostgreSQL schema for cleat tables (default \"public\"). Sets search_path on connections; CREATE SCHEMA IF NOT EXISTS on startup.")
+	peerSchemas := flag.String("peer-schemas", "", "Comma-separated list of peer cleat schemas this instance can interact with (cross-instance child workflows, signals)")
 	flag.Parse()
 
 	// Auto-enable redaction when --require-auth is set (authentication implies
@@ -155,15 +156,64 @@ func main() {
 		ratelim       *ipRateLimiter
 	)
 
+	defaultTenantID := "00000000-0000-0000-0000-000000000000"
+
 	var store host.WorkflowStore
 	var db *sql.DB
 	var tenantPools *plugin.TenantPools
+	var factory host.StoreFactory
 	if *shardsFile != "" {
 		configs, err := loadShardConfigs(*shardsFile)
 		if err != nil {
 			log.Fatalf("[worker %s] Failed to load shards config: %v", workerID, err)
 		}
-		shardedStore, err := host.NewShardedStore(ctx, configs, taskQueues...)
+		// Apply --schema flag to shards without an explicit schema.
+		for i := range configs {
+			if configs[i].Schema == "" {
+				configs[i].Schema = *schemaName
+			}
+		}
+
+		// Build stores, DB connections, and closers for each shard.
+		stores := make([]host.WorkflowStore, len(configs))
+		closers := make([]func() error, len(configs))
+		shardDBs := make([]*sql.DB, len(configs))
+		for i, cfg := range configs {
+			dsn := cfg.ConnStr
+			if cfg.Schema != "" && cfg.Schema != "public" && !strings.Contains(dsn, "search_path=") {
+				sep := "?"
+				if strings.Contains(dsn, "?") {
+					sep = "&"
+			}
+				dsn = dsn + sep + "search_path=" + cfg.Schema
+			}
+			sdb, err := sql.Open("postgres", dsn)
+			if err != nil {
+				log.Fatalf("[worker %s] shard %q open: %v", workerID, cfg.Name, err)
+			}
+			if err := sdb.PingContext(ctx); err != nil {
+				sdb.Close()
+				log.Fatalf("[worker %s] shard %q ping: %v", workerID, cfg.Name, err)
+			}
+			sdb.SetMaxOpenConns(15)
+			sdb.SetMaxIdleConns(5)
+			sdb.SetConnMaxLifetime(5 * time.Minute)
+
+			shardDBs[i] = sdb
+			f := host.NewPostgresStoreFactory(sdb, cfg.Schema)
+			if i == 0 {
+				factory = f
+			}
+			s, closer, err := f.OpenStore(ctx, defaultTenantID, taskQueues...)
+			if err != nil {
+				sdb.Close()
+				log.Fatalf("[worker %s] shard %q open store: %v", workerID, cfg.Name, err)
+			}
+			stores[i] = s
+			closers[i] = closer.Close
+		}
+
+		shardedStore, err := host.NewShardedStore(configs, stores, closers)
 		if err != nil {
 			log.Fatalf("[worker %s] Failed to create sharded store: %v", workerID, err)
 		}
@@ -173,13 +223,13 @@ func main() {
 		// Use the first shard's database for plugin migrations and
 		// administration. Plugin tables (event_subscriptions,
 		// webhook_sources, etc.) live on this shard.
-		if len(shardedStore.Shards()) > 0 {
-			db = shardedStore.Shards()[0].DB
+		if len(shardDBs) > 0 {
+			db = shardDBs[0]
 		}
 
 		// Start idempotency key cleanup on each shard.
-		for _, shard := range shardedStore.Shards() {
-			go idempotencyCleanupLoop(ctx, shard.DB, 1*time.Hour)
+		for _, sdb := range shardDBs {
+			go idempotencyCleanupLoop(ctx, sdb, 1*time.Hour)
 		}
 	} else {
 		if *dbURL == "" {
@@ -191,7 +241,8 @@ func main() {
 		}
 
 		var err error
-		db, err = sql.Open("postgres", *dbURL)
+		dbDSN := dsnWithSchema(*dbURL, *schemaName)
+		db, err = sql.Open("postgres", dbDSN)
 		if err != nil {
 			log.Fatalf("[worker %s] Failed to connect to database: %v", workerID, err)
 		}
@@ -200,7 +251,12 @@ func main() {
 		db.SetMaxOpenConns(*concurrency + 5)
 		db.SetMaxIdleConns(5)
 		db.SetConnMaxLifetime(5 * time.Minute)
-		store = host.NewPostgresStore(db, taskQueues...)
+		factory = host.NewPostgresStoreFactory(db, *schemaName)
+		s, _, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
+		if err != nil {
+			log.Fatalf("[worker %s] Failed to open store: %v", workerID, err)
+		}
+		store = s
 
 		// Start periodic cleanup of expired idempotency keys.
 		go idempotencyCleanupLoop(ctx, db, 1*time.Hour)
@@ -232,11 +288,12 @@ func main() {
 	}
 
 	pluginEnv := &plugin.Environment{
-		DB:     db,
+		DB:     &host.SQLDBAdapter{DB: db},
 		Mux:    plugMux,
 		Config: rawPluginConfig,
 		Logger: slog.Default(),
 		Done:   ctx.Done(),
+		Dialect: plugin.Dialect(factory.Dialect()),
 		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
 			versions, err := store.ListVersions(ctx, defName)
 			if err != nil {
@@ -245,7 +302,7 @@ func main() {
 			if len(versions) == 0 {
 				return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
 			}
-			runID, _, err := store.StartNewRun(ctx, defName, versions[0], input, "")
+			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "")
 			return runID, err
 		},
 
@@ -261,12 +318,12 @@ func main() {
 	}
 
 		// Run core schema migrations before plugin migrations.
-		migrator := migration.NewRunner(db, "migrations")
+		migrator := migration.NewRunner(db, factory.Dialect(), "migrations")
 		if err := migrator.Run(ctx); err != nil {
 			log.Fatalf("[worker %s] core migrations: %v", workerID, err)
 		}
 
-	if err := plugin.RunMigrations(ctx, db, nil, plugList); err != nil {
+	if err := plugin.RunMigrations(ctx, db, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
 		log.Fatalf("[worker %s] plugin migrations: %v", workerID, err)
 	}
 
@@ -284,7 +341,7 @@ func main() {
 		case plugin.DatabaseAccessReadOnly:
 			envCopy.DB = &host.ReadOnlyDB{Inner: db}
 		default: // DatabaseAccessReadWrite or empty (backward compat)
-			envCopy.DB = db
+			envCopy.DB = &host.SQLDBAdapter{DB: db}
 		}
 		func() {
 			defer func() {
@@ -292,7 +349,7 @@ func main() {
 					lp.Healthy = false
 					lp.Error = fmt.Errorf("panic during Init: %v", r)
 					log.Printf("[worker %s] plugin %s init panicked: %v", workerID, lp.Plugin.Info().Name, r)
-				}
+			}
 			}()
 			if err := lp.Plugin.Init(ctx, &envCopy); err != nil {
 				lp.Healthy = false
@@ -354,7 +411,7 @@ func main() {
 				if berr := bg.Run(ctx); berr != nil {
 					log.Printf("[worker %s] plugin %s: background worker exited: %v",
 						workerID, bg.Info().Name, berr)
-				}
+			}
 			}(p)
 		}
 	}
@@ -376,6 +433,8 @@ func main() {
 			tenantPools:          tenantPools,
 			memorySampleRetention: *memorySampleRetention,
 			retentionDays:       *retentionDays,
+			schemaName:  *schemaName,
+			peerSchemas: parsePeerSchemas(*peerSchemas),
 			maxRetries:          *maxRetries,
 			redactionEnabled:    *redact,
 			drainCh:             make(chan struct{}),
@@ -426,10 +485,10 @@ func main() {
 				ps := pluginStatus{
 					PluginInfo: lp.Plugin.Info(),
 					Healthy:    lp.Healthy,
-				}
+			}
 				if lp.Error != nil {
 					ps.Error = lp.Error.Error()
-				}
+			}
 				statuses = append(statuses, ps)
 			}
 			json.NewEncoder(w).Encode(statuses)
@@ -448,7 +507,7 @@ func main() {
 					r.URL.Path = "/"
 			} else {
 					f.Close()
-				}
+			}
 				fileServer.ServeHTTP(w, r)
 			})
 		}
@@ -460,7 +519,7 @@ func main() {
 
 		// Wrap with auth middleware if --require-auth is true.
 		if *requireAuth {
-			handler = auth.Middleware(db)(handler)
+			handler = auth.Middleware(store)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			var keyCount int
@@ -481,7 +540,7 @@ func main() {
 					fmt.Println("Store this key securely. It will NOT be shown again.")
 					fmt.Printf("Use it in the Authorization header: Authorization: Bearer %s\n", key)
 					fmt.Println()
-				}
+			}
 			}
 		}
 
@@ -642,6 +701,8 @@ type Worker struct {
 	redactionEnabled    bool
 	memorySampleRetention int
 	retentionDays        int
+	schemaName           string
+	peerSchemas          []string
 
 	drainCh    chan struct{}
 	drainOnce  sync.Once
@@ -774,13 +835,13 @@ func (w *Worker) dispatchLoop() {
 				backoff := time.Duration(w.consecutiveDBErrors) * time.Second
 				if backoff > 30*time.Second {
 					backoff = 30 * time.Second
-				}
+			}
 				log.Printf("[worker %s] DB unreachable during sticky claim, backing off %v", w.id, backoff)
 				select {
 				case <-w.ctx.Done():
 					return
 				case <-time.After(backoff):
-				}
+			}
 				continue
 			}
 			log.Printf("[worker %s] sticky claim error: %v", w.id, err)
@@ -801,15 +862,15 @@ func (w *Worker) dispatchLoop() {
 					backoff := time.Duration(w.consecutiveDBErrors) * time.Second
 					if backoff > 30*time.Second {
 						backoff = 30 * time.Second
-					}
+			}
 					log.Printf("[worker %s] DB unreachable during claim, backing off %v", w.id, backoff)
 					select {
 					case <-w.ctx.Done():
 						return
 					case <-time.After(backoff):
-					}
+			}
 					continue
-				}
+			}
 				log.Printf("[worker %s] claim error: %v", w.id, err)
 				time.Sleep(time.Second)
 				continue
@@ -881,7 +942,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	// ---- Assign trace ID ----
 	traceID := generateTraceID()
 	if true {
-		if _, err := w.store.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
+		if err := w.store.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
 			log.Printf("[worker %s] %s: failed to set trace_id: %v", w.id, wf.ID, err)
 		}
 	}
@@ -942,15 +1003,23 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 	defer rt.Close(w.ctx)
 
+	// Extract child version pins from WASM metadata (compile-time resolution).
+	var childVersions map[string]int
+	if wfMeta, err := wasm.ReadMetadata(wasmBytes); err == nil {
+		childVersions = wfMeta.ChildVersions
+	}
+
 	caller := &dbServiceCaller{store: w.store, workerID: w.id}
 	engineOpts := []host.EngineOption{
 		host.WithSignalStore(w.store.(host.SignalStore)),
-		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion}),
+		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, childVersions: childVersions}),
 		host.WithWorkflowID(wf.ID),
 		host.WithTenantID(wf.TenantID),
 		host.WithChildWorkflowStore(w.store),
 		host.WithPluginRegistry(w.pluginRegistry),
 		host.WithMaxRetryAttempts(w.maxRetries),
+			host.WithSchema(w.schemaName),
+			host.WithPeerSchemas(w.peerSchemas),
 	}
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
@@ -1031,7 +1100,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 					log.Printf("[worker %s] DB down saving events for %s — releasing", w.id, wf.ID)
 					w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
 					return
-				}
+			}
 				log.Printf("[worker %s] %s: save events error: %v", w.id, wf.ID, err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
@@ -1041,7 +1110,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				if errors.As(err, &ce) {
 					errorCode = ce.Code.String()
 					errorOp = ce.Op
-				}
+			}
 				w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), errorCode, errorOp, nil)
 				return
 			}
@@ -1132,7 +1201,7 @@ func (w *Worker) heartbeatLoop() {
 					log.Printf("[worker %s] BatchHeartbeat failed — DB appears down", w.id)
 				} else {
 					log.Printf("[worker %s] BatchHeartbeat error: %v", w.id, err)
-				}
+			}
 			} else {
 				backgroundLoopsTotal.WithLabelValues("heartbeat", "ok").Inc()
 			}
@@ -1166,7 +1235,7 @@ func (w *Worker) reaperLoop() {
 					log.Printf("[worker %s] Reaper: DB appears down", w.id)
 			} else {
 					log.Printf("[worker %s] Reaper: %v", w.id, err)
-				}
+			}
 				backgroundLoopsTotal.WithLabelValues("reaper", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("reaper").Set(time.Since(reaperStart).Seconds())
 				continue
@@ -1199,7 +1268,7 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 					log.Printf("[worker %s] Concurrency key reaper: DB appears down", w.id)
 			} else {
 					log.Printf("[worker %s] Concurrency key reaper: %v", w.id, err)
-				}
+			}
 				backgroundLoopsTotal.WithLabelValues("concurrency_key_reaper", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("concurrency_key_reaper").Set(time.Since(ckStart).Seconds())
 				continue
@@ -1233,7 +1302,7 @@ func (w *Worker) scheduleLoop() {
 					log.Printf("[worker %s] Scheduler: DB appears down", w.id)
 			} else {
 					log.Printf("[worker %s] Scheduler: %v", w.id, err)
-				}
+			}
 				backgroundLoopsTotal.WithLabelValues("schedule", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("schedule").Set(time.Since(schStart).Seconds())
 				continue
@@ -1244,16 +1313,16 @@ func (w *Worker) scheduleLoop() {
 				input := sch.Input
 				if len(input) == 0 {
 					input = json.RawMessage("{}")
-				}
+			}
 				if sch.EntryPoint != "" {
 					var m map[string]interface{}
 					json.Unmarshal(input, &m)
 					if m == nil {
 						m = make(map[string]interface{})
-					}
+			}
 					m["__entry_point"] = sch.EntryPoint
 					input, _ = json.Marshal(m)
-				}
+			}
 
 				// Find latest version.
 				versions, verr := w.store.ListVersions(w.ctx, sch.DefName)
@@ -1261,21 +1330,21 @@ func (w *Worker) scheduleLoop() {
 					log.Printf("[worker %s] Scheduler: definition %s not found for schedule %s",
 						w.id, sch.DefName, sch.Name)
 					continue
-				}
+			}
 
-				runID, _, serr := w.store.StartNewRun(w.ctx, sch.DefName, versions[0], input, "")
+				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "")
 				if serr != nil {
 					log.Printf("[worker %s] Scheduler: failed to start %s for schedule %s: %v",
 						w.id, sch.DefName, sch.Name, serr)
 					continue
-				}
+			}
 
 				// Compute next run time and update.
 				nextRun := host.NextCronTime(sch.CronExpression, time.Now())
 				if uerr := w.store.UpdateScheduleNextRun(w.ctx, sch.Name, nextRun); uerr != nil {
 					log.Printf("[worker %s] Scheduler: failed to update next run for %s: %v",
 						w.id, sch.Name, uerr)
-				}
+			}
 
 				log.Printf("[worker %s] Scheduler: fired %s → %s (next at %s)",
 					w.id, sch.Name, runID, nextRun.Format(time.RFC3339))
@@ -1309,7 +1378,7 @@ func (w *Worker) compactionLoop() {
 			for _, wfID := range candidates {
 				if err := host.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold); err != nil {
 					log.Printf("[worker %s] compaction: error compacting %s: %v", w.id, wfID, err)
-				}
+			}
 			}
 			backgroundLoopsTotal.WithLabelValues("compaction", "ok").Inc()
 			backgroundLoopDuration.WithLabelValues("compaction").Set(time.Since(compStart).Seconds())
@@ -1389,7 +1458,7 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 				backgroundLoopsTotal.WithLabelValues("memory_cleanup", "ok").Inc()
 				if deleted > 0 {
 					backgroundLoopItemsProcessed.WithLabelValues("memory_cleanup").Set(float64(deleted))
-				}
+			}
 			}
 			backgroundLoopDuration.WithLabelValues("memory_cleanup").Set(time.Since(mcStart).Seconds())
 		}
@@ -1460,12 +1529,12 @@ func (w *Worker) dispatchPendingUpdates() {
 				if dErr != nil {
 					if rErr := w.store.RejectPromise(ctx, wfID, upd.PromiseID, errStr); rErr != nil {
 						log.Printf("[worker %s] %s: error rejecting promise %s: %v", w.id, wfID, upd.PromiseID, rErr)
-					}
+			}
 				} else {
 					if rErr := w.store.ResolvePromise(ctx, wfID, upd.PromiseID, resultStr); rErr != nil {
 						log.Printf("[worker %s] %s: error resolving promise %s: %v", w.id, wfID, upd.PromiseID, rErr)
-					}
-				}
+			}
+			}
 			}
 		}
 		return true
@@ -1587,12 +1656,20 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 
 // dbWorkflowState implements host.WorkflowState.
 type dbWorkflowState struct {
-	version    int
-	minVersion int
+	version       int
+	minVersion    int
+	childVersions map[string]int
 }
 
 func (s *dbWorkflowState) Version() int    { return s.version }
 func (s *dbWorkflowState) MinVersion() int { return s.minVersion }
+func (s *dbWorkflowState) ChildVersion(name string) (int, bool) {
+	if s.childVersions == nil {
+		return 0, false
+	}
+	v, ok := s.childVersions[name]
+	return v, ok
+}
 
 // hostPluginRegistryAdapter bridges plugin.FuncRegistry and plugin.StreamFuncRegistry
 // to host.PluginRegistry and host.PluginStreamRegistry.
@@ -1790,8 +1867,8 @@ func newIPRateLimiter(r rate.Limit, burst int) *ipRateLimiter {
 						for ip, entry := range rl.limits {
 					if now.Sub(entry.lastUsed) > time.Hour {
 						delete(rl.limits, ip)
-					}
-				}
+			}
+			}
 				rl.mu.Unlock()
 			case <-rl.stopCh:
 				return
@@ -2120,7 +2197,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if s.worker.redactionEnabled {
 		in = json.RawMessage(host.Redact(string(in)))
 	}
-	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), name, versions[0], in, idempotencyKey)
+	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -2591,6 +2668,38 @@ func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, interval time.Durat
 // suitable for use as a base connection string (without user/password).
 // Example URL: "postgres://user:pass@localhost:5432/cleat?sslmode=disable"
 // Returns:     "host=localhost port=5432 dbname=cleat sslmode=disable"
+// parsePeerSchemas splits a comma-separated list of peer schema names,
+// trimming whitespace and filtering empty strings. Returns nil for "".
+func parsePeerSchemas(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, s := range strings.Split(raw, ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// dsnWithSchema appends search_path=<schema> to a PostgreSQL connection string.
+// If the schema is "public" (the PostgreSQL default), the DSN is returned unchanged.
+func dsnWithSchema(dbURL, schema string) string {
+	if schema == "" || schema == "public" {
+		return dbURL
+	}
+	if strings.Contains(dbURL, "search_path=") {
+		return dbURL // caller already set search_path
+	}
+	sep := "?"
+	if strings.Contains(dbURL, "?") {
+		sep = "&"
+	}
+	return dbURL + sep + "search_path=" + schema
+}
+
 func baseDSNFromURL(dbURL string) string {
 	u, err := url.Parse(dbURL)
 	if err != nil {

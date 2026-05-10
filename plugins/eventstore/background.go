@@ -3,6 +3,8 @@ package eventstore
 import (
 	"context"
 	"time"
+
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // Run starts the periodic cleanup goroutine. It logs a cleanup message on a
@@ -49,21 +51,18 @@ func (p *Plugin) cleanup(ctx context.Context) int64 {
 		return 0
 	}
 
-	result, err := p.db.ExecContext(ctx,
-		`DELETE FROM event_stream
-		 WHERE created_at < NOW() - make_interval(days => $1)`,
+	result, err := p.db.Exec(ctx, plugin.Rebind(deleteEventsOlderThan.For(p.dialect), p.dialect),
 		retentionDays,
 	)
 	if err != nil {
 		p.logger.Error("eventstore: cleanup failed", "error", err)
 		return 0
 	}
-	n, _ := result.RowsAffected()
-	if n > 0 {
+	if result > 0 {
 		p.logger.Info("eventstore: cleanup completed",
-			"deleted_events", n,
+			"deleted_events", result,
 			"retention_days", retentionDays,
 		)
 	}
-	return n
+	return result
 }

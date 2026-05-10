@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -60,7 +59,11 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 		return fmt.Errorf("invalid config UUID: %w", err)
 	}
 
-	db, err := sql.Open("postgres", *dsn)
+	driver := os.Getenv("CLEAT_DB_DRIVER")
+	if driver == "" {
+		driver = "postgres"
+	}
+	db, err := sql.Open(driver, *dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
@@ -175,7 +178,11 @@ func (p *Plugin) cliBackupList(cmds []string) error {
 		return fmt.Errorf("invalid tenant UUID: %w", err)
 	}
 
-	db, err := sql.Open("postgres", *dsn)
+	driver := os.Getenv("CLEAT_DB_DRIVER")
+	if driver == "" {
+		driver = "postgres"
+	}
+	db, err := sql.Open(driver, *dsn)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}

@@ -46,10 +46,10 @@ type kafkaRestProxyPayload struct {
 }
 
 type kafkaRestProxyRecord struct {
-	Key     interface{}            `json:"key,omitempty"`
-	Value   interface{}            `json:"value"`
-	Headers map[string]string      `json:"headers,omitempty"`
-	Partition int                  `json:"partition,omitempty"`
+	Key       interface{}       `json:"key,omitempty"`
+	Value     interface{}       `json:"value"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Partition int               `json:"partition,omitempty"`
 }
 
 // ---- Host functions ----
@@ -76,11 +76,11 @@ func (p *Plugin) produce(ctx context.Context, inputJSON string) (string, error) 
 
 	// Look up the Kafka config, verifying tenant ownership.
 	var brokers, topic string
-	err := p.db.QueryRowContext(ctx, `
-		SELECT brokers, topic
-		FROM kafka_config
-		WHERE id = $1 AND tenant_id = $2 AND enabled = true
-	`, input.ConfigID, cc.TenantID).Scan(&brokers, &topic)
+	err := p.db.QueryRow(ctx, plugin.Rebind(`
+			SELECT brokers, topic
+			FROM kafka_config
+			WHERE id = $1 AND tenant_id = $2 AND enabled = true
+		`, p.dialect), input.ConfigID, cc.TenantID).Scan(&brokers, &topic)
 	if err != nil {
 		return "", fmt.Errorf("kafka-connect: config not found or disabled")
 	}

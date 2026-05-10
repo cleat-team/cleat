@@ -16,6 +16,8 @@ The system has three goals:
 
 3. **Built-in observability.** Because every external interaction must be recorded for durability (replay-after-crash), that same record serves as structured logging, distributed tracing, metrics, and business-level querying. The developer writes zero observability code.
 
+**Cleat is NOT a database. It is a worker pool.** All state -- workflow instances, event history, schedules, deployment metadata -- lives in PostgreSQL. Workers are stateless compute: they claim work from Postgres, execute it in a sandboxed WASM runtime, and write results back. The database is YOURS -- managed Postgres (RDS, Cloud SQL, Crunchy), self-hosted Patroni, or anything that speaks the PostgreSQL wire protocol. Cleat just needs a connection string. Workers and database scale independently: add workers for throughput, scale Postgres the way you always do.
+
 The system compiles workflow code to WASM, stores it as a versioned blob in the database, and executes it in a wazero runtime on any worker in the cluster. Workflow instances carry a `(def_name, def_version)` pointer to their code — so in-flight workflows always replay against the exact code they started with, even as new versions are deployed.
 
 ---
@@ -306,6 +308,18 @@ The entire system runs on a single PostgreSQL database (plus Patroni for HA). Po
 **Why PostgreSQL instead of Temporal's 4+ services?** Temporal requires operating a Frontend, History, Matching, and Worker service — each independently scaled, each stateful, each needing HA configuration. For most use cases, PostgreSQL handles the queue, state, and blob storage roles well enough that the operational simplicity dominates any scaling concerns.
 
 **Resilience** is achieved through synchronous streaming replication (no lost commits), Patroni for automatic failover (~30s MTTR), WAL archiving to S3 for point-in-time recovery (protection against operator error), and application-level restricted database users (the worker app has `INSERT` and `UPDATE` permissions only — no `DROP`, `TRUNCATE`, or `DELETE`).
+
+**Multiple cleat instances share one PostgreSQL cluster.** Because cleat is
+stateless workers connecting to YOUR database, multiple worker pools can share
+a single Postgres cluster. The `--schema` flag assigns each worker pool its own
+PostgreSQL schema, providing full table-level isolation:
+`team_a.workflow_instances` is a separate table from
+`team_b.workflow_instances`.
+The `--peer-schemas` flag enables cross-pool cooperation: if `team_a` starts a
+child workflow defined in `team_b`'s schema, the host can resolve and claim it.
+This gives teams the flexibility to operate isolated worker pools while still
+enabling cross-team workflow composition when needed. Each schema gets its own
+migration state, so schema changes are rolled out per pool, not globally.
 
 ### 3.8 Built-in observability
 
@@ -1712,7 +1726,7 @@ SELECT * FROM ancestors ORDER BY depth DESC LIMIT 1;
    VALUES ($child_run_id, 'FraudCheck', $latest_version, 'ready', $input_json, $parent_id, now());
    ```
 
-   The child is immediately claimable (`next_wake_at = now()`). The `def_version` is resolved lazily: the host uses the latest non-deprecated version of the child's `def_name` at the time of `DurableChildWorkflow`. This means a child workflow always runs the latest code unless an explicit version pin is added (a future enhancement). This is intentional -- child workflows are independently deployable services, not continuations of the parent's code.
+   The child is immediately claimable (`next_wake_at = now()`). The `def_version` is resolved at **compile time**: when the parent workflow is built, `cleat build` detects all `h.ChildWorkflow("name", ...)` calls, resolves each child name to its latest non-deprecated version in the database (or reads pinned versions from `cleat.lock`), and embeds the resolved version map in the WASM binary's metadata. At runtime, the host reads the pinned versions from WASM metadata and uses them when spawning children. This means a parent always spawns the exact child version it was compiled against — a key property of cleat's WASM-based versioning. The pinned version can be overridden at runtime via `ChildWorkflowOptions.Version`.
 
 4. The host returns the `child_run_id` to the parent WASM module. Step 1 (starting the child) is complete. The parent now has the child's run ID in its local variable (e.g., `runID`).
 
@@ -1807,12 +1821,18 @@ When a parent workflow is cancelled, children are cancelled by default. The pare
 
 6. If the parent was awaiting this child (`DurableAwaitChild`), the `child_cancelled` event causes `DurableAwaitChild` to return `ErrCancelled` to the parent. The parent's error handling can then run its own compensation.
 
-**Opt-out:** The child's `ChildWorkflowOptions.CancelChildrenOnParentCancel` defaults to `true` (nil = true). Set it to `false` to make the child survive parent cancellation. This is useful for audit logs, billing, or notification workflows that must run regardless of the parent's fate:
+**Parent close policy:** Each child workflow has a `ParentClosePolicy` that determines what happens when the parent completes or fails. Three policies are supported, matching Temporal's model:
+
+- **ABANDON** (default): The child continues running independently regardless of the parent's fate.
+- **REQUEST_CANCEL**: A cancellation request is delivered to the child, giving it a grace period to run compensation before exiting.
+- **TERMINATE**: The child is immediately marked as failed without running compensation.
+
+The policy is set via `ChildWorkflowOptions.ParentClosePolicy`:
 
 ```go
 _, _ = h.DurableChildWorkflow("AuditLog", input, &durable.ChildWorkflowOptions{
     FireAndForget: true,
-    CancelChildrenOnParentCancel: boolPtr(false),
+    ParentClosePolicy: durable.ParentClosePolicyAbandon,
 })
 ```
 
@@ -1891,16 +1911,17 @@ These limits are configurable per worker via a configuration file or environment
 
 Temporal's child workflows share the same fundamental design -- separate event histories, independent lifecycles, parent-child instance trees. The main differences:
 
-| Aspect | Temporal | This design |
+| Aspect | Temporal | cleat |
 |---|---|---|
 | **API** | `ExecuteChildWorkflow()` returns a `Future`; `future.Get()` blocks | `DurableChildWorkflow()` returns `runID`; `DurableAwaitChild(runID)` blocks |
 | **Separate histories** | Yes, child has its own event history | Yes, same approach |
-| **Parent-close policy** | Required: `ParentClosePolicy` enum (`ABANDON`, `TERMINATE`, `REQUEST_CANCEL`) per child | Default: cancel children on parent cancellation; opt-out via `CancelChildrenOnParentCancel: false` |
-| **Fire-and-forget** | `ParentClosePolicy = PARENT_CLOSE_POLICY_ABANDON` + never call `.Get()` | `FireAndForget: true` option on `ChildWorkflowOptions` |
-| **Cancellation propagation** | Explicit: parent must call `RequestCancelExternalWorkflowExecution` or configure `ParentClosePolicy` | Default: children cancelled when parent is cancelled; `CancelChildrenOnParentCancel: false` to opt out |
+| **Parent-close policy** | `ParentClosePolicy` enum (`ABANDON`, `TERMINATE`, `REQUEST_CANCEL`) per child | Same: `ParentClosePolicy` enum (`ABANDON`, `TERMINATE`, `REQUEST_CANCEL`) per child |
+| **Fire-and-forget** | `ParentClosePolicy.ABANDON` + never call `.Get()` | `FireAndForget: true` option on `ChildWorkflowOptions` |
+| **Cancellation propagation** | Explicit per child via `ParentClosePolicy` | Same: per-child `ParentClosePolicy`; `enforceParentClosePolicy` runs on parent terminal transition |
 | **Depth limit** | Not enforced by Temporal (operational concern) | Default 10, configurable |
 | **Fan-out limit** | Not enforced by Temporal (operational concern) | Default 100 concurrent, configurable |
-| **Version resolution** | Child uses the same task queue and worker binary (same version) | Child resolves to the latest non-deprecated version of its `def_name`; parent and child versions are independent |
+| **Version resolution** | Child uses the same task queue and worker binary (same version) | Compile-time pinning: child version is embedded in parent's WASM metadata at build time; pinned via `cleat.lock` |
+| **Exactly-once creation** | Via workflow ID + dedup in Temporal server | Atomic transaction: child row + parent `child_workflow` event committed together; reply deduplicated via `PRIMARY KEY (workflow_id, step)` |
 
 Temporal's approach gives more fine-grained control (separate parent-close policies per child) at the cost of complexity -- every child needs an explicit policy decision. This design defaults to sensible behavior: children are cancelled with their parent (preventing orphan workflows), and fire-and-forget is an explicit opt-in (`FireAndForget: true`). The limits are enforced at the database level rather than being purely operational concerns, which prevents runaway resource consumption from buggy workflow code.
 

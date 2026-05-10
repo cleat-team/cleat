@@ -1,11 +1,27 @@
 # Cleat User Guide
 
-> Durable workflow engine on PostgreSQL -- write in Go, compile to WASM, deploy via INSERT.
+> **Durable execution on YOUR PostgreSQL — write in Go, compile to WASM, deploy via INSERT.**
 
 This guide takes you from your first workflow through production deployment. Each
 tutorial is designed to be followed without reading source code. All commands
 and code examples are pulled from the project's test suites and examples
 directory.
+
+## What you need
+
+To use cleat, you need exactly one piece of infrastructure:
+
+- **A PostgreSQL 14+ connection string** — that's it. Cleat connects to your
+  existing database as a client, the same way your application does. It does not
+  provision, own, or manage your database.
+
+If you already run PostgreSQL in production, you can add cleat to your existing
+cluster with zero new stateful services. If you need a local PostgreSQL for
+development:
+
+```bash
+docker run -d --name cleat-pg -e POSTGRES_PASSWORD=cleat -p 5432:5432 postgres:16
+```
 
 ## Learning path
 
@@ -44,7 +60,7 @@ For teams running cleat in production or migrating from another system.
 
 - **CLI reference** -- `cleat build`, `cleat vet`, `cleat deploy`, `cleat schedule` --
   see the [README](../README.md#cli-reference)
-- **Worker flags** -- `cleat-worker --help` for all runtime options
+- **Worker flags** -- `cleat-worker --help` for all runtime options (including `--schema` to isolate worker pools by schema, and `--peer-schemas` to cooperate across schemas)
 - **Database schema** -- `schema.sql` and [README table docs](../README.md#tables)
 - **Go SDK docs** -- `go doc github.com/rcownie/cleat/cleat`
 - **API reference** -- REST API at `/api/*` when `--api-addr` is set

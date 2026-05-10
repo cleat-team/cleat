@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -459,7 +460,7 @@ func setupKafkaHandler(t *testing.T) (*Plugin, http.Handler, *fakeKafkaStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -472,7 +473,7 @@ func setupKafkaHandler(t *testing.T) (*Plugin, http.Handler, *fakeKafkaStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(db)(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
 	return p, handler, store
 }
 

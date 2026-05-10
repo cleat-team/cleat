@@ -22,7 +22,7 @@ func init() {
 // Plugin implements vector similarity search using the pgvector PostgreSQL
 // extension. Workflows can store and query embedding vectors with metadata.
 type Plugin struct {
-db     plugin.DB
+db     plugin.PluginDB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config
@@ -70,13 +70,13 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	}
 
 	// Ensure the pgvector extension is installed.
-	if _, err := p.db.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
+	if _, err := p.db.Exec(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
 		return fmt.Errorf("pgvector: create extension: %w", err)
 	}
 
 	// Create default collection if configured.
 	if p.config.DefaultCollection != "" {
-		_, err := p.db.ExecContext(ctx, `
+		_, err := p.db.Exec(ctx, `
 			INSERT INTO pgvector_collections (name, dimensions, embedding_provider, embedding_model)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (name) DO NOTHING

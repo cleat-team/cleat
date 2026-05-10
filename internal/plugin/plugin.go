@@ -5,10 +5,10 @@
 // them at startup, calls Init(), and optionally calls lifecycle methods
 // based on which optional interfaces the plugin implements.
 //
-// Design principle: give plugins raw access to infrastructure, not
-// abstractions over it. The Environment struct uses standard library
-// types (*sql.DB, *http.ServeMux, *slog.Logger) so plugin authors
-// don't need to learn a new API.
+// Design principle: give plugins access to infrastructure through
+// purpose-built interfaces. The Environment struct provides a
+// PluginDB interface (not *sql.DB directly), along with standard
+// library types (*http.ServeMux, *slog.Logger).
 //
 // Crash recovery boundaries:
 //
@@ -27,9 +27,7 @@ package plugin
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -46,19 +44,37 @@ type PluginInfo struct {
 	DatabaseAccess DatabaseAccess `json:"database_access,omitempty"`
 }
 
-// DB is the minimal database interface that plugins receive.
-// Both *sql.DB and host.ReadOnlyDB satisfy this interface.
-type DB interface {
-	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
-	Exec(query string, args ...interface{}) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
-	Query(query string, args ...interface{}) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
-	QueryRow(query string, args ...interface{}) *sql.Row
-	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+// RowScanner abstracts a single row result for single-row queries.
+type RowScanner interface {
+	Scan(dest ...interface{}) error
+}
+
+// Rows is the result of a multi-row query.
+type Rows interface {
+	RowScanner
+	Next() bool
 	Close() error
-	PingContext(ctx context.Context) error
+	Err() error
+}
+
+// PluginDB is the database handle available to plugins.
+// It intentionally does not mirror *sql.DB — plugins get a scoped
+// interface appropriate to their declared DatabaseAccess level.
+type PluginDB interface {
+	Begin(ctx context.Context) (PluginTx, error)
+	Exec(ctx context.Context, query string, args ...interface{}) (int64, error)
+	Query(ctx context.Context, query string, args ...interface{}) (Rows, error)
+	QueryRow(ctx context.Context, query string, args ...interface{}) RowScanner
+	Ping(ctx context.Context) error
+}
+
+// PluginTx is a transaction scoped to a plugin operation.
+type PluginTx interface {
+	Exec(ctx context.Context, query string, args ...interface{}) (int64, error)
+	Query(ctx context.Context, query string, args ...interface{}) (Rows, error)
+	QueryRow(ctx context.Context, query string, args ...interface{}) RowScanner
+	Commit() error
+	Rollback() error
 }
 
 // Plugin is the only required interface. Every plugin must implement this.
@@ -67,15 +83,15 @@ type Plugin interface {
 	Init(ctx context.Context, env *Environment) error
 }
 
-// Environment provides plugins with raw access to cleat infrastructure.
-// No wrappers, no abstractions -- standard library types.
+// Environment provides plugins with access to cleat infrastructure.
 type Environment struct {
-	DB       DB
+	DB       PluginDB
 	Mux      *http.ServeMux
 	Config   []byte
 	Logger   *slog.Logger
 	TenantID uuid.UUID
 	Done     <-chan struct{}
+	Dialect  Dialect
 
 	// StartWorkflow starts a new workflow instance using the latest deployed version.
 	// Plugins use this to trigger workflow executions (e.g., from cron schedules
@@ -103,10 +119,17 @@ type HasMigrations interface {
 }
 
 // Migration describes a single database migration.
+//
+// Up is the default SQL (PostgreSQL) and is required.
+// UpMySQL and UpMSSQL are optional dialect-specific overrides.
+// If the active dialect is MySQL or MSSQL and the corresponding
+// field is empty, the migration is skipped with a warning.
 type Migration struct {
-	Version int
-	Up      string // SQL to run
-	Down    string // SQL to roll back (optional)
+	Version   int
+	Up        string // required — SQL for PostgreSQL (the default)
+	UpMySQL   string // optional — MySQL DDL. Empty means PG-only for this version.
+	UpMSSQL   string // optional — MSSQL DDL. Empty means PG-only for this version.
+	Down      string // optional — SQL to roll back
 }
 
 // HasRoutes: plugin exposes HTTP endpoints.
@@ -188,39 +211,3 @@ type HasHealth interface {
 	Health() error // nil = healthy
 }
 
-// ReadOnlyDB wraps a *sql.DB and restricts it to read-only operations.
-// Write methods (ExecContext, Exec, BeginTx) return an error.
-// Used to enforce plugin DatabaseAccess restrictions.
-type ReadOnlyDB struct{ db *sql.DB }
-
-var _ DB = (*ReadOnlyDB)(nil)
-
-// NewReadOnlyDB creates a read-only wrapper around db.
-func NewReadOnlyDB(db *sql.DB) *ReadOnlyDB { return &ReadOnlyDB{db: db} }
-
-func (r *ReadOnlyDB) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
-	return nil, fmt.Errorf("read-only: BeginTx denied")
-}
-func (r *ReadOnlyDB) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	return nil, fmt.Errorf("read-only: ExecContext denied")
-}
-func (r *ReadOnlyDB) Exec(query string, args ...interface{}) (sql.Result, error) {
-	return nil, fmt.Errorf("read-only: Exec denied")
-}
-func (r *ReadOnlyDB) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
-	return r.db.QueryContext(ctx, query, args...)
-}
-func (r *ReadOnlyDB) Query(query string, args ...interface{}) (*sql.Rows, error) {
-	return r.db.Query(query, args...)
-}
-func (r *ReadOnlyDB) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
-	return r.db.QueryRowContext(ctx, query, args...)
-}
-func (r *ReadOnlyDB) QueryRow(query string, args ...interface{}) *sql.Row {
-	return r.db.QueryRow(query, args...)
-}
-func (r *ReadOnlyDB) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
-	return r.db.PrepareContext(ctx, query)
-}
-func (r *ReadOnlyDB) Close() error  { return nil }
-func (r *ReadOnlyDB) PingContext(ctx context.Context) error { return r.db.PingContext(ctx) }

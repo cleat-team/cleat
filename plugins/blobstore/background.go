@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/hex"
 	"time"
+
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // Run starts the TTL cleanup goroutine. It runs every hour, deleting expired
@@ -64,36 +66,35 @@ func (p *Plugin) Run(ctx context.Context) error {
 func (p *Plugin) cleanupExpired(ctx context.Context) (staleRefs, expiredEntries, orphanedBlobs int, err error) {
 	// Phase 1: clean up stale workflow blob references. A ref is stale when
 	// the referencing workflow is no longer in-flight (done, failed, cancelled).
-	result1, err := p.db.ExecContext(ctx, `
+	result1, err := p.db.Exec(ctx, plugin.Rebind(`
 		DELETE FROM workflow_blob_refs
 		WHERE workflow_id NOT IN (
 			SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
 		)
-	`)
+	`, p.dialect))
 	if err != nil {
 		return staleRefs, expiredEntries, orphanedBlobs, err
 	}
-	if result1 != nil {
-		r, _ := result1.RowsAffected()
-		staleRefs = int(r)
+	if result1 > 0 {
+		staleRefs = int(result1)
 	}
 
 	// Phase 2: delete expired and soft-deleted index entries, decrementing
 	// ref_count on blob_content.
-	result, err := p.db.ExecContext(ctx, `
-		WITH deleted AS (
-			DELETE FROM blob_index
-			WHERE (expires_at < now() OR deleted_at IS NOT NULL)
-			RETURNING sha256
-		)
-		UPDATE blob_content
-		SET ref_count = ref_count - (SELECT count(*) FROM deleted WHERE deleted.sha256 = blob_content.sha256)
-		WHERE sha256 IN (SELECT sha256 FROM deleted)
-	`)
+	var affected int64
+	if p.dialect == plugin.DialectMySQL {
+		// MySQL: DELETE first, then UPDATE (no DELETE..RETURNING)
+		_, err = p.db.Exec(ctx, plugin.Rebind(deleteBlobIndexExpired.For(p.dialect), p.dialect))
+		if err != nil {
+			return staleRefs, expiredEntries, orphanedBlobs, err
+		}
+		affected, err = p.db.Exec(ctx, plugin.Rebind(deleteChunksReturning.For(p.dialect), p.dialect))
+	} else {
+		affected, err = p.db.Exec(ctx, plugin.Rebind(deleteChunksReturning.For(p.dialect), p.dialect))
+	}
 	if err != nil {
 		return staleRefs, expiredEntries, orphanedBlobs, err
 	}
-	affected, _ := result.RowsAffected()
 	expiredEntries = int(affected)
 	if affected > 0 {
 		p.logger.Info("blobstore: expired/deleted index entries cleaned", "count", affected)
@@ -101,15 +102,13 @@ func (p *Plugin) cleanupExpired(ctx context.Context) (staleRefs, expiredEntries,
 
 	// Phase 3: garbage-collect blob_content with no remaining references,
 	// but only if no in-flight workflow references the content.
-	orphanRows, err := p.db.QueryContext(ctx, `
-		DELETE FROM blob_content
-		WHERE ref_count <= 0
-		  AND NOT EXISTS (
-			SELECT 1 FROM workflow_blob_refs r
-			WHERE r.sha256 = blob_content.sha256
-		  )
-		RETURNING sha256, storage_backend
-	`)
+	var orphanRows plugin.Rows
+	if p.dialect == plugin.DialectMySQL {
+		// MySQL: SELECT first (no DELETE..RETURNING)
+		orphanRows, err = p.db.Query(ctx, plugin.Rebind(deleteBlobReturning.For(p.dialect), p.dialect))
+	} else {
+		orphanRows, err = p.db.Query(ctx, plugin.Rebind(deleteBlobReturning.For(p.dialect), p.dialect))
+	}
 	if err != nil {
 		return staleRefs, expiredEntries, orphanedBlobs, err
 	}
@@ -135,6 +134,11 @@ func (p *Plugin) cleanupExpired(ctx context.Context) (staleRefs, expiredEntries,
 		p.logger.Info("blobstore: orphaned content cleaned", "count", orphaned)
 	}
 	orphanedBlobs = orphaned
+
+	// MySQL: the SELECT above did not delete, so clean up explicitly.
+	if p.dialect == plugin.DialectMySQL && orphaned > 0 {
+		_, _ = p.db.Exec(ctx, plugin.Rebind(deleteOrphanBlobs.For(p.dialect), p.dialect))
+	}
 
 	return staleRefs, expiredEntries, orphanedBlobs, nil
 }

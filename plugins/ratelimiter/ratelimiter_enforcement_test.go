@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -385,7 +386,7 @@ func newPluginWithDB(t *testing.T) (*Plugin, *fakeDBStore) {
 	t.Cleanup(func() { fakeDB.Close() })
 
 	p := &Plugin{}
-	if err := p.Init(context.Background(), &plugin.Environment{DB: fakeDB}); err != nil {
+	if err := p.Init(context.Background(), &plugin.Environment{DB: &host.SQLDBAdapter{DB: fakeDB}}); err != nil {
 		t.Fatalf("Init(): %v", err)
 	}
 	return p, store
@@ -413,7 +414,7 @@ func authMiddlewareHandler(t *testing.T, maxRequests, windowSeconds int) (*Plugi
 	finalOK := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	return p, auth.Middleware(fakeDB)(p.Middleware(finalOK))
+	return p, auth.Middleware(host.NewPostgresStore(fakeDB))(p.Middleware(finalOK))
 }
 
 // authedRequest builds a GET request carrying the test API key so that the
@@ -901,7 +902,7 @@ func TestPutRateLimit(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	handler := auth.Middleware(p.db.(*sql.DB))(mux)
+	handler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(mux)
 
 	body := `{"max_requests":100,"window_seconds":60}`
 	req := httptest.NewRequest("PUT", "/rate-limits/myapi", bytes.NewReader([]byte(body)))
@@ -946,7 +947,7 @@ func TestPutRateLimitUpdate(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	handler := auth.Middleware(p.db.(*sql.DB))(mux)
+	handler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(mux)
 
 	// Create with 50 req / 30s.
 	body1 := `{"max_requests":50,"window_seconds":30}`
@@ -1013,7 +1014,7 @@ func TestPutRateLimitInvalidBody(t *testing.T) {
 func TestPutRateLimitEmptyKey(t *testing.T) {
 	p, _ := newPluginWithDB(t)
 
-	handler := auth.Middleware(p.db.(*sql.DB))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handlePut(w, r)
 	}))
 
@@ -1223,7 +1224,7 @@ func routeHandler(t *testing.T) (*Plugin, http.Handler) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	return p, auth.Middleware(p.db.(*sql.DB))(mux)
+	return p, auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(mux)
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,7 +1483,7 @@ func TestReload_RowsErr(t *testing.T) {
 	defer fakeDB.Close()
 
 	p := &Plugin{}
-	if err := p.Init(context.Background(), &plugin.Environment{DB: fakeDB}); err != nil {
+	if err := p.Init(context.Background(), &plugin.Environment{DB: &host.SQLDBAdapter{DB: fakeDB}}); err != nil {
 		t.Fatalf("Init(): %v", err)
 	}
 

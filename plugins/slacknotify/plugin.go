@@ -27,10 +27,11 @@ func init() {
 
 // Plugin implements Slack webhook message sending for workflows.
 type Plugin struct {
-db         plugin.DB
+	db         plugin.PluginDB
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config
+	dialect    plugin.Dialect
 }
 
 // Config holds optional configuration for the slack-notify plugin.
@@ -56,6 +57,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	}
 
 	p.db = env.DB
+	p.dialect = env.Dialect
 	p.httpClient = &http.Client{
 		Timeout: 10 * time.Second,
 	}

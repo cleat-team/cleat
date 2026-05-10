@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -438,7 +439,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -450,7 +451,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(db)(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
 	return p, handler, store
 }
 
@@ -743,7 +744,7 @@ func TestProduceViaRestProxy(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -907,7 +908,7 @@ func TestKafkaConfigTenantIsolation(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -916,7 +917,7 @@ func TestKafkaConfigTenantIsolation(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(db)(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
 
 	// Tenant A creates a config.
 	body := `{"name":"tenant-a-config","brokers":"a:9092","topic":"a-topic"}`
@@ -1244,7 +1245,7 @@ func TestKafkaProduceViaRestProxyNonSuccess(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 		config: Config{RestProxyURL: proxySrv.URL},

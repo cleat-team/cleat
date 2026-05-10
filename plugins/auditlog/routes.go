@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // auditEvent represents a single audit event for JSON serialisation.
@@ -38,11 +39,11 @@ func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Build dynamic query.
 	query := `
-		SELECT id, tenant_id, timestamp, method, path, status_code, user_id,
-		       ip_address, user_agent, duration_ms, metadata
-		FROM audit_events
-		WHERE tenant_id = $1
-	`
+				SELECT id, tenant_id, timestamp, method, path, status_code, user_id,
+				       ip_address, user_agent, duration_ms, metadata
+				FROM audit_events
+				WHERE tenant_id = $1
+			`
 	args := []interface{}{tid}
 	argIdx := 2
 
@@ -91,7 +92,7 @@ func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	query += fmt.Sprintf(" LIMIT $%d", argIdx)
 	args = append(args, limit)
 
-	rows, err := p.db.QueryContext(r.Context(), query, args...)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
 	if err != nil {
 		p.logger.Error("audit-log: query events", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to query audit events")

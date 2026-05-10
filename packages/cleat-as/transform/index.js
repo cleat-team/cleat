@@ -227,19 +227,19 @@ class CleatEntryTransformer {
 
         if (objName === "Math" && (propName === "random" || propName === "seedRandom")) {
           const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E001: Math." + propName + "() in durable function '" + funcName + "' at " + loc + "\n  → Math.random() produces different values on each replay, breaking workflow determinism.\n  → Use h.Random() for deterministic randomness.");
+          console.error("[cleat/transform] E001: Math." + propName + "() in durable function '" + funcName + "' at " + loc + "\n  → Math.random() produces different values on each replay, breaking workflow determinism.\n  → Use h.random() for deterministic randomness.");
           return;
         }
 
         if (objName === "Date" && propName === "now") {
           const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E002: Date.now() in durable function '" + funcName + "' at " + loc + "\n  → Date.now() returns wall-clock time which differs across replays, breaking determinism.\n  → Use h.Now() for deterministic time.");
+          console.error("[cleat/transform] E002: Date.now() in durable function '" + funcName + "' at " + loc + "\n  → Date.now() returns wall-clock time which differs across replays, breaking determinism.\n  → Use h.now() for deterministic time.");
           return;
         }
 
         if (objName === "console" && propName === "log") {
           const loc = self._getSourceLocation(callExpr, sourceName);
-          console.error("[cleat/transform] E003: console.log() in durable function '" + funcName + "' at " + loc + "\n  → console.log() output is not recorded in workflow event history and is lost on replay.\n  → Use h.DurableLog() for durable logging.");
+          console.error("[cleat/transform] E003: console.log() in durable function '" + funcName + "' at " + loc + "\n  → console.log() output is not recorded in workflow event history and is lost on replay.\n  → Use h.log() for durable logging.");
           return;
         }
 
@@ -325,7 +325,7 @@ class CleatEntryTransformer {
         const callee = callExpr.callee;
         let calleeName = null;
 
-        // MemberExpression: h.durableCall, Math.random, etc.
+        // MemberExpression: h.cleatCall, Math.random, etc.
         if (callee.object && typeof callee.object === 'object' && callee.property && typeof callee.property === 'object') {
           const objName = callee.object.text || (callee.object.name ? callee.object.name.text : null);
           const propName = callee.property.text || (callee.property.name ? callee.property.name.text : null);
@@ -463,8 +463,23 @@ class CleatEntryTransformer {
     if (!calleeName || typeof calleeName !== 'string' || !calleeName.startsWith("h.")) return false;
     const method = calleeName.substring(2);
     const knownMethods = [
-      "durableCall", "durableSleep", "durableLog", "Now", "Random",
-      "UUID", "setEventCallback", "childWorkflow", "getState", "setState"
+      "cleatCall", "cleatCallMs", "cleatSleep", "cleatSleepMs", "now",
+      "random", "log", "version", "minVersion", "defer",
+      "pollCancellation", "pollSignal", "continueAsNew",
+      "childWorkflow", "childWorkflowWithOptions", "awaitChild",
+      "awaitSignals", "awaitSignalsMs", "setQueryState",
+      "createPromise", "awaitPromise", "awaitPromiseMs",
+      "registerUpdateHandler", "pluginCall", "currentWorkflowId",
+      "setScope", "getScope", "clearScope", "uuid",
+      "sendSignalAndWait", "sendSignalAndWaitMs", "replyToSignal",
+      "awaitSignalsWithQuorum", "awaitSignalsWithQuorumMs",
+      "signalWorkflow", "resolvePromise", "rejectPromise", "cleatSend",
+      "scheduleInvoke", "scheduleInvokeMs", "registerQueryHandler",
+      "runDetached", "setState", "getState", "deleteState", "incrState",
+      "hasState", "listState", "awaitAllChildren", "isReplaying",
+      "currentRunId", "cleatFetch", "fetchGet", "acquireLock",
+      "acquireLockMs", "releaseLock", "scheduleCron", "deleteCron",
+      "listCrons",
     ];
     return knownMethods.includes(method);
   }
@@ -535,6 +550,10 @@ class CleatEntryTransformer {
         (stmt.module && (typeof stmt.module === "string" ? stmt.module : stmt.module.text));
 
       if (modName === "@cleat/sdk") return true;
+      // Also detect relative imports that resolve to the cleat SDK
+      if (modName && typeof modName === "string" &&
+          (modName.indexOf("cleat-as/assembly") >= 0 ||
+           modName.indexOf("@cleat/") >= 0)) return true;
 
       if (stmt.namespace && stmt.namespace.text === "@cleat/sdk") return true;
     }

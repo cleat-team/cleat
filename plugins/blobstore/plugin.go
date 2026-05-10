@@ -32,11 +32,12 @@ func init() {
 
 // Plugin implements content-addressed blob storage with tenant isolation.
 type Plugin struct {
-db      plugin.DB
+db      plugin.PluginDB
 	mux     *http.ServeMux
 	logger  *slog.Logger
 	config  Config
 	backend Backend
+	dialect plugin.Dialect
 }
 
 // Config controls blobstore backend selection and S3 parameters.
@@ -71,6 +72,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.mux = env.Mux
+	p.dialect = env.Dialect
 
 	// Parse config. If no config provided, use safe defaults.
 	if len(env.Config) > 0 {
@@ -91,7 +93,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		}
 		p.backend = s3Backend
 	default:
-		p.backend = newMemoryBackend(p.db)
+		p.backend = newMemoryBackend(p.db, p.dialect)
 	}
 
 	p.logger.Info("blobstore: initialized",

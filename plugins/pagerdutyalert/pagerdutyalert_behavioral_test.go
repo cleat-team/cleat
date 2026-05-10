@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -431,7 +432,7 @@ func setupTestPlugin(t *testing.T, httpClient *http.Client) (*Plugin, http.Handl
 	}
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: client,
 	}
@@ -441,7 +442,7 @@ func setupTestPlugin(t *testing.T, httpClient *http.Client) (*Plugin, http.Handl
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(db)(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
 	return p, handler, store
 }
 
@@ -816,7 +817,7 @@ func TestTriggerIncidentMissingAPIKey(t *testing.T) {
 
 	// First create a config that exists.
 	cfgID := uuid.New().String()
-	p.db.ExecContext(context.Background(), `
+	p.db.Exec(context.Background(), `
 		INSERT INTO pd_config (tenant_id, id, name, routing_key, enabled, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, true, now(), now())
 	`, testTenantStr, cfgID, "test", "rk_test")

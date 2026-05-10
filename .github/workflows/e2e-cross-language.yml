@@ -1,0 +1,109 @@
+# ---------------------------------------------------------------------------
+# Cross-Language End-to-End WASM Tests
+#
+# Workstream 2 — Cross-cutting CI (Task C2)
+#
+# Compiles workflow examples in Rust, Python, AssemblyScript, and Java to
+# WASM, then runs them through the Go host runtime to verify the full
+# compilation-to-execution pipeline for each non-Go language.
+#
+# Key design decisions:
+#   - Rust and Python are first-class: build/execute failures block the CI.
+#   - AssemblyScript and Java are best-effort: their Go tests skip gracefully
+#     when the toolchain is unavailable or execution fails.
+#   - Each Go test handles its own WASM compilation; the CI only provides
+#     the toolchains and dependencies, avoiding redundant double-builds.
+# ---------------------------------------------------------------------------
+name: Cross-Language E2E
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.24"
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-cross-language:
+    name: Cross-Language WASM E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------
+      # Language toolchains
+      # ------------------------------------------------------------------
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup Rust + wasm32-wasip1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      # ------------------------------------------------------------------
+      # Python WASM toolchain
+      # ------------------------------------------------------------------
+      - name: Install Python WASM toolchain
+        run: |
+          pip install --upgrade pip
+          pip install componentize-py
+          cargo install wasm-tools
+
+      - name: Install Python SDK
+        working-directory: python-sdk
+        run: pip install -e .
+
+      # ------------------------------------------------------------------
+      # Run cross-language E2E tests
+      #
+      # -short=false overrides any default -short so WASM integration tests
+      #   are not skipped; -count=1 bypasses Go's test cache.
+      # The -run regex matches only cross-language E2E tests.
+      # ------------------------------------------------------------------
+      - name: Run cross-language E2E tests
+        run: |
+          go test -count=1 -short=false -timeout=10m \
+            -v \
+            -run "TestRust|TestPython|TestAssemblyScript|TestJava" \
+            ./internal/host/... 2>&1 | tee e2e-report.txt
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-report-${{ github.sha }}
+          path: e2e-report.txt
+          retention-days: 30

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 const defaultRetryInterval = 30 * time.Second
@@ -43,15 +44,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 func (p *Plugin) processBatch(parentCtx context.Context) {
 	start := time.Now()
 
-	rows, err := p.db.QueryContext(parentCtx, `
-		SELECT id, tenant_id, event_type, event_data, retry_count
-		FROM ingested_events
-		WHERE NOT processed
-		  AND (status = 'pending' OR status IS NULL)
-		  AND received_at < NOW() - INTERVAL '10 seconds'
-		ORDER BY received_at
-		LIMIT 100
-	`)
+	rows, err := p.db.Query(parentCtx, plugin.Rebind(queryUnprocessedEvents.For(p.dialect), p.dialect))
 	if err != nil {
 		p.logger.Error("event-triggers: query unprocessed events", "error", err)
 		return
@@ -93,7 +86,7 @@ func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uui
 	if err := json.Unmarshal(eventDataJSON, &eventData); err != nil {
 		p.logger.Error("event-triggers: unmarshal event data for retry",
 			"event_id", eventID, "error", err)
-		p.db.ExecContext(ctx, `
+		p.db.Exec(ctx, `
 			UPDATE ingested_events
 			SET processed = true, status = 'dead_letter', error_msg = $2
 			WHERE id = $1
@@ -112,7 +105,7 @@ func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uui
 
 	if matched > 0 {
 		// At least one workflow was started successfully.
-		p.db.ExecContext(ctx, `
+		p.db.Exec(ctx, `
 			UPDATE ingested_events
 			SET processed = true, status = 'completed', error_msg = NULL
 			WHERE id = $1
@@ -126,14 +119,14 @@ func (p *Plugin) retryEvent(ctx context.Context, eventID uuid.UUID, tenantID uui
 		// No subscriptions matched or all dispatch attempts failed.
 		// Check if any enabled subscriptions exist for this event type.
 		var subCount int
-		p.db.QueryRowContext(ctx, `
+		p.db.QueryRow(ctx, `
 			SELECT COUNT(*) FROM event_subscriptions
 			WHERE tenant_id = $1 AND event_type = $2 AND enabled = true
 		`, tenantID, eventType).Scan(&subCount)
 
 		if subCount == 0 {
 			// No subscriptions exist — no point retrying. Mark as completed.
-			p.db.ExecContext(ctx, `
+			p.db.Exec(ctx, `
 				UPDATE ingested_events
 				SET processed = true, status = 'completed', error_msg = 'no matching subscriptions'
 				WHERE id = $1
@@ -156,7 +149,7 @@ func (p *Plugin) markRetryFailed(ctx context.Context, eventID uuid.UUID, current
 	// Determine max_retries from the subscriptions for this event type.
 	// Default to 3 if no subscriptions are found.
 	maxRetries := 3
-	row := p.db.QueryRowContext(ctx, `
+	row := p.db.QueryRow(ctx, `
 		SELECT COALESCE(MAX(max_retries), 3) FROM event_subscriptions
 		WHERE tenant_id = (SELECT tenant_id FROM ingested_events WHERE id = $1)
 		  AND event_type = (SELECT event_type FROM ingested_events WHERE id = $1)
@@ -169,7 +162,7 @@ func (p *Plugin) markRetryFailed(ctx context.Context, eventID uuid.UUID, current
 	}
 
 	if newRetryCount >= maxRetries {
-		p.db.ExecContext(ctx, `
+		p.db.Exec(ctx, `
 			UPDATE ingested_events
 			SET retry_count = $2, error_msg = $3, last_retry_at = NOW(), status = 'dead_letter', processed = true
 			WHERE id = $1
@@ -182,7 +175,7 @@ func (p *Plugin) markRetryFailed(ctx context.Context, eventID uuid.UUID, current
 			"error", errMsg,
 		)
 	} else {
-		p.db.ExecContext(ctx, `
+		p.db.Exec(ctx, `
 			UPDATE ingested_events
 			SET retry_count = $2, error_msg = $3, last_retry_at = NOW(), status = 'pending'
 			WHERE id = $1

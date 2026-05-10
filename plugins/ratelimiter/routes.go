@@ -7,7 +7,37 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
+
+// upsertQuery provides dialect-specific upsert for rate limits.
+var upsertQuery = plugin.Query{
+	Default: `
+		INSERT INTO rate_limits (tenant_id, limit_key, max_requests, window_seconds)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (tenant_id, limit_key) DO UPDATE
+		SET max_requests = EXCLUDED.max_requests,
+		    window_seconds = EXCLUDED.window_seconds,
+		    updated_at = now()`,
+	MySQL: `
+		INSERT INTO rate_limits (tenant_id, limit_key, max_requests, window_seconds)
+		VALUES ($1, $2, $3, $4)
+		ON DUPLICATE KEY UPDATE
+		max_requests = VALUES(max_requests),
+		window_seconds = VALUES(window_seconds),
+		updated_at = now()`,
+	MSSQL: `
+		MERGE INTO rate_limits AS target
+		USING (VALUES ($1, $2, $3, $4)) AS source (tenant_id, limit_key, max_requests, window_seconds)
+		ON target.tenant_id = source.tenant_id AND target.limit_key = source.limit_key
+		WHEN MATCHED THEN
+		    UPDATE SET max_requests = source.max_requests,
+		               window_seconds = source.window_seconds,
+		               updated_at = now()
+		WHEN NOT MATCHED THEN
+		    INSERT (tenant_id, limit_key, max_requests, window_seconds, created_at, updated_at)
+		    VALUES (source.tenant_id, source.limit_key, source.max_requests, source.window_seconds, now(), now());`,
+}
 
 // rateLimitPut is the JSON body for PUT /rate-limits/{key}.
 type rateLimitPut struct {
@@ -68,12 +98,12 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.QueryContext(r.Context(), `
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
 		SELECT limit_key, max_requests, window_seconds, created_at, updated_at
 		FROM rate_limits
 		WHERE tenant_id = $1
 		ORDER BY limit_key
-	`, tid)
+	`, p.dialect), tid)
 	if err != nil {
 		p.logger.Error("rate-limiter: list", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to list rate limits")
@@ -128,14 +158,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err := p.db.ExecContext(r.Context(), `
-		INSERT INTO rate_limits (tenant_id, limit_key, max_requests, window_seconds)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (tenant_id, limit_key) DO UPDATE
-		SET max_requests = EXCLUDED.max_requests,
-		    window_seconds = EXCLUDED.window_seconds,
-		    updated_at = now()
-	`, tid, key, req.MaxRequests, req.WindowSeconds)
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(upsertQuery.For(p.dialect), p.dialect), tid, key, req.MaxRequests, req.WindowSeconds)
 	if err != nil {
 		p.logger.Error("rate-limiter: upsert", "key", key, "tenant", tid, "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to set rate limit")
@@ -176,16 +199,15 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
 		DELETE FROM rate_limits
 		WHERE tenant_id = $1 AND limit_key = $2
-	`, tid, key)
+	`, p.dialect), tid, key)
 	if err != nil {
 		p.logger.Error("rate-limiter: delete", "key", key, "tenant", tid, "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to delete rate limit")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, http.StatusNotFound, "rate limit not found")
 		return

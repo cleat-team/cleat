@@ -145,7 +145,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	runID, alreadyExisted, serr := s.store.StartNewRun(r.Context(), wf.DefName, versions[0], wf.Input, "")
+	runID, alreadyExisted, serr := s.store.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, "")
 	if serr != nil {
 		s.writeError(w, 500, serr.Error())
 		return

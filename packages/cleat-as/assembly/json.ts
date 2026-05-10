@@ -134,7 +134,8 @@ class Lexer {
         else if (esc == 0x75) {
           // unicode escape \uXXXX
           if (this.pos + 4 <= this.len) {
-            let hexStr: string = this.input.substring(this.pos, this.pos + 4);
+            // this.pos is at 'u' after the '\'; hex digits start at this.pos+1
+            let hexStr: string = this.input.substring(this.pos + 1, this.pos + 5);
             let codePoint: i32 = 0;
             for (let i: i32 = 0; i < 4; i++) {
               let hc: i32 = hexStr.charCodeAt(i);
@@ -146,11 +147,12 @@ class Lexer {
             // Handle surrogate pairs for characters beyond BMP (U+10000+)
             if (codePoint >= 0xD800 && codePoint <= 0xDBFF) {
               // High surrogate -- look for \uDC00-\uDFFF low surrogate
-              if (this.pos + 10 <= this.len) {
-                let next1: i32 = this.input.charCodeAt(this.pos + 4);
-                let next2: i32 = this.input.charCodeAt(this.pos + 5);
+              if (this.pos + 11 <= this.len) {
+                // this.pos+5 should be '\', this.pos+6 should be 'u'
+                let next1: i32 = this.input.charCodeAt(this.pos + 5);
+                let next2: i32 = this.input.charCodeAt(this.pos + 6);
                 if (next1 == 0x5c && next2 == 0x75) {
-                  let lowHex: string = this.input.substring(this.pos + 6, this.pos + 10);
+                  let lowHex: string = this.input.substring(this.pos + 7, this.pos + 11);
                   let lowCode: i32 = 0;
                   for (let i: i32 = 0; i < 4; i++) {
                     let hc: i32 = lowHex.charCodeAt(i);

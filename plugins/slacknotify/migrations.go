@@ -23,6 +23,38 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE INDEX IF NOT EXISTS idx_slack_config_tenant
 					ON slack_config(tenant_id, created_at DESC);
 			`,
+			UpMySQL: `
+				CREATE TABLE IF NOT EXISTS slack_config (
+					tenant_id       CHAR(36) NOT NULL,
+					id              CHAR(36) PRIMARY KEY,
+					` + "`name`" + `          VARCHAR(255) NOT NULL,
+					webhook_url     TEXT NOT NULL,
+					default_channel VARCHAR(255),
+					enabled         TINYINT(1) NOT NULL DEFAULT 1,
+					created_at      TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+					updated_at      TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
+				);
+
+				CREATE INDEX idx_slack_config_tenant
+					ON slack_config(tenant_id, created_at DESC);
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'slack_config')
+				CREATE TABLE slack_config (
+					tenant_id       UNIQUEIDENTIFIER NOT NULL,
+					id              UNIQUEIDENTIFIER PRIMARY KEY,
+					[name]          NVARCHAR(MAX) NOT NULL,
+					webhook_url     NVARCHAR(MAX) NOT NULL,
+					default_channel NVARCHAR(MAX),
+					enabled         BIT NOT NULL DEFAULT 1,
+					created_at      DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+					updated_at      DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME()
+				);
+
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_slack_config_tenant' AND object_id = OBJECT_ID('slack_config'))
+				CREATE INDEX idx_slack_config_tenant
+					ON slack_config(tenant_id, created_at DESC);
+			`,
 			Down: `
 				DROP TABLE IF EXISTS slack_config;
 			`,

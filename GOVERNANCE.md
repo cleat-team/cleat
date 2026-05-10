@@ -141,10 +141,13 @@ Bug fixes, documentation corrections, dependency updates, test improvements,
 and other changes that do not alter the project's behavior or API surface.
 
 **Process:**
-1. Submit a pull request.
-2. Leave it open for 24 hours for review.
-3. If no objections are raised, any Maintainer can approve and merge.
-4. If an objection is raised, the change is elevated to medium.
+1. Submit a pull request following the branch naming convention.
+2. Automated CI checks must pass (lint, test, DCO, semantic title, branch naming,
+   CLA check for first-time contributors).
+3. An AI review is posted automatically as a first-pass advisory check.
+4. Leave the PR open for 24 hours for human review.
+5. If no objections are raised, any Maintainer can approve and merge.
+6. If an objection is raised, the change is elevated to medium.
 
 **Voting:** Not needed. Silence implies consent.
 
@@ -422,6 +425,45 @@ removal process) is listed as Emeritus in MAINTAINERS.md. Emeritus
 Maintainers retain their contribution history and are welcome to rejoin
 by going through the nomination process again. Their past service is
 recognized and valued regardless of current status.
+
+---
+
+## AI/LLM usage policy
+
+cleat welcomes the use of AI and LLM tools to assist with contributions. This
+policy sets clear expectations for transparency and accountability.
+
+### AI-assisted contributions
+
+Contributors who use AI/LLM tools in creating a pull request must disclose this
+in the PR template's AI disclosure section. Disclosure is not about permission —
+it is about calibration. Knowing a contribution was AI-assisted helps reviewers
+focus on correctness, safety, and fit rather than surface-level issues an AI
+would typically catch.
+
+The contributor is responsible for every line of code they submit, regardless
+of origin. Using an AI tool does not excuse a contributor from understanding,
+testing, and standing behind their contribution.
+
+### AI code review
+
+Every pull request receives an automated AI review as a first-pass advisory
+check. The AI review identifies obvious issues (missing error handling, potential
+race conditions, API inconsistencies, test gaps) before a human reviewer spends
+time on the PR.
+
+The AI review is **advisory, not blocking**. It exists to save reviewer time,
+not to replace human judgment. Contributors may address AI feedback directly or
+respond with a rationale for why a suggestion does not apply.
+
+The AI reviewer has no vote in the decision-making process. Approval and merge
+authority remains exclusively with human Maintainers.
+
+### Vulnerability disclosure
+
+If an AI/LLM tool assists in discovering a security vulnerability, this must be
+disclosed in the vulnerability report per the [security policy](SECURITY.md).
+This helps the security team assess the finding's provenance and reliability.
 
 ---
 

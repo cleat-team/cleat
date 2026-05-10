@@ -29,9 +29,10 @@ func init() {
 // Plugin implements inbound webhook ingestion with source management,
 // HMAC verification, and workflow-accessible event polling.
 type Plugin struct {
-db     plugin.DB
+db     plugin.PluginDB
 	mux    *http.ServeMux
 	logger *slog.Logger
+	dialect plugin.Dialect
 	config Config
 	env    *plugin.Environment
 }
@@ -63,6 +64,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.db = env.DB
 	p.mux = env.Mux
 	p.env = env
+	p.dialect = env.Dialect
 
 	// Parse optional config.
 	if len(env.Config) > 0 {

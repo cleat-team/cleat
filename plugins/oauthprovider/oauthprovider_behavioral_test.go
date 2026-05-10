@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // ---------------------------------------------------------------------------
@@ -342,7 +343,7 @@ func setupTestPlugin(t *testing.T, store *fakeDBStore) (*Plugin, http.Handler) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -1276,7 +1277,7 @@ func TestOA_Middleware_TokenHashMismatch(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
 
-	p := &Plugin{db: db, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	p := &Plugin{db: &host.SQLDBAdapter{DB: db}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	nextCalled := false
 	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1304,7 +1305,7 @@ func TestOA_Middleware_ValidTokenInjectsSession(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
 
-	p := &Plugin{db: db, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	p := &Plugin{db: &host.SQLDBAdapter{DB: db}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	var gotSession *SessionInfo
 	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1339,7 +1340,7 @@ func TestOA_Middleware_ExpiredTokenRejected(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
 
-	p := &Plugin{db: db, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	p := &Plugin{db: &host.SQLDBAdapter{DB: db}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	nextCalled := false
 	handler := p.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

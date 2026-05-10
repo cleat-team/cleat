@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // Run starts the background rate limit config reload loop. It queries all
@@ -64,10 +66,10 @@ func (p *Plugin) Run(ctx context.Context) error {
 // in-memory token bucket map atomically under the plugin mutex.
 // Returns the number of configs reloaded.
 func (p *Plugin) reload(ctx context.Context) (int, error) {
-	rows, err := p.db.QueryContext(ctx, `
+	rows, err := p.db.Query(ctx, plugin.Rebind(`
 		SELECT tenant_id, limit_key, max_requests, window_seconds
 		FROM rate_limits
-	`)
+	`, p.dialect))
 	if err != nil {
 		return 0, err
 	}

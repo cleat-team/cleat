@@ -70,7 +70,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		receivedAt time.Time
 	)
 
-	err := p.db.QueryRowContext(ctx, `
+	err := p.db.QueryRow(ctx, plugin.Rebind(`
 		SELECT id, event_type, event_data, received_at
 		FROM ingested_events
 		WHERE tenant_id = $1
@@ -78,7 +78,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		  AND NOT processed
 		ORDER BY received_at DESC
 		LIMIT 1
-	`, cc.TenantID, input.EventType).Scan(&eventID, &eventType, &eventData, &receivedAt)
+	`, p.dialect), cc.TenantID, input.EventType).Scan(&eventID, &eventType, &eventData, &receivedAt)
 
 	if err == sql.ErrNoRows {
 		// No matching event found -- register as an awaiter so the publish
@@ -96,7 +96,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 	}
 
 	// Mark the event as consumed.
-	_, err = p.db.ExecContext(ctx, `
+	_, err = p.db.Exec(ctx, `
 		UPDATE ingested_events
 		SET processed = true, status = 'consumed'
 		WHERE id = $1
@@ -131,12 +131,8 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 // the specified type.  This allows the publish handler to deliver a signal
 // when a matching event arrives.
 func (p *Plugin) registerAwaiter(ctx context.Context, tenantID uuid.UUID, workflowID, eventType string) {
-	_, err := p.db.ExecContext(ctx, `
-		INSERT INTO event_awaiters (workflow_id, tenant_id, event_type, created_at)
-		VALUES ($1, $2, $3, NOW())
-		ON CONFLICT (workflow_id, event_type) DO UPDATE
-			SET created_at = NOW()
-	`, workflowID, tenantID, eventType)
+	_, err := p.db.Exec(ctx, plugin.Rebind(upsertAwaiter.For(p.dialect), p.dialect),
+		workflowID, tenantID, eventType)
 	if err != nil {
 		p.logger.Warn("event-triggers: register awaiter", "error", err, "workflow_id", workflowID)
 	}

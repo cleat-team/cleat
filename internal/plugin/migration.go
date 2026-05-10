@@ -4,27 +4,116 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"sort"
 )
+
+// Dialect identifies the SQL dialect of the backing database.
+type Dialect string
+
+const (
+	DialectPostgres Dialect = "postgres"
+	DialectMySQL    Dialect = "mysql"
+	DialectMSSQL    Dialect = "mssql"
+)
+
+// NOTE: Callers must update their invocation of RunMigrations to pass a dialect parameter.
+// The signature changed from:
+//
+//	RunMigrations(ctx, db, coreMigrations, plugins)
+//
+// to:
+//
+//	RunMigrations(ctx, db, dialect, coreMigrations, plugins)
+//
+// Plugins can provide dialect-specific migration SQL via UpMySQL and
+// UpMSSQL fields. If a plugin lacks the dialect-specific SQL for the
+// active backend, the migration is skipped with a warning (the version
+// is recorded so it won't block future migrations). Plugins that are
+// inherently PostgreSQL-only (e.g., pgvector) simply leave those fields
+// empty and work only with PostgreSQL.
+//
+// RegisterPluginTables remains PostgreSQL-specific and has not yet been
+// made dialect-aware.
+
+// createPluginMigrationsTableSQL returns the dialect-specific SQL for
+// creating the plugin_migrations tracking table.
+func createPluginMigrationsTableSQL(d Dialect) string {
+	switch d {
+	case DialectPostgres:
+		return `CREATE TABLE IF NOT EXISTS plugin_migrations (
+			plugin_name  TEXT NOT NULL,
+			version      INTEGER NOT NULL,
+			applied_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (plugin_name, version)
+		)`
+	case DialectMySQL:
+		return `CREATE TABLE IF NOT EXISTS plugin_migrations (
+			plugin_name VARCHAR(255) NOT NULL,
+			version INTEGER NOT NULL,
+			applied_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+			PRIMARY KEY (plugin_name, version)
+		)`
+	case DialectMSSQL:
+		return `IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'plugin_migrations')
+		CREATE TABLE plugin_migrations (
+			plugin_name NVARCHAR(255) NOT NULL,
+			version INTEGER NOT NULL,
+			applied_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+			PRIMARY KEY (plugin_name, version)
+		)`
+	default:
+		return `CREATE TABLE IF NOT EXISTS plugin_migrations (
+			plugin_name  TEXT NOT NULL,
+			version      INTEGER NOT NULL,
+			applied_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (plugin_name, version)
+		)`
+	}
+}
+
+// checkPluginMigrationSQL returns the dialect-specific SQL for checking
+// whether a plugin migration has already been applied.
+func checkPluginMigrationSQL(d Dialect) string {
+	switch d {
+	case DialectPostgres:
+		return `SELECT EXISTS(SELECT 1 FROM plugin_migrations WHERE plugin_name = $1 AND version = $2)`
+	case DialectMySQL:
+		return `SELECT EXISTS(SELECT 1 FROM plugin_migrations WHERE plugin_name = ? AND version = ?)`
+	case DialectMSSQL:
+		return `SELECT CASE WHEN EXISTS(SELECT 1 FROM plugin_migrations WHERE plugin_name = @p1 AND version = @p2) THEN 1 ELSE 0 END`
+	default:
+		return `SELECT EXISTS(SELECT 1 FROM plugin_migrations WHERE plugin_name = $1 AND version = $2)`
+	}
+}
+
+// insertPluginMigrationSQL returns the dialect-specific SQL for recording
+// an applied plugin migration in the tracking table.
+func insertPluginMigrationSQL(d Dialect) string {
+	switch d {
+	case DialectPostgres:
+		return `INSERT INTO plugin_migrations (plugin_name, version) VALUES ($1, $2)`
+	case DialectMySQL:
+		return `INSERT INTO plugin_migrations (plugin_name, version) VALUES (?, ?)`
+	case DialectMSSQL:
+		return `INSERT INTO plugin_migrations (plugin_name, version) VALUES (@p1, @p2)`
+	default:
+		return `INSERT INTO plugin_migrations (plugin_name, version) VALUES ($1, $2)`
+	}
+}
 
 // RunMigrations runs core migrations and plugin migrations in order.
 // Core migrations are run first, then plugins in dependency order.
 // Each plugin's migrations are tracked in a plugin_migrations table
 // so they run only once.
-func RunMigrations(ctx context.Context, db *sql.DB, coreMigrations []Migration, plugins []*LoadedPlugin) error {
+func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrations []Migration, plugins []*LoadedPlugin) error {
 	if db == nil {
 		return nil
 	}
 
 	// Ensure the plugin_migrations tracking table exists.
-	if _, err := db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS plugin_migrations (
-			plugin_name  TEXT NOT NULL,
-			version      INTEGER NOT NULL,
-			applied_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-			PRIMARY KEY (plugin_name, version)
-		)
-	`); err != nil {
+	ddl := createPluginMigrationsTableSQL(dialect)
+	if _, err := db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("plugin: create migrations table: %w", err)
 	}
 
@@ -55,7 +144,7 @@ func RunMigrations(ctx context.Context, db *sql.DB, coreMigrations []Migration, 
 			// Check if already applied.
 			var exists bool
 			err := db.QueryRowContext(ctx,
-				`SELECT EXISTS(SELECT 1 FROM plugin_migrations WHERE plugin_name = $1 AND version = $2)`,
+				checkPluginMigrationSQL(dialect),
 				name, m.Version).Scan(&exists)
 			if err != nil {
 				return fmt.Errorf("plugin %s migration v%d check: %w", name, m.Version, err)
@@ -70,13 +159,43 @@ func RunMigrations(ctx context.Context, db *sql.DB, coreMigrations []Migration, 
 				return fmt.Errorf("plugin %s migration v%d begin: %w", name, m.Version, err)
 			}
 
-			if _, err := tx.ExecContext(ctx, m.Up); err != nil {
+			// Select dialect-appropriate SQL.
+			sql := m.Up
+			switch dialect {
+			case DialectMySQL:
+				if m.UpMySQL != "" {
+					sql = m.UpMySQL
+				} else {
+					log.Printf("[plugin] %s v%d: no MySQL migration — skipping", name, m.Version)
+					if _, err := tx.ExecContext(ctx, insertPluginMigrationSQL(dialect), name, m.Version); err != nil {
+						tx.Rollback()
+						return fmt.Errorf("plugin %s migration v%d record skip: %w", name, m.Version, err)
+					}
+					tx.Commit()
+					continue
+				}
+			case DialectMSSQL:
+				if m.UpMSSQL != "" {
+					sql = m.UpMSSQL
+				} else {
+					log.Printf("[plugin] %s v%d: no MSSQL migration — skipping", name, m.Version)
+					if _, err := tx.ExecContext(ctx, insertPluginMigrationSQL(dialect), name, m.Version); err != nil {
+						tx.Rollback()
+						return fmt.Errorf("plugin %s migration v%d record skip: %w", name, m.Version, err)
+					}
+					tx.Commit()
+					continue
+				}
+			}
+
+			// Run the selected migration SQL.
+			if _, err := tx.ExecContext(ctx, sql); err != nil {
 				tx.Rollback()
 				return fmt.Errorf("plugin %s migration v%d: %w", name, m.Version, err)
 			}
 
 			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO plugin_migrations (plugin_name, version) VALUES ($1, $2)`,
+				insertPluginMigrationSQL(dialect),
 				name, m.Version); err != nil {
 				tx.Rollback()
 				return fmt.Errorf("plugin %s migration v%d record: %w", name, m.Version, err)

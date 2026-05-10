@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 // Run starts the delivery retry loop. It runs every 30 seconds, finding
@@ -76,14 +77,14 @@ type webhookConfigRow struct {
 // time has elapsed, and attempts HTTP POST delivery for each.
 // Returns (attempted, succeeded, failed, error).
 func (p *Plugin) processDeliveries(ctx context.Context) (int, int, int, error) {
-	rows, err := p.db.QueryContext(ctx, `
-		SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
-		FROM webhook_delivery d
-		WHERE d.status IN ('pending', 'retrying')
-		  AND d.next_attempt_at <= now()
-		ORDER BY d.next_attempt_at ASC
-		LIMIT 100
-	`)
+	rows, err := p.db.Query(ctx, `
+			SELECT d.id, d.webhook_id, d.event_type, d.payload, d.attempt_count
+			FROM webhook_delivery d
+			WHERE d.status IN ('pending', 'retrying')
+			  AND d.next_attempt_at <= now()
+			ORDER BY d.next_attempt_at ASC
+			LIMIT 100
+		`)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("query deliveries: %w", err)
 	}
@@ -121,9 +122,9 @@ func (p *Plugin) processDeliveries(ctx context.Context) (int, int, int, error) {
 func (p *Plugin) deliver(ctx context.Context, d deliveryRow) (string, error) {
 	// Look up the webhook config.
 	var cfg webhookConfigRow
-	err := p.db.QueryRowContext(ctx, `
-		SELECT url, secret FROM webhook_config WHERE id = $1
-	`, d.WebhookID).Scan(&cfg.URL, &cfg.Secret)
+	err := p.db.QueryRow(ctx, plugin.Rebind(`
+			SELECT url, secret FROM webhook_config WHERE id = $1
+		`, p.dialect), d.WebhookID).Scan(&cfg.URL, &cfg.Secret)
 	if err != nil {
 		return "", fmt.Errorf("lookup webhook config: %w", err)
 	}
@@ -171,16 +172,16 @@ func (p *Plugin) deliver(ctx context.Context, d deliveryRow) (string, error) {
 
 // markDelivered updates the delivery as successfully delivered.
 func (p *Plugin) markDelivered(ctx context.Context, id uuid.UUID, attemptCount, statusCode int, responseBody string) error {
-	_, err := p.db.ExecContext(ctx, `
-		UPDATE webhook_delivery
-		SET status = 'delivered',
-		    attempt_count = $1,
-		    last_attempt_at = now(),
-		    delivered_at = now(),
-		    response_code = $2,
-		    response_body = $3
-		WHERE id = $4
-	`, attemptCount, statusCode, responseBody, id)
+	_, err := p.db.Exec(ctx, plugin.Rebind(`
+			UPDATE webhook_delivery
+			SET status = 'delivered',
+			    attempt_count = $1,
+			    last_attempt_at = now(),
+			    delivered_at = now(),
+			    response_code = $2,
+			    response_body = $3
+			WHERE id = $4
+		`, p.dialect), attemptCount, statusCode, responseBody, id)
 	if err != nil {
 		return fmt.Errorf("mark delivered: %w", err)
 	}
@@ -191,15 +192,15 @@ func (p *Plugin) markDelivered(ctx context.Context, id uuid.UUID, attemptCount, 
 // markRetrying updates the delivery for retry with exponential backoff.
 func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount int, reason string) error {
 	nextAt := time.Now().Add(nextBackoff(attemptCount))
-	_, err := p.db.ExecContext(ctx, `
-		UPDATE webhook_delivery
-		SET status = 'retrying',
-		    attempt_count = $1,
-		    last_attempt_at = now(),
-		    next_attempt_at = $2,
-		    response_body = $3
-		WHERE id = $4
-	`, attemptCount, nextAt, reason, id)
+	_, err := p.db.Exec(ctx, plugin.Rebind(`
+			UPDATE webhook_delivery
+			SET status = 'retrying',
+			    attempt_count = $1,
+			    last_attempt_at = now(),
+			    next_attempt_at = $2,
+			    response_body = $3
+			WHERE id = $4
+		`, p.dialect), attemptCount, nextAt, reason, id)
 	if err != nil {
 		return fmt.Errorf("mark retrying: %w", err)
 	}
@@ -210,14 +211,14 @@ func (p *Plugin) markRetrying(ctx context.Context, id uuid.UUID, attemptCount in
 
 // markFailed updates the delivery as permanently failed.
 func (p *Plugin) markFailed(ctx context.Context, id uuid.UUID, attemptCount int, reason string) error {
-	_, err := p.db.ExecContext(ctx, `
-		UPDATE webhook_delivery
-		SET status = 'failed',
-		    attempt_count = $1,
-		    last_attempt_at = now(),
-		    response_body = $2
-		WHERE id = $3
-	`, attemptCount, reason, id)
+	_, err := p.db.Exec(ctx, plugin.Rebind(`
+			UPDATE webhook_delivery
+			SET status = 'failed',
+			    attempt_count = $1,
+			    last_attempt_at = now(),
+			    response_body = $2
+			WHERE id = $3
+		`, p.dialect), attemptCount, reason, id)
 	if err != nil {
 		return fmt.Errorf("mark failed: %w", err)
 	}

@@ -27,10 +27,11 @@ func init() {
 
 // Plugin implements PagerDuty incident management for workflows.
 type Plugin struct {
-db         plugin.DB
+	db         plugin.PluginDB
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config
+	dialect    plugin.Dialect
 }
 
 // Config holds optional configuration for the pagerduty-alert plugin.
@@ -56,6 +57,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	}
 
 	p.db = env.DB
+	p.dialect = env.Dialect
 	p.httpClient = &http.Client{
 		Timeout: 30 * time.Second,
 	}
@@ -74,7 +76,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 // Health returns nil if at least one enabled PagerDuty config exists.
 func (p *Plugin) Health() error {
 	var count int
-	err := p.db.QueryRow(`SELECT COUNT(*) FROM pd_config WHERE enabled = true`).Scan(&count)
+	err := p.db.QueryRow(context.Background(), `SELECT COUNT(*) FROM pd_config WHERE enabled = true`).Scan(&count)
 	if err != nil {
 		return fmt.Errorf("pagerduty: health check failed: %w", err)
 	}

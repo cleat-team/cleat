@@ -19,6 +19,29 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					PRIMARY KEY (tenant_id, key)
 				);
 			`,
+			UpMySQL: `
+				CREATE TABLE IF NOT EXISTS kv_store (
+					tenant_id   CHAR(36) NOT NULL,
+					` + "`key`" + `       VARCHAR(255) NOT NULL,
+					value       JSON NOT NULL DEFAULT ('null'),
+					version     INT NOT NULL DEFAULT 1,
+					created_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+					updated_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+					PRIMARY KEY (tenant_id, ` + "`key`" + `)
+				);
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'kv_store')
+				CREATE TABLE kv_store (
+					tenant_id   UNIQUEIDENTIFIER NOT NULL,
+					[key]       NVARCHAR(255) NOT NULL,
+					value       NVARCHAR(MAX) NOT NULL DEFAULT ('null'),
+					version     INT NOT NULL DEFAULT 1,
+					created_at  DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+					updated_at  DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+					PRIMARY KEY (tenant_id, [key])
+				);
+			`,
 			Down: `
 				DROP TABLE IF EXISTS kv_store;
 			`,

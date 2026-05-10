@@ -37,7 +37,7 @@ type Config struct {
 
 // Plugin implements the LLM provider plugin.
 type Plugin struct {
-db         plugin.DB
+db         plugin.PluginDB
 	logger     *slog.Logger
 	httpClient *http.Client
 	config     Config

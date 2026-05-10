@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
 	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // ---------------------------------------------------------------------------
@@ -737,7 +738,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, *fakeNotifyStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -784,7 +785,7 @@ func buildHandler(t *testing.T, p *Plugin, store *fakeNotifyStore) http.Handler 
 	}
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
-	return auth.Middleware(db)(mux)
+	return auth.Middleware(host.NewPostgresStore(db))(mux)
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,7 +1015,7 @@ func TestHostFunctionSendWebhook(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID,
 		WorkflowID: "wf-test",
-		DB:         p.db.(*sql.DB),
+		DB:         p.db.(*host.SQLDBAdapter).DB,
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
@@ -1060,7 +1061,7 @@ func TestHostFunctionInvalidWebhook(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID,
 		WorkflowID: "wf-test",
-		DB:         p.db.(*sql.DB),
+		DB:         p.db.(*host.SQLDBAdapter).DB,
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
@@ -1082,7 +1083,7 @@ func TestHostFunctionMissingWebhookID(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID,
 		WorkflowID: "wf-test",
-		DB:         p.db.(*sql.DB),
+		DB:         p.db.(*host.SQLDBAdapter).DB,
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
@@ -1100,7 +1101,7 @@ func TestHostFunctionMissingEventType(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID,
 		WorkflowID: "wf-test",
-		DB:         p.db.(*sql.DB),
+		DB:         p.db.(*host.SQLDBAdapter).DB,
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 

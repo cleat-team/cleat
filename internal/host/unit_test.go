@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/plugin"
 	"github.com/tetratelabs/wazero"
 )
@@ -1415,11 +1416,14 @@ func (s *stubWorkflowStore) DeliverSignal(ctx context.Context, workflowID, signa
 func (s *stubWorkflowStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
 	return "", false, nil
 }
-func (s *stubWorkflowStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (s *stubWorkflowStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
 	return "", false, nil
 }
 func (s *stubWorkflowStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
 	return "", nil
+}
+func (s *stubWorkflowStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (string, error) {
+	return s.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy)
 }
 func (s *stubWorkflowStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
 	return "", false, nil
@@ -1466,8 +1470,8 @@ func (s *stubWorkflowStore) LoadWorkflowConfig(ctx context.Context, defName stri
 func (s *stubWorkflowStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
 	return nil, nil
 }
-func (s *stubWorkflowStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) {
-	return nil, nil
+func (s *stubWorkflowStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error {
+	return nil
 }
 func (s *stubWorkflowStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) {
 	return nil, nil
@@ -2403,6 +2407,7 @@ func (m *mockPurgeStore) BatchHeartbeat(ctx context.Context, workerID string) (i
 func (s *stubWorkflowStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) { return nil, nil }
 func (s *stubWorkflowStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (s *stubWorkflowStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error { return nil }
+func (s *stubWorkflowStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
@@ -2422,8 +2427,9 @@ func (m *mockCollectMetricsStore) RequestCancellation(ctx context.Context, workf
 func (m *mockCollectMetricsStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockCollectMetricsStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
 func (m *mockCollectMetricsStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error) { return "", false, nil }
-func (m *mockCollectMetricsStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (runID string, alreadyExisted bool, err error) { return "", false, nil }
+func (m *mockCollectMetricsStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
 func (m *mockCollectMetricsStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error) { return "", nil }
+func (m *mockCollectMetricsStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy) }
 func (m *mockCollectMetricsStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) { return "", false, nil }
 func (m *mockCollectMetricsStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) { return 0, nil }
 func (m *mockCollectMetricsStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) { return "", nil }
@@ -2437,7 +2443,7 @@ func (m *mockCollectMetricsStore) GetDueSchedules(ctx context.Context) ([]Schedu
 func (m *mockCollectMetricsStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error { return nil }
 func (m *mockCollectMetricsStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error) { return 0, nil }
 func (m *mockCollectMetricsStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) { return nil, nil }
-func (m *mockCollectMetricsStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) { return nil, nil }
+func (m *mockCollectMetricsStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error { return nil }
 func (m *mockCollectMetricsStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) { return nil, nil }
 func (m *mockCollectMetricsStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) { return nil, nil }
 func (m *mockCollectMetricsStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error { return nil }
@@ -2466,6 +2472,7 @@ func (m *mockCollectMetricsStore) LoadMemoryStats(ctx context.Context) ([]Workfl
 func (m *mockCollectMetricsStore) QueueDepth(ctx context.Context) (int64, error) { return 0, nil }
 func (m *mockCollectMetricsStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
 func (m *mockCollectMetricsStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
+func (m *mockCollectMetricsStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
 func (m *mockCheckStaleStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) { return nil, nil }
 func (m *mockCheckStaleStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
 func (m *mockCheckStaleStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
@@ -2485,8 +2492,9 @@ func (m *mockCheckStaleStore) RequestCancellation(ctx context.Context, workflowI
 func (m *mockCheckStaleStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockCheckStaleStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
 func (m *mockCheckStaleStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error) { return "", false, nil }
-func (m *mockCheckStaleStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (runID string, alreadyExisted bool, err error) { return "", false, nil }
+func (m *mockCheckStaleStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
 func (m *mockCheckStaleStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error) { return "", nil }
+func (m *mockCheckStaleStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy) }
 func (m *mockCheckStaleStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) { return "", false, nil }
 func (m *mockCheckStaleStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) { return 0, nil }
 func (m *mockCheckStaleStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) { return "", nil }
@@ -2500,7 +2508,7 @@ func (m *mockCheckStaleStore) GetDueSchedules(ctx context.Context) ([]Schedule, 
 func (m *mockCheckStaleStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error { return nil }
 func (m *mockCheckStaleStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error) { return 0, nil }
 func (m *mockCheckStaleStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) { return nil, nil }
-func (m *mockCheckStaleStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) { return nil, nil }
+func (m *mockCheckStaleStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error { return nil }
 func (m *mockCheckStaleStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) { return nil, nil }
 func (m *mockCheckStaleStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) { return nil, nil }
 func (m *mockCheckStaleStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error { return nil }
@@ -2529,6 +2537,7 @@ func (m *mockCheckStaleStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMe
 func (m *mockCheckStaleStore) QueueDepth(ctx context.Context) (int64, error) { return 0, nil }
 func (m *mockCheckStaleStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
 func (m *mockCheckStaleStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
+func (m *mockCheckStaleStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
 func (m *mockGCStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) { return nil, nil }
 func (m *mockGCStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
 func (m *mockGCStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
@@ -2548,8 +2557,9 @@ func (m *mockGCStore) RequestCancellation(ctx context.Context, workflowID, reaso
 func (m *mockGCStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockGCStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
 func (m *mockGCStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error) { return "", false, nil }
-func (m *mockGCStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (runID string, alreadyExisted bool, err error) { return "", false, nil }
+func (m *mockGCStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
 func (m *mockGCStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error) { return "", nil }
+func (m *mockGCStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy) }
 func (m *mockGCStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) { return "", false, nil }
 func (m *mockGCStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) { return 0, nil }
 func (m *mockGCStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) { return "", nil }
@@ -2563,7 +2573,7 @@ func (m *mockGCStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 func (m *mockGCStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error { return nil }
 func (m *mockGCStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error) { return 0, nil }
 func (m *mockGCStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) { return nil, nil }
-func (m *mockGCStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) { return nil, nil }
+func (m *mockGCStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error { return nil }
 func (m *mockGCStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) { return nil, nil }
 func (m *mockGCStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) { return nil, nil }
 func (m *mockGCStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error { return nil }
@@ -2591,6 +2601,7 @@ func (m *mockGCStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStat
 func (m *mockGCStore) QueueDepth(ctx context.Context) (int64, error) { return 0, nil }
 func (m *mockGCStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
 func (m *mockGCStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
+func (m *mockGCStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
 func (m *mockPurgeStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) { return nil, nil }
 func (m *mockPurgeStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
 func (m *mockPurgeStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
@@ -2610,8 +2621,9 @@ func (m *mockPurgeStore) RequestCancellation(ctx context.Context, workflowID, re
 func (m *mockPurgeStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockPurgeStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
 func (m *mockPurgeStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error) { return "", false, nil }
-func (m *mockPurgeStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (runID string, alreadyExisted bool, err error) { return "", false, nil }
+func (m *mockPurgeStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
 func (m *mockPurgeStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error) { return "", nil }
+func (m *mockPurgeStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy) }
 func (m *mockPurgeStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) { return "", false, nil }
 func (m *mockPurgeStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) { return 0, nil }
 func (m *mockPurgeStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) { return "", nil }
@@ -2625,7 +2637,7 @@ func (m *mockPurgeStore) GetDueSchedules(ctx context.Context) ([]Schedule, error
 func (m *mockPurgeStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error { return nil }
 func (m *mockPurgeStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (maxHistoryLength int, err error) { return 0, nil }
 func (m *mockPurgeStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) { return nil, nil }
-func (m *mockPurgeStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) { return nil, nil }
+func (m *mockPurgeStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error { return nil }
 func (m *mockPurgeStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) { return nil, nil }
 func (m *mockPurgeStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) { return nil, nil }
 func (m *mockPurgeStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error { return nil }
@@ -2653,3 +2665,4 @@ func (m *mockPurgeStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryS
 func (m *mockPurgeStore) QueueDepth(ctx context.Context) (int64, error) { return 0, nil }
 func (m *mockPurgeStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
 func (m *mockPurgeStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
+func (m *mockPurgeStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }

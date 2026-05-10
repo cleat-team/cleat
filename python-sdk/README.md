@@ -3,11 +3,11 @@
 Python SDK for the [Cleat](https://github.com/rcownie/cleat) durable execution framework. Write workflows in Python, compile to WASM, and run on the Cleat engine.
 
 ```python
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
-@durable_entry
+@cleat_entry
 def my_workflow(h: HostCalls, name: str) -> str:
-    resp = h.durable_call("greeter", "Greet", {"name": name})
+    resp = h.cleat_call("greeter", "Greet", {"name": name})
     return resp
 ```
 
@@ -26,25 +26,25 @@ pip install -e .
 
 ## Quick start
 
-Define a workflow decorated with `@durable_entry`. The framework injects a `HostCalls` instance as the first argument; additional arguments are deserialised from JSON input automatically.
+Define a workflow decorated with `@cleat_entry`. The framework injects a `HostCalls` instance as the first argument; additional arguments are deserialised from JSON input automatically.
 
 ```python
 from dataclasses import dataclass
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
 @dataclass
 class GreetingRequest:
     name: str
     language: str = "en"
 
-@durable_entry
+@cleat_entry
 def hello_workflow(h: HostCalls, request: GreetingRequest) -> str:
-    h.durable_log(f"Hello workflow started for {request.name}")
-    response = h.durable_call(
+    h.cleat_log(f"Hello workflow started for {request.name}")
+    response = h.cleat_call(
         "greeter", "Greet",
         {"name": request.name, "language": request.language}
     )
-    h.durable_log(f"Got response: {response}")
+    h.cleat_log(f"Got response: {response}")
     return response
 ```
 
@@ -65,14 +65,14 @@ The `HostCalls` class wraps all 36 WASM host function imports grouped by categor
 - `min_version() -> int` -- minimum supported version
 
 ### Durable Execution
-- `durable_call(service, operation, request) -> str` -- recorded API call
-- `durable_call_typed(service, operation, request, result_type) -> T` -- typed variant with automatic JSON deserialisation
-- `durable_call_with_retry(service, operation, request, retry_policy) -> str` -- server-side retry
-- `durable_call_with_heartbeat(service, operation, request, interval_ms, progress_cb) -> str` -- long-running call with progress updates
-- `durable_sleep(duration_ms) -> None` -- suspend for a duration (survives restarts)
-- `durable_log(message) -> None` -- emit a log message
-- `durable_fetch(url, method, headers, body) -> (body, status)` -- durable HTTP fetch via host
-- `durable_send(service, operation, request) -> None` -- fire-and-forget (no response)
+- `cleat_call(service, operation, request) -> str` -- recorded API call
+- `cleat_call_typed(service, operation, request, result_type) -> T` -- typed variant with automatic JSON deserialisation
+- `cleat_call_with_retry(service, operation, request, retry_policy) -> str` -- server-side retry
+- `cleat_call_with_heartbeat(service, operation, request, interval_ms, progress_cb) -> str` -- long-running call with progress updates
+- `cleat_sleep(duration_ms) -> None` -- suspend for a duration (survives restarts)
+- `cleat_log(message) -> None` -- emit a log message
+- `cleat_fetch(url, method, headers, body) -> (body, status)` -- durable HTTP fetch via host
+- `cleat_send(service, operation, request) -> None` -- fire-and-forget (no response)
 - `schedule_invoke(service, operation, request, delay_ms) -> None` -- delayed one-shot invocation
 
 ### Signals & Events
@@ -103,35 +103,35 @@ The `HostCalls` class wraps all 36 WASM host function imports grouped by categor
 - `register_query_handler(name, handler) -> None` -- register read-only query handler
 
 ### Lifecycle
-- `durable_defer(description) -> str` -- register cleanup to run on exit, returns defer ID
+- `cleat_defer(description) -> str` -- register cleanup to run on exit, returns defer ID
 - `continue_as_new(input) -> None` -- start a fresh run with new input
 - `run_detached(fn) -> None` -- execute a function detached from cancellation
 
 ### Plugin Calls
 - `plugin_call(plugin_name, function_name, input) -> str` -- call a host plugin function
 
-### durable_log vs print/stdout
+### cleat_log vs print/stdout
 
-`durable_log()` writes to the **workflow event history** -- it is deterministic, recorded, and replayed. Messages appear in the workflow's event log and are visible through the Cleat monitoring UI, even when replaying from history.
+`cleat_log()` writes to the **workflow event history** -- it is deterministic, recorded, and replayed. Messages appear in the workflow's event log and are visible through the Cleat monitoring UI, even when replaying from history.
 
 `print()` / `stdout` writes to the **host console** -- it is non-deterministic and **not** replayed. During replay, `print()` output will only appear if the workflow code actually executes (e.g., cached results skip execution entirely).
 
 ```python
-@durable_entry
+@cleat_entry
 def my_workflow(h: HostCalls, name: str) -> str:
     # WRONG: stdout output is not deterministic, not visible in replay
     print(f"Processing {name}")
 
     # CORRECT: recorded in event history, visible in replay
-    h.durable_log(f"Processing {name}")
+    h.cleat_log(f"Processing {name}")
 
-    result = h.durable_call("service", "Op", {"name": name})
+    result = h.cleat_call("service", "Op", {"name": name})
 
     # WRONG: stdout is not replayed
     print(f"Result: {result}")
 
-    # CORRECT: durable_log is replayed deterministically
-    h.durable_log(f"Result: {result}")
+    # CORRECT: cleat_log is replayed deterministically
+    h.cleat_log(f"Result: {result}")
     return result
 ```
 
@@ -139,12 +139,12 @@ def my_workflow(h: HostCalls, name: str) -> str:
 
 | Use Case | Method | Reason |
 |----------|--------|--------|
-| Workflow-visible logging | `durable_log()` | Survives replay, recorded in history |
+| Workflow-visible logging | `cleat_log()` | Survives replay, recorded in history |
 | Debugging during development | `print()` | Immediate stdout output, no host call overhead |
 | Structured observability | `log_kv()` | Key-value logging, recorded in history |
 | External logging pipeline | `plugin_call("logger", "send", ...)` | Forward events to an external system |
 
-Use `durable_log` for messages that should appear in the workflow event history. Use `print` sparingly for development-time debugging only.
+Use `cleat_log` for messages that should appear in the workflow event history. Use `print` sparingly for development-time debugging only.
 
 ## Examples
 
@@ -163,18 +163,18 @@ The `examples/` directory contains ready-to-run workflows:
 
 ```python
 # CORRECT: synchronous code
-@durable_entry
+@cleat_entry
 def my_workflow(h: HostCalls, name: str) -> str:
-    h.durable_log(f"Processing {name}")
-    result = h.durable_call("service", "Op", {"name": name})
+    h.cleat_log(f"Processing {name}")
+    result = h.cleat_call("service", "Op", {"name": name})
     return result
 
 # WRONG: async is not supported
-# @durable_entry
+# @cleat_entry
 # async def my_workflow(h: HostCalls, name: str) -> str:  ...  # won't work
 ```
 
-When a workflow calls `durable_sleep()` or `await_signals()` on a fresh execution, the host suspends the workflow. On replay, the same calls return cached results without suspending. The user code never sees the suspend/resume cycle -- it is handled by the `@durable_entry` wrapper.
+When a workflow calls `cleat_sleep()` or `await_signals()` on a fresh execution, the host suspends the workflow. On replay, the same calls return cached results without suspending. The user code never sees the suspend/resume cycle -- it is handled by the `@cleat_entry` wrapper.
 
 ### Converting async Python to synchronous WASM code
 
@@ -198,17 +198,17 @@ async def process_order(order_id: str) -> dict:
 
 **After (Cleat synchronous -- compiles to WASM):**
 ```python
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 import json
 
 def fetch_data(h: HostCalls, url: str) -> dict:
-    response, status = h.durable_fetch(url, "GET")
+    response, status = h.cleat_fetch(url, "GET")
     return json.loads(response)
 
-@durable_entry
+@cleat_entry
 def process_order(h: HostCalls, order_id: str) -> dict:
     data = fetch_data(h, f"https://api.example.com/orders/{order_id}")
-    h.durable_sleep(5000)           # instead of asyncio.sleep(5)
+    h.cleat_sleep(5000)           # instead of asyncio.sleep(5)
     return {"order_id": order_id, "data": data}
 ```
 
@@ -218,8 +218,8 @@ def process_order(h: HostCalls, order_id: str) -> dict:
 |---------------|-------------------------------|
 | `async def fn()` | `def fn()` |
 | `await call()` | `call()` (synchronous) |
-| `asyncio.sleep(n)` | `h.durable_sleep(n * 1000)` |
-| `aiohttp.ClientSession()` | `h.durable_fetch()` or `h.durable_call()` |
+| `asyncio.sleep(n)` | `h.cleat_sleep(n * 1000)` |
+| `aiohttp.ClientSession()` | `h.cleat_fetch()` or `h.cleat_call()` |
 | `asyncio.gather(*tasks)` | `h.await_all_children(run_ids)` or sequential calls |
 | `asyncio.wait_for(coro, timeout)` | `h.await_signals(names, timeout_ms)` or `h.await_promise(id, timeout_ms)` |
 | `async for` (stream) | `h.plugin_call_streaming()` (iterator-based) |
@@ -269,7 +269,7 @@ These modules are partially available with documented restrictions:
 | `pathlib` | ⚠️ Limited | Path manipulation works. No real filesystem I/O (`read_text`, `write_text`, etc.) |
 | `random` | ⚠️ Limited | Basic PRNG works. Use `h.random()` for deterministic workflow randomness instead |
 | `json` | ✅ Fully available, see above | |
-| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` is not available (use `h.durable_sleep()`) |
+| `time` | ⚠️ Limited | `time.time()` works. `time.sleep()` is not available (use `h.cleat_sleep()`) |
 
 ### Not available
 
@@ -286,9 +286,9 @@ These modules will **fail at import time or runtime** in WASM:
 | `select` / `selectors` | No I/O multiplexing |
 | `mmap` | No memory mapping |
 | `ctypes` / `cffi` | No native code interop |
-| `ssl` | No TLS/SSL (use host's `durable_call` instead) |
+| `ssl` | No TLS/SSL (use host's `cleat_call` instead) |
 | `http.client` / `urllib` | No outbound HTTP (use host calls instead) |
-| `requests` | Third-party HTTP library (use `h.durable_fetch()` instead) |
+| `requests` | Third-party HTTP library (use `h.cleat_fetch()` instead) |
 | `xml` / `xmlrpc` | XML parsing may be unavailable; avoid |
 | `tkinter` | No GUI support in WASM |
 | `concurrent.futures` | Depends on threading |
@@ -301,11 +301,11 @@ Replace standard Python HTTP libraries with host-provided durable calls:
 ```python
 # INSTEAD OF: import requests; requests.get(url)
 # USE:
-response = h.durable_fetch(url, "GET", {}, None)
+response = h.cleat_fetch(url, "GET", {}, None)
 
 # INSTEAD OF: import urllib.request; urllib.request.urlopen(url)
 # USE:
-response = h.durable_call("http", "fetch", {"url": url, "method": "GET"})
+response = h.cleat_call("http", "fetch", {"url": url, "method": "GET"})
 ```
 
 The host calls are recorded in the workflow history and replayed deterministically, which standard HTTP libraries cannot provide.
@@ -316,12 +316,12 @@ WASM workflows **cannot make direct database connections**. Modules like `sqlite
 
 Data access must go through one of these deterministic alternatives:
 
-1. **`durable_call` to a service** -- Call a registered backend service that performs the database operation:
+1. **`cleat_call` to a service** -- Call a registered backend service that performs the database operation:
 
 ```python
 # INSTEAD OF: import psycopg2; conn.execute("SELECT ...")
 # USE:
-response = h.durable_call("db-service", "query", {"sql": "SELECT * FROM orders"})
+response = h.cleat_call("db-service", "query", {"sql": "SELECT * FROM orders"})
 ```
 
 2. **`plugin_call` to a host plugin** -- Use a host-registered plugin that provides database access:
@@ -330,10 +330,10 @@ response = h.durable_call("db-service", "query", {"sql": "SELECT * FROM orders"}
 response = h.plugin_call("postgres", "query", {"sql": "SELECT * FROM orders"})
 ```
 
-3. **`durable_fetch` to a REST API** -- Call an external API that wraps database access:
+3. **`cleat_fetch` to a REST API** -- Call an external API that wraps database access:
 
 ```python
-response, status = h.durable_fetch("https://api.example.com/orders", "GET")
+response, status = h.cleat_fetch("https://api.example.com/orders", "GET")
 ```
 
 All three approaches are recorded in the workflow event history and survive replay, which direct database connections cannot guarantee.
@@ -344,32 +344,32 @@ Cleat uses **milliseconds** for all time-related host calls. This is important w
 
 | Framework | Sleep Unit | Example |
 |-----------|-----------|---------|
-| **Cleat** | milliseconds | `durable_sleep(5000)` = 5 seconds |
+| **Cleat** | milliseconds | `cleat_sleep(5000)` = 5 seconds |
 | **Temporal** | Go: `time.Duration`, Java: `Duration`, Python: `timedelta` / seconds | `sleep(Duration.ofSeconds(5))` |
 | **DBOS** | seconds | `DBOS.sleepSeconds(5)` |
 | **Restate** | `Duration` / milliseconds (SDK-dependent) | `Duration.ofSeconds(5)` |
 
-Cleat's `durable_sleep(duration_ms)` always takes **milliseconds**. The `advance_time(ms)` method in the test harness also uses milliseconds. This is consistent with the WASM host ABI which uses `i64` milliseconds for all timing operations.
+Cleat's `cleat_sleep(duration_ms)` always takes **milliseconds**. The `advance_time(ms)` method in the test harness also uses milliseconds. This is consistent with the WASM host ABI which uses `i64` milliseconds for all timing operations.
 
 Conversion examples when porting from other frameworks:
 
 ```python
 # Temporal (Python): workflow.sleep(timedelta(seconds=5))
 # Cleat:
-h.durable_sleep(5000)  # 5 seconds in ms
+h.cleat_sleep(5000)  # 5 seconds in ms
 
 # DBOS: DBOS.sleepSeconds(5)
 # Cleat:
-h.durable_sleep(5_000)
+h.cleat_sleep(5_000)
 
 # Restate (Java): Duration.ofSeconds(5)
 # Cleat:
-h.durable_sleep(5_000)
+h.cleat_sleep(5_000)
 
 # Helper pattern for readability:
 def sleep_seconds(h: HostCalls, secs: int) -> None:
     """Sleep for the given number of seconds."""
-    h.durable_sleep(secs * 1000)
+    h.cleat_sleep(secs * 1000)
 
 sleep_seconds(h, 5)  # 5 seconds
 ```
@@ -381,9 +381,9 @@ The Virtual Object pattern models long-lived stateful entities that process sign
 ### Complete entity workflow example
 
 ```python
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
-@durable_entry
+@cleat_entry
 def counter_entity(h: HostCalls, instance_key: str) -> str:
     # Scope all state operations to this entity instance
     h.set_scope("counter", instance_key)
@@ -393,7 +393,7 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
     if h.has_state("count"):
         count = int(h.get_state("count", int))
 
-    h.durable_log(f"Counter {instance_key} starting at {count}")
+    h.cleat_log(f"Counter {instance_key} starting at {count}")
 
     # Process signals in a loop (long-lived entity)
     while True:
@@ -408,19 +408,19 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
 
         if name == "increment":
             count = h.incr_state("count", 1)
-            h.durable_log(f"Counter {instance_key} incremented to {count}")
+            h.cleat_log(f"Counter {instance_key} incremented to {count}")
 
         elif name == "reset":
             h.set_state("count", 0)
             count = 0
-            h.durable_log(f"Counter {instance_key} reset to 0")
+            h.cleat_log(f"Counter {instance_key} reset to 0")
 
         elif name == "get":
             # Return current value via query state
             h.set_query_state("value", str(count))
 
         elif name == "stop":
-            h.durable_log(f"Counter {instance_key} stopping at {count}")
+            h.cleat_log(f"Counter {instance_key} stopping at {count}")
             return f'{{"final_count": {count}}}'
 
     return f'{{"count": {count}}}'
@@ -464,7 +464,7 @@ h.reply_to_signal(correlation_id, '{"approved": true}')
 ```python
 payload, found = h.poll_signal("update")
 if found:
-    h.durable_log(f"Received signal: {payload}")
+    h.cleat_log(f"Received signal: {payload}")
 ```
 
 ### Update handler pattern (bi-directional RPC)
@@ -472,7 +472,7 @@ if found:
 Update handlers provide synchronous request-response for external clients:
 
 ```python
-@durable_entry
+@cleat_entry
 def approval_workflow(h: HostCalls, input: str) -> str:
     # Register an "approve" update handler with validation
     def approve_handler(payload: str) -> str:
@@ -508,9 +508,9 @@ def approval_workflow(h: HostCalls, input: str) -> str:
 
 ## Per-call timeout limitations
 
-Per-call timeouts are **under development** and not yet enforced on the host side during WASM execution. The `durable_call_with_retry` host import does not accept a timeout parameter.
+Per-call timeouts are **under development** and not yet enforced on the host side during WASM execution. The `cleat_call_with_retry` host import does not accept a timeout parameter.
 
-**Workaround:** Use `durable_sleep` + polling for timeout-aware patterns:
+**Workaround:** Use `cleat_sleep` + polling for timeout-aware patterns:
 
 ```python
 def call_with_timeout(
@@ -522,10 +522,10 @@ def call_with_timeout(
 
     while h.now() < deadline:
         try:
-            return h.durable_call(service, op, request)
+            return h.cleat_call(service, op, request)
         except RuntimeError as e:
             last_error = e
-            h.durable_sleep(1000)  # poll interval
+            h.cleat_sleep(1000)  # poll interval
 
     raise RuntimeError(f"Call timed out after {timeout_ms}ms: {last_error}")
 ```
@@ -541,14 +541,14 @@ Cleat does **not** have an `all_handlers_finished` equivalent (found in Temporal
 1. **Manual handler counting** -- Track handler invocations with state keys:
 
 ```python
-@durable_entry
+@cleat_entry
 def tracked_workflow(h: HostCalls, input: str) -> str:
     h.set_state("pending_handlers", 0)
 
     def handler(payload: str) -> str:
         h.incr_state("pending_handlers", 1)
         try:
-            result = h.durable_call("service", "Op", payload)
+            result = h.cleat_call("service", "Op", payload)
             return result
         finally:
             h.incr_state("pending_handlers", -1)
@@ -560,12 +560,12 @@ def tracked_workflow(h: HostCalls, input: str) -> str:
 2. **Durable promises** -- External callers signal completion via promises:
 
 ```python
-@durable_entry
+@cleat_entry
 def promise_tracked_workflow(h: HostCalls, input: str) -> str:
     promise_id = h.create_promise("all_handlers_done")
 
     def handler(payload: str) -> str:
-        result = h.durable_call("service", "Op", payload)
+        result = h.cleat_call("service", "Op", payload)
         # Signal done via the promise
         h.resolve_promise(promise_id, "done")
         return result
@@ -581,22 +581,22 @@ For coordinating multiple concurrent operations, use `await_all_children` with c
 
 ## Multi-export WASM modules (Python)
 
-A single Python file can export multiple workflow entry points using `@durable_entry`:
+A single Python file can export multiple workflow entry points using `@cleat_entry`:
 
 ```python
-from cleat_sdk import HostCalls, durable_entry
+from cleat_sdk import HostCalls, cleat_entry
 
-@durable_entry
+@cleat_entry
 def place_order(h: HostCalls, input: str) -> str:
-    return h.durable_call("orders", "Place", input)
+    return h.cleat_call("orders", "Place", input)
 
-@durable_entry
+@cleat_entry
 def cancel_order(h: HostCalls, input: str) -> str:
-    return h.durable_call("orders", "Cancel", input)
+    return h.cleat_call("orders", "Cancel", input)
 
-@durable_entry
+@cleat_entry
 def get_order_status(h: HostCalls, input: str) -> str:
-    return h.durable_call("orders", "Status", input)
+    return h.cleat_call("orders", "Status", input)
 ```
 
 When compiled to WASM, `componentize-py` generates a named export for each decorated function. The host dispatches invocations by matching the called workflow name to the export name. Each export wrapper handles ABI marshalling, suspend/resume, and error serialization independently.
@@ -665,7 +665,7 @@ Required flags:
 
 | Flag | Purpose |
 |------|---------|
-| `componentize <file>` | Subcommand; the Python file containing your `@durable_entry` workflow function |
+| `componentize <file>` | Subcommand; the Python file containing your `@cleat_entry` workflow function |
 | `--wit-path <dir>` | Path to the directory with the Cleat WIT files (`cleat.wit`) |
 | `--world <name>` | The WIT world to implement (e.g. `cleat-workflow`) |
 | `-o <file>` | Output WASM file path |
@@ -724,7 +724,7 @@ wasm-tools dump hello_workflow.wasm | head -20
 wasm-objdump -x hello_workflow.wasm | grep Export
 ```
 
-The output WASM file can be loaded by the Cleat worker runtime. The compiled component exports entry points that dispatch to your `@durable_entry`-decorated functions.
+The output WASM file can be loaded by the Cleat worker runtime. The compiled component exports entry points that dispatch to your `@cleat_entry`-decorated functions.
 
 ### Using the Makefile
 
@@ -773,15 +773,20 @@ The SDK exposes six main modules via `cleat_sdk/`:
 | Module | Contents |
 |--------|----------|
 | `host_calls` | `HostCalls`, `SuspendSentinel`, `RetryPolicy`, `SignalResult`, `ChildResult`, `PromiseResult` |
-| `entry` | `durable_entry` decorator |
+| `entry` | `cleat_entry`, `virtual_object` decorators |
 | `memory` | WASM linear memory helpers and bit-packing decoders |
 | `types` | `ChildWorkflow[T]`, `Saga`, `SagaStep`, `TerminalError`, `DurableDefer` |
+| `test_harness` | `CleatTestHarness` — in-memory workflow test harness with mock host calls |
 | `client` | `CleatClient` — REST client for programmatic workflow interaction |
 | `plugins` | `Plugins`, `BlobPutResult`, `BlobGetResult`, `AwaitEventResult`, `EvaluateFlagResult`, `ProduceResult`, `SendWebhookResult`, `TriggerIncidentResult`, `ResolveIncidentResult`, `SendMessageResult`, `AwaitWebhookResult` |
 
-### `durable_entry(name=None)`
+### `cleat_entry(name=None)`
 
 Decorator that marks a function as a Cleat workflow entry point. The decorated function must accept `HostCalls` as its first parameter. Additional parameters are deserialised from the workflow input JSON by name. The decorator handles suspend propagation (`SuspendSentinel` exception) and error serialisation.
+
+### `virtual_object(name=None)`
+
+Decorator similar to `@cleat_entry` but for entity workflows (virtual objects). Like `cleat_entry`, the decorated function must accept `HostCalls` as its first parameter. Sets `_is_virtual_object = True` for introspection by the build tooling.
 
 ### `HostCalls`
 
@@ -792,7 +797,7 @@ Core class wrapping all 36 WASM host function imports. Each method handles the p
 - `SignalResult(name, payload, timed_out)` — returned by `await_signals`
 - `ChildResult(run_id, result, error)` — returned by `await_all_children`
 - `PromiseResult(result, timed_out, rejected)` — returned by `await_promise` (``rejected`` is ``True`` if the promise was rejected)
-- `RetryPolicy(max_attempts, initial_interval_ms, backoff_coefficient, max_interval_ms, non_retryable_errors)` — for `durable_call_with_retry`
+- `RetryPolicy(max_attempts, initial_interval_ms, backoff_coefficient, max_interval_ms, non_retryable_errors)` — for `cleat_call_with_retry`
 - `SuspendSentinel` — exception raised to signal workflow suspension
 - `TerminalError` — exception raised from a saga step to trigger immediate compensation (non-retryable)
 
@@ -811,6 +816,36 @@ External REST client for interacting with the Cleat host:
 - `resolve_promise(promise_id, value) -> None` — resolve a durable promise
 - `get_query_state(run_id, key) -> Any` — read queryable workflow state
 - `get_workflow_status(run_id) -> dict` — get workflow status, result, and timestamps
+
+### `CleatTestHarness()`
+
+In-memory test harness for unit-testing workflows without a running host. Simulates the WASM execution environment in pure Python with a mock linear memory, providing deterministic test coverage comparable to Go's `cleattest.TestEnv`.
+
+```python
+from cleat_sdk import HostCalls, cleat_entry, CleatTestHarness
+
+@cleat_entry
+def GreetWorkflow(h: HostCalls, name: str) -> str:
+    h.cleat_log(f"Hello {name}")
+    return h.cleat_call("greeter", "Greet", {"name": name})
+
+def test_greet_workflow():
+    harness = CleatTestHarness()
+    harness.register_call_stub("greeter", "Greet", '{"result": "Hello Alice"}')
+
+    result = harness.run(GreetWorkflow, "Alice")
+    assert result == '{"result": "Hello Alice"}'
+    harness.assert_called("greeter", "Greet", times=1)
+```
+
+Key methods:
+- `run(entry_fn, input)` — execute a `@cleat_entry` workflow against mock host calls
+- `register_call_stub(service, operation, response)` — stub a `cleat_call` response
+- `register_call_handler(service, operation, handler)` — register a dynamic handler
+- `assert_called(service, operation, times=None)` — assert a call was recorded
+- `deliver_signal(signal_name, payload)` — simulate signal delivery
+- `advance_time(ms)` — advance the simulated clock by milliseconds
+- `call_count` / `call_records` — inspect recorded calls
 
 ### `Plugins(host)`
 

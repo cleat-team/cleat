@@ -1,0 +1,5 @@
+error: first parameter must be &HostCalls: must be &HostCalls. Replace the current type with 'h: &HostCalls' to access the cleat runtime API.
+ --> tests/ui/reject_no_hostcalls.rs:4:24
+  |
+4 | fn no_hostcalls(input: String) -> Result<String, String> {
+  |                        ^^^^^^

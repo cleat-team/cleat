@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -761,7 +762,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeJobQueueStore, *
 	fakeEnv := newFakeEnvironment()
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		env:    &fakeEnv.Environment,
@@ -771,7 +772,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeJobQueueStore, *
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(db)(p.mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(p.mux)
 	return p, handler, store, clock, fakeEnv
 }
 

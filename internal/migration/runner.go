@@ -17,11 +17,14 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rcownie/cleat/internal/host"
 )
 
-// Runner applies pending SQL migrations to a PostgreSQL database.
+// Runner applies pending SQL migrations to a database.
 type Runner struct {
 	db            *sql.DB
+	dialect       host.Dialect
 	migrationsDir string
 }
 
@@ -32,11 +35,12 @@ type migration struct {
 	sql     string
 }
 
-// NewRunner creates a migration runner that reads .sql files from dir
-// and applies pending ones against db.
-func NewRunner(db *sql.DB, dir string) *Runner {
+// NewRunner creates a migration runner that reads .sql files from the
+// dialect-specific subdirectory under dir and applies pending ones against db.
+func NewRunner(db *sql.DB, dialect host.Dialect, dir string) *Runner {
 	return &Runner{
 		db:            db,
+		dialect:       dialect,
 		migrationsDir: dir,
 	}
 }
@@ -84,24 +88,47 @@ func (r *Runner) Run(ctx context.Context) error {
 }
 
 // ensureMigrationsTable creates the schema_migrations tracking table if it
-// does not already exist.
+// does not already exist, using the appropriate DDL for each dialect.
 func (r *Runner) ensureMigrationsTable(ctx context.Context) error {
-	_, err := r.db.ExecContext(ctx, `
+	var ddl string
+	switch r.dialect {
+	case host.DialectPostgres:
+		ddl = `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    TEXT PRIMARY KEY,
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)
-	`)
+		`
+	case host.DialectMySQL:
+		ddl = `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    VARCHAR(255) PRIMARY KEY,
+			applied_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
+		)
+		`
+	case host.DialectMSSQL:
+		ddl = `
+		IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'schema_migrations')
+			CREATE TABLE schema_migrations (
+				version    NVARCHAR(255) PRIMARY KEY,
+				applied_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME()
+			)
+		`
+	default:
+		return fmt.Errorf("unsupported dialect: %s", r.dialect)
+	}
+	_, err := r.db.ExecContext(ctx, ddl)
 	return err
 }
 
-// readMigrations scans the migrations directory for .sql files matching the
-// NNN_name.sql naming convention and returns them sorted by version number.
-// Files that do not match the convention are silently skipped.
+// readMigrations scans the dialect-specific subdirectory for .sql files
+// matching the NNN_name.sql naming convention and returns them sorted by
+// version number. Files that do not match the convention are silently skipped.
 func (r *Runner) readMigrations() ([]migration, error) {
-	entries, err := os.ReadDir(r.migrationsDir)
+	migDir := filepath.Join(r.migrationsDir, string(r.dialect))
+	entries, err := os.ReadDir(migDir)
 	if err != nil {
-		return nil, fmt.Errorf("read directory %s: %w", r.migrationsDir, err)
+		return nil, fmt.Errorf("read directory %s: %w", migDir, err)
 	}
 
 	var migrations []migration
@@ -125,7 +152,7 @@ func (r *Runner) readMigrations() ([]migration, error) {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(r.migrationsDir, name))
+		data, err := os.ReadFile(filepath.Join(migDir, name))
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
@@ -193,12 +220,22 @@ func (r *Runner) applyMigration(ctx context.Context, m migration) error {
 	}
 
 	versionStr := strconv.Itoa(m.version)
-	if _, err := tx.ExecContext(
-		ctx,
-		"INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING",
-		versionStr,
-		time.Now(),
-	); err != nil {
+	var recordSQL string
+	var recordArgs []interface{}
+	switch r.dialect {
+	case host.DialectPostgres:
+		recordSQL = "INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING"
+		recordArgs = []interface{}{versionStr, time.Now()}
+	case host.DialectMySQL:
+		recordSQL = "INSERT IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)"
+		recordArgs = []interface{}{versionStr, time.Now()}
+	case host.DialectMSSQL:
+		recordSQL = "IF NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = @p1) INSERT INTO schema_migrations (version, applied_at) VALUES (@p1, @p2)"
+		recordArgs = []interface{}{versionStr, time.Now()}
+	default:
+		return fmt.Errorf("unsupported dialect: %s", r.dialect)
+	}
+	if _, err := tx.ExecContext(ctx, recordSQL, recordArgs...); err != nil {
 		return fmt.Errorf("record version: %w", err)
 	}
 

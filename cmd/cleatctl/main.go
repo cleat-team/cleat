@@ -26,8 +26,6 @@ import (
 	"log"
 	"os"
 
-	_ "github.com/lib/pq"
-
 	"github.com/rcownie/cleat/internal/host"
 )
 
@@ -63,8 +61,13 @@ func main() {
 		log.Fatalf("failed to ping: %v", err)
 	}
 
-	store := host.NewPostgresStore(db)
 	ctx := context.Background()
+	factory := host.NewPostgresStoreFactory(db, "public")
+	store, closer, err := factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000")
+	if err != nil {
+		log.Fatalf("failed to open store: %v", err)
+	}
+	defer closer.Close()
 
 	cmd := args[0]
 	switch cmd {

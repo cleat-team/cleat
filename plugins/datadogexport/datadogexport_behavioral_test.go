@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 // ---------------------------------------------------------------------------
@@ -529,7 +530,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -539,7 +540,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(db)(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
 	return p, handler, store
 }
 
@@ -798,7 +799,7 @@ func TestMetricDataFormatting(t *testing.T) {
 	// Use a custom RoundTripper that captures the request payload and returns OK.
 	var capturedPayload []byte
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -894,7 +895,7 @@ func TestBackgroundExportWorker(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{
 			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -1044,7 +1045,7 @@ func TestDD_Run_Cancellation(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1184,7 +1185,7 @@ func TestDD_ErrorPaths_DBError_Create(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1212,7 +1213,7 @@ func TestDD_ErrorPaths_DBError_List(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1240,7 +1241,7 @@ func TestDD_ErrorPaths_DBError_Get(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1268,7 +1269,7 @@ func TestDD_ErrorPaths_DBError_Update(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1296,7 +1297,7 @@ func TestDD_ErrorPaths_DBError_Delete(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1322,7 +1323,7 @@ func TestDD_ExportMetrics_QueryError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1343,7 +1344,7 @@ func TestDD_ExportForConfig_QueryError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     db,
+		db:     &host.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}

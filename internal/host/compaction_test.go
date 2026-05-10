@@ -2,11 +2,12 @@ package host
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // TestPluginCallCompactionRoundTrip verifies that plugin_call and
@@ -374,8 +375,9 @@ func (m *mockCompactStore) RequestCancellation(ctx context.Context, workflowID, 
 func (m *mockCompactStore) CheckCancellation(ctx context.Context, workflowID string) (bool, string, error) { return false, "", nil }
 func (m *mockCompactStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
 func (m *mockCompactStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) { return "", false, nil }
-func (m *mockCompactStore) StartNewRun(ctx context.Context, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
+func (m *mockCompactStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
 func (m *mockCompactStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) { return "", nil }
+func (m *mockCompactStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (string, error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy) }
 func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) { return "", false, nil }
 func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) { return 0, nil }
 func (m *mockCompactStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) { return "", nil }
@@ -389,7 +391,7 @@ func (m *mockCompactStore) GetDueSchedules(ctx context.Context) ([]Schedule, err
 func (m *mockCompactStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error { return nil }
 func (m *mockCompactStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) { return 0, nil }
 func (m *mockCompactStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) { return nil, nil }
-func (m *mockCompactStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) (sql.Result, error) { return nil, nil }
+func (m *mockCompactStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error { return nil }
 func (m *mockCompactStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) { return nil, nil }
 func (m *mockCompactStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) {
 	if m.loadCompactionStateErr != nil {
@@ -417,6 +419,7 @@ func (m *mockCompactStore) ClearStickyWorker(ctx context.Context, workflowID str
 func (m *mockCompactStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error { return nil }
 func (m *mockCompactStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) { return nil, nil }
 func (m *mockCompactStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) { return nil, nil }
+func (m *mockCompactStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
 func (m *mockCompactStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error { return nil }
 func (m *mockCompactStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error { return nil }
 func (m *mockCompactStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) { return 0, nil }
@@ -1480,3 +1483,7 @@ func (m *mockCompactStore) BatchHeartbeat(ctx context.Context, workerID string) 
 func (m *mockCompactStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) { return nil, nil }
 func (m *mockCompactStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error { return nil }
+func (m *mockCompactStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) { return "", false, nil }
+func (m *mockCompactStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) { return false, "", nil }
+func (m *mockCompactStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) { return 0, nil }
+func (m *mockCompactStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) { return true, nil }

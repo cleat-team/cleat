@@ -8,11 +8,11 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/rcownie/cleat/internal/host"
 )
 
 type tenantIDKey struct{}
@@ -29,21 +29,14 @@ func TenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 }
 
 // TenantFromAPIKey looks up a tenant by API key hash.
-func TenantFromAPIKey(ctx context.Context, db *sql.DB, keyHash []byte) (uuid.UUID, error) {
-	var tenantID uuid.UUID
-	err := db.QueryRowContext(ctx,
-		`SELECT tenant_id FROM tenant_api_keys
-		 WHERE key_hash = $1 AND revoked_at IS NULL`, keyHash).Scan(&tenantID)
-	if err != nil {
-		return uuid.Nil, err
-	}
-	return tenantID, nil
+func TenantFromAPIKey(ctx context.Context, store host.WorkflowStore, keyHash []byte) (uuid.UUID, error) {
+	return store.ResolveTenantFromAPIKey(ctx, keyHash)
 }
 
 // Middleware authenticates requests using a cleat API key.
 // Supports: Authorization: Bearer cleat_sk_<key>
 // Also supports: X-Cleat-API-Key: <key>
-func Middleware(db *sql.DB) func(http.Handler) http.Handler {
+func Middleware(store host.WorkflowStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := extractAPIKey(r)
@@ -54,7 +47,7 @@ func Middleware(db *sql.DB) func(http.Handler) http.Handler {
 				return
 			}
 			keyHash := sha256Hash(key)
-			tenantID, err := TenantFromAPIKey(r.Context(), db, keyHash)
+			tenantID, err := TenantFromAPIKey(r.Context(), store, keyHash)
 			if err != nil {
 				http.Error(w, `{"error":"invalid or revoked API key"}`, http.StatusUnauthorized)
 				return

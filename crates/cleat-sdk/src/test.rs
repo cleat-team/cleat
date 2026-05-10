@@ -13,7 +13,7 @@
 //! # Usage
 //!
 //! ```rust
-//! use durable_sdk::test::{CleatTest, CallRecord};
+//! use cleat_sdk::test::{CleatTest, CallRecord};
 //!
 //! #[test]
 //! fn test_payment_workflow() {
@@ -41,6 +41,8 @@
 //! Mirrors Go `durabletest.TestEnv` at durable/durabletest/durabletest.go.
 
 use std::collections::HashMap;
+
+use crate::host_calls::{FetchResult, RetryPolicy};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Public types
@@ -278,6 +280,26 @@ impl MockHostCalls {
         (String::new(), Some(err))
     }
 
+    /// Typed version of cleat_call_with_retry. In mock mode, delegates to cleat_call.
+    pub fn cleat_call_with_retry_typed<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &mut self, service: &str, operation: &str, request: &T, _retry_policy: &RetryPolicy,
+    ) -> Result<R, String> {
+        let request_json = serde_json::to_string(request).map_err(|e| format!("serialize: {}", e))?;
+        let (resp_json, err) = self.cleat_call(service, operation, &request_json);
+        if let Some(e) = err { return Err(e); }
+        serde_json::from_str(&resp_json).map_err(|e| format!("deserialize: {}", e))
+    }
+
+    /// Typed cleat_call with heartbeat interval. Delegates to cleat_call in mock mode.
+    pub fn cleat_call_heartbeat_typed<T: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &mut self, service: &str, operation: &str, request: &T, _heartbeat_interval_ms: i64,
+    ) -> Result<R, String> {
+        let request_json = serde_json::to_string(request).map_err(|e| format!("serialize: {}", e))?;
+        let (resp_json, err) = self.cleat_call(service, operation, &request_json);
+        if let Some(e) = err { return Err(e); }
+        serde_json::from_str(&resp_json).map_err(|e| format!("deserialize: {}", e))
+    }
+
     /// Simulate workflow suspension for a duration.
     pub fn cleat_sleep(&mut self, duration_ms: i64) -> bool {
         self.now_ms += duration_ms;
@@ -369,6 +391,11 @@ impl MockHostCalls {
         }
 
         (run_id, None)
+    }
+
+    /// Start a child workflow with version options (mock: delegates to child_workflow).
+    pub fn child_workflow_with_options(&mut self, name: &str, input_json: &str, _version: i32) -> (String, Option<String>) {
+        self.child_workflow(name, input_json)
     }
 
     /// Wait for a child workflow to complete.
@@ -502,6 +529,40 @@ impl MockHostCalls {
         Ok(())
     }
 
+    /// Schedule a delayed invocation (ms variant, alias for schedule_invoke).
+    pub fn schedule_invoke_ms(&mut self, service: &str, operation: &str, request_json: &str, delay_ms: i64) -> Result<(), String> {
+        self.schedule_invoke(service, operation, request_json, delay_ms)
+    }
+
+    /// Acquire a concurrency lock with a TTL in milliseconds. Simple mock: always succeeds.
+    pub fn acquire_lock_ms(&mut self, _key: &str, _ttl_ms: i64) -> (bool, Option<String>) {
+        (true, None)
+    }
+
+    /// Acquire a concurrency lock with a Duration TTL. Delegates to acquire_lock_ms.
+    pub fn acquire_lock(&mut self, key: &str, ttl: std::time::Duration) -> (bool, Option<String>) {
+        self.acquire_lock_ms(key, ttl.as_millis() as i64)
+    }
+
+    /// Release a concurrency lock. Simple mock: always succeeds.
+    pub fn release_lock(&mut self, _key: &str) -> Option<String> {
+        None
+    }
+
+    /// Make an HTTP fetch request. Returns a default FetchResult with status 200.
+    pub fn cleat_fetch(&mut self, _method: &str, _url: &str, _headers: &str, _body: &str) -> Result<FetchResult, String> {
+        Ok(FetchResult {
+            status: 200,
+            headers: std::collections::HashMap::new(),
+            body: String::new(),
+        })
+    }
+
+    /// Generate a deterministic UUID from a seed.
+    pub fn uuid(&mut self, seed: &str) -> String {
+        format!("mock-uuid-{}", seed)
+    }
+
     /// Register a query handler.
     pub fn register_query_handler(&mut self, name: &str) -> Result<(), String> {
         self.query_handlers.push(name.to_string());
@@ -596,6 +657,11 @@ impl MockHostCalls {
         // Simulate timeout
         self.now_ms += timeout_ms;
         Err(format!("SendSignalAndWait(target={}, signal={}) timed out after {}ms", target_run_id, signal_name, timeout_ms))
+    }
+
+    /// Send signal and wait (ms variant, alias for send_signal_and_wait).
+    pub fn send_signal_and_wait_ms(&mut self, target_run_id: &str, signal_name: &str, payload: &str, timeout_ms: i64) -> Result<String, String> {
+        self.send_signal_and_wait(target_run_id, signal_name, payload, timeout_ms)
     }
 
     /// Reply to a signal from within a handler.
@@ -853,7 +919,7 @@ impl Default for MockHostCalls {
 /// # Usage
 ///
 /// ```rust
-/// use durable_sdk::test::CleatTest;
+/// use cleat_sdk::test::CleatTest;
 ///
 /// #[test]
 /// fn test_workflow() {

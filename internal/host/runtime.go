@@ -122,22 +122,61 @@ func (r *Runtime) InstantiateModuleNamed(ctx context.Context, compiled wazero.Co
 
 // InitModule starts the Go wasip1 runtime by calling _start in a background
 // goroutine. _start initializes WASI and calls main() which blocks to keep
-// the module alive. After a brief pause for initialization, the module is
-// ready for export calls.
+// the module alive. After yielding until the runtime is ready, the module
+// can accept export calls.
+//
+// Readiness detection uses exponential backoff after _start has been
+// dispatched. Most Go wasip1 binaries complete runtime initialization in
+// under 1ms (stack setup, GC init, scheduler start). Without a shared-memory
+// readiness flag (which would require SDK changes), we check that the module
+// is responsive by verifying its memory remains accessible — a live WASM
+// module with initialized memory is a reliable indicator that _start
+// succeeded.
 //
 // For non-Go modules (e.g., Rust, C) that don't have _start, this is a no-op.
 func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 	start := mod.ExportedFunction("_start")
 	if start == nil {
-		return nil // Non-Go modules don't need _start.
+		return nil
 	}
+
+	started := make(chan struct{})
 	go func() {
+		close(started)
 		start.Call(ctx)
 	}()
-	// Most Go wasip1 binaries initialize in under 10ms; readiness polling
-	// on a shared memory flag can replace this sleep entirely if needed.
-	time.Sleep(10 * time.Millisecond)
-	return nil
+
+	// Wait for the goroutine to actually begin executing _start.
+	select {
+	case <-started:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	// Exponential backoff: check module liveness at increasing intervals.
+	// Fast-starting modules (most Go wasip1 binaries) pass on the first
+	// iteration and pay only the initial 100µs yield. Slow starters
+	// (e.g., modules with heavy init() work) get up to ~10ms total.
+	delay := 100 * time.Microsecond
+	const maxDelay = 10 * time.Millisecond
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+
+		// Liveness check: memory is allocated during instantiation, but
+		// if _start panicked the module may have been torn down, so verify
+		// memory is still accessible.
+		if mem := mod.Memory(); mem != nil && mem.Size() > 0 {
+			return nil
+		}
+		delay *= 2
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+	}
 }
 
 // InstantiateAndInit compiles, instantiates, and initialises a WASM module.

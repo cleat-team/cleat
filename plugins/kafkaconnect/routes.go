@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/plugin"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -110,10 +111,10 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.ExecContext(r.Context(), `
-		INSERT INTO kafka_config (tenant_id, id, name, brokers, topic, consumer_group, event_type, enabled, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $8)
-	`, tid, id, req.Name, req.Brokers, req.Topic, consumerGroup, eventType, now)
+	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+			INSERT INTO kafka_config (tenant_id, id, name, brokers, topic, consumer_group, event_type, enabled, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $8)
+		`, p.dialect), tid, id, req.Name, req.Brokers, req.Topic, consumerGroup, eventType, now)
 	if err != nil {
 		p.logger.Error("kafka-connect: create config", "error", err)
 		p.writeError(w, 500, "failed to create config")
@@ -145,12 +146,12 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.QueryContext(r.Context(), `
-		SELECT id, name, brokers, topic, consumer_group, event_type, enabled, created_at, updated_at
-		FROM kafka_config
-		WHERE tenant_id = $1
-		ORDER BY created_at DESC
-	`, tid)
+	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+			SELECT id, name, brokers, topic, consumer_group, event_type, enabled, created_at, updated_at
+			FROM kafka_config
+			WHERE tenant_id = $1
+			ORDER BY created_at DESC
+		`, p.dialect), tid)
 	if err != nil {
 		p.logger.Error("kafka-connect: list configs", "error", err)
 		p.writeError(w, 500, "failed to list configs")
@@ -192,16 +193,15 @@ func (p *Plugin) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := p.db.ExecContext(r.Context(), `
-		DELETE FROM kafka_config
-		WHERE id = $1 AND tenant_id = $2
-	`, id, tid)
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+			DELETE FROM kafka_config
+			WHERE id = $1 AND tenant_id = $2
+		`, p.dialect), id, tid)
 	if err != nil {
 		p.logger.Error("kafka-connect: delete config", "error", err)
 		p.writeError(w, 500, "failed to delete config")
 		return
 	}
-	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		p.writeError(w, 404, "config not found")
 		return

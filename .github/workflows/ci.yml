@@ -256,6 +256,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install ".[dev]"
+          pip install "componentize-py>=0.12.0"
 
       - name: Run tests
         working-directory: python-sdk
@@ -304,6 +305,86 @@ jobs:
       - name: Run tests
         working-directory: packages/cleat-as
         run: npm test
+
+  # -------------------------------------------------------------------------
+  # Test Rust
+  # -------------------------------------------------------------------------
+  test-rust:
+    name: Test Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Test cleat-macro
+        working-directory: crates/cleat-macro
+        run: cargo test
+
+      - name: Test cleat-sdk
+        working-directory: crates/cleat-sdk
+        run: cargo test
+
+      - name: Verify WASM compilation
+        working-directory: crates/cleat-sdk
+        run: cargo build --target wasm32-wasip1 --release
+
+  # -------------------------------------------------------------------------
+  # Test AssemblyScript WASM compilation
+  # -------------------------------------------------------------------------
+  test-assemblyscript-wasm:
+    name: AssemblyScript WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install SDK dependencies
+        working-directory: packages/cleat-as
+        run: npm ci
+
+      - name: Install example dependencies
+        working-directory: examples/as-workflow
+        run: npm ci
+
+      - name: Build example WASM
+        working-directory: examples/as-workflow
+        run: npx asc assembly/index.ts --target release --transform ./node_modules/@cleat/transform/index.js
+
+      - name: Verify WASM output exists and is non-empty
+        working-directory: examples/as-workflow
+        run: |
+          if [ ! -f dist/workflow.wasm ]; then
+            echo "ERROR: dist/workflow.wasm not found after build"
+            exit 1
+          fi
+          FILE_SIZE=$(stat -c%s dist/workflow.wasm)
+          echo "WASM file size: $FILE_SIZE bytes"
+          if [ "$FILE_SIZE" -le 100 ]; then
+            echo "ERROR: workflow.wasm is too small ($FILE_SIZE bytes)"
+            exit 1
+          fi
+          echo "workflow.wasm is valid (size: $FILE_SIZE bytes)"
+
+      - name: Inspect WASM exports
+        working-directory: examples/as-workflow
+        run: |
+          if command -v wasm-objdump &>/dev/null; then
+            echo "=== WASM Exports ==="
+            wasm-objdump -x dist/workflow.wasm 2>/dev/null | grep -A1 "Export\| - func\["
+          elif command -v wasm2wat &>/dev/null; then
+            echo "=== WASM exports (wasm2wat) ==="
+            wasm2wat dist/workflow.wasm 2>/dev/null | grep "(export " | head -20
+          else
+            echo "No WASM inspection tools available. File size check passed."
+          fi
 
   # -------------------------------------------------------------------------
   # Fuzz tests (WASM boundary)
@@ -395,6 +476,8 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -418,6 +501,7 @@ jobs:
         run: |
           cd crates/cleat-macro && cargo build --all-targets
           cd ../cleat-sdk && cargo build --all-targets
+          cargo build --target wasm32-wasip1 --release
 
       - name: Build AssemblyScript
         working-directory: packages/cleat-as
@@ -434,6 +518,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install .
+          pip install "componentize-py>=0.12.0"
 
   # -------------------------------------------------------------------------
   # Coverage (informational, non-blocking)

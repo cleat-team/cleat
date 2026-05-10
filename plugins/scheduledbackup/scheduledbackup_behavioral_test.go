@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/auth"
+	"github.com/rcownie/cleat/internal/host"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -1078,7 +1079,7 @@ func newSBPlugin(t *testing.T) (*Plugin, *sbDB, *sql.DB) {
 	fdb := newSBDB()
 	rawDB := sql.OpenDB(&sbConnector{db: fdb})
 	p := &Plugin{
-		db:     rawDB,
+		db:     &host.SQLDBAdapter{DB: rawDB},
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -1945,7 +1946,7 @@ func TestSB_Run_NilDB(t *testing.T) {
 
 func TestSB_Run_NoDSN(t *testing.T) {
 	p := &Plugin{
-		db:     &sql.DB{},
+		db:     &host.SQLDBAdapter{DB: &sql.DB{}},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
