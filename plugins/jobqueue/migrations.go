@@ -47,7 +47,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				"\t\t\t\t\tqueue_name   NVARCHAR(255) NOT NULL,\n" +
 				"\t\t\t\t\tjob_id       UNIQUEIDENTIFIER NOT NULL,\n" +
 				"\t\t\t\t\tpayload      NVARCHAR(MAX) NOT NULL DEFAULT ('{}'),\n" +
-				"\t\t\t\t\t[status]     NVARCHAR(MAX) NOT NULL DEFAULT 'pending',\n" +
+				"\t\t\t\t\t[status]     NVARCHAR(255) NOT NULL DEFAULT 'pending',\n" +
 				"\t\t\t\t\tcreated_at   DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),\n" +
 				"\t\t\t\t\tstarted_at   DATETIMEOFFSET,\n" +
 				"\t\t\t\t\tcompleted_at DATETIMEOFFSET,\n" +

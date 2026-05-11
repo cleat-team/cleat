@@ -16,9 +16,9 @@ Usage pattern::
     # POST /workflows/{run_id}/update/approve {"amount": 100}
     # Response: {"approved": true, "payload": "{\"amount\": 100}"}
 """
+
 import json
 from dataclasses import dataclass
-from typing import Optional
 from cleat_sdk import HostCalls, cleat_entry
 
 
@@ -50,11 +50,13 @@ def approval_workflow(h: HostCalls, request: ApprovalRequest) -> str:
         data = json.loads(payload)
         approved = data.get("approved", False)
         h.cleat_log(f"Approval decision for {request.task_id}: {approved}")
-        return json.dumps({
-            "task_id": request.task_id,
-            "approved": approved,
-            "reason": data.get("reason", ""),
-        })
+        return json.dumps(
+            {
+                "task_id": request.task_id,
+                "approved": approved,
+                "reason": data.get("reason", ""),
+            }
+        )
 
     def validate_approve(payload: str) -> bool:
         """Validate the approval payload.
@@ -82,8 +84,10 @@ def approval_workflow(h: HostCalls, request: ApprovalRequest) -> str:
     )
 
     h.cleat_log(f"Update handler registered for task {request.task_id}")
-    return json.dumps({
-        "status": "waiting",
-        "task_id": request.task_id,
-        "message": "Approval handler registered. Send update to /update/approve",
-    })
+    return json.dumps(
+        {
+            "status": "waiting",
+            "task_id": request.task_id,
+            "message": "Approval handler registered. Send update to /update/approve",
+        }
+    )

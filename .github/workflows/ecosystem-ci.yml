@@ -1,7 +1,7 @@
 name: Ecosystem CI
 on:
   pull_request:
-    branches: [main]
+    branches: [main, develop]
     paths:
       - "cleat/**"
       - "internal/**"
@@ -9,7 +9,7 @@ on:
       - "go.mod"
       - "go.sum"
   push:
-    branches: [main]
+    branches: [main, develop]
 
 jobs:
   python-sdk:

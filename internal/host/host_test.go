@@ -1036,7 +1036,7 @@ func buildTestWasm(t *testing.T) string {
 	}
 
 	tmpDir := t.TempDir()
-	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "durable"),
+	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "cleat"),
 		"build", "--target", "tinygo", "-o", tmpDir, filepath.Join(projectRoot, "testdata", "basic"))
 	cmd.Dir = projectRoot
 

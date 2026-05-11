@@ -48,7 +48,7 @@ func TestMSSQLStoreFactory(t *testing.T) {
 	connStr := os.Getenv("CLEAT_TEST_MSSQL")
 
 	// Open a temporary connection for schema setup.
-	setupDB, err := sql.Open("mssql", connStr)
+	setupDB, err := sql.Open("sqlserver", connStr)
 	if err != nil {
 		t.Fatalf("open setup DB: %v", err)
 	}

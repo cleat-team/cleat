@@ -1,6 +1,7 @@
 package host
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -10,6 +11,20 @@ import (
 	"sort"
 	"time"
 )
+
+// compactJSONString removes any extra whitespace (spaces after colons and commas)
+// that MySQL adds when casting JSON columns to CHAR/VARCHAR. This ensures
+// consistent JSON string comparison in tests and callers.
+func compactJSONString(s string) string {
+	if s == "" {
+		return s
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, []byte(s)); err != nil {
+		return s // fallback to original if invalid JSON
+	}
+	return buf.String()
+}
 
 // ---------------------------------------------------------------------------
 // Promises
@@ -73,7 +88,7 @@ func (s *MySQLStore) GetPromise(ctx context.Context, workflowID, promiseID strin
 	if err != nil {
 		return "", "", "", err
 	}
-	return status, resultStr.String, errStr.String, nil
+	return status, compactJSONString(resultStr.String), errStr.String, nil
 }
 
 // ListPromises returns all promises for a workflow ordered by creation time.
@@ -100,6 +115,7 @@ func (s *MySQLStore) ListPromises(ctx context.Context, workflowID string) ([]Pro
 			&pi.Result, &pi.ErrorMsg, &pi.CreatedAt, &resolvedAt); err != nil {
 			return nil, err
 		}
+		pi.Result = compactJSONString(pi.Result)
 		if resolvedAt.Valid {
 			pi.ResolvedAt = &resolvedAt.Time
 		}
@@ -146,6 +162,8 @@ func (s *MySQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 			&r.PromiseID, &r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
 			return nil, err
 		}
+		r.Payload = compactJSONString(r.Payload)
+		r.Result = compactJSONString(r.Result)
 		requests = append(requests, r)
 	}
 	return requests, rows.Err()
@@ -172,8 +190,17 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	keyHash := hash[:]
 	expiration := time.Now().Add(ttl)
 
-	// Insert IGNORE — if the key already exists, this is a silent no-op.
+	// Step 1: delete any expired key for this hash (consistent with Postgres/MSSQL).
 	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM concurrency_keys WHERE key_hash = ? AND expires_at <= NOW(6)
+	`, keyHash)
+	if err != nil {
+		return false, fmt.Errorf("AcquireConcurrencyKey: cleanup expired: %w", err)
+	}
+
+	// Step 2: try to insert. If the key_hash already exists (held by another
+	// workflow with a still-valid expiry), INSERT IGNORE is a silent no-op.
+	_, err = s.db.ExecContext(ctx, `
 		INSERT IGNORE INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at)
 		VALUES (?, ?, ?, ?)
 	`, keyHash, key, workflowID, expiration)
@@ -181,52 +208,16 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 		return false, fmt.Errorf("AcquireConcurrencyKey: %w", err)
 	}
 
-	// Check who owns the key.
+	// Step 3: check who owns the key now.
 	var ownerID string
-	var expAt time.Time
 	err = s.db.QueryRowContext(ctx, `
-		SELECT workflow_id, expires_at FROM concurrency_keys WHERE key_hash = ?
-	`, keyHash).Scan(&ownerID, &expAt)
+		SELECT workflow_id FROM concurrency_keys WHERE key_hash = ?
+	`, keyHash).Scan(&ownerID)
 	if err != nil {
-		return false, fmt.Errorf("AcquireConcurrencyKey: check: %w", err)
+		return false, fmt.Errorf("AcquireConcurrencyKey: verify: %w", err)
 	}
 
-	if ownerID == workflowID {
-		return true, nil
-	}
-
-	// If the existing key is expired, take it over in a transaction.
-	if expAt.Before(time.Now()) {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return false, fmt.Errorf("AcquireConcurrencyKey: begin: %w", err)
-		}
-		defer tx.Rollback()
-
-		// Re-read with lock to ensure consistency.
-		err = tx.QueryRowContext(ctx, `
-			SELECT workflow_id, expires_at FROM concurrency_keys WHERE key_hash = ? FOR UPDATE
-		`, keyHash).Scan(&ownerID, &expAt)
-		if err != nil {
-			return false, fmt.Errorf("AcquireConcurrencyKey: re-check: %w", err)
-		}
-
-		if expAt.Before(time.Now()) {
-			_, err = tx.ExecContext(ctx, `
-				UPDATE concurrency_keys SET workflow_id = ?, expires_at = ? WHERE key_hash = ?
-			`, workflowID, expiration, keyHash)
-			if err != nil {
-				return false, fmt.Errorf("AcquireConcurrencyKey: takeover: %w", err)
-			}
-			if err := tx.Commit(); err != nil {
-				return false, fmt.Errorf("AcquireConcurrencyKey: commit: %w", err)
-			}
-			return true, nil
-		}
-		return false, tx.Commit()
-	}
-
-	return false, nil
+	return ownerID == workflowID, nil
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
@@ -459,7 +450,7 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 // ListWorkflows returns workflow instances filtered by the given filter parameters.
 func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	query := `
-		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at
 		FROM workflow_instances
 		WHERE tenant_id = ?
 	`
@@ -482,8 +473,8 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 
 	if filter.Search != "" {
 		pattern := "%" + filter.Search + "%"
-		query += " AND (LOWER(CAST(input AS CHAR)) LIKE LOWER(?) OR LOWER(CAST(result AS CHAR)) LIKE LOWER(?) OR LOWER(error_msg) LIKE LOWER(?))"
-		args = append(args, pattern, pattern, pattern)
+		query += " AND (LOWER(CAST(input AS CHAR)) LIKE LOWER(?) OR LOWER(CAST(result AS CHAR)) LIKE LOWER(?) OR LOWER(error_msg) LIKE LOWER(?) OR LOWER(def_name) LIKE LOWER(?))"
+		args = append(args, pattern, pattern, pattern, pattern)
 	}
 
 	query += " ORDER BY created_at DESC"
@@ -531,13 +522,16 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
 
+	var errorCode, errorOp sql.NullString
+
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
 		       assigned_to, heartbeat_at, next_wake_at, completed_at,
-		       CAST(result AS CHAR), error_msg
+		       CAST(result AS CHAR), error_msg, error_code, error_op
 		FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg)
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg,
+		&errorCode, &errorOp)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -545,8 +539,11 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		return nil, fmt.Errorf("GetWorkflowByID: %w", err)
 	}
 	wf.AssignedTo = assignedTo.String
-	wf.Result = result.String
+	wf.Input = json.RawMessage(compactJSONString(string(wf.Input)))
+	wf.Result = compactJSONString(result.String)
 	wf.Error = errorMsg.String
+	wf.ErrorCode = errorCode.String
+	wf.ErrorOp = errorOp.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}
@@ -1025,14 +1022,14 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 	var totalDeleted int64
 	for {
 		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM event_history
-			WHERE workflow_id IN (
+			DELETE e FROM event_history e
+			INNER JOIN (
 				SELECT id FROM workflow_instances
 				WHERE status IN ('done', 'failed')
 				  AND completed_at IS NOT NULL
 				  AND completed_at < ?
 				LIMIT 10000
-			)
+			) AS w ON e.workflow_id = w.id
 		`, olderThan)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("DeleteExpiredEvents: %w", err)
@@ -1050,12 +1047,14 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 			UPDATE workflow_instances
 			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
 			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
-				  AND compaction_state IS NOT NULL
-				LIMIT 10000
+				SELECT id FROM (
+					SELECT id FROM workflow_instances
+					WHERE status IN ('done', 'failed')
+					  AND completed_at IS NOT NULL
+					  AND completed_at < ?
+					  AND compaction_state IS NOT NULL
+					LIMIT 10000
+				) AS subq
 			)
 		`, olderThan)
 		if err != nil {

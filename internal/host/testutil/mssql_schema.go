@@ -16,7 +16,7 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
 		// workflow_defs
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_defs')
          CREATE TABLE workflow_defs (
-             name NVARCHAR(MAX) NOT NULL,
+             name NVARCHAR(900) NOT NULL,
              version INTEGER NOT NULL,
              wasm_bytes VARBINARY(MAX) NOT NULL,
              entry_points NVARCHAR(MAX) NOT NULL DEFAULT '[]',
@@ -27,6 +27,7 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
              task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
              max_history_length INTEGER NOT NULL DEFAULT 0,
              dag_spec NVARCHAR(MAX) DEFAULT NULL,
+             namespace NVARCHAR(MAX) NOT NULL DEFAULT 'default',
              tenant_id UNIQUEIDENTIFIER,
              created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
              PRIMARY KEY (name, version)
@@ -35,8 +36,8 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
 		// workflow_instances
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_instances')
          CREATE TABLE workflow_instances (
-             id NVARCHAR(MAX) NOT NULL PRIMARY KEY,
-             def_name NVARCHAR(MAX) NOT NULL,
+             id NVARCHAR(900) NOT NULL PRIMARY KEY,
+             def_name NVARCHAR(900) NOT NULL,
              def_version INTEGER NOT NULL,
              status NVARCHAR(MAX) NOT NULL DEFAULT 'ready',
              input NVARCHAR(MAX) NOT NULL DEFAULT '{}',
@@ -61,6 +62,7 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
              compacted_at DATETIMEOFFSET,
              compaction_step INTEGER,
              plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
+             namespace NVARCHAR(MAX) NOT NULL DEFAULT 'default',
              tenant_id UNIQUEIDENTIFIER,
              FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
          )`,
@@ -68,7 +70,7 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
 		// event_history
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_history')
          CREATE TABLE event_history (
-             workflow_id NVARCHAR(MAX) NOT NULL REFERENCES workflow_instances(id),
+             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
              step INTEGER NOT NULL,
              event_type NVARCHAR(MAX) NOT NULL DEFAULT 'call',
              service NVARCHAR(MAX),
@@ -106,8 +108,8 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
 		// workflow_signals
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_signals')
          CREATE TABLE workflow_signals (
-             workflow_id NVARCHAR(MAX) NOT NULL REFERENCES workflow_instances(id),
-             signal_name NVARCHAR(MAX) NOT NULL,
+             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
+             signal_name NVARCHAR(900) NOT NULL,
              payload NVARCHAR(MAX) NOT NULL DEFAULT '{}',
              delivered_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
              tenant_id UNIQUEIDENTIFIER,
@@ -133,8 +135,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		// workflow_schedules
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_schedules')
          CREATE TABLE workflow_schedules (
-             name NVARCHAR(MAX) NOT NULL PRIMARY KEY,
-             def_name NVARCHAR(MAX) NOT NULL,
+             name NVARCHAR(900) NOT NULL PRIMARY KEY,
+             def_name NVARCHAR(900) NOT NULL,
              entry_point NVARCHAR(MAX) NOT NULL DEFAULT '',
              cron_expression NVARCHAR(MAX) NOT NULL,
              input NVARCHAR(MAX) NOT NULL DEFAULT '{}',
@@ -148,9 +150,9 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		// concurrency_keys
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'concurrency_keys')
          CREATE TABLE concurrency_keys (
-             key_hash VARBINARY(MAX) NOT NULL PRIMARY KEY,
+             key_hash VARBINARY(900) NOT NULL PRIMARY KEY,
              key_text NVARCHAR(MAX) NOT NULL,
-             workflow_id NVARCHAR(MAX) NOT NULL REFERENCES workflow_instances(id),
+             workflow_id NVARCHAR(900) NOT NULL,
              acquired_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
              expires_at DATETIMEOFFSET NOT NULL
          )`,
@@ -158,8 +160,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		// workflow_promises
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_promises')
          CREATE TABLE workflow_promises (
-             workflow_id NVARCHAR(MAX) NOT NULL REFERENCES workflow_instances(id),
-             promise_id NVARCHAR(MAX) NOT NULL,
+             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
+             promise_id NVARCHAR(900) NOT NULL,
              promise_name NVARCHAR(MAX) NOT NULL,
              status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
              result NVARCHAR(MAX),
@@ -172,8 +174,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		// workflow_update_requests
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_update_requests')
          CREATE TABLE workflow_update_requests (
-             workflow_id NVARCHAR(MAX) NOT NULL REFERENCES workflow_instances(id),
-             update_name NVARCHAR(MAX) NOT NULL,
+             workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
+             update_name NVARCHAR(900) NOT NULL,
              payload NVARCHAR(MAX) NOT NULL DEFAULT '{}',
              promise_id NVARCHAR(MAX),
              status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
@@ -187,7 +189,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		// idempotency_keys
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'idempotency_keys')
          CREATE TABLE idempotency_keys (
-             key_hash VARBINARY(MAX) NOT NULL PRIMARY KEY,
+             key_hash VARBINARY(900) NOT NULL PRIMARY KEY,
              workflow_id NVARCHAR(MAX) NOT NULL,
              result NVARCHAR(MAX),
              error_msg NVARCHAR(MAX),
@@ -207,7 +209,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		// workflow_memory_stats
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_stats')
          CREATE TABLE workflow_memory_stats (
-             def_name NVARCHAR(MAX) NOT NULL PRIMARY KEY,
+             def_name NVARCHAR(900) NOT NULL PRIMARY KEY,
              mean_bytes FLOAT(53) NOT NULL DEFAULT 0,
              sample_count INTEGER NOT NULL DEFAULT 0,
              alpha FLOAT(53) NOT NULL DEFAULT 0.3,
@@ -217,8 +219,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		// plugin_defs
 		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'plugin_defs')
          CREATE TABLE plugin_defs (
-             name NVARCHAR(MAX) NOT NULL,
-             version NVARCHAR(MAX) NOT NULL,
+             name NVARCHAR(900) NOT NULL,
+             version NVARCHAR(900) NOT NULL,
              wasm_bytes VARBINARY(MAX),
              config NVARCHAR(MAX) NOT NULL DEFAULT '{}',
              created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
@@ -282,7 +284,7 @@ func MSSQLTestDB(t *testing.T) *sql.DB {
 		t.Logf("CLEAT_TEST_MSSQL not set, using default: %s", connStr)
 	}
 
-	db, err := sql.Open("mssql", connStr)
+	db, err := sql.Open("sqlserver", connStr)
 	if err != nil {
 		t.Fatalf("open MSSQL test DB: %v", err)
 	}

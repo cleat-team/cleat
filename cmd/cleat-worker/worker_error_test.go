@@ -45,8 +45,8 @@ func TestDispatchLoop_StickyEmptyGeneralStillCalled(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -97,8 +97,8 @@ func TestDispatchLoop_StickyErrorContinuesLoop(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -139,8 +139,8 @@ func TestHeartbeatLoop_ConnectionErrorPreservesInflight(t *testing.T) {
 	w.inflight.Store("wf-1", &host.WorkflowInstance{ID: "wf-1"})
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.heartbeatLoop()
 		close(done)
 	}()
@@ -174,8 +174,8 @@ func TestHeartbeatLoop_NonConnectionErrorPreservesInflight(t *testing.T) {
 	w.inflight.Store("wf-1", &host.WorkflowInstance{ID: "wf-1"})
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.heartbeatLoop()
 		close(done)
 	}()

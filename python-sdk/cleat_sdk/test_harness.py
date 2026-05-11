@@ -29,7 +29,7 @@ Port of the Go pattern from ``durable/durabletest/durabletest.go``.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .host_calls import (
@@ -40,7 +40,6 @@ from .host_calls import (
     SignalResult,
     SuspendSentinel,
 )
-from .memory import SUSPEND_SENTINEL
 
 
 # ---------------------------------------------------------------------------
@@ -228,9 +227,7 @@ class CleatTestHarness(HostCalls):
             self._promises[promise_id].status = "resolved"
             self._promises[promise_id].result = value
         else:
-            self._promises[promise_id] = _PromiseState(
-                name="stub", status="resolved", result=value
-            )
+            self._promises[promise_id] = _PromiseState(name="stub", status="resolved", result=value)
 
     def stub_reject_promise(self, promise_id: str, error: str) -> None:
         """Reject a promise with the given error message.
@@ -246,9 +243,7 @@ class CleatTestHarness(HostCalls):
             self._promises[promise_id].status = "rejected"
             self._promises[promise_id].error = error
         else:
-            self._promises[promise_id] = _PromiseState(
-                name="stub", status="rejected", error=error
-            )
+            self._promises[promise_id] = _PromiseState(name="stub", status="rejected", error=error)
 
     def stub_child_workflow(self, name: str, result: str, error: Optional[str] = None) -> None:
         """Register a stub result for a child workflow.
@@ -456,9 +451,7 @@ class CleatTestHarness(HostCalls):
                 )
                 self.call_history.append(rec)
                 if stub.error:
-                    raise RuntimeError(
-                        f"cleat_call({service}.{operation}) failed: {stub.error}"
-                    )
+                    raise RuntimeError(f"cleat_call({service}.{operation}) failed: {stub.error}")
                 return stub.response
 
         # No stub found
@@ -471,8 +464,7 @@ class CleatTestHarness(HostCalls):
         )
         self.call_history.append(rec)
         raise RuntimeError(
-            f"CleatTestHarness: no stub registered for {service}.{operation} "
-            f"(request: {req_str})"
+            f"CleatTestHarness: no stub registered for {service}.{operation} (request: {req_str})"
         )
 
     def cleat_call_with_retry(
@@ -674,13 +666,9 @@ class CleatTestHarness(HostCalls):
 
     def cleat_send(self, service: str, operation: str, request: Any) -> None:
         req_str = self._marshal(request)
-        self.call_history.append(
-            CallRecord(service=service, operation=operation, request=req_str)
-        )
+        self.call_history.append(CallRecord(service=service, operation=operation, request=req_str))
 
-    def schedule_invoke(
-        self, service: str, operation: str, request: Any, delay_ms: int
-    ) -> None:
+    def schedule_invoke(self, service: str, operation: str, request: Any, delay_ms: int) -> None:
         req_str = self._marshal(request)
         self.call_history.append(
             CallRecord(
@@ -691,7 +679,6 @@ class CleatTestHarness(HostCalls):
         )
 
     def plugin_call(self, plugin_name: str, function_name: str, input: Any) -> str:
-        input_str = self._marshal(input)
         # Check for stubs — try matching registered stubs
         for i, stub in enumerate(self._call_stubs):
             if stub.service == f"plugin:{plugin_name}" and stub.operation == function_name:

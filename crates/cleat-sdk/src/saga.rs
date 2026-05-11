@@ -1,6 +1,7 @@
 use crate::host_calls::HostCalls;
 
 /// A single step in a Saga: a forward operation and its compensation.
+#[allow(clippy::type_complexity)]
 pub struct SagaStep {
     pub name: String,
     forward: Box<dyn Fn(&HostCalls) -> Result<String, String>>,

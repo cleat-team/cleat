@@ -15,6 +15,12 @@ pub const SUSPEND_SENTINEL: i64 = 1 << 62;
 
 /// Read a string from WASM linear memory at (ptr, len).
 /// Matches readWasmString in memory.go.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid region of WASM linear memory at least `len` bytes long.
+/// The caller must ensure that `ptr` is correctly aligned and that the memory region
+/// is not concurrently mutated.
 pub unsafe fn read_string(ptr: *const u8, len: u32) -> String {
     if len == 0 {
         return String::new();
@@ -25,6 +31,12 @@ pub unsafe fn read_string(ptr: *const u8, len: u32) -> String {
 
 /// Write a string to WASM linear memory, truncating to max_len.
 /// Returns the number of bytes written. Matches writeWasmString in memory.go.
+///
+/// # Safety
+///
+/// `ptr` must point to a valid region of WASM linear memory at least `max_len` bytes long.
+/// The caller must ensure that `ptr` is correctly aligned and that the memory region
+/// is not concurrently read or written during the copy.
 pub unsafe fn write_string(ptr: *mut u8, max_len: u32, s: &str) -> u32 {
     let data = s.as_bytes();
     let len = (data.len() as u32).min(max_len);

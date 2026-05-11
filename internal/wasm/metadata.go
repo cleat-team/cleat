@@ -97,6 +97,10 @@ func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 			return nil, fmt.Errorf("corrupt WASM: failed to decode section size at offset %d", offset)
 		}
 		offset += n
+		// Protect against malformed input declaring impossibly large sections.
+		if int(size) > len(wasmBytes)-offset {
+			return nil, fmt.Errorf("corrupt WASM at offset %d: section size %d overflows binary", offset, size)
+		}
 		if sectionID != 0 {
 			// Not a custom section; skip.
 			offset += int(size)
@@ -173,6 +177,10 @@ func stripCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 		}
 		offset += n
 		sectionLen := 1 + n + int(size) // ID byte + size-encoding + body
+		if sectionStart+sectionLen > len(wasmBytes) {
+			result = append(result, wasmBytes[sectionStart:]...)
+			break
+		}
 		if sectionID != 0 {
 			result = append(result, wasmBytes[sectionStart:sectionStart+sectionLen]...)
 			offset = sectionStart + sectionLen

@@ -512,7 +512,7 @@ func (m *mockStore) QueueDepth(ctx context.Context) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []host.EventRecord, result string, queryState map[string]string) (string, error) {
 	if m.continueAsNewFn != nil {
 		return m.continueAsNewFn(ctx, currentRunID, workerID, defName, defVersion, newInput, result, queryState)
 	}
@@ -1699,7 +1699,9 @@ func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64,
 
 func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error) { return nil, nil }
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
-func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error { return nil }
+func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
 func (m *mockStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) { return 0, nil }
 func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) { return true, nil }
+func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }

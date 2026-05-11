@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -160,7 +161,7 @@ func detectEntryFunction(pyFile string) (string, error) {
 		stderr := strings.TrimSpace(stderrBuf.String())
 		// If the Python vet module is not installed, fall back to simple
 		// string scanning so the build still works without the SDK.
-		if strings.Contains(stderr, "No module named") || strings.Contains(stderr, "ModuleNotFoundError") {
+		if strings.Contains(stderr, "No module named") || strings.Contains(stderr, "ModuleNotFoundError") || errors.Is(err, exec.ErrNotFound) {
 			return detectEntryFunctionFallback(pyFile)
 		}
 		if stderr != "" {

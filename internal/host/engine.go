@@ -851,9 +851,10 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	}
 	s.recordEvent(rec)
 
-	// Flush the event immediately to guarantee exactly-once: if the worker
+	// Flush the event immediately to guarantee at-least-once: if the worker
 	// crashes before the workflow completes, replay will find this event
-	// and return the cached response.
+	// and return the cached response.  (Use DurableCallIdempotent for
+	// exactly-once with write-ahead logging and ambiguity detection.)
 	if s.engine.db != nil {
 		s.engine.flushEvent(ctx, s.workflowID, rec)
 	}
@@ -888,6 +889,17 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
+
+			// Detect a pending call intent: the external call was dispatched
+			// but the outcome was never persisted.  Return ErrAmbiguous so
+			// the caller can check the external service before retrying.
+			if rec.Err == pendingSentinel {
+				ambiguousErr := fmt.Sprintf(
+					"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
+					rec.Step, rec.Service, rec.Op)
+				written, _ := writeWasmString(mem, responsePtr, ambiguousErr, responseMaxLen)
+				return packDurableCallResult(int(written), 1, 1)
+			}
 
 		if rec.Err != "" {
 			written, _ := writeWasmString(mem, responsePtr, rec.Err, responseMaxLen)
@@ -1933,6 +1945,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 	}
 
 	var lastErr error
+	exhausted := true
 
 	for attempt := int64(1); attempt <= maxAttempts; attempt++ {
 		resp, callErr := s.engine.caller.Call(ctx, service, operation, requestJSON)
@@ -1957,6 +1970,7 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 
 		// Check if error is definitively non-retryable.
 		if isDefinitelyNonRetryable(callErr, nonRetryableErrors) {
+			exhausted = false
 			break
 		}
 
@@ -1978,6 +1992,9 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 
 	// All retries exhausted or non-retryable error — record failure event.
 	errMsg := lastErr.Error()
+	if exhausted {
+		errMsg = "retries exhausted: " + errMsg
+	}
 	rec := EventRecord{
 		Step:      s.stepCount,
 		EventType: EventTypeCall,
@@ -2947,6 +2964,72 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	}
 	return tx.Commit()
 }
+
+	// pendingSentinel is stored in the error column of event_history to mark a
+	// DurableCall whose external call has been dispatched but whose outcome is
+	// not yet persisted.  On replay, a pending event means the call outcome is
+	// ambiguous — the external service may have processed it.
+	const pendingSentinel = "__CLEAT_PENDING_INTENT__"
+
+	// flushCallIntent inserts a pending event BEFORE the external call is
+	// dispatched.  This provides a durable record of intent: if the worker
+	// crashes after the external call succeeds but before the response is
+	// persisted, replay will find the pending event and return ErrAmbiguous.
+	func (e *Engine) flushCallIntent(ctx context.Context, workflowID string, rec EventRecord) error {
+		if e.db == nil {
+			return nil
+		}
+		tx, err := e.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("flush call intent: begin tx: %w", err)
+		}
+		defer tx.Rollback()
+
+		checksum := computeEventChecksum(rec)
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error, checksum)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (workflow_id, step) DO NOTHING
+		`, workflowID, rec.Step, rec.EventType,
+			nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), pendingSentinel,
+			checksum)
+		if err != nil {
+			return fmt.Errorf("flush call intent: exec: %w", err)
+		}
+		return tx.Commit()
+	}
+
+	// completeCallEvent updates a previously-flushed pending event with the
+	// actual call response (or error).  This transitions the event from the
+	// pending state to the completed state so that replay returns the cached
+	// response rather than ErrAmbiguous.  The checksum is recomputed from the
+	// full event record (which the caller stashes in rec) so that integrity
+	// verification remains consistent.
+	func (e *Engine) completeCallEvent(ctx context.Context, workflowID string, rec EventRecord, callErr string) error {
+		if e.db == nil {
+			return nil
+		}
+		tx, err := e.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("complete call event: begin tx: %w", err)
+		}
+		defer tx.Rollback()
+
+		// Recompute the checksum with the actual response.
+		completed := rec
+		completed.Err = callErr
+		checksum := computeEventChecksum(completed)
+
+		_, err = tx.ExecContext(ctx, `
+			UPDATE event_history
+			SET response = $1, error = $2, checksum = $6
+			WHERE workflow_id = $3 AND step = $4 AND error = $5
+		`, nullStr(rec.Response), nullStr(callErr), workflowID, rec.Step, pendingSentinel, checksum)
+		if err != nil {
+			return fmt.Errorf("complete call event: exec: %w", err)
+		}
+		return tx.Commit()
+	}
 
 // runDefers invokes registered defer functions on a fresh module instance.
 // Called on non-suspend errors to ensure cleanup runs even when the workflow fails.

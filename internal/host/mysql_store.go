@@ -152,10 +152,11 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 	tqClause, tqArgs := s.taskQueueClause()
 
 	// Step 1: Select IDs with SKIP LOCKED.
-	// Arg order: task_queue values..., namespace, tenant_id, worker_id, limit
+	// Arg order: namespace, task_queue values..., tenant_id, worker_id, limit
 	selArgs := make([]interface{}, 0)
+	selArgs = append(selArgs, namespace)
 	selArgs = append(selArgs, tqArgs...)
-	selArgs = append(selArgs, namespace, s.tenantID, workerID, limit)
+	selArgs = append(selArgs, s.tenantID, workerID, limit)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id FROM workflow_instances
 		WHERE status = 'ready'
@@ -211,7 +212,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -226,9 +227,10 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
+		var errorCode, errorOp sql.NullString
 
 		if err := rows2.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -241,6 +243,8 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows2.Err(); err != nil {
@@ -324,7 +328,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -339,9 +343,10 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
+		var errorCode, errorOp sql.NullString
 
 		if err := rows2.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
@@ -354,6 +359,8 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows2.Err(); err != nil {
@@ -574,12 +581,17 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 // ContinueAsNew atomically creates a new workflow run AND completes the
 // current one in a single database transaction. If the transaction fails
 // neither operation takes effect. Returns the new run ID on success.
-func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Append events within the same transaction.
+	if err := s.appendEventsInTx(ctx, tx, currentRunID, newEvents); err != nil {
+		return "", fmt.Errorf("continue as new: append events: %w", err)
+	}
 
 	// Create the new workflow run.
 	newRunID := uuid.New().String()
@@ -745,7 +757,7 @@ func (s *MySQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error, payload,
 			created_at, checksum, tenant_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return fmt.Errorf("append events in tx: prepare: %w", err)
@@ -822,12 +834,13 @@ func (s *MySQLStore) BatchHeartbeat(ctx context.Context, workerID string) (int64
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts. This is a terminal status similar to
 // 'failed' but indicates the workflow was retried without success.
-func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error {
+func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'dead_lettered', error_msg = ?, completed_at = NOW(6), assigned_to = NULL
+		SET status = 'dead_lettered', error_msg = ?, error_code = ?, error_op = ?,
+		    completed_at = NOW(6), assigned_to = NULL
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-	`, errMsg, workflowID, workerID, s.tenantID)
+	`, errMsg, errorCode, errorOp, workflowID, workerID, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -841,7 +854,22 @@ func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 	s.ClearStickyWorker(context.Background(), workflowID)
 	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
 
+	// Enforce ParentClosePolicy on children.
+	s.enforceParentClosePolicy(context.Background(), workflowID)
+
 	return nil
+}
+
+// RetryWorkflow moves a dead_lettered workflow back to a runnable state.
+func (s *MySQLStore) RetryWorkflow(ctx context.Context, workflowID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		    error_msg = NULL, error_code = NULL, error_op = NULL,
+		    next_wake_at = NOW(6)
+		WHERE id = ? AND status = 'dead_lettered'
+	`, workflowID)
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -898,8 +926,8 @@ func (s *MySQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue, tenant_id)
 			VALUES (?, ?, ?, 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT namespace FROM workflow_instances WHERE id = ?), 'default'),
-			        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = ?), 'default'),
+			        COALESCE((SELECT namespace FROM (SELECT namespace FROM workflow_instances WHERE id = ?) AS subq), 'default'),
+			        COALESCE((SELECT task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        ?)
 		`, runID, defName, defVersion, inputJSON, parentID, parentClosePolicy, parentID, parentID, s.tenantID)
 	} else {
@@ -907,8 +935,8 @@ func (s *MySQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue, tenant_id)
 			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT namespace FROM workflow_instances WHERE id = ?), 'default'),
-			        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = ?), 'default'),
+			        COALESCE((SELECT namespace FROM (SELECT namespace FROM workflow_instances WHERE id = ?) AS subq), 'default'),
+			        COALESCE((SELECT task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        ?)
 		`, runID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, parentID, s.tenantID)
 	}
@@ -937,8 +965,8 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue, tenant_id)
 			VALUES (?, ?, ?, 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT namespace FROM workflow_instances WHERE id = ?), 'default'),
-			        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = ?), 'default'),
+			        COALESCE((SELECT namespace FROM (SELECT namespace FROM workflow_instances WHERE id = ?) AS subq), 'default'),
+			        COALESCE((SELECT task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        ?)
 		`, childID, defName, defVersion, inputJSON, parentID, parentClosePolicy, parentID, parentID, s.tenantID)
 	} else {
@@ -946,8 +974,8 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue, tenant_id)
 			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT namespace FROM workflow_instances WHERE id = ?), 'default'),
-			        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = ?), 'default'),
+			        COALESCE((SELECT namespace FROM (SELECT namespace FROM workflow_instances WHERE id = ?) AS subq), 'default'),
+			        COALESCE((SELECT task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        ?)
 		`, childID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, parentID, s.tenantID)
 	}
@@ -988,7 +1016,7 @@ func (s *MySQLStore) GetChildResult(ctx context.Context, runID string) (string, 
 		return "", false, fmt.Errorf("get child result: %w", err)
 	}
 	if status == "done" || status == "failed" {
-		return result, true, nil
+		return compactJSONString(result), true, nil
 	}
 	return "", false, nil
 }
@@ -1198,6 +1226,13 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 	return history, rows.Err()
 }
 
+// CountEventHistory returns the total number of events for a workflow.
+func (s *MySQLStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = ? AND tenant_id = ?`, workflowID, s.tenantID).Scan(&count)
+	return count, err
+}
+
 // ---------------------------------------------------------------------------
 // VerifyWorkflowEvents
 // ---------------------------------------------------------------------------
@@ -1286,10 +1321,21 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	return tx.Commit()
 }
 
-// PollSignal checks for a delivered signal. Delegates to PollAndClaimSignal
-// for atomic claim semantics.
+// PollSignal checks for a delivered signal without consuming it.
+// This is non-destructive — the signal remains available after polling.
 func (s *MySQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return s.PollAndClaimSignal(ctx, workflowID, signalName)
+	var payload string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT payload FROM workflow_signals
+		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
+	`, workflowID, signalName, s.tenantID).Scan(&payload)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("poll signal: %w", err)
+	}
+	return payload, true, nil
 }
 
 // PollCancellation checks whether the workflow has been cancelled.

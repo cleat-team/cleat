@@ -18,9 +18,9 @@ name: Multi-DB CI
 
 on:
   push:
-    branches: [main, "feature/**"]
+    branches: [main, develop, "feature/**"]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -43,13 +43,14 @@ jobs:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
         options: >-
-          --health-cmd "mysqladmin ping -h localhost"
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 10
-          --health-start-period 30s
+          --health-retries 15
+          --health-start-period 60s
+          --publish 3306:3306
     env:
-      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat
+      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
     steps:
       - uses: actions/checkout@v4
 
@@ -79,8 +80,9 @@ jobs:
           --health-timeout 5s
           --health-retries 10
           --health-start-period 30s
+          --publish 1433:1433
     env:
-      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=master
     steps:
       - uses: actions/checkout@v4
 
@@ -125,11 +127,12 @@ jobs:
           MYSQL_ROOT_PASSWORD: cleat
           MYSQL_DATABASE: cleat
         options: >-
-          --health-cmd "mysqladmin ping -h localhost"
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u root -pcleat"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 10
-          --health-start-period 30s
+          --health-retries 15
+          --health-start-period 60s
+          --publish 3306:3306
       mssql:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
@@ -141,9 +144,10 @@ jobs:
           --health-timeout 5s
           --health-retries 10
           --health-start-period 30s
+          --publish 1433:1433
     env:
-      CLEAT_TEST_POSTGRES: postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable
-      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat
+      CLEAT_TEST_POSTGRES: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
+      CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
     steps:
       - uses: actions/checkout@v4

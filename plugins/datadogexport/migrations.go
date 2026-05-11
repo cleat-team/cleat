@@ -27,8 +27,8 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					id             CHAR(36) PRIMARY KEY,
 					` + "`name`" + `         TEXT,
 					api_key        TEXT NOT NULL,
-					site           TEXT DEFAULT 'datadoghq.com',
-					metrics_prefix TEXT DEFAULT 'cleat',
+					site           VARCHAR(255) DEFAULT 'datadoghq.com',
+					metrics_prefix VARCHAR(255) DEFAULT 'cleat',
 					enabled        TINYINT(1) DEFAULT 1,
 					created_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 					updated_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6)

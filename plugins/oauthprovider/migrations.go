@@ -44,7 +44,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					client_id      TEXT NOT NULL,
 					client_secret  TEXT NOT NULL,
 					redirect_url   TEXT NOT NULL,
-					domain         TEXT NOT NULL DEFAULT '',
+					domain         VARCHAR(900) NOT NULL DEFAULT '',
 					enabled        TINYINT(1) NOT NULL DEFAULT 1,
 					created_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 					updated_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
@@ -55,8 +55,8 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					id             CHAR(36) PRIMARY KEY,
 					tenant_id      CHAR(36) NOT NULL,
 					provider       TEXT NOT NULL,
-					session_token  TEXT NOT NULL,
-					user_email     TEXT NULL,
+					session_token  VARCHAR(255) NOT NULL,
+					user_email     VARCHAR(255) NULL,
 					access_token   TEXT NULL,
 					refresh_token  TEXT NULL,
 					expires_at     TIMESTAMP(6) NULL,
@@ -87,7 +87,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					tenant_id      UNIQUEIDENTIFIER NOT NULL,
 					provider       NVARCHAR(MAX) NOT NULL,
 					session_token  NVARCHAR(255) NOT NULL,
-					user_email     NVARCHAR(MAX),
+					user_email     NVARCHAR(255),
 					access_token   NVARCHAR(MAX),
 					refresh_token  NVARCHAR(MAX),
 					expires_at     DATETIMEOFFSET,
@@ -116,21 +116,21 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE INDEX IF NOT EXISTS idx_oauth_sessions_token_hash ON oauth_sessions(token_hash);
 			`,
 			UpMySQL: `
-				ALTER TABLE oauth_sessions ADD COLUMN state TEXT;
+				ALTER TABLE oauth_sessions ADD COLUMN state VARCHAR(255);
 				ALTER TABLE oauth_sessions ADD COLUMN code_verifier TEXT;
-				ALTER TABLE oauth_sessions ADD COLUMN token_hash TEXT;
-				ALTER TABLE oauth_sessions MODIFY COLUMN session_token TEXT NULL;
+				ALTER TABLE oauth_sessions ADD COLUMN token_hash VARCHAR(255);
+				ALTER TABLE oauth_sessions MODIFY COLUMN session_token VARCHAR(255) NULL;
 				DROP INDEX idx_oauth_sessions_token ON oauth_sessions;
 				CREATE INDEX idx_oauth_sessions_state ON oauth_sessions(state);
 				CREATE INDEX idx_oauth_sessions_token_hash ON oauth_sessions(token_hash);
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_sessions') AND name = 'state')
-				ALTER TABLE oauth_sessions ADD state NVARCHAR(MAX);
+				ALTER TABLE oauth_sessions ADD state NVARCHAR(255);
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_sessions') AND name = 'code_verifier')
 				ALTER TABLE oauth_sessions ADD code_verifier NVARCHAR(MAX);
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_sessions') AND name = 'token_hash')
-				ALTER TABLE oauth_sessions ADD token_hash NVARCHAR(MAX);
+				ALTER TABLE oauth_sessions ADD token_hash NVARCHAR(255);
 				ALTER TABLE oauth_sessions ALTER COLUMN session_token NVARCHAR(255) NULL;
 				DROP INDEX idx_oauth_sessions_token ON oauth_sessions;
 				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_oauth_sessions_state' AND object_id = OBJECT_ID('oauth_sessions'))

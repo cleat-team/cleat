@@ -102,13 +102,9 @@ class CleatClient:
                 return (resp.status, resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"Cleat API error {e.code} for {method} {path}: {error_body}"
-            ) from e
+            raise RuntimeError(f"Cleat API error {e.code} for {method} {path}: {error_body}") from e
         except urllib.error.URLError as e:
-            raise RuntimeError(
-                f"Cleat API request failed for {method} {path}: {e.reason}"
-            ) from e
+            raise RuntimeError(f"Cleat API request failed for {method} {path}: {e.reason}") from e
 
     # ------------------------------------------------------------------
     # Public API
@@ -148,15 +144,11 @@ class CleatClient:
         if idempotency_key is not None:
             body["idempotency_key"] = idempotency_key
 
-        status, response = self._request(
-            "POST", "/api/workflows", json.dumps(body)
-        )
+        status, response = self._request("POST", "/api/workflows", json.dumps(body))
         data = json.loads(response)
         run_id = data.get("run_id") or data.get("id", "")
         if not run_id:
-            raise RuntimeError(
-                f"start_workflow response missing run_id: {response}"
-            )
+            raise RuntimeError(f"start_workflow response missing run_id: {response}")
         return run_id
 
     def send_signal(

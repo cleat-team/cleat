@@ -10,11 +10,9 @@ be loaded by the cleat worker runtime.
 """
 
 import argparse
-import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -33,13 +31,11 @@ def parse_entry(entry: str) -> tuple[str, str]:
     func_name = func_name.strip()
     if not file_path:
         raise ValueError(
-            f"Invalid entry format: {entry!r}. File path is empty. "
-            f"Expected 'file.py:func_name'"
+            f"Invalid entry format: {entry!r}. File path is empty. Expected 'file.py:func_name'"
         )
     if not func_name:
         raise ValueError(
-            f"Invalid entry format: {entry!r}. Function name is empty. "
-            f"Expected 'file.py:func_name'"
+            f"Invalid entry format: {entry!r}. Function name is empty. Expected 'file.py:func_name'"
         )
     return file_path, func_name
 
@@ -55,14 +51,10 @@ def validate_entry(entry_file: str, func_name: str) -> dict:
 
     # Simple AST-free check for @cleat_entry decorated function
     if "@cleat_entry" not in source:
-        raise ValueError(
-            f"No @cleat_entry decorator found in {entry_file}"
-        )
+        raise ValueError(f"No @cleat_entry decorator found in {entry_file}")
 
     if f"def {func_name}" not in source:
-        raise ValueError(
-            f"Function '{func_name}' not found in {entry_file}"
-        )
+        raise ValueError(f"Function '{func_name}' not found in {entry_file}")
 
     return {"entry_file": str(entry_path.absolute()), "func_name": func_name}
 
@@ -93,10 +85,7 @@ def run_componentize_py(
     """
     # Check if componentize-py is available
     try:
-        result = subprocess.run(
-            ["componentize-py", "--version"],
-            capture_output=True, text=True
-        )
+        result = subprocess.run(["componentize-py", "--version"], capture_output=True, text=True)
         if result.returncode != 0:
             print("Error: componentize-py not found or not working", file=sys.stderr)
             print("Install with: pip install componentize-py", file=sys.stderr)
@@ -107,18 +96,24 @@ def run_componentize_py(
         return False
 
     entry_dir = Path(entry_file).resolve().parent
-    entry_name = Path(entry_file).stem
+    module_name = Path(entry_file).stem  # componentize-py expects a module name, not a file path
 
     # Build the componentize-py command using the modern CLI syntax
-    # (compatible with componentize-py >= 0.12.0).
+    # (compatible with componentize-py >= 0.23.0).
     cmd = [
         "componentize-py",
-        "componentize", str(entry_file),
-        "--wit-path", str(wit_dir),
-        "--world", "cleat-workflow",
-        "-p", str(sdk_root),
-        "-p", str(entry_dir),
-        "-o", output,
+        "-d",
+        str(wit_dir),
+        "-w",
+        "cleat-workflow",
+        "componentize",
+        module_name,
+        "-p",
+        str(sdk_root),
+        "-p",
+        str(entry_dir),
+        "-o",
+        output,
     ]
 
     if verbose:
@@ -152,16 +147,20 @@ def run_componentize_py(
             stdout = result.stdout.strip() if result.stdout else ""
             details = f" (stderr: {stderr})" if stderr else ""
             details += f" (stdout: {stdout})" if stdout and not stderr else ""
-            print(f"Error: componentize-py failed with exit code {result.returncode}{details}",
-                  file=sys.stderr)
+            print(
+                f"Error: componentize-py failed with exit code {result.returncode}{details}",
+                file=sys.stderr,
+            )
             return False
 
         return True
 
     except subprocess.TimeoutExpired:
-        print("Error: componentize-py compilation timed out (5 minutes). "
-              "Try simplifying the workflow or increasing the timeout.",
-              file=sys.stderr)
+        print(
+            "Error: componentize-py compilation timed out (5 minutes). "
+            "Try simplifying the workflow or increasing the timeout.",
+            file=sys.stderr,
+        )
         return False
     except Exception as e:
         print(f"Error running componentize-py: {e}", file=sys.stderr)
@@ -188,17 +187,20 @@ def main():
         description="Build a Python workflow into a WASM component, with optional metadata stamping"
     )
     parser.add_argument(
-        "--entry", "-e",
+        "--entry",
+        "-e",
         required=True,
         help="Entry point in 'file.py:func_name' format",
     )
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         default=None,
         help="Output .wasm file path (default: <func_name>.wasm)",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="Verbose output from componentize-py",
     )
@@ -252,9 +254,11 @@ def main():
     wit_dir = sdk_root / "wit"
 
     if not wit_dir.exists():
-        print(f"Error: WIT directory not found: {wit_dir}. "
-              "Run 'componentize-py init' to initialize the WIT directory.",
-              file=sys.stderr)
+        print(
+            f"Error: WIT directory not found: {wit_dir}. "
+            "Run 'componentize-py init' to initialize the WIT directory.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Validate entry
@@ -272,33 +276,32 @@ def main():
     # Determine output path
     output = args.output or f"{func_name}.wasm"
 
-    print(f"Building WASM component...")
+    print("Building WASM component...")
     print(f"  Entry:  {entry_file}:{func_name}")
     print(f"  Output: {output}")
     print(f"  WIT:    {wit_dir}")
     print()
 
-    success = run_componentize_py(
-        entry_file, func_name, output, wit_dir, sdk_root, args.verbose
-    )
+    success = run_componentize_py(entry_file, func_name, output, wit_dir, sdk_root, args.verbose)
 
     if not success:
         print("\nBuild FAILED", file=sys.stderr)
         print("\nTroubleshooting tips:", file=sys.stderr)
-        print("  1. Ensure componentize-py is installed: pip install componentize-py",
-              file=sys.stderr)
+        print(
+            "  1. Ensure componentize-py is installed: pip install componentize-py", file=sys.stderr
+        )
         print("  2. Ensure PYTHONPATH includes the cleat SDK", file=sys.stderr)
         print("  3. Try with --verbose for detailed error output", file=sys.stderr)
         sys.exit(1)
 
     info = get_wasm_info(output)
-    print(f"\nBuild SUCCESS")
+    print("\nBuild SUCCESS")
     print(f"  Output: {info['path']}")
     print(f"  Size:   {info['size_bytes']:,} bytes ({info['size_mb']} MB)")
 
     if info["size_mb"] > 25:
         print(f"  Warning: WASM binary is large ({info['size_mb']} MB).")
-        print(f"  This is expected for CPython-in-WASM but may affect load times.")
+        print("  This is expected for CPython-in-WASM but may affect load times.")
 
     # ---- Post-compile metadata stamping ----
     stamp_name = args.name or os.environ.get("CLEAT_WORKFLOW_NAME")
@@ -334,7 +337,7 @@ def main():
             stamp_args.append("--verbose")
 
         try:
-            stamp_result = subprocess.run(stamp_args, capture_output=True, text=True, check=True)
+            subprocess.run(stamp_args, capture_output=True, text=True, check=True)
             print("  Metadata stamped successfully.")
         except subprocess.CalledProcessError as e:
             err = e.stderr.strip() if e.stderr else ""

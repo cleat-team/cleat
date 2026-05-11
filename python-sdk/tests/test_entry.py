@@ -18,8 +18,7 @@ try:
     from cleat_sdk.host_calls import HostCalls
 except ImportError as e:
     pytest.skip(
-        f"Skipping entry tests: {e}.  "
-        "entry.py and host_calls.py must exist.",
+        f"Skipping entry tests: {e}.  entry.py and host_calls.py must exist.",
         allow_module_level=True,
     )
 
@@ -116,9 +115,16 @@ class TestCleatEntry:
         def my_func(h: HostCalls, data: str):
             # The injected object should have the key host-call methods
             # Note: ``now`` and ``random`` are not prefixed with ``cleat_``
-            for attr in ("cleat_call", "cleat_sleep", "cleat_log",
-                         "now", "random", "cleat_defer",
-                         "poll_cancellation", "poll_signal"):
+            for attr in (
+                "cleat_call",
+                "cleat_sleep",
+                "cleat_log",
+                "now",
+                "random",
+                "cleat_defer",
+                "poll_cancellation",
+                "poll_signal",
+            ):
                 assert hasattr(h, attr), f"HostCalls missing {attr}"
             return {"ok": True}
 
@@ -171,8 +177,7 @@ class TestCleatEntry:
         def my_func(h: HostCalls, name: str):
             return {"name": name}
 
-        packed = _call_export(my_func, {"name": "Bob", "extra": "ignored",
-                                         "another": 123})
+        packed = _call_export(my_func, {"name": "Bob", "extra": "ignored", "another": 123})
         err_code, output = _decode_output(packed)
         assert err_code == 0
         assert output == {"name": "Bob"}

@@ -1,4 +1,5 @@
 """Hello World workflow - demonstrates basic Cleat Python SDK usage."""
+
 from dataclasses import dataclass
 from cleat_sdk import HostCalls, cleat_entry
 
@@ -16,8 +17,7 @@ def hello_workflow(h: HostCalls, request: GreetingRequest) -> str:
 
     # Call an external translation/greeting service
     response = h.cleat_call(
-        "greeter", "Greet",
-        {"name": request.name, "language": request.language}
+        "greeter", "Greet", {"name": request.name, "language": request.language}
     )
 
     h.cleat_log(f"Got response: {response}")

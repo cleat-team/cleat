@@ -161,6 +161,12 @@ IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workf
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'error_msg')
     ALTER TABLE dbo.workflow_instances ADD error_msg NVARCHAR(MAX) NULL;
 
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'error_code')
+    ALTER TABLE dbo.workflow_instances ADD error_code NVARCHAR(MAX) NULL;
+
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'error_op')
+    ALTER TABLE dbo.workflow_instances ADD error_op NVARCHAR(MAX) NULL;
+
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'parent_workflow_id')
     ALTER TABLE dbo.workflow_instances ADD parent_workflow_id NVARCHAR(MAX) NULL;
 

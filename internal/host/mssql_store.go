@@ -38,14 +38,24 @@ func (c *tenantSessionConnector) Connect(ctx context.Context) (driver.Conn, erro
 		conn.Close()
 		return nil, fmt.Errorf("mssql: invalid tenant ID %q: %w", c.tenantID, parseErr)
 	}
-	execer, ok := conn.(driver.ExecerContext)
-	if !ok {
-		conn.Close()
-		return nil, fmt.Errorf("mssql: driver.Conn does not implement ExecerContext")
+
+	// Use Prepare+Exec to set the session context, since go-mssqldb v1.10+
+	// does not implement driver.ExecerContext on its connection type.
+	// Explicit command text (no parameter markers) is safe because tenantID
+	// was validated as a UUID above.
+	query := "EXEC sp_set_session_context @key=N'tenant_id', @value=N'" + c.tenantID + "'"
+	var stmt driver.Stmt
+	if prepCtx, ok := conn.(driver.ConnPrepareContext); ok {
+		stmt, err = prepCtx.PrepareContext(ctx, query)
+	} else {
+		stmt, err = conn.Prepare(query)
 	}
-	_, err = execer.ExecContext(ctx,
-		"EXEC sp_set_session_context @key=N'tenant_id', @value=N'"+c.tenantID+"'",
-		nil)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("mssql: prepare session context for tenant %s: %w", c.tenantID, err)
+	}
+	_, err = stmt.Exec(nil)
+	stmt.Close()
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("mssql: set session context for tenant %s: %w", c.tenantID, err)
@@ -165,7 +175,8 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 		    heartbeat_at = SYSUTCDATETIME()
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
-		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at
+		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at,
+		       INSERTED.error_code, INSERTED.error_op
 		WHERE id IN (
 			SELECT id
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
@@ -189,9 +200,10 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
 		var inputStr string
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -205,6 +217,8 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -238,7 +252,8 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 		    heartbeat_at = SYSUTCDATETIME()
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
-		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at
+		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at,
+		       INSERTED.error_code, INSERTED.error_op
 		WHERE id IN (
 			SELECT id
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
@@ -263,9 +278,10 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
 		var inputStr string
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
@@ -279,6 +295,8 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -457,6 +475,13 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		history = append(history, rec)
 	}
 	return history, rows.Err()
+}
+
+// CountEventHistory returns the total number of events for a workflow.
+func (s *MSSQLStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = @p1`, workflowID).Scan(&count)
+	return count, err
 }
 
 // AppendEventHistory appends a single event to the history.
@@ -645,7 +670,7 @@ func (s *MSSQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID,
 		UPDATE workflow_instances
 		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
 		WHERE id = @p1 AND assigned_to = @p2
-	`, workflowID, workerID, result, qsJSON)
+	`, workflowID, workerID, result, string(qsJSON))
 	if err != nil {
 		return err
 	}
@@ -689,7 +714,7 @@ func (s *MSSQLStore) FailWorkflow(ctx context.Context, workflowID, workerID, err
 		    assigned_to = NULL,
 		    query_state = @p6
 		WHERE id = @p1 AND assigned_to = @p2
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsJSON)
+	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON))
 	if err != nil {
 		return err
 	}
@@ -713,12 +738,13 @@ func (s *MSSQLStore) FailWorkflow(ctx context.Context, workflowID, workerID, err
 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
-func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error {
+func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'dead_lettered', error_msg = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL
+		SET status = 'dead_lettered', error_msg = @p3, error_code = @p4, error_op = @p5,
+		    completed_at = SYSUTCDATETIME(), assigned_to = NULL
 		WHERE id = @p1 AND assigned_to = @p2
-	`, workflowID, workerID, errMsg)
+	`, workflowID, workerID, errMsg, errorCode, errorOp)
 	if err != nil {
 		return err
 	}
@@ -732,7 +758,24 @@ func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, work
 	s.ClearStickyWorker(context.Background(), workflowID)
 	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
 
+	// Enforce ParentClosePolicy on children.
+	s.enforceParentClosePolicy(context.Background(), workflowID)
+
 	return nil
+}
+
+// RetryWorkflow moves a dead_lettered workflow back to a runnable state.
+// Resets status to 'ready', clears the worker assignment and error fields,
+// and sets next_wake_at to now so the workflow is re-queued immediately.
+func (s *MSSQLStore) RetryWorkflow(ctx context.Context, workflowID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		    error_msg = NULL, error_code = NULL, error_op = NULL,
+		    next_wake_at = SYSUTCDATETIME()
+		WHERE id = @p1 AND status = 'dead_lettered'
+	`, workflowID)
+	return err
 }
 
 // ReleaseWorkflow returns a workflow to the ready queue with a next wake time.
@@ -757,12 +800,17 @@ func (s *MSSQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID s
 
 // ContinueAsNew atomically creates a new workflow run and completes the current
 // one in a single database transaction. Returns the new run ID on success.
-func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Append events within the same transaction.
+	if err := s.appendEventsInTx(ctx, tx, currentRunID, newEvents); err != nil {
+		return "", fmt.Errorf("continue as new: append events: %w", err)
+	}
 
 	// Create the new workflow run with a Go-generated UUID.
 	newRunID := uuid.New().String()
@@ -771,7 +819,7 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		VALUES (@p1, @p2, @p3, 'ready', @p4,
 		        ISNULL((SELECT namespace FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
-	`, newRunID, defName, defVersion, newInput)
+	`, newRunID, defName, defVersion, string(newInput))
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -785,7 +833,7 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		UPDATE workflow_instances
 		SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
 		WHERE id = @p1 AND assigned_to = @p2
-	`, currentRunID, workerID, result, qsJSON)
+	`, currentRunID, workerID, result, string(qsJSON))
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}
@@ -832,7 +880,7 @@ func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 			UPDATE workflow_instances
 			SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(), assigned_to = NULL, query_state = @p4
 			WHERE id = @p1 AND assigned_to = @p2
-		`, runID, workerID, result, qsJSON)
+		`, runID, workerID, result, string(qsJSON))
 	case "failed":
 		qsJSON, _ := json.Marshal(queryState)
 		if qsJSON == nil {
@@ -848,7 +896,7 @@ func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 			    assigned_to = NULL,
 			    query_state = @p6
 			WHERE id = @p1 AND assigned_to = @p2
-		`, runID, workerID, result, errorCode, errorOp, qsJSON)
+		`, runID, workerID, result, errorCode, errorOp, string(qsJSON))
 	case "ready":
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
@@ -987,7 +1035,7 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 			VALUES (@p1, @p2, @p3, 'ready', @p4,
 			        ISNULL((SELECT namespace FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
 			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
-		`, runID, defName, defVersion, input)
+		`, runID, defName, defVersion, string(input))
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -1007,7 +1055,7 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		VALUES (@p1, @p2, @p3, 'ready', @p4,
 		        ISNULL((SELECT namespace FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
-	`, runID, defName, defVersion, input)
+	`, runID, defName, defVersion, string(input))
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -1105,7 +1153,7 @@ func (f *MSSQLStoreFactory) getOrCreateTenantPool(ctx context.Context, tenantID 
 	}
 
 	// Get the mssql driver as a Connector through the registered driver.
-	baseDB, err := sql.Open("mssql", f.connStr)
+	baseDB, err := sql.Open("sqlserver", f.connStr)
 	if err != nil {
 		return nil, fmt.Errorf("open base mssql connection: %w", err)
 	}
@@ -1259,9 +1307,9 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		USING (SELECT @p1 AS workflow_id, @p2 AS signal_name, @p3 AS payload) AS source
 		ON target.workflow_id = source.workflow_id AND target.signal_name = source.signal_name
 		WHEN MATCHED THEN UPDATE SET payload = source.payload, delivered_at = SYSUTCDATETIME()
-		WHEN NOT MATCHED THEN INSERT (workflow_id, signal_name, payload)
-		     VALUES (source.workflow_id, source.signal_name, source.payload);
-	`, workflowID, signalName, payload)
+		WHEN NOT MATCHED THEN INSERT (workflow_id, signal_name, payload, tenant_id)
+		     VALUES (source.workflow_id, source.signal_name, source.payload, @p4);
+	`, workflowID, signalName, payload, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -1269,9 +1317,21 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	return tx.Commit()
 }
 
-// PollSignal checks for a delivered signal.
+// PollSignal checks for a delivered signal without consuming it.
+// This is non-destructive — the signal remains available after polling.
 func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return s.PollAndClaimSignal(ctx, workflowID, signalName)
+	var payload string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT payload FROM workflow_signals
+		WHERE workflow_id = @p1 AND signal_name = @p2 AND tenant_id = @p3
+	`, workflowID, signalName, s.tenantID).Scan(&payload)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("poll signal: %w", err)
+	}
+	return payload, true, nil
 }
 
 // PollCancellation checks whether the workflow has been cancelled.
@@ -1429,7 +1489,7 @@ func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 // Supports pagination via Offset and Limit (default 100, max 1000).
 func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	query := `
-		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op
 		FROM workflow_instances
 		WHERE 1=1
 	`
@@ -1457,7 +1517,7 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	if filter.Search != "" {
 		pi++
 		pattern := "%" + filter.Search + "%"
-		query += fmt.Sprintf(" AND (CAST(input AS NVARCHAR(MAX)) LIKE @p%d OR CAST(result AS NVARCHAR(MAX)) LIKE @p%d OR error_msg LIKE @p%d)", pi, pi, pi)
+		query += fmt.Sprintf(" AND (CAST(input AS NVARCHAR(MAX)) LIKE @p%d OR CAST(result AS NVARCHAR(MAX)) LIKE @p%d OR error_msg LIKE @p%d OR def_name LIKE @p%d)", pi, pi, pi, pi)
 		args = append(args, pattern)
 	}
 
@@ -1491,13 +1551,18 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	for rows.Next() {
 		var wf WorkflowInstance
 		var nextWakeAt sql.NullTime
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt); err != nil {
+		var errorCode, errorOp sql.NullString
+			var inputStr string
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
+			&wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
+			wf.Input = json.RawMessage(inputStr)
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
 		}
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		workflows = append(workflows, wf)
 	}
 	return workflows, rows.Err()
@@ -1509,24 +1574,27 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
-	var inputRaw json.RawMessage
+	var inputRaw string
+	var errorCode, errorOp sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op
 		FROM workflow_instances WHERE id = @p1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg)
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get workflow: %w", err)
 	}
-	wf.Input = inputRaw
+	wf.Input = json.RawMessage(inputRaw)
 	wf.AssignedTo = assignedTo.String
 	wf.Result = result.String
 	wf.Error = errorMsg.String
+	wf.ErrorCode = errorCode.String
+	wf.ErrorOp = errorOp.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}
@@ -1559,10 +1627,12 @@ func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	for rows.Next() {
 		var sch Schedule
 		var lastRunAt sql.NullTime
+			var inputStr string
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
+			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
 			return nil, err
 		}
+			sch.Input = json.RawMessage(inputStr)
 		if lastRunAt.Valid {
 			sch.LastRunAt = &lastRunAt.Time
 		}
@@ -1602,10 +1672,12 @@ func (s *MSSQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	for rows.Next() {
 		var sch Schedule
 		var lastRunAt sql.NullTime
+			var inputStr string
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
+			&inputStr, &sch.Enabled, &sch.NextRunAt, &lastRunAt); err != nil {
 			return nil, err
 		}
+			sch.Input = json.RawMessage(inputStr)
 		if lastRunAt.Valid {
 			sch.LastRunAt = &lastRunAt.Time
 		}

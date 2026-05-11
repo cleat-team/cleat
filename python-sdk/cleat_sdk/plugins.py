@@ -233,6 +233,7 @@ class AwaitWebhookResult:
 
 # -- llm ----------------------------------------------------------------
 
+
 @dataclass
 class LLMChatResult:
     """Result of a :meth:`Plugins.llm_chat` call."""
@@ -287,6 +288,7 @@ class LLMListModelsResult:
 
 
 # -- pgvector -----------------------------------------------------------
+
 
 @dataclass
 class PgVectorSearchResult:
@@ -386,14 +388,11 @@ class Plugins:
         try:
             data = json.loads(response)
         except json.JSONDecodeError as e:
-            raise RuntimeError(
-                f"Plugin {plugin}.{function} returned invalid JSON: {e}"
-            ) from e
+            raise RuntimeError(f"Plugin {plugin}.{function} returned invalid JSON: {e}") from e
         if isinstance(data, dict):
             return result_type(**data)
         raise RuntimeError(
-            f"Plugin {plugin}.{function} expected a JSON object response, "
-            f"got {type(data).__name__}"
+            f"Plugin {plugin}.{function} expected a JSON object response, got {type(data).__name__}"
         )
 
     # --------------------------------------------------------------------
@@ -465,9 +464,7 @@ class Plugins:
         RuntimeError
             If the plugin call fails.
         """
-        return self._call(
-            self._h, "blobstore", "get", {"key": key}, BlobGetResult
-        )
+        return self._call(self._h, "blobstore", "get", {"key": key}, BlobGetResult)
 
     # --------------------------------------------------------------------
     # eventtriggers
@@ -536,9 +533,7 @@ class Plugins:
         inp: dict = {"key": key}
         if context is not None:
             inp["context"] = context
-        return self._call(
-            self._h, "featureflags", "evaluate_flag", inp, EvaluateFlagResult
-        )
+        return self._call(self._h, "featureflags", "evaluate_flag", inp, EvaluateFlagResult)
 
     # --------------------------------------------------------------------
     # kafkaconnect
@@ -579,9 +574,7 @@ class Plugins:
             inp["key"] = key
         if headers is not None:
             inp["headers"] = headers
-        return self._call(
-            self._h, "kafkaconnect", "produce", inp, ProduceResult
-        )
+        return self._call(self._h, "kafkaconnect", "produce", inp, ProduceResult)
 
     # --------------------------------------------------------------------
     # notifications
@@ -617,9 +610,7 @@ class Plugins:
         inp: dict = {"webhook_id": webhook_id, "event_type": event_type}
         if payload is not None:
             inp["payload"] = payload
-        return self._call(
-            self._h, "notifications", "send_webhook", inp, SendWebhookResult
-        )
+        return self._call(self._h, "notifications", "send_webhook", inp, SendWebhookResult)
 
     # --------------------------------------------------------------------
     # pagerdutyalert
@@ -745,9 +736,7 @@ class Plugins:
             inp["channel"] = channel
         if blocks is not None:
             inp["blocks"] = blocks
-        return self._call(
-            self._h, "slacknotify", "send_message", inp, SendMessageResult
-        )
+        return self._call(self._h, "slacknotify", "send_message", inp, SendMessageResult)
 
     # --------------------------------------------------------------------
     # webhookingest
@@ -1009,9 +998,7 @@ class Plugins:
         }
         if filter is not None:
             inp["filter"] = filter
-        result = self._call(
-            self._h, "pgvector", "search", inp, PgVectorSearchResult
-        )
+        result = self._call(self._h, "pgvector", "search", inp, PgVectorSearchResult)
         items = result.results
         if min_score is not None:
             items = [r for r in items if r.get("score", 0) >= min_score]

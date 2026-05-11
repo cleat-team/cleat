@@ -42,8 +42,8 @@ func TestDispatchLoop_CapacityLimit(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -132,8 +132,8 @@ func TestHeartbeatLoop_SuccessPreservesInflight(t *testing.T) {
 	w.inflight.Store("wf-alive-1", &host.WorkflowInstance{ID: "wf-alive-1"})
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.heartbeatLoop()
 		close(done)
 	}()
@@ -177,8 +177,8 @@ func TestHeartbeatLoop_LostOwnership(t *testing.T) {
 	w.inflight.Store("wf-keep-1", &host.WorkflowInstance{ID: "wf-keep-1"})
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.heartbeatLoop()
 		close(done)
 	}()

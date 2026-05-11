@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -48,42 +47,75 @@ ERROR_MULTIPLE_ENTRIES = "PY013"  # multiple @cleat_entry functions
 #: journalises (i.e. they create events in the workflow history).
 DURABLE_LEAVES: Set[str] = {
     # Core durable calls
-    "cleat_call", "cleat_call_typed", "cleat_call_with_retry",
+    "cleat_call",
+    "cleat_call_typed",
+    "cleat_call_with_retry",
     "cleat_call_with_heartbeat",
     # Sleep
     "cleat_sleep",
     # Logging
-    "cleat_log", "log_kv",
+    "cleat_log",
+    "log_kv",
     # HTTP fetch
-    "cleat_fetch", "cleat_fetch_json", "fetch_get", "fetch_get_json",
+    "cleat_fetch",
+    "cleat_fetch_json",
+    "fetch_get",
+    "fetch_get_json",
     # Signals
-    "await_signals", "poll_signal", "poll_cancellation",
-    "signal_workflow", "send_signal_and_wait", "reply_to_signal",
+    "await_signals",
+    "poll_signal",
+    "poll_cancellation",
+    "signal_workflow",
+    "send_signal_and_wait",
+    "reply_to_signal",
     "await_signals_with_quorum",
     # Child workflows
-    "child_workflow", "child_workflow_with_options",
-    "await_child", "await_all_children",
+    "child_workflow",
+    "child_workflow_with_options",
+    "await_child",
+    "await_all_children",
     # State
-    "set_state", "get_state", "set_query_state", "get_query_state",
-    "delete_state", "incr_state", "has_state", "list_state",
+    "set_state",
+    "get_state",
+    "set_query_state",
+    "get_query_state",
+    "delete_state",
+    "incr_state",
+    "has_state",
+    "list_state",
     # Promises
-    "create_promise", "await_promise", "resolve_promise", "reject_promise",
+    "create_promise",
+    "await_promise",
+    "resolve_promise",
+    "reject_promise",
     # Handlers
-    "register_update_handler", "register_query_handler",
+    "register_update_handler",
+    "register_query_handler",
     # Lifecycle
-    "cleat_defer", "continue_as_new", "extend_timeout", "run_detached",
+    "cleat_defer",
+    "continue_as_new",
+    "extend_timeout",
+    "run_detached",
     # Fire-and-forget / scheduling
-    "cleat_send", "schedule_invoke",
+    "cleat_send",
+    "schedule_invoke",
     # Identity
-    "current_workflow_id", "current_run_id",
+    "current_workflow_id",
+    "current_run_id",
     # Scope
-    "set_scope", "get_scope", "clear_scope",
+    "set_scope",
+    "get_scope",
+    "clear_scope",
     # UUID
     "uuid",
     # Plugin
-    "plugin_call", "plugin_call_streaming",
+    "plugin_call",
+    "plugin_call_streaming",
     # Clock / random (deterministic versions)
-    "now", "random", "version", "min_version",
+    "now",
+    "random",
+    "version",
+    "min_version",
 }
 
 #: Callable expression prefixes that identify forbidden APIs.
@@ -277,14 +309,16 @@ class AnalysisResult:
         suggestion: str = "",
         col: int = 0,
     ) -> None:
-        self.errors.append({
-            "code": code,
-            "file": self.filepath,
-            "line": line,
-            "column": col,
-            "message": message,
-            "suggestion": suggestion,
-        })
+        self.errors.append(
+            {
+                "code": code,
+                "file": self.filepath,
+                "line": line,
+                "column": col,
+                "message": message,
+                "suggestion": suggestion,
+            }
+        )
 
     def add_warning(
         self,
@@ -294,14 +328,16 @@ class AnalysisResult:
         suggestion: str = "",
         col: int = 0,
     ) -> None:
-        self.warnings.append({
-            "code": code,
-            "file": self.filepath,
-            "line": line,
-            "column": col,
-            "message": message,
-            "suggestion": suggestion,
-        })
+        self.warnings.append(
+            {
+                "code": code,
+                "file": self.filepath,
+                "line": line,
+                "column": col,
+                "message": message,
+                "suggestion": suggestion,
+            }
+        )
 
     @property
     def summary(self) -> Dict[str, Any]:
@@ -437,14 +473,16 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
             key = (None, name)
             if key in FORBIDDEN_API_RULES:
                 code, msg, suggestion = FORBIDDEN_API_RULES[key]
-                self.errors.append({
-                    "code": code,
-                    "file": self.filepath,
-                    "line": node.lineno,
-                    "column": getattr(node, "col_offset", 0),
-                    "message": msg,
-                    "suggestion": suggestion,
-                })
+                self.errors.append(
+                    {
+                        "code": code,
+                        "file": self.filepath,
+                        "line": node.lineno,
+                        "column": getattr(node, "col_offset", 0),
+                        "message": msg,
+                        "suggestion": suggestion,
+                    }
+                )
                 return
 
         # Qualified calls: module.func() or obj.method()
@@ -455,14 +493,16 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
                 key = (module, attr)
                 if key in FORBIDDEN_API_RULES:
                     code, msg, suggestion = FORBIDDEN_API_RULES[key]
-                    self.errors.append({
-                        "code": code,
-                        "file": self.filepath,
-                        "line": node.lineno,
-                        "column": getattr(node, "col_offset", 0),
-                        "message": msg,
-                        "suggestion": suggestion,
-                    })
+                    self.errors.append(
+                        {
+                            "code": code,
+                            "file": self.filepath,
+                            "line": node.lineno,
+                            "column": getattr(node, "col_offset", 0),
+                            "message": msg,
+                            "suggestion": suggestion,
+                        }
+                    )
                     return
 
         # Walk arguments and sub-calls
@@ -475,17 +515,19 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
             if isinstance(attr.value, ast.Name):
                 module = attr.value.id
                 if module == "os" and attr.attr == "environ":
-                    self.errors.append({
-                        "code": "PY007",
-                        "file": self.filepath,
-                        "line": node.lineno,
-                        "column": getattr(node, "col_offset", 0),
-                        "message": "os.environ access is not allowed in durable functions",
-                        "suggestion": (
-                            "Environment may differ across replays. "
-                            "Pass config as input instead."
-                        ),
-                    })
+                    self.errors.append(
+                        {
+                            "code": "PY007",
+                            "file": self.filepath,
+                            "line": node.lineno,
+                            "column": getattr(node, "col_offset", 0),
+                            "message": "os.environ access is not allowed in durable functions",
+                            "suggestion": (
+                                "Environment may differ across replays. "
+                                "Pass config as input instead."
+                            ),
+                        }
+                    )
         self.generic_visit(node)
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -493,105 +535,127 @@ class ForbiddenAPIChecker(ast.NodeVisitor):
         for alias in node.names:
             name = alias.name
             if name == "requests" or name.startswith("requests."):
-                self.errors.append({
+                self.errors.append(
+                    {
+                        "code": "PY003",
+                        "file": self.filepath,
+                        "line": node.lineno,
+                        "column": getattr(node, "col_offset", 0),
+                        "message": "requests library is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
+                        "suggestion": "Use cleat_fetch() or cleat_call() instead",
+                    }
+                )
+            elif name == "urllib" or name.startswith("urllib."):
+                self.errors.append(
+                    {
+                        "code": "PY003",
+                        "file": self.filepath,
+                        "line": node.lineno,
+                        "column": getattr(node, "col_offset", 0),
+                        "message": "urllib is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
+                        "suggestion": "Use cleat_fetch() or cleat_call() instead",
+                    }
+                )
+            elif name == "http" or name.startswith("http."):
+                self.errors.append(
+                    {
+                        "code": "PY003",
+                        "file": self.filepath,
+                        "line": node.lineno,
+                        "column": getattr(node, "col_offset", 0),
+                        "message": "http.client is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
+                        "suggestion": "Use cleat_fetch() or cleat_call() instead",
+                    }
+                )
+            elif name == "socket" or name.startswith("socket."):
+                self.errors.append(
+                    {
+                        "code": "PY009",
+                        "file": self.filepath,
+                        "line": node.lineno,
+                        "column": getattr(node, "col_offset", 0),
+                        "message": "socket module is not allowed in workflow code: raw sockets produce non-replayable network side effects.",
+                        "suggestion": "Use cleat_fetch() or cleat_call() instead",
+                    }
+                )
+            elif name in ("threading", "asyncio", "multiprocessing"):
+                code = "PY008"
+                msg = f"{name} module is not allowed in workflow code"
+                suggestion = (
+                    "Cleat workflows are single-threaded. Use child workflows for parallelism."
+                )
+                self.errors.append(
+                    {
+                        "code": code,
+                        "file": self.filepath,
+                        "line": node.lineno,
+                        "column": getattr(node, "col_offset", 0),
+                        "message": msg,
+                        "suggestion": suggestion,
+                    }
+                )
+            elif name == "subprocess" or name.startswith("subprocess."):
+                self.errors.append(
+                    {
+                        "code": "PY007",
+                        "file": self.filepath,
+                        "line": node.lineno,
+                        "column": getattr(node, "col_offset", 0),
+                        "message": "subprocess module is not allowed in workflow code",
+                        "suggestion": "Subprocess execution is not permitted in workflow code",
+                    }
+                )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        """Flag imports from forbidden modules."""
+        module = node.module or ""
+        if module == "requests":
+            self.errors.append(
+                {
                     "code": "PY003",
                     "file": self.filepath,
                     "line": node.lineno,
                     "column": getattr(node, "col_offset", 0),
                     "message": "requests library is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
                     "suggestion": "Use cleat_fetch() or cleat_call() instead",
-                })
-            elif name == "urllib" or name.startswith("urllib."):
-                self.errors.append({
+                }
+            )
+        elif module == "urllib" or module.startswith("urllib."):
+            self.errors.append(
+                {
                     "code": "PY003",
                     "file": self.filepath,
                     "line": node.lineno,
                     "column": getattr(node, "col_offset", 0),
                     "message": "urllib is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
                     "suggestion": "Use cleat_fetch() or cleat_call() instead",
-                })
-            elif name == "http" or name.startswith("http."):
-                self.errors.append({
-                    "code": "PY003",
-                    "file": self.filepath,
-                    "line": node.lineno,
-                    "column": getattr(node, "col_offset", 0),
-                    "message": "http.client is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
-                    "suggestion": "Use cleat_fetch() or cleat_call() instead",
-                })
-            elif name == "socket" or name.startswith("socket."):
-                self.errors.append({
+                }
+            )
+        elif module == "socket":
+            self.errors.append(
+                {
                     "code": "PY009",
                     "file": self.filepath,
                     "line": node.lineno,
                     "column": getattr(node, "col_offset", 0),
                     "message": "socket module is not allowed in workflow code: raw sockets produce non-replayable network side effects.",
                     "suggestion": "Use cleat_fetch() or cleat_call() instead",
-                })
-            elif name in ("threading", "asyncio", "multiprocessing"):
-                code = "PY008"
-                msg = f"{name} module is not allowed in workflow code"
-                suggestion = "Cleat workflows are single-threaded. Use child workflows for parallelism."
-                self.errors.append({
+                }
+            )
+        elif module in ("threading", "asyncio", "multiprocessing"):
+            code = "PY008"
+            msg = f"from {module} import ... is not allowed in workflow code"
+            suggestion = "Cleat workflows are single-threaded. Use child workflows for parallelism."
+            self.errors.append(
+                {
                     "code": code,
                     "file": self.filepath,
                     "line": node.lineno,
                     "column": getattr(node, "col_offset", 0),
                     "message": msg,
                     "suggestion": suggestion,
-                })
-            elif name == "subprocess" or name.startswith("subprocess."):
-                self.errors.append({
-                    "code": "PY007",
-                    "file": self.filepath,
-                    "line": node.lineno,
-                    "column": getattr(node, "col_offset", 0),
-                    "message": "subprocess module is not allowed in workflow code",
-                    "suggestion": "Subprocess execution is not permitted in workflow code",
-                })
-
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
-        """Flag imports from forbidden modules."""
-        module = node.module or ""
-        if module == "requests":
-            self.errors.append({
-                "code": "PY003",
-                "file": self.filepath,
-                "line": node.lineno,
-                "column": getattr(node, "col_offset", 0),
-                "message": "requests library is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
-                "suggestion": "Use cleat_fetch() or cleat_call() instead",
-            })
-        elif module == "urllib" or module.startswith("urllib."):
-            self.errors.append({
-                "code": "PY003",
-                "file": self.filepath,
-                "line": node.lineno,
-                "column": getattr(node, "col_offset", 0),
-                "message": "urllib is not allowed in workflow code: direct HTTP calls produce non-replayable network effects.",
-                "suggestion": "Use cleat_fetch() or cleat_call() instead",
-            })
-        elif module == "socket":
-            self.errors.append({
-                "code": "PY009",
-                "file": self.filepath,
-                "line": node.lineno,
-                "column": getattr(node, "col_offset", 0),
-                "message": "socket module is not allowed in workflow code: raw sockets produce non-replayable network side effects.",
-                "suggestion": "Use cleat_fetch() or cleat_call() instead",
-            })
-        elif module in ("threading", "asyncio", "multiprocessing"):
-            code = "PY008"
-            msg = f"from {module} import ... is not allowed in workflow code"
-            suggestion = "Cleat workflows are single-threaded. Use child workflows for parallelism."
-            self.errors.append({
-                "code": code,
-                "file": self.filepath,
-                "line": node.lineno,
-                "column": getattr(node, "col_offset", 0),
-                "message": msg,
-                "suggestion": suggestion,
-            })
+                }
+            )
 
 
 class ThreadingChecker(ast.NodeVisitor):
@@ -602,8 +666,9 @@ class ThreadingChecker(ast.NodeVisitor):
     - Is called by a function that does (transitive threading).
     """
 
-    def __init__(self, filepath: str, func_defs: Dict[str, ast.FunctionDef],
-                 closure_funcs: Set[str]) -> None:
+    def __init__(
+        self, filepath: str, func_defs: Dict[str, ast.FunctionDef], closure_funcs: Set[str]
+    ) -> None:
         self.filepath = filepath
         self.func_defs = func_defs
         self.closure_funcs = closure_funcs
@@ -622,20 +687,22 @@ class ThreadingChecker(ast.NodeVisitor):
             if func_name in self.func_defs:
                 func_node = self.func_defs[func_name]
                 if not self._has_host_calls_param(func_node):
-                    self.errors.append({
-                        "code": "PY011",
-                        "file": self.filepath,
-                        "line": func_node.lineno,
-                        "column": getattr(func_node, "col_offset", 0),
-                        "message": (
-                            f"'{func_name}' is in the durable closure but "
-                            f"does not have a HostCalls parameter"
-                        ),
-                        "suggestion": (
-                            "Add 'h' as a parameter. Functions calling SDK "
-                            "methods need a HostCalls instance."
-                        ),
-                    })
+                    self.errors.append(
+                        {
+                            "code": "PY011",
+                            "file": self.filepath,
+                            "line": func_node.lineno,
+                            "column": getattr(func_node, "col_offset", 0),
+                            "message": (
+                                f"'{func_name}' is in the durable closure but "
+                                f"does not have a HostCalls parameter"
+                            ),
+                            "suggestion": (
+                                "Add 'h' as a parameter. Functions calling SDK "
+                                "methods need a HostCalls instance."
+                            ),
+                        }
+                    )
         return self.errors
 
 
@@ -749,17 +816,28 @@ def analyze_file(filepath: str) -> AnalysisResult:
         with open(filepath) as f:
             source = f.read()
     except FileNotFoundError:
-        result.add_error("E001", 0, f"File not found: {filepath}", suggestion="Check that the file path is correct.")
+        result.add_error(
+            "E001",
+            0,
+            f"File not found: {filepath}",
+            suggestion="Check that the file path is correct.",
+        )
         return result
     except IOError as e:
-        result.add_error("E001", 0, f"Error reading file: {e}", suggestion="Check file permissions and that the file is readable.")
+        result.add_error(
+            "E001",
+            0,
+            f"Error reading file: {e}",
+            suggestion="Check file permissions and that the file is readable.",
+        )
         return result
 
     try:
         tree = ast.parse(source, filename=filepath)
     except SyntaxError as e:
         result.add_error(
-            "E001", getattr(e, "lineno", 0),
+            "E001",
+            getattr(e, "lineno", 0),
             f"Syntax error: {e.msg}",
             suggestion="Fix the Python syntax error and re-run.",
         )
@@ -776,10 +854,7 @@ def analyze_file(filepath: str) -> AnalysisResult:
             result.add_error(
                 "PY012",
                 func_node.lineno,
-                (
-                    f"'{name}' is an async function. "
-                    "Async functions cannot be compiled to WASM."
-                ),
+                (f"'{name}' is an async function. Async functions cannot be compiled to WASM."),
                 "Remove the 'async' keyword. Cleat workflows run synchronously "
                 "use h.cleat_call(), h.cleat_sleep(), etc. for durable operations.",
                 getattr(func_node, "col_offset", 0),
@@ -850,7 +925,7 @@ def detect_entry(filepath: str) -> Tuple[Optional[str], Optional[str]]:
     entries = find_cleat_entry_functions(tree, filepath)
 
     if len(entries) == 0:
-        return None, f"No @cleat_entry decorated function found in {filepath}"
+        return None, f"no @cleat_entry decorated function found in {filepath}"
 
     if len(entries) > 1:
         names = ", ".join(name for name, _ in entries)

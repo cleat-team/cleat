@@ -62,10 +62,15 @@ __pycache__/
 .pytest_cache/
 htmlcov/
 
-# Node modules in ports
+# Node modules
+node_modules/
 ports-round2/*/node_modules/
+packages/*/node_modules/
 ports-round2/*/package-lock.json
 ports-round2/*/dist/
+
+# Generated WASM binaries in examples
+examples/*/dist/*.wasm
 
 # Cloned source repos (not our work product)
 ports-round2/dbos-demo-apps/
@@ -91,3 +96,8 @@ ports-round2/*/build/
 /cleatctl
 
 .go-cache/
+
+# Java build artifacts
+crates/cleat-java/.gradle/
+crates/cleat-java/build/
+examples/*/node_modules/

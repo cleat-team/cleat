@@ -16,7 +16,6 @@
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -232,8 +231,7 @@ fn decode_uleb128(data: &[u8], offset: usize) -> Option<(u64, usize)> {
     let mut shift: u32 = 0;
     let mut consumed = 0;
 
-    for i in offset..data.len() {
-        let b = data[i];
+    for &b in data.iter().skip(offset) {
         consumed += 1;
         result |= ((b & 0x7F) as u64) << shift;
         if b & 0x80 == 0 {

@@ -71,7 +71,9 @@ def decode_uleb128(data: bytes, offset: int) -> tuple[int, int]:
             return result, consumed
         shift += 7
         if shift > 63:
-            raise ValueError(f"invalid WASM binary at offset {offset}: corrupted section length encoding")
+            raise ValueError(
+                f"invalid WASM binary at offset {offset}: corrupted section length encoding"
+            )
 
     raise ValueError(f"invalid WASM binary at offset {offset}: truncated section length encoding")
 
@@ -142,15 +144,6 @@ def inject_metadata(wasm_bytes: bytes, meta: dict) -> bytes:
     """Inject (or replace) a cleat.metadata custom section in a WASM binary."""
     json_payload = json.dumps(meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
-    # Check if a cleat.metadata section already exists.
-    _, _, section_end = find_custom_section(wasm_bytes, SECTION_NAME)
-    if section_end > 0:
-        # Remove existing section.
-        base = wasm_bytes[:section_end - len(build_custom_section(SECTION_NAME, b""))]
-        # Actually, we need to find the exact section and remove it.
-        # Let's rebuild: keep everything before the section start.
-        pass
-
     # For simplicity: if section exists, reconstruct without it.
     existing_payload, s_start, s_end = find_custom_section(wasm_bytes, SECTION_NAME)
     if existing_payload is not None:
@@ -170,6 +163,7 @@ def read_metadata(wasm_bytes: bytes) -> dict | None:
 
 def build_metadata(args: argparse.Namespace) -> dict:
     """Build the metadata dict from command-line args or environment variables."""
+
     # Environment variable fallbacks.
     def env_or_arg(env_var: str, arg_value):
         return arg_value if arg_value is not None else os.environ.get(env_var)
@@ -221,12 +215,24 @@ def main():
     )
     parser.add_argument("wasm_file", help="Path to compiled WASM file")
     parser.add_argument("--name", help="Workflow name (or CLEAT_WORKFLOW_NAME env var)")
-    parser.add_argument("--version", type=int, help="Workflow version (or CLEAT_WORKFLOW_VERSION env var)")
-    parser.add_argument("--min-version", type=int, help="Min compatible version (or CLEAT_MIN_COMPATIBLE_VERSION env var)")
-    parser.add_argument("--abi-version", type=int, help="ABI version (or CLEAT_ABI_VERSION env var)")
-    parser.add_argument("--plugin-deps", help="Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)")
+    parser.add_argument(
+        "--version", type=int, help="Workflow version (or CLEAT_WORKFLOW_VERSION env var)"
+    )
+    parser.add_argument(
+        "--min-version",
+        type=int,
+        help="Min compatible version (or CLEAT_MIN_COMPATIBLE_VERSION env var)",
+    )
+    parser.add_argument(
+        "--abi-version", type=int, help="ABI version (or CLEAT_ABI_VERSION env var)"
+    )
+    parser.add_argument(
+        "--plugin-deps", help="Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)"
+    )
     parser.add_argument("--output", "-o", help="Output WASM path (default: overwrite input)")
-    parser.add_argument("--read", action="store_true", help="Read and display metadata instead of writing")
+    parser.add_argument(
+        "--read", action="store_true", help="Read and display metadata instead of writing"
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
 
     args = parser.parse_args()

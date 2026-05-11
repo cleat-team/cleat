@@ -11,8 +11,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
             &input_fn.sig.ident,
             "#[cleat_entry] does not support async functions: async functions export Futures which cannot be used as WASM exports. Remove the 'async' keyword and use synchronous code with cleat_sdk calls.",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     // A1: Validate return type is Result<T, E>.
@@ -36,8 +35,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
             &input_fn.sig.output,
             "#[cleat_entry] function must return Result<T, E>: must return Result to allow the macro to format success and error values for the WASM ABI. Change return type to Result<T, E>.",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     let fn_vis = &input_fn.vis;
@@ -53,8 +51,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
             &input_fn.sig.ident,
             "#[cleat_entry] function must have at least a &HostCalls parameter: must have &HostCalls as first parameter to access the cleat runtime (logging, sleep, state, etc.). Add 'h: &HostCalls' as the first parameter.",
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     // A1: Validate that the first parameter is &HostCalls.
@@ -70,8 +67,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
                 &first_pt.ty,
                 "first parameter must be &HostCalls: must be &HostCalls. Replace the current type with 'h: &HostCalls' to access the cleat runtime API.",
             )
-            .to_compile_error()
-            .into();
+            .to_compile_error();
         }
     }
 
@@ -81,14 +77,13 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     // Validate: #[cleat_entry] supports exactly one input parameter beyond &HostCalls.
     if all_args.len() > 1 {
         return syn::Error::new_spanned(
-            &all_args[1],
+            all_args[1],
             format!(
                 "`#[cleat_entry]` functions must have exactly one input parameter (beyond `&HostCalls`). Found {} extra parameters. Reason: WASM exports receive a single JSON payload, so only one user parameter is supported. Combine parameters into a struct with #[derive(Deserialize)].",
                 all_args.len()
             ),
         )
-        .to_compile_error()
-        .into();
+        .to_compile_error();
     }
 
     // Rebuild inner function params (including HostCalls).
@@ -199,5 +194,5 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
         }
     };
 
-    expanded.into()
+    expanded
 }

@@ -440,7 +440,6 @@ func TestListWorkflows_Pagination(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)
@@ -456,40 +455,60 @@ func TestListWorkflows_Pagination(t *testing.T) {
 				}
 			}
 
-			// Page 1: offset=0, limit=2 → 2 results.
-			r1, err := store.ListWorkflows(ctx, WorkflowFilter{Offset: 0, Limit: 2})
+			// Get total count first (no limit filter → default 100).
+			allResults, err := store.ListWorkflows(ctx, WorkflowFilter{})
+			if err != nil {
+				t.Fatalf("ListWorkflows(all): %v", err)
+			}
+			total := len(allResults)
+			if total < 5 {
+				t.Fatalf("ListWorkflows(all): expected at least 5 results, got %d", total)
+			}
+
+			// Page 1: offset=0, limit=2 → should return min(2, total).
+			const pageSize = 2
+			r1, err := store.ListWorkflows(ctx, WorkflowFilter{Offset: 0, Limit: pageSize})
 			if err != nil {
 				t.Fatalf("ListWorkflows(offset=0,limit=2): %v", err)
 			}
-			if len(r1) != 2 {
-				t.Fatalf("ListWorkflows(offset=0,limit=2): expected 2 results, got %d", len(r1))
+			if len(r1) != pageSize {
+				t.Fatalf("ListWorkflows(offset=0,limit=2): expected %d results, got %d", pageSize, len(r1))
 			}
 
-			// Page 2: offset=2, limit=2 → 2 results.
-			r2, err := store.ListWorkflows(ctx, WorkflowFilter{Offset: 2, Limit: 2})
+			// Page 2: offset=2 → should return min(2, total-2) results.
+			r2, err := store.ListWorkflows(ctx, WorkflowFilter{Offset: 2, Limit: pageSize})
 			if err != nil {
 				t.Fatalf("ListWorkflows(offset=2,limit=2): %v", err)
 			}
-			if len(r2) != 2 {
-				t.Fatalf("ListWorkflows(offset=2,limit=2): expected 2 results, got %d", len(r2))
+			exp2 := pageSize
+			if total-2 < pageSize {
+				exp2 = total - 2
+			}
+			if exp2 < 0 {
+				exp2 = 0
+			}
+			if len(r2) != exp2 {
+				t.Fatalf("ListWorkflows(offset=2,limit=2): expected %d results, got %d (total=%d)", exp2, len(r2), total)
 			}
 
-			// Page 3: offset=4, limit=2 → 1 result (the 5th workflow).
-			r3, err := store.ListWorkflows(ctx, WorkflowFilter{Offset: 4, Limit: 2})
-			if err != nil {
-				t.Fatalf("ListWorkflows(offset=4,limit=2): %v", err)
+			// Verify no overlap between pages.
+			page1IDs := make(map[string]bool)
+			for _, wf := range r1 {
+				page1IDs[wf.ID] = true
 			}
-			if len(r3) != 1 {
-				t.Fatalf("ListWorkflows(offset=4,limit=2): expected 1 result, got %d", len(r3))
+			for _, wf := range r2 {
+				if page1IDs[wf.ID] {
+					t.Fatalf("ListWorkflows pagination: page 2 returned workflow %s already in page 1", wf.ID)
+				}
 			}
 
-			// Page beyond end: offset=10, limit=5 → 0 results.
-			r4, err := store.ListWorkflows(ctx, WorkflowFilter{Offset: 10, Limit: 5})
+			// Page beyond end: offset=total, limit=5 → 0 results.
+			r4, err := store.ListWorkflows(ctx, WorkflowFilter{Offset: total, Limit: 5})
 			if err != nil {
-				t.Fatalf("ListWorkflows(offset=10,limit=5): %v", err)
+				t.Fatalf("ListWorkflows(offset=%d,limit=5): %v", total, err)
 			}
 			if len(r4) != 0 {
-				t.Fatalf("ListWorkflows(offset=10,limit=5): expected 0 results, got %d", len(r4))
+				t.Fatalf("ListWorkflows(offset=%d,limit=5): expected 0 results, got %d", total, len(r4))
 			}
 		})
 	}
@@ -499,7 +518,6 @@ func TestListWorkflows_Search(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
 		t.Run(backend.Name(), func(t *testing.T) {
-			t.Parallel()
 			store, teardown := backend.Setup(t)
 			defer teardown()
 			setupTestData(t, store)

@@ -35,6 +35,7 @@ from .memory import SUSPEND_SENTINEL, encode_export_result, read_string, write_s
 # Helper
 # ---------------------------------------------------------------------------
 
+
 def _unwrap_result(result: Any) -> Any:
     """Unwrap Result-like types to get the inner value for serialisation.
 
@@ -123,9 +124,7 @@ def _from_dict(
     # ---- dict[str, Value] / Dict[str, Value] ----
     if origin in (dict, typing.Dict):
         if args and len(args) == 2 and isinstance(value, dict):
-            return {
-                k: _from_dict(v, args[1], _cache) for k, v in value.items()
-            }
+            return {k: _from_dict(v, args[1], _cache) for k, v in value.items()}
         return value
 
     # ---- Dataclass ----
@@ -169,8 +168,8 @@ def _from_dict(
 # Decorator
 # ---------------------------------------------------------------------------
 
-def _inject_witworld(func: Callable, export_wrapper: Callable,
-                     entry_name: str) -> None:
+
+def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) -> None:
     """Inject a ``WitWorld`` class into *func*'s module.
 
     ``componentize-py`` requires the entry module to export a class named
@@ -201,8 +200,10 @@ def _inject_witworld(func: Callable, export_wrapper: Callable,
     module._cleat_entry_wrappers[entry_name] = export_wrapper
 
     def _dispatcher_run(
-        args_ptr: int, args_len: int,
-        out_ptr: int, max_out_len: int,
+        args_ptr: int,
+        args_len: int,
+        out_ptr: int,
+        max_out_len: int,
     ) -> int:
         """WitWorld.run dispatcher -- selects the right entry and delegates."""
         wrappers = module._cleat_entry_wrappers
@@ -212,7 +213,10 @@ def _inject_witworld(func: Callable, export_wrapper: Callable,
         if len(wrappers) == 1:
             # Single entry: call the only wrapper directly (backward compat).
             return list(wrappers.values())[0](
-                args_ptr, args_len, out_ptr, max_out_len,
+                args_ptr,
+                args_len,
+                out_ptr,
+                max_out_len,
             )
 
         # Multiple entries: dispatch based on __cleat_entry__ in input JSON.
@@ -230,8 +234,7 @@ def _inject_witworld(func: Callable, export_wrapper: Callable,
         wrapper = wrappers.get(entry_key)
         if wrapper is None:
             raise ValueError(
-                f"No cleat_entry named '{entry_key}'. "
-                f"Available entries: {list(wrappers.keys())}"
+                f"No cleat_entry named '{entry_key}'. Available entries: {list(wrappers.keys())}"
             )
 
         # Write modified input (without __cleat_entry__) back to memory.
@@ -327,18 +330,20 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
         all_param_set = set(all_param_names)
         # ``get_type_hints`` may omit un-annotated params; merge both.
         params_with_host = [
-            p for p in all_param_names
-            if p in hint_names or p not in all_param_set - hint_names
+            p for p in all_param_names if p in hint_names or p not in all_param_set - hint_names
         ]
-        workflow_param_names = [p for p in params_with_host
-                                if not (p in hints and hints[p] is HostCalls)]
+        workflow_param_names = [
+            p for p in params_with_host if not (p in hints and hints[p] is HostCalls)
+        ]
 
         workflow_name = name if name is not None else func.__name__
 
         @functools.wraps(func)
         def export_wrapper(
-            args_ptr: int, args_len: int,
-            out_ptr: int, max_out_len: int,
+            args_ptr: int,
+            args_len: int,
+            out_ptr: int,
+            max_out_len: int,
         ) -> int:
             """Cleat ABI export wrapper.
 
@@ -349,17 +354,13 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
             try:
                 # (a) Read input JSON from linear memory.
                 input_json = read_string(args_ptr, args_len)
-                input_data: dict[str, Any] = (
-                    json.loads(input_json) if input_json else {}
-                )
+                input_data: dict[str, Any] = json.loads(input_json) if input_json else {}
 
                 # (b) Validate that every required workflow parameter appears
                 #     in the deserialised input.
                 missing = [p for p in workflow_param_names if p not in input_data]
                 if missing:
-                    raise ValueError(
-                        f"Missing required parameters: {', '.join(missing)}"
-                    )
+                    raise ValueError(f"Missing required parameters: {', '.join(missing)}")
 
                 # (c) Build keyword arguments from the JSON keys that match
                 #     workflow parameters, constructing dataclass instances

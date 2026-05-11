@@ -18,6 +18,11 @@ func buildRustWasm(t *testing.T) string {
 		t.Skip("cargo not installed — skipping Rust WASM integration test")
 	}
 
+	// Check if wasm32-wasip1 target is available.
+	if out, err := exec.Command("rustup", "target", "list", "--installed").Output(); err != nil || !strings.Contains(string(out), "wasm32-wasip1") {
+		t.Skip("wasm32-wasip1 Rust target not installed — skipping Rust WASM integration test")
+	}
+
 	projectRoot := findProjectRoot(t)
 	rustDir := filepath.Join(projectRoot, "examples", "rust-workflow")
 

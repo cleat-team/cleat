@@ -104,7 +104,17 @@ public class HostCalls {
     private static native long cleatChildWorkflowWithOptionsRaw(
         int namePtr, int nameLen,
         int inPtr, int inLen,
-        int version,
+        long version,
+        int policyPtr, int policyLen,
+        int outPtr, int maxLen);
+
+    @Import(module = "env", name = "cleat_child_workflow_in_schema")
+    private static native long cleatChildWorkflowInSchemaRaw(
+        int schemaPtr, int schemaLen,
+        int namePtr, int nameLen,
+        int inPtr, int inLen,
+        long version,
+        int policyPtr, int policyLen,
         int outPtr, int maxLen);
 
     @Import(module = "env", name = "cleat_await_child")
@@ -652,22 +662,24 @@ public class HostCalls {
      * Like {@link #childWorkflow(String, String)} but allows specifying
      * the workflow definition version explicitly.
      *
-     * @param name      the child workflow definition name
-     * @param inputJSON the input JSON for the child workflow
-     * @param version   the explicit workflow definition version
-     *                  (0 = use parent's version / default resolution)
+     * @param name              the child workflow definition name
+     * @param inputJSON         the input JSON for the child workflow
+     * @param version           the explicit workflow definition version
+     *                          (0 = use parent's version / default resolution)
+     * @param parentClosePolicy parent close policy ("abandon", "terminate", "request_cancel")
      * @return a result containing the child's run ID on success, or an error
      *         description on failure
      */
-    public CleatResult<String> childWorkflowWithOptions(String name, String inputJSON, int version) {
-        int[] p = packStrings(name, inputJSON);
-        int nameOff = p[0], inOff = p[1];
-        int nameLen = p[2], inLen = p[3];
+    public CleatResult<String> childWorkflowWithOptions(String name, String inputJSON, long version, String parentClosePolicy) {
+        int[] p = packStrings(name, inputJSON, parentClosePolicy);
+        int nameOff = p[0], inOff = p[1], policyOff = p[2];
+        int nameLen = p[3], inLen = p[4], policyLen = p[5];
 
         long result = cleatChildWorkflowWithOptionsRaw(
             nameOff, nameLen,
             inOff, inLen,
             version,
+            policyOff, policyLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
         int errCode = Memory.decodeSimpleErrCode(result);
@@ -675,6 +687,43 @@ public class HostCalls {
 
         if (errCode != 0) {
             return CleatResult.err("childWorkflowWithOptions(name=\"" + name + "\", version=" + version + ") failed: host returned error code " + errCode + ". Check that the child workflow name is correct.");
+        }
+
+        String runId = readOutput(runIdLen);
+        return CleatResult.ok(runId);
+    }
+
+    /**
+     * Start a child workflow in a different schema (cross-instance cooperation).
+     * Mirrors Go's ChildWorkflowInSchema.
+     *
+     * @param targetSchema     the PostgreSQL schema of the target cleat instance
+     * @param name             the child workflow definition name
+     * @param inputJSON        the input payload as a JSON string
+     * @param version          the explicit workflow definition version to use
+     *                         (0 = use parent's version / default resolution)
+     * @param parentClosePolicy parent close policy ("abandon", "terminate", "request_cancel")
+     * @return a result containing the child's run ID on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> childWorkflowInSchema(String targetSchema, String name, String inputJSON, long version, String parentClosePolicy) {
+        int[] p = packStrings(targetSchema, name, inputJSON, parentClosePolicy);
+        int schemaOff = p[0], nameOff = p[1], inOff = p[2], policyOff = p[3];
+        int schemaLen = p[4], nameLen = p[5], inLen = p[6], policyLen = p[7];
+
+        long result = cleatChildWorkflowInSchemaRaw(
+            schemaOff, schemaLen,
+            nameOff, nameLen,
+            inOff, inLen,
+            version,
+            policyOff, policyLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int runIdLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("childWorkflowInSchema(schema=\"" + targetSchema + "\", name=\"" + name + "\", version=" + version + ") failed: host returned error code " + errCode);
         }
 
         String runId = readOutput(runIdLen);
@@ -2305,19 +2354,23 @@ public class HostCalls {
      */
     /**
      * Options for starting a child workflow with version control.
-     * Use with {@link #childWorkflowWithOptions(String, String, int)}.
+     * Use with {@link #childWorkflowWithOptions(String, String, long, String)}.
      * {@code version = 0} means default resolution (parent's version).
      */
     public static class ChildWorkflowOptions {
         /** Explicit workflow definition version to use. 0 = default. */
-        public int version;
+        public long version;
+        /** Parent close policy (e.g. "abandon", "terminate", "request_cancel"). */
+        public String parentClosePolicy;
 
         public ChildWorkflowOptions() {
             this.version = 0;
+            this.parentClosePolicy = "";
         }
 
-        public ChildWorkflowOptions(int version) {
+        public ChildWorkflowOptions(long version) {
             this.version = version;
+            this.parentClosePolicy = "";
         }
     }
 

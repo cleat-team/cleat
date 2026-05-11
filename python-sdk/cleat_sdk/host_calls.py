@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Optional, TypeVar
 
@@ -126,6 +127,7 @@ try:
         plugin_call as _import_plugin_call,
         plugin_call_streaming as _import_plugin_call_streaming,
     )
+
     _USING_WASM = True
 except ImportError:
     _USING_WASM = False
@@ -172,9 +174,7 @@ class CleatCallError(RuntimeError):
         self.service = service
         self.operation = operation
         self.call_error_code = call_error_code
-        super().__init__(
-            f"cleat call {service}.{operation}: [{call_error_code}] {message}"
-        )
+        super().__init__(f"cleat call {service}.{operation}: [{call_error_code}] {message}")
 
 
 class CleatCallTransientError(CleatCallError):
@@ -315,6 +315,7 @@ class ChildWorkflowOptions:
         Explicit workflow definition version to use.
         0 = use default resolution (parent's version).
     """
+
     version: int = 0
 
 
@@ -346,6 +347,7 @@ class PromiseResult:
 
 
 if not _USING_WASM:
+
     def _import_cleat_sleep(duration_ms: int) -> int:
         """Stub for WASM import ``(import "env" "cleat_sleep") (param i64) (result i64)``.
 
@@ -361,50 +363,47 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_now() -> int:
         """Stub for WASM import ``(import "env" "cleat_now") (result i64)``."""
-        raise NotImplementedError(
-            "cleat_now can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("cleat_now can only be called within a cleat WASM runtime.")
 
 
 # -- 3. cleat_random --------------------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_cleat_random() -> int:
         """Stub for WASM import ``(import "env" "cleat_random") (result i64)``."""
-        raise NotImplementedError(
-            "cleat_random can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("cleat_random can only be called within a cleat WASM runtime.")
 
 
 # -- 4. cleat_log -----------------------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_cleat_log(msg_ptr: int, msg_len: int) -> int:
         """Stub for WASM import ``(import "env" "cleat_log") (param i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_log can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("cleat_log can only be called within a cleat WASM runtime.")
 
 
 # -- 5. cleat_version -------------------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_cleat_version() -> int:
         """Stub for WASM import ``(import "env" "cleat_version") (result i64)``."""
-        raise NotImplementedError(
-            "cleat_version can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("cleat_version can only be called within a cleat WASM runtime.")
 
 
 # -- 6. cleat_min_version ---------------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_cleat_min_version() -> int:
         """Stub for WASM import ``(import "env" "cleat_min_version") (result i64)``."""
         raise NotImplementedError(
@@ -416,6 +415,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_defer(
         desc_ptr: int,
         desc_len: int,
@@ -423,15 +423,14 @@ if not _USING_WASM:
         defer_id_max_len: int,
     ) -> int:
         """Stub for WASM import ``(import "env" "cleat_defer") (param i32 i32 i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_defer can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("cleat_defer can only be called within a cleat WASM runtime.")
 
 
 # -- 8. cleat_poll_cancellation ---------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_cleat_poll_cancellation(reason_ptr: int, reason_max_len: int) -> int:
         """Stub for WASM import ``(import "env" "cleat_poll_cancellation") (param i32 i32) (result i64)``."""
         raise NotImplementedError(
@@ -443,6 +442,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_poll_signal(
         name_ptr: int,
         name_len: int,
@@ -459,6 +459,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_continue_as_new(input_ptr: int, input_len: int) -> int:
         """Stub for WASM import ``(import "env" "cleat_continue_as_new") (param i32 i32) (result i64)``."""
         raise NotImplementedError(
@@ -470,6 +471,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_child_workflow(
         name_ptr: int,
         name_len: int,
@@ -485,6 +487,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_child_workflow_with_options(
         name: str,
         input: str,
@@ -500,6 +503,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_await_child(
         run_id_ptr: int,
         run_id_len: int,
@@ -516,6 +520,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_await_signals(
         names_ptr: int,
         names_len: int,
@@ -535,6 +540,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_set_query_state(
         key_ptr: int,
         key_len: int,
@@ -542,15 +548,14 @@ if not _USING_WASM:
         val_len: int,
     ) -> int:
         """Stub for WASM import ``(import "env" "set_query_state") (param i32 i32 i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "set_query_state can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("set_query_state can only be called within a cleat WASM runtime.")
 
 
 # -- 15. cleat_call ---------------------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_cleat_call(
         svc_ptr: int,
         svc_len: int,
@@ -562,15 +567,14 @@ if not _USING_WASM:
         resp_max_len: int,
     ) -> int:
         """Stub for WASM import ``(import "env" "cleat_call") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_call can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("cleat_call can only be called within a cleat WASM runtime.")
 
 
 # -- 16. cleat_call_retry ---------------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_cleat_call_retry(
         svc_ptr: int,
         svc_len: int,
@@ -597,6 +601,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_call_heartbeat(
         svc_ptr: int,
         svc_len: int,
@@ -618,6 +623,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_await_all_children(
         run_ids_json_ptr: int,
         run_ids_json_len: int,
@@ -634,6 +640,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_plugin_call(
         plugin_name_ptr: int,
         plugin_name_len: int,
@@ -645,15 +652,14 @@ if not _USING_WASM:
         response_max_len: int,
     ) -> int:
         """Stub for WASM import ``(import "env" "plugin_call") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "plugin_call can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("plugin_call can only be called within a cleat WASM runtime.")
 
 
 # -- 19b. plugin_call_streaming -------------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_plugin_call_streaming(
         plugin_name_ptr: int,
         plugin_name_len: int,
@@ -674,6 +680,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_create_promise(
         name_ptr: int,
         name_len: int,
@@ -691,6 +698,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_await_promise(
         id_ptr: int,
         id_len: int,
@@ -708,6 +716,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_resolve_promise(
         id_ptr: int,
         id_len: int,
@@ -724,6 +733,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_reject_promise(
         id_ptr: int,
         id_len: int,
@@ -740,6 +750,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_acquire_lock(
         key: str,
         ttl_ms: int,
@@ -754,6 +765,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_release_lock(
         key: str,
     ) -> int:
@@ -767,6 +779,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_register_update_handler(name_ptr: int, name_len: int) -> int:
         """Stub for WASM import ``(import "env" "cleat_register_update_handler") (param i32 i32) (result i64)``."""
         raise NotImplementedError(
@@ -778,6 +791,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_workflow_id(
         id_ptr: int,
         id_max_len: int,
@@ -792,20 +806,20 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_run_id(
         id_ptr: int,
         id_max_len: int,
     ) -> int:
         """Stub for WASM import ``(import "env" "cleat_run_id") (param i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_run_id can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("cleat_run_id can only be called within a cleat WASM runtime.")
 
 
 # -- 29. cleat_send ---------------------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_cleat_send(
         svc_ptr: int,
         svc_len: int,
@@ -815,15 +829,14 @@ if not _USING_WASM:
         req_len: int,
     ) -> int:
         """Stub for WASM import ``(import "env" "cleat_send") (param i32 i32 i32 i32 i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_send can only be called within a cleat WASM runtime."
-        )
+        raise NotImplementedError("cleat_send can only be called within a cleat WASM runtime.")
 
 
 # -- 30. cleat_schedule_invoke ----------------------------------------------
 
 
 if not _USING_WASM:
+
     def _import_cleat_schedule_invoke(
         svc_ptr: int,
         svc_len: int,
@@ -843,6 +856,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_register_query_handler(name_ptr: int, name_len: int) -> int:
         """Stub for WASM import ``(import "env" "cleat_register_query_handler") (param i32 i32) (result i64)``."""
         raise NotImplementedError(
@@ -854,6 +868,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_send_signal_and_wait(
         target_run_id_ptr: int,
         target_run_id_len: int,
@@ -875,6 +890,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_reply_to_signal(
         correlation_id_ptr: int,
         correlation_id_len: int,
@@ -891,6 +907,7 @@ if not _USING_WASM:
 
 
 if not _USING_WASM:
+
     def _import_cleat_signal_workflow(
         target_run_id_ptr: int,
         target_run_id_len: int,
@@ -926,7 +943,9 @@ class HostCalls:
 
     def __init__(self) -> None:
         """Initialize the HostCalls instance."""
-        self._update_handlers: dict[str, tuple[Callable[[str], str], Optional[Callable[[str], bool]]]] = {}
+        self._update_handlers: dict[
+            str, tuple[Callable[[str], str], Optional[Callable[[str], bool]]]
+        ] = {}
         self._query_handlers: dict[str, Callable[[str], str]] = {}
         self._scope_prefix: str = ""
 
@@ -1006,9 +1025,7 @@ class HostCalls:
         """
         prev = self._scope_prefix
         self._scope_prefix = (
-            f"vo:{object_type}:{instance_key}:"
-            if object_type and instance_key
-            else ""
+            f"vo:{object_type}:{instance_key}:" if object_type and instance_key else ""
         )
         return prev
 
@@ -1070,8 +1087,8 @@ class HostCalls:
         h = hashlib.sha256(data).digest()[:16]
         # Set UUIDv5 version and variant bits
         h_bytes = bytearray(h)
-        h_bytes[6] = (h_bytes[6] & 0x0f) | 0x50  # Version 5
-        h_bytes[8] = (h_bytes[8] & 0x3f) | 0x80  # Variant 1
+        h_bytes[6] = (h_bytes[6] & 0x0F) | 0x50  # Version 5
+        h_bytes[8] = (h_bytes[8] & 0x3F) | 0x80  # Variant 1
         return (
             f"{h_bytes[0:4].hex()}-"
             f"{h_bytes[4:6].hex()}-"
@@ -1336,9 +1353,7 @@ class HostCalls:
         if err_code != 0:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
             if call_error_code != 0:
-                self._raise_for_call_error(
-                    service, operation, err_msg, call_error_code
-                )
+                self._raise_for_call_error(service, operation, err_msg, call_error_code)
             raise RuntimeError(f"cleat_call({service}.{operation}) failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
@@ -1451,9 +1466,7 @@ class HostCalls:
         if err_code != 0:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
             if call_error_code != 0:
-                self._raise_for_call_error(
-                    service, operation, err_msg, call_error_code
-                )
+                self._raise_for_call_error(service, operation, err_msg, call_error_code)
             raise RuntimeError(f"cleat_call_with_retry({service}.{operation}) failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
@@ -1472,33 +1485,33 @@ class HostCalls:
     ) -> str:
         """Make a cleat call with periodic heartbeat / progress updates.
 
-        The host sends periodic progress updates while the call is running.
-        Each progress update is delivered to the *progress* callback as a
-        JSON string.  (In the current MVP the callback is accepted but not
-       invoked by the stub; it will be wired in a future runtime.)
+         The host sends periodic progress updates while the call is running.
+         Each progress update is delivered to the *progress* callback as a
+         JSON string.  (In the current MVP the callback is accepted but not
+        invoked by the stub; it will be wired in a future runtime.)
 
-        Parameters
-        ----------
-        service : str
-            Service name.
-        operation : str
-            Operation name.
-        request : Any
-            Request payload (dict or str).
-        heartbeat_interval_ms : int
-            Heartbeat interval in milliseconds.
-        progress : Callable[[str], None]
-            Callback invoked with progress JSON strings from the host.
+         Parameters
+         ----------
+         service : str
+             Service name.
+         operation : str
+             Operation name.
+         request : Any
+             Request payload (dict or str).
+         heartbeat_interval_ms : int
+             Heartbeat interval in milliseconds.
+         progress : Callable[[str], None]
+             Callback invoked with progress JSON strings from the host.
 
-        Returns
-        -------
-        str
-            The final response JSON string.
+         Returns
+         -------
+         str
+             The final response JSON string.
 
-        Raises
-        ------
-        RuntimeError
-            If the host reports an error from the service call.
+         Raises
+         ------
+         RuntimeError
+             If the host reports an error from the service call.
         """
         req_str = self._marshal(request)
 
@@ -1526,10 +1539,10 @@ class HostCalls:
         if err_code != 0:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
             if call_error_code != 0:
-                self._raise_for_call_error(
-                    service, operation, err_msg, call_error_code
-                )
-            raise RuntimeError(f"cleat_call_with_heartbeat({service}.{operation}) failed: {err_msg}")
+                self._raise_for_call_error(service, operation, err_msg, call_error_code)
+            raise RuntimeError(
+                f"cleat_call_with_heartbeat({service}.{operation}) failed: {err_msg}"
+            )
 
         return read_string(OUTPUT_OFFSET, response_len)
 
@@ -1821,21 +1834,15 @@ class HostCalls:
         if result == SUSPEND_SENTINEL:
             raise SuspendSentinel()
 
-        sig_name_len, payload_len, timed_out, err_code = decode_await_signals_result(
-            result
-        )
+        sig_name_len, payload_len, timed_out, err_code = decode_await_signals_result(result)
         if err_code != 0:
             raise RuntimeError(
                 f"await_signals(signal_names={signal_names}) failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
-        sig_name = (
-            read_string(OUTPUT_OFFSET, sig_name_len) if sig_name_len > 0 else ""
-        )
+        sig_name = read_string(OUTPUT_OFFSET, sig_name_len) if sig_name_len > 0 else ""
         payload = (
-            read_string(payload_offset, payload_len)
-            if not timed_out and payload_len > 0
-            else ""
+            read_string(payload_offset, payload_len) if not timed_out and payload_len > 0 else ""
         )
 
         return SignalResult(name=sig_name, payload=payload, timed_out=timed_out)
@@ -1878,13 +1885,11 @@ class HostCalls:
 
         payload_len, found, err_code = decode_poll_signal_result(result)
         if err_code != 0:
-            raise RuntimeError(f"poll_signal(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})")
+            raise RuntimeError(
+                f"poll_signal(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
 
-        payload = (
-            read_string(OUTPUT_OFFSET, payload_len)
-            if found and payload_len > 0
-            else ""
-        )
+        payload = read_string(OUTPUT_OFFSET, payload_len) if found and payload_len > 0 else ""
 
         return (payload, found)
 
@@ -1908,9 +1913,7 @@ class HostCalls:
         result = _import_cleat_poll_cancellation(OUTPUT_OFFSET, OUT_BUF_SIZE)
 
         reason_len, cancelled = decode_poll_cancellation_result(result)
-        reason = (
-            read_string(OUTPUT_OFFSET, reason_len) if cancelled and reason_len > 0 else ""
-        )
+        reason = read_string(OUTPUT_OFFSET, reason_len) if cancelled and reason_len > 0 else ""
 
         return (cancelled, reason)
 
@@ -2218,9 +2221,7 @@ class HostCalls:
         int
             The new value after incrementing.
         """
-        result = self.cleat_call(
-            "state", "incr", {"key": key, "delta": delta}
-        )
+        result = self.cleat_call("state", "incr", {"key": key, "delta": delta})
         return int(json.loads(result))
 
     # --------------------------------------------------------------------
@@ -2243,9 +2244,7 @@ class HostCalls:
         bool
             ``True`` if the key exists in cleat state.
         """
-        result = self.cleat_call(
-            "state", "has", {"key": self._scoped_key(key)}
-        )
+        result = self.cleat_call("state", "has", {"key": self._scoped_key(key)})
         return bool(json.loads(result))
 
     # --------------------------------------------------------------------
@@ -2386,9 +2385,7 @@ class HostCalls:
                 f"await_promise(promise_id='{promise_id}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
-        result_str = (
-            read_string(OUTPUT_OFFSET, result_len) if result_len > 0 else ""
-        )
+        result_str = read_string(OUTPUT_OFFSET, result_len) if result_len > 0 else ""
         return PromiseResult(
             result=result_str,
             timed_out=timed_out,
@@ -2531,9 +2528,7 @@ class HostCalls:
         """
         entry = self._update_handlers.get(name)
         if entry is None:
-            raise RuntimeError(
-                f"No update handler registered for '{name}'"
-            )
+            raise RuntimeError(f"No update handler registered for '{name}'")
         handler, _ = entry
         return handler(payload)
 
@@ -2610,9 +2605,7 @@ class HostCalls:
         """
         handler = self._query_handlers.get(name)
         if handler is None:
-            raise RuntimeError(
-                f"No query handler registered for '{name}'"
-            )
+            raise RuntimeError(f"No query handler registered for '{name}'")
         return handler(payload)
 
     # --------------------------------------------------------------------
@@ -2651,7 +2644,9 @@ class HostCalls:
 
         id_len, err_code = decode_simple_result(result)
         if err_code != 0:
-            raise RuntimeError(f"cleat_defer(description='{description}') failed: {_error_code_name(err_code)} (code {err_code})")
+            raise RuntimeError(
+                f"cleat_defer(description='{description}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
 
         return read_string(OUTPUT_OFFSET, id_len)
 
@@ -2828,9 +2823,7 @@ class HostCalls:
     # 31. plugin_call — call a plugin host function
     # --------------------------------------------------------------------
 
-    def plugin_call(
-        self, plugin_name: str, function_name: str, input: Any
-    ) -> str:
+    def plugin_call(self, plugin_name: str, function_name: str, input: Any) -> str:
         """Call a plugin host function.
 
         Plugins extend the host runtime with custom functionality beyond
@@ -2884,7 +2877,9 @@ class HostCalls:
                 self._raise_for_call_error(
                     f"plugin:{plugin_name}", function_name, err_msg, call_error_code
                 )
-            raise RuntimeError(f"plugin_call(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}")
+            raise RuntimeError(
+                f"plugin_call(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}"
+            )
 
         return read_string(OUTPUT_OFFSET, response_len)
 
@@ -2947,12 +2942,18 @@ class HostCalls:
 
             response_len, call_error_code, err_code = decode_cleat_call_result(result)
             if err_code != 0:
-                err_msg = read_string(OUTPUT_OFFSET, response_len) if response_len > 0 else "unknown error"
+                err_msg = (
+                    read_string(OUTPUT_OFFSET, response_len)
+                    if response_len > 0
+                    else "unknown error"
+                )
                 if call_error_code != 0:
                     self._raise_for_call_error(
                         f"plugin:{plugin_name}", function_name, err_msg, call_error_code
                     )
-                raise RuntimeError(f"plugin_call_streaming(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}")
+                raise RuntimeError(
+                    f"plugin_call_streaming(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}"
+                )
 
             if response_len == 0:
                 break  # End of stream
@@ -3063,7 +3064,9 @@ class HostCalls:
         response_len, err_code = decode_simple_result(result)
         if err_code != 0:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
-            raise RuntimeError(f"send_signal_and_wait(target_run_id='{target_run_id}', signal_name='{signal_name}') failed: {err_msg}")
+            raise RuntimeError(
+                f"send_signal_and_wait(target_run_id='{target_run_id}', signal_name='{signal_name}') failed: {err_msg}"
+            )
 
         return read_string(OUTPUT_OFFSET, response_len)
 
@@ -3154,28 +3157,23 @@ class HostCalls:
             remaining_ms = max(0, (deadline_ns - time.monotonic_ns()) // 1_000_000)
 
             if remaining_ms <= 0:
-                raise RuntimeError(
-                    f"quorum timeout: got {len(results)}/{min_count} signals"
-                )
+                raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
 
             result = self.await_signals_ms(signal_names, remaining_ms)
             if result.timed_out:
-                raise RuntimeError(
-                    f"quorum timeout: got {len(results)}/{min_count} signals"
-                )
+                raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
             results.append(result)
 
             # Check for rejection if max_rejections >= 0.
             if max_rejections >= 0 and result.payload:
                 import json
+
                 try:
                     payload_data = json.loads(result.payload)
                     if isinstance(payload_data, dict) and payload_data.get("rejected"):
                         rejection_count += 1
                         if rejection_count > max_rejections:
-                            raise RuntimeError(
-                                f"quorum exceeded max rejections ({max_rejections})"
-                            )
+                            raise RuntimeError(f"quorum exceeded max rejections ({max_rejections})")
                 except (json.JSONDecodeError, TypeError):
                     pass
 
@@ -3450,9 +3448,7 @@ class HostCalls:
 
         list_len, err_code = decode_simple_result(result)
         if err_code != 0:
-            raise RuntimeError(
-                f"list_crons failed: {_error_code_name(err_code)} (code {err_code})"
-            )
+            raise RuntimeError(f"list_crons failed: {_error_code_name(err_code)} (code {err_code})")
 
         list_json = read_string(OUTPUT_OFFSET, list_len)
         if not list_json:
@@ -3481,9 +3477,7 @@ def _import_schedule_cron(
     registers a cron expression and input; the host creates the recurring
     schedule and returns a schedule ID.
     """
-    raise NotImplementedError(
-        "schedule_cron can only be called within a cleat WASM runtime."
-    )
+    raise NotImplementedError("schedule_cron can only be called within a cleat WASM runtime.")
 
 
 # -- 36d. delete_cron -----------------------------------------------------------
@@ -3497,9 +3491,7 @@ def _import_delete_cron(
 
     Removes a previously created cron-triggered workflow schedule.
     """
-    raise NotImplementedError(
-        "delete_cron can only be called within a cleat WASM runtime."
-    )
+    raise NotImplementedError("delete_cron can only be called within a cleat WASM runtime.")
 
 
 # -- 36e. list_crons ------------------------------------------------------------
@@ -3513,9 +3505,7 @@ def _import_list_crons(
 
     Lists all registered cron-triggered workflow schedules as a JSON array.
     """
-    raise NotImplementedError(
-        "list_crons can only be called within a cleat WASM runtime."
-    )
+    raise NotImplementedError("list_crons can only be called within a cleat WASM runtime.")
 
 
 # -- 36. cleat_extend_timeout --------------------------------------------------

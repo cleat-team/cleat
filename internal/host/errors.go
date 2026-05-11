@@ -6,11 +6,13 @@ import "fmt"
 type ErrorCode int
 
 const (
-	ErrUnknown   ErrorCode = iota
-	ErrTransient           // retryable (DB connection, timeout)
-	ErrPermanent           // non-retryable (invalid input, not found)
-	ErrCancelled           // workflow cancelled
-	ErrTimeout             // execution timeout
+	ErrUnknown          ErrorCode = iota
+	ErrTransient                  // retryable (DB connection, timeout)
+	ErrPermanent                  // non-retryable (invalid input, not found)
+	ErrCancelled                  // workflow cancelled
+	ErrTimeout                    // execution timeout
+	ErrAmbiguous                  // call outcome unknown after crash (replay found pending intent)
+	ErrRetriesExhausted           // retries exhausted
 )
 
 // String returns a human-readable representation of the error code
@@ -25,6 +27,10 @@ func (c ErrorCode) String() string {
 		return "cancelled"
 	case ErrTimeout:
 		return "timeout"
+	case ErrAmbiguous:
+		return "ambiguous"
+	case ErrRetriesExhausted:
+		return "retries_exhausted"
 	default:
 		return "unknown"
 	}
@@ -68,4 +74,16 @@ func NewTimeoutError(op, workflowID string, err error) *CleatError {
 // NewCancelledError creates a cancellation error.
 func NewCancelledError(op, workflowID string, err error) *CleatError {
 	return &CleatError{Code: ErrCancelled, Op: op, WorkflowID: workflowID, Err: err}
+}
+
+// NewAmbiguousError creates an ambiguous-outcome error — the call may have
+// succeeded but the response was never persisted. The caller should check
+// the external service before retrying.
+func NewAmbiguousError(op, workflowID string, err error) *CleatError {
+	return &CleatError{Code: ErrAmbiguous, Op: op, WorkflowID: workflowID, Err: err}
+}
+
+// NewRetriesExhaustedError creates an error indicating retries were exhausted.
+func NewRetriesExhaustedError(op, workflowID string, err error) *CleatError {
+	return &CleatError{Code: ErrRetriesExhausted, Op: op, WorkflowID: workflowID, Err: err}
 }

@@ -52,7 +52,7 @@ import java.util.Map;
  * @see CleatEntry
  * @see HostCalls
  */
-@SupportedAnnotationTypes("cleat.CleatEntry")
+@SupportedAnnotationTypes("*")
 @SupportedSourceVersion(SourceVersion.RELEASE_11)
 public class CleatEntryProcessor extends AbstractProcessor {
 

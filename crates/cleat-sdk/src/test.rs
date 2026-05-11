@@ -12,10 +12,9 @@
 //!
 //! # Usage
 //!
-//! ```rust
-//! use cleat_sdk::test::{CleatTest, CallRecord};
+//! ```rust,ignore
+//! use cleat_sdk::test::{CleatTest, CallRecord, MockHostCalls};
 //!
-//! #[test]
 //! fn test_payment_workflow() {
 //!     let mut env = CleatTest::new();
 //!
@@ -394,7 +393,7 @@ impl MockHostCalls {
     }
 
     /// Start a child workflow with version options (mock: delegates to child_workflow).
-    pub fn child_workflow_with_options(&mut self, name: &str, input_json: &str, _version: i32) -> (String, Option<String>) {
+    pub fn child_workflow_with_options(&mut self, name: &str, input_json: &str, _version: i64) -> (String, Option<String>) {
         self.child_workflow(name, input_json)
     }
 
@@ -918,10 +917,9 @@ impl Default for MockHostCalls {
 ///
 /// # Usage
 ///
-/// ```rust
+/// ```rust,ignore
 /// use cleat_sdk::test::CleatTest;
 ///
-/// #[test]
 /// fn test_workflow() {
 ///     let mut env = CleatTest::new();
 ///
@@ -1081,7 +1079,7 @@ impl CleatTest {
 
     /// Assert that a workflow state key has the given value.
     pub fn assert_state(&self, key: &str, value: &str) -> bool {
-        self.mock.get_state(key).map_or(false, |v| v == value)
+        self.mock.get_state(key).is_ok_and(|v| v == value)
     }
 
     /// Assert that a signal with the given name was delivered.

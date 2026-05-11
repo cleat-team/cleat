@@ -23,7 +23,6 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-BOLD='\033[1m'
 NC='\033[0m'
 
 # ---------------------------------------------------------------------------
@@ -81,6 +80,7 @@ run_step "go vet ./..." \
 run_step "cleat vet (go) ./... (blocking)" \
     go run ./cmd/cleat vet --lang go --json ./...
 
+# shellcheck disable=SC2016
 run_step "cleat vet (go) testdata/vet-checks/e001 (expect errors)" \
     bash -c '
         output=$(go run ./cmd/cleat vet --lang go ./testdata/vet-checks/go/e001_goroutine/ 2>&1)

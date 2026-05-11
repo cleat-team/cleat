@@ -58,11 +58,21 @@ mod imports {
             run_id_ptr: *mut u8, run_id_max_len: u32,
         ) -> i64;
 
-        // cleat_child_workflow_with_options - two strings, i32 version, parentClosePolicy string, one string out
+        // cleat_child_workflow_with_options - two strings, i64 version, parentClosePolicy string, one string out
         pub fn cleat_child_workflow_with_options(
             name_ptr: *const u8, name_len: u32,
             input_ptr: *const u8, input_len: u32,
-            version: i32,
+            version: i64,
+            policy_ptr: *const u8, policy_len: u32,
+            run_id_ptr: *mut u8, run_id_max_len: u32,
+        ) -> i64;
+
+        // cleat_child_workflow_in_schema - 4 strings in, i64 version, 1 string out
+        pub fn cleat_child_workflow_in_schema(
+            schema_ptr: *const u8, schema_len: u32,
+            name_ptr: *const u8, name_len: u32,
+            input_ptr: *const u8, input_len: u32,
+            version: i64,
             policy_ptr: *const u8, policy_len: u32,
             run_id_ptr: *mut u8, run_id_max_len: u32,
         ) -> i64;
@@ -271,19 +281,15 @@ mod imports {
 
 /// Options for starting a child workflow with version control.
 /// `version = 0` means default resolution (parent's version or latest).
+#[derive(Default)]
 pub struct ChildWorkflowOptions {
     /// Explicit workflow definition version to use.
     /// 0 = default resolution.
-    pub version: i32,
+    pub version: i64,
     /// Parent close policy for the child workflow (e.g. "abandon", "terminate", "request_cancel").
     pub parent_close_policy: String,
 }
 
-impl Default for ChildWorkflowOptions {
-    fn default() -> Self {
-        Self { version: 0, parent_close_policy: String::new() }
-    }
-}
 
 /// High-level Rust wrapper around the WASM host function imports.
 /// Mirrors the Go `durable.HostCalls` interface.
@@ -467,6 +473,31 @@ impl HostCalls {
         let (run_id_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return (String::new(), Some(format!("child_workflow_with_options(name=\"{}\", version={}) failed: host error code {}. Check that the child workflow name is correct.", name, opts.version, err_code)));
+        }
+        let run_id = unsafe { memory::read_string(run_id_buf.as_ptr(), run_id_len) };
+        (run_id, None)
+    }
+
+    /// Start a child workflow in a different schema (cross-instance cooperation).
+    /// Mirrors Go's ChildWorkflowInSchema.
+    pub fn child_workflow_in_schema(
+        &self, target_schema: &str, name: &str, input_json: &str,
+        version: i64, parent_close_policy: &str,
+    ) -> (String, Option<String>) {
+        let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_child_workflow_in_schema(
+                target_schema.as_ptr(), target_schema.len() as u32,
+                name.as_ptr(), name.len() as u32,
+                input_json.as_ptr(), input_json.len() as u32,
+                version,
+                parent_close_policy.as_ptr(), parent_close_policy.len() as u32,
+                run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (run_id_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return (String::new(), Some(format!("child_workflow_in_schema(schema=\"{}\", name=\"{}\", version={}) failed: host error code {}", target_schema, name, version, err_code)));
         }
         let run_id = unsafe { memory::read_string(run_id_buf.as_ptr(), run_id_len) };
         (run_id, None)

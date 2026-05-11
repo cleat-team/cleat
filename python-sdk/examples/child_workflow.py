@@ -1,7 +1,7 @@
 """Child workflow example - demonstrates parent-child workflow patterns."""
+
 import json
 from dataclasses import dataclass
-from typing import Optional
 from cleat_sdk import HostCalls, cleat_entry, ChildResult
 
 
@@ -35,10 +35,11 @@ def process_order(h: HostCalls, input: OrderInput) -> str:
     results: list[ChildResult] = h.await_all_children(run_ids)
 
     h.cleat_log(f"All items processed for order {input.order_id}")
-    return json.dumps({
-        "order_id": input.order_id,
-        "results": [
-            {"run_id": r.run_id, "result": r.result, "error": r.error}
-            for r in results
-        ],
-    })
+    return json.dumps(
+        {
+            "order_id": input.order_id,
+            "results": [
+                {"run_id": r.run_id, "result": r.result, "error": r.error} for r in results
+            ],
+        }
+    )

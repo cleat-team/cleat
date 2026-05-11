@@ -196,7 +196,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		return uint64(handlerFromContext(ctx).ChildWorkflow(ctx, m, wfName, wfInput, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow")
 
-	// cleat_child_workflow_with_options: (ptr,len x3, i32, ptr,len, ptr,maxLen) -> i64
+	// cleat_child_workflow_with_options: (ptr,len x3, i64, ptr,len, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen, inputPtr, inputLen uint32, version int64,
 		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
@@ -207,7 +207,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_with_options")
 
-		// cleat_child_workflow_in_schema: (ptr,len x4, i32, ptr,len, ptr,maxLen) -> i64
+		// cleat_child_workflow_in_schema: (ptr,len x4, i64, ptr,len, ptr,maxLen) -> i64
 		// Creates a child workflow in a different PostgreSQL schema for cross-instance cooperation.
 		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 			schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64,

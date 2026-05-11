@@ -39,9 +39,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					tenant_id CHAR(36) NOT NULL,
 					event_type VARCHAR(255) NOT NULL,
 					def_name VARCHAR(255) NOT NULL,
-					entry_point TEXT DEFAULT '',
+					entry_point VARCHAR(900) DEFAULT '',
 					input_template JSON DEFAULT ('{}'),
-					filter_expr TEXT DEFAULT '',
+					filter_expr VARCHAR(900) DEFAULT '',
 					enabled TINYINT(1) DEFAULT 1,
 					created_at TIMESTAMP(6) DEFAULT NOW(6)
 				);
@@ -62,7 +62,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE TABLE event_subscriptions (
 					id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
 					tenant_id UNIQUEIDENTIFIER NOT NULL,
-					event_type NVARCHAR(MAX) NOT NULL,
+					event_type NVARCHAR(255) NOT NULL,
 					def_name NVARCHAR(MAX) NOT NULL,
 					entry_point NVARCHAR(MAX) DEFAULT '',
 					input_template NVARCHAR(MAX) DEFAULT ('{}'),

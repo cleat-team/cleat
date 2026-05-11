@@ -65,7 +65,7 @@ class MemoryTest {
         // errCode=0xFF, callErrorCode=0xFFFFFFFF, responseLen=0xFFFFFF
         long result = (0xFFFFFFL << 40) | (0xFFFFFFFFL << 8) | 0xFFL;
         assertEquals(0xFF, Memory.decodeCallErrCode(result));
-        assertEquals(0xFFFFFFFFL, Memory.decodeCallErrorCode(result));
+        assertEquals(0xFFFFFFFFL, Integer.toUnsignedLong(Memory.decodeCallErrorCode(result)));
         assertEquals(0xFFFFFF, Memory.decodeCallResponseLen(result));
     }
 

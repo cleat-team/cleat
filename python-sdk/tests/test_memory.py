@@ -3,7 +3,6 @@
 Tests all encode/decode round-trips, edge cases, constants, and string I/O.
 """
 
-import json
 import pytest
 
 from cleat_sdk import memory
@@ -327,7 +326,7 @@ class TestAwaitSignalsResult:
 
     def test_decode_await_signals_timed_out(self):
         """errCode=0, timedOut=True, payloadLen=0, sigNameLen=0."""
-        result = (1 << 16)
+        result = 1 << 16
         sig_name_len, payload_len, timed_out, err_code = memory.decode_await_signals_result(result)
         assert err_code == 0
         assert timed_out
@@ -357,7 +356,7 @@ class TestAwaitSignalsResult:
 
     def test_decode_await_signals_timed_out_any_bit(self):
         """Any bit in the timedOut field (bits 16-31) should produce True."""
-        result = (1 << 17)  # bit 17, not bit 16
+        result = 1 << 17  # bit 17, not bit 16
         _, _, timed_out, _ = memory.decode_await_signals_result(result)
         assert timed_out
 
@@ -369,8 +368,10 @@ class TestAwaitSignalsResult:
             ((1 << 32), (0, 1, False, 0)),
             ((1 << 16), (0, 0, True, 0)),
             (1, (0, 0, False, 1)),
-            ((0xFFFF << 48) | (0xFFFF << 32) | (0xFFFF << 16) | 0xFFFF,
-             (0xFFFF, 0xFFFF, True, 0xFFFF)),
+            (
+                (0xFFFF << 48) | (0xFFFF << 32) | (0xFFFF << 16) | 0xFFFF,
+                (0xFFFF, 0xFFFF, True, 0xFFFF),
+            ),
         ],
     )
     def test_decode_await_signals_result_parametrized(self, packed, expected):
@@ -402,7 +403,7 @@ class TestAwaitPromiseResult:
 
     def test_decode_await_promise_timed_out(self):
         """errCode=0, timedOut=True, rejected=False, resultLen=0."""
-        result = (1 << 16)
+        result = 1 << 16
         result_len, timed_out, rejected, err_code = memory.decode_await_promise_result(result)
         assert err_code == 0
         assert timed_out
@@ -432,7 +433,7 @@ class TestAwaitPromiseResult:
 
     def test_decode_await_promise_timed_out_any_bit(self):
         """Any bit in the timedOut field (bits 16-23) should produce True."""
-        result = (1 << 17)
+        result = 1 << 17
         _, timed_out, _, _ = memory.decode_await_promise_result(result)
         assert timed_out
 
@@ -443,8 +444,10 @@ class TestAwaitPromiseResult:
             ((42 << 32), (42, False, False, 0)),
             ((1 << 16), (0, True, False, 0)),
             (7, (0, False, False, 7)),
-            ((0xFFFF_FFFF << 32) | (0xFF << 16) | (0xFF << 24) | 0xFFFF,
-             (0xFFFF_FFFF, True, True, 0xFFFF)),
+            (
+                (0xFFFF_FFFF << 32) | (0xFF << 16) | (0xFF << 24) | 0xFFFF,
+                (0xFFFF_FFFF, True, True, 0xFFFF),
+            ),
         ],
     )
     def test_decode_await_promise_result_parametrized(self, packed, expected):
@@ -503,7 +506,7 @@ class TestPollSignalResult:
     def test_decode_poll_signal_any_bit_in_flag_field(self):
         """Any bit set in the flag field (bits 8-15) should be found=True,
         even if it's not 0x0100."""
-        result = (1 << 9)  # bit 9, not bit 8
+        result = 1 << 9  # bit 9, not bit 8
         _, found, _ = memory.decode_poll_signal_result(result)
         assert found
 
@@ -572,7 +575,7 @@ class TestPollCancellationResult:
             (0, (0, False)),
             (1, (0, True)),
             (0xFFFF_FFFF, (0, True)),  # only low 32 bits set -> cancelled, reason=0
-            ((5 << 32), (5, False)),   # reasonLen=5, cancelled=False
+            ((5 << 32), (5, False)),  # reasonLen=5, cancelled=False
             ((5 << 32) | 1, (5, True)),
             ((0xFFFF_FFFF << 32) | 0, (0xFFFF_FFFF, False)),
         ],
@@ -667,7 +670,7 @@ class TestStringIO:
     def test_read_string_invalid_utf8(self):
         """Invalid UTF-8 bytes should be replaced with replacement character."""
         ptr = 8000
-        memory._memory[ptr:ptr + 3] = b"\xff\xfe\x00"
+        memory._memory[ptr : ptr + 3] = b"\xff\xfe\x00"
         result = memory.read_string(ptr, 3)
         # \xff\xfe is not valid UTF-8, should be replaced
         assert "�" in result

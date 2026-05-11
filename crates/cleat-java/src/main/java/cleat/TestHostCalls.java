@@ -615,9 +615,14 @@ public class TestHostCalls {
 
     /**
      * Check if a state key exists.
+     * Uses the raw (unscoped) key, so that scoped state is isolated
+     * from unscoped lookups.  This allows tests to verify scope isolation:
+     * after {@link #setState} with a scope active, {@code hasState}
+     * with the same raw key returns {@code false} because the stored
+     * key is prefixed.
      */
     public boolean hasState(String key) {
-        return workflowState.containsKey(scopedKey(key));
+        return workflowState.containsKey(key);
     }
 
     /**

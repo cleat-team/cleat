@@ -34,6 +34,7 @@ class TerminalError(Exception):
 # Child workflow
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ChildWorkflow(Generic[T]):
     """A typed handle for starting and awaiting a child workflow.
@@ -107,9 +108,7 @@ class ChildWorkflow(Generic[T]):
             Deserialised result of the child workflow.
         """
         if self.run_id is None:
-            raise RuntimeError(
-                "ChildWorkflow.await_result() called before start()"
-            )
+            raise RuntimeError("ChildWorkflow.await_result() called before start()")
         result_json = h.await_child(self.run_id)
         result: T = json.loads(result_json)  # type: ignore[assignment]
         return result
@@ -317,9 +316,7 @@ class Saga(Generic[SagaResultT]):
             ``HostCalls``.  If ``None``, no compensation is performed
             for this step.
         """
-        self._steps.append(
-            _FnSagaStep(name=name, action=action, compensate=compensate)
-        )
+        self._steps.append(_FnSagaStep(name=name, action=action, compensate=compensate))
 
     def execute(
         self,
@@ -458,9 +455,7 @@ def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
             step.compensate(h)
         except Exception as exc:
             try:
-                h.cleat_log(
-                    f"Saga compensation failed for step '{step.name}': {exc}"
-                )
+                h.cleat_log(f"Saga compensation failed for step '{step.name}': {exc}")
             except Exception:
                 # Fall back to stderr when cleat_log is unavailable
                 # (e.g., workflow context already torn down).
@@ -471,6 +466,7 @@ def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
 # ---------------------------------------------------------------------------
 # Cleat defer
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class CleatDefer:

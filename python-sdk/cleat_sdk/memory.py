@@ -59,6 +59,7 @@ def _ensure_memory_size(min_size: int) -> None:
     if len(_memory) < min_size:
         _memory.extend(bytearray(min_size - len(_memory)))
 
+
 # ---------------------------------------------------------------------------
 # String I/O
 # ---------------------------------------------------------------------------

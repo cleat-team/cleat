@@ -75,30 +75,30 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			event_type         VARCHAR(255) NOT NULL DEFAULT 'call',
 			service            VARCHAR(255),
 			operation          VARCHAR(255),
-			request            JSON,
-			response           JSON,
+			request            TEXT,
+			response           TEXT,
 			error              TEXT,
 			duration_ms        BIGINT,
 			signal_names       TEXT,
 			timeout_ms         BIGINT,
 			signal_name        VARCHAR(255),
-			signal_payload     JSON,
+			signal_payload     TEXT,
 			defer_description  TEXT,
 			defer_id           VARCHAR(255),
 			child_name         VARCHAR(255),
-			child_input        JSON,
+			child_input        TEXT,
 			run_id             VARCHAR(255),
-			new_input          JSON,
+			new_input          TEXT,
 			plugin_name        VARCHAR(255),
 			plugin_func        VARCHAR(255),
-			plugin_input       JSON,
-			plugin_output      JSON,
+			plugin_input       TEXT,
+			plugin_output      TEXT,
 			plugin_error       TEXT,
 			promise_name       VARCHAR(255),
 			promise_id         VARCHAR(255),
 			promise_result     TEXT,
 			promise_error      TEXT,
-			payload            JSON,
+			payload            TEXT,
 			created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			checksum           VARCHAR(255),
 			tenant_id          VARCHAR(255),
@@ -110,7 +110,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 		`CREATE TABLE IF NOT EXISTS workflow_signals (
 			workflow_id    VARCHAR(255) NOT NULL,
 			signal_name    VARCHAR(255) NOT NULL,
-			payload        JSON NOT NULL DEFAULT ('{}'),
+			payload        TEXT NOT NULL,
 			delivered_at   TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			tenant_id      VARCHAR(255),
 			PRIMARY KEY (workflow_id, signal_name),
@@ -133,13 +133,15 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
 		// concurrency_keys
+		// Note: no FOREIGN KEY on workflow_id — concurrency keys are ephemeral
+		// and workflow instances may be cleaned up before their keys are released.
+		// This matches the Postgres and MSSQL test schemas.
 		`CREATE TABLE IF NOT EXISTS concurrency_keys (
 			key_hash     VARBINARY(64) PRIMARY KEY,
 			key_text     TEXT NOT NULL,
 			workflow_id  VARCHAR(255) NOT NULL,
 			acquired_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-			expires_at   TIMESTAMP(6) NOT NULL,
-			FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id)
+			expires_at   TIMESTAMP(6) NOT NULL
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
 		// workflow_promises
@@ -160,7 +162,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 		`CREATE TABLE IF NOT EXISTS workflow_update_requests (
 			workflow_id   VARCHAR(255) NOT NULL,
 			update_name   VARCHAR(255) NOT NULL,
-			payload       JSON NOT NULL DEFAULT ('{}'),
+			payload       TEXT NOT NULL,
 			promise_id    VARCHAR(255),
 			status        VARCHAR(50) NOT NULL DEFAULT 'pending',
 			result        JSON,
@@ -178,7 +180,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			result       JSON,
 			error_msg    TEXT,
 			created_at   TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-			expires_at   TIMESTAMP(6) NOT NULL DEFAULT DATE_ADD(NOW(6), INTERVAL 7 DAY)
+			expires_at   TIMESTAMP(6) NOT NULL DEFAULT (NOW(6) + INTERVAL 7 DAY)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
 		// workflow_memory_samples
@@ -252,7 +254,7 @@ func MySQLTestDB(t *testing.T) *sql.DB {
 
 	dsn := os.Getenv("CLEAT_TEST_MYSQL")
 	if dsn == "" {
-		dsn = "root:cleat@tcp(127.0.0.1:3306)/cleat"
+		dsn = "root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true&multiStatements=true"
 		t.Logf("CLEAT_TEST_MYSQL not set, using default: %s", dsn)
 	}
 

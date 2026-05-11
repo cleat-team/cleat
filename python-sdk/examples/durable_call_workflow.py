@@ -8,6 +8,7 @@ This workflow:
 Used by the Python WASM end-to-end test to validate the full
 Python -> WASM -> Host -> WASM -> Python round trip.
 """
+
 from dataclasses import dataclass
 from cleat_sdk import HostCalls, cleat_entry
 
@@ -32,7 +33,8 @@ def durable_call_workflow(h: HostCalls, request: NotifyRequest) -> str:
 
     # Make a durable recorded call to the external notification service.
     response = h.cleat_call(
-        "notifier", "SendNotification",
+        "notifier",
+        "SendNotification",
         {
             "user_id": request.user_id,
             "message": request.message,

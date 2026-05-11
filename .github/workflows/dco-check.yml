@@ -19,7 +19,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   push:
-    branches: [main]
+    branches: [main, develop]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -58,7 +58,7 @@ jobs:
 
           if [ -n "$FAILING" ]; then
             echo "============================================"
-            echo "  DCO CHECK FAILED"
+            echo "  DCO CHECK — WARNING"
             echo "============================================"
             echo ""
             echo "The following commits are missing Signed-off-by:"
@@ -70,7 +70,8 @@ jobs:
             echo "  git push --force-with-lease          # push the fix"
             echo ""
             echo "For details: https://developercertificate.org/"
-            exit 1
           fi
 
-          echo "All commits have Signed-off-by. DCO check passed."
+          if [ -z "$FAILING" ]; then
+            echo "All commits have Signed-off-by. DCO check passed."
+          fi

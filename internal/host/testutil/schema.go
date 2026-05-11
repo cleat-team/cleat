@@ -29,7 +29,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				assigned_to TEXT, heartbeat_at TIMESTAMPTZ,
 				next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 				created_at TIMESTAMPTZ NOT NULL DEFAULT now(), completed_at TIMESTAMPTZ,
-				result JSONB, error_msg TEXT, parent_workflow_id TEXT,
+				result JSONB, error_msg TEXT, error_code TEXT, error_op TEXT, parent_workflow_id TEXT,
 				namespace TEXT NOT NULL DEFAULT 'default', trace_id TEXT,
 				query_state JSONB DEFAULT '{}', task_queue TEXT NOT NULL DEFAULT 'default',
 				cancellation_requested BOOLEAN NOT NULL DEFAULT false,
@@ -68,9 +68,10 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				assigned_to TEXT, heartbeat_at TIMESTAMP(6),
 				next_wake_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6), completed_at TIMESTAMP(6),
-				result JSON, error_msg TEXT, parent_workflow_id TEXT,
-				namespace VARCHAR(255) NOT NULL DEFAULT 'default', trace_id TEXT,
-				query_state JSON DEFAULT ('{}'), task_queue VARCHAR(255) NOT NULL DEFAULT 'default',
+				result JSON, error_msg TEXT, error_code VARCHAR(255), error_op VARCHAR(255),
+				parent_workflow_id TEXT, namespace VARCHAR(255) NOT NULL DEFAULT 'default',
+				trace_id TEXT, query_state JSON DEFAULT ('{}'),
+				task_queue VARCHAR(255) NOT NULL DEFAULT 'default',
 				cancellation_requested TINYINT(1) NOT NULL DEFAULT 0,
 				cancellation_reason TEXT, sticky_worker_id TEXT)`,
 			`CREATE TABLE IF NOT EXISTS event_history (
@@ -115,6 +116,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
 					completed_at DATETIMEOFFSET,
 					result NVARCHAR(MAX), error_msg NVARCHAR(MAX),
+					error_code NVARCHAR(MAX), error_op NVARCHAR(MAX),
 					parent_workflow_id NVARCHAR(MAX),
 					namespace NVARCHAR(MAX) NOT NULL DEFAULT 'default',
 					trace_id NVARCHAR(MAX),
@@ -202,6 +204,8 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			// ALTER TABLE ADD COLUMN IF NOT EXISTS for migrated columns
 			`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS tenant_id TEXT`,
 			`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS sticky_worker_id TEXT`,
+			`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS error_code TEXT`,
+			`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS error_op TEXT`,
 			`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS payload JSONB`,
 			// Memory statistics tables (migration 010)
 			`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
@@ -247,6 +251,9 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`CREATE INDEX idx_instances_namespace_ready ON workflow_instances(namespace, status, next_wake_at)`,
 			// concurrency_keys index
 			`CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,
+			// error_code/error_op columns are created by SetupMinimalSchema.
+			// MySQL does not support IF NOT EXISTS for ALTER TABLE ADD COLUMN,
+			// so existing test databases must be recreated if upgrading.
 			// Memory statistics tables
 			`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
 				id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -304,6 +311,11 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			// concurrency_keys index
 			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_concurrency_keys_workflow' AND object_id = OBJECT_ID('concurrency_keys'))
 				CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,
+			// ADD COLUMN for error_code/error_op (idempotent via sys.columns check)
+			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_instances') AND name = 'error_code')
+				ALTER TABLE workflow_instances ADD error_code NVARCHAR(MAX) NULL`,
+			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_instances') AND name = 'error_op')
+				ALTER TABLE workflow_instances ADD error_op NVARCHAR(MAX) NULL`,
 			// Memory statistics tables
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_samples')
 				CREATE TABLE workflow_memory_samples (

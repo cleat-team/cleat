@@ -32,6 +32,8 @@ type mockStore struct {
 	claimWorkflowsFn                  func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
 	claimStickyWorkflowsFn            func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
 	loadEventHistoryFn                func(ctx context.Context, workflowID string) ([]host.EventRecord, error)
+	loadEventHistoryPaginatedFn       func(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error)
+	countEventHistoryFn               func(ctx context.Context, workflowID string) (int, error)
 	appendEventHistoryFn              func(ctx context.Context, workflowID string, rec host.EventRecord) error
 	appendEventHistoryBatchFn         func(ctx context.Context, workflowID string, recs []host.EventRecord) error
 	loadWASMFn                        func(ctx context.Context, defName string, defVersion int) ([]byte, error)
@@ -543,7 +545,7 @@ func (m *mockStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time
 	return 0, nil
 }
 
-func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []host.EventRecord, result string, queryState map[string]string) (string, error) {
 	if m.continueAsNewFn != nil {
 		return m.continueAsNewFn(ctx, currentRunID, workerID, defName, defVersion, newInput, result, queryState)
 	}
@@ -741,8 +743,8 @@ func TestDispatchLoop_StopsOnCancel(t *testing.T) {
 	w := newTestWorker(ms)
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -781,8 +783,8 @@ func TestDispatchLoop_EmptyQueuesNoCrash(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -816,8 +818,8 @@ func TestDispatchLoop_AtCapacity(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -852,8 +854,8 @@ func TestDispatchLoop_ProgressiveBackoff(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -887,8 +889,8 @@ func TestDispatchLoop_StoreError(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -919,8 +921,8 @@ func TestDispatchLoop_ConnectionError(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -989,8 +991,8 @@ func TestHeartbeatLoop_StopsOnCancel(t *testing.T) {
 	w := newTestWorker(ms)
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.heartbeatLoop()
 		close(done)
 	}()
@@ -1059,8 +1061,8 @@ func TestHeartbeatLoop_DBErrorNoCrash(t *testing.T) {
 	w.inflight.Store("wf-1", &host.WorkflowInstance{ID: "wf-1"})
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.heartbeatLoop()
 		close(done)
 	}()
@@ -1105,8 +1107,8 @@ func TestReaperLoop_StopsOnCancel(t *testing.T) {
 	w := newTestWorker(ms)
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.reaperLoop()
 		close(done)
 	}()
@@ -1235,8 +1237,8 @@ func TestCompactionLoop_StopsOnCancel(t *testing.T) {
 	w := newTestWorker(ms)
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.compactionLoop()
 		close(done)
 	}()
@@ -1276,8 +1278,8 @@ func TestCompactionLoop_NoCandidates(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.compactionLoop()
 		close(done)
 	}()
@@ -1311,8 +1313,8 @@ func TestCompactionLoop_StoreError(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.compactionLoop()
 		close(done)
 	}()
@@ -1848,8 +1850,8 @@ func TestConcurrencyKeyReaperLoop_StopsOnCancel(t *testing.T) {
 	w := newTestWorker(ms)
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.concurrencyKeyReaperLoop()
 		close(done)
 	}()
@@ -1870,8 +1872,8 @@ func TestScheduleLoop_StopsOnCancel(t *testing.T) {
 	w.scheduleInterval = 10 * time.Millisecond
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.scheduleLoop()
 		close(done)
 	}()
@@ -1930,8 +1932,8 @@ func TestDispatchLoop_BatchSizeCap(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -1964,8 +1966,8 @@ func TestHeartbeatLoop_EmptyInflight(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.heartbeatLoop()
 		close(done)
 	}()
@@ -2009,8 +2011,8 @@ func TestDispatchLoop_ClaimWorkflowsFallback(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-	go func() {
 		w.wg.Add(1)
+	go func() {
 		w.dispatchLoop()
 		close(done)
 	}()
@@ -2390,10 +2392,13 @@ func TestAPICancel(t *testing.T) {
 
 func TestAPIGetHistory(t *testing.T) {
 	ms := &mockStore{}
-	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]host.EventRecord, error) {
+	ms.loadEventHistoryPaginatedFn = func(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error) {
 		return []host.EventRecord{
 			{Step: 1, EventType: "call", Service: "my_svc", Op: "my_func"},
 		}, nil
+	}
+	ms.countEventHistoryFn = func(ctx context.Context, workflowID string) (int, error) {
+		return 1, nil
 	}
 
 	api := newTestAPIServer(ms)
@@ -2419,8 +2424,11 @@ func TestAPIGetHistory(t *testing.T) {
 func TestAPIGetHistory_Nil(t *testing.T) {
 	// When store returns nil, handler should return an empty array.
 	ms := &mockStore{}
-	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]host.EventRecord, error) {
+	ms.loadEventHistoryPaginatedFn = func(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error) {
 		return nil, nil
+	}
+	ms.countEventHistoryFn = func(ctx context.Context, workflowID string) (int, error) {
+		return 0, nil
 	}
 
 	api := newTestAPIServer(ms)
@@ -2904,9 +2912,21 @@ func TestReadMemTotal(t *testing.T) {
 }
 func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) { if m.batchHeartbeatFn != nil { return m.batchHeartbeatFn(ctx, workerID) }; return 0, nil }
 
-func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error) { return nil, nil }
+func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error) {
+	if m.loadEventHistoryPaginatedFn != nil {
+		return m.loadEventHistoryPaginatedFn(ctx, workflowID, offset, limit)
+	}
+	return nil, nil
+}
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
-func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error { return nil }
+func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
 func (m *mockStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) { return 0, nil }
 func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) { return true, nil }
+func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
+	if m.countEventHistoryFn != nil {
+		return m.countEventHistoryFn(ctx, workflowID)
+	}
+	return 0, nil
+}
 func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }

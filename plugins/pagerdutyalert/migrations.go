@@ -30,11 +30,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					routing_key TEXT NOT NULL,
 					enabled     TINYINT(1) NOT NULL DEFAULT 1,
 					created_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-					updated_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
+					updated_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+					INDEX idx_pd_config_tenant (tenant_id, created_at DESC)
 				);
-
-				CREATE INDEX idx_pd_config_tenant
-					ON pd_config(tenant_id, created_at DESC);
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'pd_config')

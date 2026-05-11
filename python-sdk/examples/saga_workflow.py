@@ -1,7 +1,7 @@
 """Saga workflow - multi-step transaction with compensation."""
+
 import json
 from dataclasses import dataclass
-from typing import Optional
 from cleat_sdk import HostCalls, cleat_entry
 
 
@@ -30,8 +30,7 @@ def book_travel(h: HostCalls, request: BookingRequest) -> BookingResult:
     # Step 1: Reserve flight
     try:
         flight_resp = h.cleat_call(
-            "flights", "Reserve",
-            {"flight_id": request.flight_id, "user_id": request.user_id}
+            "flights", "Reserve", {"flight_id": request.flight_id, "user_id": request.user_id}
         )
         flight_data = json.loads(flight_resp)
         result.flight_reservation_id = flight_data["reservation_id"]
@@ -44,8 +43,7 @@ def book_travel(h: HostCalls, request: BookingRequest) -> BookingResult:
     # Step 2: Reserve hotel
     try:
         hotel_resp = h.cleat_call(
-            "hotels", "Reserve",
-            {"hotel_id": request.hotel_id, "user_id": request.user_id}
+            "hotels", "Reserve", {"hotel_id": request.hotel_id, "user_id": request.user_id}
         )
         hotel_data = json.loads(hotel_resp)
         result.hotel_reservation_id = hotel_data["reservation_id"]
@@ -53,18 +51,14 @@ def book_travel(h: HostCalls, request: BookingRequest) -> BookingResult:
     except Exception as e:
         # Compensate: cancel flight
         h.cleat_log(f"Hotel reservation failed: {e}. Compensating flight...")
-        h.cleat_call(
-            "flights", "Cancel",
-            {"reservation_id": result.flight_reservation_id}
-        )
+        h.cleat_call("flights", "Cancel", {"reservation_id": result.flight_reservation_id})
         result.status = f"failed: {e}"
         return result
 
     # Step 3: Process payment
     try:
         payment_resp = h.cleat_call(
-            "payments", "Charge",
-            {"user_id": request.user_id, "amount_cents": request.amount_cents}
+            "payments", "Charge", {"user_id": request.user_id, "amount_cents": request.amount_cents}
         )
         payment_data = json.loads(payment_resp)
         result.payment_charge_id = payment_data["charge_id"]

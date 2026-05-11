@@ -5,13 +5,12 @@ child workflow stubs, promise resolution, and state operations.
 """
 
 import json
-import time
 
 import pytest
 
 try:
-    from cleat_sdk.test_harness import CleatTestHarness, CallRecord
-    from cleat_sdk.host_calls import HostCalls, RetryPolicy, SignalResult, PromiseResult, ChildResult, SuspendSentinel
+    from cleat_sdk.test_harness import CleatTestHarness
+    from cleat_sdk.host_calls import HostCalls, RetryPolicy, SuspendSentinel
 except ImportError as e:
     pytest.skip(
         f"Skipping test harness tests: {e}",
@@ -399,7 +398,7 @@ class TestReset:
         h.stub_call("svc", "op", "resp")
         h.cleat_call("svc", "op", "req")
         h.stub_signal("sig", "payload")
-        pid = h.create_promise("p")
+        h.create_promise("p")
         h.now_ms += 9999
 
         h.reset()
@@ -427,10 +426,7 @@ class TestWorkflowIntegration:
 
         def hello_workflow(h: HostCalls, name: str) -> str:
             h.cleat_log(f"Hello workflow started for {name}")
-            response = h.cleat_call(
-                "greeter", "Greet",
-                {"name": name, "language": "en"}
-            )
+            response = h.cleat_call("greeter", "Greet", {"name": name, "language": "en"})
             return response
 
         result = hello_workflow(h, "World")
@@ -476,10 +472,7 @@ class TestEdgeCases:
     def test_cleat_call_with_retry_delegates(self):
         h = CleatTestHarness()
         h.stub_call("svc", "op", "ok")
-        result = h.cleat_call_with_retry(
-            "svc", "op", {},
-            RetryPolicy(max_attempts=3)
-        )
+        result = h.cleat_call_with_retry("svc", "op", {}, RetryPolicy(max_attempts=3))
         assert result == "ok"
 
     def test_cleat_fetch_delegates(self):

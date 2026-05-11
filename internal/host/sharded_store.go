@@ -360,6 +360,15 @@ func (s *ShardedStore) LoadEventHistoryPaginated(ctx context.Context, workflowID
 	return shard.Store.LoadEventHistoryPaginated(ctx, workflowID, offset, limit)
 }
 
+// CountEventHistory routes by workflow ID.
+func (s *ShardedStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return 0, fmt.Errorf("no shard available for workflow %s", workflowID)
+	}
+	return shard.Store.CountEventHistory(ctx, workflowID)
+}
+
 // VerifyWorkflowEvents routes by workflow ID.
 func (s *ShardedStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
 	shard := s.getShard(workflowID)
@@ -370,12 +379,21 @@ func (s *ShardedStore) VerifyWorkflowEvents(ctx context.Context, workflowID stri
 }
 
 // MoveToDeadLetterQueue routes by workflow ID.
-func (s *ShardedStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error {
+func (s *ShardedStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return fmt.Errorf("no shard available for workflow %s", workflowID)
 	}
-	return shard.Store.MoveToDeadLetterQueue(ctx, workflowID, workerID, errMsg)
+	return shard.Store.MoveToDeadLetterQueue(ctx, workflowID, workerID, errMsg, errorCode, errorOp)
+}
+
+// RetryWorkflow routes by workflow ID.
+func (s *ShardedStore) RetryWorkflow(ctx context.Context, workflowID string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("no shard available for workflow %s", workflowID)
+	}
+	return shard.Store.RetryWorkflow(ctx, workflowID)
 }
 
 // CompleteWorkflow routes by workflow ID.
@@ -407,12 +425,12 @@ func (s *ShardedStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID
 
 // ContinueAsNew routes by current run ID so that both the new-run insert and
 // the old-run completion land on the same shard.
-func (s *ShardedStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+func (s *ShardedStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
 	shard := s.getShard(currentRunID)
 	if shard == nil {
 		return "", fmt.Errorf("continue_as_new: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.ContinueAsNew(ctx, currentRunID, workerID, defName, defVersion, newInput, result, queryState)
+	return shard.Store.ContinueAsNew(ctx, currentRunID, workerID, defName, defVersion, newInput, newEvents, result, queryState)
 }
 
 // FinalizeWorkflowSegment routes by workflow ID.

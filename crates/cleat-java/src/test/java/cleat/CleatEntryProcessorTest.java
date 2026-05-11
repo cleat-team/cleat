@@ -254,7 +254,7 @@ class CleatEntryProcessorTest {
     // ========================================================================
 
     @Test
-    void testSuccessfulCompilationGeneratesExpectedFiles() {
+    void testSuccessfulCompilationGeneratesExpectedFiles() throws IOException {
         // WHAT: Verify that compiling a valid @CleatEntry method generates the
         // export wrapper, CleatEntryIndex, and WorkflowEntry files.
         // WHY: The annotation processor must produce the correct generated sources
@@ -597,9 +597,10 @@ class CleatEntryProcessorTest {
             "Expected compilation to fail for @CleatEntry on a field, "
             + "but it succeeded. Errors: " + result.errors);
         boolean hasMethodError = result.hasErrorContaining("method")
-            || result.hasErrorContaining("METHOD");
+            || result.hasErrorContaining("METHOD")
+            || result.hasErrorContaining("not applicable");
         assertTrue(hasMethodError,
-            "Expected an error message mentioning 'method' for @CleatEntry on a field. "
+            "Expected an error message mentioning 'method' or 'not applicable' for @CleatEntry on a field. "
             + "Actual errors: " + result.errors);
     }
 

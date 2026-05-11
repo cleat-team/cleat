@@ -8,7 +8,6 @@ These tests validate that:
 5. End-to-end Python WASM compilation round-trip
 """
 
-import os
 import subprocess
 import sys
 import textwrap
@@ -31,6 +30,7 @@ def test_build_script_imports():
     sys.path.insert(0, scripts_dir)
     try:
         import build_wasm
+
         assert hasattr(build_wasm, "main")
         assert hasattr(build_wasm, "validate_entry")
         assert hasattr(build_wasm, "parse_entry")
@@ -164,8 +164,9 @@ def test_wit_file_exists_and_has_required_interfaces():
     ]
 
     for interface in required_interfaces:
-        assert f"interface {interface}" in wit_content, \
+        assert f"interface {interface}" in wit_content, (
             f"Missing interface '{interface}' in WIT file"
+        )
 
     # Check for required functions
     required_functions = [
@@ -200,15 +201,16 @@ def test_all_stubs_accounted_for():
 
     # Find all _import_* function definitions (the stubs)
     import re
+
     # Match "def _import_XXX(..."
     stub_defs = set()
-    for match in re.finditer(r'def (_import_\w+)\(', source):
+    for match in re.finditer(r"def (_import_\w+)\(", source):
         stub_defs.add(match.group(1))
 
     # Find all _import_* aliases in the try block
     import_aliases = set()
     # Match "_import_XXX as _import_XXX" or "XXX as _import_XXX"
-    for match in re.finditer(r'(\w+)\s+as\s+(_import_\w+)', source):
+    for match in re.finditer(r"(\w+)\s+as\s+(_import_\w+)", source):
         import_aliases.add(match.group(2))
 
     # All stubs should be in the import block OR all imports should cover all stubs
@@ -230,7 +232,9 @@ def test_all_stubs_accounted_for():
 
     # This is informational - we don't assert because some stubs might delegate
     # to cleat_call internally and not need direct WIT imports
-    print(f"Stub coverage: {len(stub_defs) - len(missing_from_imports)}/{len(stub_defs)} stubs have WIT imports")
+    print(
+        f"Stub coverage: {len(stub_defs) - len(missing_from_imports)}/{len(stub_defs)} stubs have WIT imports"
+    )
 
 
 def test_new_imports_in_init():
@@ -314,7 +318,9 @@ def test_python_wasm_roundtrip(tmp_path):
     try:
         subprocess.run(
             ["componentize-py", "--version"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (FileNotFoundError, subprocess.SubprocessError):
         pytest.skip("componentize-py not installed")
@@ -323,7 +329,8 @@ def test_python_wasm_roundtrip(tmp_path):
     workflow_dir = tmp_path / "workflow"
     workflow_dir.mkdir()
     workflow_file = workflow_dir / "workflow.py"
-    workflow_file.write_text(textwrap.dedent("""\
+    workflow_file.write_text(
+        textwrap.dedent("""\
         from cleat_sdk.entry import cleat_entry
         from cleat_sdk.host_calls import HostCalls
 
@@ -331,7 +338,8 @@ def test_python_wasm_roundtrip(tmp_path):
         def hello_workflow(h: HostCalls, name: str) -> str:
             h.cleat_log(f"Hello, {name}!")
             return f"Hello, {name}!"
-    """))
+    """)
+    )
 
     # Run the build script
     build_script = str(_scripts_dir() / "build_wasm.py")
@@ -347,9 +355,7 @@ def test_python_wasm_roundtrip(tmp_path):
     )
 
     assert result.returncode == 0, (
-        f"Build failed (exit {result.returncode})\n"
-        f"stdout: {result.stdout}\n"
-        f"stderr: {result.stderr}"
+        f"Build failed (exit {result.returncode})\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
     # Verify WASM file exists and is non-empty
@@ -361,12 +367,11 @@ def test_python_wasm_roundtrip(tmp_path):
     try:
         val_result = subprocess.run(
             ["wasm-tools", "validate", output],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if val_result.returncode != 0:
-            pytest.fail(
-                f"wasm-tools validation failed:\n"
-                f"stderr: {val_result.stderr}"
-            )
+            pytest.fail(f"wasm-tools validation failed:\nstderr: {val_result.stderr}")
     except FileNotFoundError:
         pass  # wasm-tools not available

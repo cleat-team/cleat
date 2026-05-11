@@ -104,6 +104,9 @@ public class CleatResult<T> {
 
     @Override
     public int hashCode() {
-        return isOk() ? (value != null ? value.hashCode() : 0) : (error != null ? error.hashCode() : 0);
+        if (isOk()) {
+            return value != null ? value.hashCode() : 0;
+        }
+        return 31 + (error != null ? error.hashCode() : 0);
     }
 }

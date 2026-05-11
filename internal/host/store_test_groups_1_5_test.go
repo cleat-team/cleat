@@ -762,7 +762,7 @@ func TestContinueAsNew_Atomic(t *testing.T) {
 			}
 
 			newInput := json.RawMessage(`{"v":2}`)
-			newRunID, err := store.ContinueAsNew(ctx, wf.ID, "worker-1", "test-workflow", 1, newInput, `{"result":"ok"}`, nil)
+			newRunID, err := store.ContinueAsNew(ctx, wf.ID, "worker-1", "test-workflow", 1, newInput, nil, `{"result":"ok"}`, nil)
 			if err != nil {
 				t.Fatalf("ContinueAsNew: %v", err)
 			}
@@ -967,7 +967,7 @@ func TestMoveToDeadLetterQueue(t *testing.T) {
 				t.Fatal("ClaimWorkflow returned nil")
 			}
 
-			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", "exhausted retries"); err != nil {
+			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", "exhausted retries", "retries_exhausted", "DurableCall"); err != nil {
 				t.Fatalf("MoveToDeadLetterQueue: %v", err)
 			}
 
@@ -980,6 +980,12 @@ func TestMoveToDeadLetterQueue(t *testing.T) {
 			}
 			if stored.Status != "dead_lettered" {
 				t.Errorf("status = %q, want %q", stored.Status, "dead_lettered")
+			}
+			if stored.ErrorCode != "retries_exhausted" {
+				t.Errorf("error_code = %q, want %q", stored.ErrorCode, "retries_exhausted")
+			}
+			if stored.ErrorOp != "DurableCall" {
+				t.Errorf("error_op = %q, want %q", stored.ErrorOp, "DurableCall")
 			}
 		})
 	}

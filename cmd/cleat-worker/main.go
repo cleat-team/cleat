@@ -34,6 +34,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+		"sort"
+		"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -89,7 +91,7 @@ func main() {
 	rateLimit := flag.Float64("rate-limit", 100, "Requests/second/IP rate limit (only when --api-addr is set)")
 	rateLimitBurst := flag.Int("rate-limit-burst", 200, "Rate limit burst size")
 	maxRetries := flag.Int("max-retries", 100, "Maximum retry attempts for DurableCallWithRetry")
-	redact := flag.Bool("redact", false, "Enable redaction of sensitive fields in event history (auto-enabled when --require-auth is set)")
+	redact := flag.Bool("redact", true, "Enable redaction of sensitive fields in event history (default: true)")
 	retentionDays := flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables)")
 	wasmCacheMaxEntries := flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
 	wasmCacheMaxMB := flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
@@ -97,11 +99,6 @@ func main() {
 	peerSchemas := flag.String("peer-schemas", "", "Comma-separated list of peer cleat schemas this instance can interact with (cross-instance child workflows, signals)")
 	flag.Parse()
 
-	// Auto-enable redaction when --require-auth is set (authentication implies
-	// sensitive data may be present).
-	if *requireAuth {
-		*redact = true
-	}
 
 	workerID := generateWorkerID()
 	log.Printf("[worker %s] Starting with concurrency=%d", workerID, *concurrency)
@@ -430,6 +427,7 @@ func main() {
 		compactionThreshold: *compactionThreshold,
 		compactionInterval:  *compactionInterval,
 		pluginRegistry:       pluginRegistry,
+			plugList:             plugList,
 			tenantPools:          tenantPools,
 			memorySampleRetention: *memorySampleRetention,
 			retentionDays:       *retentionDays,
@@ -439,6 +437,8 @@ func main() {
 			redactionEnabled:    *redact,
 			drainCh:             make(chan struct{}),
 		}
+
+		log.Printf("[worker %s] Redaction %s", workerID, map[bool]string{true: "enabled", false: "disabled"}[*redact])
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
@@ -468,6 +468,8 @@ func main() {
 		mux.HandleFunc("/api/schedules", api.handleSchedulesList)
 		mux.HandleFunc("/api/workflows/", api.handleWorkflows)
 		mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
+		mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
+		mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
 
 		// Workflow definitions endpoint.
 		mux.HandleFunc("/api/definitions", api.handleDefinitions)
@@ -674,6 +676,7 @@ type Worker struct {
 	pluginRegistry       *host.PluginRegistry
 	pluginStreamRegistry *host.PluginStreamRegistry
 	tenantPools          *plugin.TenantPools
+	plugList             []*plugin.LoadedPlugin
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -962,7 +965,13 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			errorCode = ce.Code.String()
 			errorOp = ce.Op
 		}
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), errorCode, errorOp, nil)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "retries exhausted") {
+			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp)
+			workflowsDeadLettered.Inc()
+		} else {
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp, nil)
+		}
 		return
 	}
 
@@ -1005,14 +1014,67 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 
 	// Extract child version pins from WASM metadata (compile-time resolution).
 	var childVersions map[string]int
-	if wfMeta, err := wasm.ReadMetadata(wasmBytes); err == nil {
-		childVersions = wfMeta.ChildVersions
+	var wfMeta *wasm.Metadata
+	if m, err := wasm.ReadMetadata(wasmBytes); err == nil {
+		childVersions = m.ChildVersions
+		wfMeta = m
+	}
+
+	// ---- Pre-flight correctness checks ----
+
+	// (a) Verify the WASM binary version matches the workflow
+	// definition version stored in workflow_defs.  A mismatch means
+	// the wrong binary was deployed or the DB row is stale.
+	if wfMeta != nil && wfMeta.WorkflowVersion != wf.DefVersion {
+		err := fmt.Errorf(
+			"version mismatch: workflow instance %s expects def_version %d but WASM binary metadata reports version %d (def=%s). The workflow_defs row and the deployed WASM binary are out of sync.",
+			wf.ID, wf.DefVersion, wfMeta.WorkflowVersion, wf.DefName)
+		log.Printf("[worker %s] %s: %v", w.id, wf.ID, err)
+		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), host.ErrPermanent.String(), "version_check", nil)
+		return
+	}
+
+	// (b) Verify plugin dependencies in the WASM binary match the
+	// plugins loaded in this worker.  A missing or mismatched plugin
+	// version will cause runtime failures in host function calls.
+	if wfMeta != nil && len(wfMeta.PluginDeps) > 0 {
+		// Build a map of loaded plugin versions.
+		workerPlugins := make(map[string]string)
+		for _, lp := range w.plugList {
+			info := lp.Plugin.Info()
+			workerPlugins[info.Name] = info.Version
+		}
+		for pluginName, requiredVersion := range wfMeta.PluginDeps {
+			workerVersion, ok := workerPlugins[pluginName]
+			if !ok {
+				err := fmt.Errorf(
+					"missing plugin: workflow requires plugin %q version %s but it is not installed in this worker. Available plugins: %v",
+					pluginName, requiredVersion, pluginNames(workerPlugins))
+				log.Printf("[worker %s] %s: %v", w.id, wf.ID, err)
+				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
+				return
+			}
+			if workerVersion != requiredVersion {
+				err := fmt.Errorf(
+					"plugin version mismatch: workflow requires plugin %q version %s but worker has version %s",
+					pluginName, requiredVersion, workerVersion)
+				log.Printf("[worker %s] %s: %v", w.id, wf.ID, err)
+				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
+				return
+			}
+		}
 	}
 
 	caller := &dbServiceCaller{store: w.store, workerID: w.id}
 	engineOpts := []host.EngineOption{
 		host.WithSignalStore(w.store.(host.SignalStore)),
-		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, childVersions: childVersions}),
+		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, childVersions: childVersions}),
 		host.WithWorkflowID(wf.ID),
 		host.WithTenantID(wf.TenantID),
 		host.WithChildWorkflowStore(w.store),
@@ -1045,6 +1107,24 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		engineOpts = append(engineOpts, host.WithCompactionState(compactionState))
 		log.Printf("[worker %s] %s: loaded compaction state (compacted_step=%d)", w.id, wf.ID, compactionState.CompactedStep)
 	}
+	// When replaying, validate version compatibility between the old
+	// workflow definition (from the instance) and the new definition
+	// (from the WASM binary) so incompatible transitions fail fast.
+	if len(history) > 0 {
+		oldDef, err := w.store.GetWorkflowDef(w.ctx, wf.DefName, wf.DefVersion)
+		if err == nil && oldDef != nil && wfMeta != nil {
+			newDef := &host.WorkflowDef{
+				Name:       wfMeta.WorkflowName,
+				Version:    wfMeta.WorkflowVersion,
+				ABIVersion: wfMeta.ABIVersion,
+				MinVersion: wfMeta.MinCompatibleVersion,
+				PluginDeps: wfMeta.PluginDeps,
+			}
+			engineOpts = append(engineOpts, host.WithVersionValidation(func() error {
+				return host.ValidateVersionCompatibility(oldDef, newDef)
+			}))
+		}
+	}
 	engine := host.NewEngine(rt, caller, engineOpts...)
 
 	// ---- Execute/Resume ----
@@ -1068,7 +1148,13 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			errorCode = ce.Code.String()
 			errorOp = ce.Op
 		}
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), errorCode, errorOp, nil)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "retries exhausted") {
+			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp)
+			workflowsDeadLettered.Inc()
+		} else {
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp, nil)
+		}
 		return
 	}
 
@@ -1090,36 +1176,10 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 
 	if suspended != nil && suspended.Reason == "continue_as_new" {
-		// ContinueAsNew: persist events first, then atomically create a new run
-		// AND complete the current one in a single transaction.
-		if len(newEvents) > 0 {
-			queryStart := time.Now()
-			if err := w.store.AppendEventHistoryBatch(w.ctx, wf.ID, newEvents); err != nil {
-				dbQueryDuration.WithLabelValues("append_events").Observe(time.Since(queryStart).Seconds())
-				if isConnectionError(err) {
-					log.Printf("[worker %s] DB down saving events for %s — releasing", w.id, wf.ID)
-					w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
-					return
-			}
-				log.Printf("[worker %s] %s: save events error: %v", w.id, wf.ID, err)
-				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				var ce *host.CleatError
-				errorCode := host.ErrUnknown.String()
-				errorOp := ""
-				if errors.As(err, &ce) {
-					errorCode = ce.Code.String()
-					errorOp = ce.Op
-			}
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), errorCode, errorOp, nil)
-				return
-			}
-			dbQueryDuration.WithLabelValues("append_events").Observe(time.Since(queryStart).Seconds())
-		}
-
-		// Atomically create the new run and complete the current one.
+		// ContinueAsNew: atomically append events, create a new run, and
+		// complete the current one — all in a single database transaction.
 		log.Printf("[worker %s] %s: continue_as_new → starting new run", w.id, wf.ID)
-		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), result, queryState)
+		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState)
 		if err != nil {
 			log.Printf("[worker %s] %s: continue_as_new failed: %v", w.id, wf.ID, err)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
@@ -1161,7 +1221,13 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			errorCode = ce.Code.String()
 			errorOp = ce.Op
 		}
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), errorCode, errorOp, nil)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "retries exhausted") {
+			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp)
+			workflowsDeadLettered.Inc()
+		} else {
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp, nil)
+		}
 		return
 	}
 	dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
@@ -1583,7 +1649,12 @@ func (w *Worker) waitForDB() {
 
 func (w *Worker) releaseOrFail(wf *host.WorkflowInstance, errMsg string) {
 	if errMsg != "" {
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, "", "", nil)
+		if strings.Contains(errMsg, "retries exhausted") {
+			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, errMsg, "", "")
+			workflowsDeadLettered.Inc()
+		} else {
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, "", "", nil)
+		}
 	} else {
 		w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
 	}
@@ -1712,6 +1783,17 @@ func (a *hostPluginRegistryAdapter) RegisterStream(opts plugin.FuncOptions, fn p
 }
 
 // determineEntryPoint extracts the entry point name from workflow input.
+// pluginNames returns a sorted, human-readable list of plugin names from
+// a map, for use in error messages.
+func pluginNames(m map[string]string) string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
 // The default entry point is "place_order". This can be overridden by
 // including an "__entry_point" field in the input.
 func determineEntryPoint(input json.RawMessage) string {
@@ -2074,6 +2156,9 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
 		// POST /api/workflows/:id/cancel
 		s.handleCancel(w, r, id)
+	case len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost:
+		// POST /api/workflows/:id/retry
+		s.handleWorkflowRetry(w, r, id)
 	case len(parts) == 2 && parts[1] == "history" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/history
 		s.handleGetHistory(w, r, id)
@@ -2282,7 +2367,25 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id string) {
-	history, err := s.store.LoadEventHistory(r.Context(), id)
+	offset := 0
+	limit := 1000
+	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v >= 0 {
+		offset = v
+	}
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 {
+		limit = v
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	total, err := s.store.CountEventHistory(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+
+	history, err := s.store.LoadEventHistoryPaginated(r.Context(), id, offset, limit)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -2290,6 +2393,8 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 	if history == nil {
 		history = []host.EventRecord{}
 	}
+
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	s.writeJSON(w, 200, history)
 }
 

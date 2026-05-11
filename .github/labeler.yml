@@ -5,42 +5,54 @@
 
 # Area labels
 "area/cli":
-  - cmd/cleat/**/*
-  - cmd/cleat-gen/**/*
+  - any:
+      - cmd/cleat/**/*
+      - cmd/cleat-gen/**/*
 
 "area/wasm":
-  - internal/wasm/**/*
-  - internal/transform/**/*
+  - any:
+      - internal/wasm/**/*
+      - internal/transform/**/*
 
 "area/engine":
-  - internal/host/**/*
-  - internal/replay/**/*
+  - any:
+      - internal/host/**/*
+      - internal/replay/**/*
 
 "area/ui":
-  - cmd/cleat-worker/web/**/*
+  - any:
+      - cmd/cleat-worker/web/**/*
 
 "area/sdk":
-  - cleat/**/*
+  - any:
+      - cleat/**/*
 
 "area/docs":
-  - "*.md"
-  - "**/*.md"
-  - docs/**/*
+  - any:
+      - "*.md"
+      - "**/*.md"
+      - docs/**/*
 
 "area/ci":
-  - .github/**/*
+  - any:
+      - .github/**/*
 
 "area/plugins":
-  - plugins/**/*
+  - any:
+      - plugins/**/*
 
 "area/rust":
-  - crates/**/*
+  - any:
+      - crates/**/*
 
 "area/python":
-  - python-sdk/**/*
+  - any:
+      - python-sdk/**/*
 
 "area/java":
-  - crates/cleat-java/**/*
+  - any:
+      - crates/cleat-java/**/*
 
 "area/assemblyscript":
-  - packages/cleat-as/**/*
+  - any:
+      - packages/cleat-as/**/*

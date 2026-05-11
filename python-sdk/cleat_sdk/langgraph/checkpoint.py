@@ -344,8 +344,15 @@ class CleatCheckpointer:
 
         class _CkptTuple:
             """Duck-typed CheckpointTuple."""
-            __slots__ = ("config", "checkpoint", "metadata", "parent_config",
-                         "pending_writes", "checkpoint_id")
+
+            __slots__ = (
+                "config",
+                "checkpoint",
+                "metadata",
+                "parent_config",
+                "pending_writes",
+                "checkpoint_id",
+            )
 
         result = _CkptTuple()
 
@@ -363,6 +370,7 @@ class CleatCheckpointer:
         # Build a duck-typed checkpoint object with channel values.
         class _Ckpt:
             """Duck-typed checkpoint."""
+
             __slots__ = ("channel_values", "channel_versions", "id")
 
         ckpt = _Ckpt()
@@ -402,8 +410,6 @@ def _make_json_safe(obj: Any) -> Any:
         return {str(k): _make_json_safe(v) for k, v in obj.items()}
     if hasattr(obj, "__dict__"):
         return {
-            str(k): _make_json_safe(v)
-            for k, v in obj.__dict__.items()
-            if not k.startswith("_")
+            str(k): _make_json_safe(v) for k, v in obj.__dict__.items() if not k.startswith("_")
         }
     return str(obj)

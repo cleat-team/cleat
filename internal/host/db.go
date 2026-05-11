@@ -39,6 +39,8 @@ type WorkflowInstance struct {
 	Input      json.RawMessage `json:"input"`
 	Result     string          `json:"result,omitempty"`
 	Error      string          `json:"error,omitempty"`
+	ErrorCode  string          `json:"error_code,omitempty"`
+	ErrorOp    string          `json:"error_op,omitempty"`
 	AssignedTo string          `json:"assigned_to"`
 	NextWakeAt time.Time       `json:"next_wake_at"`
 	TenantID   string          `json:"tenant_id,omitempty"`
@@ -139,6 +141,9 @@ type WorkflowStore interface {
 	// (defaults to 1000 if limit <= 0, capped at 1000).
 	LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error)
 
+	// CountEventHistory returns the total number of events for a workflow.
+	CountEventHistory(ctx context.Context, workflowID string) (int, error)
+
 	// AppendEventHistory appends a single event to the history.
 	// Uses ON CONFLICT (workflow_id, step) DO NOTHING for idempotency.
 	AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error
@@ -176,7 +181,12 @@ type WorkflowStore interface {
 	// MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 	// after exhausting all retry attempts. This is a terminal status similar to
 	// 'failed' but indicates the workflow was retried without success.
-	MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error
+	MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error
+
+	// RetryWorkflow moves a dead_lettered workflow back to a runnable state.
+	// Resets status to 'ready', clears the assigned worker and all error fields,
+	// and sets next_wake_at to now so the workflow is picked up immediately.
+	RetryWorkflow(ctx context.Context, workflowID string) error
 
 	// ReleaseWorkflow returns a workflow to the ready queue.
 	// Used when a workflow suspends (sleep/await signals).
@@ -185,7 +195,7 @@ type WorkflowStore interface {
 	// ContinueAsNew atomically creates a new workflow run AND completes the
 	// current one in a single database transaction.  If the transaction fails
 	// neither operation takes effect.  Returns the new run ID on success.
-	ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (newRunID string, err error)
+	ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)
 
 	// FinalizeWorkflowSegment atomically appends new events and updates the
 	// workflow status in a single database transaction.  finalStatus is one of
@@ -496,7 +506,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace 
 			LIMIT $4
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op
 	`, workerID, namespace, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
@@ -509,9 +519,10 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace 
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
+			var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -524,6 +535,8 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace 
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
+			wf.ErrorCode = errorCode.String
+			wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -563,7 +576,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, name
 			LIMIT $4
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op
 	`, workerID, namespace, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
@@ -576,9 +589,10 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, name
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
+			var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
@@ -588,6 +602,11 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, name
 		if tenantID.Valid {
 			wf.TenantID = tenantID.String
 		}
+			if createdAt.Valid {
+				wf.CreatedAt = createdAt.Time
+			}
+			wf.ErrorCode = errorCode.String
+			wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -761,6 +780,13 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 	return history, rows.Err()
 }
 
+// CountEventHistory returns the total number of events for a workflow.
+func (s *PostgresStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = $1`, workflowID).Scan(&count)
+	return count, err
+}
+
 // AppendEventHistoryBatch appends multiple events to the history.
 // Computes a SHA-256 checksum of each event's payload for data integrity
 // verification. The checksum is stored in the checksum column; if the column
@@ -836,15 +862,21 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 	return nil
 }
 
-// ContinueAsNew atomically creates a new workflow run and completes the current
-// one in a single database transaction.  If the transaction fails, neither
-// operation takes effect.  Returns the new run ID on success.
-func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) {
+// ContinueAsNew atomically creates a new workflow run, appends events, and
+// completes the current run in a single database transaction.  If the
+// transaction fails, neither events, the new run, nor the completion takes
+// effect.  Returns the new run ID on success.
+func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
 	}
 	defer tx.Rollback()
+
+	// Append events within the same transaction.
+	if err := s.appendEventsInTx(ctx, tx, currentRunID, newEvents); err != nil {
+		return "", fmt.Errorf("continue as new: append events: %w", err)
+	}
 
 	// Create the new workflow run.
 	var newRunID string
@@ -1400,12 +1432,13 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
-func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error {
+func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'dead_lettered', error_msg = $3, completed_at = now(), assigned_to = NULL
+		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
+		    completed_at = now(), assigned_to = NULL
 		WHERE id = $1 AND assigned_to = $2
-	`, workflowID, workerID, errMsg)
+	`, workflowID, workerID, errMsg, errorCode, errorOp)
 	if err != nil {
 		return err
 	}
@@ -1420,7 +1453,22 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	// Best-effort: release all concurrency keys (Feature 5).
 	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
 
+	// Enforce ParentClosePolicy on children.
+	s.enforceParentClosePolicy(context.Background(), workflowID)
+
 	return nil
+}
+
+// RetryWorkflow moves a dead_lettered workflow back to a runnable state.
+func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		    error_msg = NULL, error_code = NULL, error_op = NULL,
+		    next_wake_at = now()
+		WHERE id = $1 AND status = 'dead_lettered'
+	`, workflowID)
+	return err
 }
 
 // ReleaseWorkflow returns a workflow to the queue with a next wake time.
@@ -1796,7 +1844,7 @@ func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key strin
 // and combined full-text search, as well as pagination via Offset/Limit.
 func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	query := `
-		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at
+		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op
 		FROM workflow_instances
 		WHERE 1=1
 	`
@@ -1860,13 +1908,16 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	for rows.Next() {
 		var wf WorkflowInstance
 		var nextWakeAt sql.NullTime
+		var errorCode, errorOp sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
 		}
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		workflows = append(workflows, wf)
 	}
 	return workflows, rows.Err()
@@ -1878,14 +1929,15 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
+	var errorCode, errorOp sql.NullString
 	var inputRaw json.RawMessage
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, result::text, error_msg
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, result::text, error_msg, error_code, error_op
 		FROM workflow_instances WHERE id = $1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg)
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1896,6 +1948,8 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	wf.AssignedTo = assignedTo.String
 	wf.Result = result.String
 	wf.Error = errorMsg.String
+	wf.ErrorCode = errorCode.String
+	wf.ErrorOp = errorOp.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}

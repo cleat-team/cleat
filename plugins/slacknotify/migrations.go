@@ -32,11 +32,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					default_channel VARCHAR(255),
 					enabled         TINYINT(1) NOT NULL DEFAULT 1,
 					created_at      TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-					updated_at      TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
+					updated_at      TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+					INDEX idx_slack_config_tenant (tenant_id, created_at DESC)
 				);
-
-				CREATE INDEX idx_slack_config_tenant
-					ON slack_config(tenant_id, created_at DESC);
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'slack_config')

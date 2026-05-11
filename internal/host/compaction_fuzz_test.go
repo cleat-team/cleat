@@ -62,10 +62,7 @@ func FuzzCompactionEquivalence(f *testing.F) {
 	f.Add(fuzzSeed(EventCodePluginCallStreamChunk, []string{"s3", "GetObject", `{"key":"x"}`, `{"body":"..."}`, ""}, []int64{}...))
 
 	// Pair: Call + Sleep (tests split at 1-halfway).
-	f.Add(append(
-		fuzzSeed(EventCodeCall, []string{"svc", "op", `{}`, `{}`, ""}),
-	))
-
+		f.Add(fuzzSeed(EventCodeCall, []string{"svc", "op", `{}`, `{}`, ""}))
 	// Pair: ChildWorkflow + child completing AwaitChild (tests open-children
 	// tracking and completion).
 	f.Add(append(

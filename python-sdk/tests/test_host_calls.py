@@ -21,7 +21,6 @@ Test layout
    ``plugin_call``, and error handling in the ``_call`` helper.
 """
 
-import json
 from unittest import mock
 
 import pytest
@@ -30,7 +29,6 @@ try:
     from cleat_sdk import memory
     from cleat_sdk.host_calls import (
         HostCalls,
-        SuspendSentinel,
         RetryPolicy,
         SignalResult,
         ChildResult,
@@ -39,20 +37,17 @@ try:
         CleatCallTransientError,
         CleatCallPermanentError,
         CleatCallTimeoutError,
-        INFINITE_TIMEOUT_MS,
     )
     from cleat_sdk.plugins import (
         Plugins,
         LLMChatResult,
         LLMEmbedResult,
         LLMListModelsResult,
-        PgVectorSearchResult,
     )
     from cleat_sdk.test_harness import CleatTestHarness
 except ImportError as e:
     pytest.fail(
-        f"Required import failed: {e}.  "
-        "All SDK modules must be importable.",
+        f"Required import failed: {e}.  All SDK modules must be importable.",
     )
 
 
@@ -479,7 +474,7 @@ class TestRetryWithBackoff:
                 if attempt == retry.max_attempts - 1:
                     raise
                 delay = min(
-                    int(retry.initial_interval_ms * (retry.backoff_coefficient ** attempt)),
+                    int(retry.initial_interval_ms * (retry.backoff_coefficient**attempt)),
                     retry.max_interval_ms,
                 )
                 h.cleat_sleep(delay)
@@ -777,53 +772,83 @@ class TestHostCallsMethodExistence:
 
     EXPECTED_METHODS = {
         # Core operations
-        "now", "random", "version", "min_version",
-        "cleat_log", "log_kv",
+        "now",
+        "random",
+        "version",
+        "min_version",
+        "cleat_log",
+        "log_kv",
         # Durable calls
-        "cleat_call", "cleat_call_typed", "cleat_call_with_retry",
-        "cleat_call_with_heartbeat", "cleat_sleep",
+        "cleat_call",
+        "cleat_call_typed",
+        "cleat_call_with_retry",
+        "cleat_call_with_heartbeat",
+        "cleat_sleep",
         # HTTP fetch
-        "cleat_fetch", "cleat_fetch_json", "fetch_get", "fetch_get_json",
+        "cleat_fetch",
+        "cleat_fetch_json",
+        "fetch_get",
+        "fetch_get_json",
         # Signals
-        "await_signals", "poll_signal", "poll_cancellation",
-        "send_signal_and_wait", "reply_to_signal",
-        "await_signals_with_quorum", "signal_workflow",
+        "await_signals",
+        "poll_signal",
+        "poll_cancellation",
+        "send_signal_and_wait",
+        "reply_to_signal",
+        "await_signals_with_quorum",
+        "signal_workflow",
         # Child workflows
-        "child_workflow", "child_workflow_with_options",
-        "await_child", "await_all_children",
+        "child_workflow",
+        "child_workflow_with_options",
+        "await_child",
+        "await_all_children",
         # State
-        "set_query_state", "set_state", "get_state",
-        "delete_state", "incr_state", "has_state", "list_state",
+        "set_query_state",
+        "set_state",
+        "get_state",
+        "delete_state",
+        "incr_state",
+        "has_state",
+        "list_state",
         # Promises
-        "create_promise", "await_promise", "resolve_promise", "reject_promise",
+        "create_promise",
+        "await_promise",
+        "resolve_promise",
+        "reject_promise",
         # Handlers
-        "register_update_handler", "register_query_handler",
+        "register_update_handler",
+        "register_query_handler",
         # Lifecycle
-        "cleat_defer", "continue_as_new", "extend_timeout", "run_detached",
+        "cleat_defer",
+        "continue_as_new",
+        "extend_timeout",
+        "run_detached",
         # Fire-and-forget / scheduling
-        "cleat_send", "schedule_invoke",
+        "cleat_send",
+        "schedule_invoke",
         # Identity
-        "current_workflow_id", "current_run_id",
+        "current_workflow_id",
+        "current_run_id",
         # Scope
-        "set_scope", "get_scope", "clear_scope",
+        "set_scope",
+        "get_scope",
+        "clear_scope",
         # UUID
         "uuid",
         # Plugin
-        "plugin_call", "plugin_call_streaming",
+        "plugin_call",
+        "plugin_call_streaming",
     }
 
     def test_all_expected_methods_present(self, host):
         """Verify all expected public methods exist on ``HostCalls``."""
         public_methods = {
-            name for name in dir(host)
-            if not name.startswith("_") and callable(getattr(host, name))
+            name for name in dir(host) if not name.startswith("_") and callable(getattr(host, name))
         }
         missing = self.EXPECTED_METHODS - public_methods
         extra = public_methods - self.EXPECTED_METHODS
 
-        assert not missing, (
-            f"Expected methods not found on HostCalls: {sorted(missing)}"
-        )
+        assert not missing, f"Expected methods not found on HostCalls: {sorted(missing)}"
         assert len(public_methods) >= len(self.EXPECTED_METHODS), (
             f"Expected at least {len(self.EXPECTED_METHODS)} public methods, "
             f"got {len(public_methods)}. Extra: {sorted(extra)}"
@@ -886,18 +911,14 @@ class TestHostCallsNewMethods:
 
     def test_list_state_delegates(self, host):
         """``list_state`` delegates to ``cleat_call('state', 'list', ...)``."""
-        with mock.patch.object(
-            host, "cleat_call", return_value='["k1", "k2"]'
-        ) as mock_call:
+        with mock.patch.object(host, "cleat_call", return_value='["k1", "k2"]') as mock_call:
             result = host.list_state("prefix_")
             mock_call.assert_called_once_with("state", "list", {"prefix": "prefix_"})
             assert result == ["k1", "k2"]
 
     def test_list_state_empty_prefix(self, host):
         """``list_state`` with an empty prefix passes ``{"prefix": ""}``."""
-        with mock.patch.object(
-            host, "cleat_call", return_value="[]"
-        ) as mock_call:
+        with mock.patch.object(host, "cleat_call", return_value="[]") as mock_call:
             result = host.list_state()
             mock_call.assert_called_once_with("state", "list", {"prefix": ""})
             assert result == []
@@ -906,9 +927,7 @@ class TestHostCallsNewMethods:
 
     def test_cleat_fetch_json_delegates(self, host):
         """``cleat_fetch_json`` deserialises the response body from ``cleat_fetch``."""
-        with mock.patch.object(
-            host, "cleat_fetch", return_value=('{"key": "val"}', 200)
-        ):
+        with mock.patch.object(host, "cleat_fetch", return_value=('{"key": "val"}', 200)):
             result = host.cleat_fetch_json("http://example.com")
             assert result == {"key": "val"}
 
@@ -927,9 +946,7 @@ class TestHostCallsNewMethods:
 
     def test_fetch_get_json_delegates(self, host):
         """``fetch_get_json`` chains through ``fetch_get`` with JSON parsing."""
-        with mock.patch.object(
-            host, "cleat_fetch", return_value=('{"x": 1}', 200)
-        ):
+        with mock.patch.object(host, "cleat_fetch", return_value=('{"x": 1}', 200)):
             result = host.fetch_get_json("http://example.com")
             assert result == {"x": 1}
 
@@ -1042,31 +1059,37 @@ class TestPluginMethodExistence:
     """Verify every expected ``Plugins`` public method exists."""
 
     EXPECTED_PLUGIN_METHODS = {
-        "blobstore_put", "blobstore_get",
+        "blobstore_put",
+        "blobstore_get",
         "await_event",
         "evaluate_flag",
         "produce",
         "send_webhook",
-        "trigger_incident", "resolve_incident",
+        "trigger_incident",
+        "resolve_incident",
         "send_message",
         "await_webhook",
-        "llm_chat", "llm_embed", "llm_list_models",
-        "plugin_call_streaming", "llm_chat_streaming",
-        "pgvector_search", "pgvector_upsert", "pgvector_delete",
+        "llm_chat",
+        "llm_embed",
+        "llm_list_models",
+        "plugin_call_streaming",
+        "llm_chat_streaming",
+        "pgvector_search",
+        "pgvector_upsert",
+        "pgvector_delete",
     }
 
     def test_all_plugin_methods_present(self, plugins):
         """Verify all expected public plugin wrapper methods exist."""
         public_methods = {
-            name for name in dir(plugins)
+            name
+            for name in dir(plugins)
             if not name.startswith("_") and callable(getattr(plugins, name))
         }
         missing = self.EXPECTED_PLUGIN_METHODS - public_methods
         extra = public_methods - self.EXPECTED_PLUGIN_METHODS
 
-        assert not missing, (
-            f"Expected plugin methods not found: {sorted(missing)}"
-        )
+        assert not missing, f"Expected plugin methods not found: {sorted(missing)}"
         assert len(public_methods) >= len(self.EXPECTED_PLUGIN_METHODS), (
             f"Expected at least {len(self.EXPECTED_PLUGIN_METHODS)} plugin methods, "
             f"got {len(public_methods)}. Extra: {sorted(extra)}"
@@ -1086,15 +1109,18 @@ class TestPluginAIMethods:
     def test_llm_chat_minimal(self, plugins):
         """``llm_chat`` with required parameters only."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value='{"choices": [], "usage": {}, "cost": 0.0, "model": "gpt-4o"}',
         ) as mock_call:
             result = plugins.llm_chat(
-                "openai", "gpt-4o",
+                "openai",
+                "gpt-4o",
                 [{"role": "user", "content": "hello"}],
             )
             mock_call.assert_called_once_with(
-                "llm", "chat",
+                "llm",
+                "chat",
                 {
                     "provider": "openai",
                     "model": "gpt-4o",
@@ -1107,13 +1133,13 @@ class TestPluginAIMethods:
     def test_llm_chat_with_options(self, plugins):
         """``llm_chat`` with all optional parameters."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
-            return_value=(
-                '{"choices": [], "usage": {}, "cost": 0.0, "model": "gpt-4o"}'
-            ),
+            plugins._h,
+            "plugin_call",
+            return_value=('{"choices": [], "usage": {}, "cost": 0.0, "model": "gpt-4o"}'),
         ):
             result = plugins.llm_chat(
-                "openai", "gpt-4o",
+                "openai",
+                "gpt-4o",
                 [{"role": "user", "content": "hi"}],
                 tools=[{"type": "function", "function": {"name": "foo", "parameters": {}}}],
                 max_tokens=100,
@@ -1126,44 +1152,41 @@ class TestPluginAIMethods:
     def test_llm_chat_error_response(self, plugins):
         """``llm_chat`` surfaces an error from the plugin response."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value=(
-                '{"choices": [], "usage": {}, "cost": 0.0, '
-                '"model": "", "error": "rate limited"}'
+                '{"choices": [], "usage": {}, "cost": 0.0, "model": "", "error": "rate limited"}'
             ),
         ):
-            result = plugins.llm_chat(
-                "openai", "gpt-4o", [{"role": "user", "content": "hi"}]
-            )
+            result = plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
             assert result.error == "rate limited"
 
     def test_llm_chat_runtime_error(self, plugins):
         """``llm_chat`` propagates ``RuntimeError`` from ``plugin_call``."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             side_effect=RuntimeError("plugin not available"),
         ):
             with pytest.raises(RuntimeError, match="plugin not available"):
-                plugins.llm_chat(
-                    "openai", "gpt-4o", [{"role": "user", "content": "hi"}]
-                )
+                plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
 
     # --- llm_embed ---
 
     def test_llm_embed(self, plugins):
         """``llm_embed`` constructs the correct input and returns a typed result."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value=(
                 '{"data": [{"embedding": [0.1, 0.2], "index": 0}], '
                 '"usage": {"total_tokens": 5}, "cost": 0.001}'
             ),
         ) as mock_call:
-            result = plugins.llm_embed(
-                "openai", "text-embedding-3-small", ["hello world"]
-            )
+            result = plugins.llm_embed("openai", "text-embedding-3-small", ["hello world"])
             mock_call.assert_called_once_with(
-                "llm", "embed",
+                "llm",
+                "embed",
                 {
                     "provider": "openai",
                     "model": "text-embedding-3-small",
@@ -1179,7 +1202,8 @@ class TestPluginAIMethods:
     def test_llm_list_models_all(self, plugins):
         """``llm_list_models`` without a provider queries all providers."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value=(
                 '{"providers": {"openai": [{"name": "gpt-4o", "cost_per_1k_tokens": 0.01}]}}'
             ),
@@ -1192,16 +1216,14 @@ class TestPluginAIMethods:
     def test_llm_list_models_by_provider(self, plugins):
         """``llm_list_models`` with a provider filters results."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value=(
-                '{"models": [{"name": "gpt-4o", "cost_per_1k_tokens": 0.01}], '
-                '"provider": "openai"}'
+                '{"models": [{"name": "gpt-4o", "cost_per_1k_tokens": 0.01}], "provider": "openai"}'
             ),
         ) as mock_call:
             result = plugins.llm_list_models(provider="openai")
-            mock_call.assert_called_once_with(
-                "llm", "list_models", {"provider": "openai"}
-            )
+            mock_call.assert_called_once_with("llm", "list_models", {"provider": "openai"})
             assert isinstance(result, LLMListModelsResult)
             assert len(result.models) == 1
 
@@ -1210,14 +1232,14 @@ class TestPluginAIMethods:
     def test_pgvector_search(self, plugins):
         """``pgvector_search`` constructs correct input and returns a result list."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
-            return_value=(
-                '{"results": [{"id": "abc", "score": 0.95, "content": "match"}]}'
-            ),
+            plugins._h,
+            "plugin_call",
+            return_value=('{"results": [{"id": "abc", "score": 0.95, "content": "match"}]}'),
         ) as mock_call:
             results = plugins.pgvector_search("docs", [0.1, 0.2, 0.3], limit=5)
             mock_call.assert_called_once_with(
-                "pgvector", "search",
+                "pgvector",
+                "search",
                 {
                     "collection": "docs",
                     "query_vector": [0.1, 0.2, 0.3],
@@ -1232,7 +1254,8 @@ class TestPluginAIMethods:
     def test_pgvector_search_with_filter(self, plugins):
         """``pgvector_search`` passes metadata filter to the backend."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value='{"results": []}',
         ) as mock_call:
             plugins.pgvector_search("docs", [1.0, 2.0], filter={"status": "active"})
@@ -1242,10 +1265,9 @@ class TestPluginAIMethods:
     def test_pgvector_search_min_score_filter(self, plugins):
         """``pgvector_search`` with ``min_score`` filters results client-side."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
-            return_value=(
-                '{"results": [{"id": "a", "score": 0.9}, {"id": "b", "score": 0.5}]}'
-            ),
+            plugins._h,
+            "plugin_call",
+            return_value=('{"results": [{"id": "a", "score": 0.9}, {"id": "b", "score": 0.5}]}'),
         ):
             results = plugins.pgvector_search("docs", [0.1, 0.2], min_score=0.7)
             assert len(results) == 1
@@ -1256,14 +1278,14 @@ class TestPluginAIMethods:
     def test_pgvector_upsert(self, plugins):
         """``pgvector_upsert`` constructs correct input with metadata."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value='{"id": "new-id"}',
         ) as mock_call:
-            plugins.pgvector_upsert(
-                "docs", "ext-1", [0.1, 0.2], metadata={"author": "alice"}
-            )
+            plugins.pgvector_upsert("docs", "ext-1", [0.1, 0.2], metadata={"author": "alice"})
             mock_call.assert_called_once_with(
-                "pgvector", "upsert",
+                "pgvector",
+                "upsert",
                 {
                     "collection": "docs",
                     "external_id": "ext-1",
@@ -1275,7 +1297,8 @@ class TestPluginAIMethods:
     def test_pgvector_upsert_no_metadata(self, plugins):
         """``pgvector_upsert`` without metadata omits key from input."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value='{"id": "new-id"}',
         ) as mock_call:
             plugins.pgvector_upsert("docs", "ext-1", [0.1, 0.2])
@@ -1287,12 +1310,14 @@ class TestPluginAIMethods:
     def test_pgvector_delete(self, plugins):
         """``pgvector_delete`` constructs correct input."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value='{"deleted": 1}',
         ) as mock_call:
             plugins.pgvector_delete("docs", "ext-1")
             mock_call.assert_called_once_with(
-                "pgvector", "delete",
+                "pgvector",
+                "delete",
                 {"collection": "docs", "external_id": "ext-1"},
             )
 
@@ -1308,24 +1333,22 @@ class TestPluginErrorHandling:
     def test_invalid_json_response(self, plugins):
         """``_call`` raises ``RuntimeError`` when the plugin returns invalid JSON."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value="not json",
         ):
             with pytest.raises(RuntimeError, match="invalid JSON"):
-                plugins.llm_chat(
-                    "openai", "gpt-4o", [{"role": "user", "content": "hi"}]
-                )
+                plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
 
     def test_non_object_response(self, plugins):
         """``_call`` raises ``RuntimeError`` when the response is not a JSON object."""
         with mock.patch.object(
-            plugins._h, "plugin_call",
+            plugins._h,
+            "plugin_call",
             return_value='"just a string"',
         ):
             with pytest.raises(RuntimeError, match="expected a JSON object"):
-                plugins.llm_chat(
-                    "openai", "gpt-4o", [{"role": "user", "content": "hi"}]
-                )
+                plugins.llm_chat("openai", "gpt-4o", [{"role": "user", "content": "hi"}])
 
     def test_plugin_call_runtime_error(self, host):
         """``plugin_call`` propagates ``RuntimeError`` from the WASM import stub."""

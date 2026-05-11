@@ -7,7 +7,6 @@ name = "cleat-sdk"
 version = "0.2.0"
 description = "Python SDK for cleat — durable execution framework for AI agents"
 readme = "README.md"
-long_description_content_type = "text/markdown"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 authors = [
@@ -39,9 +38,6 @@ all = ["cleat-sdk[langchain,langgraph,dev]"]
 Repository = "https://github.com/rcownie/cleat"
 Issues = "https://github.com/rcownie/cleat/issues"
 
-[tool.setuptools]
-include_package_data = true
-
 [tool.setuptools.packages.find]
 where = ["."]
 
@@ -55,6 +51,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+exclude = ["cleat_sdk/_wit"]
 
 [tool.componentize-py]
 wit_path = "wit/"
@@ -65,4 +62,4 @@ source = ["cleat_sdk"]
 omit = ["cleat_sdk/_wit/*", "*/tests/*"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 50

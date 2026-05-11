@@ -306,7 +306,7 @@ public final class Memory {
      * (bits 8-15).  Returns true if the value equals 0x0100 (256).
      */
     public static boolean decodePollSigFound(long result) {
-        return ((result >>> 8) & 0xFFL) == 0x0100;
+        return ((result & 0xFFFFFFFFL) >>> 8) != 0;
     }
 
     /**

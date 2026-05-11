@@ -35,7 +35,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			`,
 			UpMySQL: `
 				CREATE TABLE IF NOT EXISTS blob_content (
-					sha256      LONGBLOB PRIMARY KEY,
+					sha256      VARBINARY(32) PRIMARY KEY,
 					size        BIGINT NOT NULL,
 					data        LONGBLOB NOT NULL,
 					ref_count   INT NOT NULL DEFAULT 1,
@@ -45,9 +45,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE TABLE IF NOT EXISTS blob_index (
 					` + "`key`" + `       VARCHAR(255) NOT NULL,
 					tenant_id   CHAR(36) NOT NULL,
-					sha256      LONGBLOB NOT NULL REFERENCES blob_content(sha256),
+					sha256      VARBINARY(32) NOT NULL REFERENCES blob_content(sha256),
 					size        BIGINT NOT NULL,
-					content_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+					content_type VARCHAR(255) NOT NULL DEFAULT 'application/octet-stream',
 					tags        JSON NOT NULL DEFAULT ('{}'),
 					expires_at  TIMESTAMP(6),
 					created_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
@@ -60,7 +60,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'blob_content')
 				CREATE TABLE blob_content (
-					sha256      VARBINARY(MAX) PRIMARY KEY,
+					sha256      VARBINARY(32) PRIMARY KEY,
 					size        BIGINT NOT NULL,
 					data        VARBINARY(MAX) NOT NULL,
 					ref_count   INT NOT NULL DEFAULT 1,
@@ -71,7 +71,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE TABLE blob_index (
 					[key]        NVARCHAR(255) NOT NULL,
 					tenant_id    UNIQUEIDENTIFIER NOT NULL,
-					sha256       VARBINARY(MAX) NOT NULL REFERENCES blob_content(sha256),
+					sha256       VARBINARY(32) NOT NULL REFERENCES blob_content(sha256),
 					size         BIGINT NOT NULL,
 					content_type NVARCHAR(MAX) NOT NULL DEFAULT 'application/octet-stream',
 					tags         NVARCHAR(MAX) NOT NULL DEFAULT ('{}'),
@@ -98,7 +98,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE blob_content ALTER COLUMN data DROP NOT NULL;
 			`,
 			UpMySQL: `
-				ALTER TABLE blob_content ADD COLUMN storage_backend TEXT NOT NULL DEFAULT 'memory';
+				ALTER TABLE blob_content ADD COLUMN storage_backend VARCHAR(255) NOT NULL DEFAULT 'memory';
 				ALTER TABLE blob_content ADD COLUMN s3_key TEXT;
 				ALTER TABLE blob_content MODIFY COLUMN data LONGBLOB NULL;
 			`,
@@ -130,7 +130,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			UpMySQL: `
 				CREATE TABLE IF NOT EXISTS workflow_blob_refs (
 					workflow_id VARCHAR(255) NOT NULL,
-					sha256      LONGBLOB NOT NULL,
+					sha256      VARBINARY(32) NOT NULL,
 					created_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 					PRIMARY KEY (workflow_id, sha256)
 				);
@@ -141,7 +141,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_blob_refs')
 				CREATE TABLE workflow_blob_refs (
 					workflow_id NVARCHAR(255) NOT NULL,
-					sha256      VARBINARY(MAX) NOT NULL,
+					sha256      VARBINARY(32) NOT NULL,
 					created_at  DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
 					PRIMARY KEY (workflow_id, sha256)
 				);

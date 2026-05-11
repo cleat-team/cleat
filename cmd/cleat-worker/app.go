@@ -157,3 +157,28 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 
 	s.writeJSON(w, 201, map[string]string{"id": runID})
 }
+
+func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, 405, "method not allowed")
+		return
+	}
+	wf, err := s.store.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if wf == nil {
+		s.writeError(w, 404, "workflow not found")
+		return
+	}
+	if wf.Status != "dead_lettered" {
+		s.writeError(w, 400, "workflow is not dead-lettered, status="+wf.Status)
+		return
+	}
+	if err := s.store.RetryWorkflow(r.Context(), id); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"id": id, "status": "retried"})
+}

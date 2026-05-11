@@ -18,7 +18,6 @@ Usage::
 
 from __future__ import annotations
 
-import json
 from typing import Any, Optional
 from uuid import UUID
 
@@ -115,9 +114,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.cleat_log(
-                f"[Cleat] LLM end step={self.step_counter} elapsed={elapsed}ms"
-            )
+            self.h.cleat_log(f"[Cleat] LLM end step={self.step_counter} elapsed={elapsed}ms")
 
     def on_llm_error(
         self,
@@ -182,9 +179,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.cleat_log(
-                f"[Cleat] Tool start step={self.step_counter} tool={tool_name}"
-            )
+            self.h.cleat_log(f"[Cleat] Tool start step={self.step_counter} tool={tool_name}")
 
     def on_tool_end(
         self,
@@ -210,9 +205,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.cleat_log(
-                f"[Cleat] Tool end step={self.step_counter} elapsed={elapsed}ms"
-            )
+            self.h.cleat_log(f"[Cleat] Tool end step={self.step_counter} elapsed={elapsed}ms")
 
     def on_tool_error(
         self,
@@ -322,9 +315,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.cleat_log(
-                f"[Cleat] Agent action step={self.step_counter} tool={tool}"
-            )
+            self.h.cleat_log(f"[Cleat] Agent action step={self.step_counter} tool={tool}")
 
     def on_agent_finish(
         self,

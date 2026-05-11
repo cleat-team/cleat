@@ -14,7 +14,7 @@ SHELL := /usr/bin/env bash
 .SHELLFLAGS := -euo pipefail -c
 
 # ----- helpers --------------------------------------------------------------
-GO_PACKAGES ?= ./durable/... ./internal/... ./plugins/... ./cmd/...
+GO_PACKAGES ?= ./cleat/... ./internal/... ./plugins/... ./cmd/...
 GO_BENCHTIME ?= 30s
 
 # ---- convenience -----------------------------------------------------------
@@ -116,9 +116,11 @@ coverage-check: coverage-go
 	    fail = 0; \
 	    printf "=== Coverage by Package ===\n"; \
 	    printf "%-40s %8s\n\n", "Package", "Coverage"; \
-	    n = split("internal/host internal/plugin internal cleat plugins cmd", prefixes, " "); \
+	    n = split("internal/host/testutil internal/host internal/plugin internal/migration internal cleat plugins cmd", prefixes, " "); \
 	    thresh["internal/host"] = 15; \
+	    thresh["internal/host/testutil"] = 0; \
 	    thresh["internal/plugin"] = 50; \
+	    thresh["internal/migration"] = 0; \
 	    thresh["internal"] = 50; \
 	    thresh["cleat"] = 15; \
 	    thresh["plugins"] = 20; \

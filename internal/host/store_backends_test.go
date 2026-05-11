@@ -161,7 +161,7 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 	now := time.Now()
 
 	// A "ready" workflow instance
-	_, _, err := store.StartNewRun(context.Background(), "", "test-workflow", 1,
+	readyWfID, _, err := store.StartNewRun(context.Background(), "", "test-workflow", 1,
 		json.RawMessage(`{"key":"value"}`), "setup-ready-1")
 	if err != nil {
 		t.Fatalf("setupTestData: StartNewRun ready: %v", err)
@@ -194,22 +194,60 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 	}
 
 	// Create a promise for testing
-	err = store.CreatePromise(context.Background(), "setup-ready-1", "test-promise", "promise-1")
+	err = store.CreatePromise(context.Background(), readyWfID, "test-promise", "promise-1")
 	if err != nil {
 		t.Fatalf("setupTestData: CreatePromise: %v", err)
 	}
 }
 
 // truncateAll cleans up ALL test data between test cases.
-// Uses delete/cleanup methods on the store interface.
+// setupTestData leaves behind a "ready" workflow and a "running" workflow
+// that DeleteExpiredEvents does not touch (it only cleans events for
+// terminal workflows).  We delete every row from all dynamic tables so that
+// subtests and subsequent tests each start with a truly empty database.
 func truncateAll(t *testing.T, store WorkflowStore) {
 	t.Helper()
 	ctx := context.Background()
 
-	// Delete schedules
+	// Delete schedules via the store interface.
 	_ = store.DeleteSchedule(ctx, "test-schedule")
 	_ = store.DeleteSchedule(ctx, "test-schedule-2")
 
-	// Delete workflow instances via DeleteExpiredEvents for terminal ones
+	// Delete expired events for terminal workflows (a no-op for ready/running
+	// instances, but harmless).
 	_, _ = store.DeleteExpiredEvents(ctx, time.Now().Add(1*time.Hour))
+
+	// Wipe rows from dynamic tables so the next test section starts clean.
+	// Type-switch on the concrete store so we can access the unexported *sql.DB.
+	//
+	// Only tables present in all three backend test schemas are included.
+	// The deletion order respects MySQL's FK constraints (child rows first).
+	// MySQL-only tables (workflow_update_requests, idempotency_keys) are
+	// handled in a separate branch.
+	switch s := store.(type) {
+	case *MySQLStore:
+		s.db.Exec("DELETE FROM workflow_update_requests")
+		s.db.Exec("DELETE FROM workflow_promises")
+		s.db.Exec("DELETE FROM workflow_signals")
+		s.db.Exec("DELETE FROM concurrency_keys")
+		s.db.Exec("DELETE FROM idempotency_keys")
+		s.db.Exec("DELETE FROM event_history")
+		s.db.Exec("DELETE FROM workflow_instances")
+	case *PostgresStore:
+		s.db.Exec("DELETE FROM workflow_update_requests")
+		s.db.Exec("DELETE FROM workflow_promises")
+		s.db.Exec("DELETE FROM workflow_signals")
+		s.db.Exec("DELETE FROM concurrency_keys")
+		s.db.Exec("DELETE FROM idempotency_keys")
+		s.db.Exec("DELETE FROM event_history")
+		s.db.Exec("DELETE FROM workflow_instances")
+	case *MSSQLStore:
+		s.db.Exec("DELETE FROM workflow_update_requests")
+		s.db.Exec("DELETE FROM workflow_promises")
+		s.db.Exec("DELETE FROM workflow_signals")
+		s.db.Exec("DELETE FROM concurrency_keys")
+		s.db.Exec("DELETE FROM idempotency_keys")
+		s.db.Exec("DELETE FROM event_history")
+		s.db.Exec("DELETE FROM workflow_instances")
+	}
 }

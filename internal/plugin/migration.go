@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 )
 
 // Dialect identifies the SQL dialect of the backing database.
@@ -102,6 +103,30 @@ func insertPluginMigrationSQL(d Dialect) string {
 	}
 }
 
+// splitStatements splits SQL text on semicolons, discarding empty fragments.
+func splitStatements(sql string) []string {
+	parts := strings.Split(sql, ";")
+	var stmts []string
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed != "" {
+			stmts = append(stmts, trimmed)
+		}
+	}
+	return stmts
+}
+
+// execSQLStatements splits multi-statement SQL and executes each statement
+// via the provided exec function.
+func execSQLStatements(ctx context.Context, execFn func(ctx context.Context, query string, args ...any) (sql.Result, error), sqlStr string) error {
+	for _, stmt := range splitStatements(sqlStr) {
+		if _, err := execFn(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RunMigrations runs core migrations and plugin migrations in order.
 // Core migrations are run first, then plugins in dependency order.
 // Each plugin's migrations are tracked in a plugin_migrations table
@@ -113,13 +138,13 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 
 	// Ensure the plugin_migrations tracking table exists.
 	ddl := createPluginMigrationsTableSQL(dialect)
-	if _, err := db.ExecContext(ctx, ddl); err != nil {
+	if err := execSQLStatements(ctx, db.ExecContext, ddl); err != nil {
 		return fmt.Errorf("plugin: create migrations table: %w", err)
 	}
 
 	// Run core migrations first (caller handles tracking).
 	for _, m := range coreMigrations {
-		if _, err := db.ExecContext(ctx, m.Up); err != nil {
+		if err := execSQLStatements(ctx, db.ExecContext, m.Up); err != nil {
 			return fmt.Errorf("core migration v%d: %w", m.Version, err)
 		}
 	}
@@ -189,7 +214,7 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 			}
 
 			// Run the selected migration SQL.
-			if _, err := tx.ExecContext(ctx, sql); err != nil {
+			if err := execSQLStatements(ctx, tx.ExecContext, sql); err != nil {
 				tx.Rollback()
 				return fmt.Errorf("plugin %s migration v%d: %w", name, m.Version, err)
 			}

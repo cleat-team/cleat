@@ -430,7 +430,7 @@ func (m *mockCompactStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemor
 func (m *mockCompactStore) QueueDepth(ctx context.Context) (int64, error) { return 0, nil }
 func (m *mockCompactStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
 func (m *mockCompactStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
-func (m *mockCompactStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error) { return "", nil }
+func (m *mockCompactStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) { return "", nil }
 func (m *mockCompactStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error { return nil }
 
 func TestCompactWorkflowHistory_EmptyHistory(t *testing.T) {
@@ -1482,8 +1482,10 @@ func (m *mockCompactStore) BatchHeartbeat(ctx context.Context, workerID string) 
 
 func (m *mockCompactStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) { return nil, nil }
 func (m *mockCompactStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
-func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg string) error { return nil }
+func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockCompactStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
 func (m *mockCompactStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) { return "", false, nil }
 func (m *mockCompactStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) { return false, "", nil }
 func (m *mockCompactStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) { return 0, nil }
+func (m *mockCompactStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockCompactStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) { return true, nil }

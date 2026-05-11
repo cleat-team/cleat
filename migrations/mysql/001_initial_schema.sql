@@ -178,8 +178,7 @@ CREATE TABLE IF NOT EXISTS concurrency_keys (
     key_text           TEXT NOT NULL,
     workflow_id        VARCHAR(255) NOT NULL,
     acquired_at        TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-    expires_at         TIMESTAMP(6) NOT NULL,
-    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id)
+    expires_at         TIMESTAMP(6) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id);
