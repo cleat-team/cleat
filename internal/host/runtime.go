@@ -21,10 +21,11 @@ var wazeroInitOnce sync.Once
 
 // Runtime wraps a wazero runtime with pre-registered host function imports.
 type Runtime struct {
-	wazeroRuntime wazero.Runtime
-	stdout        bytes.Buffer
-	stderr        bytes.Buffer
-	callTimeout   time.Duration // per-call WASM execution timeout (0 = none)
+	wazeroRuntime    wazero.Runtime
+	stdout           bytes.Buffer
+	stderr           bytes.Buffer
+	callTimeout      time.Duration // per-call WASM execution timeout (0 = none)
+	memoryLimitPages uint32        // max WASM memory pages (0 = default/unlimited)
 }
 
 // Stdout returns captured stdout output from the most recent module.
@@ -33,11 +34,21 @@ func (r *Runtime) Stdout() string { return r.stdout.String() }
 // Stderr returns captured stderr output from the most recent module.
 func (r *Runtime) Stderr() string { return r.stderr.String() }
 
+// RuntimeOption configures a Runtime.
+type RuntimeOption func(*Runtime)
+
+// WithMemoryLimitPages sets the maximum WASM memory pages for modules
+// instantiated by this Runtime. Default is 4096 pages (256 MB).
+// Pass 0 to disable the limit (wazero default, up to host memory).
+func WithMemoryLimitPages(pages uint32) RuntimeOption {
+	return func(r *Runtime) { r.memoryLimitPages = pages }
+}
+
 // NewRuntime creates a Runtime with all cleat_* host functions and the plugin_call
 // host function registered on the "env" module. WASI preview1 is also instantiated
 // for Go wasip1 support. Plugin host functions are registered via the Engine's
 // PluginRegistry — not through NewRuntime.
-func NewRuntime(ctx context.Context) (*Runtime, error) {
+func NewRuntime(ctx context.Context, opts ...RuntimeOption) (*Runtime, error) {
 	wazeroInitOnce.Do(func() {
 		dummy := wazero.NewRuntime(context.Background())
 		dummy.Close(context.Background())
@@ -85,7 +96,11 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("host: instantiating env module: %w", err)
 	}
 
-	return &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second}, nil
+	r := &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second, memoryLimitPages: 4096}
+	for _, o := range opts {
+		o(r)
+	}
+	return r, nil
 }
 
 // Close releases all resources held by the runtime.

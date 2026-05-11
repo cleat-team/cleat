@@ -200,6 +200,7 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 		return fmt.Errorf("compact: store: %w", err)
 	}
 
+	CompactionEventsDeletedTotal.Add(float64(compactedStep))
 	log.Printf("compact: workflow=%s events=%d compacted=%d kept=%d state_size=%d",
 		workflowID, len(events), compactedStep, len(events)-keepStep, len(csJSON))
 	return nil
@@ -441,57 +442,70 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 	return full
 }
 
+// compactionPageSize is the number of rows fetched per page when loading
+// events for compaction. Using a modest page size prevents loading the
+// entire event history into memory at once for workflows with very large
+// histories.
+const compactionPageSize = 1000
+
 // loadAllEventsForCompaction loads all event records for a workflow directly
-// from the database. Provided as a low-level utility; callers may also use
-// PostgresStore.LoadEventHistory.
+// from the database using cursor-based pagination. Instead of loading all
+// rows at once (which could be millions for long-running workflows), it
+// fetches rows in pages of compactionPageSize, keeping memory usage bounded.
 func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID string) ([]EventRecord, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT step, event_type, service, operation, request, response, error,
-		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+	var history []EventRecord
+	offset := 0
+
+	for {
+		rows, err := db.QueryContext(ctx, `
+			SELECT step, event_type, service, operation, request, response, error,
+			       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 			       defer_description, defer_id, child_name, child_input, run_id, new_input,
 			       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error
-		FROM event_history
-		WHERE workflow_id = $1
-		ORDER BY step
-	`, workflowID)
-	if err != nil {
-		return nil, fmt.Errorf("load events for compaction: %w", err)
-	}
-	defer rows.Close()
-
-	var history []EventRecord
-	for rows.Next() {
-		var rec EventRecord
-		var service, op, request, response, errMsg sql.NullString
-		var durationMs, timeoutMs sql.NullInt64
-		var signalNames, signalName, signalPayload sql.NullString
-		var deferDesc, deferID sql.NullString
-		var childName, childInput, runID, newInput sql.NullString
-		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
-
-		if err := rows.Scan(&rec.Step, &rec.EventType,
-			&service, &op, &request, &response, &errMsg,
-			&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
-				&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
-				&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr); err != nil {
-			return nil, fmt.Errorf("scan compaction events: %w", err)
+			FROM event_history
+			WHERE workflow_id = $1
+			ORDER BY step
+			LIMIT $2 OFFSET $3
+		`, workflowID, compactionPageSize, offset)
+		if err != nil {
+			return nil, fmt.Errorf("load events for compaction (offset=%d): %w", offset, err)
 		}
 
-		rec.Service = service.String
-		rec.Op = op.String
-		rec.Request = request.String
-		rec.Response = response.String
-		rec.Err = errMsg.String
-		rec.DurationMs = durationMs.Int64
-		rec.SignalNames = signalNames.String
-		rec.TimeoutMs = timeoutMs.Int64
-		rec.SignalName = signalName.String
-		rec.SignalPayload = signalPayload.String
-		rec.DeferDescription = deferDesc.String
-		rec.DeferID = deferID.String
-		rec.ChildName = childName.String
-		rec.ChildInput = childInput.String
-		rec.RunID = runID.String
+		var pageCount int
+		for rows.Next() {
+			pageCount++
+			var rec EventRecord
+			var service, op, request, response, errMsg sql.NullString
+			var durationMs, timeoutMs sql.NullInt64
+			var signalNames, signalName, signalPayload sql.NullString
+			var deferDesc, deferID sql.NullString
+			var childName, childInput, runID, newInput sql.NullString
+			var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
+
+			if err := rows.Scan(&rec.Step, &rec.EventType,
+				&service, &op, &request, &response, &errMsg,
+				&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
+				&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
+				&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("scan compaction events (offset=%d): %w", offset, err)
+			}
+
+			rec.Service = service.String
+			rec.Op = op.String
+			rec.Request = request.String
+			rec.Response = response.String
+			rec.Err = errMsg.String
+			rec.DurationMs = durationMs.Int64
+			rec.SignalNames = signalNames.String
+			rec.TimeoutMs = timeoutMs.Int64
+			rec.SignalName = signalName.String
+			rec.SignalPayload = signalPayload.String
+			rec.DeferDescription = deferDesc.String
+			rec.DeferID = deferID.String
+			rec.ChildName = childName.String
+			rec.ChildInput = childInput.String
+			rec.RunID = runID.String
 			rec.NewInput = newInput.String
 			rec.PluginName = pluginName.String
 			rec.PluginFunc = pluginFunc.String
@@ -499,7 +513,20 @@ func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID stri
 			rec.PluginOutput = pluginOutput.String
 			rec.PluginError = pluginErr.String
 
-		history = append(history, rec)
+			history = append(history, rec)
+		}
+		rows.Close()
+
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("load events for compaction rows (offset=%d): %w", offset, err)
+		}
+
+		// If we got fewer rows than the page size, we've reached the end.
+		if pageCount < compactionPageSize {
+			break
+		}
+		offset += compactionPageSize
 	}
-	return history, rows.Err()
+
+	return history, nil
 }

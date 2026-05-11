@@ -75,6 +75,10 @@ func main() {
 		runVersions(ctx, store, args[1:])
 	case "deploy":
 		runDeploy(ctx, store, db, args[1:])
+	case "cost":
+		runCost(args[1:])
+	case "restore-workflow":
+		runRestoreWorkflow(ctx, store, db, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -94,6 +98,8 @@ Commands:
   versions gc [--dry-run]         run garbage collection on deprecated versions
   deploy workflow <name> <wasm>   deploy a new workflow WASM binary
   deploy plugin <name> <wasm>     deploy a plugin WASM binary
+  cost [flags]                    estimate monthly operational costs
+  restore-workflow <id> <file>    restore a single workflow from NDJSON backup
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

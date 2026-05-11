@@ -69,6 +69,12 @@ type EventRecord struct {
 	// the post-sleep virtual time for deterministic replay.
 	TimestampMs int64 `json:"timestamp_ms"`
 
+	// CreatedAt is the wall-clock time when the event was recorded in the
+	// database. Used for timeline visualization; may be zero for events
+	// loaded without timestamps or for events created before this field
+	// was added.
+	CreatedAt time.Time `json:"created_at,omitempty"`
+
 	// Call fields.
 	Service  string `json:"service,omitempty"`
 	Op       string `json:"op,omitempty"`
@@ -145,6 +151,7 @@ type EventRecord struct {
 	Message  string `json:"message,omitempty"`
 	LogLevel string `json:"log_level,omitempty"`
 	LogKV    string `json:"log_kv,omitempty"`
+
 }
 // CallRecord is kept for backward compatibility in tests.
 type CallRecord = EventRecord
@@ -206,6 +213,15 @@ type SuspendResult struct {
 	NewInput     string            // for continue_as_new: the new input payload
 	NewVersion   int               // for continue_as_new with version: the new workflow version
 	Deferrals    map[string]string // registered defers (deferID -> description)
+
+	// ContinueAsNewHandled is true when the engine has already persisted the
+	// ContinueAsNew transition (events + new run + old run completion) as part
+	// of the suspend path. The worker should NOT call store.ContinueAsNew again.
+	ContinueAsNewHandled bool
+
+	// NewRunID is the new workflow run ID when ContinueAsNew has been handled
+	// by the engine. Empty if not handled or if the suspend is for another reason.
+	NewRunID string
 }
 
 // ExecutionResult holds the complete outcome of a workflow run.
@@ -467,11 +483,59 @@ type Engine struct {
 	schema               string   // this instance's PostgreSQL schema name
 	peerSchemas          []string // peer cleat schemas for cross-instance child workflows and signals
 
+	// defName is the workflow definition name (used for display and testing).
+	defName string
+
+	// defVersion is the workflow definition version (used for display and testing).
+	defVersion int
+
 	// versionValidateFn is an optional hook called at the start of replay
 	// to validate version compatibility. If non-nil and the workflow is
 	// replaying (history is non-nil), the engine calls this before execution.
 	// If it returns an error, execution is aborted.
+	// NOTE: WithVersionValidation is now always-on; this field is populated
+	// automatically when version info is available. Use allowVersionMismatch
+	// as the escape hatch.
 	versionValidateFn func() error
+
+	// allowVersionMismatch disables version validation at replay start.
+	// When true, replays proceed even if version compatibility checks fail.
+	// Use this as an escape hatch for emergency rollbacks.
+	allowVersionMismatch bool
+
+	// workflowEventVerifier is called at the start of replay to verify
+	// event history integrity (checksum verification). If non-nil and the
+	// workflow is replaying, the engine calls this before execution.
+	// Verification failures are logged; if failOnChecksumMismatch is true,
+	// the error is returned and replay is aborted.
+	workflowEventVerifier func(ctx context.Context, workflowID string) error
+
+	// failOnChecksumMismatch controls whether checksum verification
+	// failures abort replay (true) or only log a warning (false).
+	failOnChecksumMismatch bool
+
+	// workerID identifies this worker instance for ContinueAsNew operations.
+	workerID string
+
+	// wasmInstanceTimeout is the maximum wall-clock duration for a single WASM
+	// execution. If exceeded, the context is cancelled and the workflow fails
+	// with a timeout error. Zero means no timeout.
+	wasmInstanceTimeout time.Duration
+
+	// defaultWorkflowTimeout is the maximum wall-clock duration for the entire
+	// workflow execution including replay and fresh execution. If exceeded,
+	// the context is cancelled and the workflow fails with a timeout error.
+	// This is a broader timeout than wasmInstanceTimeout, which only covers
+	// a single WASM invocation. Zero means no timeout.
+	defaultWorkflowTimeout time.Duration
+
+	// continueAsNewHandler is called by the engine in its suspend path
+	// to atomically persist a ContinueAsNew transition (events + new run
+	// creation + old run completion). This eliminates the race window
+	// between the engine returning and the worker calling store.ContinueAsNew.
+	// When set, the engine handles ContinueAsNew inline and marks the
+	// SuspendResult as ContinueAsNewHandled.
+	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)
 }
 
 // EngineOption configures an Engine.
@@ -509,6 +573,16 @@ func WithConcurrencyKeyStore(cks ConcurrencyKeyStore) EngineOption {
 // WithCompactionState sets the compaction state for replaying a compacted workflow.
 func WithCompactionState(cs *CompactionState) EngineOption {
 	return func(e *Engine) { e.compactionState = cs }
+}
+
+// WithDefName sets the workflow definition name for display and testing.
+func WithDefName(name string) EngineOption {
+	return func(e *Engine) { e.defName = name }
+}
+
+// WithDefVersion sets the workflow definition version for display and testing.
+func WithDefVersion(v int) EngineOption {
+	return func(e *Engine) { e.defVersion = v }
 }
 
 // WithPluginRegistry sets the plugin registry for plugin host function dispatch.
@@ -567,6 +641,56 @@ func WithMaxRetryAttempts(n int) EngineOption {
 // If the function returns an error, execution is aborted.
 func WithVersionValidation(fn func() error) EngineOption {
 	return func(e *Engine) { e.versionValidateFn = fn }
+}
+
+// WithAllowVersionMismatch allows the workflow to replay even when version
+// compatibility checks fail. This is an escape hatch for emergency rollbacks
+// where you need to replay a workflow against a different version of the
+// WASM binary than the one it was created with.
+func WithAllowVersionMismatch(allow bool) EngineOption {
+	return func(e *Engine) { e.allowVersionMismatch = allow }
+}
+
+// WithWorkflowEventVerifier sets a function that verifies event history
+// integrity (checksum verification) at the start of replay. If set,
+// the verifier is called before execution when replaying. When
+// failOnMismatch is true, verification failures abort replay.
+func WithWorkflowEventVerifier(fn func(ctx context.Context, workflowID string) error, failOnMismatch bool) EngineOption {
+	return func(e *Engine) {
+		e.workflowEventVerifier = fn
+		e.failOnChecksumMismatch = failOnMismatch
+	}
+}
+
+// WithWorkerID sets the worker instance identifier on the engine.
+// This is needed for ContinueAsNew operations so the engine can call
+// the store method directly in its suspend path.
+func WithWorkerID(id string) EngineOption {
+	return func(e *Engine) { e.workerID = id }
+}
+
+// WithWASMInstanceTimeout sets a wall-clock timeout for each WASM execution.
+// If the execution exceeds this duration, the context is cancelled and the
+// workflow fails with a timeout error. Zero means no timeout.
+func WithWASMInstanceTimeout(d time.Duration) EngineOption {
+	return func(e *Engine) { e.wasmInstanceTimeout = d }
+}
+
+// WithDefaultWorkflowTimeout sets a wall-clock timeout for the entire workflow
+// execution (replay + fresh run). If the total execution exceeds this duration,
+// the context is cancelled and the workflow fails with a timeout error.
+// Zero means no timeout. This wraps wasmInstanceTimeout, which is per-invocation.
+func WithDefaultWorkflowTimeout(d time.Duration) EngineOption {
+	return func(e *Engine) { e.defaultWorkflowTimeout = d }
+}
+
+// WithContinueAsNewHandler sets a handler that the engine calls when a
+// ContinueAsNew suspend is detected. The handler should persist the
+// transition atomically (events + new run + old run completion).
+// When set, the engine calls this from its suspend path, eliminating
+// the race between engine return and worker-side store.ContinueAsNew call.
+func WithContinueAsNewHandler(fn func(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)) EngineOption {
+	return func(e *Engine) { e.continueAsNewHandler = fn }
 }
 
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
@@ -653,16 +777,47 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		nowMs:      now,
 		deferrals:  make(map[string]string),
 		workflowID: e.workflowID,
+		defName:    e.defName,
 		execRunID:  e.workflowID,
 		tenantID:   e.tenantID,
 	}
 
 	execCtx := withHandler(ctx, session)
 
-	// If replaying and a version validation hook is set, run it now.
-	if len(replayHistory) > 0 && e.versionValidateFn != nil {
-		if err := e.versionValidateFn(); err != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: version validation failed: %w", err)
+	// Apply overall workflow execution timeout if configured.
+	// This wraps the entire execution including replay and fresh run.
+	if e.defaultWorkflowTimeout > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(execCtx, e.defaultWorkflowTimeout)
+		defer cancel()
+	}
+
+	// Apply per-execution WASM instance timeout if configured.
+	if e.wasmInstanceTimeout > 0 {
+		var cancel context.CancelFunc
+		execCtx, cancel = context.WithTimeout(execCtx, e.wasmInstanceTimeout)
+		defer cancel()
+	}
+
+	// If replaying, verify event history integrity (checksums) and
+	// validate version compatibility before proceeding.
+	if len(replayHistory) > 0 {
+		// (a) Checksum verification.
+		if e.workflowEventVerifier != nil {
+			if err := e.workflowEventVerifier(ctx, e.workflowID); err != nil {
+				log.Printf("[engine] workflow %s: checksum verification failed: %v", e.workflowID, err)
+				replayChecksumFailuresTotal.Inc()
+				if e.failOnChecksumMismatch {
+					return "", nil, nil, nil, nil, fmt.Errorf("host: checksum verification failed: %w", err)
+				}
+			}
+		}
+
+		// (b) Version validation (always-on unless allowVersionMismatch).
+		if e.versionValidateFn != nil && !e.allowVersionMismatch {
+			if err := e.versionValidateFn(); err != nil {
+				return "", nil, nil, nil, nil, fmt.Errorf("host: version validation failed: %w", err)
+			}
 		}
 	}
 
@@ -673,23 +828,42 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 			if se == nil {
 				se = &SuspendError{Reason: "workflow suspended"}
 			}
-			strippedHistory := stripCompactedEvents(session.history, compactedStep)
-			return "", strippedHistory, &SuspendResult{
+
+			// If ContinueAsNew was triggered and the engine has a handler,
+			// call it now to atomically persist the transition inline.
+			// This eliminates the race window between returning and the
+			// worker calling store.ContinueAsNew separately.
+			susResult := &SuspendResult{
 				History:      session.history,
 				SuspendUntil: se.Until,
 				Reason:       se.Reason,
 				NewInput:     se.NewInput,
 				NewVersion:   se.NewVersion,
 				Deferrals:    session.deferrals,
-			}, session.deferrals, session.queryState, nil
+			}
+			if se.Reason == "continue_as_new" && e.continueAsNewHandler != nil && !session.isReplay {
+				newEvents := session.history[len(replayHistory):]
+				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState)
+				if cnErr != nil {
+					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+				}
+				susResult.ContinueAsNewHandled = true
+				susResult.NewRunID = newRunID
+			}
+
+			strippedHistory := stripCompactedEvents(session.history, compactedStep)
+			return "", strippedHistory, susResult, session.deferrals, session.queryState, nil
 		}
-		// Workflow failed with a non-suspend error. Try running defers on the
-		// still-live module first, then fall back to fresh-module defers.
+		// Workflow failed with a non-suspend error (trap, panic, timeout,
+		// or cancellation). Try running defers on the still-live module
+		// first, then fall back to fresh-module defers.
+		// Use context.Background() so defer functions execute even when the
+		// execCtx has been cancelled or timed out (e.g., workflow timeout).
 		if len(session.deferrals) > 0 {
-			e.invokeDefersOnTrap(execCtx, mod, session.deferrals)
-			e.runDefers(ctx, wasmBytes, session.deferrals)
+			e.invokeDefersOnTrap(context.Background(), mod, session.deferrals)
+			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
-		session.releaseHeldScopes(ctx)
+		session.releaseHeldScopes(context.Background())
 		// Attempt to resolve the WASM trap to a source location using
 		// DWARF debug info. wazero v1.9.0 already embeds DWARF-resolved
 		// file:line locations in trap errors; resolveWasmTrap ensures
@@ -792,6 +966,7 @@ type execSession struct {
 	signals    map[string]string // pending signals delivered during this session
 	deferrals  map[string]string // registered defer callbacks (deferID -> description)
 	workflowID  string            // parent workflow instance ID (for child workflows)
+	defName     string            // workflow definition name (for metrics labels)
 	execRunID   string            // current execution run ID
 	queryState  map[string]string // key-value state set via SetQueryState
 	tenantID          string            // tenant ID injected into plugin function context
@@ -856,7 +1031,9 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// and return the cached response.  (Use DurableCallIdempotent for
 	// exactly-once with write-ahead logging and ambiguity detection.)
 	if s.engine.db != nil {
-		s.engine.flushEvent(ctx, s.workflowID, rec)
+		if flushErr := s.engine.flushEvent(ctx, s.workflowID, rec); flushErr != nil {
+			log.Printf("[engine] freshCall: flushEvent failed for workflow=%s step=%d: %v", s.workflowID, rec.Step, flushErr)
+		}
 	}
 
 	if err != nil {
@@ -871,35 +1048,37 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 func (s *execSession) replayCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
 	mem := m.Memory()
 
-	replayStepsTotal.Inc()
+	replayStepsTotal.WithLabelValues(s.defName).Inc()
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
 		s.stepCount++
 
 		if rec.EventType != EventTypeCall {
+			replayFailuresTotal.Inc()
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
 			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
+			replayFailuresTotal.Inc()
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, service, operation, rec.Service, rec.Op)
 			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
-			// Detect a pending call intent: the external call was dispatched
-			// but the outcome was never persisted.  Return ErrAmbiguous so
-			// the caller can check the external service before retrying.
-			if rec.Err == pendingSentinel {
-				ambiguousErr := fmt.Sprintf(
-					"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
-					rec.Step, rec.Service, rec.Op)
-				written, _ := writeWasmString(mem, responsePtr, ambiguousErr, responseMaxLen)
-				return packDurableCallResult(int(written), 1, 1)
-			}
+		// Detect a pending call intent: the external call was dispatched
+		// but the outcome was never persisted.  Return ErrAmbiguous so
+		// the caller can check the external service before retrying.
+		if rec.Err == pendingSentinel {
+			ambiguousErr := fmt.Sprintf(
+				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
+				rec.Step, rec.Service, rec.Op)
+			written, _ := writeWasmString(mem, responsePtr, ambiguousErr, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
 
 		if rec.Err != "" {
 			written, _ := writeWasmString(mem, responsePtr, rec.Err, responseMaxLen)
@@ -934,12 +1113,14 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 		s.stepCount++
 
 		if rec.EventType != EventTypePluginCall {
+			replayFailuresTotal.Inc()
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
 			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.PluginName != pluginName || rec.PluginFunc != functionName {
+			replayFailuresTotal.Inc()
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc)
 			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
@@ -1315,15 +1496,28 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 		s.stepCount++
 
 		if rec.EventType != EventTypeCall {
+			replayFailuresTotal.Inc()
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
 			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
+			replayFailuresTotal.Inc()
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, service, operation, rec.Service, rec.Op)
 			written, _ := writeWasmString(mem, responsePtr, errMsg, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		// Detect a pending call intent: the external call was dispatched
+		// but the outcome was never persisted.  Return ErrAmbiguous so
+		// the caller can check the external service before retrying.
+		if rec.Err == pendingSentinel {
+			ambiguousErr := fmt.Sprintf(
+				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
+				rec.Step, rec.Service, rec.Op)
+			written, _ := writeWasmString(mem, responsePtr, ambiguousErr, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
@@ -1397,8 +1591,8 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 						written, _ := writeWasmString(mem, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
 						_, _ = writeWasmStringOrTrap(mem, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
 						return packAwaitSignalsResult(uint32(written), uint32(len(nextRec.SignalPayload)), false, 0)
-			}
-				}
+						}
+						}
 				// No signal yet — this is a replay of a wait that hasn't resolved.
 				// Should not happen in practice (we only wake when signal arrives),
 				// but handle gracefully.
@@ -1767,7 +1961,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 					if rec.Err != "" {
 						written, _ := writeWasmString(mem, resultPtr, rec.Err, resultMaxLen)
 						return packAwaitChildResult(uint32(written), 1)
-			}
+						}
 					written, _ := writeWasmString(mem, resultPtr, rec.Response, resultMaxLen)
 					return packAwaitChildResult(uint32(written), 0)
 				}
@@ -1892,6 +2086,7 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 		s.stepCount++
 
 		if rec.EventType != EventTypeAwaitAllChildren {
+			replayFailuresTotal.Inc()
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
 			written, _ := writeWasmString(mem, resultsPtr, errMsg, resultsMaxLen)
 			return packAwaitChildResult(uint32(written), 1)
@@ -2941,28 +3136,66 @@ func stripCompactedEvents(history []EventRecord, compactedStep int) []EventRecor
 // flushEvent writes a single event to event_history in its own transaction.
 // This guarantees exactly-once: if the worker crashes before the workflow
 // completes, replay will find this event and return the cached response.
+// Retries with [100ms, 200ms, 400ms] backoff on transient failures.
 func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRecord) error {
 	if e.db == nil {
 		return nil
 	}
-	tx, err := e.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("flush event: begin tx: %w", err)
-	}
-	defer tx.Rollback()
 
-	checksum := computeEventChecksum(rec)
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error, checksum)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (workflow_id, step) DO NOTHING
-	`, workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err),
-		checksum)
-	if err != nil {
-		return fmt.Errorf("flush event: exec: %w", err)
+	var lastErr error
+	backoff := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond}
+
+	for attempt := 0; attempt <= len(backoff); attempt++ {
+		if attempt > 0 && attempt-1 < len(backoff) {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("flush event: context cancelled after %d retries: %w", attempt, ctx.Err())
+			case <-time.After(backoff[attempt-1]):
+			}
+		}
+
+		tx, err := e.db.BeginTx(ctx, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("flush event: begin tx: %w", err)
+			if attempt < len(backoff) {
+				continue
+			}
+			break
+		}
+
+		checksum := computeEventChecksum(rec)
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error, checksum, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+			ON CONFLICT (workflow_id, step) DO NOTHING
+		`, workflowID, rec.Step, rec.EventType,
+			nullStr(rec.Service), nullStr(rec.Op), nullStr(rec.Request), nullStr(rec.Response), nullStr(rec.Err),
+			checksum)
+		if err != nil {
+			tx.Rollback()
+			lastErr = fmt.Errorf("flush event: exec: %w", err)
+			if attempt < len(backoff) {
+				continue
+			}
+			break
+		}
+
+		if err := tx.Commit(); err != nil {
+			tx.Rollback()
+			lastErr = fmt.Errorf("flush event: commit: %w", err)
+			if attempt < len(backoff) {
+				continue
+			}
+			break
+		}
+
+		return nil
 	}
-	return tx.Commit()
+
+	// All retries exhausted — log a structured error that can be alerted on.
+	log.Printf("[engine] flushEvent: all %d retries exhausted for workflow=%s step=%d type=%s: %v",
+		len(backoff), workflowID, rec.Step, rec.EventType, lastErr)
+	return lastErr
 }
 
 	// pendingSentinel is stored in the error column of event_history to mark a

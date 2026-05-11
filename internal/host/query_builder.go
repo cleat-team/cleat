@@ -128,13 +128,14 @@ func (d Dialect) batchLimit(limitPos int) string {
 }
 
 // workflowInstanceColumns returns the column list for SELECT queries that
-// return WorkflowInstance rows.
+// return WorkflowInstance rows. Includes id, def_name, def_version, status,
+// input, assigned_to, next_wake_at, error_code, error_op, error_msg, and created_at.
 func (d Dialect) workflowInstanceColumns() string {
 	switch d {
 	case DialectPostgres:
-		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op"
+		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at"
 	case DialectMySQL, DialectMSSQL:
-		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op"
+		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at"
 	default:
 		panic("unknown dialect: " + d)
 	}
@@ -233,15 +234,18 @@ type scanner interface {
 
 // scanWorkflowInstance scans a row into a WorkflowInstance, handling
 // NullString/NullTime boilerplate and the MSSQL input-as-string quirk.
+// Expects columns: id, def_name, def_version, status, input, assigned_to,
+// next_wake_at, error_code, error_op, error_msg, created_at.
 func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
-	var nextWakeAt sql.NullTime
-	var errorCode, errorOp sql.NullString
+	var nextWakeAt, createdAt sql.NullTime
+	var errorCode, errorOp, errorMsg sql.NullString
 
 	if d == DialectMSSQL {
 		var inputStr string
 		if err := row.Scan(
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
+			&errorMsg, &createdAt,
 		); err != nil {
 			return err
 		}
@@ -250,6 +254,7 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 		if err := row.Scan(
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&wf.Input, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
+			&errorMsg, &createdAt,
 		); err != nil {
 			return err
 		}
@@ -260,6 +265,10 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 	}
 	wf.ErrorCode = errorCode.String
 	wf.ErrorOp = errorOp.String
+	wf.Error = errorMsg.String
+	if createdAt.Valid {
+		wf.CreatedAt = createdAt.Time
+	}
 	return nil
 }
 

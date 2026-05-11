@@ -1129,6 +1129,169 @@ func (s *ShardedStore) DeleteExpiredEvents(ctx context.Context, olderThan time.T
 	return total, nil
 }
 
+
+
+// TerminateWorkflow routes by workflow ID.
+func (s *ShardedStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return fmt.Errorf("terminate_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.TerminateWorkflow(ctx, workflowID, reason)
+}
+
+// LoadEventHistoryBatch returns event histories for multiple workflow IDs
+// by dispatching per-ID to the appropriate shard.
+func (s *ShardedStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error) {
+	result := make(map[string][]EventRecord, len(workflowIDs))
+	for _, id := range workflowIDs {
+		shard := s.getShard(id)
+		if shard == nil {
+			continue
+		}
+		events, err := shard.Store.LoadEventHistory(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		result[id] = events
+	}
+	return result, nil
+}
+
+// DeleteDeadLetteredWorkflows fans out to all shards and sums the deleted counts.
+func (s *ShardedStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var total int64
+	var errs []string
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		n, err := shard.Store.DeleteDeadLetteredWorkflows(ctx, olderThan)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("shard %q: %v", shard.Config.Name, err))
+			continue
+		}
+		total += n
+	}
+	if len(errs) > 0 {
+		return total, fmt.Errorf("DeleteDeadLetteredWorkflows errors: %s", strings.Join(errs, "; "))
+	}
+	return total, nil
+}
+
+// metricsStore is a local interface for type-asserting whether a shard's
+// underlying store supports metrics collection methods. This mirrors the
+// MetricsStore interface in cmd/cleat-worker/metrics_store.go but lives
+// in the host package to avoid import cycles.
+type metricsStore interface {
+	CountStalledWorkflows(ctx context.Context, threshold time.Duration) (int, error)
+	CountEventHistoryTotal(ctx context.Context) (int, error)
+	EstimateEventHistorySize(ctx context.Context) (int64, error)
+	CountActiveConcurrencyKeys(ctx context.Context) (int, error)
+}
+
+// ---------------------------------------------------------------------------
+// MetricsStore implementation (fans out to all shards and aggregates)
+// ---------------------------------------------------------------------------
+
+// CountStalledWorkflows returns the maximum stalled count across all shards.
+// Using max rather than sum because stalled workflows on different shards are
+// independent — the max captures the worst-case shard, which is the most
+// actionable signal for operator attention.
+func (s *ShardedStore) CountStalledWorkflows(ctx context.Context, threshold time.Duration) (int, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	var maxCount int
+	for _, shard := range shards {
+		ms, ok := shard.Store.(metricsStore)
+		if !ok {
+			continue
+		}
+		n, err := ms.CountStalledWorkflows(ctx, threshold)
+		if err != nil {
+			return 0, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		if n > maxCount {
+			maxCount = n
+		}
+	}
+	return maxCount, nil
+}
+
+// CountEventHistoryTotal returns the total row count across all shards.
+func (s *ShardedStore) CountEventHistoryTotal(ctx context.Context) (int, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	var total int
+	for _, shard := range shards {
+		ms, ok := shard.Store.(metricsStore)
+		if !ok {
+			continue
+		}
+		n, err := ms.CountEventHistoryTotal(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// EstimateEventHistorySize returns the estimated total size across all shards.
+func (s *ShardedStore) EstimateEventHistorySize(ctx context.Context) (int64, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	var total int64
+	for _, shard := range shards {
+		ms, ok := shard.Store.(metricsStore)
+		if !ok {
+			continue
+		}
+		n, err := ms.EstimateEventHistorySize(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// CountActiveConcurrencyKeys returns the total active concurrency keys across all shards.
+func (s *ShardedStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) {
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	var total int
+	for _, shard := range shards {
+		ms, ok := shard.Store.(metricsStore)
+		if !ok {
+			continue
+		}
+		n, err := ms.CountActiveConcurrencyKeys(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("shard %q: %w", shard.Config.Name, err)
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// StreamEventHistory routes by workflow ID.
+func (s *ShardedStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		errCh := make(chan error, 1)
+		errCh <- fmt.Errorf("stream_event_history: no shard available for workflow %s", workflowID)
+		ch := make(chan EventRecord)
+		close(ch)
+		return ch, errCh
+	}
+	return shard.Store.StreamEventHistory(ctx, workflowID, pageSize)
+}
+
 // ResolveTenantFromAPIKey looks up a tenant UUID by API key hash across all shards.
 func (s *ShardedStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	s.mu.RLock()

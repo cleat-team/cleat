@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -110,9 +111,13 @@ type WorkflowMemoryStats struct {
 // Empty/zero values mean "no filter" for that parameter.
 type WorkflowFilter struct {
 	Status        string
+	DefName       string
+	ID            string
 	InputContains string
 	ErrorContains string
 	Search        string
+	CreatedAfter  time.Time
+	CreatedBefore time.Time
 	Offset        int
 	Limit         int
 }
@@ -401,6 +406,33 @@ type WorkflowStore interface {
 	// Returns the number of event rows deleted.
 	DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error)
 
+	// TerminateWorkflow force-terminates a workflow, setting status to
+	// 'terminated'. Unlike FailWorkflow, this does not require the worker
+	// to own the workflow. Use sparingly — it leaves the workflow in an
+	// indeterminate state and should only be used when a workflow is truly stuck.
+	TerminateWorkflow(ctx context.Context, workflowID, reason string) error
+
+	// DeleteDeadLetteredWorkflows permanently deletes workflow instances that are
+	// in the dead_lettered state and whose completed_at is older than the cutoff.
+	// Event history rows are deleted first (to satisfy FK constraints), then the
+	// workflow_instances rows are deleted. Returns the number of instances deleted.
+	DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
+
+	// LoadEventHistoryBatch returns event histories for multiple workflow IDs.
+	// The result is keyed by workflow ID. Individual histories are returned in
+	// step order. If a workflow ID has no events, its entry is an empty slice.
+	LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error)
+
+	// StreamEventHistory loads event history for a workflow in pages, returning
+	// events through a channel. Events are fetched in pages of pageSize as the
+	// caller reads from the channel. The channel is closed when all events have
+	// been sent. The context can be used to cancel the stream mid-way.
+	StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error)
+
+	// CountActiveConcurrencyKeys returns the number of active (non-expired)
+	// concurrency keys in the store.
+	CountActiveConcurrencyKeys(ctx context.Context) (int, error)
+
 	// ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.
 	// Returns uuid.Nil if the key is not found or revoked.
 	ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error)
@@ -595,7 +627,8 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
 		       promise_name, promise_id, promise_result, promise_error,
-		       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms
+		       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms,
+		       created_at
 		FROM event_history
 		WHERE workflow_id = $1
 		ORDER BY step
@@ -616,6 +649,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+		var createdAt sql.NullTime
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -624,7 +658,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
-			&rec.TimestampMs); err != nil {
+			&rec.TimestampMs, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
@@ -653,6 +687,9 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PromiseID = promiseID.String
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
+		if createdAt.Valid {
+			rec.CreatedAt = createdAt.Time
+		}
 
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
@@ -678,7 +715,8 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
-		       promise_name, promise_id, promise_result, promise_error
+		       promise_name, promise_id, promise_result, promise_error,
+		       created_at
 		FROM event_history
 		WHERE workflow_id = $1
 		ORDER BY step
@@ -700,6 +738,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+		var createdAt sql.NullTime
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -707,7 +746,8 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
-			&promiseName, &promiseID, &promiseResult, &promiseError); err != nil {
+			&promiseName, &promiseID, &promiseResult, &promiseError,
+			&createdAt); err != nil {
 			return nil, fmt.Errorf("scan history paginated: %w", err)
 		}
 
@@ -736,6 +776,9 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		rec.PromiseID = promiseID.String
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
+		if createdAt.Valid {
+			rec.CreatedAt = createdAt.Time
+		}
 
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
@@ -751,6 +794,150 @@ func (s *PostgresStore) CountEventHistory(ctx context.Context, workflowID string
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = $1`, workflowID).Scan(&count)
 	return count, err
+}
+
+// StreamEventHistory loads event history for a workflow in pages, returning
+// events through a channel. This is the streaming counterpart to LoadEventHistory:
+// instead of loading all events into memory at once, events are fetched in
+// pages of pageSize as the caller reads from the channel.
+//
+// The channel is closed when all events have been sent. The context can be
+// used to cancel the stream mid-way. On cancellation, both channels are closed
+// and the goroutine exits.
+//
+// Example:
+//
+//	events, errs := store.StreamEventHistory(ctx, workflowID, 1000)
+//	for ev := range events {
+//	    process(ev)
+//	}
+//	if err := <-errs; err != nil {
+//	    // handle error
+//	}
+func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
+	eventCh := make(chan EventRecord, pageSize)
+	errCh := make(chan error, 1)
+
+	if pageSize <= 0 || pageSize > 1000 {
+		pageSize = 1000
+	}
+
+	go func() {
+		defer close(eventCh)
+		defer close(errCh)
+
+		offset := 0
+		for {
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			default:
+			}
+
+			rows, err := s.db.QueryContext(ctx, `
+				SELECT step, event_type, service, operation, request, response, error,
+				       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+				       defer_description, defer_id, child_name, child_input, run_id, new_input,
+				       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+				       payload,
+				       promise_name, promise_id, promise_result, promise_error,
+				       created_at,
+				       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms
+				FROM event_history
+				WHERE workflow_id = $1
+				ORDER BY step
+				LIMIT $2 OFFSET $3
+			`, workflowID, pageSize, offset)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			var pageCount int
+			for rows.Next() {
+				pageCount++
+				var rec EventRecord
+				var service, op, request, response, errMsg sql.NullString
+				var durationMs, timeoutMs sql.NullInt64
+				var signalNames, signalName, signalPayload sql.NullString
+				var deferDesc, deferID sql.NullString
+				var childName, childInput, runID, newInput sql.NullString
+				var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
+				var payload sql.NullString
+				var promiseName, promiseID, promiseResult, promiseError sql.NullString
+				var createdAt sql.NullTime
+
+				if err := rows.Scan(&rec.Step, &rec.EventType,
+					&service, &op, &request, &response, &errMsg,
+					&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
+					&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
+					&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
+					&payload,
+					&promiseName, &promiseID, &promiseResult, &promiseError,
+					&createdAt, &rec.TimestampMs); err != nil {
+					rows.Close()
+					errCh <- err
+					return
+				}
+				if createdAt.Valid {
+					rec.CreatedAt = createdAt.Time
+				}
+
+				rec.Service = service.String
+				rec.Op = op.String
+				rec.Request = tryDecodeBase64(request.String)
+				rec.Response = tryDecodeBase64(response.String)
+				rec.Err = errMsg.String
+				rec.DurationMs = durationMs.Int64
+				rec.SignalNames = signalNames.String
+				rec.TimeoutMs = timeoutMs.Int64
+				rec.SignalName = signalName.String
+				rec.SignalPayload = signalPayload.String
+				rec.DeferDescription = deferDesc.String
+				rec.DeferID = deferID.String
+				rec.ChildName = childName.String
+				rec.ChildInput = childInput.String
+				rec.RunID = runID.String
+				rec.NewInput = newInput.String
+				rec.PluginName = pluginName.String
+				rec.PluginFunc = pluginFunc.String
+				rec.PluginInput = pluginInput.String
+				rec.PluginOutput = pluginOutput.String
+				rec.PluginError = pluginErr.String
+				rec.PromiseName = promiseName.String
+				rec.PromiseID = promiseID.String
+				rec.PromiseResult = promiseResult.String
+				rec.PromiseError = promiseError.String
+
+				if payload.Valid {
+					populateFromPayload(&rec, []byte(payload.String))
+				}
+
+				select {
+				case eventCh <- rec:
+				case <-ctx.Done():
+					rows.Close()
+					errCh <- ctx.Err()
+					return
+				}
+			}
+			rows.Close()
+
+			if err := rows.Err(); err != nil {
+				errCh <- err
+				return
+			}
+
+			// If we got fewer rows than the page size, we're done.
+			if pageCount < pageSize {
+				return
+			}
+			offset += pageSize
+		}
+	}()
+
+	return eventCh, errCh
 }
 
 // AppendEventHistoryBatch appends multiple events to the history.
@@ -877,7 +1064,9 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 
 	// Best-effort cleanup after commit.
 	s.ClearStickyWorker(context.Background(), currentRunID)
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), currentRunID)
+	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), currentRunID); err != nil {
+		log.Printf("[db] release concurrency keys for run %s: %v", currentRunID, err)
+	}
 	s.enforceParentClosePolicy(context.Background(), currentRunID)
 
 	return newRunID, nil
@@ -968,7 +1157,9 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 				runID, result)
 		}
 		s.ClearStickyWorker(context.Background(), runID)
-		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
+		if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID); err != nil {
+			log.Printf("[db] release concurrency keys for run %s: %v", runID, err)
+		}
 		s.enforceParentClosePolicy(context.Background(), runID)
 	}
 
@@ -978,6 +1169,119 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 // AppendEventHistory appends a single event to the history.
 func (s *PostgresStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error {
 	return s.AppendEventHistoryBatch(ctx, workflowID, []EventRecord{rec})
+}
+
+// LoadEventHistoryBatch returns event histories for multiple workflow IDs.
+// Results are keyed by workflow ID with events ordered by step.
+func (s *PostgresStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error) {
+	if len(workflowIDs) == 0 {
+		return map[string][]EventRecord{}, nil
+	}
+
+	// Build parameterized query with IN clause.
+	params := make([]string, len(workflowIDs))
+	args := make([]interface{}, len(workflowIDs))
+	for i, id := range workflowIDs {
+		params[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = id
+	}
+
+	query := fmt.Sprintf(`
+		SELECT workflow_id, step, event_type, service, operation, request, response, error,
+		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+		       defer_description, defer_id, child_name, child_input, run_id, new_input,
+		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+		       payload,
+		       promise_name, promise_id, promise_result, promise_error,
+		       created_at,
+		       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms
+		FROM event_history
+		WHERE workflow_id IN (%s)
+		ORDER BY workflow_id, step
+	`, strings.Join(params, ","))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("load history batch: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[string][]EventRecord)
+	for rows.Next() {
+		var rec EventRecord
+		var wid string
+		var service, op, request, response, errMsg sql.NullString
+		var durationMs, timeoutMs sql.NullInt64
+		var signalNames, signalName, signalPayload sql.NullString
+		var deferDesc, deferID sql.NullString
+		var childName, childInput, runID, newInput sql.NullString
+		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
+		var payload sql.NullString
+		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+		var createdAt sql.NullTime
+		var timestampMs sql.NullInt64
+
+		if err := rows.Scan(&wid, &rec.Step, &rec.EventType,
+			&service, &op, &request, &response, &errMsg,
+			&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
+			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
+			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
+			&payload,
+			&promiseName, &promiseID, &promiseResult, &promiseError,
+			&createdAt, &timestampMs); err != nil {
+			return nil, fmt.Errorf("scan history batch: %w", err)
+		}
+
+		rec.Service = service.String
+		rec.Op = op.String
+		rec.Request = tryDecodeBase64(request.String)
+		rec.Response = tryDecodeBase64(response.String)
+		rec.Err = errMsg.String
+		rec.DurationMs = durationMs.Int64
+		rec.SignalNames = signalNames.String
+		rec.TimeoutMs = timeoutMs.Int64
+		rec.SignalName = signalName.String
+		rec.SignalPayload = signalPayload.String
+		rec.DeferDescription = deferDesc.String
+		rec.DeferID = deferID.String
+		rec.ChildName = childName.String
+		rec.ChildInput = childInput.String
+		rec.RunID = runID.String
+		rec.NewInput = newInput.String
+		rec.PluginName = pluginName.String
+		rec.PluginFunc = pluginFunc.String
+		rec.PluginInput = pluginInput.String
+		rec.PluginOutput = pluginOutput.String
+		rec.PluginError = pluginErr.String
+		rec.PromiseName = promiseName.String
+		rec.PromiseID = promiseID.String
+		rec.PromiseResult = promiseResult.String
+		rec.PromiseError = promiseError.String
+		if createdAt.Valid {
+			rec.CreatedAt = createdAt.Time
+		}
+		if timestampMs.Valid {
+			rec.TimestampMs = timestampMs.Int64
+		}
+
+		if payload.Valid {
+			populateFromPayload(&rec, []byte(payload.String))
+		}
+
+		result[wid] = append(result[wid], rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Ensure all requested IDs have at least an empty slice entry.
+	for _, id := range workflowIDs {
+		if _, ok := result[id]; !ok {
+			result[id] = []EventRecord{}
+		}
+	}
+
+	return result, nil
 }
 
 // LoadWASM returns the WASM bytes for a workflow definition.
@@ -1319,7 +1623,9 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	// Best-effort: clear sticky worker assignment (Feature 10).
 	s.ClearStickyWorker(context.Background(), workflowID)
 	// Best-effort: release all concurrency keys (Feature 5).
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID); err != nil {
+		log.Printf("[db] release concurrency keys for run %s: %v", workflowID, err)
+	}
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
@@ -1366,7 +1672,9 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, 
 	// Best-effort: clear sticky worker assignment (Feature 10).
 	s.ClearStickyWorker(context.Background(), workflowID)
 	// Best-effort: release all concurrency keys (Feature 5).
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID); err != nil {
+		log.Printf("[db] release concurrency keys for run %s: %v", workflowID, err)
+	}
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
@@ -1399,7 +1707,7 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
 func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
 		    completed_at = now(), assigned_to = NULL
@@ -1407,6 +1715,13 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	`, workflowID, workerID, errMsg, errorCode, errorOp)
 	if err != nil {
 		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("move to dead letter queue: workflow %s not found or not assigned to worker %s", workflowID, workerID)
 	}
 
 	// Best-effort: record error in idempotency_keys if this workflow was started with a key.
@@ -1417,7 +1732,9 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	// Best-effort: clear sticky worker assignment (Feature 10).
 	s.ClearStickyWorker(context.Background(), workflowID)
 	// Best-effort: release all concurrency keys (Feature 5).
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID); err != nil {
+		log.Printf("[db] release concurrency keys for run %s: %v", workflowID, err)
+	}
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
@@ -1427,14 +1744,46 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 
 // RetryWorkflow moves a dead_lettered workflow back to a runnable state.
 func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	result, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
 		    error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = now()
 		WHERE id = $1 AND status = 'dead_lettered'
 	`, workflowID)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("retry workflow: rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("retry workflow: workflow %s not found or not dead_lettered", workflowID)
+	}
+	return nil
+}
+
+// TerminateWorkflow force-terminates a workflow, setting status to 'terminated'.
+// Unlike FailWorkflow, this does not require the worker to own the workflow.
+func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'terminated',
+		    error_msg = $2,
+		    completed_at = now(),
+		    assigned_to = NULL
+		WHERE id = $1
+	`, workflowID, reason)
+	if err != nil {
+		return fmt.Errorf("terminate workflow: %w", err)
+	}
+	// Best-effort cleanup.
+	s.ClearStickyWorker(context.Background(), workflowID)
+	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID); err != nil {
+		log.Printf("[db] release concurrency keys for run %s: %v", workflowID, err)
+	}
+	return nil
 }
 
 // ReleaseWorkflow returns a workflow to the queue with a next wake time.
@@ -1807,15 +2156,22 @@ func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key strin
 
 // ListWorkflows returns workflow instances filtered by the given filter parameters,
 // ordered by creation time DESC. Supports search by input content, error message,
-// and combined full-text search, as well as pagination via Offset/Limit.
+// def_name, id, created_at range, and combined full-text search, as well as pagination
+// via Offset/Limit.
 func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	d := s.dialect
 	qb := NewQueryBuilder(d,
 		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
 	)
 
+	if filter.DefName != "" {
+		qb.AddCondition("def_name = %s", filter.DefName)
+	}
 	if filter.Status != "" {
 		qb.AddCondition("status = %s", filter.Status)
+	}
+	if filter.ID != "" {
+		qb.AddLikeCondition("id", "%"+filter.ID+"%", false)
 	}
 	if filter.InputContains != "" {
 		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
@@ -1823,16 +2179,25 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	if filter.ErrorContains != "" {
 		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
 	}
+	if !filter.CreatedAfter.IsZero() {
+		qb.AddRaw(fmt.Sprintf("AND created_at > %s", d.placeholder(qb.NextPos())))
+		qb.AddArgs(filter.CreatedAfter)
+	}
+	if !filter.CreatedBefore.IsZero() {
+		qb.AddRaw(fmt.Sprintf("AND created_at < %s", d.placeholder(qb.NextPos())))
+		qb.AddArgs(filter.CreatedBefore)
+	}
 	if filter.Search != "" {
 		pattern := "%" + filter.Search + "%"
 		icol := d.castExpr("input")
 		rcol := d.castExpr("result")
 		n := qb.NextPos()
-		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s)",
+		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
 			d.likeExpr(icol, n, true),
 			d.likeExpr(rcol, n+1, true),
-			d.likeExpr("error_msg", n+2, true)))
-		qb.AddArgs(pattern, pattern, pattern)
+			d.likeExpr("error_msg", n+2, true),
+			d.likeExpr("def_name", n+3, true)))
+		qb.AddArgs(pattern, pattern, pattern, pattern)
 	}
 
 	qb.AddRaw("ORDER BY created_at DESC")
@@ -2441,6 +2806,64 @@ func (s *PostgresStore) VerifyWorkflowEvents(ctx context.Context, workflowID str
 	}
 	return nil
 }
+
+// DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
+// whose completed_at is older than the cutoff. Event history rows are deleted
+// first (to satisfy FK constraints), then the workflow_instances rows are deleted.
+func (s *PostgresStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalDeleted int64
+	for {
+		// Delete event history first (FK constraint).
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM event_history
+			WHERE workflow_id IN (
+				SELECT id FROM workflow_instances
+				WHERE status = 'dead_lettered'
+				  AND completed_at IS NOT NULL
+				  AND completed_at < $1
+				  AND tenant_id = $2
+				ORDER BY id
+				LIMIT 10000
+			)
+		`, olderThan, s.tenantID)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered event history: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		totalDeleted += n
+
+		// Then delete the workflow instances.
+		result, err = s.db.ExecContext(ctx, `
+			DELETE FROM workflow_instances
+			WHERE id IN (
+				SELECT id FROM workflow_instances
+				WHERE status = 'dead_lettered'
+				  AND completed_at IS NOT NULL
+				  AND completed_at < $1
+				  AND tenant_id = $2
+				ORDER BY id
+				LIMIT 10000
+			)
+		`, olderThan, s.tenantID)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
+		}
+		n, _ = result.RowsAffected()
+		totalDeleted += n
+		if n == 0 {
+			break
+		}
+	}
+	return totalDeleted, nil
+}
+
+// CountActiveConcurrencyKeys returns the number of active (non-expired) concurrency keys.
+func (s *PostgresStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM concurrency_keys WHERE tenant_id = $1`, s.tenantID).Scan(&count)
+	return count, err
+}
+
 func nullStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
 }

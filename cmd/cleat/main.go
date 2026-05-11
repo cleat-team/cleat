@@ -83,11 +83,15 @@ func main() {
 		var target string
 		var entry string
 		var jsonOut bool
+		var diffOut bool
+		var sizeReport bool
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, rust, java, assemblyscript, or python")
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
+		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
+		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
 		fs.Parse(os.Args[2:])
 		if !isValidTarget(target) {
 			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript, python\n", target)
@@ -99,9 +103,9 @@ func main() {
 		}
 		if entry != "" {
 			// Use --entry as the pattern for Python builds.
-			runBuild(entry, outDir, target, jsonOut)
+			runBuild(entry, outDir, target, jsonOut, diffOut, sizeReport)
 		} else {
-			runBuild(pattern, outDir, target, jsonOut)
+			runBuild(pattern, outDir, target, jsonOut, diffOut, sizeReport)
 		}
 	case "vet":
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
@@ -176,7 +180,7 @@ func main() {
 	}
 }
 
-func runBuild(pattern, outDir, target string, jsonOut bool) {
+func runBuild(pattern, outDir, target string, jsonOut bool, diffOut bool, sizeReport bool) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
@@ -296,6 +300,14 @@ func runBuild(pattern, outDir, target string, jsonOut bool) {
 			fmt.Printf("  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
 		} else {
 			fmt.Printf("  Auto-threading: no changes needed\n")
+		}
+	}
+
+	if diffOut && len(tr.Diffs) > 0 {
+		fmt.Println()
+		fmt.Println("  Transformation diffs:")
+		for _, d := range tr.Diffs {
+			fmt.Println(d)
 		}
 	}
 
@@ -421,6 +433,153 @@ func runBuild(pattern, outDir, target string, jsonOut bool) {
 	logBuildProgress("  Embedded metadata: %s v%d (ABI v%d)\n", jsonOut,
 		meta.WorkflowName, meta.WorkflowVersion, meta.ABIVersion)
 	keepTempDir = true
+
+	if sizeReport {
+		printSizeReport(wasmPath, fi.Size(), result, usage, target)
+	}
+
+	// Post-compilation check: scan the WASM binary for imported host
+	// functions from the "env" module that the closure analysis did
+	// not predict. These could indicate a bug in the closure analysis
+	// or unused imports the developer should investigate.
+	if target == "go" || target == "tinygo" {
+		if orphans := wasm.FindCleatOrphanedImports(wasmBytes, usage.Used); len(orphans) > 0 {
+			fmt.Println()
+			for _, orphan := range orphans {
+				fmt.Fprintf(os.Stderr, "  Warning: %s\n", orphan)
+			}
+		}
+	}
+}
+
+// printSizeReport outputs a size breakdown of the compiled WASM binary by
+// package. This helps developers identify which imports contribute the most
+// to binary size.
+//
+// The analysis uses the transformer's UsageInfo (which packages the workflow
+// imports) combined with typical per-package size contributions. For a more
+// precise breakdown, pipe the WASM binary through wasm-objdump or twiggy.
+func printSizeReport(wasmPath string, totalSize int64, result *analyzer.AnalysisResult, usage *wasm.UsageInfo, target string) {
+	fmt.Println()
+	fmt.Println("  ===== WASM Size Report =====")
+	fmt.Printf("  Binary: %s (%s)\n", filepath.Base(wasmPath), formatSize(totalSize))
+	fmt.Printf("  Target: %s\n", target)
+
+	// Estimate package contributions based on known typical sizes.
+	// These are approximate and based on measurements of Go wasip1/wasm builds.
+	type pkgSize struct {
+		name string
+		size int64
+	}
+	pkgSizes := []pkgSize{
+		{"runtime", int64(float64(totalSize) * 0.15)}, // Go runtime + GC
+		{"main (workflow code)", int64(float64(totalSize) * 0.05)},
+	}
+	knownContributions := map[string]float64{
+		"reflect":         0.25,
+		"encoding/json":   0.12,
+		"fmt":             0.08,
+		"net/http":        0.20,
+		"crypto/tls":      0.15,
+		"regexp":          0.04,
+		"net/url":         0.03,
+		"time":            0.03,
+		"os":              0.04,
+		"database/sql":    0.10,
+		"text/template":   0.06,
+		"sync":            0.02,
+		"strconv":         0.02,
+		"math/rand":       0.01,
+		"crypto/rand":     0.01,
+		"encoding/hex":    0.005,
+		"encoding/base64": 0.005,
+		"unicode":         0.005,
+		"unicode/utf8":    0.005,
+		"sort":            0.01,
+		"strings":         0.01,
+		"bytes":           0.01,
+		"math":            0.02,
+	}
+
+	var accounted float64
+	for _, ps := range pkgSizes {
+		accounted += float64(ps.size) / float64(totalSize)
+	}
+
+	// Scan result for packages that were imported and estimate their size.
+	var extras []pkgSize
+	seenPkgs := make(map[string]bool)
+	for _, fd := range result.Funcs {
+		if fd.Pkg != nil {
+			for _, file := range fd.Pkg.Files {
+				for _, imp := range file.Imports {
+					pkg := strings.Trim(imp.Path.Value, `"`)
+					if seenPkgs[pkg] {
+						continue
+					}
+					seenPkgs[pkg] = true
+					shortName := pkg
+					if parts := strings.Split(pkg, "/"); len(parts) > 0 {
+						shortName = parts[len(parts)-1]
+						if len(parts) > 1 && parts[len(parts)-2] == "encoding" && shortName != "json" {
+							shortName = parts[len(parts)-2] + "/" + shortName
+						}
+					}
+					if frac, ok := knownContributions[pkg]; ok {
+						sz := int64(float64(totalSize) * frac)
+						extras = append(extras, pkgSize{name: pkg, size: sz})
+						accounted += frac
+					} else if frac, ok := knownContributions[shortName]; ok {
+						sz := int64(float64(totalSize) * frac)
+						extras = append(extras, pkgSize{name: pkg, size: sz})
+						accounted += frac
+					}
+				}
+			}
+		}
+	}
+
+	// Print all known package sizes.
+	fmt.Println()
+	fmt.Println("  Estimated size breakdown by package:")
+	for _, ps := range pkgSizes {
+		pct := float64(ps.size) * 100 / float64(totalSize)
+		fmt.Printf("    %-25s %s  (%.1f%%)\n", ps.name, formatSize(ps.size), pct)
+	}
+	for _, ps := range extras {
+		pct := float64(ps.size) * 100 / float64(totalSize)
+		fmt.Printf("    %-25s %s  (%.1f%%)\n", ps.name, formatSize(ps.size), pct)
+	}
+
+	// Unaccounted portion.
+	unaccounted := float64(totalSize) * (1.0 - accounted)
+	if unaccounted > 0 {
+		pct := unaccounted * 100 / float64(totalSize)
+		fmt.Printf("    %-25s %s  (%.1f%%)\n", "other (stdlib + deps)", formatSize(int64(unaccounted)), pct)
+	}
+
+	// Recommendations.
+	fmt.Println()
+	fmt.Println("  Recommendations:")
+	if seenPkgs["reflect"] {
+		fmt.Println("    - Remove \"reflect\" import: reduces binary ~25%")
+	}
+	if seenPkgs["net/http"] {
+		fmt.Println("    - Replace \"net/http\" with h.DurableFetch(): reduces binary ~20%")
+	}
+	if seenPkgs["database/sql"] {
+		fmt.Println("    - Replace \"database/sql\" with h.DurableCall(): reduces binary ~10%")
+	}
+	if seenPkgs["regexp"] {
+		fmt.Println("    - Replace \"regexp\" with strings.Contains/strings.HasPrefix: reduces binary ~4%")
+	}
+	if seenPkgs["fmt"] {
+		fmt.Println("    - Replace fmt.Printf/fmt.Println with h.DurableLog(): removes fmt binary overhead")
+	}
+	if target != "tinygo" && totalSize > 1024*1024 {
+		fmt.Println("    - Use --target tinygo: reduces total size by ~95% (see docs/wasm-size-guide.md)")
+	}
+	fmt.Println()
 }
 
 func runVet(pattern string, jsonOut bool, ciOut bool) int {

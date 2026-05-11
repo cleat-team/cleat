@@ -102,6 +102,31 @@ type Environment struct {
 	// The signal name and JSON payload are recorded deterministically
 	// in the workflow_signals table.
 	SignalWorkflow func(ctx context.Context, workflowID, signalName, payload string) error
+
+	// Audit provides access to the plugin audit log. Plugins can record
+	// deployment, deprecation, capability changes, and invocation events.
+	// May be nil if the audit log is not configured.
+	Audit *AuditLogger
+}
+
+// AuditLogger is the interface for recording plugin lifecycle events.
+// The concrete implementation writes to the plugin_audit_log table.
+type AuditLogger interface {
+	// Deploy records a plugin deployment event.
+	Deploy(ctx context.Context, pluginName, pluginVersion string) error
+
+	// Deprecate records a plugin deprecation event.
+	Deprecate(ctx context.Context, pluginName, pluginVersion string) error
+
+	// CapabilityChange records a change in plugin capabilities.
+	CapabilityChange(ctx context.Context, pluginName, pluginVersion, details string) error
+
+	// Invocation records a plugin function invocation. The dropRate
+	// (0.0-1.0) controls sampling: 0.995 means ~1 in 200 are logged.
+	Invocation(ctx context.Context, pluginName, functionName string, dropRate float64) error
+
+	// EnforceRetention deletes audit log entries that exceed the policy.
+	EnforceRetention(ctx context.Context, policy interface{}) (int64, error)
 }
 
 // --- Optional interfaces (discovered by loader via type assertion) ---

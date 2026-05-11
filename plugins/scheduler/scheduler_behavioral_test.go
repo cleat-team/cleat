@@ -605,7 +605,7 @@ func setupTestPlugin(t *testing.T, clock *controllableClock) (*Plugin, http.Hand
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
 	return p, handler, store
 }
 

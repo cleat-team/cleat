@@ -1272,7 +1272,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil},
 			},
 		},
 	}, nil)
@@ -1296,7 +1296,7 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil},
 			},
 		},
 	}, nil)
@@ -1761,6 +1761,7 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					"",               // promise_result
 					"",               // promise_error
 					int64(0),         // timestamp_ms
+					nil,              // created_at
 				},
 				{
 					int64(1), // step
@@ -1775,6 +1776,7 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					[]byte(`{"duration_ms":5000}`), // payload
 					"", "", "", "",
 					int64(0), // timestamp_ms
+					nil,      // created_at
 				},
 			},
 		},

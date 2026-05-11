@@ -31,6 +31,7 @@ export interface EventRecord {
   child_input?: string;
   run_id?: string;
   new_input?: string;
+  created_at?: string;
 }
 
 export interface DAGTask {

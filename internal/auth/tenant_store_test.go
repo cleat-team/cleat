@@ -437,7 +437,7 @@ func TestStoreAndMiddleware_EndToEnd(t *testing.T) {
 	// Now use the middleware with the same DB.
 	var gotTenant uuid.UUID
 	var gotOK bool
-	mw := Middleware(host.NewPostgresStore(db))
+	mw := Middleware(host.NewPostgresStore(db), false)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotTenant, gotOK = TenantIDFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)

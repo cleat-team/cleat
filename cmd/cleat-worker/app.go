@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -113,6 +114,8 @@ func (s *apiServer) handleDeadLetters(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 2 && parts[1] == "reprocess" && r.Method == http.MethodPost:
 		s.handleDeadLetterReprocess(w, r, id)
+	case len(parts) == 2 && parts[1] == "terminate" && r.Method == http.MethodPost:
+		s.handleDeadLetterTerminate(w, r, id)
 	default:
 		s.writeError(w, 404, "not found")
 	}
@@ -156,6 +159,21 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	}
 
 	s.writeJSON(w, 201, map[string]string{"id": runID})
+}
+
+func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, int64(1<<10)) // 1 KB
+		json.NewDecoder(r.Body).Decode(&req)
+	}
+	if err := s.store.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "terminated"})
 }
 
 func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, id string) {

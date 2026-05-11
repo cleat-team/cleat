@@ -17,6 +17,7 @@ import (
 	"go/format"
 	"go/token"
 	"go/types"
+	"os"
 	"strings"
 
 	"github.com/rcownie/cleat/internal/analyzer"
@@ -28,6 +29,7 @@ import (
 type Result struct {
 	Files  map[string][]byte // filename → transformed Go source
 	AddedH []string          // fully-qualified names of functions that got h added
+	Diffs  []string          // unified diffs of transformed files, computed when requested
 }
 
 // Config holds the inputs for the transformation.
@@ -156,7 +158,18 @@ func Transform(cfg *Config) (*Result, error) {
 		if err := format.Node(&buf, fset, file); err != nil {
 			return nil, fmt.Errorf("formatting %s: %w", filename, err)
 		}
-		tr.Files[filename] = buf.Bytes()
+		newContent := buf.Bytes()
+		tr.Files[filename] = newContent
+
+		// Diff computation: compare original source with transformed source.
+		if len(needsH) > 0 {
+			origContent, err := os.ReadFile(filename)
+			if err == nil {
+				if diff := unifiedDiff(filename, origContent, newContent); diff != "" {
+					tr.Diffs = append(tr.Diffs, diff)
+				}
+			}
+		}
 	}
 
 	return tr, nil
@@ -476,4 +489,183 @@ func buildFuncFileMap(files []*ast.File, result *analyzer.AnalysisResult) map[st
 		}
 	}
 	return m
+}
+// unifiedDiff returns a unified-format diff between oldContent and newContent
+// for the given filename, or an empty string if there are no differences.
+func unifiedDiff(filename string, oldContent, newContent []byte) string {
+	oldLines := bytes.Split(oldContent, []byte("\n"))
+	newLines := bytes.Split(newContent, []byte("\n"))
+
+	// Remove trailing empty line from split (files with trailing newline).
+	if len(oldLines) > 0 && len(oldLines[len(oldLines)-1]) == 0 {
+		oldLines = oldLines[:len(oldLines)-1]
+	}
+	if len(newLines) > 0 && len(newLines[len(newLines)-1]) == 0 {
+		newLines = newLines[:len(newLines)-1]
+	}
+
+	type edit struct {
+		op    byte   // ' ', '-', '+'
+		lineN int    // line number in original (for ' ' and '-') or new (for '+')
+		text  string
+	}
+
+	// Compute longest common subsequence length table.
+	m, n := len(oldLines), len(newLines)
+	dp := make([][]int, m+1)
+	for i := range dp {
+		dp[i] = make([]int, n+1)
+	}
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if string(oldLines[i-1]) == string(newLines[j-1]) {
+				dp[i][j] = dp[i-1][j-1] + 1
+			} else {
+				if dp[i-1][j] > dp[i][j-1] {
+					dp[i][j] = dp[i-1][j]
+				} else {
+					dp[i][j] = dp[i][j-1]
+				}
+			}
+		}
+	}
+
+	// Backtrack to build edit sequence.
+	var edits []edit
+	i, j := m, n
+	for i > 0 || j > 0 {
+		if i > 0 && j > 0 && string(oldLines[i-1]) == string(newLines[j-1]) {
+			edits = append(edits, edit{op: ' ', lineN: i, text: string(oldLines[i-1])})
+			i--
+			j--
+		} else if j > 0 && (i == 0 || (dp[i][j-1] >= dp[i-1][j])) {
+			edits = append(edits, edit{op: '+', lineN: j, text: string(newLines[j-1])})
+			j--
+		} else {
+			edits = append(edits, edit{op: '-', lineN: i, text: string(oldLines[i-1])})
+			i--
+		}
+	}
+	// Reverse to chronological order.
+	for k := 0; k < len(edits)/2; k++ {
+		edits[k], edits[len(edits)-1-k] = edits[len(edits)-1-k], edits[k]
+	}
+
+	if len(edits) == 0 {
+		return ""
+	}
+
+	// Check if there are any actual changes.
+	hasChanges := false
+	for _, e := range edits {
+		if e.op != ' ' {
+			hasChanges = true
+			break
+		}
+	}
+	if !hasChanges {
+		return ""
+	}
+
+	// Build unified diff output.
+	var buf bytes.Buffer
+	buf.WriteString(fmt.Sprintf("--- %s\n", filename))
+	buf.WriteString(fmt.Sprintf("+++ %s (transformed)\n", filename))
+
+	// Group edits into hunks with surrounding context.
+	hunkStart := 0
+	for hunkStart < len(edits) {
+		// Skip leading context lines.
+		hunkEnd := hunkStart
+		for hunkEnd < len(edits) && edits[hunkEnd].op == ' ' {
+			hunkEnd++
+		}
+		if hunkEnd >= len(edits) {
+			break
+		}
+		// Include non-context lines and trailing context.
+		for hunkEnd < len(edits) {
+			if edits[hunkEnd].op != ' ' {
+				hunkEnd++
+				continue
+			}
+			// Count consecutive context lines; include up to 3.
+			ctxCount := 1
+			for ctxEnd := hunkEnd + 1; ctxEnd < len(edits) && edits[ctxEnd].op == ' '; ctxEnd++ {
+				ctxCount++
+			}
+			if ctxCount >= 3 {
+				hunkEnd += 3
+				break
+			}
+			hunkEnd += ctxCount
+		}
+		if hunkEnd > len(edits) {
+			hunkEnd = len(edits)
+		}
+
+		// Include leading context (up to 3 lines before the hunk).
+		start := hunkStart
+		if trailingCtx := hunkStart - 3; trailingCtx > 0 {
+			// Check that the lines before are context lines.
+			allContext := true
+			for k := trailingCtx; k < hunkStart; k++ {
+				if edits[k].op != ' ' {
+					allContext = false
+					break
+				}
+			}
+			if allContext {
+				start = trailingCtx
+			}
+		} else if hunkStart > 0 && hunkStart <= 3 {
+			allContext := true
+			for k := 0; k < hunkStart; k++ {
+				if edits[k].op != ' ' {
+					allContext = false
+					break
+				}
+			}
+			if allContext {
+				start = 0
+			}
+		}
+
+		// Count removal and addition lines for hunk header.
+		remCount, addCount := 0, 0
+		oldLineStart, newLineStart := 0, 0
+		for k := start; k < hunkEnd; k++ {
+			if edits[k].op == '-' || edits[k].op == ' ' {
+				if edits[k].op == '-' {
+					remCount++
+				}
+				if oldLineStart == 0 {
+					oldLineStart = edits[k].lineN
+				}
+			}
+			if edits[k].op == '+' || edits[k].op == ' ' {
+				if edits[k].op == '+' {
+					addCount++
+				}
+				if newLineStart == 0 {
+					newLineStart = edits[k].lineN
+				}
+			}
+		}
+		if oldLineStart == 0 {
+			oldLineStart = 1
+		}
+		if newLineStart == 0 {
+			newLineStart = 1
+		}
+
+		buf.WriteString(fmt.Sprintf("@@ -%d,%d +%d,%d @@\n", oldLineStart, remCount, newLineStart, addCount))
+		for k := start; k < hunkEnd; k++ {
+			buf.WriteString(fmt.Sprintf("%c%s\n", edits[k].op, edits[k].text))
+		}
+
+		hunkStart = hunkEnd
+	}
+
+	return buf.String()
 }

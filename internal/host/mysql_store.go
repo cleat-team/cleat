@@ -1420,7 +1420,79 @@ func (s *MySQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte
 	return tenantID, nil
 }
 
-// ---------------------------------------------------------------------------
+// CountActiveConcurrencyKeys returns the number of non-expired concurrency keys.
+func (s *MySQLStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM concurrency_keys WHERE expires_at >= NOW()`).Scan(&count)
+	return count, err
+}
+
+// LoadEventHistoryBatch returns event histories for multiple workflow IDs.
+func (s *MySQLStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error) {
+	return nil, fmt.Errorf("LoadEventHistoryBatch not implemented for MySQL")
+}
+
+// TerminateWorkflow marks a workflow instance as terminated.
+func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	return fmt.Errorf("TerminateWorkflow not implemented for MySQL")
+}
+
+// DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
+// whose completed_at is older than the cutoff.
+func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalDeleted int64
+	for {
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM event_history
+			WHERE workflow_id IN (
+				SELECT id FROM workflow_instances
+				WHERE status = 'dead_lettered'
+				  AND completed_at IS NOT NULL
+				  AND completed_at < ?
+				ORDER BY id
+				LIMIT 10000
+			)
+		`, olderThan)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered event history: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		totalDeleted += n
+
+		result, err = s.db.ExecContext(ctx, `
+			DELETE FROM workflow_instances
+			WHERE id IN (
+				SELECT id FROM workflow_instances
+				WHERE status = 'dead_lettered'
+				  AND completed_at IS NOT NULL
+				  AND completed_at < ?
+				ORDER BY id
+				LIMIT 10000
+			)
+		`, olderThan)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
+		}
+		n, _ = result.RowsAffected()
+		totalDeleted += n
+		if n == 0 {
+			break
+		}
+	}
+	return totalDeleted, nil
+}
+
+// StreamEventHistory loads event history for a workflow in pages, returning
+// events through a channel. Not implemented for MySQL.
+func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
+	errCh := make(chan error, 1)
+	errCh <- fmt.Errorf("StreamEventHistory not implemented for MySQL")
+	ch := make(chan EventRecord)
+	close(ch)
+	return ch, errCh
+}
+
+
 // MySQLStoreFactory
 // ---------------------------------------------------------------------------
 

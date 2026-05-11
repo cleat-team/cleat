@@ -114,6 +114,40 @@ var (
 		Name: "cleat_retention_last_run_timestamp",
 		Help: "Unix timestamp of the last retention policy run",
 	})
+
+	// ---- P3.1 Workflow stuck metrics ----
+	workflowsStuck = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_workflows_stuck",
+		Help: "Number of workflow instances stalled beyond the configured stall threshold",
+	})
+
+	// ---- P3.2 Missing metrics ----
+	memoryPressureRatio = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_memory_pressure_ratio",
+		Help: "Current memory pressure ratio (0.0-1.0) from MemoryMonitor",
+	})
+	eventHistorySizeBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_event_history_size_bytes",
+		Help: "Estimated total bytes of event_history table",
+	})
+	eventHistoryRowCount = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_event_history_row_count",
+		Help: "Total row count of event_history table",
+	})
+	reaperInstancesClaimedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cleat_reaper_instances_claimed_total",
+		Help: "Workflow instances reclaimed by the stale-instance reaper",
+	}, []string{"status"})
+
+	// ---- P3.5 Concurrency key metrics ----
+	concurrencyKeysTotal = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_concurrency_keys_total",
+		Help: "Total number of concurrency keys currently tracked",
+	})
+	concurrencyKeysExpiringSoon = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_concurrency_keys_expiring_soon",
+		Help: "Number of concurrency keys approaching expiry while owning workflow is still running",
+	})
 )
 
 func init() {
@@ -125,6 +159,10 @@ func init() {
 		backgroundLoopsTotal, backgroundLoopDuration, backgroundLoopItemsProcessed,
 		eventsDeletedTotal, retentionLastRunTimestamp,
 		workerCount,
+		workflowsStuck,
+		memoryPressureRatio, eventHistorySizeBytes, eventHistoryRowCount,
+		reaperInstancesClaimedTotal,
+		concurrencyKeysTotal, concurrencyKeysExpiringSoon,
 	)
 }
 

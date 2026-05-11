@@ -55,7 +55,7 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 	mux.HandleFunc("/api/workflows/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
 
 	t.Run("invalid_api_key_returns_401", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/workflows/my-wf/start", nil)
@@ -88,7 +88,7 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 		mux2.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		handler2 := auth.Middleware(host.NewPostgresStore(db))(mux2)
+		handler2 := auth.Middleware(host.NewPostgresStore(db), false)(mux2)
 
 		req := httptest.NewRequest("GET", "/healthz", nil)
 		w := httptest.NewRecorder()

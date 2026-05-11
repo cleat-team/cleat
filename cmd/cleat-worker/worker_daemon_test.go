@@ -95,6 +95,8 @@ type mockStore struct {
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
 	continueAsNewFn             func(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error)
 	finalizeWorkflowSegmentFn   func(ctx context.Context, runID, workerID string, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
+	countActiveConcurrencyKeysFn func(ctx context.Context) (int, error)
+	streamEventHistoryFn        func(ctx context.Context, workflowID string, pageSize int) (<-chan host.EventRecord, <-chan error)
 }
 
 func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error) {
@@ -2930,3 +2932,15 @@ func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (i
 	return 0, nil
 }
 func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
+func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]host.EventRecord, error) { return nil, nil }
+func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error { return nil }
+func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
+func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) { if m.countActiveConcurrencyKeysFn != nil { return m.countActiveConcurrencyKeysFn(ctx) }; return 0, nil }
+func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan host.EventRecord, <-chan error) {
+	if m.streamEventHistoryFn != nil {
+		return m.streamEventHistoryFn(ctx, workflowID, pageSize)
+	}
+	ch := make(chan host.EventRecord)
+	close(ch)
+	return ch, nil
+}

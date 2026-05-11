@@ -48,6 +48,7 @@ import (
 	"github.com/rcownie/cleat/internal/migration"
 	"github.com/rcownie/cleat/internal/plugin"
 	"github.com/rcownie/cleat/internal/wasm"
+	"github.com/tetratelabs/wazero"
 	"golang.org/x/time/rate"
 
 	// Plugins
@@ -97,6 +98,15 @@ func main() {
 	wasmCacheMaxMB := flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
 	schemaName := flag.String("schema", "public", "PostgreSQL schema for cleat tables (default \"public\"). Sets search_path on connections; CREATE SCHEMA IF NOT EXISTS on startup.")
 	peerSchemas := flag.String("peer-schemas", "", "Comma-separated list of peer cleat schemas this instance can interact with (cross-instance child workflows, signals)")
+	deadLetterRetentionDays := flag.Int("dead-letter-retention-days", 90, "Days to retain dead-lettered workflow instances (0 = keep indefinitely)")
+	wasmMemoryPages := flag.Uint("wasm-memory-pages", 4096, "WASM memory limit in pages (64 KB each, 256 MB default, 0 = no limit)")
+	dbMaxOpenConns := flag.Int("db-max-open-conns", 0, "Max database open connections (0 = concurrency + 5)")
+	dbMaxIdleConns := flag.Int("db-max-idle-conns", 0, "Max database idle connections (0 = 5)")
+	defaultWorkflowTimeout := flag.Duration("default-workflow-timeout", 0, "Default workflow execution timeout (0 = disabled)")
+	wasmInstanceTimeout := flag.Duration("wasm-instance-timeout", 0, "WASM instance timeout per execution (0 = disabled)")
+	stallThreshold := flag.Duration("stall-threshold", 30*time.Minute, "Threshold for considering a workflow stuck (no progress beyond this)")
+	metricsCollectionInterval := flag.Duration("metrics-collection-interval", 5*time.Minute, "Interval between background metrics collection (event_history stats, etc.)")
+	allowVersionMismatch := flag.Bool("allow-version-mismatch", false, "Allow replay with mismatched workflow definition versions (escape hatch for emergency rollbacks)")
 	flag.Parse()
 
 
@@ -192,8 +202,16 @@ func main() {
 				sdb.Close()
 				log.Fatalf("[worker %s] shard %q ping: %v", workerID, cfg.Name, err)
 			}
-			sdb.SetMaxOpenConns(15)
-			sdb.SetMaxIdleConns(5)
+			shardMaxOpen := 15
+			if *dbMaxOpenConns > 0 {
+				shardMaxOpen = *dbMaxOpenConns
+			}
+			shardMaxIdle := 5
+			if *dbMaxIdleConns > 0 {
+				shardMaxIdle = *dbMaxIdleConns
+			}
+			sdb.SetMaxOpenConns(shardMaxOpen)
+			sdb.SetMaxIdleConns(shardMaxIdle)
 			sdb.SetConnMaxLifetime(5 * time.Minute)
 
 			shardDBs[i] = sdb
@@ -245,8 +263,16 @@ func main() {
 		}
 		defer db.Close()
 
-		db.SetMaxOpenConns(*concurrency + 5)
-		db.SetMaxIdleConns(5)
+		maxOpen := *concurrency + 5
+		if *dbMaxOpenConns > 0 {
+			maxOpen = *dbMaxOpenConns
+		}
+		maxIdle := 5
+		if *dbMaxIdleConns > 0 {
+			maxIdle = *dbMaxIdleConns
+		}
+		db.SetMaxOpenConns(maxOpen)
+		db.SetMaxIdleConns(maxIdle)
 		db.SetConnMaxLifetime(5 * time.Minute)
 		factory = host.NewPostgresStoreFactory(db, *schemaName)
 		s, _, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
@@ -413,32 +439,53 @@ func main() {
 		}
 	}
 
+	// Create a shared wazero Runtime reused across all workflow executions.
+	// CompiledModule instances are cached keyed by defName:version, enabling
+	// true compiled module reuse and avoiding per-execution compilation.
+	// wazero's Runtime is safe for concurrent module instantiation.
+	wazeroRuntime, rtErr := host.NewRuntime(ctx, host.WithMemoryLimitPages(uint32(*wasmMemoryPages)))
+	if rtErr != nil {
+		log.Fatalf("[worker %s] Failed to create wazero Runtime: %v", workerID, rtErr)
+	}
+	defer wazeroRuntime.Close(ctx)
+
 	w := &Worker{
-		id:                  workerID,
-		store:               store,
-		concurrency:         *concurrency,
-		heartbeatInterval:   *heartbeatInterval,
-		pollInterval:        *pollInterval,
-		ctx:                 ctx,
-		cancel:              cancel,
-		namespace:           *namespace,
-		wasmCache:           newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
-		scheduleInterval:    15 * time.Second,
-		compactionThreshold: *compactionThreshold,
-		compactionInterval:  *compactionInterval,
-		pluginRegistry:       pluginRegistry,
-			plugList:             plugList,
-			tenantPools:          tenantPools,
-			memorySampleRetention: *memorySampleRetention,
-			retentionDays:       *retentionDays,
-			schemaName:  *schemaName,
-			peerSchemas: parsePeerSchemas(*peerSchemas),
-			maxRetries:          *maxRetries,
-			redactionEnabled:    *redact,
-			drainCh:             make(chan struct{}),
-		}
+		id:                      workerID,
+		store:                   store,
+		concurrency:             *concurrency,
+		heartbeatInterval:       *heartbeatInterval,
+		pollInterval:            *pollInterval,
+		ctx:                     ctx,
+		cancel:                  cancel,
+		namespace:               *namespace,
+		wasmCache:               newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
+		scheduleInterval:        15 * time.Second,
+		compactionThreshold:     *compactionThreshold,
+		compactionInterval:      *compactionInterval,
+		pluginRegistry:          pluginRegistry,
+		plugList:                plugList,
+		tenantPools:             tenantPools,
+		memorySampleRetention:   *memorySampleRetention,
+		retentionDays:           *retentionDays,
+		deadLetterRetentionDays: *deadLetterRetentionDays,
+		schemaName:              *schemaName,
+		peerSchemas:             parsePeerSchemas(*peerSchemas),
+		maxRetries:              *maxRetries,
+		redactionEnabled:        *redact,
+		wasmMemoryPages:         uint32(*wasmMemoryPages),
+		stallThreshold:          *stallThreshold,
+		metricsInterval:         *metricsCollectionInterval,
+		allowVersionMismatch:    *allowVersionMismatch,
+		wasmInstanceTimeout:     *wasmInstanceTimeout,
+		defaultWorkflowTimeout:  *defaultWorkflowTimeout,
+		drainCh:                 make(chan struct{}),
+	}
 
 		log.Printf("[worker %s] Redaction %s", workerID, map[bool]string{true: "enabled", false: "disabled"}[*redact])
+
+	// Set the shared wazero Runtime and compiled module cache on the Worker.
+	w.wazeroRuntime = wazeroRuntime
+	w.compiledModCache = newCompiledModCache(*wasmCacheMaxEntries)
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
@@ -521,7 +568,7 @@ func main() {
 
 		// Wrap with auth middleware if --require-auth is true.
 		if *requireAuth {
-			handler = auth.Middleware(store)(handler)
+			handler = auth.Middleware(store, true)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			var keyCount int
@@ -666,6 +713,76 @@ func (c *wasmLRUCache) evictLocked() {
 	}
 }
 
+// compiledModCache is an LRU cache for compiled WASM modules keyed by
+// "defName:version". CompiledModule instances are safe for concurrent
+// instantiation per wazero guarantees, so this cache can be shared
+// across goroutines.
+//
+// H1 fix: removed the time.AfterFunc delayed close that the original
+// hostile-round2 code used. wazero's CompiledModule.Close is safe for
+// concurrent instantiation — it prevents new instantiations but does
+// not affect in-flight ones — so immediate close on eviction is correct.
+type compiledModCache struct {
+	mu      sync.Mutex
+	list    *list.List // list of *compiledModEntry for LRU ordering
+	entries map[string]*list.Element
+	maxSize int
+}
+
+type compiledModEntry struct {
+	key    string
+	module wazero.CompiledModule
+}
+
+func newCompiledModCache(maxSize int) *compiledModCache {
+	if maxSize <= 0 {
+		maxSize = 100
+	}
+	return &compiledModCache{
+		list:    list.New(),
+		entries: make(map[string]*list.Element),
+		maxSize: maxSize,
+	}
+}
+
+func (c *compiledModCache) get(key string) (wazero.CompiledModule, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.entries[key]; ok {
+		c.list.MoveToFront(elem)
+		return elem.Value.(*compiledModEntry).module, true
+	}
+	return nil, false
+}
+
+func (c *compiledModCache) put(key string, mod wazero.CompiledModule) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.entries[key]; ok {
+		c.list.MoveToFront(elem)
+		// Close the old module immediately when replacing in the cache.
+		// wazero's CompiledModule.Close is safe for concurrent instantiation:
+		// it only prevents new instantiations, in-flight ones continue.
+		oldMod := elem.Value.(*compiledModEntry).module
+		oldMod.Close(context.Background())
+		elem.Value.(*compiledModEntry).module = mod
+		return
+	}
+	for c.list.Len() >= c.maxSize {
+		if back := c.list.Back(); back != nil {
+			entry := back.Value.(*compiledModEntry)
+			delete(c.entries, entry.key)
+			c.list.Remove(back)
+			// Close immediately on eviction. wazero's Close is safe for
+			// concurrent instantiation — it blocks new instantiations but
+			// does not affect in-flight ones.
+			entry.module.Close(context.Background())
+		}
+	}
+	elem := c.list.PushFront(&compiledModEntry{key: key, module: mod})
+	c.entries[key] = elem
+}
+
 type Worker struct {
 	id                string
 	store             host.WorkflowStore
@@ -687,6 +804,11 @@ type Worker struct {
 	execEngines sync.Map // map[workflowID]*host.Engine
 	wasmCache   *wasmLRUCache
 
+	// Shared wazero Runtime reused across all workflow executions.
+	// CompiledModule instances from this Runtime are cached for reuse.
+	wazeroRuntime    *host.Runtime
+	compiledModCache *compiledModCache
+
 	scheduleMu       sync.Mutex
 	scheduleInterval time.Duration
 
@@ -699,16 +821,23 @@ type Worker struct {
 	compactionThreshold int
 	compactionInterval  time.Duration
 
-	memoryController    *MemoryController
-	maxRetries          int
-	redactionEnabled    bool
-	memorySampleRetention int
-	retentionDays        int
-	schemaName           string
-	peerSchemas          []string
+	memoryController        *MemoryController
+	maxRetries              int
+	redactionEnabled        bool
+	memorySampleRetention   int
+	retentionDays           int
+	deadLetterRetentionDays int
+	schemaName              string
+	peerSchemas             []string
+	wasmMemoryPages         uint32
+	stallThreshold          time.Duration
+	metricsInterval         time.Duration
+	allowVersionMismatch    bool
+	wasmInstanceTimeout     time.Duration
+	defaultWorkflowTimeout  time.Duration
 
-	drainCh    chan struct{}
-	drainOnce  sync.Once
+	drainCh   chan struct{}
+	drainOnce sync.Once
 }
 
 // DrainComplete returns a channel that is closed when the drain completes
@@ -755,6 +884,12 @@ func (w *Worker) Run() {
 	go w.memoryCleanupLoop(w.memorySampleRetention)
 	w.wg.Add(1)
 	go w.retentionLoop(w.retentionDays)
+	w.wg.Add(1)
+	go w.workflowStuckCheckLoop()
+
+	// Background metrics collection loop (P3.2).
+	w.wg.Add(1)
+	go w.metricsCollectionLoop()
 
 	log.Printf("[worker %s] Running", w.id)
 
@@ -1003,14 +1138,25 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 
 	// ---- Create engine ----
-	rt, err := host.NewRuntime(w.ctx)
-	if err != nil {
-		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("create runtime: %v", err), host.ErrUnknown.String(), "", nil)
-		return
+	// Use the shared wazero Runtime instead of creating one per execution.
+	rt := w.wazeroRuntime
+
+	// Check compiled module cache (keyed by defName:version) before
+	// recompiling. On cache miss, compile and store for reuse.
+	cacheKey := fmt.Sprintf("%s:%d", wf.DefName, wf.DefVersion)
+	compiledMod, cached := w.compiledModCache.get(cacheKey)
+	if !cached {
+		compiledMod, err = rt.CompileModule(w.ctx, wasmBytes)
+		if err != nil {
+			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("compile module: %v", err), host.ErrUnknown.String(), "", nil)
+			return
+		}
+		w.compiledModCache.put(cacheKey, compiledMod)
 	}
-	defer rt.Close(w.ctx)
+	// Note: compiledMod stays in the cache for reuse across executions.
+	// When evicted from the LRU cache, the module is closed automatically.
 
 	// Extract child version pins from WASM metadata (compile-time resolution).
 	var childVersions map[string]int
@@ -1076,13 +1222,29 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithSignalStore(w.store.(host.SignalStore)),
 		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, childVersions: childVersions}),
 		host.WithWorkflowID(wf.ID),
+		host.WithDefName(wf.DefName),
 		host.WithTenantID(wf.TenantID),
 		host.WithChildWorkflowStore(w.store),
 		host.WithPluginRegistry(w.pluginRegistry),
 		host.WithMaxRetryAttempts(w.maxRetries),
-			host.WithSchema(w.schemaName),
-			host.WithPeerSchemas(w.peerSchemas),
+		host.WithSchema(w.schemaName),
+		host.WithPeerSchemas(w.peerSchemas),
+		host.WithWorkerID(w.id),
+		host.WithDefVersion(wf.DefVersion),
+		host.WithAllowVersionMismatch(w.allowVersionMismatch),
+		host.WithWASMInstanceTimeout(w.wasmInstanceTimeout),
+		host.WithDefaultWorkflowTimeout(w.defaultWorkflowTimeout),
 	}
+	// ContinueAsNew handler: atomically persist the transition in-database
+	// as part of the engine's suspend path, eliminating the race window
+	// between event flush and the worker calling store.ContinueAsNew separately.
+	engineOpts = append(engineOpts, host.WithContinueAsNewHandler(func(ctx context.Context, currentRunID, workerID, defName string, defVersion int, newInput string, newEvents []host.EventRecord, result string, queryState map[string]string) (string, error) {
+		return w.store.ContinueAsNew(ctx, currentRunID, workerID, defName, defVersion, json.RawMessage(newInput), newEvents, result, queryState)
+	}))
+	// Event history checksum verification at replay start.
+	engineOpts = append(engineOpts, host.WithWorkflowEventVerifier(func(ctx context.Context, workflowID string) error {
+		return w.store.VerifyWorkflowEvents(ctx, workflowID)
+	}, false))
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
 	if cks, ok := w.store.(host.ConcurrencyKeyStore); ok {
@@ -1130,7 +1292,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	// ---- Execute/Resume ----
 	inputJSON := wf.Input
 	engineStart := time.Now()
-	result, resultHistory, suspended, deferrals, queryState, err := engine.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
+	result, resultHistory, suspended, deferrals, queryState, err := engine.ReplayCompiled(w.ctx, compiledMod, entryPoint, inputJSON, history)
 	engineElapsed := time.Since(engineStart)
 	if len(history) > 0 {
 		replayDuration.Observe(engineElapsed.Seconds())
@@ -1297,6 +1459,7 @@ func (w *Worker) reaperLoop() {
 			staleTimeout := max(w.heartbeatInterval*2, 10*time.Second)
 			reaped, err := w.store.ReapStaleInstances(w.ctx, staleTimeout)
 			if err != nil {
+				reaperInstancesClaimedTotal.WithLabelValues("error").Inc()
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Reaper: DB appears down", w.id)
 			} else {
@@ -1309,6 +1472,7 @@ func (w *Worker) reaperLoop() {
 			if reaped > 0 {
 				log.Printf("[worker %s] Reaper: reclaimed %d stale instances", w.id, reaped)
 				backgroundLoopItemsProcessed.WithLabelValues("reaper").Set(float64(reaped))
+				reaperInstancesClaimedTotal.WithLabelValues("success").Add(float64(reaped))
 			}
 			backgroundLoopsTotal.WithLabelValues("reaper", "ok").Inc()
 			backgroundLoopDuration.WithLabelValues("reaper").Set(time.Since(reaperStart).Seconds())
@@ -1345,6 +1509,21 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 			}
 			backgroundLoopsTotal.WithLabelValues("concurrency_key_reaper", "ok").Inc()
 			backgroundLoopDuration.WithLabelValues("concurrency_key_reaper").Set(time.Since(ckStart).Seconds())
+
+			// Update concurrency key metrics.
+			if ms, ok := w.store.(MetricsStore); ok {
+				if count, err := ms.CountActiveConcurrencyKeys(w.ctx); err == nil {
+					concurrencyKeysTotal.Set(float64(count))
+				}
+				// For expiring-soon keys, we approximate by recording the number
+				// of keys that were reaped (keys that JUST expired). A more precise
+				// approach would require a store query; this provides a trending signal.
+				if reaped > 0 {
+					concurrencyKeysExpiringSoon.Set(float64(reaped))
+				} else {
+					concurrencyKeysExpiringSoon.Set(0)
+				}
+			}
 		}
 	}
 }
@@ -1497,7 +1676,94 @@ func (w *Worker) retentionLoop(retentionDays int) {
 				eventsDeletedTotal.Add(float64(deleted))
 				log.Printf("[worker %s] Retention: deleted %d expired event rows", w.id, deleted)
 			}
+
+			// Also clean up dead-lettered workflow instances if configured.
+			if w.deadLetterRetentionDays > 0 {
+				dlCutoff := time.Now().Add(-time.Duration(w.deadLetterRetentionDays) * 24 * time.Hour)
+				dlDeleted, dlErr := w.store.DeleteDeadLetteredWorkflows(w.ctx, dlCutoff)
+				if dlErr != nil {
+					log.Printf("[worker %s] Retention: error deleting dead-lettered workflows: %v", w.id, dlErr)
+				} else if dlDeleted > 0 {
+					log.Printf("[worker %s] Retention: deleted %d dead-lettered workflow instances", w.id, dlDeleted)
+				}
+			}
+
 			retentionLastRunTimestamp.Set(float64(time.Now().Unix()))
+		}
+	}
+}
+
+// workflowStuckCheckLoop periodically checks for workflows that have not made
+// progress beyond the configured stall threshold and updates the stuck metric.
+func (w *Worker) workflowStuckCheckLoop() {
+	defer w.wg.Done()
+	interval := 5 * time.Minute
+	if w.stallThreshold > 0 && w.stallThreshold < interval {
+		interval = w.stallThreshold / 2
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			if w.stallThreshold <= 0 {
+				workflowsStuck.Set(0)
+				continue
+			}
+			start := time.Now()
+			// Count workflows that are running but whose last event
+			// (or creation time) is older than the stall threshold.
+			if ms, ok := w.store.(MetricsStore); ok {
+				count, err := ms.CountStalledWorkflows(w.ctx, w.stallThreshold)
+				if err != nil {
+					log.Printf("[worker %s] Stuck check: %v", w.id, err)
+					backgroundLoopsTotal.WithLabelValues("stuck_check", "error").Inc()
+					continue
+				}
+				workflowsStuck.Set(float64(count))
+				backgroundLoopsTotal.WithLabelValues("stuck_check", "ok").Inc()
+				backgroundLoopDuration.WithLabelValues("stuck_check").Set(time.Since(start).Seconds())
+			}
+		}
+	}
+
+}
+
+// metricsCollectionLoop periodically collects database-level metrics.
+func (w *Worker) metricsCollectionLoop() {
+	defer w.wg.Done()
+	if w.metricsInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(w.metricsInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			start := time.Now()
+
+			if ms, ok := w.store.(MetricsStore); ok {
+				if rowCount, err := ms.CountEventHistoryTotal(w.ctx); err == nil {
+					eventHistoryRowCount.Set(float64(rowCount))
+				}
+				if sizeBytes, err := ms.EstimateEventHistorySize(w.ctx); err == nil {
+					eventHistorySizeBytes.Set(float64(sizeBytes))
+				}
+			}
+
+			// Update memory pressure metric.
+			if w.memoryController != nil {
+				memoryPressureRatio.Set(w.memoryController.Pressure())
+			}
+
+			backgroundLoopsTotal.WithLabelValues("metrics_collection", "ok").Inc()
+			backgroundLoopDuration.WithLabelValues("metrics_collection").Set(time.Since(start).Seconds())
 		}
 	}
 }
@@ -1814,14 +2080,8 @@ func determineEntryPoint(input json.RawMessage) string {
 // Errors during defer execution are logged but do not prevent other defers
 // from running.
 func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
-	rt, err := host.NewRuntime(w.ctx)
-	if err != nil {
-		log.Printf("[worker %s] runDefers: create runtime: %v", w.id, err)
-		return
-	}
-	defer rt.Close(w.ctx)
-
-	engine := host.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id})
+	// Use the shared wazero Runtime.
+	engine := host.NewEngine(w.wazeroRuntime, &dbServiceCaller{store: w.store, workerID: w.id})
 
 	// Collect defer IDs sorted by step number for LIFO ordering.
 	type defEntry struct {
@@ -2107,11 +2367,24 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	q := r.URL.Query()
+
+	var createdAfter, createdBefore time.Time
+	if ca := q.Get("created_after"); ca != "" {
+		createdAfter, _ = time.Parse(time.RFC3339, ca)
+	}
+	if cb := q.Get("created_before"); cb != "" {
+		createdBefore, _ = time.Parse(time.RFC3339, cb)
+	}
+
 	filter := host.WorkflowFilter{
 		Status:        q.Get("status"),
+		DefName:       q.Get("def_name"),
+		ID:            q.Get("id"),
 		InputContains: q.Get("input_contains"),
 		ErrorContains: q.Get("error_contains"),
 		Search:        q.Get("search"),
+		CreatedAfter:  createdAfter,
+		CreatedBefore: createdBefore,
 		Limit:         100,
 	}
 	workflows, err := s.store.ListWorkflows(r.Context(), filter)
@@ -2131,6 +2404,12 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/workflows/")
 	if path == "" || path == "/" {
 		s.handleWorkflowsList(w, r)
+		return
+	}
+
+	// Special endpoint: batch history (POST /api/workflows/batch-history).
+	if path == "batch-history" && r.Method == http.MethodPost {
+		s.handleBatchHistory(w, r)
 		return
 	}
 
@@ -2156,6 +2435,9 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost:
 		// POST /api/workflows/:id/cancel
 		s.handleCancel(w, r, id)
+	case len(parts) == 2 && parts[1] == "terminate" && r.Method == http.MethodPost:
+		// POST /api/workflows/:id/terminate
+		s.handleTerminate(w, r, id)
 	case len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost:
 		// POST /api/workflows/:id/retry
 		s.handleWorkflowRetry(w, r, id)
@@ -2366,6 +2648,29 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	s.writeJSON(w, 200, map[string]string{"status": "cancellation_requested"})
 }
 
+func (s *apiServer) handleTerminate(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, signalMaxBodySize)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				s.writeError(w, 413, "request body too large")
+				return
+			}
+			s.writeError(w, 400, "invalid JSON: "+err.Error())
+			return
+		}
+	}
+	if err := s.store.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "terminated"})
+}
+
 func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id string) {
 	offset := 0
 	limit := 1000
@@ -2396,6 +2701,41 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	s.writeJSON(w, 200, history)
+}
+
+// handleBatchHistory handles POST /api/workflows/batch-history.
+// Accepts {"workflow_ids": ["id1", "id2"]} and returns event histories
+// keyed by workflow ID, with events sorted by step.
+func (s *apiServer) handleBatchHistory(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		WorkflowIDs []string `json:"workflow_ids"`
+	}
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, int64(1<<20)) // 1 MB
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, 400, "invalid JSON: "+err.Error())
+			return
+		}
+	}
+	if len(req.WorkflowIDs) == 0 {
+		s.writeError(w, 400, "workflow_ids is required and must be non-empty")
+		return
+	}
+	if len(req.WorkflowIDs) > 20 {
+		s.writeError(w, 400, "max 20 workflow IDs per request")
+		return
+	}
+
+	histories, err := s.store.LoadEventHistoryBatch(r.Context(), req.WorkflowIDs)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if histories == nil {
+		histories = map[string][]host.EventRecord{}
+	}
+
+	s.writeJSON(w, 200, histories)
 }
 
 func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, id string) {

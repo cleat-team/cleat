@@ -111,9 +111,18 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		service := readWasmString(mem, svcPtr, svcLen)
-		op := readWasmString(mem, opPtr, opLen)
-		req := readWasmString(mem, reqPtr, reqLen)
+		service, ok := readServiceName(mem, svcPtr, svcLen)
+		if !ok {
+			return errBadParam
+		}
+		op, ok := readServiceName(mem, opPtr, opLen)
+		if !ok {
+			return errBadParam
+		}
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.DurableCall(ctx, m, service, op, req, respPtr, respMaxLen))
 	}).Export("cleat_call")
 
@@ -135,7 +144,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	// cleat_log: (ptr,len) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module, msgPtr, msgLen uint32) uint64 {
 		mem := m.Memory()
-		msg := readWasmString(mem, msgPtr, msgLen)
+		msg, ok := readWasmStringValidated(mem, msgPtr, msgLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).DurableLog(ctx, m, msg))
 	}).Export("cleat_log")
 
@@ -153,7 +165,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		descPtr, descLen, deferIDPtr, deferIDMaxLen uint32) uint64 {
 		mem := m.Memory()
-		desc := readWasmString(mem, descPtr, descLen)
+		desc, ok := readWasmStringValidated(mem, descPtr, descLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).DurableDefer(ctx, m, desc, deferIDPtr, deferIDMaxLen))
 	}).Export("cleat_defer")
 
@@ -167,7 +182,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen, payloadPtr, payloadMaxLen uint32) uint64 {
 		mem := m.Memory()
-		name := readWasmString(mem, namePtr, nameLen)
+		name, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).PollSignal(ctx, m, name, payloadPtr, payloadMaxLen))
 	}).Export("cleat_poll_signal")
 
@@ -175,7 +193,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		inputPtr, inputLen uint32) uint64 {
 		mem := m.Memory()
-		newInput := readWasmString(mem, inputPtr, inputLen)
+		newInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).ContinueAsNew(ctx, m, newInput))
 	}).Export("cleat_continue_as_new")
 
@@ -183,7 +204,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		inputPtr, inputLen, newVersion uint32) uint64 {
 		mem := m.Memory()
-		newInput := readWasmString(mem, inputPtr, inputLen)
+		newInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).ContinueAsNewWithVersion(ctx, m, newInput, int(newVersion)))
 	}).Export("cleat_continue_as_new_versioned")
 
@@ -191,8 +215,14 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen uint32) uint64 {
 		mem := m.Memory()
-		wfName := readWasmString(mem, namePtr, nameLen)
-		wfInput := readWasmString(mem, inputPtr, inputLen)
+		wfName, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
+		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).ChildWorkflow(ctx, m, wfName, wfInput, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow")
 
@@ -201,9 +231,18 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		namePtr, nameLen, inputPtr, inputLen uint32, version int64,
 		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
 		mem := m.Memory()
-		wfName := readWasmString(mem, namePtr, nameLen)
-		wfInput := readWasmString(mem, inputPtr, inputLen)
-		parentClosePolicy := readWasmString(mem, policyPtr, policyLen)
+		wfName, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
+		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		parentClosePolicy, ok := readServiceName(mem, policyPtr, policyLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_with_options")
 
@@ -213,10 +252,22 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 			schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64,
 			policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
 			mem := m.Memory()
-			targetSchema := readWasmString(mem, schemaPtr, schemaLen)
-			wfName := readWasmString(mem, namePtr, nameLen)
-			wfInput := readWasmString(mem, inputPtr, inputLen)
-			parentClosePolicy := readWasmString(mem, policyPtr, policyLen)
+			targetSchema, ok := readServiceName(mem, schemaPtr, schemaLen)
+			if !ok {
+				return errBadParam
+			}
+			wfName, ok := readServiceName(mem, namePtr, nameLen)
+			if !ok {
+				return errBadParam
+			}
+			wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+			if !ok {
+				return errBadParam
+			}
+			parentClosePolicy, ok := readServiceName(mem, policyPtr, policyLen)
+			if !ok {
+				return errBadParam
+			}
 			return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, parentClosePolicy, runIDPtr, runIDMaxLen))
 		}).Export("cleat_child_workflow_in_schema")
 
@@ -224,7 +275,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		runIDPtr, runIDLen, resultPtr, resultMaxLen uint32) uint64 {
 		mem := m.Memory()
-		runID := readWasmString(mem, runIDPtr, runIDLen)
+		runID, ok := readServiceName(mem, runIDPtr, runIDLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).AwaitChild(ctx, m, runID, resultPtr, resultMaxLen))
 	}).Export("cleat_await_child")
 
@@ -236,10 +290,22 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		respPtr, respMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		service := readWasmString(mem, svcPtr, svcLen)
-		op := readWasmString(mem, opPtr, opLen)
-		req := readWasmString(mem, reqPtr, reqLen)
-		nonRetryableErrorsJSON := readWasmString(mem, nonRetryPtr, nonRetryLen)
+		service, ok := readServiceName(mem, svcPtr, svcLen)
+		if !ok {
+			return errBadParam
+		}
+		op, ok := readServiceName(mem, opPtr, opLen)
+		if !ok {
+			return errBadParam
+		}
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		nonRetryableErrorsJSON, ok := readWasmStringValidated(mem, nonRetryPtr, nonRetryLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.DurableCallWithRetry(ctx, m, service, op, req,
 			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
 			nonRetryableErrorsJSON, respPtr, respMaxLen))
@@ -250,7 +316,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		namesPtr, namesLen uint32, timeoutMs int64,
 		sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen uint32) uint64 {
 		mem := m.Memory()
-		names := readWasmString(mem, namesPtr, namesLen)
+		names, ok := readWasmStringValidated(mem, namesPtr, namesLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).DurableAwaitSignals(ctx, m, names, timeoutMs,
 			sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen))
 	}).Export("cleat_await_signals")
@@ -259,8 +328,14 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		keyPtr, keyLen, valPtr, valLen uint32) uint64 {
 		mem := m.Memory()
-		key := readWasmString(mem, keyPtr, keyLen)
-		val := readWasmString(mem, valPtr, valLen)
+		key, ok := readServiceName(mem, keyPtr, keyLen)
+		if !ok {
+			return errBadParam
+		}
+		val, ok := readWasmStringValidated(mem, valPtr, valLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).SetQueryState(ctx, m, key, val))
 	}).Export("set_query_state")
 
@@ -271,9 +346,18 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		respPtr, respMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		service := readWasmString(mem, svcPtr, svcLen)
-		op := readWasmString(mem, opPtr, opLen)
-		req := readWasmString(mem, reqPtr, reqLen)
+		service, ok := readServiceName(mem, svcPtr, svcLen)
+		if !ok {
+			return errBadParam
+		}
+		op, ok := readServiceName(mem, opPtr, opLen)
+		if !ok {
+			return errBadParam
+		}
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.DurableCallWithHeartbeat(ctx, m, service, op, req, heartbeatIntervalMs, respPtr, respMaxLen))
 	}).Export("cleat_call_heartbeat")
 
@@ -283,7 +367,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		resultsPtr, resultsMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		runIDsJSON := readWasmString(mem, idsPtr, idsLen)
+		runIDsJSON, ok := readWasmStringValidated(mem, idsPtr, idsLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.AwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen))
 	}).Export("cleat_await_all_children")
 
@@ -295,9 +382,18 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		responsePtr, responseMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		pluginName := readWasmString(mem, pluginNamePtr, pluginNameLen)
-		funcName := readWasmString(mem, funcNamePtr, funcNameLen)
-		inputJSON := readWasmString(mem, inputPtr, inputLen)
+		pluginName, ok := readServiceName(mem, pluginNamePtr, pluginNameLen)
+		if !ok {
+			return errBadParam
+		}
+		funcName, ok := readServiceName(mem, funcNamePtr, funcNameLen)
+		if !ok {
+			return errBadParam
+		}
+		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.PluginCallStreaming(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
 	}).Export("plugin_call_streaming")
 
@@ -309,9 +405,18 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		responsePtr, responseMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		pluginName := readWasmString(mem, pluginNamePtr, pluginNameLen)
-		funcName := readWasmString(mem, funcNamePtr, funcNameLen)
-		inputJSON := readWasmString(mem, inputPtr, inputLen)
+		pluginName, ok := readServiceName(mem, pluginNamePtr, pluginNameLen)
+		if !ok {
+			return errBadParam
+		}
+		funcName, ok := readServiceName(mem, funcNamePtr, funcNameLen)
+		if !ok {
+			return errBadParam
+		}
+		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.PluginCall(ctx, m, pluginName, funcName, inputJSON, responsePtr, responseMaxLen))
 	}).Export("plugin_call")
 
@@ -319,14 +424,20 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen uint32) uint64 {
 		mem := m.Memory()
-		name := readWasmString(mem, namePtr, nameLen)
+		name, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).RegisterUpdateHandler(ctx, m, name))
 	}).Export("cleat_register_update_handler")
 	// cleat_create_promise: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen uint32) uint64 {
 		mem := m.Memory()
-		name := readWasmString(mem, namePtr, nameLen)
+		name, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).CreatePromise(ctx, m, name, promiseIDPtr, promiseIDMaxLen))
 	}).Export("cleat_create_promise")
 
@@ -335,7 +446,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		promiseIDPtr, promiseIDLen uint32, timeoutMs int64,
 		resultPtr, resultMaxLen uint32) uint64 {
 		mem := m.Memory()
-		promiseID := readWasmString(mem, promiseIDPtr, promiseIDLen)
+		promiseID, ok := readServiceName(mem, promiseIDPtr, promiseIDLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(handlerFromContext(ctx).AwaitPromise(ctx, m, promiseID, timeoutMs, resultPtr, resultMaxLen))
 	}).Export("cleat_await_promise")
 
@@ -346,9 +460,18 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		respPtr, respMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		targetRunID := readWasmString(mem, targetPtr, targetLen)
-		signalName := readWasmString(mem, sigPtr, sigLen)
-		payload := readWasmString(mem, payloadPtr, payloadLen)
+		targetRunID, ok := readServiceName(mem, targetPtr, targetLen)
+		if !ok {
+			return errBadParam
+		}
+		signalName, ok := readServiceName(mem, sigPtr, sigLen)
+		if !ok {
+			return errBadParam
+		}
+		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.SendSignalAndWait(ctx, m, targetRunID, signalName, payload, timeoutMs, respPtr, respMaxLen))
 	}).Export("cleat_send_signal_and_wait")
 
@@ -357,8 +480,14 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		correlationPtr, correlationLen, respPtr, respLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		correlationID := readWasmString(mem, correlationPtr, correlationLen)
-		response := readWasmString(mem, respPtr, respLen)
+		correlationID, ok := readServiceName(mem, correlationPtr, correlationLen)
+		if !ok {
+			return errBadParam
+		}
+		response, ok := readWasmStringValidated(mem, respPtr, respLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.ReplyToSignal(ctx, m, correlationID, response))
 	}).Export("cleat_reply_to_signal")
 
@@ -367,9 +496,18 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		targetRunID := readWasmString(mem, targetPtr, targetLen)
-		signalName := readWasmString(mem, sigPtr, sigLen)
-		payload := readWasmString(mem, payloadPtr, payloadLen)
+		targetRunID, ok := readServiceName(mem, targetPtr, targetLen)
+		if !ok {
+			return errBadParam
+		}
+		signalName, ok := readServiceName(mem, sigPtr, sigLen)
+		if !ok {
+			return errBadParam
+		}
+		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.SignalWorkflow(ctx, m, targetRunID, signalName, payload))
 	}).Export("cleat_signal_workflow")
 
@@ -379,8 +517,14 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		prevScopePtr, prevScopeMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		objType := readWasmString(mem, objTypePtr, objTypeLen)
-		instKey := readWasmString(mem, instKeyPtr, instKeyLen)
+		objType, ok := readServiceName(mem, objTypePtr, objTypeLen)
+		if !ok {
+			return errBadParam
+		}
+		instKey, ok := readServiceName(mem, instKeyPtr, instKeyLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.SetScope(ctx, m, objType, instKey, prevScopePtr, prevScopeMaxLen))
 	}).Export("cleat_set_scope")
 
@@ -396,7 +540,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		seedPtr, seedLen, uuidPtr, uuidMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		seed := readWasmString(mem, seedPtr, seedLen)
+		seed, ok := readWasmStringValidated(mem, seedPtr, seedLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.UUID(ctx, m, seed, uuidPtr, uuidMaxLen))
 	}).Export("cleat_uuid")
 
@@ -405,7 +552,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		keyPtr, keyLen uint32, ttlMs int64) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		key := readWasmString(mem, keyPtr, keyLen)
+		key, ok := readServiceName(mem, keyPtr, keyLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.AcquireLock(ctx, m, key, ttlMs))
 	}).Export("cleat_acquire_lock")
 
@@ -414,7 +564,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		keyPtr, keyLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		key := readWasmString(mem, keyPtr, keyLen)
+		key, ok := readServiceName(mem, keyPtr, keyLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.ReleaseLock(ctx, m, key))
 	}).Export("cleat_release_lock")
 
@@ -423,7 +576,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		resultPtr, resultLen, outPtr, outMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		result := readWasmString(mem, resultPtr, resultLen)
+		result, ok := readWasmStringValidated(mem, resultPtr, resultLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.SideEffect(ctx, m, result, outPtr, outMaxLen))
 	}).Export("cleat_side_effect")
 
@@ -444,8 +600,14 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		idPtr, idLen, valPtr, valLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		promiseID := readWasmString(mem, idPtr, idLen)
-		value := readWasmString(mem, valPtr, valLen)
+		promiseID, ok := readServiceName(mem, idPtr, idLen)
+		if !ok {
+			return errBadParam
+		}
+		value, ok := readWasmStringValidated(mem, valPtr, valLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.ResolvePromise(ctx, m, promiseID, value))
 	}).Export("cleat_resolve_promise")
 
@@ -454,8 +616,14 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		idPtr, idLen, errPtr, errLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		promiseID := readWasmString(mem, idPtr, idLen)
-		errMsg := readWasmString(mem, errPtr, errLen)
+		promiseID, ok := readServiceName(mem, idPtr, idLen)
+		if !ok {
+			return errBadParam
+		}
+		errMsg, ok := readWasmStringValidated(mem, errPtr, errLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.RejectPromise(ctx, m, promiseID, errMsg))
 	}).Export("cleat_reject_promise")
 
@@ -464,9 +632,18 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		service := readWasmString(mem, svcPtr, svcLen)
-		op := readWasmString(mem, opPtr, opLen)
-		req := readWasmString(mem, reqPtr, reqLen)
+		service, ok := readServiceName(mem, svcPtr, svcLen)
+		if !ok {
+			return errBadParam
+		}
+		op, ok := readServiceName(mem, opPtr, opLen)
+		if !ok {
+			return errBadParam
+		}
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.DurableSend(ctx, m, service, op, req))
 	}).Export("cleat_send")
 
@@ -475,9 +652,18 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32, delayMs int64) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		service := readWasmString(mem, svcPtr, svcLen)
-		op := readWasmString(mem, opPtr, opLen)
-		req := readWasmString(mem, reqPtr, reqLen)
+		service, ok := readServiceName(mem, svcPtr, svcLen)
+		if !ok {
+			return errBadParam
+		}
+		op, ok := readServiceName(mem, opPtr, opLen)
+		if !ok {
+			return errBadParam
+		}
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.DurableScheduleInvoke(ctx, m, service, op, req, delayMs))
 	}).Export("cleat_schedule_invoke")
 
@@ -486,7 +672,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		namePtr, nameLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		name := readWasmString(mem, namePtr, nameLen)
+		name, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.RegisterQueryHandler(ctx, m, name))
 	}).Export("cleat_register_query_handler")
 
@@ -495,8 +684,14 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		namePtr, nameLen, inputPtr, inputLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		name := readWasmString(mem, namePtr, nameLen)
-		inputJSON := readWasmString(mem, inputPtr, inputLen)
+		name, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
+		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.RunDetached(ctx, m, name, inputJSON))
 	}).Export("cleat_run_detached")
 
@@ -505,8 +700,14 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		keyPtr, keyLen, valPtr, valLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		key := readWasmString(mem, keyPtr, keyLen)
-		value := readWasmString(mem, valPtr, valLen)
+		key, ok := readServiceName(mem, keyPtr, keyLen)
+		if !ok {
+			return errBadParam
+		}
+		value, ok := readWasmStringValidated(mem, valPtr, valLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.SetState(ctx, m, key, value))
 	}).Export("cleat_set_state")
 
@@ -515,7 +716,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		keyPtr, keyLen, valuePtr, valueMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		key := readWasmString(mem, keyPtr, keyLen)
+		key, ok := readServiceName(mem, keyPtr, keyLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.GetState(ctx, m, key, valuePtr, valueMaxLen))
 	}).Export("cleat_get_state")
 
@@ -524,7 +728,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		keyPtr, keyLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		key := readWasmString(mem, keyPtr, keyLen)
+		key, ok := readServiceName(mem, keyPtr, keyLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.DeleteState(ctx, m, key))
 	}).Export("cleat_delete_state")
 
@@ -533,7 +740,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		keyPtr, keyLen uint32, delta int64) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		key := readWasmString(mem, keyPtr, keyLen)
+		key, ok := readServiceName(mem, keyPtr, keyLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.IncrState(ctx, m, key, delta))
 	}).Export("cleat_incr_state")
 
@@ -542,7 +752,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		keyPtr, keyLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		key := readWasmString(mem, keyPtr, keyLen)
+		key, ok := readServiceName(mem, keyPtr, keyLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.HasState(ctx, m, key))
 	}).Export("cleat_has_state")
 
@@ -551,7 +764,10 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		prefixPtr, prefixLen, keysPtr, keysMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		prefix := readWasmString(mem, prefixPtr, prefixLen)
+		prefix, ok := readWasmStringValidated(mem, prefixPtr, prefixLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.ListState(ctx, m, prefix, keysPtr, keysMaxLen))
 	}).Export("cleat_list_state")
 
@@ -561,10 +777,22 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		responsePtr, responseMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		method := readWasmString(mem, methodPtr, methodLen)
-		url := readWasmString(mem, urlPtr, urlLen)
-		headersJSON := readWasmString(mem, headersPtr, headersLen)
-		body := readWasmString(mem, bodyPtr, bodyLen)
+		method, ok := readServiceName(mem, methodPtr, methodLen)
+		if !ok {
+			return errBadParam
+		}
+		url, ok := readWasmStringValidated(mem, urlPtr, urlLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		headersJSON, ok := readWasmStringValidated(mem, headersPtr, headersLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		body, ok := readWasmStringValidated(mem, bodyPtr, bodyLen, maxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
 		return uint64(h.Fetch(ctx, m, method, url, headersJSON, body, responsePtr, responseMaxLen))
 	}).Export("cleat_fetch")
 }

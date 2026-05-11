@@ -1455,14 +1455,28 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
 	)
 
+	if filter.DefName != "" {
+		qb.AddCondition("def_name = %s", filter.DefName)
+	}
 	if filter.Status != "" {
 		qb.AddCondition("status = %s", filter.Status)
+	}
+	if filter.ID != "" {
+		qb.AddLikeCondition("id", "%"+filter.ID+"%", false)
 	}
 	if filter.InputContains != "" {
 		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
 	}
 	if filter.ErrorContains != "" {
 		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
+	}
+	if !filter.CreatedAfter.IsZero() {
+		qb.AddRaw(fmt.Sprintf("AND created_at > %s", d.placeholder(qb.NextPos())))
+		qb.AddArgs(filter.CreatedAfter)
+	}
+	if !filter.CreatedBefore.IsZero() {
+		qb.AddRaw(fmt.Sprintf("AND created_at < %s", d.placeholder(qb.NextPos())))
+		qb.AddArgs(filter.CreatedBefore)
 	}
 	if filter.Search != "" {
 		pattern := "%" + filter.Search + "%"
@@ -1926,6 +1940,13 @@ func (s *MSSQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 	return n, nil
 }
 
+// CountActiveConcurrencyKeys returns the number of non-expired concurrency keys.
+func (s *MSSQLStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM concurrency_keys WHERE expires_at >= SYSUTCDATETIME()`).Scan(&count)
+	return count, err
+}
+
 // ---- Sticky Session methods ----
 
 // UpdateStickyWorker sets the sticky worker for a workflow.
@@ -2334,4 +2355,69 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 	}
 
 	return totalDeleted, nil
+}
+
+// LoadEventHistoryBatch returns event histories for multiple workflow IDs.
+func (s *MSSQLStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error) {
+	return nil, fmt.Errorf("LoadEventHistoryBatch not implemented for MSSQL")
+}
+
+// TerminateWorkflow marks a workflow instance as terminated.
+func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	return fmt.Errorf("TerminateWorkflow not implemented for MSSQL")
+}
+
+// DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
+// whose completed_at is older than the cutoff.
+func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalDeleted int64
+	for {
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM event_history
+			WHERE workflow_id IN (
+				SELECT id FROM workflow_instances
+				WHERE status = 'dead_lettered'
+				  AND completed_at IS NOT NULL
+				  AND completed_at < @p1
+				ORDER BY id
+				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
+			)
+		`, olderThan)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered event history: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		totalDeleted += n
+
+		result, err = s.db.ExecContext(ctx, `
+			DELETE FROM workflow_instances
+			WHERE id IN (
+				SELECT id FROM workflow_instances
+				WHERE status = 'dead_lettered'
+				  AND completed_at IS NOT NULL
+				  AND completed_at < @p1
+				ORDER BY id
+				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
+			)
+		`, olderThan)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
+		}
+		n, _ = result.RowsAffected()
+		totalDeleted += n
+		if n == 0 {
+			break
+		}
+	}
+	return totalDeleted, nil
+}
+
+// StreamEventHistory loads event history for a workflow in pages, returning
+// events through a channel. Not implemented for MSSQL.
+func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
+	errCh := make(chan error, 1)
+	errCh <- fmt.Errorf("StreamEventHistory not implemented for MSSQL")
+	ch := make(chan EventRecord)
+	close(ch)
+	return ch, errCh
 }

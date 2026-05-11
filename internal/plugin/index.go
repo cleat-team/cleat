@@ -33,6 +33,16 @@ type IndexVersion struct {
 	MinCleatVersion string `yaml:"min_cleat_version,omitempty"`
 	Bundled         bool   `yaml:"bundled,omitempty"`
 	Description     string `yaml:"description,omitempty"`
+
+	// Signature is an optional Ed25519 hex-encoded signature of the WASM
+	// binary SHA-256 checksum. When present and the plugin is official,
+	// the signature is verified during deployment. The signing key is
+	// identified by SigningKeyID.
+	Signature string `yaml:"signature,omitempty"`
+
+	// SigningKeyID identifies the Ed25519 public key used to produce
+	// Signature. Example: "cleat-official-2026".
+	SigningKeyID string `yaml:"signing_key_id,omitempty"`
 }
 
 // PluginIndex represents the parsed index.yaml file.

@@ -22,6 +22,18 @@ type Manifest struct {
 	Capabilities    Capabilities           `json:"capabilities,omitempty" yaml:"capabilities,omitempty"`
 	HostFunctions   map[string]HostFuncDef `json:"host_functions,omitempty" yaml:"host_functions,omitempty"`
 	Types           map[string]TypeDef     `json:"types,omitempty" yaml:"types,omitempty"`
+	// Signature is an optional Ed25519 signature of the canonical JSON
+	// representation of the manifest (excluding the signature field itself).
+	// When present, the runtime verifies the signature against the plugin
+	// author's public key before deploying. Initially this is required only
+	// for official plugins (cleat/ prefix or no slash in name); community
+	// plugins may opt in.
+	Signature string `json:"signature,omitempty" yaml:"signature,omitempty"`
+
+	// SigningKeyID identifies the public key used to produce Signature.
+	// This is an opaque identifier (e.g., "cleat-official-2026") that the
+	// runtime uses to look up the corresponding Ed25519 public key.
+	SigningKeyID string `json:"signing_key_id,omitempty" yaml:"signing_key_id,omitempty"`
 }
 
 // Capabilities declares what infrastructure access a plugin needs.

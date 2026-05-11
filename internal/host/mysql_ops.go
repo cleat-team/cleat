@@ -455,14 +455,28 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	)
 	qb.AddArgs(s.tenantID)
 
+	if filter.DefName != "" {
+		qb.AddCondition("def_name = %s", filter.DefName)
+	}
 	if filter.Status != "" {
 		qb.AddCondition("status = %s", filter.Status)
+	}
+	if filter.ID != "" {
+		qb.AddLikeCondition("id", "%"+filter.ID+"%", false)
 	}
 	if filter.InputContains != "" {
 		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
 	}
 	if filter.ErrorContains != "" {
 		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
+	}
+	if !filter.CreatedAfter.IsZero() {
+		qb.AddRaw(fmt.Sprintf("AND created_at > %s", d.placeholder(qb.NextPos())))
+		qb.AddArgs(filter.CreatedAfter)
+	}
+	if !filter.CreatedBefore.IsZero() {
+		qb.AddRaw(fmt.Sprintf("AND created_at < %s", d.placeholder(qb.NextPos())))
+		qb.AddArgs(filter.CreatedBefore)
 	}
 	if filter.Search != "" {
 		pattern := "%" + filter.Search + "%"

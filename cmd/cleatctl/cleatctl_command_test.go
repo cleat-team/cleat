@@ -1705,3 +1705,14 @@ func (m *mockStore) ResolveLatestVersion(ctx context.Context, defName string) (i
 func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) { return true, nil }
 func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
+func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) { return 0, nil }
+func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan host.EventRecord, <-chan error) {
+	ch := make(chan host.EventRecord)
+	errCh := make(chan error, 1)
+	close(ch)
+	errCh <- nil
+	return ch, errCh
+}
+func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
+func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]host.EventRecord, error) { return nil, nil }
+func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error { return nil }

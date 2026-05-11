@@ -3072,7 +3072,7 @@ func setupETPlugin(t *testing.T) (*Plugin, http.Handler, *etDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db))(mux)
+	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
 	return p, handler, store
 }
 

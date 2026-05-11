@@ -414,7 +414,7 @@ func authMiddlewareHandler(t *testing.T, maxRequests, windowSeconds int) (*Plugi
 	finalOK := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	return p, auth.Middleware(host.NewPostgresStore(fakeDB))(p.Middleware(finalOK))
+	return p, auth.Middleware(host.NewPostgresStore(fakeDB), false)(p.Middleware(finalOK))
 }
 
 // authedRequest builds a GET request carrying the test API key so that the
@@ -902,7 +902,7 @@ func TestPutRateLimit(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	handler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(mux)
+	handler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB), false)(mux)
 
 	body := `{"max_requests":100,"window_seconds":60}`
 	req := httptest.NewRequest("PUT", "/rate-limits/myapi", bytes.NewReader([]byte(body)))
@@ -947,7 +947,7 @@ func TestPutRateLimitUpdate(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	handler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(mux)
+	handler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB), false)(mux)
 
 	// Create with 50 req / 30s.
 	body1 := `{"max_requests":50,"window_seconds":30}`
@@ -1014,7 +1014,7 @@ func TestPutRateLimitInvalidBody(t *testing.T) {
 func TestPutRateLimitEmptyKey(t *testing.T) {
 	p, _ := newPluginWithDB(t)
 
-	handler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB), false)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handlePut(w, r)
 	}))
 
@@ -1224,7 +1224,7 @@ func routeHandler(t *testing.T) (*Plugin, http.Handler) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	return p, auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB))(mux)
+	return p, auth.Middleware(host.NewPostgresStore(p.db.(*host.SQLDBAdapter).DB), false)(mux)
 }
 
 // ---------------------------------------------------------------------------

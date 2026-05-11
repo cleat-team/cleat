@@ -19,6 +19,37 @@ import (
 
 const outBufSize = 1048576 // 1 MB; increased to reduce truncation risk
 
+// Maximum size of any string parameter read from WASM linear memory.
+// This prevents a malicious or buggy WASM module from causing the host to
+// allocate excessive memory via a single host function call.
+const maxWasmStringLen = 1048576 // 1 MB
+
+// validServiceName checks that a name contains only allowed characters:
+// alphanumeric, dot, underscore, and hyphen. Service and operation names
+// must be non-empty and match [a-zA-Z0-9._-]+.
+func validServiceName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= 'A' && c <= 'Z':
+		case c >= '0' && c <= '9':
+		case c == '.' || c == '_' || c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// errBadParam is a sentinel uint64 that host functions return when a WASM
+// parameter fails validation. This causes the workflow to see a non-zero
+// error code, which propagates as an error in the workflow's error handling.
+const errBadParam uint64 = 0xFFFFFFFF_00000001
+
 // readWasmString reads a Go string from WASM linear memory at (ptr, length).
 func readWasmString(mem api.Memory, ptr, length uint32) string {
 	if length == 0 {
@@ -29,6 +60,36 @@ func readWasmString(mem api.Memory, ptr, length uint32) string {
 		return ""
 	}
 	return string(data)
+}
+
+// readWasmStringValidated reads a string from WASM linear memory and validates it.
+// Returns ("", false) if the string is empty, exceeds maxLen, or cannot be read.
+func readWasmStringValidated(mem api.Memory, ptr, length, maxLen uint32) (string, bool) {
+	if length == 0 {
+		return "", false
+	}
+	if length > maxLen {
+		return "", false
+	}
+	data, ok := mem.Read(ptr, length)
+	if !ok {
+		return "", false
+	}
+	return string(data), true
+}
+
+// readServiceName reads a service or operation name from WASM linear memory
+// and validates both its length (must not exceed maxWasmStringLen) and
+// character set (must match [a-zA-Z0-9._-]+).
+func readServiceName(mem api.Memory, ptr, length uint32) (string, bool) {
+	s, ok := readWasmStringValidated(mem, ptr, length, maxWasmStringLen)
+	if !ok {
+		return "", false
+	}
+	if !validServiceName(s) {
+		return "", false
+	}
+	return s, true
 }
 
 // writeWasmString writes s into WASM linear memory at ptr, up to maxLen bytes.

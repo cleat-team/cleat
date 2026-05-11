@@ -52,7 +52,7 @@ func TestMiddleware_NoAuth_PassesThrough(t *testing.T) {
 
 	var handlerCalled bool
 	var hadTenant bool
-	mw := Middleware(host.NewPostgresStore(db))
+	mw := Middleware(host.NewPostgresStore(db), false)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		_, hadTenant = TenantIDFromContext(r.Context())
@@ -83,7 +83,7 @@ func TestMiddleware_BearerToken_Valid_SetsTenantContext(t *testing.T) {
 	var handlerCalled bool
 	var gotTenant uuid.UUID
 	var gotOK bool
-	mw := Middleware(host.NewPostgresStore(db))
+	mw := Middleware(host.NewPostgresStore(db), false)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		gotTenant, gotOK = TenantIDFromContext(r.Context())
@@ -118,7 +118,7 @@ func TestMiddleware_XCleatAPIKey_Valid_SetsTenantContext(t *testing.T) {
 	var handlerCalled bool
 	var gotTenant uuid.UUID
 	var gotOK bool
-	mw := Middleware(host.NewPostgresStore(db))
+	mw := Middleware(host.NewPostgresStore(db), false)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		gotTenant, gotOK = TenantIDFromContext(r.Context())
@@ -151,7 +151,7 @@ func TestMiddleware_InvalidToken_ReturnsUnauthorized(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(host.NewPostgresStore(db))
+	mw := Middleware(host.NewPostgresStore(db), false)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -194,7 +194,7 @@ func TestMiddleware_RevokedToken_ReturnsUnauthorized(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(host.NewPostgresStore(db))
+	mw := Middleware(host.NewPostgresStore(db), false)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -222,7 +222,7 @@ func TestMiddleware_MalformedAuthHeader_NotBearer(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(host.NewPostgresStore(db))
+	mw := Middleware(host.NewPostgresStore(db), false)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -249,7 +249,7 @@ func TestMiddleware_MalformedAuthHeader_OnlyBearerKeyword(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(host.NewPostgresStore(db))
+	mw := Middleware(host.NewPostgresStore(db), false)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -288,7 +288,7 @@ func TestMiddleware_BearerTakesPriorityOverXCleatKey(t *testing.T) {
 	}
 	store.mu.Unlock()
 
-	mw := Middleware(host.NewPostgresStore(db))
+	mw := Middleware(host.NewPostgresStore(db), false)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tid, ok := TenantIDFromContext(r.Context())
 		if !ok || tid != parsedTestTenantID {
@@ -317,7 +317,7 @@ func TestMiddleware_TenantIDPropagation(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	outerMW := Middleware(host.NewPostgresStore(db))
+	outerMW := Middleware(host.NewPostgresStore(db), false)
 	innerMW := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tid, ok := TenantIDFromContext(r.Context())

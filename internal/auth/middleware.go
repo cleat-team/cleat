@@ -36,13 +36,25 @@ func TenantFromAPIKey(ctx context.Context, store host.WorkflowStore, keyHash []b
 // Middleware authenticates requests using a cleat API key.
 // Supports: Authorization: Bearer cleat_sk_<key>
 // Also supports: X-Cleat-API-Key: <key>
-func Middleware(store host.WorkflowStore) func(http.Handler) http.Handler {
+// When requireAuth is true, requests without a valid API key are rejected with 401,
+// except for public paths (/healthz, /metrics).
+func Middleware(store host.WorkflowStore, requireAuth bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Public paths are always accessible without authentication.
+			path := r.URL.Path
+			if path == "/healthz" || path == "/metrics" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			key := extractAPIKey(r)
 			if key == "" {
-				// If no key, proceed without tenant — handler decides if that's OK
-				// (e.g., /healthz, /metrics don't need auth)
+				if requireAuth {
+					http.Error(w, `{"error":"authentication required: provide an API key via Authorization: Bearer <key> or X-Cleat-API-Key: <key>"}`, http.StatusUnauthorized)
+					return
+				}
+				// If not required, proceed without tenant — handler decides if that's OK.
 				next.ServeHTTP(w, r)
 				return
 			}

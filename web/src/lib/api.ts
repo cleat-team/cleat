@@ -83,3 +83,31 @@ export async function disableSchedule(name: string): Promise<void> {
 export async function listDefinitions(): Promise<WorkflowDefInfo[]> {
   return fetchJSON<WorkflowDefInfo[]>('/api/definitions');
 }
+
+// ── Dead Letter Queue API ──────────────────────────────────────────
+
+export async function listDeadLetters(): Promise<WorkflowInstance[]> {
+  return fetchJSON<WorkflowInstance[]>('/api/dead-letters');
+}
+
+export async function reprocessDeadLetter(id: string): Promise<{ id: string }> {
+  return fetchJSON<{ id: string }>(`/api/dead-letters/${id}/reprocess`, { method: 'POST' });
+}
+
+export async function terminateDeadLetter(id: string, reason?: string): Promise<void> {
+  await fetchJSON(`/api/dead-letters/${id}/terminate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reason: reason || '' }),
+  });
+}
+
+// ── Batch History API (workflow comparison) ─────────────────────────
+
+export async function getBatchHistories(workflowIds: string[]): Promise<Record<string, EventRecord[]>> {
+  return fetchJSON<Record<string, EventRecord[]>>('/api/workflows/batch-history', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ workflow_ids: workflowIds }),
+  });
+}

@@ -479,7 +479,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeKVStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db))(p.mux)
+	handler := auth.Middleware(host.NewPostgresStore(db), false)(p.mux)
 	return p, handler, store
 }
 
