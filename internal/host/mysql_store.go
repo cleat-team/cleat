@@ -60,6 +60,7 @@ type MySQLStore struct {
 	db         *sql.DB
 	taskQueues []string
 	tenantID   string
+	dialect    Dialect
 }
 
 // NewMySQLStore creates a MySQLStore scoped to the given task queues.
@@ -75,6 +76,7 @@ func NewMySQLStore(db *sql.DB, taskQueues ...string) *MySQLStore {
 		db:         db,
 		taskQueues: tqs,
 		tenantID:   "00000000-0000-0000-0000-000000000000",
+		dialect:    DialectMySQL,
 	}
 }
 
@@ -224,27 +226,9 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 	var wfs []*WorkflowInstance
 	for rows2.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var tenantID sql.NullString
-		var createdAt sql.NullTime
-		var errorCode, errorOp sql.NullString
-
-		if err := rows2.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
+		if err := s.dialect.scanWorkflowInstanceExtra(rows2, &wf); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
-
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
-		}
-		if tenantID.Valid {
-			wf.TenantID = tenantID.String
-		}
-		if createdAt.Valid {
-			wf.CreatedAt = createdAt.Time
-		}
-		wf.ErrorCode = errorCode.String
-		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows2.Err(); err != nil {
@@ -340,27 +324,9 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 	var wfs []*WorkflowInstance
 	for rows2.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var tenantID sql.NullString
-		var createdAt sql.NullTime
-		var errorCode, errorOp sql.NullString
-
-		if err := rows2.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
+		if err := s.dialect.scanWorkflowInstanceExtra(rows2, &wf); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
-
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
-		}
-		if tenantID.Valid {
-			wf.TenantID = tenantID.String
-		}
-		if createdAt.Valid {
-			wf.CreatedAt = createdAt.Time
-		}
-		wf.ErrorCode = errorCode.String
-		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows2.Err(); err != nil {

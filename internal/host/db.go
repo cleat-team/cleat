@@ -411,6 +411,7 @@ type PostgresStore struct {
 	db         *sql.DB
 	taskQueues []string
 	tenantID   string
+	dialect    Dialect
 }
 
 // NewPostgresStore creates a PostgresStore scoped to the given task queues.
@@ -426,6 +427,7 @@ func NewPostgresStore(db *sql.DB, taskQueues ...string) *PostgresStore {
 		db:         db,
 		taskQueues: tqs,
 		tenantID:   "00000000-0000-0000-0000-000000000000",
+		dialect:    DialectPostgres,
 	}
 }
 
@@ -516,27 +518,9 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID, namespace 
 	var wfs []*WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var tenantID sql.NullString
-		var createdAt sql.NullTime
-			var errorCode, errorOp sql.NullString
-
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
+		if err := s.dialect.scanWorkflowInstanceExtra(rows, &wf); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
-
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
-		}
-		if tenantID.Valid {
-			wf.TenantID = tenantID.String
-		}
-		if createdAt.Valid {
-			wf.CreatedAt = createdAt.Time
-		}
-			wf.ErrorCode = errorCode.String
-			wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -586,27 +570,9 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID, name
 	var wfs []*WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var tenantID sql.NullString
-		var createdAt sql.NullTime
-			var errorCode, errorOp sql.NullString
-
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
+		if err := s.dialect.scanWorkflowInstanceExtra(rows, &wf); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
-
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
-		}
-		if tenantID.Valid {
-			wf.TenantID = tenantID.String
-		}
-			if createdAt.Valid {
-				wf.CreatedAt = createdAt.Time
-			}
-			wf.ErrorCode = errorCode.String
-			wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -1843,44 +1809,33 @@ func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key strin
 // ordered by creation time DESC. Supports search by input content, error message,
 // and combined full-text search, as well as pagination via Offset/Limit.
 func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
-	query := `
-		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op
-		FROM workflow_instances
-		WHERE 1=1
-	`
-	var args []interface{}
-	argN := 0
+	d := s.dialect
+	qb := NewQueryBuilder(d,
+		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
+	)
 
 	if filter.Status != "" {
-		argN++
-		query += fmt.Sprintf(" AND status = $%d", argN)
-		args = append(args, filter.Status)
+		qb.AddCondition("status = %s", filter.Status)
 	}
-
 	if filter.InputContains != "" {
-		argN++
-		// Cast the JSONB input column to text for ILIKE substring matching.
-		// For production workloads with many rows, consider adding a GIN index:
-		//   CREATE INDEX idx_workflow_instances_input_gin
-		//   ON workflow_instances USING GIN (input jsonb_path_ops);
-		query += fmt.Sprintf(" AND input::text ILIKE $%d", argN)
-		args = append(args, "%"+filter.InputContains+"%")
+		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
 	}
-
 	if filter.ErrorContains != "" {
-		argN++
-		query += fmt.Sprintf(" AND error_msg ILIKE $%d", argN)
-		args = append(args, "%"+filter.ErrorContains+"%")
+		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
 	}
-
 	if filter.Search != "" {
-		argN++
 		pattern := "%" + filter.Search + "%"
-		query += fmt.Sprintf(" AND (input::text ILIKE $%d OR result::text ILIKE $%d OR error_msg ILIKE $%d)", argN, argN, argN)
-		args = append(args, pattern)
+		icol := d.castExpr("input")
+		rcol := d.castExpr("result")
+		n := qb.NextPos()
+		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s)",
+			d.likeExpr(icol, n, true),
+			d.likeExpr(rcol, n+1, true),
+			d.likeExpr("error_msg", n+2, true)))
+		qb.AddArgs(pattern, pattern, pattern)
 	}
 
-	query += " ORDER BY created_at DESC"
+	qb.AddRaw("ORDER BY created_at DESC")
 
 	limit := filter.Limit
 	if limit <= 0 {
@@ -1888,16 +1843,16 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	} else if limit > 1000 {
 		limit = 1000
 	}
-	argN++
-	query += fmt.Sprintf(" LIMIT $%d", argN)
-	args = append(args, limit)
 
 	if filter.Offset > 0 {
-		argN++
-		query += fmt.Sprintf(" OFFSET $%d", argN)
-		args = append(args, filter.Offset)
+		qb.AddRaw(d.limitOffset(qb.NextPos(), qb.NextPos()+1, true))
+		qb.AddArgs(limit, filter.Offset)
+	} else {
+		qb.AddRaw(d.limitOffset(qb.NextPos(), 0, false))
+		qb.AddArgs(limit)
 	}
 
+	query, args := qb.SQL()
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows: %w", err)
@@ -1907,17 +1862,9 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	var workflows []WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var errorCode, errorOp sql.NullString
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp); err != nil {
+		if err := d.scanWorkflowInstance(rows, &wf); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
-		}
-		wf.ErrorCode = errorCode.String
-		wf.ErrorOp = errorOp.String
 		workflows = append(workflows, wf)
 	}
 	return workflows, rows.Err()

@@ -75,6 +75,7 @@ type MSSQLStore struct {
 	db         *sql.DB
 	taskQueues []string
 	tenantID   string
+	dialect    Dialect
 }
 
 // NewMSSQLStore creates an MSSQLStore scoped to the given task queues.
@@ -90,6 +91,7 @@ func NewMSSQLStore(db *sql.DB, taskQueues ...string) *MSSQLStore {
 		db:         db,
 		taskQueues: tqs,
 		tenantID:   "00000000-0000-0000-0000-000000000000",
+		dialect:    DialectMSSQL,
 	}
 }
 
@@ -196,29 +198,9 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 	var wfs []*WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var tenantID sql.NullString
-		var createdAt sql.NullTime
-		var inputStr string
-		var errorCode, errorOp sql.NullString
-
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
+		if err := s.dialect.scanWorkflowInstanceExtra(rows, &wf); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
-
-		wf.Input = json.RawMessage(inputStr)
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
-		}
-		if tenantID.Valid {
-			wf.TenantID = tenantID.String
-		}
-		if createdAt.Valid {
-			wf.CreatedAt = createdAt.Time
-		}
-		wf.ErrorCode = errorCode.String
-		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -274,29 +256,9 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 	var wfs []*WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var tenantID sql.NullString
-		var createdAt sql.NullTime
-		var inputStr string
-		var errorCode, errorOp sql.NullString
-
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
+		if err := s.dialect.scanWorkflowInstanceExtra(rows, &wf); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
-
-		wf.Input = json.RawMessage(inputStr)
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
-		}
-		if tenantID.Valid {
-			wf.TenantID = tenantID.String
-		}
-		if createdAt.Valid {
-			wf.CreatedAt = createdAt.Time
-		}
-		wf.ErrorCode = errorCode.String
-		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -1488,40 +1450,34 @@ func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 // Supported filters: Status, InputContains, ErrorContains, Search.
 // Supports pagination via Offset and Limit (default 100, max 1000).
 func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
-	query := `
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op
-		FROM workflow_instances
-		WHERE 1=1
-	`
-	var args []interface{}
-	pi := 0
+	d := s.dialect
+	qb := NewQueryBuilder(d,
+		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
+	)
 
 	if filter.Status != "" {
-		pi++
-		query += fmt.Sprintf(" AND status = @p%d", pi)
-		args = append(args, filter.Status)
+		qb.AddCondition("status = %s", filter.Status)
 	}
-
 	if filter.InputContains != "" {
-		pi++
-		query += fmt.Sprintf(" AND CAST(input AS NVARCHAR(MAX)) LIKE @p%d", pi)
-		args = append(args, "%"+filter.InputContains+"%")
+		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
 	}
-
 	if filter.ErrorContains != "" {
-		pi++
-		query += fmt.Sprintf(" AND error_msg LIKE @p%d", pi)
-		args = append(args, "%"+filter.ErrorContains+"%")
+		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
 	}
-
 	if filter.Search != "" {
-		pi++
 		pattern := "%" + filter.Search + "%"
-		query += fmt.Sprintf(" AND (CAST(input AS NVARCHAR(MAX)) LIKE @p%d OR CAST(result AS NVARCHAR(MAX)) LIKE @p%d OR error_msg LIKE @p%d OR def_name LIKE @p%d)", pi, pi, pi, pi)
-		args = append(args, pattern)
+		icol := d.castExpr("input")
+		rcol := d.castExpr("result")
+		n := qb.NextPos()
+		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
+			d.likeExpr(icol, n, true),
+			d.likeExpr(rcol, n+1, true),
+			d.likeExpr("error_msg", n+2, true),
+			d.likeExpr("def_name", n+3, true)))
+		qb.AddArgs(pattern, pattern, pattern, pattern)
 	}
 
-	query += " ORDER BY created_at DESC"
+	qb.AddRaw("ORDER BY created_at DESC")
 
 	limit := filter.Limit
 	if limit <= 0 {
@@ -1531,16 +1487,14 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	}
 
 	if filter.Offset > 0 {
-		pi++
-		query += fmt.Sprintf(" OFFSET @p%d ROWS", pi)
-		args = append(args, filter.Offset)
+		qb.AddRaw(d.limitOffset(qb.NextPos(), qb.NextPos()+1, true))
+		qb.AddArgs(limit, filter.Offset)
 	} else {
-		query += " OFFSET 0 ROWS"
+		qb.AddRaw(d.limitOffset(qb.NextPos(), 0, false))
+		qb.AddArgs(limit)
 	}
-	pi++
-	query += fmt.Sprintf(" FETCH NEXT @p%d ROWS ONLY", pi)
-	args = append(args, limit)
 
+	query, args := qb.SQL()
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows: %w", err)
@@ -1550,19 +1504,9 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	var workflows []WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var errorCode, errorOp sql.NullString
-			var inputStr string
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
-			&wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp); err != nil {
+		if err := d.scanWorkflowInstance(rows, &wf); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
-			wf.Input = json.RawMessage(inputStr)
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
-		}
-		wf.ErrorCode = errorCode.String
-		wf.ErrorOp = errorOp.String
 		workflows = append(workflows, wf)
 	}
 	return workflows, rows.Err()

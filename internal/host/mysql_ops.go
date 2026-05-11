@@ -449,35 +449,35 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 
 // ListWorkflows returns workflow instances filtered by the given filter parameters.
 func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
-	query := `
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at
-		FROM workflow_instances
-		WHERE tenant_id = ?
-	`
-	args := []interface{}{s.tenantID}
+	d := s.dialect
+	qb := NewQueryBuilder(d,
+		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE tenant_id = ?",
+	)
+	qb.AddArgs(s.tenantID)
 
 	if filter.Status != "" {
-		query += " AND status = ?"
-		args = append(args, filter.Status)
+		qb.AddCondition("status = %s", filter.Status)
 	}
-
 	if filter.InputContains != "" {
-		query += " AND LOWER(CAST(input AS CHAR)) LIKE LOWER(?)"
-		args = append(args, "%"+filter.InputContains+"%")
+		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
 	}
-
 	if filter.ErrorContains != "" {
-		query += " AND LOWER(error_msg) LIKE LOWER(?)"
-		args = append(args, "%"+filter.ErrorContains+"%")
+		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
 	}
-
 	if filter.Search != "" {
 		pattern := "%" + filter.Search + "%"
-		query += " AND (LOWER(CAST(input AS CHAR)) LIKE LOWER(?) OR LOWER(CAST(result AS CHAR)) LIKE LOWER(?) OR LOWER(error_msg) LIKE LOWER(?) OR LOWER(def_name) LIKE LOWER(?))"
-		args = append(args, pattern, pattern, pattern, pattern)
+		icol := d.castExpr("input")
+		rcol := d.castExpr("result")
+		n := qb.NextPos()
+		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
+			d.likeExpr(icol, n, true),
+			d.likeExpr(rcol, n+1, true),
+			d.likeExpr("error_msg", n+2, true),
+			d.likeExpr("def_name", n+3, true)))
+		qb.AddArgs(pattern, pattern, pattern, pattern)
 	}
 
-	query += " ORDER BY created_at DESC"
+	qb.AddRaw("ORDER BY created_at DESC")
 
 	limit := filter.Limit
 	if limit <= 0 {
@@ -485,14 +485,16 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	} else if limit > 1000 {
 		limit = 1000
 	}
-	query += " LIMIT ?"
-	args = append(args, limit)
 
 	if filter.Offset > 0 {
-		query += " OFFSET ?"
-		args = append(args, filter.Offset)
+		qb.AddRaw(d.limitOffset(qb.NextPos(), qb.NextPos()+1, true))
+		qb.AddArgs(limit, filter.Offset)
+	} else {
+		qb.AddRaw(d.limitOffset(qb.NextPos(), 0, false))
+		qb.AddArgs(limit)
 	}
 
+	query, args := qb.SQL()
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("ListWorkflows: %w", err)
@@ -502,13 +504,8 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	var workflows []WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt); err != nil {
+		if err := d.scanWorkflowInstance(rows, &wf); err != nil {
 			return nil, fmt.Errorf("ListWorkflows: scan: %w", err)
-		}
-		if nextWakeAt.Valid {
-			wf.NextWakeAt = nextWakeAt.Time
 		}
 		workflows = append(workflows, wf)
 	}
