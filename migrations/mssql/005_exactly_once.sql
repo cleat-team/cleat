@@ -14,7 +14,7 @@
 IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.idempotency_keys') AND type = N'U')
 CREATE TABLE dbo.idempotency_keys (
     key_hash    VARBINARY(32)    NOT NULL,
-    workflow_id NVARCHAR(MAX)    NOT NULL,
+    workflow_id NVARCHAR(64)     NOT NULL,
     result      NVARCHAR(MAX)    NULL,
     error_msg   NVARCHAR(MAX)    NULL,
     created_at  DATETIMEOFFSET   NOT NULL DEFAULT SYSUTCDATETIME(),

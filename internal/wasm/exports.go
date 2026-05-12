@@ -128,6 +128,9 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 		}
 		buf.WriteString("\t}\n")
 		buf.WriteString("\tif err := json.Unmarshal([]byte(argsJSON), &args); err != nil {\n")
+		buf.WriteString("\t\terrJSON, _ := json.Marshal(err.Error())\n")
+		buf.WriteString("\t\terrPtr, errLen := stringPtr(string(errJSON))\n")
+		buf.WriteString("\t\tcleatCompleteImport(1, errPtr, errLen)\n")
 		buf.WriteString("\t\treturn writeErrorOut(outPtr, maxOutLen, err)\n")
 		buf.WriteString("\t}\n")
 	} else {
@@ -183,8 +186,14 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 	buf.WriteString("\t\treturn writeSuspendOut()\n")
 	buf.WriteString("\t}\n")
 	buf.WriteString("\tif __susResultErr != nil {\n")
+		buf.WriteString("\t\terrJSON, _ := json.Marshal(__susResultErr.Error())\n")
+		buf.WriteString("\t\terrPtr, errLen := stringPtr(string(errJSON))\n")
+		buf.WriteString("\t\tcleatCompleteImport(1, errPtr, errLen)\n")
 	buf.WriteString("\t\treturn writeErrorOut(outPtr, maxOutLen, __susResultErr)\n")
 	buf.WriteString("\t}\n")
+	buf.WriteString("\tresultJSON, _ := json.Marshal(string(__susResultJSON))\n")
+	buf.WriteString("\tresultPtr, resultLen := stringPtr(string(resultJSON))\n")
+	buf.WriteString("\tcleatCompleteImport(0, resultPtr, resultLen)\n")
 	buf.WriteString("\treturn writeJSONOut(outPtr, maxOutLen, json.RawMessage(__susResultJSON))\n")
 
 	buf.WriteString("}\n\n")

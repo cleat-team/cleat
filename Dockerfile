@@ -7,8 +7,11 @@ RUN apk add --no-cache git ca-certificates
 
 WORKDIR /app
 
-# Pre-cache dependencies for better layer reuse
+# Pre-cache dependencies for better layer reuse.
+# The cleat/ submodule is a separate Go module (replace directive)
+# and must be present for go mod download to resolve.
 COPY go.mod go.sum ./
+COPY cleat/go.mod cleat/go.sum cleat/
 RUN go mod download
 
 # Copy the full source tree (includes cmd/cleat-worker/web/dist/ for //go:embed)
@@ -30,6 +33,7 @@ RUN apk add --no-cache ca-certificates wget
 RUN addgroup -S cleat && adduser -S -G cleat cleat
 
 COPY --from=builder /cleat-worker /usr/local/bin/cleat-worker
+COPY --from=builder /app/migrations /migrations
 
 USER cleat
 

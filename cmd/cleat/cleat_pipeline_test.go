@@ -52,7 +52,7 @@ func repoRoot(t *testing.T) string {
 
 func TestAnalyze_ValidPackage(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
+	result, cg, cr, threadingErrs, usage, tr := analyze(pattern, "")
 
 	if result == nil {
 		t.Fatal("analyze() returned nil result")
@@ -133,7 +133,7 @@ func contains(slice []string, item string) bool {
 
 func TestAnalyze_InvalidPackagePath(t *testing.T) {
 	if os.Getenv("TEST_ANALYZE_BAD_PATH") == "1" {
-		analyze("/cleat-test-nonexistent-path-12345")
+		analyze("/cleat-test-nonexistent-path-12345", "")
 		return
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestAnalyze_InvalidPackagePath$")
@@ -150,7 +150,7 @@ func TestAnalyze_InvalidPackagePath(t *testing.T) {
 func TestAnalyze_InvalidPackageNoEntryPoints(t *testing.T) {
 	if os.Getenv("TEST_ANALYZE_NO_EP") == "1" {
 		pattern := os.Getenv("TEST_ANALYZE_NO_EP_PATH")
-		analyze(pattern)
+		analyze(pattern, "")
 		return
 	}
 
@@ -693,7 +693,7 @@ func TestInvalidTargetError(t *testing.T) {
 
 func TestWasmOutputName_FromRealAnalysis(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern)
+	result, _, _, _, _, _ := analyze(pattern, "")
 
 	name := wasmOutputName(result)
 	if name == "" {
@@ -714,7 +714,7 @@ func TestWasmOutputName_FromRealAnalysis(t *testing.T) {
 
 func TestShortEntryPoints_FromRealAnalysis(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern)
+	result, _, _, _, _, _ := analyze(pattern, "")
 
 	short := shortEntryPoints(result)
 	if len(short) == 0 {
@@ -739,7 +739,7 @@ func TestRunBuild_TinyGoTarget(t *testing.T) {
 	// The tinygo branch sets cmd.Env and uses exec.Command("tinygo", ...).
 	// We verify the target selection logic works.
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, usage, tr := analyze(pattern)
+	result, _, _, _, usage, tr := analyze(pattern, "")
 
 	// Verify analyze succeeds before we worry about tinygo dispatch.
 	if result == nil {
@@ -747,7 +747,7 @@ func TestRunBuild_TinyGoTarget(t *testing.T) {
 	}
 
 	outDir := t.TempDir()
-	outputs := wasm.BuildOutputs("main", usage, result)
+	outputs := wasm.BuildOutputs("main", usage, result, "")
 	wasmFile := wasmOutputName(result)
 	goVersion := result.GoVersion
 	if goVersion == "" {
@@ -1180,7 +1180,7 @@ func TestGenerateWorkflowFile(t *testing.T) {
 
 func TestBuildParams(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern)
+	result, _, _, _, _, _ := analyze(pattern, "")
 
 	if result == nil {
 		t.Fatal("analyze returned nil")
@@ -1223,7 +1223,7 @@ func TestBuildParams(t *testing.T) {
 
 func TestGenerateDevMain(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern)
+	result, _, _, _, _, _ := analyze(pattern, "")
 
 	// Find PlaceOrder entry point — EntryPoints order is non-deterministic.
 	var placeOrderFD *analyzer.FuncDecl
@@ -1267,7 +1267,7 @@ func TestGenerateDevMain(t *testing.T) {
 
 func TestGenerateDevMain_WithConcurrencyKey(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern)
+	result, _, _, _, _, _ := analyze(pattern, "")
 
 	// Find PlaceOrder entry point.
 	var placeOrderFD2 *analyzer.FuncDecl
@@ -1613,7 +1613,7 @@ func TestRunInit_InvalidTemplate(t *testing.T) {
 
 func TestBuildParams_CancelOrder(t *testing.T) {
 	pattern := filepath.Join(testdataDir(t), "basic")
-	result, _, _, _, _, _ := analyze(pattern)
+	result, _, _, _, _, _ := analyze(pattern, "")
 
 	// CancelOrder has signature: CancelOrder(h HostCalls, orderID string) error
 	var cancelFD *analyzer.FuncDecl

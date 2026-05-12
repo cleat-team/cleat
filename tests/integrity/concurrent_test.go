@@ -127,7 +127,7 @@ func TestConcurrentClaimAndHeartbeat(t *testing.T) {
 		go func(workerID string) {
 			defer wg.Done()
 			// Try to claim the workflow.
-			wf, err := store.ClaimWorkflow(ctx, workerID, "default")
+			wf, err := store.ClaimWorkflow(ctx, workerID)
 			if err != nil {
 				return
 			}
@@ -216,7 +216,7 @@ func TestConcurrentStatusUpdates(t *testing.T) {
 
 			for iter := 0; iter < numIterations; iter++ {
 				// Claim the workflow.
-				wf, err := store.ClaimWorkflow(ctx, workerID, "default")
+				wf, err := store.ClaimWorkflow(ctx, workerID)
 				if err != nil {
 					// No workflows ready — skip this iteration.
 					continue

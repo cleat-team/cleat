@@ -82,7 +82,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err == nil && wf != nil {
 				atomic.AddInt32(&phase1Count, 1)
 			}
@@ -112,7 +112,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for _, wid := range []string{"worker-1", "worker-2", "worker-3"} {
-				wf, err := store.ClaimWorkflow(ctx, wid, "default")
+				wf, err := store.ClaimWorkflow(ctx, wid)
 				if err == nil && wf != nil {
 					atomic.AddInt32(&phase2Count, 1)
 				}
@@ -138,7 +138,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err == nil && wf != nil {
 				atomic.AddInt32(&phase3Count, 1)
 			}
@@ -193,7 +193,7 @@ func TestScaleUpWorkers(t *testing.T) {
 	start1 := time.Now()
 	claimed1 := 0
 	for {
-		wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+		wf, err := store.ClaimWorkflow(ctx, "worker-1")
 		if err != nil {
 			t.Fatalf("Claim error: %v", err)
 		}
@@ -228,7 +228,7 @@ func TestScaleUpWorkers(t *testing.T) {
 			defer wg.Done()
 			for _, wid := range []string{"worker-1", "worker-2", "worker-3"} {
 				for j := 0; j < 10; j++ {
-					wf, err := store.ClaimWorkflow(ctx, wid, "default")
+					wf, err := store.ClaimWorkflow(ctx, wid)
 					if err != nil {
 						return
 					}

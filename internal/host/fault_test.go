@@ -52,7 +52,7 @@ func TestFaultConcurrentClaim(t *testing.T) {
 		wg.Add(1)
 		go func(workerID string) {
 			defer wg.Done()
-			wf, err := store.ClaimWorkflow(ctx, workerID, "default")
+			wf, err := store.ClaimWorkflow(ctx, workerID)
 			if err != nil {
 				return
 			}
@@ -163,7 +163,7 @@ func TestFaultHeartbeatOwnership(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Worker A claims the instance.
-	wfA, err := store.ClaimWorkflow(ctx, "worker-a", "default")
+	wfA, err := store.ClaimWorkflow(ctx, "worker-a")
 	if err != nil {
 		t.Fatalf("Worker A claim: %v", err)
 	}

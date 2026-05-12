@@ -181,11 +181,11 @@ func TestGenerateMemory(t *testing.T) {
 func TestGenerateHostAdapterBasic(t *testing.T) {
 	result, cr := loadBasic(t)
 	usage := AnalyzeUsage(result, cr)
-	code := string(GenerateHostAdapter("basic", usage))
+	code := string(GenerateHostAdapter("basic", usage, "go"))
 	for _, c := range []string{"//go:build wasip1", "package basic",
 		`"fmt"`, `"unsafe"`, `"github.com/rcownie/cleat/cleat"`,
 		"func makeHostCalls() cleat.HostCalls {",
-		"DurableCall: func(", "responseBuf := make([]byte, _cleatOutBufSize)",
+		"DurableCall: func(service string, operation string, requestJSON string) (string, error)",
 	} {
 		if !strings.Contains(code, c) {
 			t.Errorf("expected: %s", c)
@@ -197,7 +197,7 @@ func TestGenerateHostAdapterBasic(t *testing.T) {
 func TestGenerateHostAdapterNoUnusedFields(t *testing.T) {
 	result, cr := loadBasic(t)
 	usage := AnalyzeUsage(result, cr)
-	code := string(GenerateHostAdapter("basic", usage))
+	code := string(GenerateHostAdapter("basic", usage, "go"))
 	if strings.Contains(code, "DurableSleep:") {
 		t.Error("DurableSleep should not be generated for basic testdata")
 	}
@@ -271,7 +271,7 @@ func TestGenerateExportsErrorsOnlyReturn(t *testing.T) {
 func TestBuildOutputsBasic(t *testing.T) {
 	result, cr := loadBasic(t)
 	usage := AnalyzeUsage(result, cr)
-	of := BuildOutputs("basic", usage, result)
+	of := BuildOutputs("basic", usage, result, "go")
 	if of.Imports == "" || of.Memory == "" || of.Adapter == "" || of.Exports == "" {
 		t.Fatal("BuildOutputs returned empty fields")
 	}
@@ -691,10 +691,11 @@ func TestNeedsTimeTrue(t *testing.T) {
 }
 
 func TestNeedsTimeFalse(t *testing.T) {
+	// DurableSleepMs takes int64 (milliseconds), no time.Duration involved.
 	usage := &UsageInfo{Used: map[string]bool{"cleat_sleep": true},
-		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleep"}}}
+		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleepMs"}}}
 	if needsTime(usage) {
-		t.Error("DurableSleep should not need time")
+		t.Error("DurableSleepMs should not need time")
 	}
 }
 

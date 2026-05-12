@@ -145,26 +145,11 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
-	// Write a main package stub. The stub differs by target:
-	//   - tinygo: blocks on channel to keep main() alive (asyncify scheduler
-	//     handles exports while main is blocked). The deadlock message on stdout
-	//     is harmless — the module stays alive.
-	//   - go: select{} blocks forever with zero CPU to keep the runtime alive.
-	var mainStub string
-	if cfg.Target == "tinygo" {
-		mainStub = `package main
-
-func main() {
-	<-make(chan struct{})
-}
-`
+		var mainStub string
+		if cfg.Target == "tinygo" {
+		mainStub = "package main\n\nfunc main() {\n\t<-make(chan struct{})\n}\n"
 	} else {
-		mainStub = `package main
-
-func main() {
-	select {}
-}
-`
+		mainStub = "package main\n\nfunc main() {\n\t// Keep a goroutine always runnable to prevent Go WASI\n\t// deadlock detection from firing proc_exit(2).\n\tdone := make(chan struct{})\n\tgo func() {\n\t\tfor {\n\t\t\tselect {\n\t\t\tcase <-done:\n\t\t\t\treturn\n\t\t\tdefault:\n\t\t\t}\n\t\t}\n\t}()\n\t<-done\n}\n"
 	}
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
@@ -177,8 +162,8 @@ func main() {
 	goVersion := cfg.GoVersion
 	replaceRoot := cfg.ProjectRoot
 	if cfg.Target == "tinygo" {
-		goVersion = "1.24"
-		// Create a minimal dependency tree with go 1.24 so tinygo doesn't
+		goVersion = "1.23"
+		// Create a minimal dependency tree with go 1.23 so tinygo doesn't
 		// reject the project root's go 1.26 requirement.
 		depsDir := filepath.Join(cfg.OutDir, ".deps")
 		if err := os.MkdirAll(filepath.Join(depsDir, "cleat"), 0755); err != nil {
@@ -203,6 +188,16 @@ func main() {
 				return fmt.Errorf("writing %s: %w", base, err)
 			}
 		}
+
+			// Copy cleat/go.mod and go.sum into .deps/cleat/ so that
+			// github.com/rcownie/cleat/cleat is a proper submodule
+			// resolvable via the replace directive for the root module.
+			for _, modFile := range []string{"go.mod", "go.sum"} {
+				srcMod := filepath.Join(srcCleat, modFile)
+				if data, err := os.ReadFile(srcMod); err == nil {
+					os.WriteFile(filepath.Join(depsDir, "cleat", modFile), data, 0644)
+				}
+			}
 		// Also copy cleattest if present.
 		srcCleattest := filepath.Join(srcCleat, "cleattest")
 		if st, err := os.Stat(srcCleattest); err == nil && st.IsDir() {
@@ -222,7 +217,7 @@ func main() {
 		// Write .deps/go.mod with a compatible version.
 		depsMod := fmt.Sprintf(`module %s
 
-go 1.24
+go 1.23
 `, cfg.ModulePath)
 		if err := os.WriteFile(filepath.Join(depsDir, "go.mod"), []byte(depsMod), 0644); err != nil {
 			return fmt.Errorf("writing .deps/go.mod: %w", err)
@@ -230,14 +225,97 @@ go 1.24
 		replaceRoot = depsDir
 	}
 
-	modContent := fmt.Sprintf(`module cleat-build
+	// Read the project's go.mod and extract require and replace directives
+	// for transitive dependencies (e.g., cleat module) so they are resolvable
+	// from the build directory.
+	var extraRequires string
+	var extraReplaces string
+	var inRequireBlock bool
+	modFilePath := filepath.Join(cfg.ProjectRoot, "go.mod")
+	if modData, err := os.ReadFile(modFilePath); err == nil {
+		for _, line := range strings.Split(string(modData), "\n") {
+			trimmed := strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(trimmed, "require ("):
+				inRequireBlock = true
+			case inRequireBlock && trimmed == ")":
+				inRequireBlock = false
+			case inRequireBlock && trimmed != "":
+				parts := strings.Fields(trimmed)
+				if len(parts) >= 2 && parts[0] != cfg.ModulePath {
+					extraRequires += "\t" + parts[0] + " " + parts[1] + "\n"
+				}
+			case strings.HasPrefix(trimmed, "require ") && !inRequireBlock:
+				// Single-line require: "require mod v0.0.0"
+				modExpr := strings.TrimSpace(strings.TrimPrefix(trimmed, "require "))
+				if modExpr != "" {
+					parts := strings.Fields(modExpr)
+					if len(parts) >= 2 && parts[0] != cfg.ModulePath {
+						extraRequires += "\t" + parts[0] + " " + parts[1] + "\n"
+					}
+				}
+			case strings.HasPrefix(trimmed, "replace ") && strings.Contains(trimmed, "=>"):
+				parts := strings.SplitN(trimmed, "=>", 2)
+				modName := strings.TrimSpace(strings.TrimPrefix(parts[0], "replace "))
+				if modName != cfg.ModulePath {
+					// For TinyGo targets, submodules already provided
+					// by the .deps/ tree are skipped to avoid ambiguity
+					// with the project root's replace directives.
+					if cfg.Target == "tinygo" && strings.HasPrefix(modName, cfg.ModulePath+"/") {
+						continue
+					}
+					// Resolve relative paths in replacement targets
+					// to absolute paths so the build directory can
+					// be anywhere.
+					targetPath := strings.TrimSpace(parts[1])
+					if strings.HasPrefix(targetPath, ".") || (!strings.HasPrefix(targetPath, "/") && !strings.HasPrefix(targetPath, `"`) && !strings.HasPrefix(targetPath, "github.com/")) {
+						absPath := filepath.Join(cfg.ProjectRoot, targetPath)
+						extraReplaces += fmt.Sprintf("\treplace %s => %s\n", modName, absPath)
+					} else {
+						extraReplaces += "\t" + trimmed + "\n"
+					}
+				}
+			}
+		}
+	}
+
+	// Wrap extra requires in a require block if present.
+	var modContent string
+	if cfg.Target == "tinygo" {
+		// For TinyGo, use a minimal go.mod. The cleat/cleat
+		// submodule is replaced directly (not via the root
+		// module), and go mod tidy is run by the caller to
+		// generate the go.sum. This avoids issues with v0.0.0
+		// version resolution.
+		modContent = fmt.Sprintf(`module cleat-build
 
 go %s
 
 require %s v0.0.0
 
+replace %s => %s/cleat
+`, goVersion, cfg.ModulePath+"/cleat", cfg.ModulePath+"/cleat", replaceRoot)
+	} else {
+		requireBlock := fmt.Sprintf("require %s v0.0.0", cfg.ModulePath)
+		if extraRequires != "" {
+			requireBlock = fmt.Sprintf("require (\n\t%s v0.0.0\n%s)", cfg.ModulePath, extraRequires)
+		}
+
+		modContent = fmt.Sprintf(`module cleat-build
+
+go %s
+
+%s`, goVersion, requireBlock)
+
+		if extraReplaces != "" {
+			modContent += fmt.Sprintf(`
 replace %s => %s
-`, goVersion, cfg.ModulePath, cfg.ModulePath, replaceRoot)
+%s`, cfg.ModulePath, replaceRoot, extraReplaces)
+		} else {
+			modContent += fmt.Sprintf(`
+replace %s => %s`, cfg.ModulePath, replaceRoot)
+		}
+	}
 
 	modPath := filepath.Join(cfg.OutDir, "go.mod")
 	if err := os.WriteFile(modPath, []byte(modContent), 0644); err != nil {

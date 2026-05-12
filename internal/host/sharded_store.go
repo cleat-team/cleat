@@ -154,8 +154,8 @@ func (s *ShardedStore) forEachShard(fn func(WorkflowStore) error) error {
 
 // ClaimWorkflow polls every shard and returns the first runnable workflow
 // found.  This is the primary dispatch path so we fan-out across all shards.
-func (s *ShardedStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
-	wfs, err := s.ClaimWorkflows(ctx, workerID, namespace, 1)
+func (s *ShardedStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
+	wfs, err := s.ClaimWorkflows(ctx, workerID, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func (s *ShardedStore) ClaimWorkflow(ctx context.Context, workerID, namespace st
 
 // ClaimWorkflows claims up to limit runnable workflows across all shards.
 // Iterates through shards collecting workflows until limit is reached or shards exhausted.
-func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
@@ -185,7 +185,7 @@ func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID, namespace s
 		wg.Add(1)
 		go func(sh *Shard) {
 			defer wg.Done()
-			wfs, err := sh.Store.ClaimWorkflows(ctx, workerID, namespace, limit)
+			wfs, err := sh.Store.ClaimWorkflows(ctx, workerID, limit)
 			resultCh <- shardResult{wfs: wfs, err: err, name: sh.Config.Name}
 		}(shard)
 	}
@@ -213,7 +213,7 @@ func (s *ShardedStore) ClaimWorkflows(ctx context.Context, workerID, namespace s
 // ClaimStickyWorkflows claims up to limit sticky workflow instances across all shards.
 // Sticky workflows use idx_instances_sticky for low-contention claiming.
 // Iterates through shards collecting workflows until limit is reached or shards exhausted.
-func (s *ShardedStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (s *ShardedStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	s.mu.RLock()
 	shards := s.shards
 	s.mu.RUnlock()
@@ -231,7 +231,7 @@ func (s *ShardedStore) ClaimStickyWorkflows(ctx context.Context, workerID, names
 		wg.Add(1)
 		go func(sh *Shard) {
 			defer wg.Done()
-			wfs, err := sh.Store.ClaimStickyWorkflows(ctx, workerID, namespace, limit)
+			wfs, err := sh.Store.ClaimStickyWorkflows(ctx, workerID, limit)
 			resultCh <- shardResult{wfs: wfs, err: err, name: sh.Config.Name}
 		}(shard)
 	}

@@ -22,11 +22,11 @@ func TestDispatchLoop_CapacityLimit(t *testing.T) {
 	// skip claiming and sleep instead.
 	ms := &mockStore{}
 	claimAttempts := 0
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		claimAttempts++
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 
@@ -66,12 +66,12 @@ func TestDispatchLoop_StickyReclaim(t *testing.T) {
 	loadWASMCh := make(chan struct{})
 	claimedCh := make(chan struct{})
 
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return []*host.WorkflowInstance{
 			{ID: "wf-sticky-reclaim", DefName: "test", DefVersion: 1, Status: "ready"},
 		}, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 	ms.loadWASMFn = func(ctx context.Context, defName string, defVersion int) ([]byte, error) {
@@ -214,7 +214,7 @@ func TestWaitForDB_RetriesOnError(t *testing.T) {
 	ms := &mockStore{}
 	attempts := 0
 	const connErrMsg = "connection refused"
-	ms.claimWorkflowFn = func(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error) {
+	ms.claimWorkflowFn = func(ctx context.Context, workerID string) (*host.WorkflowInstance, error) {
 		attempts++
 		if attempts <= 2 {
 			return nil, errors.New(connErrMsg)
@@ -244,7 +244,7 @@ func TestWaitForDB_ImmediateSuccess(t *testing.T) {
 	// after a single call.
 	ms := &mockStore{}
 	attempts := 0
-	ms.claimWorkflowFn = func(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error) {
+	ms.claimWorkflowFn = func(ctx context.Context, workerID string) (*host.WorkflowInstance, error) {
 		attempts++
 		return nil, nil
 	}

@@ -160,13 +160,13 @@ func TestPrepareBuildDirHappyPath(t *testing.T) {
 		t.Errorf("source not rewritten: %s", string(content))
 	}
 
-	// Main stub should contain "select {}" (default target).
+	// Main stub should be valid Go (default target has goroutine-based stub).
 	stub, err := os.ReadFile(filepath.Join(outDir, "gen_main_stub.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(stub), "select {}") {
-		t.Errorf("expected select{} in main stub, got: %s", string(stub))
+	if !strings.Contains(string(stub), "package main") || !strings.Contains(string(stub), "func main()") {
+		t.Errorf("expected valid main stub, got: %s", string(stub))
 	}
 
 	// go.mod should reference the module path and version.
@@ -353,13 +353,13 @@ func TestPrepareBuildDirTinygoTarget(t *testing.T) {
 		t.Errorf("expected channel block in tinygo stub, got: %s", string(stub))
 	}
 
-	// .deps/go.mod should have go 1.24 (capped).
+	// .deps/go.mod should have go 1.23 (capped).
 	depsMod, err := os.ReadFile(filepath.Join(outDir, ".deps", "go.mod"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(depsMod), "go 1.24") {
-		t.Errorf("expected go 1.24 in .deps/go.mod, got: %s", string(depsMod))
+	if !strings.Contains(string(depsMod), "go 1.23") {
+		t.Errorf("expected go 1.23 in .deps/go.mod, got: %s", string(depsMod))
 	}
 
 	// Cleat SDK should be copied into .deps/cleat/.

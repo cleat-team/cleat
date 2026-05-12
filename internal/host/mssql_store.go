@@ -147,8 +147,8 @@ func (s *MSSQLStore) buildTaskQueueParam() string {
 // ---------------------------------------------------------------------------
 
 // ClaimWorkflow atomically claims a single runnable workflow instance.
-func (s *MSSQLStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
-	wfs, err := s.ClaimWorkflows(ctx, workerID, namespace, 1)
+func (s *MSSQLStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
+	wfs, err := s.ClaimWorkflows(ctx, workerID, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func (s *MSSQLStore) ClaimWorkflow(ctx context.Context, workerID, namespace stri
 // ClaimWorkflows atomically claims up to limit runnable workflow instances.
 // Uses UPDATE...OUTPUT with READPAST/UPDLOCK hints (SQL Server's equivalent
 // of FOR UPDATE SKIP LOCKED) wrapped in a transaction with RLS context.
-func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: begin: %w", err)
@@ -184,12 +184,11 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
 			WHERE status = 'ready'
 			  AND next_wake_at <= SYSUTCDATETIME()
-			  AND namespace = @p2
-			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p3, ','))
+			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
 			ORDER BY CASE WHEN sticky_worker_id = @p1 THEN 0 ELSE 1 END, created_at
-			OFFSET 0 ROWS FETCH NEXT @p4 ROWS ONLY
+			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
 		)
-	`, workerID, namespace, tqParam, limit)
+	`, workerID, tqParam, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
 	}
@@ -218,7 +217,7 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 // that are sticky to this worker. Uses the sticky_worker_id filter for
 // low-contention claiming. Returns fewer than limit if not enough sticky
 // workflows are ready. Callers should fall back to ClaimWorkflows for remaining capacity.
-func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: begin: %w", err)
@@ -242,12 +241,11 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 			WHERE status = 'ready'
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND sticky_worker_id = @p1
-			  AND namespace = @p2
-			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p3, ','))
+			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
 			ORDER BY created_at
-			OFFSET 0 ROWS FETCH NEXT @p4 ROWS ONLY
+			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
 		)
-	`, workerID, namespace, tqParam, limit)
+	`, workerID, tqParam, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
 	}
@@ -494,11 +492,11 @@ func (s *MSSQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 				defer_description, defer_id, child_name, child_input, run_id, new_input,
 				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				promise_name, promise_id, promise_result, promise_error, payload,
-				created_at, checksum
+				created_at, checksum, tenant_id
 			)
 			SELECT @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10,
 			       @p11, @p12, @p13, @p14, @p15, @p16, @p17, @p18, @p19, @p20,
-			       @p21, @p22, @p23, @p24, @p25, @p26, @p27, @p28, @p29, @p30, @p31
+			       @p21, @p22, @p23, @p24, @p25, @p26, @p27, @p28, @p29, @p30, @p31, @p32
 			WHERE NOT EXISTS (
 				SELECT 1 FROM event_history WHERE workflow_id = @p1 AND step = @p2
 			)
@@ -512,7 +510,7 @@ func (s *MSSQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
 			payloadArg,
 			time.UnixMilli(rec.TimestampMs),
-			checksum)
+			checksum, s.tenantID)
 		if err != nil {
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
@@ -777,11 +775,9 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	// Create the new workflow run with a Go-generated UUID.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
-		VALUES (@p1, @p2, @p3, 'ready', @p4,
-		        ISNULL((SELECT namespace FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
-		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
-	`, newRunID, defName, defVersion, string(newInput))
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		VALUES (@p1, @p2, @p3, 'ready', @p4,		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'), @p5)
+	`, newRunID, defName, defVersion, string(newInput), s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -993,11 +989,9 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
-			VALUES (@p1, @p2, @p3, 'ready', @p4,
-			        ISNULL((SELECT namespace FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
-			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
-		`, runID, defName, defVersion, string(input))
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+			VALUES (@p1, @p2, @p3, 'ready', @p4,			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'), @p5)
+		`, runID, defName, defVersion, string(input), s.tenantID)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -1013,11 +1007,9 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue)
-		VALUES (@p1, @p2, @p3, 'ready', @p4,
-		        ISNULL((SELECT namespace FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
-		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
-	`, runID, defName, defVersion, string(input))
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		VALUES (@p1, @p2, @p3, 'ready', @p4,		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'), @p5)
+	`, runID, defName, defVersion, string(input), s.tenantID)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -1334,14 +1326,12 @@ func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
 	runID := uuid.New().String()
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 		VALUES (@p1, @p2,
 		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0) END,
 		        'ready', @p3, @p4,
-		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),
-		        ISNULL((SELECT namespace FROM workflow_instances WHERE id = @p4), 'default'),
-		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'))
-	`, runID, defName, inputJSON, parentID, defVersion, parentClosePolicy)
+		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'), @p7)
+	`, runID, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
@@ -1363,14 +1353,12 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 
 	// 1. INSERT child workflow instance.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 		VALUES (@p1, @p2,
 		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0) END,
 		        'ready', @p3, @p4,
-		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),
-		        ISNULL((SELECT namespace FROM workflow_instances WHERE id = @p4), 'default'),
-		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'))
-	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy)
+		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'), @p7)
+	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
 	}
@@ -1379,14 +1367,14 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 	event.RunID = childID
 	checksum := computeEventChecksum(event)
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum)
-		SELECT @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8
+		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id)
+		SELECT @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9
 		WHERE NOT EXISTS (
 			SELECT 1 FROM event_history WHERE workflow_id = @p1 AND step = @p2
 		)
 	`, parentID, event.Step, string(event.EventType),
 		nullStr(event.ChildName), nullStr(event.ChildInput), nullStr(childID),
-		time.UnixMilli(event.TimestampMs), checksum)
+		time.UnixMilli(event.TimestampMs), checksum, s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
 	}
@@ -1989,9 +1977,9 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			min_version = @p5,
 			plugin_deps = @p6,
 			deprecated = @p7
-		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated)
-		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7);
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated)
+		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
+		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8);
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}

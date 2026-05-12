@@ -20,6 +20,7 @@ concurrency:
 
 permissions:
   pull-requests: read
+  contents: read
 
 jobs:
   cla:
@@ -34,6 +35,21 @@ jobs:
             const author = context.payload.pull_request.user.login;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+
+            // Repo owners and collaborators skip the CLA check.
+            try {
+              const { data: perms } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner, repo, username: author,
+              });
+              if (perms.permission === 'admin' || perms.permission === 'write') {
+                console.log(`${author} has ${perms.permission} access — CLA check skipped.`);
+                core.setOutput('is_first_time', 'false');
+                core.setOutput('author', author);
+                return;
+              }
+            } catch (e) {
+              // Not a collaborator — fall through to first-time check.
+            }
 
             // Search for any merged PR by this author (excluding this PR)
             const { data: prs } = await github.rest.search.issuesAndPullRequests({

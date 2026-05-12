@@ -24,7 +24,7 @@ func leafFunc(h cleat.HostCalls) {
 // parameter. This should produce an E010 threading error because it's
 // in the closure yet lacks HostCalls access.
 func unthreadedHelper(input string) string {
-	leafFunc(nil) // would panic at runtime — the threading check catches this
+	leafFunc(cleat.HostCalls{}) // would panic at runtime — the threading check catches this
 	return "done"
 }
 

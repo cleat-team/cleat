@@ -59,7 +59,7 @@ func TestRollingWorkerRestart(t *testing.T) {
 			default:
 			}
 
-			wf, err := store.ClaimWorkflow(ctx, workerID, "default")
+			wf, err := store.ClaimWorkflow(ctx, workerID)
 			if err != nil {
 				// Transient error — retry.
 				time.Sleep(5 * time.Millisecond)
@@ -177,7 +177,7 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 			}
 
 			// Claim with the worker's sticky preference.
-			wf, err := store.ClaimWorkflow(ctx, workerID, "default")
+			wf, err := store.ClaimWorkflow(ctx, workerID)
 			if err != nil {
 				time.Sleep(5 * time.Millisecond)
 				continue

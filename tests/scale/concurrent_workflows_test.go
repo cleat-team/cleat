@@ -67,7 +67,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 			defer wg.Done()
 			for wfID := range workCh {
 				// Claim the workflow.
-				wf, err := store.ClaimWorkflow(ctx, workerID, "default")
+				wf, err := store.ClaimWorkflow(ctx, workerID)
 				if err != nil {
 					errCh <- fmt.Errorf("claim %s: %w", wfID, err)
 					continue

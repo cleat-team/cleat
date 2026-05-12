@@ -41,7 +41,7 @@ func testDB(t *testing.T) *sql.DB {
 	db.Exec(`CREATE TABLE IF NOT EXISTS workflow_defs (
 		name TEXT NOT NULL, version INTEGER NOT NULL,
 		wasm_bytes BYTEA NOT NULL, entry_points TEXT[] NOT NULL DEFAULT '{}',
-		min_version INTEGER NOT NULL DEFAULT 0, namespace TEXT NOT NULL DEFAULT 'default',
+		min_version INTEGER NOT NULL DEFAULT 0,
 		max_history_length INTEGER NOT NULL DEFAULT 0,
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		PRIMARY KEY (name, version))`)
@@ -52,7 +52,7 @@ func testDB(t *testing.T) *sql.DB {
 		next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 		created_at TIMESTAMPTZ NOT NULL DEFAULT now(), completed_at TIMESTAMPTZ,
 		result JSONB, error_msg TEXT, parent_workflow_id TEXT,
-		namespace TEXT NOT NULL DEFAULT 'default', trace_id TEXT,
+		trace_id TEXT,
 		query_state JSONB DEFAULT '{}', task_queue TEXT NOT NULL DEFAULT 'default',
 		cancellation_requested BOOLEAN NOT NULL DEFAULT false,
 		cancellation_reason TEXT, sticky_worker_id TEXT)`)

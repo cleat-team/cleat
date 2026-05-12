@@ -161,16 +161,12 @@ func TestCommandFlags(t *testing.T) {
 	t.Run("deploy", func(t *testing.T) {
 		fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
 		name := fs.String("name", "", "")
-		ns := fs.String("namespace", "", "")
 		tq := fs.String("task-queue", "default", "")
-		if err := fs.Parse([]string{"--name", "myworkflow", "--namespace", "prod", "--task-queue", "gpu", "workflow.wasm"}); err != nil {
+		if err := fs.Parse([]string{"--name", "myworkflow", "--task-queue", "gpu", "workflow.wasm"}); err != nil {
 			t.Fatal(err)
 		}
 		if *name != "myworkflow" {
 			t.Errorf("deploy --name = %q, want %q", *name, "myworkflow")
-		}
-		if *ns != "prod" {
-			t.Errorf("deploy --namespace = %q, want %q", *ns, "prod")
 		}
 		if *tq != "gpu" {
 			t.Errorf("deploy --task-queue = %q, want %q", *tq, "gpu")
@@ -184,16 +180,12 @@ func TestCommandFlags(t *testing.T) {
 		// Test that deploy flag defaults are correct when no DB is set.
 		fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
 		name := fs.String("name", "", "")
-		ns := fs.String("namespace", "", "")
 		tq := fs.String("task-queue", "default", "")
 		if err := fs.Parse([]string{"test.wasm"}); err != nil {
 			t.Fatal(err)
 		}
 		if *name != "" {
 			t.Errorf("default --name = %q, want empty", *name)
-		}
-		if *ns != "" {
-			t.Errorf("default --namespace = %q, want empty", *ns)
 		}
 		if *tq != "default" {
 			t.Errorf("default --task-queue = %q, want %q", *tq, "default")
@@ -436,7 +428,6 @@ func TestHelpDoesNotPanic(t *testing.T) {
 	t.Run("deploy", func(t *testing.T) {
 		fs := flag.NewFlagSet("deploy", flag.ContinueOnError)
 		fs.String("name", "", "")
-		fs.String("namespace", "", "")
 		fs.String("task-queue", "default", "")
 		if err := fs.Parse([]string{"--help"}); err != flag.ErrHelp {
 			t.Errorf("expected flag.ErrHelp, got %v", err)

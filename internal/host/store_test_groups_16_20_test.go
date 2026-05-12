@@ -31,7 +31,7 @@ func TestGetQueryState(t *testing.T) {
 			}
 
 			// Claim all ready workflows so ours is assigned to a worker.
-			claimed, err := store.ClaimWorkflows(ctx, "qstate-worker", "default", 100)
+			claimed, err := store.ClaimWorkflows(ctx, "qstate-worker", 100)
 			if err != nil {
 				t.Fatalf("ClaimWorkflows: %v", err)
 			}
@@ -379,7 +379,7 @@ func TestDeleteExpiredEvents(t *testing.T) {
 				t.Fatalf("StartNewRun: %v", err)
 			}
 
-			claimed, err := store.ClaimWorkflows(ctx, "expired-worker", "default", 100)
+			claimed, err := store.ClaimWorkflows(ctx, "expired-worker", 100)
 			if err != nil {
 				t.Fatalf("ClaimWorkflows: %v", err)
 			}

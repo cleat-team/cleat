@@ -1566,7 +1566,7 @@ func TestPostgresStore_ClaimWorkflows_Empty(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wfs, err := store.ClaimWorkflows(testCtx, "worker-1", "default", 5)
+	wfs, err := store.ClaimWorkflows(testCtx, "worker-1", 5)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows: %v", err)
 	}
@@ -1589,7 +1589,7 @@ func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wfs, err := store.ClaimWorkflows(testCtx, "worker-1", "default", 5)
+	wfs, err := store.ClaimWorkflows(testCtx, "worker-1", 5)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows: %v", err)
 	}
@@ -1614,7 +1614,7 @@ func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wfs, err := store.ClaimWorkflows(testCtx, "worker-1", "default", 5)
+	wfs, err := store.ClaimWorkflows(testCtx, "worker-1", 5)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows: %v", err)
 	}
@@ -1631,7 +1631,7 @@ func TestPostgresStore_ClaimStickyWorkflows_Empty(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wfs, err := store.ClaimStickyWorkflows(testCtx, "worker-1", "default", 5)
+	wfs, err := store.ClaimStickyWorkflows(testCtx, "worker-1", 5)
 	if err != nil {
 		t.Fatalf("ClaimStickyWorkflows: %v", err)
 	}
@@ -1653,7 +1653,7 @@ func TestPostgresStore_ClaimStickyWorkflows_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wfs, err := store.ClaimStickyWorkflows(testCtx, "worker-1", "default", 5)
+	wfs, err := store.ClaimStickyWorkflows(testCtx, "worker-1", 5)
 	if err != nil {
 		t.Fatalf("ClaimStickyWorkflows: %v", err)
 	}
@@ -1674,7 +1674,7 @@ func TestPostgresStore_ClaimWorkflow_NilWhenEmpty(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wf, err := store.ClaimWorkflow(testCtx, "worker-1", "default")
+	wf, err := store.ClaimWorkflow(testCtx, "worker-1")
 	if err != nil {
 		t.Fatalf("ClaimWorkflow: %v", err)
 	}
@@ -1696,7 +1696,7 @@ func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	wf, err := store.ClaimWorkflow(testCtx, "worker-1", "default")
+	wf, err := store.ClaimWorkflow(testCtx, "worker-1")
 	if err != nil {
 		t.Fatalf("ClaimWorkflow: %v", err)
 	}

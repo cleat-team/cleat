@@ -129,8 +129,8 @@ func (s *MySQLStore) taskQueueClause() (string, []interface{}) {
 
 // ClaimWorkflow atomically dequeues a runnable workflow instance.
 // Uses SELECT ... FOR UPDATE SKIP LOCKED. Delegates to ClaimWorkflows.
-func (s *MySQLStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
-	wfs, err := s.ClaimWorkflows(ctx, workerID, namespace, 1)
+func (s *MySQLStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
+	wfs, err := s.ClaimWorkflows(ctx, workerID, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func (s *MySQLStore) ClaimWorkflow(ctx context.Context, workerID, namespace stri
 // Uses SELECT ... FOR UPDATE SKIP LOCKED to avoid contention.
 // MySQL does not support UPDATE ... RETURNING, so we use a three-step
 // process inside a transaction: SELECT FOR UPDATE, UPDATE, SELECT.
-func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: begin: %w", err)
@@ -154,16 +154,14 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 	tqClause, tqArgs := s.taskQueueClause()
 
 	// Step 1: Select IDs with SKIP LOCKED.
-	// Arg order: namespace, task_queue values..., tenant_id, worker_id, limit
+	// Arg order: task_queue values..., tenant_id, worker_id, limit
 	selArgs := make([]interface{}, 0)
-	selArgs = append(selArgs, namespace)
 	selArgs = append(selArgs, tqArgs...)
 	selArgs = append(selArgs, s.tenantID, workerID, limit)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT id FROM workflow_instances
 		WHERE status = 'ready'
 		  AND next_wake_at <= NOW(6)
-		  AND namespace = ?
 		  AND task_queue IN (%s)
 		  AND tenant_id = ?
 		ORDER BY CASE WHEN sticky_worker_id = ? THEN 0 ELSE 1 END, created_at
@@ -241,7 +239,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID, namespace str
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
 // that are sticky to this worker. Uses SELECT ... FOR UPDATE SKIP LOCKED with
 // sticky_worker_id filtering for low-contention claiming.
-func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: begin: %w", err)
@@ -251,9 +249,9 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 	tqClause, tqArgs := s.taskQueueClause()
 
 	// Step 1: Select IDs with SKIP LOCKED (sticky filter).
-	// Arg order: sticky_worker_id, namespace, task_queue values..., tenant_id, limit
+	// Arg order: sticky_worker_id, task_queue values..., tenant_id, limit
 	selArgs := make([]interface{}, 0)
-	selArgs = append(selArgs, workerID, namespace)
+	selArgs = append(selArgs, workerID)
 	selArgs = append(selArgs, tqArgs...)
 	selArgs = append(selArgs, s.tenantID, limit)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
@@ -261,7 +259,6 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespa
 		WHERE status = 'ready'
 		  AND next_wake_at <= NOW(6)
 		  AND sticky_worker_id = ?
-		  AND namespace = ?
 		  AND task_queue IN (%s)
 		  AND tenant_id = ?
 		ORDER BY created_at
@@ -507,12 +504,9 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue, tenant_id)
-			VALUES (?, ?, ?, 'ready', ?,
-			        COALESCE((SELECT namespace FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
-			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
-			        ?)
-		`, runID, defName, defVersion, input, defName, defVersion, defName, defVersion, s.tenantID)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, runID, defName, defVersion, "ready", input, "default", s.tenantID)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -528,12 +522,9 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue, tenant_id)
-		VALUES (?, ?, ?, 'ready', ?,
-		        COALESCE((SELECT namespace FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
-		        ?)
-	`, runID, defName, defVersion, input, defName, defVersion, defName, defVersion, s.tenantID)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, runID, defName, defVersion, "ready", input, "default", s.tenantID)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -562,12 +553,9 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	// Create the new workflow run.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, namespace, task_queue, tenant_id)
-		VALUES (?, ?, ?, 'ready', ?,
-		        COALESCE((SELECT namespace FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
-		        ?)
-	`, newRunID, defName, defVersion, newInput, defName, defVersion, defName, defVersion, s.tenantID)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, newRunID, defName, defVersion, "ready", newInput, "default", s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -889,22 +877,20 @@ func (s *MySQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 	var err error
 	if defVersion > 0 {
 		_, err = s.db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue, tenant_id)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 			VALUES (?, ?, ?, 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT namespace FROM (SELECT namespace FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        COALESCE((SELECT task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        ?)
-		`, runID, defName, defVersion, inputJSON, parentID, parentClosePolicy, parentID, parentID, s.tenantID)
+		`, runID, defName, defVersion, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID)
 	} else {
 		_, err = s.db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue, tenant_id)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT namespace FROM (SELECT namespace FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        COALESCE((SELECT task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        ?)
-		`, runID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, parentID, s.tenantID)
+		`, runID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID)
 	}
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
@@ -928,22 +914,20 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 	// 1. INSERT child workflow instance.
 	if defVersion > 0 {
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue, tenant_id)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 			VALUES (?, ?, ?, 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT namespace FROM (SELECT namespace FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        COALESCE((SELECT task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        ?)
-		`, childID, defName, defVersion, inputJSON, parentID, parentClosePolicy, parentID, parentID, s.tenantID)
+		`, childID, defName, defVersion, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID)
 	} else {
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, namespace, task_queue, tenant_id)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT namespace FROM (SELECT namespace FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        COALESCE((SELECT task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS subq), 'default'),
 			        ?)
-		`, childID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, parentID, s.tenantID)
+		`, childID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID)
 	}
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
@@ -1462,12 +1446,14 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 		result, err = s.db.ExecContext(ctx, `
 			DELETE FROM workflow_instances
 			WHERE id IN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
-				ORDER BY id
-				LIMIT 10000
+				SELECT id FROM (
+					SELECT id FROM workflow_instances
+					WHERE status = 'dead_lettered'
+					  AND completed_at IS NOT NULL
+					  AND completed_at < ?
+					ORDER BY id
+					LIMIT 10000
+				) AS subq
 			)
 		`, olderThan)
 		if err != nil {
@@ -1649,3 +1635,7 @@ func (f *MySQLStoreFactory) DriverName() string { return "mysql" }
 
 // Dialect returns DialectMySQL.
 func (f *MySQLStoreFactory) Dialect() Dialect { return DialectMySQL }
+
+func (f *MySQLStoreFactory) TenantDB(ctx context.Context, tenantID string) (*sql.DB, error) {
+	return f.getOrCreateTenantDB(ctx, tenantID)
+}

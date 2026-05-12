@@ -144,8 +144,13 @@ func TestTransformEmptyClosure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Transform: %v", err)
 	}
-	if len(tr.AddedH) != 0 || len(tr.Files) != 0 {
-		t.Error("expected empty result for empty closure")
+	if len(tr.AddedH) != 0 {
+		t.Error("expected no auto-threaded functions for empty closure")
+	}
+	// Files are always populated (Phase 5 formats all files), even when no
+	// auto-threading changes were made.
+	if len(tr.Files) == 0 {
+		t.Error("expected files to be formatted even for empty closure")
 	}
 }
 

@@ -1177,16 +1177,16 @@ func (e *TestEnv) registerQueryHandlerImpl(name string) {
 func (e *TestEnv) HandleQuery(name, payload string) (string, error) {
 	// The h field is a *hostCallsImpl which has a HandleQuery method.
 	// Type-assert to access it; if the assertion fails, try a simpler fallback.
-	if h, ok := e.h.(interface{ HandleQuery(string, string) (string, error) }); ok {
-		return h.HandleQuery(name, payload)
+	if e.h.HostCallsImpl != nil {
+		return e.h.HandleQuery(name, payload)
 	}
 	return "", fmt.Errorf("cleattest: HandleQuery not available")
 }
 
 // HandleUpdate invokes a registered update handler by name with the given payload.
 func (e *TestEnv) HandleUpdate(name, payload string) (string, error) {
-	if h, ok := e.h.(interface{ HandleUpdate(string, string) (string, error) }); ok {
-		return h.HandleUpdate(name, payload)
+	if e.h.HostCallsImpl != nil {
+		return e.h.HandleUpdate(name, payload)
 	}
 	return "", fmt.Errorf("cleattest: HandleUpdate not available")
 }

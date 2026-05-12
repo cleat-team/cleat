@@ -251,7 +251,7 @@ func TestGetChildResult_Completed(t *testing.T) {
 			}
 
 			// Claim the child so it transitions from "ready" to "running".
-			claimed, err := store.ClaimWorkflow(ctx, "test-worker", "default")
+			claimed, err := store.ClaimWorkflow(ctx, "test-worker")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
@@ -342,7 +342,7 @@ func TestReapStaleInstances(t *testing.T) {
 			}
 
 			// Claim the workflow to transition it to "running".
-			claimed, err := store.ClaimWorkflow(ctx, "reap-worker", "default")
+			claimed, err := store.ClaimWorkflow(ctx, "reap-worker")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
@@ -398,7 +398,7 @@ func TestListWorkflows_ByStatus(t *testing.T) {
 			}
 
 			// Claim one workflow to transition it to "running".
-			claimed, err := store.ClaimWorkflow(ctx, "list-worker", "default")
+			claimed, err := store.ClaimWorkflow(ctx, "list-worker")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}

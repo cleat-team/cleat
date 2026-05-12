@@ -1368,13 +1368,13 @@ func TestSuspendError_Error(t *testing.T) {
 // you need for a given test.
 type stubWorkflowStore struct{}
 
-func (s *stubWorkflowStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
+func (s *stubWorkflowStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
 	return nil, nil
 }
-func (s *stubWorkflowStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (s *stubWorkflowStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
-func (s *stubWorkflowStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (s *stubWorkflowStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
 func (s *stubWorkflowStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
@@ -2068,6 +2068,21 @@ func TestPluginRegistry_RegisterIdempotent_SameFuncDiffPlugin(t *testing.T) {
 // releaseHeldScopes tests
 // ---------------------------------------------------------------------------
 
+	// mockConcurrencyKeyStore provides a minimal in-memory ConcurrencyKeyStore
+	// implementation for unit tests.
+	type mockConcurrencyKeyStore struct{}
+
+	func (m *mockConcurrencyKeyStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
+		return true, nil
+	}
+	func (m *mockConcurrencyKeyStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+		return nil
+	}
+
+	func newMockConcurrencyKeyStore() *mockConcurrencyKeyStore {
+		return &mockConcurrencyKeyStore{}
+	}
+
 // releaseErrorStore wraps the existing mockConcurrencyKeyStore and injects
 // errors on ReleaseConcurrencyKey.
 type releaseErrorStore struct {
@@ -2451,13 +2466,13 @@ func (s *stubWorkflowStore) CountActiveConcurrencyKeys(ctx context.Context) (int
 func (s *stubWorkflowStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
-func (m *mockCollectMetricsStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
+func (m *mockCollectMetricsStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockCollectMetricsStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockCollectMetricsStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockCollectMetricsStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockCollectMetricsStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
 func (m *mockCollectMetricsStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
@@ -2643,13 +2658,13 @@ func (m *mockCollectMetricsStore) DeleteDeadLetteredWorkflows(ctx context.Contex
 func (m *mockCollectMetricsStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
-func (m *mockCheckStaleStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
+func (m *mockCheckStaleStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockCheckStaleStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockCheckStaleStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockCheckStaleStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockCheckStaleStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
 func (m *mockCheckStaleStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
@@ -2833,13 +2848,13 @@ func (m *mockCheckStaleStore) DeleteDeadLetteredWorkflows(ctx context.Context, o
 func (m *mockCheckStaleStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
-func (m *mockGCStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
+func (m *mockGCStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockGCStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockGCStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockGCStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockGCStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
 func (m *mockGCStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
@@ -3009,13 +3024,13 @@ func (m *mockGCStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan
 func (m *mockGCStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	return uuid.Nil, nil
 }
-func (m *mockPurgeStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
+func (m *mockPurgeStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockPurgeStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockPurgeStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockPurgeStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockPurgeStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
 func (m *mockPurgeStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {

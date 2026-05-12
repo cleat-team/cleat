@@ -321,13 +321,6 @@ var adapterDefs = map[string]adapterDef{
 			"return result",
 		},
 	},
-	"NowMs": {
-		FieldName:  "NowMs",
-		ReturnType: "int64",
-		ResultStmts: []string{
-			"return result",
-		},
-	},
 	"Random": {
 		FieldName:  "Random",
 		ReturnType: "int64",
@@ -482,37 +475,218 @@ var adapterDefs = map[string]adapterDef{
 		},
 		}
 
-// needsFmt returns true if any of the used adapter defs use fmt.Errorf or fmt.Sprintf.
+// hostWrapperDef describes how to generate a host_ wrapper function for a
+// higher-level HostCalls method that isn't a direct WASM import wrapper.
+// The body should call core host_* functions rather than going through h.
+type hostWrapperDef struct {
+	ReturnType string
+	Params     []adapterParam
+	Body       []string // Go statements implementing the wrapper
+}
+
+// hostWrapperDefs contains definitions for wrapper methods that call
+// core host_* functions. These are methods on HostCalls that eventually
+// delegate to a direct WASM import (e.g., DurableCallJSON → DurableCall).
+var hostWrapperDefs = map[string]hostWrapperDef{
+	"DurableCallJSON": {
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"service", "string"},
+			{"operation", "string"},
+			{"requestJSON", "string"},
+			{"result", "interface{}"},
+		},
+		Body: []string{
+			"resp, err := host_DurableCall(service, operation, requestJSON)",
+			"if err != nil { return err }",
+			"if result == nil { return nil }",
+			`return json.Unmarshal([]byte(resp), result)`,
+		},
+	},
+	"DurableCallTyped": {
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"service", "string"},
+			{"operation", "string"},
+			{"request", "interface{}"},
+			{"result", "interface{}"},
+		},
+		Body: []string{
+			"reqBytes, err := json.Marshal(request)",
+			`if err != nil { return fmt.Errorf("durable: marshaling request for %s.%s: %%w", service, operation, err) }`,
+			"return host_DurableCallJSON(service, operation, string(reqBytes), result)",
+		},
+	},
+	"DurableCallTypedWithOptions": {
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"opts", "cleat.CallOptions"},
+			{"service", "string"},
+			{"operation", "string"},
+			{"request", "interface{}"},
+			{"result", "interface{}"},
+		},
+		Body: []string{
+			"reqBytes, err := json.Marshal(request)",
+			`if err != nil { return fmt.Errorf("durable: marshaling request for %s.%s: %%w", service, operation, err) }`,
+			"return host_DurableCallJSONWithOptions(opts, service, operation, string(reqBytes), result)",
+		},
+	},
+	"DurableCallWithOptions": {
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"opts", "cleat.CallOptions"},
+			{"service", "string"},
+			{"operation", "string"},
+			{"requestJSON", "string"},
+		},
+		Body: []string{
+			"_ = opts",
+			"return host_DurableCall(service, operation, requestJSON)",
+		},
+	},
+	"DurableCallJSONWithOptions": {
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"opts", "cleat.CallOptions"},
+			{"service", "string"},
+			{"operation", "string"},
+			{"requestJSON", "string"},
+			{"result", "interface{}"},
+		},
+		Body: []string{
+			"resp, err := host_DurableCallWithOptions(opts, service, operation, requestJSON)",
+			"if err != nil { return err }",
+			"if result == nil { return nil }",
+			`return json.Unmarshal([]byte(resp), result)`,
+		},
+	},
+	"AwaitSignals": {
+		ReturnType: "cleat.SignalResult",
+		Params: []adapterParam{
+			{"signalNames", "[]string"},
+			{"timeout", "time.Duration"},
+		},
+		Body: []string{
+			"name, payload, timedOut, err := host_DurableAwaitSignals(signalNames, timeout.Milliseconds())",
+			"return cleat.SignalResult{Name: name, Payload: payload, TimedOut: timedOut, Err: err}",
+		},
+	},
+	"Now": {
+		ReturnType: "time.Time",
+		Body: []string{
+			"ms := host_NowMs()",
+			"return time.Unix(ms/1000, (ms%1000)*1_000_000)",
+		},
+	},
+	"DurableSleep": {
+		Params: []adapterParam{
+			{"d", "time.Duration"},
+		},
+		Body: []string{
+			"host_DurableSleepMs(d.Milliseconds())",
+		},
+	},
+	"AcquireLock": {
+		ReturnType: "(bool, error)",
+		Params: []adapterParam{
+			{"key", "string"},
+			{"ttl", "time.Duration"},
+		},
+		Body: []string{
+			"return host_AcquireLockMs(key, ttl.Milliseconds())",
+		},
+	},
+	"ChildWorkflowTyped": {
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"name", "string"},
+			{"request", "interface{}"},
+		},
+		Body: []string{
+			"reqJSON, err := json.Marshal(request)",
+			`if err != nil { return "", fmt.Errorf("durable: marshaling child workflow input for %%s: %%w", name, err) }`,
+			"return host_ChildWorkflow(name, string(reqJSON))",
+		},
+	},
+	"AwaitChildTyped": {
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"runID", "string"},
+			{"result", "interface{}"},
+		},
+		Body: []string{
+			"resp, err := host_AwaitChild(runID)",
+			"if err != nil { return err }",
+			`return json.Unmarshal([]byte(resp), result)`,
+		},
+	},
+	"DurableCallTypedWithHeartbeat": {
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"service", "string"},
+			{"operation", "string"},
+			{"request", "interface{}"},
+			{"result", "interface{}"},
+			{"heartbeatInterval", "time.Duration"},
+			{"onProgress", "func(string)"},
+		},
+		Body: []string{
+			"reqJSON, err := json.Marshal(request)",
+			`if err != nil { return fmt.Errorf("durable: marshaling request for %s.%s: %%w", service, operation, err) }`,
+			"resp, err := host_DurableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval, onProgress)",
+			"if err != nil { return err }",
+			"if result == nil { return nil }",
+			`return json.Unmarshal([]byte(resp), result)`,
+		},
+	},
+}
+
+// needsFmt returns true if any of the used adapter or wrapper defs use fmt.
 func needsFmt(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
 		adef, ok := adapterDefs[hf.FieldName]
-		if !ok {
-			continue
+		if ok {
+			for _, stmt := range adef.ResultStmts {
+				if strings.Contains(stmt, "fmt.Errorf") || strings.Contains(stmt, "fmt.Sprintf") {
+					return true
+				}
+			}
 		}
-		for _, stmt := range adef.ResultStmts {
-			if strings.Contains(stmt, "fmt.Errorf") || strings.Contains(stmt, "fmt.Sprintf") {
-				return true
+		wdef, ok := hostWrapperDefs[hf.FieldName]
+		if ok {
+			for _, stmt := range wdef.Body {
+				if strings.Contains(stmt, "fmt.Errorf") || strings.Contains(stmt, "fmt.Sprintf") {
+					return true
+				}
 			}
 		}
 	}
 	return false
 }
 
-// needsJSON returns true if any of the used adapter defs have []string params.
+// needsJSON returns true if any of the used adapter or wrapper defs use encoding/json.
 func needsJSON(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
 		adef, ok := adapterDefs[hf.FieldName]
-		if !ok {
-			continue
-		}
-		for _, p := range adef.Params {
-			if p.Type == "[]string" {
-				return true
+		if ok {
+			for _, p := range adef.Params {
+				if p.Type == "[]string" {
+					return true
+				}
+			}
+			for _, stmt := range adef.ResultStmts {
+				if strings.Contains(stmt, "json.Unmarshal") || strings.Contains(stmt, "json.Marshal") {
+					return true
+				}
 			}
 		}
-		for _, stmt := range adef.ResultStmts {
-			if strings.Contains(stmt, "json.Unmarshal") || strings.Contains(stmt, "json.Marshal") {
-				return true
+		wdef, ok := hostWrapperDefs[hf.FieldName]
+		if ok {
+			for _, stmt := range wdef.Body {
+				if strings.Contains(stmt, "json.Unmarshal") || strings.Contains(stmt, "json.Marshal") {
+					return true
+				}
 			}
 		}
 	}
@@ -535,16 +709,15 @@ func needsUnsafe(usage *UsageInfo) bool {
 	return false
 }
 
-// needsTime returns true if any of the used adapter defs have a time.Duration param.
+// needsTime returns true if any of the used adapter or wrapper defs use time types.
 func needsTime(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
 		adef, ok := adapterDefs[hf.FieldName]
-		if !ok {
-			continue
-		}
-		for _, p := range adef.Params {
-			if p.Type == "time.Duration" {
-				return true
+		if ok {
+			for _, p := range adef.Params {
+				if p.Type == "time.Duration" {
+					return true
+				}
 			}
 		}
 	}
@@ -582,9 +755,10 @@ func outBufNames(importName string) []string {
 }
 
 // GenerateHostAdapter produces the content of gen_host_adapter.go.
-// The generated code creates a cleat.HostCalls interface value backed by
-// WASM host imports via cleat.NewHostCalls.
-func GenerateHostAdapter(pkgName string, usage *UsageInfo) []byte {
+// It generates closure-based HostCallsOptions fields that call through
+// WASM imports. The workflow code calls h.MethodName(...) through the
+// HostCalls interface.
+func GenerateHostAdapter(pkgName string, usage *UsageInfo, target string) []byte {
 	var buf bytes.Buffer
 
 	buf.WriteString("//go:build wasip1\n\n")
@@ -608,13 +782,10 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo) []byte {
 	buf.WriteString("\t\"github.com/rcownie/cleat/cleat\"\n")
 	buf.WriteString(")\n\n")
 
-	buf.WriteString(`const _cleatOutBufSize = 65536
+	buf.WriteString("const _cleatOutBufSize = 65536\n\n")
 
-// makeHostCalls creates a cleat.HostCalls backed by WASM host imports.
-func makeHostCalls() cleat.HostCalls {
-	return cleat.NewHostCalls(cleat.HostCallsOptions{
-`)
-
+	buf.WriteString("func makeHostCalls() cleat.HostCalls {\n")
+	buf.WriteString("\treturn cleat.NewHostCalls(cleat.HostCallsOptions{\n")
 	for _, hf := range usage.Funcs {
 		adef, ok := adapterDefs[hf.FieldName]
 		if !ok {
@@ -622,7 +793,6 @@ func makeHostCalls() cleat.HostCalls {
 		}
 		generateField(&buf, hf, adef)
 	}
-
 	buf.WriteString("\t})\n")
 	buf.WriteString("}\n")
 
@@ -723,4 +893,148 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 	}
 
 	buf.WriteString("\t\t},\n")
+}
+
+// generateHostFunc writes a standalone package-level function that makes a
+// direct WASM import call. The transformer rewrites h.FieldName(...) calls
+// to host_FieldName(...) calls, avoiding all function pointer indirection.
+func generateHostFunc(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
+	importName := hf.ImportName
+	funcName := "host_" + adef.FieldName
+
+	fmt.Fprintf(buf, "// %s is the direct-call version of h.%s.\n", funcName, adef.FieldName)
+	fmt.Fprintf(buf, "// Called by workflow code after source transformation.\n")
+	fmt.Fprintf(buf, "func %s(", funcName)
+
+	// Parameter list.
+	var params []string
+	for _, p := range adef.Params {
+		switch p.Type {
+		case "string":
+			params = append(params, p.Name+" string")
+		case "[]string":
+			params = append(params, p.Name+" []string")
+		case "int64":
+			params = append(params, p.Name+" int64")
+		case "time.Duration":
+			params = append(params, p.Name+" time.Duration")
+		case "func(string)":
+			params = append(params, p.Name+" func(string)")
+		case "func() (string, error)":
+			params = append(params, p.Name+" func() (string, error)")
+		}
+	}
+	buf.WriteString(strings.Join(params, ", "))
+	buf.WriteString(")")
+
+	if adef.ReturnType != "" {
+		buf.WriteString(" ")
+		buf.WriteString(adef.ReturnType)
+	}
+
+	buf.WriteString(" {\n")
+
+	// Allocate output buffers.
+	for _, name := range outBufNames(importName) {
+		fmt.Fprintf(buf, "\t%s := make([]byte, _cleatOutBufSize)\n", name)
+	}
+
+	// Argument setup.
+	for _, p := range adef.Params {
+		switch p.Type {
+		case "string":
+			fmt.Fprintf(buf, "\t%sPtr, %sLen := stringPtr(%s)\n", p.Name, p.Name, p.Name)
+		case "[]string":
+			fmt.Fprintf(buf, "\t%sJSON, err := json.Marshal(%s)\n", p.Name, p.Name)
+			fmt.Fprintf(buf, "\tif err != nil { panic(\"json.Marshal for %s: \" + err.Error()) }\n", p.Name)
+			fmt.Fprintf(buf, "\t%sPtr, %sLen := stringPtr(string(%sJSON))\n", p.Name, p.Name, p.Name)
+		case "func() (string, error)":
+			fmt.Fprintf(buf, "\t_computedResult, _sideEffectErr := %s()\n", p.Name)
+			fmt.Fprintf(buf, "\tif _sideEffectErr != nil { return \"\", _sideEffectErr }\n")
+			fmt.Fprintf(buf, "\tresultPtr, resultLen := stringPtr(_computedResult)\n")
+		}
+	}
+
+	// Convert time.Duration params to int64 milliseconds for WASM.
+	for _, p := range adef.Params {
+		if p.Type == "time.Duration" {
+			fmt.Fprintf(buf, "\t%sMs := %s.Milliseconds()\n", p.Name, p.Name)
+		}
+	}
+
+	// Build the import call.
+	hasResultUse := len(adef.ResultStmts) > 0
+	if hasResultUse {
+		buf.WriteString("\tresult := ")
+	} else {
+		buf.WriteString("\t")
+	}
+	buf.WriteString(goName(importName))
+	buf.WriteString("Import(")
+
+	def := importDefs[importName]
+	var args []string
+	for _, dp := range def.Params {
+		switch dp.Kind {
+		case kindInString:
+			args = append(args, fmt.Sprintf("%sPtr, %sLen", dp.Name, dp.Name))
+		case kindOutString:
+			args = append(args, fmt.Sprintf("unsafe.Pointer(unsafe.SliceData(%sBuf)), uint32(len(%sBuf))", dp.Name, dp.Name))
+		case kindInt64:
+			args = append(args, dp.Name)
+		}
+	}
+	buf.WriteString(strings.Join(args, ", "))
+	buf.WriteString(")\n")
+
+	// Result processing.
+	for _, stmt := range adef.ResultStmts {
+		buf.WriteString("\t" + stmt + "\n")
+	}
+
+	buf.WriteString("}\n\n")
+}
+
+// generateHostWrapperFunc writes a standalone host_ wrapper function for a
+// higher-level HostCalls method that delegates to core host_* functions.
+func generateHostWrapperFunc(buf *bytes.Buffer, fieldName string, wdef hostWrapperDef) {
+	funcName := "host_" + fieldName
+
+	fmt.Fprintf(buf, "// %s is the direct-call version of h.%s (wrapper).\n", funcName, fieldName)
+	fmt.Fprintf(buf, "func %s(", funcName)
+
+	var params []string
+	for _, p := range wdef.Params {
+		switch p.Type {
+		case "string":
+			params = append(params, p.Name+" string")
+		case "[]string":
+			params = append(params, p.Name+" []string")
+		case "int64":
+			params = append(params, p.Name+" int64")
+		case "time.Duration":
+			params = append(params, p.Name+" time.Duration")
+		case "func(string)":
+			params = append(params, p.Name+" func(string)")
+		case "func() (string, error)":
+			params = append(params, p.Name+" func() (string, error)")
+		case "interface{}":
+			params = append(params, p.Name+" interface{}")
+		case "cleat.CallOptions":
+			params = append(params, p.Name+" cleat.CallOptions")
+		}
+	}
+	buf.WriteString(strings.Join(params, ", "))
+	buf.WriteString(")")
+
+	if wdef.ReturnType != "" {
+		buf.WriteString(" ")
+		buf.WriteString(wdef.ReturnType)
+	}
+
+	buf.WriteString(" {\n")
+	for _, stmt := range wdef.Body {
+		buf.WriteString("\t" + stmt + "\n")
+	}
+	buf.WriteString("}\n\n")
 }

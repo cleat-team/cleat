@@ -43,7 +43,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] <package>\n")
-		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
 		fmt.Fprintf(os.Stderr, "  cleat dev [--input <json>] [--entry-point <name>] <package>\n")
@@ -209,7 +209,7 @@ func runBuild(pattern, outDir, target string, jsonOut bool, diffOut bool, sizeRe
 		runBuildPython(pattern, outDir)
 		return
 	}
-	result, cg, cr, threadingErrs, usage, tr := analyze(pattern)
+	result, cg, cr, threadingErrs, usage, tr := analyze(pattern, target)
 	_ = cg
 
 	if jsonOut {
@@ -279,7 +279,7 @@ func runBuild(pattern, outDir, target string, jsonOut bool, diffOut bool, sizeRe
 		fmt.Println()
 	}
 
-	outputs := wasm.BuildOutputs("main", usage, result)
+	outputs := wasm.BuildOutputs("main", usage, result, target)
 	hostCount := usage.Count()
 	if jsonOut {
 		fmt.Fprintf(os.Stderr, "  Generating WASM imports (%d host functions used)... ", hostCount)
@@ -351,6 +351,25 @@ func runBuild(pattern, outDir, target string, jsonOut bool, diffOut bool, sizeRe
 	}
 
 	logBuildProgress("  Build directory: %s\n", jsonOut, outDir)
+
+	// For TinyGo, run go mod tidy in the build directory to generate
+	// go.sum entries before compilation. The .deps/ tree provides
+	// the cleat module locally via replace directives.
+	if target == "tinygo" {
+		tidyCmd := exec.Command("go", "mod", "tidy")
+		tidyCmd.Dir = outDir
+		if tinygoGoroot := os.Getenv("CLEAT_TINYGO_GOROOT"); tinygoGoroot != "" {
+			tidyCmd.Env = append(os.Environ(),
+				"GOROOT="+tinygoGoroot,
+				"PATH="+tinygoGoroot+"/bin:"+os.Getenv("PATH"),
+				"GOTOOLCHAIN=local",
+			)
+		}
+		if out, err := tidyCmd.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error running go mod tidy in build directory: %v\n%s\n", err, out)
+			os.Exit(1)
+		}
+	}
 
 	wasmPath := filepath.Join(outDir, wasmFile)
 	var cmd *exec.Cmd
@@ -583,7 +602,7 @@ func printSizeReport(wasmPath string, totalSize int64, result *analyzer.Analysis
 }
 
 func runVet(pattern string, jsonOut bool, ciOut bool) int {
-	result, _, cr, threadingErrs, usage, tr := analyze(pattern)
+	result, _, cr, threadingErrs, usage, tr := analyze(pattern, "go")
 	_ = usage
 	_ = tr
 
@@ -900,21 +919,19 @@ func runVetAS(dir string) int {
 }
 
 // runDeploy deploys a compiled WASM workflow to the database.
-// Usage: cleat deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>
+// Usage: cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>
 func runDeploy(args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
 	nameFlag := fs.String("name", "", "workflow name (derived from filename if not set)")
-	nsFlag := fs.String("namespace", "", "workflow namespace (default: \"default\")")
 	taskQueueFlag := fs.String("task-queue", "default", "task queue for this workflow (e.g. default, gpu, high-memory)")
 	fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--name <name>] [--namespace <ns>] [--task-queue <queue>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>\n")
 		os.Exit(1)
 	}
 	wasmPath := remainder[0]
-	_ = nsFlag
 
 	wasmBytes, err := os.ReadFile(wasmPath)
 	if err != nil {
@@ -986,10 +1003,6 @@ func runDeploy(args []string) {
 		os.Exit(1)
 	}
 
-	namespace := *nsFlag
-	if namespace == "" {
-		namespace = "default"
-	}
 
 	// Build the SQL with metadata columns if available.
 	abiVersion := 1
@@ -1004,8 +1017,8 @@ func runDeploy(args []string) {
 	}
 
 	_, err = db.Exec(
-		"INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, namespace, task_queue) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9)",
-		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, namespace, *taskQueueFlag,
+		"INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue) VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)",
+		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error inserting workflow definition: %v\n", err)
@@ -1020,7 +1033,7 @@ func runDeploy(args []string) {
 	}
 }
 
-func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {
+func analyze(pattern, target string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {
 	fset := token.NewFileSet()
 
 	result, err := analyzer.LoadPackages(pattern, fset)
@@ -1037,19 +1050,23 @@ func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closu
 
 	cr := closure.Compute(result, cg)
 
+	threadingErrs := closure.VerifyThreading(result, cg, cr)
+
+	// Analyze usage BEFORE transform — the direct-call transform rewrites
+	// h.MethodName(...) → host_MethodName(...), so usage analysis must see
+	// the original HostCalls method calls.
+	usage := wasm.AnalyzeUsage(result, cr)
+
 	tr, err := transform.Transform(&transform.Config{
 		Result:    result,
 		CallGraph: cg,
 		Closure:   cr,
+		Target:    target,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error in AST transformation: %v\n", err)
 		os.Exit(1)
 	}
-
-	threadingErrs := closure.VerifyThreading(result, cg, cr)
-
-	usage := wasm.AnalyzeUsage(result, cr)
 
 	return result, cg, cr, threadingErrs, usage, tr
 }
@@ -1521,7 +1538,7 @@ func runLock(args []string) {
 			os.Exit(1)
 		}
 		pattern := remainder[0]
-		_, _, _, _, usage, _ := analyze(pattern)
+		_, _, _, _, usage, _ := analyze(pattern, "go")
 		children = usage.Children
 	}
 

@@ -14,7 +14,7 @@
 IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.workflow_memory_samples') AND type = N'U')
 CREATE TABLE dbo.workflow_memory_samples (
     id            BIGINT IDENTITY(1,1) NOT NULL,
-    def_name      NVARCHAR(MAX)        NOT NULL,
+    def_name      NVARCHAR(255)        NOT NULL,
     sample_bytes  BIGINT               NOT NULL,
     recorded_at   DATETIMEOFFSET       NOT NULL DEFAULT SYSUTCDATETIME(),
     CONSTRAINT pk_workflow_memory_samples PRIMARY KEY (id)

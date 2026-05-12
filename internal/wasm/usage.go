@@ -92,7 +92,6 @@ var hostFunctions = []HostFunction{
 	{"cleat_call_heartbeat", "DurableCallTypedWithHeartbeat"},
 	// Time
 	{"cleat_now", "Now"},
-	{"cleat_now", "NowMs"},
 	// Random
 	{"cleat_random", "Random"},
 	// Lock/concurrency key operations

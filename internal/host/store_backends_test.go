@@ -174,7 +174,7 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 		t.Fatalf("setupTestData: StartNewRun running: %v", err)
 	}
 	// Claim it to make it running
-	_, err = store.ClaimWorkflow(context.Background(), "test-worker", "default")
+	_, err = store.ClaimWorkflow(context.Background(), "test-worker")
 	if err != nil {
 		t.Fatalf("setupTestData: ClaimWorkflow: %v", err)
 	}

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/tetratelabs/wazero"
@@ -16,16 +15,32 @@ import (
 	"github.com/tetratelabs/wazero/sys"
 )
 
+
+// cleatComplete stores the workflow result delivered via cleat_complete host import.
+// This decouples workflow completion from Go WASI runtime shutdown behavior.
+type cleatComplete struct {
+	Result *string // JSON result (status=0)
+	Error  *string // error message (status=1)
+}
+
+var cleatCompleteKey struct{}
+
 var wazeroInitOnce sync.Once
-
-
 // Runtime wraps a wazero runtime with pre-registered host function imports.
 type Runtime struct {
-	wazeroRuntime    wazero.Runtime
-	stdout           bytes.Buffer
-	stderr           bytes.Buffer
-	callTimeout      time.Duration // per-call WASM execution timeout (0 = none)
-	memoryLimitPages uint32        // max WASM memory pages (0 = default/unlimited)
+	wazeroRuntime wazero.Runtime
+	stdout        bytes.Buffer
+	stderr        bytes.Buffer
+	callTimeout   time.Duration // per-call WASM execution timeout (0 = none)
+
+		// Fields for cleat_complete host function (see imports.go).
+		// When the WASM export calls cleat_complete before returning,
+		// the result is stored here so CallExportWithSuspend can
+		// return it even if the Go WASI runtime subsequently calls
+		// proc_exit (which would otherwise overwrite the result).
+		completeMu     sync.Mutex
+		completeResult *string
+		completeErr    *string
 }
 
 // Stdout returns captured stdout output from the most recent module.
@@ -34,21 +49,11 @@ func (r *Runtime) Stdout() string { return r.stdout.String() }
 // Stderr returns captured stderr output from the most recent module.
 func (r *Runtime) Stderr() string { return r.stderr.String() }
 
-// RuntimeOption configures a Runtime.
-type RuntimeOption func(*Runtime)
-
-// WithMemoryLimitPages sets the maximum WASM memory pages for modules
-// instantiated by this Runtime. Default is 4096 pages (256 MB).
-// Pass 0 to disable the limit (wazero default, up to host memory).
-func WithMemoryLimitPages(pages uint32) RuntimeOption {
-	return func(r *Runtime) { r.memoryLimitPages = pages }
-}
-
 // NewRuntime creates a Runtime with all cleat_* host functions and the plugin_call
 // host function registered on the "env" module. WASI preview1 is also instantiated
 // for Go wasip1 support. Plugin host functions are registered via the Engine's
 // PluginRegistry — not through NewRuntime.
-func NewRuntime(ctx context.Context, opts ...RuntimeOption) (*Runtime, error) {
+func NewRuntime(ctx context.Context) (*Runtime, error) {
 	wazeroInitOnce.Do(func() {
 		dummy := wazero.NewRuntime(context.Background())
 		dummy.Close(context.Background())
@@ -63,25 +68,6 @@ func NewRuntime(ctx context.Context, opts ...RuntimeOption) (*Runtime, error) {
 	// and h.Random() (imported as cleat_now / cleat_random).
 	wasiBuilder := rt.NewHostModuleBuilder(wasi_snapshot_preview1.ModuleName)
 	wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
-
-	// Stub clock_time_get: return ENOSYS to force workflows to use cleat_now.
-	wasiBuilder.NewFunctionBuilder().
-		WithFunc(func(_ context.Context, _ api.Module, _ uint32, _ uint64, _ uint32) syscall.Errno {
-			return syscall.ENOSYS
-		}).Export("clock_time_get")
-
-	// Stub clock_res_get: return ENOSYS.
-	wasiBuilder.NewFunctionBuilder().
-		WithFunc(func(_ context.Context, _ api.Module, _ uint32, _ uint32) syscall.Errno {
-			return syscall.ENOSYS
-		}).Export("clock_res_get")
-
-	// Stub random_get: return ENOSYS to force workflows to use cleat_random.
-	wasiBuilder.NewFunctionBuilder().
-		WithFunc(func(_ context.Context, _ api.Module, _ uint32, _ uint32) syscall.Errno {
-			return syscall.ENOSYS
-		}).Export("random_get")
-
 	if _, err := wasiBuilder.Instantiate(ctx); err != nil {
 		return nil, fmt.Errorf("host: instantiating WASI module: %w", err)
 	}
@@ -89,18 +75,12 @@ func NewRuntime(ctx context.Context, opts ...RuntimeOption) (*Runtime, error) {
 	// Build the "env" host module that provides cleat_* imports.
 	envBuilder := rt.NewHostModuleBuilder("env")
 	registerHostFunctions(envBuilder)
-
-
 	if _, err := envBuilder.Instantiate(ctx); err != nil {
 		rt.Close(ctx)
 		return nil, fmt.Errorf("host: instantiating env module: %w", err)
 	}
 
-	r := &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second, memoryLimitPages: 4096}
-	for _, o := range opts {
-		o(r)
-	}
-	return r, nil
+	return &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second}, nil
 }
 
 // Close releases all resources held by the runtime.
@@ -358,18 +338,34 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// locations. If DWARF is unavailable (stripped binary), the
 	// trace falls back to raw function indices and offsets.
 	// See formatWasmCallError for the formatting logic.
+		// Create a cleatComplete struct and put it in the context.
+	// The WASM export wrapper calls cleat_complete host import to store
+	// the result before returning, so even if Go WASI subsequently calls
+	// proc_exit (which returns as a fn.Call error), we can retrieve the result.
+	complete := &cleatComplete{}
+	callCtx = context.WithValue(callCtx, &cleatCompleteKey, complete)
+
 	results, err := fn.Call(callCtx,
 		uint64(inputOffset),
 		uint64(len(inputJSON)),
 		uint64(outputOffset),
 		uint64(outBufSize),
 	)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			return "", false, fmt.Errorf("host: export %q timed out after %v", exportName, r.callTimeout)
+		if err != nil {
+			// Check for cleat_complete result before treating as error.
+			// Go WASI runtime may call proc_exit after the export wrapper
+			// has already stored the result via cleat_complete host import.
+			if complete.Result != nil {
+				return *complete.Result, false, nil
+			}
+			if complete.Error != nil {
+				return "", false, fmt.Errorf("host: export %q failed: %s", exportName, *complete.Error)
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				return "", false, fmt.Errorf("host: export %q timed out after %v", exportName, r.callTimeout)
+			}
+			return "", false, formatWasmCallError(err)
 		}
-		return "", false, formatWasmCallError(err)
-	}
 
 	if len(results) == 0 {
 		return "", false, fmt.Errorf("host: export %q returned no results. The WASM module may have panicked or returned void.", exportName)

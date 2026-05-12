@@ -31,6 +31,13 @@ type paramSpec struct {
 
 // importDefs maps each host function to its low-level WASM import signature.
 var importDefs = map[string]importDef{
+	"cleat_complete": {
+		ImportName: "cleat_complete",
+		Params: []paramSpec{
+			{"status", kindInt32},
+			{"result", kindInString},
+		},
+	},
 	"cleat_call": {
 		ImportName: "cleat_call",
 		Params: []paramSpec{
@@ -239,6 +246,8 @@ func importParamDecl(spec paramSpec) string {
 		return fmt.Sprintf("%sPtr unsafe.Pointer, %sLen uint32", spec.Name, spec.Name)
 	case kindOutString:
 		return fmt.Sprintf("out%sPtr unsafe.Pointer, max%sLen uint32", spec.Name, spec.Name)
+	case kindInt32:
+		return fmt.Sprintf("%s uint32", spec.Name)
 	case kindInt64:
 		return fmt.Sprintf("%s int64", spec.Name)
 	}
@@ -280,6 +289,13 @@ func GenerateImports(pkgName string, usage *UsageInfo) []byte {
 
 		buf.WriteString(") int64\n\n")
 	}
+
+	// Always include cleat_complete — the export wrapper calls it
+	// to signal workflow completion before the Go WASI runtime exits.
+	buf.WriteString(`//go:wasmimport env cleat_complete
+func cleatCompleteImport(status uint32, resultPtr unsafe.Pointer, resultLen uint32) int64
+
+`)
 
 	return buf.Bytes()
 }
@@ -335,11 +351,11 @@ type OutputFiles struct {
 
 // BuildOutputs generates all output files for a given analysis result and
 // package name. Returns the generated file contents.
-func BuildOutputs(pkgName string, usage *UsageInfo, result *analyzer.AnalysisResult) *OutputFiles {
+func BuildOutputs(pkgName string, usage *UsageInfo, result *analyzer.AnalysisResult, target string) *OutputFiles {
 	return &OutputFiles{
 		Imports: string(GenerateImports(pkgName, usage)),
 		Memory:  string(GenerateMemory(pkgName)),
-		Adapter: string(GenerateHostAdapter(pkgName, usage)),
+		Adapter: string(GenerateHostAdapter(pkgName, usage, target)),
 		Exports: string(GenerateExports(pkgName, result)),
 	}
 }

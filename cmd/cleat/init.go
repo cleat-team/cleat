@@ -12,13 +12,19 @@ import (
 //go:embed templates/agent/*
 var agentTemplates embed.FS
 
+//go:embed templates/agent-python/*
+var agentPythonTemplates embed.FS
+
+//go:embed templates/workflow/*
+var workflowTemplates embed.FS
+
 func runInit(args []string) {
 	flags := flag.NewFlagSet("init", flag.ExitOnError)
-	templateName := flags.String("template", "basic", "project template (basic, agent)")
+	templateName := flags.String("template", "basic", "project template (basic, agent, agent-python, workflow)")
 	flags.Parse(args)
 
 	if flags.NArg() < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat init [--template agent|basic] <project-name>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat init [--template agent|basic|agent-python|workflow] <project-name>\n")
 		os.Exit(1)
 	}
 	projectName := flags.Arg(0)
@@ -28,8 +34,12 @@ func runInit(args []string) {
 		scaffoldAgent(projectName)
 	case "basic":
 		scaffoldBasic(projectName)
+	case "agent-python":
+		scaffoldAgentPython(projectName)
+	case "workflow":
+		scaffoldWorkflow(projectName)
 	default:
-		fmt.Fprintf(os.Stderr, "Error: unknown template %q. Valid: basic, agent\n", *templateName)
+		fmt.Fprintf(os.Stderr, "Error: unknown template %q. Valid: basic, agent, agent-python, workflow\n", *templateName)
 		os.Exit(1)
 	}
 }
@@ -107,6 +117,64 @@ func scaffoldAgent(projectName string) {
 
 	writeYAML(dir, projectName)
 	fmt.Printf("Created AI agent project in %s/\n", dir)
+}
+
+func scaffoldAgentPython(projectName string) {
+	dir := projectName
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	copyTemplate := func(name, dest string) {
+		data, err := agentPythonTemplates.ReadFile("templates/agent-python/" + name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading template %s: %v\n", name, err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(filepath.Join(dir, dest), data, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", dest, err)
+			os.Exit(1)
+		}
+	}
+
+	copyTemplate("agent.py", "agent.py")
+	copyTemplate("cleat.toml", "cleat.toml")
+	copyTemplate(".gitignore", ".gitignore")
+	copyTemplate("README.md", "README.md")
+	copyTemplate("requirements.txt", "requirements.txt")
+
+	fmt.Printf("Created Python agent project in %s/\n", dir)
+}
+
+func scaffoldWorkflow(projectName string) {
+	dir := projectName
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	copyTemplate := func(name, dest string) {
+		data, err := workflowTemplates.ReadFile("templates/workflow/" + name)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading template %s: %v\n", name, err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(filepath.Join(dir, dest), data, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", dest, err)
+			os.Exit(1)
+		}
+	}
+
+	copyTemplate("main.go", "main.go")
+	copyTemplate("main_test.go", "main_test.go")
+	copyTemplate("cleat.yaml", "cleat.yaml")
+	copyTemplate("go.mod.txt", "go.mod")
+	copyTemplate("Makefile", "Makefile")
+	copyTemplate("README.md", "README.md")
+	copyTemplate("docker-compose.yml", "docker-compose.yml")
+
+	fmt.Printf("Created workflow project in %s/\n", dir)
 }
 
 func writeYAML(dir, projectName string) {

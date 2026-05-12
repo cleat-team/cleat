@@ -85,7 +85,7 @@ func TestTenantSelfAccess(t *testing.T) {
 		}
 
 		// Cleanup: claim and complete the workflow.
-		claimed, err := store.ClaimWorkflow(ctx, "test-worker", "default")
+		claimed, err := store.ClaimWorkflow(ctx, "test-worker")
 		if err != nil {
 			t.Fatalf("ClaimWorkflow: %v", err)
 		}
@@ -195,11 +195,11 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			}
 
 			// Cleanup.
-			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker", "default")
+			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker")
 			if claimedA != nil {
 				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", `{"done":true}`, nil)
 			}
-			claimedB, _ := storeB.ClaimWorkflow(ctx, "test-worker", "default")
+			claimedB, _ := storeB.ClaimWorkflow(ctx, "test-worker")
 			if claimedB != nil {
 				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", `{"done":true}`, nil)
 			}
@@ -284,11 +284,11 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			}
 
 			// Cleanup.
-			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker", "default")
+			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker")
 			if claimedA != nil {
 				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", `{"done":true}`, nil)
 			}
-			claimedB, _ := storeB.ClaimWorkflow(ctx, "test-worker", "default")
+			claimedB, _ := storeB.ClaimWorkflow(ctx, "test-worker")
 			if claimedB != nil {
 				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", `{"done":true}`, nil)
 			}
@@ -476,11 +476,11 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			}
 
 			// Cleanup.
-			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker", "default")
+			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker")
 			if claimedA != nil {
 				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", `{"done":true}`, nil)
 			}
-			claimedB, _ := storeB.ClaimWorkflow(ctx, "test-worker", "default")
+			claimedB, _ := storeB.ClaimWorkflow(ctx, "test-worker")
 			if claimedB != nil {
 				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", `{"done":true}`, nil)
 			}

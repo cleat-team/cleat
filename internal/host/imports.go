@@ -795,6 +795,28 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		}
 		return uint64(h.Fetch(ctx, m, method, url, headersJSON, body, responsePtr, responseMaxLen))
 	}).Export("cleat_fetch")
+
+		// cleat_complete signals workflow completion with a result or error.
+		// This is called by the WASM export wrapper BEFORE returning, so the
+		// worker can capture the result even if the Go WASI runtime subsequently
+		// calls proc_exit (which would overwrite the normal return value).
+		// status=0 means success (result is JSON), status=1 means error (result is error message).
+		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+			status uint32, resultPtr uint32, resultLen uint32) uint64 {
+			mem := m.Memory()
+			result := readWasmString(mem, resultPtr, resultLen)
+			// Store in context for CallExportWithSuspend to retrieve.
+			r := ctx.Value(&cleatCompleteKey)
+			if r != nil {
+				c := r.(*cleatComplete)
+				if status == 0 {
+					c.Result = &result
+				} else {
+					c.Error = &result
+				}
+			}
+			return 0
+		}).Export("cleat_complete")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

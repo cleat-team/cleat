@@ -32,10 +32,15 @@ type Plugin struct {
 	httpClient *http.Client
 	config     Config
 	dialect    plugin.Dialect
+
+	signalWorkflow     func(ctx context.Context, workflowID, signalName, payload string) error
+	slackSigningSecret string
 }
 
 // Config holds optional configuration for the slack-notify plugin.
-type Config struct{}
+type Config struct {
+	SlackSigningSecret string `json:"slack_signing_secret,omitempty"`
+}
 
 // Info returns plugin metadata for discovery and documentation.
 func (p *Plugin) Info() plugin.PluginInfo {
@@ -68,6 +73,9 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 			return fmt.Errorf("slack-notify: invalid config: %w", err)
 		}
 	}
+
+	p.signalWorkflow = env.SignalWorkflow
+	p.slackSigningSecret = p.config.SlackSigningSecret
 
 	p.logger.Info("slack-notify: initialized")
 	return nil

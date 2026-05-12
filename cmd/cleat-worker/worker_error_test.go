@@ -23,13 +23,13 @@ func TestDispatchLoop_StickyEmptyGeneralStillCalled(t *testing.T) {
 	stickyCalls := 0
 	generalCalls := 0
 
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		mu.Lock()
 		stickyCalls++
 		mu.Unlock()
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		mu.Lock()
 		generalCalls++
 		mu.Unlock()
@@ -74,13 +74,13 @@ func TestDispatchLoop_StickyErrorContinuesLoop(t *testing.T) {
 	stickyCalls := 0
 	generalCalls := 0
 
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		mu.Lock()
 		stickyCalls++
 		mu.Unlock()
 		return nil, errors.New("sticky error (non-connection)")
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		mu.Lock()
 		generalCalls++
 		mu.Unlock()

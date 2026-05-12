@@ -30,9 +30,9 @@ type mockStore struct {
 	markVersionDeprecatedFn           func(ctx context.Context, name string, version int, deprecated bool) error
 	purgeWorkflowDefFn                func(ctx context.Context, name string, version int) error
 	deployWorkflowDefFn               func(ctx context.Context, def *host.WorkflowDef) error
-	claimWorkflowFn                   func(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error)
-	claimWorkflowsFn                  func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
-	claimStickyWorkflowsFn            func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
+	claimWorkflowFn                   func(ctx context.Context, workerID string) (*host.WorkflowInstance, error)
+	claimWorkflowsFn                  func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error)
+	claimStickyWorkflowsFn            func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error)
 	loadEventHistoryFn                func(ctx context.Context, workflowID string) ([]host.EventRecord, error)
 	appendEventHistoryFn              func(ctx context.Context, workflowID string, rec host.EventRecord) error
 	appendEventHistoryBatchFn         func(ctx context.Context, workflowID string, recs []host.EventRecord) error
@@ -88,23 +88,23 @@ type mockStore struct {
 
 // ---- mockStore interface methods ----
 
-func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error) {
+func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID string) (*host.WorkflowInstance, error) {
 	if m.claimWorkflowFn != nil {
-		return m.claimWorkflowFn(ctx, workerID, namespace)
+		return m.claimWorkflowFn(ctx, workerID)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 	if m.claimWorkflowsFn != nil {
-		return m.claimWorkflowsFn(ctx, workerID, namespace, limit)
+		return m.claimWorkflowsFn(ctx, workerID, limit)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 	if m.claimStickyWorkflowsFn != nil {
-		return m.claimStickyWorkflowsFn(ctx, workerID, namespace, limit)
+		return m.claimStickyWorkflowsFn(ctx, workerID, limit)
 	}
 	return nil, nil
 }
@@ -1706,13 +1706,11 @@ func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVers
 func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
 func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) { return 0, nil }
-func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan host.EventRecord, <-chan error) {
-	ch := make(chan host.EventRecord)
-	errCh := make(chan error, 1)
-	close(ch)
-	errCh <- nil
-	return ch, errCh
-}
 func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
-func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]host.EventRecord, error) { return nil, nil }
+func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]host.EventRecord, error) {
+	return nil, nil
+}
+func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan host.EventRecord, <-chan error) {
+	return nil, nil
+}
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error { return nil }

@@ -22,6 +22,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 	mux.HandleFunc("GET /slack/configs/{id}", p.handleGetConfig)
 	mux.HandleFunc("PUT /slack/configs/{id}", p.handleUpdateConfig)
 	mux.HandleFunc("DELETE /slack/configs/{id}", p.handleDeleteConfig)
+	mux.HandleFunc("POST /slack/interactive", p.handleInteractiveCallback)
 	return nil
 }
 

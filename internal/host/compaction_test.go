@@ -360,13 +360,13 @@ func (m *mockCompactStore) CompactHistory(ctx context.Context, workflowID string
 }
 
 // satisfy the rest of the WorkflowStore interface with no-ops.
-func (m *mockCompactStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*WorkflowInstance, error) {
+func (m *mockCompactStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockCompactStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockCompactStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
-func (m *mockCompactStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*WorkflowInstance, error) {
+func (m *mockCompactStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
 func (m *mockCompactStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error {

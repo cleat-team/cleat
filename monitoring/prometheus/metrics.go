@@ -5,7 +5,6 @@
 // Usage:
 //
 //	m, err := prometheus.New(prometheus.Config{
-//	    Namespace: "default",
 //	    WorkerID:  "abc123",
 //	})
 //	if err != nil {
@@ -37,8 +36,6 @@ import (
 
 // Config holds configuration for the Metrics instance.
 type Config struct {
-	// Namespace is the workflow namespace label applied to all metrics.
-	Namespace string
 	// WorkerID uniquely identifies this worker instance.
 	WorkerID string
 	// ServiceName identifies the service for the OTel meter.
@@ -83,9 +80,6 @@ type Metrics struct {
 // initialises all OTel instruments and starts a manual reader that will be
 // polled on each /metrics request.
 func New(cfg Config) (*Metrics, error) {
-	if cfg.Namespace == "" {
-		cfg.Namespace = "default"
-	}
 	if cfg.ServiceName == "" {
 		cfg.ServiceName = "cleat-workflow-engine"
 	}
@@ -104,7 +98,6 @@ func New(cfg Config) (*Metrics, error) {
 		reader: reader,
 		mp:     mp,
 		defaultAttrs: []attribute.KeyValue{
-			attribute.String("namespace", cfg.Namespace),
 			attribute.String("worker_id", cfg.WorkerID),
 		},
 	}

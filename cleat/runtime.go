@@ -385,20 +385,16 @@ type RandomSource interface {
 // The concrete implementation is *hostCallsImpl, created by the WASM host
 // adapter at runtime. For tests, mock implementations of individual group
 // interfaces (e.g., Caller, Timer) can be used where the full HostCalls
-// is not needed.
-type HostCalls interface {
-	Caller
-	Timer
-	Signaler
-	Lifecycle
-	Promises
-	StateManager
-	QueryHandlers
-	CronScheduler
-	Scoper
-	UUIDGenerator
-	Locker
-	RandomSource
+// HostCalls is a lightweight wrapper passed to workflows by value.
+// It embeds a pointer to HostCallsImpl which holds all the function pointers.
+// Passing by value avoids interface dispatch, which prevents WASM function
+// table issues in Go 1.24+ WASI.
+//
+// Workflows use h.DurableCall, h.DurableSleep, h.Now, h.AwaitSignals,
+// h.SetQueryState, h.CreatePromise, etc. to record their side effects
+// in the event history.
+type HostCalls struct {
+	*HostCallsImpl
 }
 
 // ---- Streaming types ----
@@ -767,10 +763,10 @@ func (rp *RetryPolicy) MaximumInterval() time.Duration {
 
 // ---- Concrete implementation ----
 
-// hostCallsImpl is the default concrete implementation of HostCalls.
-// The WASM host adapter populates the function fields with closures that
+// HostCallsImpl holds the function pointer fields that back HostCalls.
+// The WASM host adapter populates the function fields with functions that
 // call into the WASM host imports.
-type hostCallsImpl struct {
+type HostCallsImpl struct {
 	durableCall               func(service, operation, requestJSON string) (string, error)
 	durableCallTyped          func(service, operation string, request, result interface{}) error
 	durableCallTypedWithOptions func(opts CallOptions, service, operation string, request, result interface{}) error
@@ -845,7 +841,7 @@ type hostCallsImpl struct {
 // NewHostCalls creates a HostCalls from a set of function implementations.
 // Used by the WASM host adapter and by tests.
 func NewHostCalls(opts HostCallsOptions) HostCalls {
-	return &hostCallsImpl{
+	return HostCalls{&HostCallsImpl{
 		durableCall:               opts.DurableCall,
 		durableCallTyped:          opts.DurableCallTyped,
 		durableCallTypedWithOptions: opts.DurableCallTypedWithOptions,
@@ -901,7 +897,7 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		releaseLock:               opts.ReleaseLock,
 		awaitCondition:            opts.AwaitCondition,
 		sideEffect:                opts.SideEffect,
-	}
+	}}
 }
 
 // HostCallsOptions holds the function implementations for NewHostCalls.
@@ -1005,14 +1001,14 @@ type HostCallsOptions struct {
 //   Default: Version, MinVersion — return 1 when nil
 // ----
 
-func (h *hostCallsImpl) DurableCall(service, operation, requestJSON string) (string, error) {
+func (h *HostCallsImpl) DurableCall(service, operation, requestJSON string) (string, error) {
 	if h.durableCall == nil {
 		return "", errors.New("durable: DurableCall can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableCall(service, operation, requestJSON)
 }
 
-func (h *hostCallsImpl) DurableCallJSON(service, operation, requestJSON string, result interface{}) error {
+func (h *HostCallsImpl) DurableCallJSON(service, operation, requestJSON string, result interface{}) error {
 	resp, err := h.DurableCall(service, operation, requestJSON)
 	if err != nil {
 		return err
@@ -1026,7 +1022,7 @@ func (h *hostCallsImpl) DurableCallJSON(service, operation, requestJSON string, 
 	return nil
 }
 
-func (h *hostCallsImpl) DurableCallTyped(service, operation string, request, result interface{}) error {
+func (h *HostCallsImpl) DurableCallTyped(service, operation string, request, result interface{}) error {
 	if h.durableCallTyped != nil {
 		return h.durableCallTyped(service, operation, request, result)
 	}
@@ -1053,7 +1049,7 @@ func (h *hostCallsImpl) DurableCallTyped(service, operation string, request, res
 // When the host-side durableCallWithRetry import is available, the retry
 // loop runs on the host and produces ONE history event per logical call.
 // Otherwise, it falls back to SDK-level retry (one event per attempt).
-func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operation, requestJSON string) (string, error) {
+func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operation, requestJSON string) (string, error) {
 	if h.durableCallWithOptions != nil {
 		return h.durableCallWithOptions(opts, service, operation, requestJSON)
 	}
@@ -1186,7 +1182,7 @@ func (h *hostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 		service, operation, rp.MaxAttempts, lastErr)
 }
 
-func (h *hostCallsImpl) DurableCallTypedWithOptions(opts CallOptions, service, operation string, request, result interface{}) error {
+func (h *HostCallsImpl) DurableCallTypedWithOptions(opts CallOptions, service, operation string, request, result interface{}) error {
 	if h.durableCallTypedWithOptions != nil {
 		return h.durableCallTypedWithOptions(opts, service, operation, request, result)
 	}
@@ -1283,7 +1279,7 @@ func (h *hostCallsImpl) DurableCallTypedWithOptions(opts CallOptions, service, o
 	return nil
 }
 
-func (h *hostCallsImpl) DurableCallJSONWithOptions(opts CallOptions, service, operation, requestJSON string, result interface{}) error {
+func (h *HostCallsImpl) DurableCallJSONWithOptions(opts CallOptions, service, operation, requestJSON string, result interface{}) error {
 	resp, err := h.DurableCallWithOptions(opts, service, operation, requestJSON)
 	if err != nil {
 		return err
@@ -1297,7 +1293,7 @@ func (h *hostCallsImpl) DurableCallJSONWithOptions(opts CallOptions, service, op
 	return nil
 }
 
-func (h *hostCallsImpl) DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+func (h *HostCallsImpl) DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
 	if h.durableCallWithHeartbeat != nil {
 		return h.durableCallWithHeartbeat(service, operation, requestJSON, heartbeatInterval, onProgress)
 	}
@@ -1305,7 +1301,7 @@ func (h *hostCallsImpl) DurableCallWithHeartbeat(service, operation, requestJSON
 	return h.DurableCall(service, operation, requestJSON)
 }
 
-func (h *hostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
+func (h *HostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
 	reqJSON, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("durable: marshaling request for %s.%s: %w", service, operation, err)
@@ -1323,49 +1319,49 @@ func (h *hostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string,
 	return nil
 }
 
-func (h *hostCallsImpl) PluginCall(pluginName, functionName, inputJSON string) (string, error) {
+func (h *HostCallsImpl) PluginCall(pluginName, functionName, inputJSON string) (string, error) {
 	if h.pluginCall != nil {
 		return h.pluginCall(pluginName, functionName, inputJSON)
 	}
 	return "", fmt.Errorf("durable: PluginCall can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 }
 
-func (h *hostCallsImpl) PluginCallStreaming(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error) {
+func (h *HostCallsImpl) PluginCallStreaming(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error) {
 	if h.pluginCallStreaming != nil {
 		return h.pluginCallStreaming(pluginName, functionName, inputJSON)
 	}
 	return nil, fmt.Errorf("durable: PluginCallStreaming can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 }
 
-func (h *hostCallsImpl) DurableSend(service, operation, requestJSON string) error {
+func (h *HostCallsImpl) DurableSend(service, operation, requestJSON string) error {
 	if h.durableSend == nil {
 		return errors.New("durable: DurableSend can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableSend(service, operation, requestJSON)
 }
 
-func (h *hostCallsImpl) ScheduleInvoke(service, operation, requestJSON string, delayMs int64) error {
+func (h *HostCallsImpl) ScheduleInvoke(service, operation, requestJSON string, delayMs int64) error {
 	if h.scheduleInvoke == nil {
 		return errors.New("durable: ScheduleInvoke can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.scheduleInvoke(service, operation, requestJSON, delayMs)
 }
 
-func (h *hostCallsImpl) SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
+func (h *HostCallsImpl) SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
 	if h.sendSignalAndWait == nil {
 		return "", errors.New("durable: SendSignalAndWait can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.sendSignalAndWait(targetRunID, signalName, payload, timeout)
 }
 
-func (h *hostCallsImpl) ReplyToSignal(correlationID, response string) error {
+func (h *HostCallsImpl) ReplyToSignal(correlationID, response string) error {
 	if h.replyToSignal == nil {
 		return errors.New("durable: ReplyToSignal can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.replyToSignal(correlationID, response)
 }
 
-func (h *hostCallsImpl) AwaitSignalsWithQuorum(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error) {
+func (h *HostCallsImpl) AwaitSignalsWithQuorum(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error) {
 	if h.awaitSignalsWithQuorum != nil {
 		return h.awaitSignalsWithQuorum(signalNames, minCount, maxRejections, timeout)
 	}
@@ -1405,35 +1401,35 @@ func (h *hostCallsImpl) AwaitSignalsWithQuorum(signalNames []string, minCount in
 	return results, nil
 }
 
-func (h *hostCallsImpl) SignalWorkflow(targetRunID, signalName, payload string) error {
+func (h *HostCallsImpl) SignalWorkflow(targetRunID, signalName, payload string) error {
 	if h.signalWorkflow == nil {
 		return errors.New("durable: SignalWorkflow can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.signalWorkflow(targetRunID, signalName, payload)
 }
 
-func (h *hostCallsImpl) ScheduleCron(workflowName, cronExpr, timezone, inputJSON string) (string, error) {
+func (h *HostCallsImpl) ScheduleCron(workflowName, cronExpr, timezone, inputJSON string) (string, error) {
 	if h.scheduleCron == nil {
 		return "", errors.New("durable: ScheduleCron can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.scheduleCron(workflowName, cronExpr, timezone, inputJSON)
 }
 
-func (h *hostCallsImpl) DeleteCron(scheduleID string) error {
+func (h *HostCallsImpl) DeleteCron(scheduleID string) error {
 	if h.deleteCron == nil {
 		return errors.New("durable: DeleteCron can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.deleteCron(scheduleID)
 }
 
-func (h *hostCallsImpl) ListCrons() (string, error) {
+func (h *HostCallsImpl) ListCrons() (string, error) {
 	if h.listCrons == nil {
 		return "", errors.New("durable: ListCrons can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.listCrons()
 }
 
-func (h *hostCallsImpl) AwaitCondition(predicate func() bool, pollInterval, timeout time.Duration) (met bool) {
+func (h *HostCallsImpl) AwaitCondition(predicate func() bool, pollInterval, timeout time.Duration) (met bool) {
 	if h.awaitCondition != nil {
 		met, err := h.awaitCondition(predicate, pollInterval, timeout)
 		if err != nil {
@@ -1453,7 +1449,7 @@ func (h *hostCallsImpl) AwaitCondition(predicate func() bool, pollInterval, time
 	}
 }
 
-func (h *hostCallsImpl) SideEffect(fn func() (string, error)) (string, error) {
+func (h *HostCallsImpl) SideEffect(fn func() (string, error)) (string, error) {
 	if h.sideEffect == nil {
 		return "", errors.New("durable: SideEffect can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
@@ -1464,29 +1460,29 @@ func (h *hostCallsImpl) SideEffect(fn func() (string, error)) (string, error) {
 	return h.sideEffect(computedResult)
 }
 
-func (h *hostCallsImpl) AcquireLock(key string, ttl time.Duration) (bool, error) {
+func (h *HostCallsImpl) AcquireLock(key string, ttl time.Duration) (bool, error) {
 	return h.AcquireLockMs(key, ttl.Milliseconds())
 }
 
-func (h *hostCallsImpl) AcquireLockMs(key string, ttlMs int64) (bool, error) {
+func (h *HostCallsImpl) AcquireLockMs(key string, ttlMs int64) (bool, error) {
 	if h.acquireLock == nil {
 		return false, errors.New("durable: AcquireLock can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.acquireLock(key, ttlMs)
 }
 
-func (h *hostCallsImpl) ReleaseLock(key string) error {
+func (h *HostCallsImpl) ReleaseLock(key string) error {
 	if h.releaseLock == nil {
 		return errors.New("durable: ReleaseLock can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.releaseLock(key)
 }
 
-func (h *hostCallsImpl) DurableSleep(d time.Duration) {
+func (h *HostCallsImpl) DurableSleep(d time.Duration) {
 	h.DurableSleepMs(d.Milliseconds())
 }
 
-func (h *hostCallsImpl) DurableSleepMs(ms int64) {
+func (h *HostCallsImpl) DurableSleepMs(ms int64) {
 	if h.durableSleep == nil {
 		log.Printf("durable: DurableSleep can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 		return
@@ -1494,7 +1490,7 @@ func (h *hostCallsImpl) DurableSleepMs(ms int64) {
 	h.durableSleep(ms)
 }
 
-func (h *hostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration) SignalResult {
+func (h *HostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration) SignalResult {
 	name, payload, timedOut, err := h.DurableAwaitSignals(signalNames, timeout.Milliseconds())
 	return SignalResult{
 		Name:     name,
@@ -1504,80 +1500,80 @@ func (h *hostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration
 	}
 }
 
-func (h *hostCallsImpl) DurableAwaitSignals(signalNames []string, timeoutMs int64) (string, string, bool, error) {
+func (h *HostCallsImpl) DurableAwaitSignals(signalNames []string, timeoutMs int64) (string, string, bool, error) {
 	if h.durableAwaitSignals == nil {
 		return "", "", false, errors.New("durable: DurableAwaitSignals can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableAwaitSignals(signalNames, timeoutMs)
 }
 
-func (h *hostCallsImpl) CreatePromise(name string) (string, error) {
+func (h *HostCallsImpl) CreatePromise(name string) (string, error) {
 	if h.createPromise == nil {
 		return "", errors.New("durable: CreatePromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.createPromise(name)
 }
 
-func (h *hostCallsImpl) AwaitPromise(promiseID string, timeout time.Duration) (string, bool, error) {
+func (h *HostCallsImpl) AwaitPromise(promiseID string, timeout time.Duration) (string, bool, error) {
 	if h.awaitPromise == nil {
 		return "", false, errors.New("durable: AwaitPromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.awaitPromise(promiseID, timeout)
 }
 
-func (h *hostCallsImpl) AwaitPromiseMs(promiseID string, timeoutMs int64) (result string, timedOut bool, err error) {
+func (h *HostCallsImpl) AwaitPromiseMs(promiseID string, timeoutMs int64) (result string, timedOut bool, err error) {
 	return h.AwaitPromise(promiseID, time.Duration(timeoutMs)*time.Millisecond)
 }
 
-func (h *hostCallsImpl) ResolvePromise(id, value string) error {
+func (h *HostCallsImpl) ResolvePromise(id, value string) error {
 	if h.resolvePromise == nil {
 		return errors.New("durable: ResolvePromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.resolvePromise(id, value)
 }
 
-func (h *hostCallsImpl) RejectPromise(id, errMsg string) error {
+func (h *HostCallsImpl) RejectPromise(id, errMsg string) error {
 	if h.rejectPromise == nil {
 		return errors.New("durable: RejectPromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.rejectPromise(id, errMsg)
 }
 
-func (h *hostCallsImpl) DurableDefer(description string) (string, error) {
+func (h *HostCallsImpl) DurableDefer(description string) (string, error) {
 	if h.durableDefer == nil {
 		return "", errors.New("durable: DurableDefer can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableDefer(description)
 }
 
-func (h *hostCallsImpl) DurableDeferFunc(fn func()) (string, error) {
+func (h *HostCallsImpl) DurableDeferFunc(fn func()) (string, error) {
 	if h.durableDeferFunc == nil {
 		return "", errors.New("durable: DurableDeferFunc can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.durableDeferFunc(fn)
 }
 
-func (h *hostCallsImpl) WorkflowID() string {
+func (h *HostCallsImpl) WorkflowID() string {
 	if h.workflowID == nil {
 		return ""
 	}
 	return h.workflowID()
 }
 
-func (h *hostCallsImpl) RunID() string {
+func (h *HostCallsImpl) RunID() string {
 	if h.workflowRunID == nil {
 		return ""
 	}
 	return h.workflowRunID()
 }
 
-func (h *hostCallsImpl) DurableLog(message string) {
+func (h *HostCallsImpl) DurableLog(message string) {
 	if h.durableLog != nil {
 		h.durableLog(message)
 	}
 }
 
-func (h *hostCallsImpl) LogKV(message string, kvs ...interface{}) {
+func (h *HostCallsImpl) LogKV(message string, kvs ...interface{}) {
 	entry := map[string]interface{}{
 		"msg": message,
 	}
@@ -1599,42 +1595,42 @@ func (h *hostCallsImpl) LogKV(message string, kvs ...interface{}) {
 	h.DurableLog(string(data))
 }
 
-func (h *hostCallsImpl) PollCancellation() (bool, string) {
+func (h *HostCallsImpl) PollCancellation() (bool, string) {
 	if h.pollCancellation == nil {
 		return false, ""
 	}
 	return h.pollCancellation()
 }
 
-func (h *hostCallsImpl) PollSignal(signalName string) (string, bool, error) {
+func (h *HostCallsImpl) PollSignal(signalName string) (string, bool, error) {
 	if h.pollSignal == nil {
 		return "", false, errors.New("durable: PollSignal can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.pollSignal(signalName)
 }
 
-func (h *hostCallsImpl) ContinueAsNew(newInputJSON string) error {
+func (h *HostCallsImpl) ContinueAsNew(newInputJSON string) error {
 	if h.continueAsNew == nil {
 		return errors.New("durable: ContinueAsNew can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.continueAsNew(newInputJSON)
 }
 
-func (h *hostCallsImpl) ContinueAsNewWithVersion(newInputJSON string, newVersion int64) error {
+func (h *HostCallsImpl) ContinueAsNewWithVersion(newInputJSON string, newVersion int64) error {
 	if h.continueAsNewWithVersion == nil {
 		return errors.New("durable: ContinueAsNewWithVersion can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.continueAsNewWithVersion(newInputJSON, newVersion)
 }
 
-func (h *hostCallsImpl) ChildWorkflow(name, inputJSON string) (string, error) {
+func (h *HostCallsImpl) ChildWorkflow(name, inputJSON string) (string, error) {
 	if h.childWorkflow == nil {
 		return "", errors.New("durable: ChildWorkflow can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.childWorkflow(name, inputJSON)
 }
 
-func (h *hostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts ChildWorkflowOptions) (string, error) {
+func (h *HostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts ChildWorkflowOptions) (string, error) {
 	if h.childWorkflowWithOptions != nil {
 		return h.childWorkflowWithOptions(name, inputJSON, opts.Version, string(opts.ParentClosePolicy))
 	}
@@ -1643,21 +1639,21 @@ func (h *hostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts Ch
 	return h.ChildWorkflow(name, inputJSON)
 }
 
-func (h *hostCallsImpl) AwaitChild(runID string) (string, error) {
+func (h *HostCallsImpl) AwaitChild(runID string) (string, error) {
 	if h.awaitChild == nil {
 		return "", errors.New("durable: AwaitChild can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.awaitChild(runID)
 }
 
-func (h *hostCallsImpl) AwaitAllChildren(runIDs []string) ([]ChildResult, error) {
+func (h *HostCallsImpl) AwaitAllChildren(runIDs []string) ([]ChildResult, error) {
 	if h.awaitAllChildren == nil {
 		return nil, errors.New("durable: AwaitAllChildren can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.awaitAllChildren(runIDs)
 }
 
-func (h *hostCallsImpl) ChildWorkflowTyped(name string, request interface{}) (string, error) {
+func (h *HostCallsImpl) ChildWorkflowTyped(name string, request interface{}) (string, error) {
 	if h.childWorkflowTyped != nil {
 		return h.childWorkflowTyped(name, request)
 	}
@@ -1668,7 +1664,7 @@ func (h *hostCallsImpl) ChildWorkflowTyped(name string, request interface{}) (st
 	return h.ChildWorkflow(name, string(reqJSON))
 }
 
-func (h *hostCallsImpl) AwaitChildTyped(runID string, result interface{}) error {
+func (h *HostCallsImpl) AwaitChildTyped(runID string, result interface{}) error {
 	if h.awaitChildTyped != nil {
 		return h.awaitChildTyped(runID, result)
 	}
@@ -1682,21 +1678,21 @@ func (h *hostCallsImpl) AwaitChildTyped(runID string, result interface{}) error 
 	return nil
 }
 
-func (h *hostCallsImpl) Version() int {
+func (h *HostCallsImpl) Version() int {
 	if h.version == nil {
 		return 1
 	}
 	return h.version()
 }
 
-func (h *hostCallsImpl) MinVersion() int {
+func (h *HostCallsImpl) MinVersion() int {
 	if h.minVersion == nil {
 		return 1
 	}
 	return h.minVersion()
 }
 
-func (h *hostCallsImpl) SetQueryState(key, value string) {
+func (h *HostCallsImpl) SetQueryState(key, value string) {
 	if h.setQueryState != nil {
 		h.setQueryState(key, value)
 	}
@@ -1709,7 +1705,7 @@ func (h *hostCallsImpl) SetQueryState(key, value string) {
 
 // scopedKey returns the internally-stored key, applying the current
 // virtual-object scope prefix when one is active.
-func (h *hostCallsImpl) scopedKey(key string) string {
+func (h *HostCallsImpl) scopedKey(key string) string {
 	if h.scopeSet && h.scopePrefix != "" {
 		return h.scopePrefix + key
 	}
@@ -1720,7 +1716,7 @@ func (h *hostCallsImpl) scopedKey(key string) string {
 // All subsequent SetState/GetState/etc calls are automatically prefixed
 // with "vo:<objectType>:<instanceKey>:". Returns the previous scope
 // prefix for stack-style save/restore.
-func (h *hostCallsImpl) SetScope(objectType, instanceKey string) (previousScope string) {
+func (h *HostCallsImpl) SetScope(objectType, instanceKey string) (previousScope string) {
 	if h.scopeSet {
 		previousScope = h.scopePrefix
 	}
@@ -1740,7 +1736,7 @@ func (h *hostCallsImpl) SetScope(objectType, instanceKey string) (previousScope 
 
 // GetScope returns the current (objectType, instanceKey) or ("", "")
 // if no scope is set.
-func (h *hostCallsImpl) GetScope() (objectType, instanceKey string) {
+func (h *HostCallsImpl) GetScope() (objectType, instanceKey string) {
 	if !h.scopeSet {
 		return "", ""
 	}
@@ -1749,7 +1745,7 @@ func (h *hostCallsImpl) GetScope() (objectType, instanceKey string) {
 
 // ClearScope removes the current scope and returns the previous scope
 // prefix (empty string if none was set).
-func (h *hostCallsImpl) ClearScope() (previousScope string) {
+func (h *HostCallsImpl) ClearScope() (previousScope string) {
 	if h.scopeSet {
 		previousScope = h.scopePrefix
 	}
@@ -1763,7 +1759,7 @@ func (h *hostCallsImpl) ClearScope() (previousScope string) {
 // UUID returns a deterministic UUID scoped to the current workflow
 // and the given seed. Same seed always produces the same UUID for
 // this workflow instance.
-func (h *hostCallsImpl) UUID(seed string) string {
+func (h *HostCallsImpl) UUID(seed string) string {
 	wfID := h.WorkflowID()
 	data := wfID + ":" + seed
 	hash := sha256.Sum256([]byte(data))
@@ -1775,7 +1771,7 @@ func (h *hostCallsImpl) UUID(seed string) string {
 }
 
 // NewUUID generates a random UUID (v4) deterministically.
-func (h *hostCallsImpl) NewUUID() string {
+func (h *HostCallsImpl) NewUUID() string {
 	r1 := uint64(h.Random())
 	r2 := uint64(h.Random())
 	// Format as random (version 4) UUID.
@@ -1793,7 +1789,7 @@ func (h *hostCallsImpl) NewUUID() string {
 // NewUUIDv7 generates a time-sortable UUID (v7) deterministically.
 // The timestamp comes from Now() — deterministic on replay. The random
 // portion comes from Random() — also deterministic on replay.
-func (h *hostCallsImpl) NewUUIDv7() string {
+func (h *HostCallsImpl) NewUUIDv7() string {
 	ts := uint64(h.NowMs()) // Unix timestamp in ms
 	r1 := uint64(h.Random())
 	r2 := uint64(h.Random())
@@ -1822,7 +1818,7 @@ func (h *hostCallsImpl) NewUUIDv7() string {
 }
 
 
-func (h *hostCallsImpl) SetState(key string, value interface{}) {
+func (h *HostCallsImpl) SetState(key string, value interface{}) {
 	sk := h.scopedKey(key)
 	if h.stateMap == nil {
 		h.stateMap = make(map[string]interface{})
@@ -1843,7 +1839,7 @@ func (h *hostCallsImpl) SetState(key string, value interface{}) {
 	}
 }
 
-func (h *hostCallsImpl) GetState(key string, result interface{}) error {
+func (h *HostCallsImpl) GetState(key string, result interface{}) error {
 	sk := h.scopedKey(key)
 	if h.stateMap == nil {
 		return errors.New("durable: state not found for key: " + sk)
@@ -1864,7 +1860,7 @@ func (h *hostCallsImpl) GetState(key string, result interface{}) error {
 	return json.Unmarshal(data, result)
 }
 
-func (h *hostCallsImpl) DeleteState(key string) {
+func (h *HostCallsImpl) DeleteState(key string) {
 	sk := h.scopedKey(key)
 	if h.stateMap != nil {
 		delete(h.stateMap, sk)
@@ -1874,7 +1870,7 @@ func (h *hostCallsImpl) DeleteState(key string) {
 	}
 }
 
-func (h *hostCallsImpl) HasState(key string) bool {
+func (h *HostCallsImpl) HasState(key string) bool {
 	if h.stateMap == nil {
 		return false
 	}
@@ -1882,7 +1878,7 @@ func (h *hostCallsImpl) HasState(key string) bool {
 	return ok
 }
 
-func (h *hostCallsImpl) IncrState(key string, delta int64) int64 {
+func (h *HostCallsImpl) IncrState(key string, delta int64) int64 {
 	sk := h.scopedKey(key)
 	if h.stateMap == nil {
 		h.stateMap = make(map[string]interface{})
@@ -1912,7 +1908,7 @@ func (h *hostCallsImpl) IncrState(key string, delta int64) int64 {
 	return current
 }
 
-func (h *hostCallsImpl) ListState(prefix string) []string {
+func (h *HostCallsImpl) ListState(prefix string) []string {
 	if h.stateMap == nil {
 		return nil
 	}
@@ -1931,7 +1927,7 @@ func (h *hostCallsImpl) ListState(prefix string) []string {
 	return keys
 }
 
-func (h *hostCallsImpl) RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error) {
+func (h *HostCallsImpl) RegisterUpdateHandler(name string, handler func(payloadJSON string) (resultJSON string, err error), validator func(payloadJSON string) error) {
 	if h.updateHandlers == nil {
 		h.updateHandlers = make(map[string]updateHandlerEntry)
 	}
@@ -1984,7 +1980,7 @@ func RegisterTypedUpdateHandler[TReq, TResp any](h HostCalls, name string, handl
 	)
 }
 
-func (h *hostCallsImpl) RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error)) {
+func (h *HostCallsImpl) RegisterQueryHandler(name string, handler func(payloadJSON string) (resultJSON string, err error)) {
 	if h.queryHandlers == nil {
 		h.queryHandlers = make(map[string]func(payloadJSON string) (resultJSON string, err error))
 	}
@@ -1995,7 +1991,7 @@ func (h *hostCallsImpl) RegisterQueryHandler(name string, handler func(payloadJS
 }
 
 // HandleQuery invokes a registered query handler by name with the given payload.
-func (h *hostCallsImpl) HandleQuery(name, payload string) (string, error) {
+func (h *HostCallsImpl) HandleQuery(name, payload string) (string, error) {
 	if h.handleQuery != nil {
 		return h.handleQuery(name, payload)
 	}
@@ -2006,7 +2002,7 @@ func (h *hostCallsImpl) HandleQuery(name, payload string) (string, error) {
 	return handler(payload)
 }
 
-func (h *hostCallsImpl) HandleUpdate(name, payload string) (string, error) {
+func (h *HostCallsImpl) HandleUpdate(name, payload string) (string, error) {
 	if h.handleUpdate != nil {
 		return h.handleUpdate(name, payload)
 	}
@@ -2017,14 +2013,14 @@ func (h *hostCallsImpl) HandleUpdate(name, payload string) (string, error) {
 	return entry.handler(payload)
 }
 
-func (h *hostCallsImpl) RunDetached(fn func(h HostCalls) error) error {
+func (h *HostCallsImpl) RunDetached(fn func(h HostCalls) error) error {
 	if h.runDetached != nil {
 		return h.runDetached(fn)
 	}
 	return nil
 }
 
-func (h *hostCallsImpl) DurableFetch(url, method string, headers map[string]string, body string) (responseJSON string, statusCode int, err error) {
+func (h *HostCallsImpl) DurableFetch(url, method string, headers map[string]string, body string) (responseJSON string, statusCode int, err error) {
 	requestMap := map[string]interface{}{
 		"url":     url,
 		"method":  method,
@@ -2049,7 +2045,7 @@ func (h *hostCallsImpl) DurableFetch(url, method string, headers map[string]stri
 	return respData.Body, respData.StatusCode, nil
 }
 
-func (h *hostCallsImpl) DurableFetchJSON(url, method string, headers map[string]string, body string, result interface{}) error {
+func (h *HostCallsImpl) DurableFetchJSON(url, method string, headers map[string]string, body string, result interface{}) error {
 	resp, _, err := h.DurableFetch(url, method, headers, body)
 	if err != nil {
 		return err
@@ -2058,12 +2054,12 @@ func (h *hostCallsImpl) DurableFetchJSON(url, method string, headers map[string]
 }
 
 // FetchGet is a shorthand for DurableFetch with GET method, no headers, and no body.
-func (h *hostCallsImpl) FetchGet(url string) (responseJSON string, statusCode int, err error) {
+func (h *HostCallsImpl) FetchGet(url string) (responseJSON string, statusCode int, err error) {
 	return h.DurableFetch(url, "GET", nil, "")
 }
 
 // FetchGetJSON is like FetchGet but unmarshals the response into result.
-func (h *hostCallsImpl) FetchGetJSON(url string, result interface{}) error {
+func (h *HostCallsImpl) FetchGetJSON(url string, result interface{}) error {
 	resp, _, err := h.FetchGet(url)
 	if err != nil {
 		return err
@@ -2071,12 +2067,12 @@ func (h *hostCallsImpl) FetchGetJSON(url string, result interface{}) error {
 	return json.Unmarshal([]byte(resp), result)
 }
 
-func (h *hostCallsImpl) Now() time.Time {
+func (h *HostCallsImpl) Now() time.Time {
 	ms := h.NowMs()
 	return time.Unix(ms/1000, (ms%1000)*1_000_000)
 }
 
-func (h *hostCallsImpl) NowMs() int64 {
+func (h *HostCallsImpl) NowMs() int64 {
 	if h.now == nil {
 		log.Printf("durable: Now can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 		return 0
@@ -2085,7 +2081,7 @@ func (h *hostCallsImpl) NowMs() int64 {
 }
 
 
-func (h *hostCallsImpl) Random() int64 {
+func (h *HostCallsImpl) Random() int64 {
 	if h.random == nil {
 		log.Printf("durable: Random can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 		return 0

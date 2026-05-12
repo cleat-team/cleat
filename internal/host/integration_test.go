@@ -709,7 +709,7 @@ func TestRLSTenantIsolation(t *testing.T) {
 
 	// ---- Test 1: Tenant A's store should only see tenant A's workflow ----
 	storeA := NewPostgresStore(db).WithTenant(tenantA)
-	wfsA, err := storeA.ClaimWorkflows(ctx, "worker-a", "default", 10)
+	wfsA, err := storeA.ClaimWorkflows(ctx, "worker-a", 10)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows tenant A: %v", err)
 	}
@@ -738,7 +738,7 @@ func TestRLSTenantIsolation(t *testing.T) {
 
 	// ---- Test 2: Tenant B's store should only see tenant B's workflow ----
 	storeB := NewPostgresStore(db).WithTenant(tenantB)
-	wfsB, err := storeB.ClaimWorkflows(ctx, "worker-b", "default", 10)
+	wfsB, err := storeB.ClaimWorkflows(ctx, "worker-b", 10)
 	if err != nil {
 		t.Fatalf("ClaimWorkflows tenant B: %v", err)
 	}

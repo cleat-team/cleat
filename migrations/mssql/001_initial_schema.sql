@@ -26,9 +26,9 @@ CREATE TABLE dbo.workflow_instances (
     id              NVARCHAR(64)    NOT NULL,
     def_name        NVARCHAR(255)   NOT NULL,
     def_version     INT             NOT NULL,
-    status          NVARCHAR(MAX)   NOT NULL DEFAULT 'ready',
+    status          NVARCHAR(50)    NOT NULL DEFAULT 'ready',
     input           NVARCHAR(MAX)   NOT NULL DEFAULT '{}',
-    assigned_to     NVARCHAR(MAX)   NULL,
+    assigned_to     NVARCHAR(255)   NULL,
     heartbeat_at    DATETIMEOFFSET  NULL,
     next_wake_at    DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),
     created_at      DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),
@@ -179,14 +179,11 @@ IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workf
 -- ===========================================================================
 -- Migration columns: min_version (already exists), namespace, max_history_length, trace_id
 -- ===========================================================================
-IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_defs') AND name = N'min_version')
-    ALTER TABLE dbo.workflow_defs ADD min_version INT NOT NULL DEFAULT 0;
-
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_defs') AND name = N'namespace')
-    ALTER TABLE dbo.workflow_defs ADD namespace NVARCHAR(MAX) NOT NULL DEFAULT 'default';
+    ALTER TABLE dbo.workflow_defs ADD namespace NVARCHAR(255) NOT NULL DEFAULT 'default';
 
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'namespace')
-    ALTER TABLE dbo.workflow_instances ADD namespace NVARCHAR(MAX) NOT NULL DEFAULT 'default';
+    ALTER TABLE dbo.workflow_instances ADD namespace NVARCHAR(255) NOT NULL DEFAULT 'default';
 
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_defs') AND name = N'max_history_length')
     ALTER TABLE dbo.workflow_defs ADD max_history_length INT NOT NULL DEFAULT 0;
@@ -229,7 +226,7 @@ CREATE TABLE dbo.workflow_promises (
     workflow_id     NVARCHAR(64)    NOT NULL,
     promise_id      NVARCHAR(64)    NOT NULL,
     promise_name    NVARCHAR(MAX)   NOT NULL,
-    status          NVARCHAR(MAX)   NOT NULL DEFAULT 'pending',
+    status          NVARCHAR(50)    NOT NULL DEFAULT 'pending',
     result          NVARCHAR(MAX)   NULL,
     error_msg       NVARCHAR(MAX)   NULL,
     created_at      DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),
@@ -289,7 +286,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workf
 -- Migration: add sticky_worker_id for sticky sessions (Feature 10)
 -- ===========================================================================
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'sticky_worker_id')
-    ALTER TABLE dbo.workflow_instances ADD sticky_worker_id NVARCHAR(MAX) NULL;
+    ALTER TABLE dbo.workflow_instances ADD sticky_worker_id NVARCHAR(255) NULL;
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_sticky' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
     CREATE INDEX idx_instances_sticky ON dbo.workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL;
@@ -303,7 +300,7 @@ CREATE TABLE dbo.workflow_update_requests (
     update_name     NVARCHAR(255)   NOT NULL,
     payload         NVARCHAR(MAX)   NOT NULL DEFAULT '{}',
     promise_id      NVARCHAR(MAX)   NULL,
-    status          NVARCHAR(MAX)   NOT NULL DEFAULT 'pending',
+    status          NVARCHAR(50)    NOT NULL DEFAULT 'pending',
     result          NVARCHAR(MAX)   NULL,
     error_msg       NVARCHAR(MAX)   NULL,
     created_at      DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),

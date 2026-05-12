@@ -1,0 +1,4 @@
+name: my-workflow
+language: go
+entry_points:
+  - process

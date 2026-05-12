@@ -1,5 +1,6 @@
 plugins {
     java
+    id("org.teavm") version "0.10.2"
 }
 
 group = "com.cleat"

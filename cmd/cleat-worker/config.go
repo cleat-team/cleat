@@ -9,7 +9,6 @@ type Config struct {
 	HeartbeatInterval      time.Duration
 	PollInterval           time.Duration
 	APIAddr                string
-	Namespace              string
 	TaskQueues             []string
 	CompactionThreshold    int
 	CompactionInterval     time.Duration

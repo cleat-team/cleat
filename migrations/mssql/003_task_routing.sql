@@ -8,13 +8,13 @@
 -- Add task_queue to workflow_defs
 -- ===========================================================================
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_defs') AND name = N'task_queue')
-    ALTER TABLE dbo.workflow_defs ADD task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default';
+    ALTER TABLE dbo.workflow_defs ADD task_queue NVARCHAR(255) NOT NULL DEFAULT 'default';
 
 -- ===========================================================================
 -- Add task_queue to workflow_instances
 -- ===========================================================================
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'task_queue')
-    ALTER TABLE dbo.workflow_instances ADD task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default';
+    ALTER TABLE dbo.workflow_instances ADD task_queue NVARCHAR(255) NOT NULL DEFAULT 'default';
 
 -- ===========================================================================
 -- Drop old ready indexes and create new one with task_queue

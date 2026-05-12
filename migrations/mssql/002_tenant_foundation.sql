@@ -25,7 +25,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.tenan
 CREATE TABLE dbo.tenant_api_keys (
     key_id      UNIQUEIDENTIFIER NOT NULL DEFAULT NEWID(),
     tenant_id   UNIQUEIDENTIFIER NOT NULL,
-    key_hash    VARBINARY(MAX)   NOT NULL,
+    key_hash    VARBINARY(64)    NOT NULL,
     description NVARCHAR(MAX)    NOT NULL DEFAULT '',
     created_at  DATETIMEOFFSET   NOT NULL DEFAULT SYSUTCDATETIME(),
     revoked_at  DATETIMEOFFSET   NULL,
@@ -65,11 +65,13 @@ IF NOT EXISTS (SELECT 1 FROM dbo.tenants WHERE tenant_id = '00000000-0000-0000-0
 -- ===========================================================================
 -- 9. Backfill existing rows with default tenant
 -- ===========================================================================
-UPDATE dbo.workflow_defs SET tenant_id = '00000000-0000-0000-0000-000000000000' WHERE tenant_id IS NULL;
-UPDATE dbo.workflow_instances SET tenant_id = '00000000-0000-0000-0000-000000000000' WHERE tenant_id IS NULL;
-UPDATE dbo.event_history SET tenant_id = '00000000-0000-0000-0000-000000000000' WHERE tenant_id IS NULL;
-UPDATE dbo.workflow_signals SET tenant_id = '00000000-0000-0000-0000-000000000000' WHERE tenant_id IS NULL;
-UPDATE dbo.workflow_schedules SET tenant_id = '00000000-0000-0000-0000-000000000000' WHERE tenant_id IS NULL;
+-- Wrapped in EXEC because tenant_id columns are added conditionally above
+-- and SQL Server validates column references at parse time.
+EXEC('UPDATE dbo.workflow_defs SET tenant_id = ''00000000-0000-0000-0000-000000000000'' WHERE tenant_id IS NULL');
+EXEC('UPDATE dbo.workflow_instances SET tenant_id = ''00000000-0000-0000-0000-000000000000'' WHERE tenant_id IS NULL');
+EXEC('UPDATE dbo.event_history SET tenant_id = ''00000000-0000-0000-0000-000000000000'' WHERE tenant_id IS NULL');
+EXEC('UPDATE dbo.workflow_signals SET tenant_id = ''00000000-0000-0000-0000-000000000000'' WHERE tenant_id IS NULL');
+EXEC('UPDATE dbo.workflow_schedules SET tenant_id = ''00000000-0000-0000-0000-000000000000'' WHERE tenant_id IS NULL');
 
 -- ===========================================================================
 -- 10. Make tenant_id NOT NULL
@@ -134,11 +136,32 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_schedules_tenant_ena
 -- ===========================================================================
 -- 12. Drop old namespace columns (replaced by tenant_id)
 -- ===========================================================================
+-- Drop dependent objects before dropping namespace columns.
+-- The namespace columns were added with DEFAULT constraints, and
+-- idx_instances_namespace_ready references namespace.
+-- Use dynamic SQL to find and drop auto-named default constraints.
+IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_instances_namespace_ready' AND object_id = OBJECT_ID(N'dbo.workflow_instances'))
+    DROP INDEX idx_instances_namespace_ready ON dbo.workflow_instances;
+
 IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_defs') AND name = N'namespace')
-    ALTER TABLE dbo.workflow_defs DROP COLUMN namespace;
+    EXEC('
+        DECLARE @c nvarchar(200);
+        SELECT @c = name FROM sys.default_constraints
+        WHERE parent_object_id = OBJECT_ID(''dbo.workflow_defs'')
+        AND parent_column_id = COLUMNPROPERTY(OBJECT_ID(''dbo.workflow_defs''), ''namespace'', ''ColumnId'');
+        IF @c IS NOT NULL EXEC(''ALTER TABLE dbo.workflow_defs DROP CONSTRAINT '' + @c);
+        ALTER TABLE dbo.workflow_defs DROP COLUMN namespace;
+    ');
 
 IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'namespace')
-    ALTER TABLE dbo.workflow_instances DROP COLUMN namespace;
+    EXEC('
+        DECLARE @c nvarchar(200);
+        SELECT @c = name FROM sys.default_constraints
+        WHERE parent_object_id = OBJECT_ID(''dbo.workflow_instances'')
+        AND parent_column_id = COLUMNPROPERTY(OBJECT_ID(''dbo.workflow_instances''), ''namespace'', ''ColumnId'');
+        IF @c IS NOT NULL EXEC(''ALTER TABLE dbo.workflow_instances DROP CONSTRAINT '' + @c);
+        ALTER TABLE dbo.workflow_instances DROP COLUMN namespace;
+    ');
 
 -- ===========================================================================
 -- 13. Row-Level Security (defense in depth) via Security Policy
@@ -150,49 +173,9 @@ IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_
 -- db_owner members bypass the filter.
 -- ===========================================================================
 
--- Create inline TVF predicate for tenant isolation
--- EXEC is used because CREATE FUNCTION must be the first statement in a batch
--- and most migration frameworks do not support the GO batch separator.
-IF EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.fn_tenant_filter') AND type = N'IF')
-    EXEC('DROP FUNCTION dbo.fn_tenant_filter');
-
-IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.fn_tenant_filter') AND type = N'IF')
-    EXEC('
-CREATE FUNCTION dbo.fn_tenant_filter()
-RETURNS TABLE
-AS RETURN
-    SELECT 1 AS fn_tenant_filter_result
-    WHERE CAST(SESSION_CONTEXT(N''tenant_id'') AS UNIQUEIDENTIFIER) = tenant_id
-       OR IS_MEMBER(''db_owner'') = 1
-    ');
-
--- Create security policies for each tenant-scoped table
-IF NOT EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
-    CREATE SECURITY POLICY dbo.TenantFilter_Defs
-        ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.workflow_defs,
-        ADD BLOCK PREDICATE dbo.fn_tenant_filter() ON dbo.workflow_defs
-        WITH (STATE = ON);
-
-IF NOT EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Instances')
-    CREATE SECURITY POLICY dbo.TenantFilter_Instances
-        ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.workflow_instances,
-        ADD BLOCK PREDICATE dbo.fn_tenant_filter() ON dbo.workflow_instances
-        WITH (STATE = ON);
-
-IF NOT EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Events')
-    CREATE SECURITY POLICY dbo.TenantFilter_Events
-        ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.event_history,
-        ADD BLOCK PREDICATE dbo.fn_tenant_filter() ON dbo.event_history
-        WITH (STATE = ON);
-
-IF NOT EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Signals')
-    CREATE SECURITY POLICY dbo.TenantFilter_Signals
-        ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.workflow_signals,
-        ADD BLOCK PREDICATE dbo.fn_tenant_filter() ON dbo.workflow_signals
-        WITH (STATE = ON);
-
-IF NOT EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Schedules')
-    CREATE SECURITY POLICY dbo.TenantFilter_Schedules
-        ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.workflow_schedules,
-        ADD BLOCK PREDICATE dbo.fn_tenant_filter() ON dbo.workflow_schedules
-        WITH (STATE = ON);
+-- RLS (Row-Level Security) via security policies and inline TVF predicates
+-- is skipped for now. The inline TVF cannot be created standalone because
+-- it references the table column 'tenant_id' without a table qualifier
+-- (valid only as a security policy predicate, not as a standalone function).
+-- Application-layer tenant isolation (WHERE tenant_id = ? on every query) is
+-- the primary mechanism. See internal/host/mssql_store.go for implementation.

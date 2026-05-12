@@ -37,6 +37,12 @@ type Config struct {
 	Result    *analyzer.AnalysisResult
 	CallGraph *callgraph.Graph
 	Closure   *closure.Result
+
+	// Target is the compilation target ("go" or "tinygo").
+	// When "tinygo", the direct-call transform is skipped because
+	// TinyGo's asyncify scheduler needs function pointer indirection
+	// for goroutine switching.
+	Target string
 }
 
 // Transform modifies ASTs to automatically thread cleat.HostCalls.
@@ -95,32 +101,28 @@ func Transform(cfg *Config) (*Result, error) {
 		}
 	}
 
-	if len(needsH) == 0 {
-		return &Result{Files: make(map[string][]byte)}, nil
-	}
-
-	// Build func-to-file mapping.
+	// Phase 1: Add h parameter (auto-threading).
 	funcFile := buildFuncFileMap(cfg.Result.TargetPkg.Files, cfg.Result)
-
-	// Phase 1: Add h parameter.
-	for fqname := range needsH {
-		fd := cfg.Result.Funcs[fqname]
-		if fd == nil || fd.Ast == nil {
-			continue
+	if len(needsH) > 0 {
+		for fqname := range needsH {
+			fd := cfg.Result.Funcs[fqname]
+			if fd == nil || fd.Ast == nil {
+				continue
+			}
+			file := funcFile[fqname]
+			if file == nil {
+				file = findFileForFunc(cfg.Result.TargetPkg.Files, fd.Ast)
+			}
+			if file == nil {
+				continue
+			}
+			addHostCallsParam(fd.Ast)
+			fd.AutoThreaded = true
+			ensureHostCallsImport(file, cfg.Result)
 		}
-		file := funcFile[fqname]
-		if file == nil {
-			file = findFileForFunc(cfg.Result.TargetPkg.Files, fd.Ast)
-		}
-		if file == nil {
-			continue
-		}
-		addHostCallsParam(fd.Ast)
-		fd.AutoThreaded = true
-		ensureHostCallsImport(file, cfg.Result)
 	}
 
-	// Phase 2: Update call sites.
+	// Phase 2: Update call sites for auto-threaded functions.
 	modifiedFuncs := make(map[string]bool)
 	for name := range needsH {
 		modifiedFuncs[name] = true
@@ -128,9 +130,10 @@ func Transform(cfg *Config) (*Result, error) {
 	for name := range hasH {
 		modifiedFuncs[name] = true
 	}
-
-	for _, file := range cfg.Result.TargetPkg.Files {
-		updateCallSites(file, cfg.Result.TargetPkg.Info, modifiedFuncs, fset)
+	if len(modifiedFuncs) > 0 {
+		for _, file := range cfg.Result.TargetPkg.Files {
+			updateCallSites(file, cfg.Result.TargetPkg.Info, modifiedFuncs, fset)
+		}
 	}
 
 	// Phase 3: Remove unused global h.

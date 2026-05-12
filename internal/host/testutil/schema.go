@@ -19,7 +19,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`CREATE TABLE IF NOT EXISTS workflow_defs (
 				name TEXT NOT NULL, version INTEGER NOT NULL,
 				wasm_bytes BYTEA NOT NULL, entry_points TEXT[] NOT NULL DEFAULT '{}',
-				min_version INTEGER NOT NULL DEFAULT 0, namespace TEXT NOT NULL DEFAULT 'default',
+				min_version INTEGER NOT NULL DEFAULT 0,
 				max_history_length INTEGER NOT NULL DEFAULT 0,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 				PRIMARY KEY (name, version))`,
@@ -30,7 +30,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 				created_at TIMESTAMPTZ NOT NULL DEFAULT now(), completed_at TIMESTAMPTZ,
 				result JSONB, error_msg TEXT, error_code TEXT, error_op TEXT, parent_workflow_id TEXT,
-				namespace TEXT NOT NULL DEFAULT 'default', trace_id TEXT,
+				trace_id TEXT,
 				query_state JSONB DEFAULT '{}', task_queue TEXT NOT NULL DEFAULT 'default',
 				cancellation_requested BOOLEAN NOT NULL DEFAULT false,
 				cancellation_reason TEXT, sticky_worker_id TEXT)`,
@@ -57,7 +57,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`CREATE TABLE IF NOT EXISTS workflow_defs (
 				name VARCHAR(255) NOT NULL, version INTEGER NOT NULL,
 				wasm_bytes LONGBLOB NOT NULL, entry_points JSON NOT NULL DEFAULT ('[]'),
-				min_version INTEGER NOT NULL DEFAULT 0, namespace VARCHAR(255) NOT NULL DEFAULT 'default',
+				min_version INTEGER NOT NULL DEFAULT 0,
 				max_history_length INTEGER NOT NULL DEFAULT 0,
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 				PRIMARY KEY (name, version))`,
@@ -69,7 +69,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				next_wake_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6), completed_at TIMESTAMP(6),
 				result JSON, error_msg TEXT, error_code VARCHAR(255), error_op VARCHAR(255),
-				parent_workflow_id TEXT, namespace VARCHAR(255) NOT NULL DEFAULT 'default',
+				parent_workflow_id TEXT,
 				trace_id TEXT, query_state JSON DEFAULT ('{}'),
 				task_queue VARCHAR(255) NOT NULL DEFAULT 'default',
 				cancellation_requested TINYINT(1) NOT NULL DEFAULT 0,
@@ -100,7 +100,6 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					wasm_bytes VARBINARY(MAX) NOT NULL,
 					entry_points NVARCHAR(MAX) NOT NULL DEFAULT '[]',
 					min_version INTEGER NOT NULL DEFAULT 0,
-					namespace NVARCHAR(MAX) NOT NULL DEFAULT 'default',
 					max_history_length INTEGER NOT NULL DEFAULT 0,
 					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
 					PRIMARY KEY (name, version))`,
@@ -118,7 +117,6 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					result NVARCHAR(MAX), error_msg NVARCHAR(MAX),
 					error_code NVARCHAR(MAX), error_op NVARCHAR(MAX),
 					parent_workflow_id NVARCHAR(MAX),
-					namespace NVARCHAR(MAX) NOT NULL DEFAULT 'default',
 					trace_id NVARCHAR(MAX),
 					query_state NVARCHAR(MAX) DEFAULT ('{}'),
 					task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
@@ -196,7 +194,6 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`CREATE INDEX IF NOT EXISTS idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running'`,
 			`CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`,
 			`CREATE INDEX IF NOT EXISTS idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`,
-			`CREATE INDEX IF NOT EXISTS idx_instances_namespace_ready ON workflow_instances(namespace, status, next_wake_at) WHERE status = 'ready'`,
 			// concurrency_keys index
 			`CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,
 			// pgcrypto extension (required for digest(), gen_random_uuid())
@@ -248,7 +245,6 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at)`,
 			`CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at)`,
 			`CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id)`,
-			`CREATE INDEX idx_instances_namespace_ready ON workflow_instances(namespace, status, next_wake_at)`,
 			// concurrency_keys index
 			`CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,
 			// error_code/error_op columns are created by SetupMinimalSchema.
@@ -306,8 +302,6 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_sticky' AND object_id = OBJECT_ID('workflow_instances'))
 				CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_namespace_ready' AND object_id = OBJECT_ID('workflow_instances'))
-				CREATE INDEX idx_instances_namespace_ready ON workflow_instances(namespace, status, next_wake_at) WHERE status = 'ready'`,
 			// concurrency_keys index
 			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_concurrency_keys_workflow' AND object_id = OBJECT_ID('concurrency_keys'))
 				CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,

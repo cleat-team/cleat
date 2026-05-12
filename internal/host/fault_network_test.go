@@ -45,7 +45,7 @@ func TestFaultNetworkPartition(t *testing.T) {
 	claimDone := make(chan struct{})
 	var claimed bool
 	go func() {
-		wf, err := store.ClaimWorkflow(ctx, "partition-worker", "default")
+		wf, err := store.ClaimWorkflow(ctx, "partition-worker")
 		if err == nil && wf != nil {
 			claimed = true
 		}
@@ -66,7 +66,7 @@ func TestFaultNetworkPartition(t *testing.T) {
 	tx.Commit()
 
 	// Now claim should succeed.
-	wf, err := store.ClaimWorkflow(ctx, "partition-worker", "default")
+	wf, err := store.ClaimWorkflow(ctx, "partition-worker")
 	if err != nil {
 		t.Fatalf("Claim after partition heal: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestFaultSlowNetwork(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow first.
-	wf, err := store.ClaimWorkflow(ctx, "slow-worker", "default")
+	wf, err := store.ClaimWorkflow(ctx, "slow-worker")
 	if err != nil {
 		t.Fatalf("Initial claim: %v", err)
 	}

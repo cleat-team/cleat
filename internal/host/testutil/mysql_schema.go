@@ -22,7 +22,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			wasm_bytes         LONGBLOB NOT NULL,
 			entry_points       JSON NOT NULL DEFAULT ('[]'),
 			min_version        INTEGER NOT NULL DEFAULT 0,
-			namespace          VARCHAR(255) NOT NULL DEFAULT 'default',
+			
 			max_history_length INTEGER NOT NULL DEFAULT 0,
 			dag_spec           JSON DEFAULT NULL,
 			abi_version        INTEGER NOT NULL DEFAULT 1,
@@ -55,7 +55,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			parent_workflow_id     VARCHAR(255),
 			parent_close_policy    VARCHAR(50) DEFAULT 'ABANDON',
 			query_state            JSON DEFAULT ('{}'),
-			namespace              VARCHAR(255) NOT NULL DEFAULT 'default',
+			
 			trace_id               VARCHAR(255),
 			sticky_worker_id       VARCHAR(255),
 			task_queue             VARCHAR(255) NOT NULL DEFAULT 'default',

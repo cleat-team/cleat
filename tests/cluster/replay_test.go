@@ -207,7 +207,7 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 	v2WASM := []byte("mock-wasm-v2")
 
 	_, err := db.Exec(`
-		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, namespace)
+		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
 		VALUES ('versioned-workflow', 1, $1, ARRAY['place_order'], 'default')
 		ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = $1
 	`, v1WASM)
@@ -216,7 +216,7 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 	}
 
 	_, err = db.Exec(`
-		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, namespace)
+		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
 		VALUES ('versioned-workflow', 2, $1, ARRAY['place_order'], 'default')
 		ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = $1
 	`, v2WASM)
@@ -255,7 +255,7 @@ func TestNewWASMVersionUsesNewCode(t *testing.T) {
 	}()
 
 	// Claim the v1 workflow — it should use v1 WASM.
-	wf1, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+	wf1, err := store.ClaimWorkflow(ctx, "worker-1")
 	if err != nil {
 		t.Fatalf("Claim v1 workflow: %v", err)
 	}

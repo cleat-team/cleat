@@ -84,7 +84,7 @@ func TestClusterWorkersRegister(t *testing.T) {
 	claimed := make(map[string]string)
 
 	for _, workerID := range []string{"worker-1", "worker-2", "worker-3"} {
-		wf, err := store.ClaimWorkflow(ctx, workerID, "default")
+		wf, err := store.ClaimWorkflow(ctx, workerID)
 		if err != nil {
 			t.Fatalf("Claim error for %s: %v", workerID, err)
 		}
@@ -148,7 +148,7 @@ func TestClusterSpreadWorkflows(t *testing.T) {
 	for range 200 {
 		claimed := false
 		for _, workerID := range workers {
-			wf, err := store.ClaimWorkflow(ctx, workerID, "default")
+			wf, err := store.ClaimWorkflow(ctx, workerID)
 			if err != nil {
 				t.Fatalf("Claim error for %s: %v", workerID, err)
 			}
@@ -203,7 +203,7 @@ func TestClusterBasicWorkflowExecution(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow.
-	wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+	wf, err := store.ClaimWorkflow(ctx, "worker-1")
 	if err != nil {
 		t.Fatalf("ClaimWorkflow: %v", err)
 	}

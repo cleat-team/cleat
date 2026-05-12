@@ -88,34 +88,37 @@ func TestGenericsPipelineRunsCleanly(t *testing.T) {
 		}
 	}
 
-	// Stage 4: Transform
+	// Stage 4: Analyze usage (must run before Transform since Transform
+	// rewrites h.MethodName(...) → host_MethodName(...)).
+	usage := AnalyzeUsage(result, cr)
+	if usage.Count() == 0 {
+		t.Error("Stage 4 (Usage): expected at least one used host function")
+	}
+
+	// Stage 6: Transform
 	tr, err := transform.Transform(&transform.Config{
 		Result:    result,
 		CallGraph: cg,
 		Closure:   cr,
 	})
 	if err != nil {
-		t.Fatalf("Stage 4 (Transform): Transform failed: %v", err)
+		t.Fatalf("Stage 6 (Transform): Transform failed: %v", err)
 	}
 
 	for name, content := range tr.Files {
 		// Check that output is valid Go.
 		_, parseErr := parser.ParseFile(token.NewFileSet(), name, string(content), parser.AllErrors)
 		if parseErr != nil {
-			t.Errorf("Stage 4 (Transform): %s is not valid Go: %v", name, parseErr)
+			t.Errorf("Stage 6 (Transform): %s is not valid Go: %v", name, parseErr)
 		}
 	}
 
-	// Stage 5: WASM build preparation
-	usage := AnalyzeUsage(result, cr)
-	if usage.Count() == 0 {
-		t.Error("Stage 5 (Usage): expected at least one used host function")
-	}
+	// Stage 6: WASM build preparation
 
 	// Build the output files.
-	outputs := BuildOutputs("main", usage, result)
+	outputs := BuildOutputs("main", usage, result, "go")
 	if outputs == nil {
-		t.Fatal("Stage 5 (BuildOutputs): nil OutputFiles")
+		t.Fatal("Stage 6 (BuildOutputs): nil OutputFiles")
 	}
 
 	// Verify generated code references types used by generics.
@@ -126,10 +129,10 @@ func TestGenericsPipelineRunsCleanly(t *testing.T) {
 		"gen_wasm_memory.go":  outputs.Memory,
 	} {
 		if content == "" {
-			t.Errorf("Stage 5: %s is empty", name)
+			t.Errorf("Stage 6: %s is empty", name)
 		}
 		if !strings.Contains(content, "package main") {
-			t.Errorf("Stage 5: %s should have package main", name)
+			t.Errorf("Stage 6: %s should have package main", name)
 		}
 	}
 
@@ -183,7 +186,7 @@ func TestGenericsPipelineRunsCleanly(t *testing.T) {
 	}
 
 	if err := PrepareBuildDir(cfg); err != nil {
-		t.Fatalf("Stage 5 (PrepareBuildDir): %v", err)
+		t.Fatalf("Stage 6 (PrepareBuildDir): %v", err)
 	}
 
 	// Verify key files were created.
@@ -197,7 +200,7 @@ func TestGenericsPipelineRunsCleanly(t *testing.T) {
 	} {
 		path := filepath.Join(outDir, name)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
-			t.Errorf("Stage 5: expected file %s was not created", name)
+			t.Errorf("Stage 6: expected file %s was not created", name)
 		}
 	}
 

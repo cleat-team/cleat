@@ -22,7 +22,7 @@ func TestClaimWorkflow(t *testing.T) {
 			ctx := context.Background()
 			setupTestData(t, store)
 
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
@@ -49,7 +49,7 @@ func TestClaimWorkflow(t *testing.T) {
 			}
 
 			// Second claim should return nil — no more ready workflows remaining.
-			wf2, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf2, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow (second): %v", err)
 			}
@@ -82,7 +82,7 @@ func TestClaimWorkflows_Batch(t *testing.T) {
 				}
 			}
 
-			wfs, err := store.ClaimWorkflows(ctx, "worker-1", "default", 5)
+			wfs, err := store.ClaimWorkflows(ctx, "worker-1", 5)
 			if err != nil {
 				t.Fatalf("ClaimWorkflows: %v", err)
 			}
@@ -127,7 +127,7 @@ func TestClaimStickyWorkflows(t *testing.T) {
 				t.Fatalf("UpdateStickyWorker: %v", err)
 			}
 
-			wfs, err := store.ClaimStickyWorkflows(ctx, "sticky-worker-1", "default", 10)
+			wfs, err := store.ClaimStickyWorkflows(ctx, "sticky-worker-1", 10)
 			if err != nil {
 				t.Fatalf("ClaimStickyWorkflows: %v", err)
 			}
@@ -177,7 +177,7 @@ func TestClaimSkipLocked(t *testing.T) {
 			}
 
 			// First claim: 3 workflows with "worker-1".
-			first, err := store.ClaimWorkflows(ctx, "worker-1", "default", 3)
+			first, err := store.ClaimWorkflows(ctx, "worker-1", 3)
 			if err != nil {
 				t.Fatalf("ClaimWorkflows (first, limit=3): %v", err)
 			}
@@ -194,7 +194,7 @@ func TestClaimSkipLocked(t *testing.T) {
 			}
 
 			// Second claim: 7 workflows with "worker-2".
-			second, err := store.ClaimWorkflows(ctx, "worker-2", "default", 7)
+			second, err := store.ClaimWorkflows(ctx, "worker-2", 7)
 			if err != nil {
 				t.Fatalf("ClaimWorkflows (second, limit=7): %v", err)
 			}
@@ -225,7 +225,7 @@ func TestNoWorkflowsToClaim(t *testing.T) {
 			ctx := context.Background()
 			truncateAll(t, store)
 
-			wfs, err := store.ClaimWorkflows(ctx, "worker-1", "default", 5)
+			wfs, err := store.ClaimWorkflows(ctx, "worker-1", 5)
 			if err != nil {
 				t.Fatalf("ClaimWorkflows on empty store: %v", err)
 			}
@@ -606,7 +606,7 @@ func TestCompleteWorkflow(t *testing.T) {
 				t.Fatalf("StartNewRun: %v", err)
 			}
 
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
@@ -655,7 +655,7 @@ func TestFailWorkflow(t *testing.T) {
 				t.Fatalf("StartNewRun: %v", err)
 			}
 
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
@@ -703,7 +703,7 @@ func TestReleaseWorkflow(t *testing.T) {
 				t.Fatalf("StartNewRun: %v", err)
 			}
 
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
@@ -753,7 +753,7 @@ func TestContinueAsNew_Atomic(t *testing.T) {
 				t.Fatalf("StartNewRun: %v", err)
 			}
 
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
@@ -813,7 +813,7 @@ func TestFinalizeWorkflowSegment(t *testing.T) {
 				t.Fatalf("StartNewRun: %v", err)
 			}
 
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
@@ -875,7 +875,7 @@ func TestHeartbeat(t *testing.T) {
 				t.Fatalf("StartNewRun: %v", err)
 			}
 
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}
@@ -923,7 +923,7 @@ func TestBatchHeartbeat(t *testing.T) {
 				}
 			}
 
-			wfs, err := store.ClaimWorkflows(ctx, "worker-1", "default", 10)
+			wfs, err := store.ClaimWorkflows(ctx, "worker-1", 10)
 			if err != nil {
 				t.Fatalf("ClaimWorkflows: %v", err)
 			}
@@ -959,7 +959,7 @@ func TestMoveToDeadLetterQueue(t *testing.T) {
 				t.Fatalf("StartNewRun: %v", err)
 			}
 
-			wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
 			if err != nil {
 				t.Fatalf("ClaimWorkflow: %v", err)
 			}

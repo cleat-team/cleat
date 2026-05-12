@@ -1,16 +1,15 @@
 module github.com/rcownie/cleat
 
-go 1.26
-
-toolchain go1.26.2
+go 1.25.7
 
 require (
-	github.com/go-sql-driver/mysql v1.10.0
+	github.com/go-sql-driver/mysql v1.8.1
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.12.3
 	github.com/microsoft/go-mssqldb v1.10.0
 	github.com/minio/minio-go/v7 v7.1.0
 	github.com/prometheus/client_golang v1.23.2
+	github.com/rcownie/cleat/cleat v0.0.0
 	github.com/tetratelabs/wazero v1.9.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
@@ -65,3 +64,5 @@ require (
 	google.golang.org/grpc v1.80.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
+
+replace github.com/rcownie/cleat/cleat => ./cleat

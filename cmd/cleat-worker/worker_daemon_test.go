@@ -28,9 +28,9 @@ import (
 // Each method checks for a custom function field first; if set, it delegates
 // to that function. Otherwise it returns a safe zero-valued result.
 type mockStore struct {
-	claimWorkflowFn                   func(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error)
-	claimWorkflowsFn                  func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
-	claimStickyWorkflowsFn            func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error)
+	claimWorkflowFn                   func(ctx context.Context, workerID string) (*host.WorkflowInstance, error)
+	claimWorkflowsFn                  func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error)
+	claimStickyWorkflowsFn            func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error)
 	loadEventHistoryFn                func(ctx context.Context, workflowID string) ([]host.EventRecord, error)
 	loadEventHistoryPaginatedFn       func(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error)
 	countEventHistoryFn               func(ctx context.Context, workflowID string) (int, error)
@@ -95,27 +95,25 @@ type mockStore struct {
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
 	continueAsNewFn             func(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error)
 	finalizeWorkflowSegmentFn   func(ctx context.Context, runID, workerID string, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
-	countActiveConcurrencyKeysFn func(ctx context.Context) (int, error)
-	streamEventHistoryFn        func(ctx context.Context, workflowID string, pageSize int) (<-chan host.EventRecord, <-chan error)
 }
 
-func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID, namespace string) (*host.WorkflowInstance, error) {
+func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID string) (*host.WorkflowInstance, error) {
 	if m.claimWorkflowFn != nil {
-		return m.claimWorkflowFn(ctx, workerID, namespace)
+		return m.claimWorkflowFn(ctx, workerID)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 	if m.claimWorkflowsFn != nil {
-		return m.claimWorkflowsFn(ctx, workerID, namespace, limit)
+		return m.claimWorkflowsFn(ctx, workerID, limit)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 	if m.claimStickyWorkflowsFn != nil {
-		return m.claimStickyWorkflowsFn(ctx, workerID, namespace, limit)
+		return m.claimStickyWorkflowsFn(ctx, workerID, limit)
 	}
 	return nil, nil
 }
@@ -578,7 +576,6 @@ func newTestWorker(ms *mockStore) *Worker {
 		pollInterval:        1 * time.Millisecond,
 		compactionThreshold: host.DefaultCompactionThreshold,
 		compactionInterval:  10 * time.Millisecond,
-		namespace:           "default",
 		ctx:                 ctx,
 		cancel:              cancel,
 		wasmCache:           newWasmLRUCache(100, 500),
@@ -601,7 +598,6 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 		pollInterval:        1 * time.Millisecond,
 		compactionThreshold: host.DefaultCompactionThreshold,
 		compactionInterval:  10 * time.Millisecond,
-		namespace:           "default",
 		ctx:                 ctx,
 		cancel:              cancel,
 		wasmCache:           newWasmLRUCache(100, 500),
@@ -643,7 +639,7 @@ func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 	loadWASMCh := make(chan struct{})
 	claimedCh := make(chan string, 1)
 
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		nCalls++
 		if nCalls == 1 {
 			return []*host.WorkflowInstance{
@@ -652,7 +648,7 @@ func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 		}
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 	ms.loadWASMFn = func(ctx context.Context, defName string, defVersion int) ([]byte, error) {
@@ -706,7 +702,7 @@ func TestDispatchLoop_StickyThenGeneral(t *testing.T) {
 	var stickyCalled atomic.Bool
 	var generalCalled atomic.Bool
 
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		stickyCalled.Store(true)
 		if limit >= 5 {
 			return []*host.WorkflowInstance{
@@ -715,7 +711,7 @@ func TestDispatchLoop_StickyThenGeneral(t *testing.T) {
 		}
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		generalCalled.Store(true)
 		// Should be called with remaining = concurrency (5) - sticky (1) = 4.
 		return nil, nil
@@ -766,11 +762,11 @@ func TestDispatchLoop_EmptyQueuesNoCrash(t *testing.T) {
 	// and must not busy-loop (progressive backoff caps at 6 ticks).
 	ms := &mockStore{}
 	callCount := 0
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		callCount++
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 
@@ -801,11 +797,11 @@ func TestDispatchLoop_EmptyQueuesNoCrash(t *testing.T) {
 func TestDispatchLoop_AtCapacity(t *testing.T) {
 	ms := &mockStore{}
 	claimAttempts := 0
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		claimAttempts++
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 
@@ -839,11 +835,11 @@ func TestDispatchLoop_ProgressiveBackoff(t *testing.T) {
 	// the effective sleep to grow up to the maxIdleTicks cap.
 	ms := &mockStore{}
 	claimTimestamps := make([]time.Time, 0, 10)
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		claimTimestamps = append(claimTimestamps, time.Now())
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 
@@ -875,11 +871,11 @@ func TestDispatchLoop_StoreError(t *testing.T) {
 	// sleeps one second and retries. We verify it does not crash.
 	ms := &mockStore{}
 	errCount := 0
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		errCount++
 		return nil, errors.New("some store error")
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 
@@ -908,11 +904,11 @@ func TestDispatchLoop_ConnectionError(t *testing.T) {
 	// When claim returns a connection error, the loop should back off and retry.
 	ms := &mockStore{}
 	connErrCount := 0
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		connErrCount++
 		return nil, errors.New("connection refused")
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 
@@ -1749,9 +1745,6 @@ func TestWorkerFieldsDefault(t *testing.T) {
 	if w.concurrency != 5 {
 		t.Errorf("concurrency = %d, want 5", w.concurrency)
 	}
-	if w.namespace != "default" {
-		t.Errorf("namespace = %q, want default", w.namespace)
-	}
 	if w.id != "test-worker" {
 		t.Errorf("id = %q, want test-worker", w.id)
 	}
@@ -1796,10 +1789,10 @@ func TestIsConnectionError_Patterns(t *testing.T) {
 func TestWorkerRun_StopsOnCancel(t *testing.T) {
 	// Verify that calling cancel() during Run() causes it to exit.
 	ms := &mockStore{}
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 
@@ -1917,11 +1910,11 @@ func TestDispatchLoop_BatchSizeCap(t *testing.T) {
 	// is very high.
 	ms := &mockStore{}
 	requestedLimits := make([]int, 0)
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		requestedLimits = append(requestedLimits, limit)
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		return nil, nil
 	}
 
@@ -1987,7 +1980,7 @@ func TestDispatchLoop_ClaimWorkflowsFallback(t *testing.T) {
 	ms := &mockStore{}
 	var stickyLimit, generalLimit int
 	var stickyReturned bool
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		stickyLimit = limit
 		if !stickyReturned {
 			stickyReturned = true
@@ -1997,7 +1990,7 @@ func TestDispatchLoop_ClaimWorkflowsFallback(t *testing.T) {
 		}
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID, namespace string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
 		if generalLimit == 0 {
 			generalLimit = limit
 		}
@@ -2932,15 +2925,12 @@ func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (i
 	return 0, nil
 }
 func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
-func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]host.EventRecord, error) { return nil, nil }
-func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error { return nil }
+func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) { return 0, nil }
 func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
-func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) { if m.countActiveConcurrencyKeysFn != nil { return m.countActiveConcurrencyKeysFn(ctx) }; return 0, nil }
-func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan host.EventRecord, <-chan error) {
-	if m.streamEventHistoryFn != nil {
-		return m.streamEventHistoryFn(ctx, workflowID, pageSize)
-	}
-	ch := make(chan host.EventRecord)
-	close(ch)
-	return ch, nil
+func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]host.EventRecord, error) {
+	return nil, nil
 }
+func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan host.EventRecord, <-chan error) {
+	return nil, nil
+}
+func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error { return nil }

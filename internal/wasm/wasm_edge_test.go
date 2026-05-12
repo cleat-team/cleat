@@ -965,8 +965,9 @@ func TestMetadataCurrentABIVersion(t *testing.T) {
 func TestImportParamDeclKindInt32(t *testing.T) {
 	spec := paramSpec{Name: "unused", Kind: kindInt32}
 	got := importParamDecl(spec)
-	if got != "" {
-		t.Errorf("expected empty string for kindInt32, got %q", got)
+	expected := "unused uint32"
+	if got != expected {
+		t.Errorf("expected %q for kindInt32, got %q", expected, got)
 	}
 }
 
@@ -980,7 +981,7 @@ func TestGenerateHostAdapterWithHeartbeat(t *testing.T) {
 		Used:  map[string]bool{"cleat_call_heartbeat": true},
 		Funcs: []HostFunction{{ImportName: "cleat_call_heartbeat", FieldName: "DurableCallWithHeartbeat"}},
 	}
-	code := string(GenerateHostAdapter("mypkg", usage))
+	code := string(GenerateHostAdapter("mypkg", usage, "go"))
 	for _, c := range []string{
 		"heartbeatInterval time.Duration",
 		"onProgress func(string)",
@@ -999,7 +1000,7 @@ func TestGenerateHostAdapterWithAwaitAllChildren(t *testing.T) {
 		Used:  map[string]bool{"cleat_await_all_children": true},
 		Funcs: []HostFunction{{ImportName: "cleat_await_all_children", FieldName: "AwaitAllChildren"}},
 	}
-	code := string(GenerateHostAdapter("mypkg", usage))
+	code := string(GenerateHostAdapter("mypkg", usage, "go"))
 	for _, c := range []string{
 		`"encoding/json"`,
 		"runIDs []string",
@@ -1018,7 +1019,7 @@ func TestGenerateHostAdapterWithSideEffect(t *testing.T) {
 		Used:  map[string]bool{"cleat_side_effect": true},
 		Funcs: []HostFunction{{ImportName: "cleat_side_effect", FieldName: "SideEffect"}},
 	}
-	code := string(GenerateHostAdapter("mypkg", usage))
+	code := string(GenerateHostAdapter("mypkg", usage, "go"))
 	if !strings.Contains(code, "fn func() (string, error)") {
 		t.Errorf("expected func() param pattern")
 	}
@@ -1034,7 +1035,7 @@ func TestGenerateHostAdapterWithSleep(t *testing.T) {
 		Used:  map[string]bool{"cleat_sleep": true},
 		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleep"}},
 	}
-	code := string(GenerateHostAdapter("mypkg", usage))
+	code := string(GenerateHostAdapter("mypkg", usage, "go"))
 	// Should not have fmt or unsafe since DurableSleep doesn't use them.
 	if strings.Contains(code, `"fmt"`) {
 		t.Error("DurableSleep should not import fmt")
@@ -1069,13 +1070,13 @@ func TestGenerateHostAdapterWithMultiple(t *testing.T) {
 			{ImportName: "cleat_release_lock", FieldName: "ReleaseLock"},
 		},
 	}
-	code := string(GenerateHostAdapter("multi", usage))
+	code := string(GenerateHostAdapter("multi", usage, "go"))
 	for _, c := range []string{
 		"DurableCall: func(",
 		"DurableSleep: func(",
 		"DurableAwaitSignals: func(",
 		"DurableLog: func(",
-		"Now: func(",
+		"Now: func()",
 		"SetQueryState: func(",
 		"AcquireLock: func(",
 		"ReleaseLock: func(",

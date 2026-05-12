@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/plugin"
@@ -47,6 +48,30 @@ type embedRequest struct {
 	Provider string   `json:"provider"`
 	Model    string   `json:"model"`
 	Input    []string `json:"input"`
+}
+
+// normalizeOutput ensures consistent ChatOutput structure across all providers.
+func normalizeOutput(out *providers.ChatOutput) {
+	for i := range out.Choices {
+		ch := &out.Choices[i]
+		ch.FinishReason = strings.ToLower(ch.FinishReason)
+		switch ch.FinishReason {
+		case "tool_calls", "stop", "length", "content_filter":
+		case "":
+			ch.FinishReason = "stop"
+		default:
+			ch.FinishReason = "stop"
+		}
+		for j := range ch.Message.ToolCalls {
+			tc := &ch.Message.ToolCalls[j]
+			if tc.ID == "" {
+				tc.ID = "call_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:24]
+			}
+		}
+	}
+	if out.Choices == nil {
+		out.Choices = []providers.Choice{}
+	}
 }
 
 func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
@@ -104,6 +129,8 @@ func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 	if err != nil {
 		output.Error = err.Error()
 	}
+
+	normalizeOutput(&output)
 
 	outJSON, err := json.Marshal(output)
 	if err != nil {

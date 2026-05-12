@@ -82,7 +82,7 @@ func TestKillWorkerMidExecution(t *testing.T) {
 		go func(wID string) {
 			defer wg.Done()
 			for range 5 {
-				wf, err := store.ClaimWorkflow(ctx, wID, "default")
+				wf, err := store.ClaimWorkflow(ctx, wID)
 				if err != nil {
 					return
 				}
@@ -110,7 +110,7 @@ func TestKillWorkerMidExecution(t *testing.T) {
 	reclaimed := make(map[string]string)
 	for _, wid := range []string{"worker-2", "worker-3"} {
 		for range 10 {
-			wf, err := store.ClaimWorkflow(ctx, wid, "default")
+			wf, err := store.ClaimWorkflow(ctx, wid)
 			if err != nil {
 				break
 			}
@@ -196,7 +196,7 @@ func TestKillPostgresAndRestart(t *testing.T) {
 	newDB, newStore := requireDB(t)
 	_ = newDB
 
-	wf, err := newStore.ClaimWorkflow(ctx, "worker-1", "default")
+	wf, err := newStore.ClaimWorkflow(ctx, "worker-1")
 	if err != nil {
 		t.Fatalf("Claim after restart failed: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestFullClusterRestart(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 
 	// Claim the workflow and append some events.
-	wf, err := store.ClaimWorkflow(ctx, "worker-1", "default")
+	wf, err := store.ClaimWorkflow(ctx, "worker-1")
 	if err != nil {
 		t.Fatalf("ClaimWorkflow: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestFullClusterRestart(t *testing.T) {
 	}
 
 	// Now claim it again on a "new" worker and verify events are intact.
-	wf2, err := store.ClaimWorkflow(ctx, "worker-2", "default")
+	wf2, err := store.ClaimWorkflow(ctx, "worker-2")
 	if err != nil {
 		t.Fatalf("Second claim: %v", err)
 	}

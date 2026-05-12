@@ -62,8 +62,9 @@ stamped: $(STAMPED_FILES)
 # Pattern rule: compile a single Python workflow to WASM
 $(OUT_DIR)/%.wasm: $(EXAMPLES)/%.py pyproject.toml $(WIT_DIR)/cleat.wit
 	@mkdir -p $(OUT_DIR)
-	PYTHONPATH=$(PYTHONPATH) componentize-py -d $(WIT_DIR) -w $(WORLD) componentize $< \
-
+	PYTHONPATH=$(PYTHONPATH) componentize-py componentize $< \
+		--wit $(WIT_DIR) \
+		--world $(WORLD) \
 		-o $@
 	@echo "Compiled $< -> $@"
 

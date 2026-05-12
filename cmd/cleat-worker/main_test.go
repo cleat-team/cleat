@@ -211,7 +211,6 @@ func TestWorkerFlags(t *testing.T) {
 	hb := fs.Duration("heartbeat", 5*time.Second, "")
 	poll := fs.Duration("poll", 500*time.Millisecond, "")
 	apiAddr := fs.String("api-addr", "", "")
-	ns := fs.String("namespace", "default", "")
 	tq := fs.String("task-queue", "default", "")
 	ct := fs.Int("compaction-threshold", host.DefaultCompactionThreshold, "")
 	ci := fs.Duration("compaction-interval", 5*time.Minute, "")
@@ -223,7 +222,6 @@ func TestWorkerFlags(t *testing.T) {
 		"--heartbeat", "10s",
 		"--poll", "1s",
 		"--api-addr", ":9090",
-		"--namespace", "prod",
 		"--task-queue", "gpu,high-memory",
 		"--compaction-threshold", "500",
 		"--compaction-interval", "10m",
@@ -244,9 +242,6 @@ func TestWorkerFlags(t *testing.T) {
 	}
 	if *apiAddr != ":9090" {
 		t.Errorf("api-addr = %q", *apiAddr)
-	}
-	if *ns != "prod" {
-		t.Errorf("namespace = %q", *ns)
 	}
 	if *tq != "gpu,high-memory" {
 		t.Errorf("task-queue = %q", *tq)
@@ -269,7 +264,6 @@ func TestWorkerFlag_Defaults(t *testing.T) {
 	fs := flag.NewFlagSet("cleat-worker", flag.ContinueOnError)
 	db := fs.String("db", "", "")
 	conc := fs.Int("concurrency", 10, "")
-	ns := fs.String("namespace", "default", "")
 	tq := fs.String("task-queue", "default", "")
 	ct := fs.Int("compaction-threshold", host.DefaultCompactionThreshold, "")
 	if err := fs.Parse(nil); err != nil {
@@ -280,9 +274,6 @@ func TestWorkerFlag_Defaults(t *testing.T) {
 	}
 	if *conc != 10 {
 		t.Errorf("default concurrency = %d, want 10", *conc)
-	}
-	if *ns != "default" {
-		t.Errorf("default namespace = %q", *ns)
 	}
 	if *tq != "default" {
 		t.Errorf("default task-queue = %q", *tq)
