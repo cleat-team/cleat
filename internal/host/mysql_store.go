@@ -49,7 +49,7 @@ func isLockWaitTimeout(err error) bool {
 // MySQLStore
 // ---------------------------------------------------------------------------
 
-// MySQLStore implements WorkflowStore using a MySQL 8.0+ or MariaDB 10.5+
+// MySQLStore implements WorkflowStore using a MySQL 8.0+ or MariaDB 10.6+
 // database. MySQL has no row-level security, so tenant isolation is
 // enforced at the database level — each tenant gets its own database
 // (cleat_<tenant_id>). The store's connection pool is scoped to the
@@ -154,7 +154,6 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	tqClause, tqArgs := s.taskQueueClause()
 
 	// Step 1: Select IDs with SKIP LOCKED.
-	// Arg order: task_queue values..., tenant_id, worker_id, limit
 	selArgs := make([]interface{}, 0)
 	selArgs = append(selArgs, tqArgs...)
 	selArgs = append(selArgs, s.tenantID, workerID, limit)
@@ -249,7 +248,6 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 	tqClause, tqArgs := s.taskQueueClause()
 
 	// Step 1: Select IDs with SKIP LOCKED (sticky filter).
-	// Arg order: sticky_worker_id, task_queue values..., tenant_id, limit
 	selArgs := make([]interface{}, 0)
 	selArgs = append(selArgs, workerID)
 	selArgs = append(selArgs, tqArgs...)
@@ -505,8 +503,10 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, runID, defName, defVersion, "ready", input, "default", s.tenantID)
+			VALUES (?, ?, ?, 'ready', ?,
+			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
+			        ?)
+		`, runID, defName, defVersion, input, defName, defVersion, s.tenantID)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -523,8 +523,10 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, runID, defName, defVersion, "ready", input, "default", s.tenantID)
+		VALUES (?, ?, ?, 'ready', ?,
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
+		        ?)
+	`, runID, defName, defVersion, input, defName, defVersion, s.tenantID)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -554,8 +556,10 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, newRunID, defName, defVersion, "ready", newInput, "default", s.tenantID)
+		VALUES (?, ?, ?, 'ready', ?,
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
+		        ?)
+	`, newRunID, defName, defVersion, newInput, defName, defVersion, s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -1176,6 +1180,130 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 	return history, rows.Err()
 }
 
+// StreamEventHistory loads event history for a workflow in pages, returning
+// events through a channel. Events are fetched in pages of pageSize as the
+// caller reads from the channel. The channel is closed when all events have
+// been sent.
+func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
+	eventCh := make(chan EventRecord, pageSize)
+	errCh := make(chan error, 1)
+
+	if pageSize <= 0 || pageSize > 1000 {
+		pageSize = 1000
+	}
+
+	go func() {
+		defer close(eventCh)
+		defer close(errCh)
+
+		offset := 0
+		for {
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			default:
+			}
+
+			rows, err := s.db.QueryContext(ctx, `
+				SELECT step, event_type, service, operation, request, response, error,
+				       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+				       defer_description, defer_id, child_name, child_input, run_id, new_input,
+				       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+				       payload,
+				       promise_name, promise_id, promise_result, promise_error,
+				       CAST(UNIX_TIMESTAMP(created_at) * 1000 AS UNSIGNED) AS timestamp_ms
+				FROM event_history
+				WHERE workflow_id = ? AND tenant_id = ?
+				ORDER BY step
+				LIMIT ? OFFSET ?
+			`, workflowID, s.tenantID, pageSize, offset)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			var pageCount int
+			for rows.Next() {
+				pageCount++
+				var rec EventRecord
+				var service, op, request, response, errMsg sql.NullString
+				var durationMs, timeoutMs sql.NullInt64
+				var signalNames, signalName, signalPayload sql.NullString
+				var deferDesc, deferID sql.NullString
+				var childName, childInput, runID, newInput sql.NullString
+				var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
+				var payload sql.NullString
+				var promiseName, promiseID, promiseResult, promiseError sql.NullString
+
+				if err := rows.Scan(&rec.Step, &rec.EventType,
+					&service, &op, &request, &response, &errMsg,
+					&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
+					&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
+					&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
+					&payload,
+					&promiseName, &promiseID, &promiseResult, &promiseError,
+					&rec.TimestampMs); err != nil {
+					rows.Close()
+					errCh <- err
+					return
+				}
+
+				rec.Service = service.String
+				rec.Op = op.String
+				rec.Request = tryDecodeBase64(request.String)
+				rec.Response = tryDecodeBase64(response.String)
+				rec.Err = errMsg.String
+				rec.DurationMs = durationMs.Int64
+				rec.SignalNames = signalNames.String
+				rec.TimeoutMs = timeoutMs.Int64
+				rec.SignalName = signalName.String
+				rec.SignalPayload = signalPayload.String
+				rec.DeferDescription = deferDesc.String
+				rec.DeferID = deferID.String
+				rec.ChildName = childName.String
+				rec.ChildInput = childInput.String
+				rec.RunID = runID.String
+				rec.NewInput = newInput.String
+				rec.PluginName = pluginName.String
+				rec.PluginFunc = pluginFunc.String
+				rec.PluginInput = pluginInput.String
+				rec.PluginOutput = pluginOutput.String
+				rec.PluginError = pluginErr.String
+				rec.PromiseName = promiseName.String
+				rec.PromiseID = promiseID.String
+				rec.PromiseResult = promiseResult.String
+				rec.PromiseError = promiseError.String
+
+				if payload.Valid {
+					populateFromPayload(&rec, []byte(payload.String))
+				}
+
+				select {
+				case eventCh <- rec:
+				case <-ctx.Done():
+					rows.Close()
+					errCh <- ctx.Err()
+					return
+				}
+			}
+			rows.Close()
+
+			if err := rows.Err(); err != nil {
+				errCh <- err
+				return
+			}
+
+			if pageCount < pageSize {
+				return
+			}
+			offset += pageSize
+		}
+	}()
+
+	return eventCh, errCh
+}
+
 // CountEventHistory returns the total number of events for a workflow.
 func (s *MySQLStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
 	var count int
@@ -1404,81 +1532,7 @@ func (s *MySQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte
 	return tenantID, nil
 }
 
-// CountActiveConcurrencyKeys returns the number of non-expired concurrency keys.
-func (s *MySQLStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM concurrency_keys WHERE expires_at >= NOW()`).Scan(&count)
-	return count, err
-}
-
-// LoadEventHistoryBatch returns event histories for multiple workflow IDs.
-func (s *MySQLStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error) {
-	return nil, fmt.Errorf("LoadEventHistoryBatch not implemented for MySQL")
-}
-
-// TerminateWorkflow marks a workflow instance as terminated.
-func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
-	return fmt.Errorf("TerminateWorkflow not implemented for MySQL")
-}
-
-// DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
-// whose completed_at is older than the cutoff.
-func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
-	var totalDeleted int64
-	for {
-		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM event_history
-			WHERE workflow_id IN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
-				ORDER BY id
-				LIMIT 10000
-			)
-		`, olderThan)
-		if err != nil {
-			return totalDeleted, fmt.Errorf("delete dead-lettered event history: %w", err)
-		}
-		n, _ := result.RowsAffected()
-		totalDeleted += n
-
-		result, err = s.db.ExecContext(ctx, `
-			DELETE FROM workflow_instances
-			WHERE id IN (
-				SELECT id FROM (
-					SELECT id FROM workflow_instances
-					WHERE status = 'dead_lettered'
-					  AND completed_at IS NOT NULL
-					  AND completed_at < ?
-					ORDER BY id
-					LIMIT 10000
-				) AS subq
-			)
-		`, olderThan)
-		if err != nil {
-			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
-		}
-		n, _ = result.RowsAffected()
-		totalDeleted += n
-		if n == 0 {
-			break
-		}
-	}
-	return totalDeleted, nil
-}
-
-// StreamEventHistory loads event history for a workflow in pages, returning
-// events through a channel. Not implemented for MySQL.
-func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
-	errCh := make(chan error, 1)
-	errCh <- fmt.Errorf("StreamEventHistory not implemented for MySQL")
-	ch := make(chan EventRecord)
-	close(ch)
-	return ch, errCh
-}
-
-
+// ---------------------------------------------------------------------------
 // MySQLStoreFactory
 // ---------------------------------------------------------------------------
 
@@ -1605,6 +1659,12 @@ func (f *MySQLStoreFactory) getOrCreateTenantDB(ctx context.Context, tenantID st
 	return f.CreateTenantDatabase(ctx, tenantID)
 }
 
+// TenantDB returns a *sql.DB connection pool for the given tenant, creating
+// a new per-tenant database and connection pool if one does not already exist.
+func (f *MySQLStoreFactory) TenantDB(ctx context.Context, tenantID string) (*sql.DB, error) {
+	return f.getOrCreateTenantDB(ctx, tenantID)
+}
+
 // OpenStore creates a MySQLStore scoped to the given tenant and task queues.
 // The store's connection pool is scoped to the tenant's database.
 func (f *MySQLStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
@@ -1635,7 +1695,3 @@ func (f *MySQLStoreFactory) DriverName() string { return "mysql" }
 
 // Dialect returns DialectMySQL.
 func (f *MySQLStoreFactory) Dialect() Dialect { return DialectMySQL }
-
-func (f *MySQLStoreFactory) TenantDB(ctx context.Context, tenantID string) (*sql.DB, error) {
-	return f.getOrCreateTenantDB(ctx, tenantID)
-}

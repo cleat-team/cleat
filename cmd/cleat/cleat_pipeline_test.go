@@ -767,20 +767,20 @@ func TestRunBuild_TinyGoTarget(t *testing.T) {
 	}
 
 	// PrepareBuildDir with "tinygo" target creates a .deps dir with
-	// a go 1.24 compatible module.
+	// a go 1.23 compatible module (capped for tinygo compatibility).
 	if err := wasm.PrepareBuildDir(buildCfg); err != nil {
 		t.Fatalf("PrepareBuildDir (tinygo) failed: %v", err)
 	}
 
-	// The build directory should have go.mod targeting 1.24 for tinygo.
+	// The build directory should have go.mod targeting 1.23 for tinygo.
 	modPath := filepath.Join(outDir, "go.mod")
 	modData, err := os.ReadFile(modPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	modStr := string(modData)
-	if !strings.Contains(modStr, "go 1.24") {
-		t.Errorf("expected 'go 1.24' in go.mod for tinygo target, got: %s", modStr)
+	if !strings.Contains(modStr, "go 1.23") {
+		t.Errorf("expected 'go 1.23' in go.mod for tinygo target, got: %s", modStr)
 	}
 
 	// Should also have .deps/go.mod.

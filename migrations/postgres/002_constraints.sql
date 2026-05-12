@@ -69,6 +69,8 @@ CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON admin.tenant_api_keys(key_hash) 
 CREATE INDEX IF NOT EXISTS idx_defs_tenant_name_version ON workflow_defs(tenant_id, name, version DESC);
 CREATE INDEX IF NOT EXISTS idx_instances_tenant_ready
     ON workflow_instances(tenant_id, status, next_wake_at) WHERE status = 'ready';
+CREATE INDEX IF NOT EXISTS idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running';
+CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running';
 CREATE INDEX IF NOT EXISTS idx_event_history_tenant_wf ON event_history(tenant_id, workflow_id, step);
 CREATE INDEX IF NOT EXISTS idx_signals_tenant_wf ON workflow_signals(tenant_id, workflow_id, signal_name);
 CREATE INDEX IF NOT EXISTS idx_schedules_tenant_enabled ON workflow_schedules(tenant_id, enabled, next_run_at);
@@ -81,6 +83,10 @@ CREATE INDEX IF NOT EXISTS idx_idempotency_expires
     ON idempotency_keys(expires_at);
 CREATE INDEX IF NOT EXISTS idx_mem_samples_def
     ON workflow_memory_samples (def_name, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_instances_created_at ON workflow_instances(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_instances_terminal_completed ON workflow_instances(tenant_id, status, completed_at) WHERE status IN ('done','failed');
+CREATE INDEX IF NOT EXISTS idx_concurrency_keys_expires ON concurrency_keys(expires_at);
+CREATE INDEX IF NOT EXISTS idx_instances_parent_policy ON workflow_instances(parent_workflow_id, parent_close_policy, status);
 CREATE POLICY tenant_isolation_defs ON workflow_defs
     FOR ALL USING (tenant_id = COALESCE(current_setting('cleat.tenant_id', true), '00000000-0000-0000-0000-000000000000')::uuid);
 CREATE POLICY tenant_isolation_instances ON workflow_instances
@@ -102,6 +108,7 @@ ALTER TABLE workflow_instances ENABLE ROW LEVEL SECURITY;
 ALTER TABLE event_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workflow_signals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workflow_schedules ENABLE ROW LEVEL SECURITY;
+DROP INDEX IF EXISTS idx_instances_ready;
 DROP INDEX IF EXISTS idx_instances_tenant_ready;
 -- Migration 012: Add GIN index on workflow_instances.input for full-text JSONB search.
 -- Enables efficient JSONB containment queries (e.g., WHERE input @> '{"field":"value"}').

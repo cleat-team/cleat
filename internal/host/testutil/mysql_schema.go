@@ -22,7 +22,6 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			wasm_bytes         LONGBLOB NOT NULL,
 			entry_points       JSON NOT NULL DEFAULT ('[]'),
 			min_version        INTEGER NOT NULL DEFAULT 0,
-			
 			max_history_length INTEGER NOT NULL DEFAULT 0,
 			dag_spec           JSON DEFAULT NULL,
 			abi_version        INTEGER NOT NULL DEFAULT 1,
@@ -55,7 +54,6 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			parent_workflow_id     VARCHAR(255),
 			parent_close_policy    VARCHAR(50) DEFAULT 'ABANDON',
 			query_state            JSON DEFAULT ('{}'),
-			
 			trace_id               VARCHAR(255),
 			sticky_worker_id       VARCHAR(255),
 			task_queue             VARCHAR(255) NOT NULL DEFAULT 'default',
@@ -137,7 +135,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 		// and workflow instances may be cleaned up before their keys are released.
 		// This matches the Postgres and MSSQL test schemas.
 		`CREATE TABLE IF NOT EXISTS concurrency_keys (
-			key_hash     VARBINARY(64) PRIMARY KEY,
+			key_hash     VARBINARY(32) PRIMARY KEY,
 			key_text     TEXT NOT NULL,
 			workflow_id  VARCHAR(255) NOT NULL,
 			acquired_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
@@ -175,7 +173,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 
 		// idempotency_keys
 		`CREATE TABLE IF NOT EXISTS idempotency_keys (
-			key_hash     VARBINARY(64) PRIMARY KEY,
+			key_hash     VARBINARY(32) PRIMARY KEY,
 			workflow_id  VARCHAR(255) NOT NULL,
 			result       JSON,
 			error_msg    TEXT,

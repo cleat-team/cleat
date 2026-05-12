@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS tenants (
 CREATE TABLE IF NOT EXISTS tenant_api_keys (
     key_id             CHAR(36) NOT NULL,
     tenant_id          CHAR(36) NOT NULL,
-    key_hash           VARBINARY(64) NOT NULL,
+    key_hash           VARBINARY(32) NOT NULL,
     description        VARCHAR(1024) NOT NULL DEFAULT '',
     created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
     revoked_at         TIMESTAMP(6),
@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     compacted_at TIMESTAMP(6),
     compaction_step INTEGER,
     plugin_vers JSON NOT NULL DEFAULT ('{}'),
+    event_count BIGINT NOT NULL DEFAULT 0,
     FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version),
     PRIMARY KEY (id)
 ) ENGINE=InnoDB;
@@ -97,9 +98,9 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
 CREATE TABLE IF NOT EXISTS event_history (
     workflow_id        VARCHAR(255) NOT NULL,
     step               INTEGER NOT NULL,
-    service VARCHAR(255) NULL,
-    operation VARCHAR(255) NULL,
-    request LONGTEXT NULL,
+    service VARCHAR(255) NOT NULL,
+    operation VARCHAR(255) NOT NULL,
+    request LONGTEXT NOT NULL,
     response LONGTEXT,
     error              TEXT,
     created_at         TIMESTAMP(6) NOT NULL DEFAULT NOW(6),

@@ -33,7 +33,7 @@ func scaleStore(t *testing.T) (*sql.DB, *host.PostgresStore) {
 		t.Skipf("Skipping: cannot ping database: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return db, host.NewPostgresStore(db, "default")
+	return db, host.NewPostgresStore(db)
 }
 
 // cleanupScaleData removes test data created by scale tests.

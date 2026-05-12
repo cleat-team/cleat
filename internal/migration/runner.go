@@ -215,8 +215,19 @@ func (r *Runner) applyMigration(ctx context.Context, m migration) error {
 		_ = tx.Rollback()
 	}()
 
-	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
-		return fmt.Errorf("execute: %w", err)
+	// MySQL driver does not support multi-statement execution by
+	// default, so split on semicolons. Postgres (pq) and MSSQL
+	// (go-mssqldb) handle multi-statement SQL natively.
+	if r.dialect == host.DialectMySQL {
+		for _, stmt := range splitSQL(m.sql) {
+			if _, err := tx.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("execute: %w", err)
+			}
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+			return fmt.Errorf("execute: %w", err)
+		}
 	}
 
 	versionStr := strconv.Itoa(m.version)
@@ -244,4 +255,17 @@ func (r *Runner) applyMigration(ctx context.Context, m migration) error {
 	}
 
 	return nil
+}
+
+// splitSQL splits a multi-statement SQL string into individual statements
+// on semicolons, ignoring trailing whitespace and empty statements.
+func splitSQL(sql string) []string {
+	var stmts []string
+	for _, s := range strings.Split(sql, ";") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			stmts = append(stmts, s)
+		}
+	}
+	return stmts
 }

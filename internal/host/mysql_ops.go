@@ -455,28 +455,14 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	)
 	qb.AddArgs(s.tenantID)
 
-	if filter.DefName != "" {
-		qb.AddCondition("def_name = %s", filter.DefName)
-	}
 	if filter.Status != "" {
 		qb.AddCondition("status = %s", filter.Status)
-	}
-	if filter.ID != "" {
-		qb.AddLikeCondition("id", "%"+filter.ID+"%", false)
 	}
 	if filter.InputContains != "" {
 		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
 	}
 	if filter.ErrorContains != "" {
 		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
-	}
-	if !filter.CreatedAfter.IsZero() {
-		qb.AddRaw(fmt.Sprintf("AND created_at > %s", d.placeholder(qb.NextPos())))
-		qb.AddArgs(filter.CreatedAfter)
-	}
-	if !filter.CreatedBefore.IsZero() {
-		qb.AddRaw(fmt.Sprintf("AND created_at < %s", d.placeholder(qb.NextPos())))
-		qb.AddArgs(filter.CreatedBefore)
 	}
 	if filter.Search != "" {
 		pattern := "%" + filter.Search + "%"
@@ -1039,6 +1025,7 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 				WHERE status IN ('done', 'failed')
 				  AND completed_at IS NOT NULL
 				  AND completed_at < ?
+				ORDER BY completed_at
 				LIMIT 10000
 			) AS w ON e.workflow_id = w.id
 		`, olderThan)
@@ -1064,6 +1051,7 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 					  AND completed_at IS NOT NULL
 					  AND completed_at < ?
 					  AND compaction_state IS NOT NULL
+					ORDER BY completed_at
 					LIMIT 10000
 				) AS subq
 			)
@@ -1077,5 +1065,66 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 		}
 	}
 
+	return totalDeleted, nil
+}
+
+// TerminateWorkflow force-terminates a workflow, setting status to 'terminated'.
+func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'terminated',
+		    error_msg = ?,
+		    completed_at = NOW(),
+		    assigned_to = NULL
+		WHERE id = ?
+	`, reason, workflowID)
+	if err != nil {
+		return fmt.Errorf("terminate workflow: %w", err)
+	}
+	return nil
+}
+
+// DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
+// whose completed_at is older than the cutoff.
+func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalDeleted int64
+	for {
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM event_history
+			WHERE workflow_id IN (
+				SELECT id FROM workflow_instances
+				WHERE status = 'dead_lettered'
+				  AND completed_at IS NOT NULL
+				  AND completed_at < ?
+				ORDER BY id
+				LIMIT 10000
+			)
+		`, olderThan)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered event history: %w", err)
+		}
+		n, _ := result.RowsAffected()
+		totalDeleted += n
+
+		result, err = s.db.ExecContext(ctx, `
+			DELETE FROM workflow_instances
+			WHERE id IN (
+				SELECT id FROM workflow_instances
+				WHERE status = 'dead_lettered'
+				  AND completed_at IS NOT NULL
+				  AND completed_at < ?
+				ORDER BY id
+				LIMIT 10000
+			)
+		`, olderThan)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
+		}
+		n, _ = result.RowsAffected()
+		totalDeleted += n
+		if n == 0 {
+			break
+		}
+	}
 	return totalDeleted, nil
 }

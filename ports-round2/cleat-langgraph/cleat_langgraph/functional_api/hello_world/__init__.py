@@ -1,3 +1,0 @@
-"""
-Functional API Hello World.
-"""

@@ -1719,8 +1719,8 @@ func TestDetermineEntryPoint_EdgeCases(t *testing.T) {
 		input json.RawMessage
 		want  string
 	}{
-		{"invalid json", json.RawMessage(`{bad`), "place_order"},
-		{"nested entry point ignored", json.RawMessage(`{"nested":{"__entry_point":"inner"}}`), "place_order"},
+		{"invalid json", json.RawMessage(`{bad`), "handle_incident"},
+		{"nested entry point ignored", json.RawMessage(`{"nested":{"__entry_point":"inner"}}`), "handle_incident"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

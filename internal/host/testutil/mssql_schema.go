@@ -27,7 +27,6 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
              task_queue NVARCHAR(MAX) NOT NULL DEFAULT 'default',
              max_history_length INTEGER NOT NULL DEFAULT 0,
              dag_spec NVARCHAR(MAX) DEFAULT NULL,
-             namespace NVARCHAR(MAX) NOT NULL DEFAULT 'default',
              tenant_id UNIQUEIDENTIFIER,
              created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
              PRIMARY KEY (name, version)
@@ -62,7 +61,6 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
              compacted_at DATETIMEOFFSET,
              compaction_step INTEGER,
              plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-             namespace NVARCHAR(MAX) NOT NULL DEFAULT 'default',
              tenant_id UNIQUEIDENTIFIER,
              FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
          )`,

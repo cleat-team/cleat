@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     compacted_at TIMESTAMPTZ,
     compaction_step INTEGER,
     plugin_vers JSONB NOT NULL DEFAULT '{}',
+    event_count BIGINT NOT NULL DEFAULT 0,
     FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
 );
 CREATE TABLE IF NOT EXISTS event_history (

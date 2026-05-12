@@ -681,14 +681,6 @@ func needsJSON(usage *UsageInfo) bool {
 				}
 			}
 		}
-		wdef, ok := hostWrapperDefs[hf.FieldName]
-		if ok {
-			for _, stmt := range wdef.Body {
-				if strings.Contains(stmt, "json.Unmarshal") || strings.Contains(stmt, "json.Marshal") {
-					return true
-				}
-			}
-		}
 	}
 	return false
 }

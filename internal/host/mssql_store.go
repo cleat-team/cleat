@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -353,6 +354,132 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 	return history, rows.Err()
 }
 
+// StreamEventHistory loads event history for a workflow in pages, returning
+// events through a channel. Events are fetched in pages of pageSize as the
+// caller reads from the channel. The channel is closed when all events have
+// been sent.
+func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
+	eventCh := make(chan EventRecord, pageSize)
+	errCh := make(chan error, 1)
+
+	if pageSize <= 0 || pageSize > 1000 {
+		pageSize = 1000
+	}
+
+	go func() {
+		defer close(eventCh)
+		defer close(errCh)
+
+		offset := 0
+		for {
+			select {
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			default:
+			}
+
+			rows, err := s.db.QueryContext(ctx, `
+				SELECT step, event_type, service, operation, request, response, error,
+				       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
+				       defer_description, defer_id, child_name, child_input, run_id, new_input,
+				       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+				       payload,
+				       promise_name, promise_id, promise_result, promise_error,
+				       created_at
+				FROM event_history
+				WHERE workflow_id = @p1
+				ORDER BY step
+				OFFSET @p2 ROWS FETCH NEXT @p3 ROWS ONLY
+			`, workflowID, offset, pageSize)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			var pageCount int
+			for rows.Next() {
+				pageCount++
+				var rec EventRecord
+				var service, op, request, response, errMsg sql.NullString
+				var durationMs, timeoutMs sql.NullInt64
+				var signalNames, signalName, signalPayload sql.NullString
+				var deferDesc, deferID sql.NullString
+				var childName, childInput, runID, newInput sql.NullString
+				var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
+				var payload sql.NullString
+				var promiseName, promiseID, promiseResult, promiseError sql.NullString
+				var createdAt time.Time
+
+				if err := rows.Scan(&rec.Step, &rec.EventType,
+					&service, &op, &request, &response, &errMsg,
+					&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
+					&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
+					&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
+					&payload,
+					&promiseName, &promiseID, &promiseResult, &promiseError,
+					&createdAt); err != nil {
+					rows.Close()
+					errCh <- err
+					return
+				}
+
+				rec.TimestampMs = createdAt.UnixMilli()
+				rec.Service = service.String
+				rec.Op = op.String
+				rec.Request = tryDecodeBase64(request.String)
+				rec.Response = tryDecodeBase64(response.String)
+				rec.Err = errMsg.String
+				rec.DurationMs = durationMs.Int64
+				rec.SignalNames = signalNames.String
+				rec.TimeoutMs = timeoutMs.Int64
+				rec.SignalName = signalName.String
+				rec.SignalPayload = signalPayload.String
+				rec.DeferDescription = deferDesc.String
+				rec.DeferID = deferID.String
+				rec.ChildName = childName.String
+				rec.ChildInput = childInput.String
+				rec.RunID = runID.String
+				rec.NewInput = newInput.String
+				rec.PluginName = pluginName.String
+				rec.PluginFunc = pluginFunc.String
+				rec.PluginInput = pluginInput.String
+				rec.PluginOutput = pluginOutput.String
+				rec.PluginError = pluginErr.String
+				rec.PromiseName = promiseName.String
+				rec.PromiseID = promiseID.String
+				rec.PromiseResult = promiseResult.String
+				rec.PromiseError = promiseError.String
+
+				if payload.Valid {
+					populateFromPayload(&rec, []byte(payload.String))
+				}
+
+				select {
+				case eventCh <- rec:
+				case <-ctx.Done():
+					rows.Close()
+					errCh <- ctx.Err()
+					return
+				}
+			}
+			rows.Close()
+
+			if err := rows.Err(); err != nil {
+				errCh <- err
+				return
+			}
+
+			if pageCount < pageSize {
+				return
+			}
+			offset += pageSize
+		}
+	}()
+
+	return eventCh, errCh
+}
+
 // LoadEventHistoryPaginated returns a page of event history for a workflow,
 // with offset and limit support. Defaults limit to 1000 if limit <= 0, capped at 1000.
 func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {
@@ -510,7 +637,8 @@ func (s *MSSQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
 			payloadArg,
 			time.UnixMilli(rec.TimestampMs),
-			checksum, s.tenantID)
+			checksum,
+			s.tenantID)
 		if err != nil {
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
@@ -776,7 +904,9 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-		VALUES (@p1, @p2, @p3, 'ready', @p4,		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'), @p5)
+		VALUES (@p1, @p2, @p3, 'ready', @p4,
+		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
+		        @p5)
 	`, newRunID, defName, defVersion, string(newInput), s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
@@ -990,7 +1120,9 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-			VALUES (@p1, @p2, @p3, 'ready', @p4,			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'), @p5)
+			VALUES (@p1, @p2, @p3, 'ready', @p4,
+			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
+			        @p5)
 		`, runID, defName, defVersion, string(input), s.tenantID)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
@@ -1008,7 +1140,9 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
-		VALUES (@p1, @p2, @p3, 'ready', @p4,		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'), @p5)
+		VALUES (@p1, @p2, @p3, 'ready', @p4,
+		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
+		        @p5)
 	`, runID, defName, defVersion, string(input), s.tenantID)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
@@ -1330,7 +1464,9 @@ func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 		VALUES (@p1, @p2,
 		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0) END,
 		        'ready', @p3, @p4,
-		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'), @p7)
+		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),
+		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'),
+		        @p7)
 	`, runID, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
@@ -1357,7 +1493,9 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 		VALUES (@p1, @p2,
 		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0) END,
 		        'ready', @p3, @p4,
-		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'), @p7)
+		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),
+		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'),
+		        @p7)
 	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
@@ -1420,6 +1558,13 @@ func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 }
 
 // GetQueryState returns the query state for a workflow instance key.
+//
+// SECURITY: The JSON path is constructed via concatenation of user-controlled
+// key into '$.' + @p2. This is safe from SQL injection (JSON_VALUE cannot
+// execute DML), and the key is passed as a parameter, not string-embedded.
+// However, a malicious key could produce an invalid JSON path expression,
+// causing a runtime error. Consider using JSON_QUERY with a parameterized
+// path when SQL Server adds support for parameterized JSON paths.
 func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	var value sql.NullString
 	err := s.db.QueryRowContext(ctx, `
@@ -1443,28 +1588,14 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		"SELECT "+d.workflowInstanceColumns()+" FROM workflow_instances WHERE 1=1",
 	)
 
-	if filter.DefName != "" {
-		qb.AddCondition("def_name = %s", filter.DefName)
-	}
 	if filter.Status != "" {
 		qb.AddCondition("status = %s", filter.Status)
-	}
-	if filter.ID != "" {
-		qb.AddLikeCondition("id", "%"+filter.ID+"%", false)
 	}
 	if filter.InputContains != "" {
 		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
 	}
 	if filter.ErrorContains != "" {
 		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
-	}
-	if !filter.CreatedAfter.IsZero() {
-		qb.AddRaw(fmt.Sprintf("AND created_at > %s", d.placeholder(qb.NextPos())))
-		qb.AddArgs(filter.CreatedAfter)
-	}
-	if !filter.CreatedBefore.IsZero() {
-		qb.AddRaw(fmt.Sprintf("AND created_at < %s", d.placeholder(qb.NextPos())))
-		qb.AddArgs(filter.CreatedBefore)
 	}
 	if filter.Search != "" {
 		pattern := "%" + filter.Search + "%"
@@ -1552,9 +1683,9 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 // CreateSchedule inserts a new cron schedule.
 func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at)
-		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt)
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id)
+		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8)
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID)
 	return err
 }
 
@@ -1865,11 +1996,20 @@ func (s *MSSQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, upda
 // ---- Concurrency Key methods ----
 
 // AcquireConcurrencyKey tries to acquire a concurrency key for a workflow.
+// All three operations (cleanup, insert, verify) are wrapped in a single
+// explicit transaction to prevent race conditions between separate implicit
+// transactions that would each see a different snapshot of concurrency_keys.
 func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	keyHash := sha256.Sum256([]byte(key))
 
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("acquire concurrency key: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
 	// Release expired keys during acquisition.
-	_, err := s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		DELETE FROM concurrency_keys WHERE key_hash = @p1 AND expires_at < SYSUTCDATETIME()
 	`, keyHash[:])
 	if err != nil {
@@ -1877,7 +2017,7 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	}
 
 	// Try to insert with a unique constraint.
-	_, err = s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at)
 		SELECT @p1, @p2, @p3, DATEADD(SECOND, @p4, SYSUTCDATETIME())
 		WHERE NOT EXISTS (
@@ -1890,13 +2030,13 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 
 	// Check if our insert succeeded.
 	var wkID string
-	err = s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT workflow_id FROM concurrency_keys WHERE key_hash = @p1
 	`, keyHash[:]).Scan(&wkID)
 	if err != nil {
 		return false, fmt.Errorf("acquire concurrency key: verify: %w", err)
 	}
-	return wkID == workflowID, nil
+	return wkID == workflowID, tx.Commit()
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
@@ -1926,13 +2066,6 @@ func (s *MSSQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 	}
 	n, _ := result.RowsAffected()
 	return n, nil
-}
-
-// CountActiveConcurrencyKeys returns the number of non-expired concurrency keys.
-func (s *MSSQLStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) {
-	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM concurrency_keys WHERE expires_at >= SYSUTCDATETIME()`).Scan(&count)
-	return count, err
 }
 
 // ---- Sticky Session methods ----
@@ -1977,9 +2110,9 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			min_version = @p5,
 			plugin_deps = @p6,
 			deprecated = @p7
-		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
-		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8);
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
+		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated)
+		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7);
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}
@@ -2345,14 +2478,25 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 	return totalDeleted, nil
 }
 
-// LoadEventHistoryBatch returns event histories for multiple workflow IDs.
-func (s *MSSQLStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]EventRecord, error) {
-	return nil, fmt.Errorf("LoadEventHistoryBatch not implemented for MSSQL")
-}
-
-// TerminateWorkflow marks a workflow instance as terminated.
+// TerminateWorkflow force-terminates a workflow, setting status to 'terminated'.
 func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
-	return fmt.Errorf("TerminateWorkflow not implemented for MSSQL")
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = 'terminated',
+		    error_msg = @p2,
+		    completed_at = GETDATE(),
+		    assigned_to = NULL
+		WHERE id = @p1
+	`, sql.Named("p1", workflowID), sql.Named("p2", reason))
+	if err != nil {
+		return fmt.Errorf("terminate workflow: %w", err)
+	}
+	// Best-effort cleanup.
+	s.ClearStickyWorker(context.Background(), workflowID)
+	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID); err != nil {
+		log.Printf("[db] release concurrency keys for run %s: %v", workflowID, err)
+	}
+	return nil
 }
 
 // DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
@@ -2370,7 +2514,7 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 				ORDER BY id
 				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
 			)
-		`, olderThan)
+		`, sql.Named("p1", olderThan))
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered event history: %w", err)
 		}
@@ -2387,7 +2531,7 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 				ORDER BY id
 				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
 			)
-		`, olderThan)
+		`, sql.Named("p1", olderThan))
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
 		}
@@ -2398,14 +2542,4 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 		}
 	}
 	return totalDeleted, nil
-}
-
-// StreamEventHistory loads event history for a workflow in pages, returning
-// events through a channel. Not implemented for MSSQL.
-func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
-	errCh := make(chan error, 1)
-	errCh <- fmt.Errorf("StreamEventHistory not implemented for MSSQL")
-	ch := make(chan EventRecord)
-	close(ch)
-	return ch, errCh
 }

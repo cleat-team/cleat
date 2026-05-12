@@ -180,15 +180,22 @@ func TestRustWorkflow_ExecuteAndReplay(t *testing.T) {
 		{"notifications", "SendEmail"},
 	}
 
-	if len(history) < len(expectedServices) {
-		t.Fatalf("expected at least %d events, got %d", len(expectedServices), len(history))
+	// Filter to service-call events (log events have empty Service/Op).
+	var calls []struct {
+		svc string
+		op  string
+	}
+	for _, ev := range history {
+		if ev.Service != "" || ev.Op != "" {
+			calls = append(calls, struct{ svc, op string }{ev.Service, ev.Op})
+		}
+	}
+	if len(calls) < len(expectedServices) {
+		t.Fatalf("expected at least %d service calls, got %d", len(expectedServices), len(calls))
 	}
 	for i, exp := range expectedServices {
-		if i >= len(history) {
-			break
-		}
-		if history[i].Service != exp.svc || history[i].Op != exp.op {
-			t.Errorf("event %d: expected %s.%s, got %s.%s", i, exp.svc, exp.op, history[i].Service, history[i].Op)
+		if calls[i].svc != exp.svc || calls[i].op != exp.op {
+			t.Errorf("call %d: expected %s.%s, got %s.%s", i, exp.svc, exp.op, calls[i].svc, calls[i].op)
 		}
 	}
 
@@ -313,7 +320,17 @@ type callRecorder struct {
 }
 
 func (c *callRecorder) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
-	resp := fmt.Sprintf(`{"result":"ok-%s-%s"}`, service, operation)
+	var resp string
+	switch {
+	case service == "inventory" && operation == "Reserve":
+		resp = `{"reservation_id":"RES-001","total_cents":5999}`
+	case service == "payments" && operation == "Charge":
+		resp = `{"charge_id":"CHG-001","amount":5999}`
+	case service == "shipping" && operation == "CreateShipment":
+		resp = `{"tracking_id":"TRACK-123456"}`
+	default:
+		resp = fmt.Sprintf(`{"result":"ok-%s-%s"}`, service, operation)
+	}
 	c.calls = append(c.calls, host.EventRecord{
 		EventType: host.EventTypeCall,
 		Service:   service,

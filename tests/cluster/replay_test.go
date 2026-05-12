@@ -31,7 +31,7 @@ func replayStoreDB(t *testing.T) (*sql.DB, *host.PostgresStore) {
 		t.Skipf("Skipping: cannot ping database: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return db, host.NewPostgresStore(db, "default")
+	return db, host.NewPostgresStore(db)
 }
 
 // cleanupReplayData removes test data left by replay tests.
