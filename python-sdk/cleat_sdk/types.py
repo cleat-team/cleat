@@ -215,8 +215,8 @@ class Saga(Generic[SagaResultT]):
         saga = Saga[str](h)
         saga.add_step(
             name="reserve_inventory",
-            action=lambda: h.cleat_call("inventory", "Reserve", reserve_json),
-            compensate=lambda: h.cleat_call("inventory", "Release", release_json),
+            action=lambda: h.call("inventory", "Reserve", reserve_json),
+            compensate=lambda: h.call("inventory", "Release", release_json),
         )
 
     Usage with explicit HostCalls (no closure capture)::
@@ -224,17 +224,17 @@ class Saga(Generic[SagaResultT]):
         saga = Saga[str](h)
         saga.add_step_fn(
             name="reserve_inventory",
-            action=lambda h: h.cleat_call("inventory", "Reserve", reserve_json),
-            compensate=lambda h: h.cleat_call("inventory", "Release", release_json),
+            action=lambda h: h.call("inventory", "Reserve", reserve_json),
+            compensate=lambda h: h.call("inventory", "Release", release_json),
         )
 
     Usage with subclassed steps (cleanest for WASM)::
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("inventory", "Reserve", reserve_json)
+                return h.call("inventory", "Reserve", reserve_json)
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("inventory", "Release", release_json)
+                h.call("inventory", "Release", release_json)
 
         saga = Saga[str](h)
         saga.add_step(ReserveStep("reserve_inventory"))
@@ -444,10 +444,10 @@ class _FnSagaStep(SagaStep):
 def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
     """Run compensations for *completed* steps in reverse order.
 
-    Failures during compensation are logged via ``h.cleat_log`` but do
+    Failures during compensation are logged via ``h.log`` but do
     not prevent later compensations from running (best-effort).
 
-    If ``cleat_log`` is not available (e.g. the workflow context has been
+    If ``log`` is not available (e.g. the workflow context has been
     torn down), falls back to writing errors to ``sys.stderr``.
     """
     for step in reversed(completed):
@@ -455,9 +455,9 @@ def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
             step.compensate(h)
         except Exception as exc:
             try:
-                h.cleat_log(f"Saga compensation failed for step '{step.name}': {exc}")
+                h.log(f"Saga compensation failed for step '{step.name}': {exc}")
             except Exception:
-                # Fall back to stderr when cleat_log is unavailable
+                # Fall back to stderr when log is unavailable
                 # (e.g., workflow context already torn down).
                 msg = f"Saga compensation failed for step '{step.name}': {exc}\n"
                 sys.stderr.write(msg)
@@ -472,7 +472,7 @@ def _compensate_all(h: HostCalls, completed: list[SagaStep[Any]]) -> None:
 class CleatDefer:
     """Context manager for registering deferred cleanup with the host.
 
-    The ``cleat_defer`` host call registers a cleanup description that
+    The ``defer`` host call registers a cleanup description that
     the host will execute when the workflow exits (normally or abnormally).
     This context manager provides a convenient ``with``-statement wrapper.
 
@@ -480,7 +480,7 @@ class CleatDefer:
 
         with CleatDefer("release inventory reservation", h):
             # ... workflow logic ...
-            pass   # ``cleat_defer`` registered on entry
+            pass   # ``defer`` registered on entry
     """
 
     description: str
@@ -495,7 +495,7 @@ class CleatDefer:
     def __enter__(self) -> CleatDefer:
         """Register the defer with the host on context entry."""
         if self._h is not None:
-            self._defer_id = self._h.cleat_defer(self.description)
+            self._defer_id = self._h.defer(self.description)
         return self
 
     def __exit__(

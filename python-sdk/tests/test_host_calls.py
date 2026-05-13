@@ -87,14 +87,14 @@ def plugins(host):
 
 
 class TestDurableCallRoundTrip:
-    """``cleat_call`` behaviour through ``CleatTestHarness``."""
+    """``call`` behaviour through ``CleatTestHarness``."""
 
     def test_stubbed_response_returned(self):
         """Stub a service call and verify the stubbed response is returned."""
         h = CleatTestHarness()
         h.reset()
         h.stub_call("greeter", "Greet", '{"greeting": "Hello, World"}')
-        result = h.cleat_call("greeter", "Greet", {"name": "World"})
+        result = h.call("greeter", "Greet", {"name": "World"})
         assert result == '{"greeting": "Hello, World"}'
         assert h.call_count("greeter", "Greet") == 1
 
@@ -103,7 +103,7 @@ class TestDurableCallRoundTrip:
         h = CleatTestHarness()
         h.reset()
         h.stub_call("email", "send", '"ok"')
-        h.cleat_call("email", "send", {"to": "alice@example.com", "subject": "Hello"})
+        h.call("email", "send", {"to": "alice@example.com", "subject": "Hello"})
         rec = h.last_call("email", "send")
         assert rec is not None
         assert rec.service == "email"
@@ -117,7 +117,7 @@ class TestDurableCallRoundTrip:
         h.reset()
         h.stub_call("payment", "charge", error="insufficient funds")
         with pytest.raises(RuntimeError, match="insufficient funds"):
-            h.cleat_call("payment", "charge", {"amount": 999999})
+            h.call("payment", "charge", {"amount": 999999})
 
     def test_stubs_consumed_fifo(self):
         """Multiple stubs for the same ``(service, op)`` are consumed in order."""
@@ -127,9 +127,9 @@ class TestDurableCallRoundTrip:
         h.stub_call("svc", "op", '"second"')
         h.stub_call("svc", "op", '"third"')
 
-        assert h.cleat_call("svc", "op", {}) == '"first"'
-        assert h.cleat_call("svc", "op", {}) == '"second"'
-        assert h.cleat_call("svc", "op", {}) == '"third"'
+        assert h.call("svc", "op", {}) == '"first"'
+        assert h.call("svc", "op", {}) == '"second"'
+        assert h.call("svc", "op", {}) == '"third"'
         assert h.call_count("svc", "op") == 3
 
     def test_call_count_tracks_multiple_services(self):
@@ -139,20 +139,20 @@ class TestDurableCallRoundTrip:
         h.stub_call("a", "op1", '"ok"')
         h.stub_call("a", "op2", '"ok"')
         h.stub_call("b", "op1", '"ok"')
-        h.cleat_call("a", "op1", {})
-        h.cleat_call("a", "op2", {})
-        h.cleat_call("b", "op1", {})
+        h.call("a", "op1", {})
+        h.call("a", "op2", {})
+        h.call("b", "op1", {})
         assert h.call_count("a", "op1") == 1
         assert h.call_count("a", "op2") == 1
         assert h.call_count("b", "op1") == 1
         assert h.call_count("a", "op_bogus") == 0
 
     def test_no_stub_raises_informative_error(self):
-        """Calling ``cleat_call`` without a registered stub raises."""
+        """Calling ``call`` without a registered stub raises."""
         h = CleatTestHarness()
         h.reset()
         with pytest.raises(RuntimeError, match="no stub registered"):
-            h.cleat_call("unknown", "op", {})
+            h.call("unknown", "op", {})
 
 
 # ========================================================================
@@ -161,14 +161,14 @@ class TestDurableCallRoundTrip:
 
 
 class TestDurableSleep:
-    """``cleat_sleep`` behaviour through ``CleatTestHarness``."""
+    """``sleep`` behaviour through ``CleatTestHarness``."""
 
     def test_sleep_advances_clock(self):
         """Sleep advances the simulated clock by the specified duration."""
         h = CleatTestHarness()
         h.reset()
         before = h.now_ms
-        result = h.cleat_sleep(5000)
+        result = h.sleep(5000)
         after = h.now_ms
         assert after - before == 5000
         assert result is False
@@ -178,9 +178,9 @@ class TestDurableSleep:
         h = CleatTestHarness()
         h.reset()
         start = h.now_ms
-        h.cleat_sleep(1000)
-        h.cleat_sleep(2000)
-        h.cleat_sleep(3000)
+        h.sleep(1000)
+        h.sleep(2000)
+        h.sleep(3000)
         assert h.now_ms == start + 6000
 
     def test_sleep_zero_is_noop(self):
@@ -188,14 +188,14 @@ class TestDurableSleep:
         h = CleatTestHarness()
         h.reset()
         before = h.now_ms
-        h.cleat_sleep(0)
+        h.sleep(0)
         assert h.now_ms == before
 
     def test_advance_time_equivalence(self):
-        """``advance_time`` produces the same clock result as ``cleat_sleep``."""
+        """``advance_time`` produces the same clock result as ``sleep``."""
         h1 = CleatTestHarness()
         h1.reset()
-        h1.cleat_sleep(5000)
+        h1.sleep(5000)
 
         h2 = CleatTestHarness()
         h2.reset()
@@ -204,12 +204,12 @@ class TestDurableSleep:
         assert h1.now_ms == h2.now_ms
 
     def test_sleep_always_returns_false(self):
-        """In the test harness ``cleat_sleep`` never suspends (returns ``False``)."""
+        """In the test harness ``sleep`` never suspends (returns ``False``)."""
         h = CleatTestHarness()
         h.reset()
-        assert h.cleat_sleep(100) is False
-        assert h.cleat_sleep(0) is False
-        assert h.cleat_sleep(86_400_000) is False
+        assert h.sleep(100) is False
+        assert h.sleep(0) is False
+        assert h.sleep(86_400_000) is False
 
 
 # ========================================================================
@@ -385,10 +385,10 @@ class TestSagaCompensation:
 
         def saga():
             completed.append(1)
-            h.cleat_call("saga", "step_1", {})
+            h.call("saga", "step_1", {})
             completed.append(2)
-            h.cleat_call("saga", "step_2", {})
-            h.cleat_call("saga", "step_3", {})  # raises
+            h.call("saga", "step_2", {})
+            h.call("saga", "step_3", {})  # raises
             completed.append(3)  # never reached
 
         with pytest.raises(RuntimeError, match="step 3 failed"):
@@ -396,7 +396,7 @@ class TestSagaCompensation:
 
         # Compensate completed steps in reverse
         for step in reversed(completed):
-            h.cleat_call("saga", f"compensate_{step}", {})
+            h.call("saga", f"compensate_{step}", {})
 
         # Steps 1-2 executed
         assert completed == [1, 2]
@@ -423,7 +423,7 @@ class TestSagaCompensation:
         h.stub_call("saga", "step_3", '"ok"')
 
         for i in range(1, 4):
-            h.cleat_call("saga", f"step_{i}", {})
+            h.call("saga", f"step_{i}", {})
 
         assert h.call_count("saga", "step_1") == 1
         assert h.call_count("saga", "step_2") == 1
@@ -436,7 +436,7 @@ class TestSagaCompensation:
         h.stub_call("saga", "step_1", error="immediate failure")
 
         with pytest.raises(RuntimeError, match="immediate failure"):
-            h.cleat_call("saga", "step_1", {})
+            h.call("saga", "step_1", {})
 
         assert h.call_count("saga", "step_1") == 1
 
@@ -468,7 +468,7 @@ class TestRetryWithBackoff:
         result = None
         for attempt in range(retry.max_attempts):
             try:
-                result = h.cleat_call("svc", "op", {})
+                result = h.call("svc", "op", {})
                 break
             except RuntimeError:
                 if attempt == retry.max_attempts - 1:
@@ -477,7 +477,7 @@ class TestRetryWithBackoff:
                     int(retry.initial_interval_ms * (retry.backoff_coefficient**attempt)),
                     retry.max_interval_ms,
                 )
-                h.cleat_sleep(delay)
+                h.sleep(delay)
 
         assert result == '"success"'
         assert h.call_count("svc", "op") == 3
@@ -494,7 +494,7 @@ class TestRetryWithBackoff:
         with pytest.raises(RuntimeError, match="persistent error"):
             for attempt in range(retry.max_attempts):
                 try:
-                    h.cleat_call("svc", "op", {})
+                    h.call("svc", "op", {})
                 except RuntimeError:
                     if attempt == retry.max_attempts - 1:
                         raise
@@ -540,7 +540,7 @@ class TestPollCancellation:
         for batch in range(3):
             cancelled, reason = h.poll_cancellation()
             assert not cancelled, f"Cancelled unexpectedly at batch {batch}"
-            h.cleat_call("worker", "process", {"batch": batch})
+            h.call("worker", "process", {"batch": batch})
 
         assert h.call_count("worker", "process") == 3
 
@@ -596,21 +596,21 @@ class TestCleatFetch:
     """HTTP fetch convenience through ``CleatTestHarness``."""
 
     def test_cleat_fetch_delegates(self):
-        """``cleat_fetch`` delegates to ``cleat_call("http", "fetch", ...)``."""
+        """``fetch`` delegates to ``call("http", "fetch", ...)``."""
         h = CleatTestHarness()
         h.reset()
         h.stub_call("http", "fetch", '{"body": "hello", "status": 200}')
-        body, status = h.cleat_fetch("http://example.com")
+        body, status = h.fetch("http://example.com")
         assert body == "hello"
         assert status == 200
         assert h.call_count("http", "fetch") == 1
 
     def test_cleat_fetch_with_custom_method(self):
-        """``cleat_fetch`` passes the method through to the stub."""
+        """``fetch`` passes the method through to the stub."""
         h = CleatTestHarness()
         h.reset()
         h.stub_call("http", "fetch", '{"body": "created", "status": 201}')
-        body, status = h.cleat_fetch("http://example.com", "POST", body='{"x": 1}')
+        body, status = h.fetch("http://example.com", "POST", body='{"x": 1}')
         assert body == "created"
         assert status == 201
 
@@ -684,10 +684,10 @@ class TestFireAndForget:
     """Fire-and-forget and scheduled-invoke operations."""
 
     def test_cleat_send_records(self):
-        """``cleat_send`` records the call in ``call_history``."""
+        """``send`` records the call in ``call_history``."""
         h = CleatTestHarness()
         h.reset()
-        h.cleat_send("notification", "send", {"message": "hello"})
+        h.send("notification", "send", {"message": "hello"})
         assert h.call_count("notification", "send") == 1
         rec = h.last_call("notification", "send")
         assert rec is not None
@@ -776,17 +776,17 @@ class TestHostCallsMethodExistence:
         "random",
         "version",
         "min_version",
-        "cleat_log",
+        "log",
         "log_kv",
         # Durable calls
-        "cleat_call",
-        "cleat_call_typed",
-        "cleat_call_with_retry",
-        "cleat_call_with_heartbeat",
-        "cleat_sleep",
+        "call",
+        "call_typed",
+        "call_with_retry",
+        "call_with_heartbeat",
+        "sleep",
         # HTTP fetch
-        "cleat_fetch",
-        "cleat_fetch_json",
+        "fetch",
+        "fetch_json",
         "fetch_get",
         "fetch_get_json",
         # Signals
@@ -819,12 +819,12 @@ class TestHostCallsMethodExistence:
         "register_update_handler",
         "register_query_handler",
         # Lifecycle
-        "cleat_defer",
+        "defer",
         "continue_as_new",
         "extend_timeout",
         "run_detached",
         # Fire-and-forget / scheduling
-        "cleat_send",
+        "send",
         "schedule_invoke",
         # Identity
         "current_workflow_id",
@@ -872,13 +872,13 @@ class TestHostCallsNewMethods:
 
     def test_log_kv_basic(self, host):
         """``log_kv`` without key-value pairs passes through to ``cleat_log``."""
-        with mock.patch.object(host, "cleat_log") as mock_log:
+        with mock.patch.object(host, "log") as mock_log:
             host.log_kv("hello")
             mock_log.assert_called_once_with("hello")
 
     def test_log_kv_with_pairs(self, host):
         """``log_kv`` formats key-value pairs correctly."""
-        with mock.patch.object(host, "cleat_log") as mock_log:
+        with mock.patch.object(host, "log") as mock_log:
             host.log_kv("processing order", "order_id", "ord-42", "status", "active")
             mock_log.assert_called_once()
             msg = mock_log.call_args[0][0]
@@ -888,7 +888,7 @@ class TestHostCallsNewMethods:
 
     def test_log_kv_odd_count(self, host):
         """``log_kv`` with an odd number of kv arguments handles trailing key."""
-        with mock.patch.object(host, "cleat_log") as mock_log:
+        with mock.patch.object(host, "log") as mock_log:
             host.log_kv("test", "key_only")
             msg = mock_log.call_args[0][0]
             assert "key_only=" in msg  # empty value
@@ -896,29 +896,29 @@ class TestHostCallsNewMethods:
     # --- has_state ---
 
     def test_has_state_delegates(self, host):
-        """``has_state`` delegates to ``cleat_call('state', 'has', ...)``."""
-        with mock.patch.object(host, "cleat_call", return_value="true") as mock_call:
+        """``has_state`` delegates to ``call('state', 'has', ...)``."""
+        with mock.patch.object(host, "call", return_value="true") as mock_call:
             result = host.has_state("my_key")
             mock_call.assert_called_once_with("state", "has", {"key": "my_key"})
             assert result is True
 
     def test_has_state_false(self, host):
         """``has_state`` returns ``False`` when the key does not exist."""
-        with mock.patch.object(host, "cleat_call", return_value="false"):
+        with mock.patch.object(host, "call", return_value="false"):
             assert host.has_state("missing") is False
 
     # --- list_state ---
 
     def test_list_state_delegates(self, host):
-        """``list_state`` delegates to ``cleat_call('state', 'list', ...)``."""
-        with mock.patch.object(host, "cleat_call", return_value='["k1", "k2"]') as mock_call:
+        """``list_state`` delegates to ``call('state', 'list', ...)``."""
+        with mock.patch.object(host, "call", return_value='["k1", "k2"]') as mock_call:
             result = host.list_state("prefix_")
             mock_call.assert_called_once_with("state", "list", {"prefix": "prefix_"})
             assert result == ["k1", "k2"]
 
     def test_list_state_empty_prefix(self, host):
         """``list_state`` with an empty prefix passes ``{"prefix": ""}``."""
-        with mock.patch.object(host, "cleat_call", return_value="[]") as mock_call:
+        with mock.patch.object(host, "call", return_value="[]") as mock_call:
             result = host.list_state()
             mock_call.assert_called_once_with("state", "list", {"prefix": ""})
             assert result == []
@@ -926,17 +926,17 @@ class TestHostCallsNewMethods:
     # --- cleat_fetch_json ---
 
     def test_cleat_fetch_json_delegates(self, host):
-        """``cleat_fetch_json`` deserialises the response body from ``cleat_fetch``."""
-        with mock.patch.object(host, "cleat_fetch", return_value=('{"key": "val"}', 200)):
-            result = host.cleat_fetch_json("http://example.com")
+        """``fetch_json`` deserialises the response body from ``fetch``."""
+        with mock.patch.object(host, "fetch", return_value=('{"key": "val"}', 200)):
+            result = host.fetch_json("http://example.com")
             assert result == {"key": "val"}
 
     # --- fetch_get ---
 
     def test_fetch_get_delegates(self, host):
-        """``fetch_get`` delegates to ``cleat_fetch`` with ``"GET"`` method."""
+        """``fetch_get`` delegates to ``fetch`` with ``"GET"`` method."""
         with mock.patch.object(
-            host, "cleat_fetch", return_value=('{"ok": true}', 200)
+            host, "fetch", return_value=('{"ok": true}', 200)
         ) as mock_fetch:
             result = host.fetch_get("http://example.com")
             mock_fetch.assert_called_once_with("http://example.com", "GET")
@@ -946,7 +946,7 @@ class TestHostCallsNewMethods:
 
     def test_fetch_get_json_delegates(self, host):
         """``fetch_get_json`` chains through ``fetch_get`` with JSON parsing."""
-        with mock.patch.object(host, "cleat_fetch", return_value=('{"x": 1}', 200)):
+        with mock.patch.object(host, "fetch", return_value=('{"x": 1}', 200)):
             result = host.fetch_get_json("http://example.com")
             assert result == {"x": 1}
 

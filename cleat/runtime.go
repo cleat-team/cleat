@@ -1331,13 +1331,6 @@ func (h *HostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string,
 	return nil
 }
 
-// CallEphemeral is an alias for PluginCall. Invokes a named function on a
-// registered plugin without journaling (non-durable).
-// Prefer CallEphemeral for consistency across SDKs.
-func (h *HostCallsImpl) CallEphemeral(pluginName, functionName, inputJSON string) (string, error) {
-	return h.PluginCall(pluginName, functionName, inputJSON)
-}
-
 func (h *HostCallsImpl) PluginCall(pluginName, functionName, inputJSON string) (string, error) {
 	if h.pluginCall != nil {
 		return h.pluginCall(pluginName, functionName, inputJSON)

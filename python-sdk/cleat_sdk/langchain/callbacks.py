@@ -36,7 +36,7 @@ class CleatCallbackHandler:
     h : HostCalls
         The HostCalls instance for the current workflow execution.
     verbose : bool
-        If True, each event is also logged via cleat_log for debugging.
+        If True, each event is also logged via log for debugging.
     """
 
     def __init__(self, h: HostCalls, verbose: bool = False) -> None:
@@ -84,7 +84,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.cleat_log(
+            self.h.log(
                 f"[Cleat] LLM start step={self.step_counter} model={serialized.get('name', '?')}"
             )
 
@@ -114,7 +114,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] LLM end step={self.step_counter} elapsed={elapsed}ms")
+            self.h.log(f"[Cleat] LLM end step={self.step_counter} elapsed={elapsed}ms")
 
     def on_llm_error(
         self,
@@ -132,7 +132,7 @@ class CleatCallbackHandler:
             {"run_id": rid, "error": str(error)},
         )
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] LLM error step={self.step_counter}: {error}")
+            self.h.log(f"[Cleat] LLM error step={self.step_counter}: {error}")
 
     def on_llm_new_token(
         self,
@@ -179,7 +179,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] Tool start step={self.step_counter} tool={tool_name}")
+            self.h.log(f"[Cleat] Tool start step={self.step_counter} tool={tool_name}")
 
     def on_tool_end(
         self,
@@ -205,7 +205,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] Tool end step={self.step_counter} elapsed={elapsed}ms")
+            self.h.log(f"[Cleat] Tool end step={self.step_counter} elapsed={elapsed}ms")
 
     def on_tool_error(
         self,
@@ -223,7 +223,7 @@ class CleatCallbackHandler:
             {"run_id": rid, "error": str(error)},
         )
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] Tool error step={self.step_counter}: {error}")
+            self.h.log(f"[Cleat] Tool error step={self.step_counter}: {error}")
 
     # ------------------------------------------------------------------
     # Chain callbacks
@@ -254,7 +254,7 @@ class CleatCallbackHandler:
         )
 
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] Chain start: {chain_name}")
+            self.h.log(f"[Cleat] Chain start: {chain_name}")
 
     def on_chain_end(
         self,
@@ -270,7 +270,7 @@ class CleatCallbackHandler:
             elapsed = self.h.now() - self._chain_starts.pop(rid)
 
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] Chain end elapsed={elapsed}ms")
+            self.h.log(f"[Cleat] Chain end elapsed={elapsed}ms")
 
     def on_chain_error(
         self,
@@ -284,7 +284,7 @@ class CleatCallbackHandler:
         self._chain_starts.pop(rid, None)
 
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] Chain error: {error}")
+            self.h.log(f"[Cleat] Chain error: {error}")
 
     # ------------------------------------------------------------------
     # Agent callbacks
@@ -315,7 +315,7 @@ class CleatCallbackHandler:
             },
         )
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] Agent action step={self.step_counter} tool={tool}")
+            self.h.log(f"[Cleat] Agent action step={self.step_counter} tool={tool}")
 
     def on_agent_finish(
         self,
@@ -335,7 +335,7 @@ class CleatCallbackHandler:
             {"output": str(output)[:5000], "step": self.step_counter},
         )
         if self.verbose:
-            self.h.cleat_log(f"[Cleat] Agent finished step={self.step_counter}")
+            self.h.log(f"[Cleat] Agent finished step={self.step_counter}")
 
     # ------------------------------------------------------------------
     # Retriever callbacks

@@ -51,13 +51,13 @@ class TestStubCall:
     def test_stub_call_returns_response(self):
         h = CleatTestHarness()
         h.stub_call("greeter", "Greet", '{"greeting": "Hello"}')
-        result = h.cleat_call("greeter", "Greet", {"name": "World"})
+        result = h.call("greeter", "Greet", {"name": "World"})
         assert result == '{"greeting": "Hello"}'
 
     def test_stub_call_records_history(self):
         h = CleatTestHarness()
         h.stub_call("payment", "Charge", '{"status": "ok"}')
-        h.cleat_call("payment", "Charge", {"amount": 100})
+        h.call("payment", "Charge", {"amount": 100})
         records = h.call_history
         assert len(records) == 1
         assert records[0].service == "payment"
@@ -68,28 +68,28 @@ class TestStubCall:
         h = CleatTestHarness()
         h.stub_call("svc", "op", "resp1")
         h.stub_call("svc", "op", "resp2")
-        assert h.cleat_call("svc", "op", "") == "resp1"
-        assert h.cleat_call("svc", "op", "") == "resp2"
+        assert h.call("svc", "op", "") == "resp1"
+        assert h.call("svc", "op", "") == "resp2"
 
     def test_stub_call_raises_error(self):
         h = CleatTestHarness()
         h.stub_call("svc", "op", "", error="service unavailable")
         with pytest.raises(RuntimeError, match="service unavailable"):
-            h.cleat_call("svc", "op", "")
+            h.call("svc", "op", "")
 
     def test_stub_call_no_stub_raises(self):
         h = CleatTestHarness()
         with pytest.raises(RuntimeError, match="no stub registered"):
-            h.cleat_call("unknown", "op", "")
+            h.call("unknown", "op", "")
 
     def test_call_count(self):
         h = CleatTestHarness()
         h.stub_call("a", "x", "1")
         h.stub_call("a", "x", "2")
         h.stub_call("a", "y", "3")
-        h.cleat_call("a", "x", "")
-        h.cleat_call("a", "x", "")
-        h.cleat_call("a", "y", "")
+        h.call("a", "x", "")
+        h.call("a", "x", "")
+        h.call("a", "y", "")
         assert h.call_count("a", "x") == 2
         assert h.call_count("a", "y") == 1
         assert h.call_count("b", "z") == 0
@@ -98,22 +98,22 @@ class TestStubCall:
         h = CleatTestHarness()
         h.stub_call("svc", "op", "")
         assert not h.assert_called("svc", "op")
-        h.cleat_call("svc", "op", "")
+        h.call("svc", "op", "")
         assert h.assert_called("svc", "op")
 
     def test_assert_not_called(self):
         h = CleatTestHarness()
         assert h.assert_not_called("svc", "op")
         h.stub_call("svc", "op", "")
-        h.cleat_call("svc", "op", "")
+        h.call("svc", "op", "")
         assert not h.assert_not_called("svc", "op")
 
     def test_last_call(self):
         h = CleatTestHarness()
         h.stub_call("svc", "op", "resp1")
         h.stub_call("svc", "op", "resp2")
-        h.cleat_call("svc", "op", "req1")
-        h.cleat_call("svc", "op", "req2")
+        h.call("svc", "op", "req1")
+        h.call("svc", "op", "req2")
         last = h.last_call("svc", "op")
         assert last is not None
         assert last.response == "resp2"
@@ -142,7 +142,7 @@ class TestClockControl:
     def test_sleep_advances_clock(self):
         h = CleatTestHarness()
         before = h.now_ms
-        h.cleat_sleep(3000)
+        h.sleep(3000)
         assert h.now_ms - before == 3000
 
 
@@ -366,7 +366,7 @@ class TestLifecycle:
 
     def test_cleat_send(self):
         h = CleatTestHarness()
-        h.cleat_send("email", "notify", {"user": "u1"})
+        h.send("email", "notify", {"user": "u1"})
         assert h.call_count("email", "notify") == 1
 
     def test_schedule_invoke(self):
@@ -376,7 +376,7 @@ class TestLifecycle:
 
     def test_cleat_defer(self):
         h = CleatTestHarness()
-        defer_id = h.cleat_defer("cleanup temp files")
+        defer_id = h.defer("cleanup temp files")
         assert defer_id.startswith("test-defer")
 
     def test_continue_as_new(self):
@@ -396,7 +396,7 @@ class TestReset:
     def test_reset_clears_everything(self):
         h = CleatTestHarness()
         h.stub_call("svc", "op", "resp")
-        h.cleat_call("svc", "op", "req")
+        h.call("svc", "op", "req")
         h.stub_signal("sig", "payload")
         h.create_promise("p")
         h.now_ms += 9999
@@ -425,8 +425,8 @@ class TestWorkflowIntegration:
         h.stub_call("greeter", "Greet", '{"greeting": "Hello, Alice"}')
 
         def hello_workflow(h: HostCalls, name: str) -> str:
-            h.cleat_log(f"Hello workflow started for {name}")
-            response = h.cleat_call("greeter", "Greet", {"name": name, "language": "en"})
+            h.log(f"Hello workflow started for {name}")
+            response = h.call("greeter", "Greet", {"name": name, "language": "en"})
             return response
 
         result = hello_workflow(h, "World")
@@ -442,7 +442,7 @@ class TestWorkflowIntegration:
 
         def charge_workflow(h: HostCalls, amount: int) -> str:
             try:
-                result = h.cleat_call("payment", "Charge", {"amount": amount})
+                result = h.call("payment", "Charge", {"amount": amount})
                 return result
             except RuntimeError as e:
                 return json.dumps({"error": str(e)})
@@ -465,20 +465,20 @@ class TestEdgeCases:
         h.stub_call("b", "op2", "r2")
         h.stub_call("a", "op1", "r3")
 
-        assert h.cleat_call("a", "op1", "") == "r1"
-        assert h.cleat_call("b", "op2", "") == "r2"
-        assert h.cleat_call("a", "op1", "") == "r3"
+        assert h.call("a", "op1", "") == "r1"
+        assert h.call("b", "op2", "") == "r2"
+        assert h.call("a", "op1", "") == "r3"
 
     def test_cleat_call_with_retry_delegates(self):
         h = CleatTestHarness()
         h.stub_call("svc", "op", "ok")
-        result = h.cleat_call_with_retry("svc", "op", {}, RetryPolicy(max_attempts=3))
+        result = h.call_with_retry("svc", "op", {}, RetryPolicy(max_attempts=3))
         assert result == "ok"
 
     def test_cleat_fetch_delegates(self):
         h = CleatTestHarness()
         h.stub_call("http", "fetch", '{"body": "response body", "status": 200}')
-        body, status = h.cleat_fetch("https://example.com")
+        body, status = h.fetch("https://example.com")
         assert body == "response body"
         assert status == 200
 

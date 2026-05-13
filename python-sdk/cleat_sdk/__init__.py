@@ -10,8 +10,8 @@ Quick start:
 
     @cleat_entry
     def my_workflow(h: HostCalls, name: str) -> str:
-        h.cleat_log(f"Hello, {name}!")
-        resp = h.cleat_call("my-service", "DoThing", {"name": name})
+        h.log(f"Hello, {name}!")
+        resp = h.call("my-service", "DoThing", {"name": name})
         return resp
 """
 

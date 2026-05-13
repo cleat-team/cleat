@@ -8,17 +8,14 @@ import (
 // CallTyped marshals request to JSON, makes a durable (journaled) call via
 // DurableCall, unmarshals the response into the generic type T, and returns
 // the typed result. This eliminates manual JSON marshaling/unmarshaling
-// at plugin call sites.
+// at call sites.
 //
 // Usage:
 //
 //	type MyRequest struct { ... }
 //	type MyResponse struct { ... }
 //
-//	resp, err := cleat.CallTyped[MyResponse](h, "my_plugin", "my_op", MyRequest{...})
-//
-// The call is durable (journaled for deterministic replay), use CallTypedEphemeral
-// for non-durable (non-journaled) calls.
+//	resp, err := cleat.CallTyped[MyResponse](h, "my_service", "my_op", MyRequest{...})
 func CallTyped[T any](h HostCalls, service, operation string, request any) (T, error) {
 	var zero T
 	reqJSON, err := json.Marshal(request)
@@ -36,25 +33,17 @@ func CallTyped[T any](h HostCalls, service, operation string, request any) (T, e
 	return result, nil
 }
 
-// CallEphemeralTyped is an alias for CallTypedEphemeral.
-// Prefer CallEphemeralTyped over CallTypedEphemeral for consistency.
-func CallEphemeralTyped[T any](h HostCalls, plugin, function string, request any) (T, error) {
-	return CallTypedEphemeral[T](h, plugin, function, request)
-}
-
-// CallTypedEphemeral marshals request to JSON, makes a non-durable
-// (non-journaled) plugin call via PluginCall, unmarshals the response into
-// the generic type T, and returns the typed result.
+// PluginCallTyped marshals request to JSON, makes a plugin call via PluginCall,
+// unmarshals the response into the generic type T, and returns the typed result.
 //
-// Use this for read-only or side-effect-free operations where durability
-// (journaling for deterministic replay) is not needed.
+// Plugin calls target Go host plugins (e.g., "llm", "blobstore") rather than
+// external services. They are journaled for deterministic replay, same as
+// regular durable calls.
 //
 // Usage:
 //
-//	resp, err := cleat.CallTypedEphemeral[MyResponse](h, "llm", "chat", ChatRequest{...})
-//
-// Deprecated: Use CallEphemeralTyped instead.
-func CallTypedEphemeral[T any](h HostCalls, plugin, function string, request any) (T, error) {
+//	resp, err := cleat.PluginCallTyped[MyResponse](h, "llm", "chat", ChatRequest{...})
+func PluginCallTyped[T any](h HostCalls, plugin, function string, request any) (T, error) {
 	var zero T
 	reqJSON, err := json.Marshal(request)
 	if err != nil {

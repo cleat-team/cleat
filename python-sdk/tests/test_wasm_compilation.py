@@ -231,7 +231,7 @@ def test_all_stubs_accounted_for():
             print(f"  - {imp}")
 
     # This is informational - we don't assert because some stubs might delegate
-    # to cleat_call internally and not need direct WIT imports
+    # to call internally and not need direct WIT imports
     print(
         f"Stub coverage: {len(stub_defs) - len(missing_from_imports)}/{len(stub_defs)} stubs have WIT imports"
     )
@@ -336,7 +336,7 @@ def test_python_wasm_roundtrip(tmp_path):
 
         @cleat_entry
         def hello_workflow(h: HostCalls, name: str) -> str:
-            h.cleat_log(f"Hello, {name}!")
+            h.log(f"Hello, {name}!")
             return f"Hello, {name}!"
     """)
     )

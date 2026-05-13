@@ -995,17 +995,12 @@ public class HostCalls {
      * @return a result containing the plugin function's response JSON on
      *         success, or an error description on failure
      */
-    public CleatResult<String> callEphemeral(String pluginName, String functionName, String inputJson) {
-        return pluginCall(pluginName, functionName, inputJson);
-    }
-
     /**
      * Call a plugin host function and return the response.
      * <p>
      * Plugins extend the host runtime with custom functionality beyond the
-     * standard host imports.  Unlike {@link #cleatCall(String, String, String)},
-     * plugin calls are <em>not</em> recorded in the workflow event history
-     * and are not replayed.
+     * standard host imports. Plugin calls are journaled for deterministic
+     * replay, same as {@link #cleatCall(String, String, String)}.
      *
      * @param pluginName   name of the plugin (e.g. {@code "blobstore"},
      *                     {@code "slacknotify"})
@@ -1014,7 +1009,6 @@ public class HostCalls {
      * @param inputJson    input JSON for the plugin function
      * @return a result containing the plugin function's response JSON on
      *         success, or an error description on failure
-     * @see #callEphemeral(String, String, String)
      */
     public CleatResult<String> pluginCall(String pluginName, String functionName, String inputJson) {
         int[] p = packStrings(pluginName, functionName, inputJson);
@@ -1036,6 +1030,33 @@ public class HostCalls {
         }
 
         return CleatResult.ok(readOutput(responseLen));
+    }
+
+    /**
+     * Typed variant of {@link #pluginCall(String, String, String)}.
+     * Deserialises the JSON response into the given type using the
+     * configured JSON mapper.
+     *
+     * @param pluginName   name of the plugin
+     * @param functionName name of the function within the plugin
+     * @param input        input object (serialised to JSON)
+     * @param resultType   class of the response type
+     * @param <T>          response type
+     * @return a result containing the deserialised response on success
+     */
+    public <T> CleatResult<T> pluginCallTyped(String pluginName, String functionName,
+                                               Object input, Class<T> resultType) {
+        String inputJson = JsonHelper.toJson(input);
+        CleatResult<String> raw = pluginCall(pluginName, functionName, inputJson);
+        if (raw.isErr()) {
+            return CleatResult.err(raw.errorOrNull());
+        }
+        try {
+            T result = JsonHelper.fromJson(raw.valueOrNull(), resultType);
+            return CleatResult.ok(result);
+        } catch (Exception e) {
+            return CleatResult.err("deserializing plugin response: " + e.getMessage());
+        }
     }
 
     /**

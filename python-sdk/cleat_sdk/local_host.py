@@ -16,13 +16,13 @@ Usage::
     # Record mode: make real calls in-process
     h = LocalHostCalls(mode="record")
     h.set_state("counter", 0)
-    result = h.cleat_call("greeter", "Greet", {"name": "World"})
+    result = h.call("greeter", "Greet", {"name": "World"})
     log = h.get_event_log()
 
     # Replay mode: replay the recorded log
     h2 = LocalHostCalls(mode="replay")
     h2.load_event_log(log)
-    result2 = h2.cleat_call("greeter", "Greet", {"name": "World"})
+    result2 = h2.call("greeter", "Greet", {"name": "World"})
 """
 
 from __future__ import annotations
@@ -427,22 +427,18 @@ class LocalHostCalls:
         return result
 
     # ------------------------------------------------------------------
-    # 7. cleat_log
+    # 7. log
     # ------------------------------------------------------------------
 
-    def cleat_log(self, message: str) -> None:
+    def log(self, message: str) -> None:
         """Log a message to the workflow event history.
 
         In local mode, the message is printed to stdout for visibility.
         """
         if self._mode == "replay":
-            self._replay_next("cleat_log")
+            self._replay_next("log")
             return
-        self._record("cleat_log", message=message)
-
-    def log(self, message: str) -> None:
-        """Alias for :meth:`cleat_log` — the preferred short form."""
-        return self.cleat_log(message)
+        self._record("log", message=message)
 
     # ------------------------------------------------------------------
     # 8. log_kv
@@ -467,13 +463,13 @@ class LocalHostCalls:
             formatted = "\n".join(parts)
         else:
             formatted = message
-        self.cleat_log(formatted)
+        self.log(formatted)
 
     # ------------------------------------------------------------------
-    # 9. cleat_call — recorded API call
+    # 9. call — recorded API call
     # ------------------------------------------------------------------
 
-    def cleat_call(
+    def call(
         self,
         service: str,
         operation: str,
@@ -487,7 +483,7 @@ class LocalHostCalls:
         result.
         """
         if self._mode == "replay":
-            return self._replay_next("cleat_call")
+            return self._replay_next("call")
         result = json.dumps(
             {
                 "status": "ok",
@@ -496,48 +492,38 @@ class LocalHostCalls:
                 "echo": self._marshal(request),
             }
         )
-        self._record("cleat_call", result=result, service=service, operation=operation, request=request)
+        self._record("call", result=result, service=service, operation=operation, request=request)
         return result
 
     # ------------------------------------------------------------------
-    # 10. cleat_call_typed
+    # 10. call_typed
     # ------------------------------------------------------------------
 
-    def call(self, service: str, operation: str, request: Any) -> str:
-        """Alias for :meth:`cleat_call` — the preferred short form."""
-        return self.cleat_call(service, operation, request)
-
-    def cleat_call_typed(
+    def call_typed(
         self, service: str, operation: str, request: Any, result_type: type[T]
     ) -> T:
         """Make a cleat call and deserialise the JSON response."""
-        response = self.cleat_call(service, operation, request)
+        response = self.call(service, operation, request)
         data = json.loads(response)
         if isinstance(data, dict):
             return result_type(**data)
         return result_type(data)
 
-    def call_typed(
-        self, service: str, operation: str, request: Any, result_type: type[T]
-    ) -> T:
-        """Alias for :meth:`cleat_call_typed` — the preferred short form."""
-        return self.cleat_call_typed(service, operation, request, result_type)
-
     # ------------------------------------------------------------------
-    # 11. cleat_call_with_retry
+    # 11. call_with_retry
     # ------------------------------------------------------------------
 
-    def cleat_call_with_retry(
+    def call_with_retry(
         self, service: str, operation: str, request: Any, retry: RetryPolicy
     ) -> str:
         """Make a cleat call with server-side retry (single attempt local)."""
-        return self.cleat_call(service, operation, request)
+        return self.call(service, operation, request)
 
     # ------------------------------------------------------------------
-    # 12. cleat_call_with_heartbeat
+    # 12. call_with_heartbeat
     # ------------------------------------------------------------------
 
-    def cleat_call_with_heartbeat(
+    def call_with_heartbeat(
         self,
         service: str,
         operation: str,
@@ -546,62 +532,58 @@ class LocalHostCalls:
         progress: Callable[[str], None],
     ) -> str:
         """Make a cleat call with heartbeat / progress updates."""
-        return self.cleat_call(service, operation, request)
+        return self.call(service, operation, request)
 
     # ------------------------------------------------------------------
-    # 13. cleat_sleep
+    # 13. sleep
     # ------------------------------------------------------------------
-
-    def cleat_sleep(self, timeout_seconds: float) -> bool:
-        """Suspend workflow execution for a duration in seconds."""
-        return self.cleat_sleep_ms(int(timeout_seconds * 1000))
 
     def sleep(self, timeout_seconds: float) -> bool:
-        """Alias for :meth:`cleat_sleep` — the preferred short form."""
-        return self.cleat_sleep(timeout_seconds)
+        """Suspend workflow execution for a duration in seconds."""
+        return self.sleep_ms(int(timeout_seconds * 1000))
 
-    def cleat_sleep_ms(self, timeout_ms: int) -> bool:
+    def sleep_ms(self, timeout_ms: int) -> bool:
         """Suspend workflow execution for a duration in milliseconds."""
         if self._mode == "replay":
-            return self._replay_next("cleat_sleep_ms")
+            return self._replay_next("sleep_ms")
         if timeout_ms > 0:
             time.sleep(timeout_ms / 1000.0)
             self._now_ms += timeout_ms
         result = False
-        self._record("cleat_sleep_ms", result=result, timeout_ms=timeout_ms)
+        self._record("sleep_ms", result=result, timeout_ms=timeout_ms)
         return result
 
     # ------------------------------------------------------------------
-    # 14. cleat_fetch
+    # 14. fetch
     # ------------------------------------------------------------------
 
-    def cleat_fetch(
+    def fetch(
         self,
         url: str,
         method: str = "GET",
         headers: Optional[dict] = None,
         body: str = "",
     ) -> tuple:
-        """Perform a cleat HTTP fetch via the ``"http"`` service.
+        """Perform an HTTP fetch via the ``"http"`` service.
 
         Returns a mock response tuple (body, status_code) without making
         an actual HTTP request.
         """
         if self._mode == "replay":
-            return self._replay_next("cleat_fetch")
+            return self._replay_next("fetch")
         body_text = json.dumps(
             {"url": url, "method": method, "headers": headers or {}, "body": body}
         )
         status_code = 200
         result = (body_text, status_code)
-        self._record("cleat_fetch", result=result, url=url, method=method, headers=headers, body=body)
+        self._record("fetch", result=result, url=url, method=method, headers=headers, body=body)
         return result
 
     # ------------------------------------------------------------------
-    # 15. cleat_fetch_json
+    # 15. fetch_json
     # ------------------------------------------------------------------
 
-    def cleat_fetch_json(
+    def fetch_json(
         self,
         url: str,
         method: str = "GET",
@@ -610,7 +592,7 @@ class LocalHostCalls:
         result_type: type[T] = dict,
     ) -> T:
         """Perform a cleat HTTP fetch and deserialize the JSON response."""
-        resp_body, status = self.cleat_fetch(url, method, headers, body)
+        resp_body, status = self.fetch(url, method, headers, body)
         data = json.loads(resp_body)
         if isinstance(data, dict) and result_type is not dict:
             return result_type(**data)
@@ -621,8 +603,8 @@ class LocalHostCalls:
     # ------------------------------------------------------------------
 
     def fetch_get(self, url: str) -> tuple:
-        """Shorthand for a cleat GET request via :meth:`cleat_fetch`."""
-        return self.cleat_fetch(url, "GET")
+        """Shorthand for a GET request via :meth:`fetch`."""
+        return self.fetch(url, "GET")
 
     # ------------------------------------------------------------------
     # 17. fetch_get_json
@@ -634,7 +616,7 @@ class LocalHostCalls:
         result_type: type[T] = dict,
     ) -> T:
         """Shorthand for a cleat GET request with JSON deserialization."""
-        return self.cleat_fetch_json(url, "GET", result_type=result_type)
+        return self.fetch_json(url, "GET", result_type=result_type)
 
     # ------------------------------------------------------------------
     # 18. await_signals
@@ -1198,10 +1180,10 @@ class LocalHostCalls:
         return handler(payload)
 
     # ------------------------------------------------------------------
-    # 41. cleat_defer
+    # 41. defer
     # ------------------------------------------------------------------
 
-    def cleat_defer(self, description: str) -> str:
+    def defer(self, description: str) -> str:
         """Register a deferred cleanup action to run on workflow exit.
 
         Returns
@@ -1210,11 +1192,11 @@ class LocalHostCalls:
             The defer ID.
         """
         if self._mode == "replay":
-            return self._replay_next("cleat_defer")
+            return self._replay_next("defer")
         self._deferral_counter += 1
         defer_id = f"local-defer-{self._deferral_counter}"
         self._deferrals[defer_id] = description
-        self._record("cleat_defer", result=defer_id, description=description)
+        self._record("defer", result=defer_id, description=description)
         return defer_id
 
     # ------------------------------------------------------------------
@@ -1331,15 +1313,15 @@ class LocalHostCalls:
             self._detached_context = saved
 
     # ------------------------------------------------------------------
-    # 45. cleat_send
+    # 45. send
     # ------------------------------------------------------------------
 
-    def cleat_send(self, service: str, operation: str, request: Any) -> None:
+    def send(self, service: str, operation: str, request: Any) -> None:
         """Send a fire-and-forget request to an external service."""
         if self._mode == "replay":
-            self._replay_next("cleat_send")
+            self._replay_next("send")
             return
-        self._record("cleat_send", service=service, operation=operation, request=request)
+        self._record("send", service=service, operation=operation, request=request)
 
     # ------------------------------------------------------------------
     # 46. schedule_invoke
@@ -1488,14 +1470,10 @@ class LocalHostCalls:
         )
         return result
 
-    def call_ephemeral(self, plugin_name: str, function_name: str, input: Any) -> str:
-        """Alias for :meth:`plugin_call` — the preferred short form."""
-        return self.plugin_call(plugin_name, function_name, input)
-
-    def call_ephemeral_typed(
+    def plugin_call_typed(
         self, plugin_name: str, function_name: str, input: Any, result_type: type[T]
     ) -> T:
-        """Typed variant of :meth:`call_ephemeral`."""
+        """Typed variant of :meth:`plugin_call`."""
         response = self.plugin_call(plugin_name, function_name, input)
         data = json.loads(response)
         if isinstance(data, dict):

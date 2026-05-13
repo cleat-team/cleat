@@ -51,21 +51,21 @@ class TestRecordMode:
     """Verify that calls in record mode are recorded to the event log."""
 
     def test_cleat_call_is_recorded(self, host: LocalHostCalls):
-        """``cleat_call`` is recorded with service, operation, and request."""
-        result = host.cleat_call("greeter", "Greet", {"name": "World"})
+        """``call`` is recorded with service, operation, and request."""
+        result = host.call("greeter", "Greet", {"name": "World"})
         assert json.loads(result)["status"] == "ok"
         log = host.get_event_log()
         assert len(log) == 1
-        assert log[0]["method"] == "cleat_call"
+        assert log[0]["method"] == "call"
         assert log[0]["kwargs"]["service"] == "greeter"
         assert log[0]["kwargs"]["operation"] == "Greet"
 
     def test_sleep_is_recorded(self, host: LocalHostCalls):
-        """``cleat_sleep_ms`` is recorded."""
-        host.cleat_sleep_ms(100)
+        """``sleep_ms`` is recorded."""
+        host.sleep_ms(100)
         log = host.get_event_log()
         assert len(log) == 1
-        assert log[0]["method"] == "cleat_sleep_ms"
+        assert log[0]["method"] == "sleep_ms"
         assert log[0]["kwargs"]["timeout_ms"] == 100
 
     def test_state_operations_recorded(self, host: LocalHostCalls):
@@ -80,14 +80,14 @@ class TestRecordMode:
         assert log[2]["method"] == "delete_state"
 
     def test_log_recorded(self, host: LocalHostCalls):
-        """``cleat_log`` and ``log_kv`` are recorded."""
-        host.cleat_log("hello")
+        """``log`` and ``log_kv`` are recorded."""
+        host.log("hello")
         host.log_kv("test", "key", "value")
         log = host.get_event_log()
         assert len(log) >= 2
-        # log_kv chains through cleat_log, so there should be at least 2 entries
-        cleat_log_entries = [e for e in log if e["method"] == "cleat_log"]
-        assert len(cleat_log_entries) == 2
+        # log_kv chains through log, so there should be at least 2 entries
+        log_entries = [e for e in log if e["method"] == "log"]
+        assert len(log_entries) == 2
 
     def test_signal_workflow_recorded(self, host: LocalHostCalls):
         """``signal_workflow`` records the signal."""
@@ -108,51 +108,51 @@ class TestReplayMode:
     def test_cleat_call_replay(self):
         """Record a call, save the log, replay it, verify the same result."""
         h1 = LocalHostCalls(mode="record")
-        result1 = h1.cleat_call("svc", "op", {"x": 1})
+        result1 = h1.call("svc", "op", {"x": 1})
         log = h1.get_event_log()
 
         h2 = LocalHostCalls(mode="replay")
         h2.load_event_log(log)
-        result2 = h2.cleat_call("svc", "op", {"x": 1})
+        result2 = h2.call("svc", "op", {"x": 1})
 
         assert result1 == result2
 
     def test_replay_cursor_advances(self):
         """Replaying multiple calls advances the cursor and returns in order."""
         h1 = LocalHostCalls(mode="record")
-        h1.cleat_call("a", "op1", {})
-        h1.cleat_call("b", "op2", {})
+        h1.call("a", "op1", {})
+        h1.call("b", "op2", {})
         log = h1.get_event_log()
 
         h2 = LocalHostCalls(mode="replay")
         h2.load_event_log(log)
-        r1 = h2.cleat_call("a", "op1", {})
-        r2 = h2.cleat_call("b", "op2", {})
+        r1 = h2.call("a", "op1", {})
+        r2 = h2.call("b", "op2", {})
         assert json.loads(r1)["service"] == "a"
         assert json.loads(r2)["service"] == "b"
 
     def test_replay_method_mismatch_raises(self):
         """Replaying with the wrong method name raises RuntimeError."""
         h1 = LocalHostCalls(mode="record")
-        h1.cleat_call("svc", "op", {})
+        h1.call("svc", "op", {})
         log = h1.get_event_log()
 
         h2 = LocalHostCalls(mode="replay")
         h2.load_event_log(log)
         with pytest.raises(RuntimeError, match="Replay mismatch"):
-            h2.cleat_sleep_ms(100)  # wrong method
+            h2.sleep_ms(100)  # wrong method
 
     def test_replay_exhausted_raises(self):
         """Replaying with no more events raises RuntimeError."""
         h1 = LocalHostCalls(mode="record")
-        h1.cleat_call("svc", "op", {})
+        h1.call("svc", "op", {})
         log = h1.get_event_log()
 
         h2 = LocalHostCalls(mode="replay")
         h2.load_event_log(log)
-        h2.cleat_call("svc", "op", {})  # OK
+        h2.call("svc", "op", {})  # OK
         with pytest.raises(RuntimeError, match="Replay exhausted"):
-            h2.cleat_call("svc", "op", {})  # no more events
+            h2.call("svc", "op", {})  # no more events
 
     def test_state_replay(self):
         """State operations can be recorded and replayed."""
@@ -511,13 +511,13 @@ class TestLifecycleHelpers:
     """Defer, send, schedule_invoke, extend_timeout, continue_as_new."""
 
     def test_cleat_defer_returns_id(self, host: LocalHostCalls):
-        """``cleat_defer`` returns a defer ID."""
-        did = host.cleat_defer("cleanup resources")
+        """``defer`` returns a defer ID."""
+        did = host.defer("cleanup resources")
         assert did.startswith("local-defer-")
 
     def test_cleat_send_no_error(self, host: LocalHostCalls):
-        """``cleat_send`` does not raise."""
-        host.cleat_send("notification", "send", {"msg": "hello"})  # should not raise
+        """``send`` does not raise."""
+        host.send("notification", "send", {"msg": "hello"})  # should not raise
 
     def test_schedule_invoke_no_error(self, host: LocalHostCalls):
         """``schedule_invoke`` does not raise."""
@@ -650,7 +650,7 @@ class TestPluginCalls:
 
 
 # ========================================================================
-# cleat_fetch convenience methods
+# fetch convenience methods
 # ========================================================================
 
 
@@ -658,13 +658,13 @@ class TestFetchMethods:
     """HTTP fetch convenience methods."""
 
     def test_cleat_fetch(self, host: LocalHostCalls):
-        """``cleat_fetch`` returns a tuple (body, status)."""
-        body, status = host.cleat_fetch("http://example.com")
+        """``fetch`` returns a tuple (body, status)."""
+        body, status = host.fetch("http://example.com")
         assert status == 200
         assert isinstance(body, str)
 
     def test_fetch_get(self, host: LocalHostCalls):
-        """``fetch_get`` delegates to cleat_fetch with GET."""
+        """``fetch_get`` delegates to fetch with GET."""
         body, status = host.fetch_get("http://example.com")
         assert status == 200
 
@@ -674,13 +674,13 @@ class TestFetchMethods:
         assert isinstance(result, dict)
 
     def test_cleat_fetch_json(self, host: LocalHostCalls):
-        """``cleat_fetch_json`` deserialises the response."""
-        result = host.cleat_fetch_json("http://example.com")
+        """``fetch_json`` deserialises the response."""
+        result = host.fetch_json("http://example.com")
         assert isinstance(result, dict)
 
 
 # ========================================================================
-# cleat_log / log_kv
+# log / log_kv
 # ========================================================================
 
 
@@ -688,8 +688,8 @@ class TestLogging:
     """Logging operations."""
 
     def test_cleat_log_no_error(self, host: LocalHostCalls):
-        """``cleat_log`` does not raise."""
-        host.cleat_log("hello world")  # should not raise
+        """``log`` does not raise."""
+        host.log("hello world")  # should not raise
 
     def test_log_kv_no_error(self, host: LocalHostCalls):
         """``log_kv`` does not raise."""
@@ -701,21 +701,21 @@ class TestLogging:
 
 
 # ========================================================================
-# cleat_call error handling (non-replay path)
+# call error handling (non-replay path)
 # ========================================================================
 
 
 class TestCallErrorHandling:
-    """Error conditions for cleat_call and related methods."""
+    """Error conditions for call and related methods."""
 
     def test_cleat_call_with_retry_delegates(self, host: LocalHostCalls):
-        """``cleat_call_with_retry`` delegates to ``cleat_call``."""
+        """``call_with_retry`` delegates to ``call``."""
         policy = RetryPolicy(max_attempts=3)
-        result = host.cleat_call_with_retry("svc", "op", {"x": 1}, policy)
+        result = host.call_with_retry("svc", "op", {"x": 1}, policy)
         assert json.loads(result)["status"] == "ok"
 
     def test_cleat_call_typed(self, host: LocalHostCalls):
-        """``cleat_call_typed`` returns an instance of the target type."""
+        """``call_typed`` returns an instance of the target type."""
         from dataclasses import dataclass
 
         @dataclass
@@ -725,7 +725,7 @@ class TestCallErrorHandling:
             operation: str = ""
             echo: str = ""
 
-        result = host.cleat_call_typed("svc", "greet", {"name": "World"}, CallResponse)
+        result = host.call_typed("svc", "greet", {"name": "World"}, CallResponse)
         assert isinstance(result, CallResponse)
         assert result.status == "ok"
         assert result.service == "svc"

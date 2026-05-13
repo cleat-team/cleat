@@ -79,7 +79,7 @@ class CallRecord:
 
 @dataclass
 class _CallStub:
-    """Internal stub record for a cleat_call."""
+    """Internal stub record for a call."""
 
     service: str
     operation: str
@@ -171,7 +171,7 @@ class CleatTestHarness(HostCalls):
         response: str = "",
         error: Optional[str] = None,
     ) -> None:
-        """Register a stub response for a ``cleat_call``.
+        """Register a stub response for a ``call``.
 
         Stubs are consumed in FIFO order. If multiple stubs are registered
         for the same (service, operation), they are used in sequence.
@@ -414,7 +414,7 @@ class CleatTestHarness(HostCalls):
     def current_run_id(self) -> str:
         return self._run_id
 
-    def cleat_log(self, message: str) -> None:
+    def log(self, message: str) -> None:
         # Best-effort: no-op in test harness
         pass
 
@@ -431,10 +431,10 @@ class CleatTestHarness(HostCalls):
         return result_type(data)
 
     # ------------------------------------------------------------------
-    # cleat_call
+    # call
     # ------------------------------------------------------------------
 
-    def cleat_call(self, service: str, operation: str, request: Any) -> str:
+    def call(self, service: str, operation: str, request: Any) -> str:
         req_str = self._marshal(request)
 
         # Find first matching stub
@@ -451,7 +451,7 @@ class CleatTestHarness(HostCalls):
                 )
                 self.call_history.append(rec)
                 if stub.error:
-                    raise RuntimeError(f"cleat_call({service}.{operation}) failed: {stub.error}")
+                    raise RuntimeError(f"call({service}.{operation}) failed: {stub.error}")
                 return stub.response
 
         # No stub found
@@ -467,13 +467,13 @@ class CleatTestHarness(HostCalls):
             f"CleatTestHarness: no stub registered for {service}.{operation} (request: {req_str})"
         )
 
-    def cleat_call_with_retry(
+    def call_with_retry(
         self, service: str, operation: str, request: Any, retry: RetryPolicy
     ) -> str:
-        # Delegate to cleat_call (simplified; no actual retry in harness)
-        return self.cleat_call(service, operation, request)
+        # Delegate to call (simplified; no actual retry in harness)
+        return self.call(service, operation, request)
 
-    def cleat_call_with_heartbeat(
+    def call_with_heartbeat(
         self,
         service: str,
         operation: str,
@@ -481,27 +481,27 @@ class CleatTestHarness(HostCalls):
         heartbeat_interval_ms: int,
         progress: Callable[[str], None],
     ) -> str:
-        # Delegate to cleat_call (no heartbeat simulation)
-        return self.cleat_call(service, operation, request)
+        # Delegate to call (no heartbeat simulation)
+        return self.call(service, operation, request)
 
-    def cleat_fetch(
+    def fetch(
         self,
         url: str,
         method: str = "GET",
         headers: Optional[dict] = None,
         body: str = "",
     ) -> tuple:
-        # Delegate to cleat_call("http", "fetch", ...)
+        # Delegate to call("http", "fetch", ...)
         request = {"url": url, "method": method, "headers": headers or {}, "body": body}
-        result = self.cleat_call("http", "fetch", request)
+        result = self.call("http", "fetch", request)
         data = json.loads(result)
         return data.get("body", ""), data.get("status", 200)
 
     # ------------------------------------------------------------------
-    # cleat_sleep
+    # sleep
     # ------------------------------------------------------------------
 
-    def cleat_sleep(self, duration_ms: int) -> bool:
+    def sleep(self, duration_ms: int) -> bool:
         # In the test harness, sleep advances the clock immediately
         self.now_ms += duration_ms
         return False
@@ -590,10 +590,10 @@ class CleatTestHarness(HostCalls):
     # ------------------------------------------------------------------
 
     def set_state(self, key: str, value: Any) -> None:
-        self.cleat_call("state", "set", {"key": key, "value": value})
+        self.call("state", "set", {"key": key, "value": value})
 
     def get_state(self, key: str, result_type: type = str) -> Any:
-        result = self.cleat_call("state", "get", {"key": key})
+        result = self.call("state", "get", {"key": key})
         data = json.loads(result)
         if isinstance(data, dict):
             value = data.get("value", data)
@@ -606,10 +606,10 @@ class CleatTestHarness(HostCalls):
         return result_type(value)
 
     def delete_state(self, key: str) -> None:
-        self.cleat_call("state", "delete", {"key": key})
+        self.call("state", "delete", {"key": key})
 
     def incr_state(self, key: str, delta: int = 1) -> int:
-        result = self.cleat_call("state", "incr", {"key": key, "delta": delta})
+        result = self.call("state", "incr", {"key": key, "delta": delta})
         return int(json.loads(result))
 
     # ------------------------------------------------------------------
@@ -654,7 +654,7 @@ class CleatTestHarness(HostCalls):
     # Defer, continue_as_new, send, schedule, plugin
     # ------------------------------------------------------------------
 
-    def cleat_defer(self, description: str) -> str:
+    def defer(self, description: str) -> str:
         return f"test-defer-{len(self.call_history)}"
 
     def continue_as_new(self, input: Any) -> None:
@@ -664,7 +664,7 @@ class CleatTestHarness(HostCalls):
         """Extend the workflow's execution timeout (no-op in test harness)."""
         pass
 
-    def cleat_send(self, service: str, operation: str, request: Any) -> None:
+    def send(self, service: str, operation: str, request: Any) -> None:
         req_str = self._marshal(request)
         self.call_history.append(CallRecord(service=service, operation=operation, request=req_str))
 

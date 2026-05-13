@@ -86,7 +86,7 @@ def test_py002_open_not_allowed(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             open("data.txt")
     """,
         "PY002",
@@ -139,7 +139,7 @@ def test_py004_time_sleep(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             time.sleep(1)
     """,
         "PY004",
@@ -157,7 +157,7 @@ def test_py005_time_time(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             _ = time.time()
     """,
         "PY005",
@@ -175,7 +175,7 @@ def test_py006_random_random(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             random.random()
     """,
         "PY006",
@@ -188,7 +188,7 @@ def test_py006_random_randint(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             random.randint(1, 10)
     """,
         "PY006",
@@ -201,7 +201,7 @@ def test_py006_random_uniform(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             random.uniform(0, 1)
     """,
         "PY006",
@@ -214,7 +214,7 @@ def test_py006_random_choice(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             random.choice([1, 2, 3])
     """,
         "PY006",
@@ -227,7 +227,7 @@ def test_py006_random_shuffle(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             lst = [1, 2, 3]
             random.shuffle(lst)
     """,
@@ -246,7 +246,7 @@ def test_py007_os_system(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             os.system("cmd")
     """,
         "PY007",
@@ -259,7 +259,7 @@ def test_py007_os_popen(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             os.popen("cmd")
     """,
         "PY007",
@@ -272,7 +272,7 @@ def test_py007_os_getenv(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             os.getenv("HOME")
     """,
         "PY007",
@@ -285,7 +285,7 @@ def test_py007_os_environ_subscript(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             _ = os.environ["HOME"]
     """,
         "PY007",
@@ -298,7 +298,7 @@ def test_py007_os_listdir(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             os.listdir(".")
     """,
         "PY007",
@@ -311,7 +311,7 @@ def test_py007_os_remove(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             os.remove("f.txt")
     """,
         "PY007",
@@ -324,7 +324,7 @@ def test_py007_os_rename(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             os.rename("a", "b")
     """,
         "PY007",
@@ -337,7 +337,7 @@ def test_py007_os_mkdir(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             os.mkdir("d")
     """,
         "PY007",
@@ -350,7 +350,7 @@ def test_py007_os_walk(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             os.walk(".")
     """,
         "PY007",
@@ -363,7 +363,7 @@ def test_py007_os_exit(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             os.exit(1)
     """,
         "PY007",
@@ -376,7 +376,7 @@ def test_py007_subprocess_call(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             subprocess.call(["ls"])
     """,
         "PY007",
@@ -389,7 +389,7 @@ def test_py007_subprocess_run(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             subprocess.run(["ls"])
     """,
         "PY007",
@@ -402,7 +402,7 @@ def test_py007_subprocess_popen(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             subprocess.Popen(["ls"])
     """,
         "PY007",
@@ -459,7 +459,7 @@ def test_py008_module_level_call(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             threading.Thread()
     """,
         "PY008",
@@ -477,7 +477,7 @@ def test_py009_socket_socket(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             socket.socket()
     """,
         "PY009",
@@ -490,7 +490,7 @@ def test_py009_socket_create_connection(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             socket.create_connection(("localhost", 80))
     """,
         "PY009",
@@ -518,7 +518,7 @@ def test_py010_print_not_allowed(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            cleat_call("foo")
+            call("foo")
             print("hello")
     """,
         "PY010",
@@ -541,7 +541,7 @@ def test_py011_missing_host_calls_param(tmp_path) -> None:
         tmp_path,
         """\
         def worker():
-            cleat_call("some_func")
+            call("some_func")
     """,
         "PY011",
     )
@@ -553,7 +553,7 @@ def test_py011_host_calls_param_h(tmp_path) -> None:
         tmp_path,
         """\
         def worker(h):
-            cleat_call("some_func")
+            call("some_func")
     """,
         "PY011",
     )
@@ -565,7 +565,7 @@ def test_py011_host_calls_param_host_calls(tmp_path) -> None:
         tmp_path,
         """\
         def worker(host_calls):
-            cleat_call("some_func")
+            call("some_func")
     """,
         "PY011",
     )
@@ -577,7 +577,7 @@ def test_py011_host_calls_param_hc(tmp_path) -> None:
         tmp_path,
         """\
         def worker(hc):
-            cleat_call("some_func")
+            call("some_func")
     """,
         "PY011",
     )
@@ -589,7 +589,7 @@ def test_py011_host_calls_param_host(tmp_path) -> None:
         tmp_path,
         """\
         def worker(host):
-            cleat_call("some_func")
+            call("some_func")
     """,
         "PY011",
     )
@@ -607,7 +607,7 @@ def test_py012_async_entry_function(tmp_path) -> None:
         """\
         @cleat_entry
         async def my_func(h):
-            cleat_call("foo")
+            call("foo")
     """,
         "PY012",
     )
@@ -663,7 +663,7 @@ def test_clean_file_no_errors(tmp_path) -> None:
         tmp_path,
         """\
         def my_func(h):
-            h.cleat_call("foo")
+            h.call("foo")
     """,
     )
     result = analyze_file(fp)
@@ -700,7 +700,7 @@ def test_entry_function_detected_in_analyze(tmp_path) -> None:
         """\
         @cleat_entry
         def my_func(h):
-            h.cleat_call("foo")
+            h.call("foo")
     """,
     )
     result = analyze_file(fp)

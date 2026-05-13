@@ -43,21 +43,21 @@ class TestSagaClassBasedSteps:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
+                return h.call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("inventory", "Release", {"item": "widget"})
+                h.call("inventory", "Release", {"item": "widget"})
 
         class ChargeStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("payment", "Charge", {"amount": 100})
+                return h.call("payment", "Charge", {"amount": 100})
 
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("payment", "Refund", {"amount": 100})
+                h.call("payment", "Refund", {"amount": 100})
 
         class NotifyStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("notification", "Send", {"message": "Order placed"})
+                return h.call("notification", "Send", {"message": "Order placed"})
 
             def compensate(self, h: HostCalls) -> None:
                 pass  # No compensation needed for notifications
@@ -100,17 +100,17 @@ class TestSagaClassBasedSteps:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
+                return h.call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("inventory", "Release", {"item": "widget"})
+                h.call("inventory", "Release", {"item": "widget"})
 
         class ChargeStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("payment", "Charge", {"amount": 100})
+                return h.call("payment", "Charge", {"amount": 100})
 
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("payment", "Refund", {"amount": 100})
+                h.call("payment", "Refund", {"amount": 100})
 
         class FailStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
@@ -142,17 +142,17 @@ class TestSagaClassBasedSteps:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
+                return h.call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("inventory", "Release", {"item": "widget"})
+                h.call("inventory", "Release", {"item": "widget"})
 
         class ChargeStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("payment", "Charge", {"amount": 100})
+                return h.call("payment", "Charge", {"amount": 100})
 
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("payment", "Refund", {"amount": 100})
+                h.call("payment", "Refund", {"amount": 100})
 
         class FailStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
@@ -180,7 +180,7 @@ class TestSagaClassBasedSteps:
 
         class GreetStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("greeter", "Greet", {"name": "World"})
+                return h.call("greeter", "Greet", {"name": "World"})
 
             def compensate(self, h: HostCalls) -> None:
                 pass
@@ -222,17 +222,17 @@ class TestSagaTerminalExceptions:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
+                return h.call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("inventory", "Release", {"item": "widget"})
+                h.call("inventory", "Release", {"item": "widget"})
 
         class ChargeStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
                 raise MyAppError("non-retryable business error")
 
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("payment", "Refund", {"amount": 100})
+                h.call("payment", "Refund", {"amount": 100})
 
         saga = Saga[str](h, terminal_exceptions=(MyAppError,))
         saga.add_step(ReserveStep("reserve_inventory"))
@@ -255,10 +255,10 @@ class TestSagaTerminalExceptions:
 
         class ReserveStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
-                return h.cleat_call("inventory", "Reserve", {"item": "widget"})
+                return h.call("inventory", "Reserve", {"item": "widget"})
 
             def compensate(self, h: HostCalls) -> None:
-                h.cleat_call("inventory", "Release", {"item": "widget"})
+                h.call("inventory", "Release", {"item": "widget"})
 
         class FailStep(SagaStep[str]):
             def action(self, h: HostCalls) -> str:
@@ -332,7 +332,7 @@ class TestCleatDefer:
         with CleatDefer("cleanup temp files", h) as defer:
             assert defer is not None
             # Note: defer_id is None in the test harness since
-            # we haven't set up a stub for cleat_defer
+            # we haven't set up a stub for defer
 
     def test_defer_context_manager_no_host(self):
         """CleatDefer without a host is a no-op."""

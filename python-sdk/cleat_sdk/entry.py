@@ -389,7 +389,7 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
                 return encode_export_result(0, bytes_written)
 
             except SuspendSentinel:
-                # The workflow signalled suspension (e.g. cleat_sleep on a
+                # The workflow signalled suspension (e.g. sleep on a
                 # fresh execution).  Propagate the sentinel to the host.
                 return SUSPEND_SENTINEL
 
@@ -481,7 +481,7 @@ def query_handler(name: Optional[str] = None) -> Callable:
 
         @query_handler("get_status")
         def get_status(h: HostCalls, order_id: str) -> str:
-            # Read-only — no cleat_call, cleat_sleep, etc.
+            # Read-only — no call, sleep, etc.
             state = h.get_state(order_id, dict)
             return json.dumps({"status": state.get("status", "unknown")})
 

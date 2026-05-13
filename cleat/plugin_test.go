@@ -118,10 +118,10 @@ func TestCallTypedEmptyResponse(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CallTypedEphemeral
+// PluginCallTyped
 // ---------------------------------------------------------------------------
 
-func TestCallTypedEphemeralSuccess(t *testing.T) {
+func TestPluginCallTypedSuccess(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		PluginCall: func(plugin, function, inputJSON string) (string, error) {
 			if plugin != "llm" || function != "chat" {
@@ -141,7 +141,7 @@ func TestCallTypedEphemeralSuccess(t *testing.T) {
 		Reply string `json:"reply"`
 	}
 
-	resp, err := CallTypedEphemeral[ChatResponse](h, "llm", "chat", ChatRequest{Prompt: "hello"})
+	resp, err := PluginCallTyped[ChatResponse](h, "llm", "chat", ChatRequest{Prompt: "hello"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,9 +150,9 @@ func TestCallTypedEphemeralSuccess(t *testing.T) {
 	}
 }
 
-func TestCallTypedEphemeralMarshalingError(t *testing.T) {
+func TestPluginCallTypedMarshalingError(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{})
-	_, err := CallTypedEphemeral[string](h, "llm", "chat", make(chan int))
+	_, err := PluginCallTyped[string](h, "llm", "chat", make(chan int))
 	if err == nil {
 		t.Fatal("expected marshaling error, got nil")
 	}
@@ -161,7 +161,7 @@ func TestCallTypedEphemeralMarshalingError(t *testing.T) {
 	}
 }
 
-func TestCallTypedEphemeralPropagatesCallError(t *testing.T) {
+func TestPluginCallTypedPropagatesCallError(t *testing.T) {
 	callErr := errors.New("plugin error")
 	h := NewHostCalls(HostCallsOptions{
 		PluginCall: func(_, _, _ string) (string, error) {
@@ -169,13 +169,13 @@ func TestCallTypedEphemeralPropagatesCallError(t *testing.T) {
 		},
 	})
 
-	_, err := CallTypedEphemeral[string](h, "llm", "chat", map[string]string{"k": "v"})
+	_, err := PluginCallTyped[string](h, "llm", "chat", map[string]string{"k": "v"})
 	if err != callErr {
 		t.Errorf("expected original error %v, got %v", callErr, err)
 	}
 }
 
-func TestCallTypedEphemeralUnmarshalError(t *testing.T) {
+func TestPluginCallTypedUnmarshalError(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		PluginCall: func(_, _, _ string) (string, error) {
 			return "{bad json}", nil
@@ -185,7 +185,7 @@ func TestCallTypedEphemeralUnmarshalError(t *testing.T) {
 	type MyResponse struct {
 		Result string `json:"result"`
 	}
-	_, err := CallTypedEphemeral[MyResponse](h, "llm", "chat", map[string]string{})
+	_, err := PluginCallTyped[MyResponse](h, "llm", "chat", map[string]string{})
 	if err == nil {
 		t.Fatal("expected unmarshaling error, got nil")
 	}
@@ -194,9 +194,9 @@ func TestCallTypedEphemeralUnmarshalError(t *testing.T) {
 	}
 }
 
-func TestCallTypedEphemeralPluginCallNotInitialized(t *testing.T) {
+func TestPluginCallTypedPluginCallNotInitialized(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{})
-	_, err := CallTypedEphemeral[string](h, "llm", "chat", map[string]string{})
+	_, err := PluginCallTyped[string](h, "llm", "chat", map[string]string{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -205,14 +205,14 @@ func TestCallTypedEphemeralPluginCallNotInitialized(t *testing.T) {
 	}
 }
 
-func TestCallTypedEphemeralEmptyResponse(t *testing.T) {
+func TestPluginCallTypedEmptyResponse(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		PluginCall: func(_, _, _ string) (string, error) {
 			return ``, nil
 		},
 	})
 
-	resp, err := CallTypedEphemeral[string](h, "llm", "chat", map[string]string{})
+	resp, err := PluginCallTyped[string](h, "llm", "chat", map[string]string{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -249,7 +249,7 @@ func TestCallTypedWithStructTypes(t *testing.T) {
 	}
 }
 
-func TestCallTypedEphemeralWithStructTypes(t *testing.T) {
+func TestPluginCallTypedWithStructTypes(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
 		PluginCall: func(_, _, inputJSON string) (string, error) {
 			return `{"id":42,"label":"test"}`, nil
@@ -261,7 +261,7 @@ func TestCallTypedEphemeralWithStructTypes(t *testing.T) {
 		Label string `json:"label"`
 	}
 
-	item, err := CallTypedEphemeral[Item](h, "db", "get", map[string]string{"key": "test"})
+	item, err := PluginCallTyped[Item](h, "db", "get", map[string]string{"key": "test"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

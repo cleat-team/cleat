@@ -15,10 +15,10 @@ Usage::
     host = HostCalls()
 
     # Recorded API call
-    resp = host.cleat_call("payment", "charge", {"amount": 100})
+    resp = host.call("payment", "charge", {"amount": 100})
 
     # Durable sleep (suspends workflow on fresh execution)
-    host.cleat_sleep(5.0)
+    host.sleep(5.0)
 
     # Signal handling
     result = host.await_signals(["payment_received"], 30.0)
@@ -259,7 +259,7 @@ INFINITE_TIMEOUT_MS: int = 9223372036854775807  # i64::MAX / 2^63 - 1
 
 @dataclass
 class RetryPolicy:
-    """Configuration for server-side retry of ``cleat_call_with_retry``."""
+    """Configuration for server-side retry of ``call_with_retry``."""
 
     max_attempts: int = 3
     """Maximum number of retry attempts (including the original call)."""
@@ -1201,10 +1201,10 @@ class HostCalls:
         return _import_cleat_min_version()
 
     # --------------------------------------------------------------------
-    # 5. cleat_log — log a message
+    # 5. log — log a message
     # --------------------------------------------------------------------
 
-    def cleat_log(self, message: str) -> None:
+    def log(self, message: str) -> None:
         """Log a message to the workflow event history.
 
         Log messages are recorded deterministically and replayed during
@@ -1218,10 +1218,6 @@ class HostCalls:
         """
         msg_len = write_string(SCRATCH_BASE, message, OUT_BUF_SIZE)
         _import_cleat_log(SCRATCH_BASE, msg_len)
-
-    def log(self, message: str) -> None:
-        """Alias for :meth:`cleat_log` — the preferred short form."""
-        return self.cleat_log(message)
 
     # --------------------------------------------------------------------
     # 5b. log_kv — structured key-value log
@@ -1252,13 +1248,13 @@ class HostCalls:
             formatted = "\n".join(parts)
         else:
             formatted = message
-        self.cleat_log(formatted)
+        self.log(formatted)
 
     # --------------------------------------------------------------------
-    # 6. cleat_call — recorded API call
+    # 6. call — recorded API call
     # --------------------------------------------------------------------
 
-    def cleat_call(
+    def call(
         self,
         service: str,
         operation: str,
@@ -1358,15 +1354,15 @@ class HostCalls:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
             if call_error_code != 0:
                 self._raise_for_call_error(service, operation, err_msg, call_error_code)
-            raise RuntimeError(f"cleat_call({service}.{operation}) failed: {err_msg}")
+            raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
-    # 7. cleat_call_typed — typed recorded API call
+    # 7. call_typed — typed recorded API call
     # --------------------------------------------------------------------
 
-    def cleat_call_typed(
+    def call_typed(
         self, service: str, operation: str, request: Any, result_type: type[T]
     ) -> T:
         """Make a cleat call and deserialise the JSON response.
@@ -1394,27 +1390,17 @@ class HostCalls:
         RuntimeError
             If the host reports an error from the service call.
         """
-        response = self.cleat_call(service, operation, request)
+        response = self.call(service, operation, request)
         data = json.loads(response)
         if isinstance(data, dict):
             return result_type(**data)
         return result_type(data)
 
-    def call(self, service: str, operation: str, request: Any) -> str:
-        """Alias for :meth:`cleat_call` — the preferred short form."""
-        return self.cleat_call(service, operation, request)
-
-    def call_typed(
-        self, service: str, operation: str, request: Any, result_type: type[T]
-    ) -> T:
-        """Alias for :meth:`cleat_call_typed` — the preferred short form."""
-        return self.cleat_call_typed(service, operation, request, result_type)
-
     # --------------------------------------------------------------------
-    # 8. cleat_call_with_retry — server-side retry
+    # 8. call_with_retry — server-side retry
     # --------------------------------------------------------------------
 
-    def cleat_call_with_retry(
+    def call_with_retry(
         self, service: str, operation: str, request: Any, retry: RetryPolicy
     ) -> str:
         """Make a cleat call with server-side retry.
@@ -1481,15 +1467,15 @@ class HostCalls:
             err_msg = read_string(OUTPUT_OFFSET, response_len)
             if call_error_code != 0:
                 self._raise_for_call_error(service, operation, err_msg, call_error_code)
-            raise RuntimeError(f"cleat_call_with_retry({service}.{operation}) failed: {err_msg}")
+            raise RuntimeError(f"call_with_retry({service}.{operation}) failed: {err_msg}")
 
         return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
-    # 9. cleat_call_with_heartbeat — long-running call with progress
+    # 9. call_with_heartbeat — long-running call with progress
     # --------------------------------------------------------------------
 
-    def cleat_call_with_heartbeat(
+    def call_with_heartbeat(
         self,
         service: str,
         operation: str,
@@ -1555,16 +1541,16 @@ class HostCalls:
             if call_error_code != 0:
                 self._raise_for_call_error(service, operation, err_msg, call_error_code)
             raise RuntimeError(
-                f"cleat_call_with_heartbeat({service}.{operation}) failed: {err_msg}"
+                f"call_with_heartbeat({service}.{operation}) failed: {err_msg}"
             )
 
         return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
-    # 10. cleat_sleep — suspend for a duration
+    # 10. sleep — suspend for a duration
     # --------------------------------------------------------------------
 
-    def cleat_sleep(self, timeout_seconds: float) -> bool:
+    def sleep(self, timeout_seconds: float) -> bool:
         """Suspend workflow execution for a duration in seconds.
 
         Compatible with Temporal/DBOS timeout conventions.
@@ -1589,16 +1575,12 @@ class HostCalls:
         SuspendSentinel
             If the workflow should suspend (fresh execution).
         """
-        return self.cleat_sleep_ms(int(timeout_seconds * 1000))
+        return self.sleep_ms(int(timeout_seconds * 1000))
 
-    def sleep(self, timeout_seconds: float) -> bool:
-        """Alias for :meth:`cleat_sleep` — the preferred short form."""
-        return self.cleat_sleep(timeout_seconds)
-
-    def cleat_sleep_ms(self, timeout_ms: int) -> bool:
+    def sleep_ms(self, timeout_ms: int) -> bool:
         """Suspend workflow execution for a duration in milliseconds.
 
-        Prefer the seconds-based :meth:`cleat_sleep` variant.
+        Prefer the seconds-based :meth:`sleep` variant.
 
         On fresh execution the host signals suspension and this method
         raises :exc:`SuspendSentinel`.  On replay the sleep has already
@@ -1633,20 +1615,20 @@ class HostCalls:
         return False
 
     # --------------------------------------------------------------------
-    # 11. cleat_fetch — cleat HTTP fetch (convenience)
+    # 11. fetch — cleat HTTP fetch (convenience)
     # --------------------------------------------------------------------
 
-    def cleat_fetch(
+    def fetch(
         self,
         url: str,
         method: str = "GET",
         headers: Optional[dict] = None,
         body: str = "",
     ) -> tuple:
-        # Routes through cleat_call('http', 'fetch', ...) — no separate WASM import needed.
+        # Routes through call('http', 'fetch', ...) — no separate WASM import needed.
         """Perform a cleat HTTP fetch via the ``"http"`` service.
 
-        This is a convenience method that delegates to :meth:`cleat_call`
+        This is a convenience method that delegates to :meth:`call`
         with the ``"http"`` service and ``"fetch"`` operation.
 
         Parameters
@@ -1666,15 +1648,15 @@ class HostCalls:
             ``(response_body, status_code)``.
         """
         request = {"url": url, "method": method, "headers": headers or {}, "body": body}
-        result = self.cleat_call("http", "fetch", request)
+        result = self.call("http", "fetch", request)
         data = json.loads(result)
         return data.get("body", ""), data.get("status", 200)
 
     # --------------------------------------------------------------------
-    # 11b. cleat_fetch_json — fetch with JSON deserialization
+    # 11b. fetch_json — fetch with JSON deserialization
     # --------------------------------------------------------------------
 
-    def cleat_fetch_json(
+    def fetch_json(
         self,
         url: str,
         method: str = "GET",
@@ -1684,7 +1666,7 @@ class HostCalls:
     ) -> T:
         """Perform a cleat HTTP fetch and deserialize the JSON response.
 
-        Like :meth:`cleat_fetch` but deserializes the response body into
+        Like :meth:`fetch` but deserializes the response body into
         the specified result type.
 
         Parameters
@@ -1706,7 +1688,7 @@ class HostCalls:
         T
             An instance of *result_type* constructed from the response.
         """
-        resp_body, status = self.cleat_fetch(url, method, headers, body)
+        resp_body, status = self.fetch(url, method, headers, body)
         data = json.loads(resp_body)
         if isinstance(data, dict) and result_type is not dict:
             return result_type(**data)
@@ -1717,7 +1699,7 @@ class HostCalls:
     # --------------------------------------------------------------------
 
     def fetch_get(self, url: str) -> tuple:
-        """Shorthand for a cleat GET request via :meth:`cleat_fetch`.
+        """Shorthand for a cleat GET request via :meth:`fetch`.
 
         Parameters
         ----------
@@ -1729,7 +1711,7 @@ class HostCalls:
         tuple[str, int]
             ``(response_body, status_code)``.
         """
-        return self.cleat_fetch(url, "GET")
+        return self.fetch(url, "GET")
 
     # --------------------------------------------------------------------
     # 11d. fetch_get_json — shorthand GET with JSON deserialization
@@ -1754,7 +1736,7 @@ class HostCalls:
         T
             An instance of *result_type* constructed from the response.
         """
-        return self.cleat_fetch_json(url, "GET", result_type=result_type)
+        return self.fetch_json(url, "GET", result_type=result_type)
 
     # --------------------------------------------------------------------
     # 12. await_signals — wait for signals
@@ -2159,7 +2141,7 @@ class HostCalls:
         """Set typed cleat state (marshals *value* to JSON).
 
         Internally delegates to the ``"state"`` service via
-        :meth:`cleat_call`.
+        :meth:`call`.
 
         Parameters
         ----------
@@ -2169,7 +2151,7 @@ class HostCalls:
         value : Any
             State value.  Dicts and lists are JSON-serialised automatically.
         """
-        self.cleat_call("state", "set", {"key": self._scoped_key(key), "value": value})
+        self.call("state", "set", {"key": self._scoped_key(key), "value": value})
 
     # --------------------------------------------------------------------
     # 20. get_state — get typed cleat state
@@ -2179,7 +2161,7 @@ class HostCalls:
         """Get typed cleat state, deserialised into *result_type*.
 
         Internally delegates to the ``"state"`` service via
-        :meth:`cleat_call`.
+        :meth:`call`.
 
         Parameters
         ----------
@@ -2194,7 +2176,7 @@ class HostCalls:
         T
             An instance of *result_type* constructed from the stored state.
         """
-        result = self.cleat_call("state", "get", {"key": key})
+        result = self.call("state", "get", {"key": key})
         data = json.loads(result)
         if isinstance(data, dict):
             return result_type(**data)
@@ -2208,14 +2190,14 @@ class HostCalls:
         """Delete a cleat state key.
 
         Internally delegates to the ``"state"`` service via
-        :meth:`cleat_call`.
+        :meth:`call`.
 
         Parameters
         ----------
         key : str
             State key to delete.
         """
-        self.cleat_call("state", "delete", {"key": key})
+        self.call("state", "delete", {"key": key})
 
     # --------------------------------------------------------------------
     # 22. incr_state — atomically increment numeric state
@@ -2225,7 +2207,7 @@ class HostCalls:
         """Atomically increment a numeric cleat state value.
 
         Internally delegates to the ``"state"`` service via
-        :meth:`cleat_call`.
+        :meth:`call`.
 
         Parameters
         ----------
@@ -2239,7 +2221,7 @@ class HostCalls:
         int
             The new value after incrementing.
         """
-        result = self.cleat_call("state", "incr", {"key": key, "delta": delta})
+        result = self.call("state", "incr", {"key": key, "delta": delta})
         return int(json.loads(result))
 
     # --------------------------------------------------------------------
@@ -2250,7 +2232,7 @@ class HostCalls:
         """Check if a cleat state key exists.
 
         Internally delegates to the ``"state"`` service via
-        :meth:`cleat_call`.
+        :meth:`call`.
 
         Parameters
         ----------
@@ -2262,7 +2244,7 @@ class HostCalls:
         bool
             ``True`` if the key exists in cleat state.
         """
-        result = self.cleat_call("state", "has", {"key": self._scoped_key(key)})
+        result = self.call("state", "has", {"key": self._scoped_key(key)})
         return bool(json.loads(result))
 
     # --------------------------------------------------------------------
@@ -2273,7 +2255,7 @@ class HostCalls:
         """List all cleat state keys matching the given prefix.
 
         Internally delegates to the ``"state"`` service via
-        :meth:`cleat_call`.
+        :meth:`call`.
 
         Parameters
         ----------
@@ -2287,7 +2269,7 @@ class HostCalls:
             List of matching state keys.
         """
         inp: dict = {"prefix": prefix}
-        result = self.cleat_call("state", "list", inp)
+        result = self.call("state", "list", inp)
         return json.loads(result)
 
     # --------------------------------------------------------------------
@@ -2627,10 +2609,10 @@ class HostCalls:
         return handler(payload)
 
     # --------------------------------------------------------------------
-    # 26. cleat_defer — register deferred cleanup
+    # 26. defer — register deferred cleanup
     # --------------------------------------------------------------------
 
-    def cleat_defer(self, description: str) -> str:
+    def defer(self, description: str) -> str:
         """Register a deferred cleanup action to run on workflow exit.
 
         Deferred actions are executed in LIFO order, analogous to Python's
@@ -2663,7 +2645,7 @@ class HostCalls:
         id_len, err_code = decode_simple_result(result)
         if err_code != 0:
             raise RuntimeError(
-                f"cleat_defer(description='{description}') failed: {_error_code_name(err_code)} (code {err_code})"
+                f"defer(description='{description}') failed: {_error_code_name(err_code)} (code {err_code})"
             )
 
         return read_string(OUTPUT_OFFSET, id_len)
@@ -2751,13 +2733,13 @@ class HostCalls:
         fn(self)
 
     # --------------------------------------------------------------------
-    # 29. cleat_send — fire-and-forget
+    # 29. send — fire-and-forget
     # --------------------------------------------------------------------
 
-    def cleat_send(self, service: str, operation: str, request: Any) -> None:
+    def send(self, service: str, operation: str, request: Any) -> None:
         """Send a fire-and-forget request to an external service.
 
-        Unlike :meth:`cleat_call`, this method does not wait for a
+        Unlike :meth:`call`, this method does not wait for a
         response.  The request is enqueued and the workflow continues
         immediately.
 
@@ -2838,14 +2820,17 @@ class HostCalls:
         )
 
     # --------------------------------------------------------------------
-    # 31. plugin_call — call a plugin host function
+    # 31. plugin_call — plugin host function call
     # --------------------------------------------------------------------
 
     def plugin_call(self, plugin_name: str, function_name: str, input: Any) -> str:
         """Call a plugin host function.
 
         Plugins extend the host runtime with custom functionality beyond
-        the standard 22 host imports.
+        the standard host imports. Plugin calls are journaled for
+        deterministic replay, same as :meth:`call`. The distinction is
+        the target: :meth:`call` targets external services,
+        :meth:`plugin_call` targets Go host plugins.
 
         Parameters
         ----------
@@ -2902,7 +2887,7 @@ class HostCalls:
         return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
-    # 31b. plugin_call_streaming — call a streaming plugin host function
+    # 31b. plugin_call_streaming — streaming plugin host function
     # --------------------------------------------------------------------
 
     def plugin_call_streaming(
@@ -2979,24 +2964,10 @@ class HostCalls:
             event_json = read_string(OUTPUT_OFFSET, response_len)
             yield _json.loads(event_json)
 
-    # --------------------------------------------------------------------
-    # 31c. call_ephemeral — non-durable plugin call alias
-    # --------------------------------------------------------------------
-
-    def call_ephemeral(self, plugin_name: str, function_name: str, input: Any) -> str:
-        """Alias for :meth:`plugin_call` — the preferred short form.
-
-        Makes a non-durable (not journaled) plugin call. Use for read-only
-        or side-effect-free plugin operations where replay durability is not
-        needed. For durable calls that must replay identically, use
-        :meth:`call` or :meth:`cleat_call` instead.
-        """
-        return self.plugin_call(plugin_name, function_name, input)
-
-    def call_ephemeral_typed(
+    def plugin_call_typed(
         self, plugin_name: str, function_name: str, input: Any, result_type: type[T]
     ) -> T:
-        """Typed variant of :meth:`call_ephemeral`.
+        """Typed variant of :meth:`plugin_call`.
 
         Deserialises the plugin response JSON into *result_type*.
         If the response JSON is a dict, ``result_type(**data)`` is used;

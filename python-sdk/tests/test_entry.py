@@ -114,14 +114,13 @@ class TestCleatEntry:
         @cleat_entry
         def my_func(h: HostCalls, data: str):
             # The injected object should have the key host-call methods
-            # Note: ``now`` and ``random`` are not prefixed with ``cleat_``
             for attr in (
-                "cleat_call",
-                "cleat_sleep",
-                "cleat_log",
+                "call",
+                "sleep",
+                "log",
                 "now",
                 "random",
-                "cleat_defer",
+                "defer",
                 "poll_cancellation",
                 "poll_signal",
             ):
