@@ -29,10 +29,10 @@ def durable_call_workflow(h: HostCalls, request: NotifyRequest) -> str:
     - Host call: WASM import "cleat_call" -> Go host handler
     - Output deserialization: WASM linear memory -> JSON -> Python string
     """
-    h.cleat_log(f"Notifying user {request.user_id} via {request.channel}")
+    h.log(f"Notifying user {request.user_id} via {request.channel}")
 
     # Make a durable recorded call to the external notification service.
-    response = h.cleat_call(
+    response = h.call(
         "notifier",
         "SendNotification",
         {
@@ -42,5 +42,5 @@ def durable_call_workflow(h: HostCalls, request: NotifyRequest) -> str:
         },
     )
 
-    h.cleat_log(f"Notification result: {response}")
+    h.log(f"Notification result: {response}")
     return response

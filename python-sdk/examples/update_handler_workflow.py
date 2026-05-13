@@ -31,7 +31,7 @@ class ApprovalRequest:
 @cleat_entry
 def approval_workflow(h: HostCalls, request: ApprovalRequest) -> str:
     """A workflow that registers an update handler for external approval."""
-    h.cleat_log(f"Starting approval workflow for task {request.task_id}")
+    h.log(f"Starting approval workflow for task {request.task_id}")
 
     # Register an update handler that external clients can call
     def handle_approve(payload: str) -> str:
@@ -49,7 +49,7 @@ def approval_workflow(h: HostCalls, request: ApprovalRequest) -> str:
         """
         data = json.loads(payload)
         approved = data.get("approved", False)
-        h.cleat_log(f"Approval decision for {request.task_id}: {approved}")
+        h.log(f"Approval decision for {request.task_id}: {approved}")
         return json.dumps(
             {
                 "task_id": request.task_id,
@@ -83,7 +83,7 @@ def approval_workflow(h: HostCalls, request: ApprovalRequest) -> str:
         validator=validate_approve,
     )
 
-    h.cleat_log(f"Update handler registered for task {request.task_id}")
+    h.log(f"Update handler registered for task {request.task_id}")
     return json.dumps(
         {
             "status": "waiting",

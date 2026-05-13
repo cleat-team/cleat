@@ -1219,6 +1219,10 @@ class HostCalls:
         msg_len = write_string(SCRATCH_BASE, message, OUT_BUF_SIZE)
         _import_cleat_log(SCRATCH_BASE, msg_len)
 
+    def log(self, message: str) -> None:
+        """Alias for :meth:`cleat_log` — the preferred short form."""
+        return self.cleat_log(message)
+
     # --------------------------------------------------------------------
     # 5b. log_kv — structured key-value log
     # --------------------------------------------------------------------
@@ -1395,6 +1399,16 @@ class HostCalls:
         if isinstance(data, dict):
             return result_type(**data)
         return result_type(data)
+
+    def call(self, service: str, operation: str, request: Any) -> str:
+        """Alias for :meth:`cleat_call` — the preferred short form."""
+        return self.cleat_call(service, operation, request)
+
+    def call_typed(
+        self, service: str, operation: str, request: Any, result_type: type[T]
+    ) -> T:
+        """Alias for :meth:`cleat_call_typed` — the preferred short form."""
+        return self.cleat_call_typed(service, operation, request, result_type)
 
     # --------------------------------------------------------------------
     # 8. cleat_call_with_retry — server-side retry
@@ -1576,6 +1590,10 @@ class HostCalls:
             If the workflow should suspend (fresh execution).
         """
         return self.cleat_sleep_ms(int(timeout_seconds * 1000))
+
+    def sleep(self, timeout_seconds: float) -> bool:
+        """Alias for :meth:`cleat_sleep` — the preferred short form."""
+        return self.cleat_sleep(timeout_seconds)
 
     def cleat_sleep_ms(self, timeout_ms: int) -> bool:
         """Suspend workflow execution for a duration in milliseconds.
@@ -2960,6 +2978,35 @@ class HostCalls:
 
             event_json = read_string(OUTPUT_OFFSET, response_len)
             yield _json.loads(event_json)
+
+    # --------------------------------------------------------------------
+    # 31c. call_ephemeral — non-durable plugin call alias
+    # --------------------------------------------------------------------
+
+    def call_ephemeral(self, plugin_name: str, function_name: str, input: Any) -> str:
+        """Alias for :meth:`plugin_call` — the preferred short form.
+
+        Makes a non-durable (not journaled) plugin call. Use for read-only
+        or side-effect-free plugin operations where replay durability is not
+        needed. For durable calls that must replay identically, use
+        :meth:`call` or :meth:`cleat_call` instead.
+        """
+        return self.plugin_call(plugin_name, function_name, input)
+
+    def call_ephemeral_typed(
+        self, plugin_name: str, function_name: str, input: Any, result_type: type[T]
+    ) -> T:
+        """Typed variant of :meth:`call_ephemeral`.
+
+        Deserialises the plugin response JSON into *result_type*.
+        If the response JSON is a dict, ``result_type(**data)`` is used;
+        otherwise ``result_type(data)`` is used.
+        """
+        response = self.plugin_call(plugin_name, function_name, input)
+        data = json.loads(response)
+        if isinstance(data, dict):
+            return result_type(**data)
+        return result_type(data)
 
     # --------------------------------------------------------------------
     # 32. send_signal_and_wait — send a signal and wait for a response

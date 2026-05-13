@@ -13,12 +13,12 @@ class GreetingRequest:
 @cleat_entry
 def hello_workflow(h: HostCalls, request: GreetingRequest) -> str:
     """A simple workflow that calls a greeting service."""
-    h.cleat_log(f"Hello workflow started for {request.name}")
+    h.log(f"Hello workflow started for {request.name}")
 
     # Call an external translation/greeting service
-    response = h.cleat_call(
+    response = h.call(
         "greeter", "Greet", {"name": request.name, "language": request.language}
     )
 
-    h.cleat_log(f"Got response: {response}")
+    h.log(f"Got response: {response}")
     return response

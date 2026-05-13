@@ -440,6 +440,10 @@ class LocalHostCalls:
             return
         self._record("cleat_log", message=message)
 
+    def log(self, message: str) -> None:
+        """Alias for :meth:`cleat_log` — the preferred short form."""
+        return self.cleat_log(message)
+
     # ------------------------------------------------------------------
     # 8. log_kv
     # ------------------------------------------------------------------
@@ -499,6 +503,10 @@ class LocalHostCalls:
     # 10. cleat_call_typed
     # ------------------------------------------------------------------
 
+    def call(self, service: str, operation: str, request: Any) -> str:
+        """Alias for :meth:`cleat_call` — the preferred short form."""
+        return self.cleat_call(service, operation, request)
+
     def cleat_call_typed(
         self, service: str, operation: str, request: Any, result_type: type[T]
     ) -> T:
@@ -508,6 +516,12 @@ class LocalHostCalls:
         if isinstance(data, dict):
             return result_type(**data)
         return result_type(data)
+
+    def call_typed(
+        self, service: str, operation: str, request: Any, result_type: type[T]
+    ) -> T:
+        """Alias for :meth:`cleat_call_typed` — the preferred short form."""
+        return self.cleat_call_typed(service, operation, request, result_type)
 
     # ------------------------------------------------------------------
     # 11. cleat_call_with_retry
@@ -541,6 +555,10 @@ class LocalHostCalls:
     def cleat_sleep(self, timeout_seconds: float) -> bool:
         """Suspend workflow execution for a duration in seconds."""
         return self.cleat_sleep_ms(int(timeout_seconds * 1000))
+
+    def sleep(self, timeout_seconds: float) -> bool:
+        """Alias for :meth:`cleat_sleep` — the preferred short form."""
+        return self.cleat_sleep(timeout_seconds)
 
     def cleat_sleep_ms(self, timeout_ms: int) -> bool:
         """Suspend workflow execution for a duration in milliseconds."""
@@ -1469,6 +1487,20 @@ class LocalHostCalls:
             plugin_name=plugin_name, function_name=function_name, input=input,
         )
         return result
+
+    def call_ephemeral(self, plugin_name: str, function_name: str, input: Any) -> str:
+        """Alias for :meth:`plugin_call` — the preferred short form."""
+        return self.plugin_call(plugin_name, function_name, input)
+
+    def call_ephemeral_typed(
+        self, plugin_name: str, function_name: str, input: Any, result_type: type[T]
+    ) -> T:
+        """Typed variant of :meth:`call_ephemeral`."""
+        response = self.plugin_call(plugin_name, function_name, input)
+        data = json.loads(response)
+        if isinstance(data, dict):
+            return result_type(**data)
+        return result_type(data)
 
     def plugin_call_streaming(
         self, plugin_name: str, function_name: str, input: Any
