@@ -2,7 +2,7 @@
 
 package payments
 
-import "github.com/rcownie/cleat/cleat"
+import "github.com/cleat-team/cleat/cleat"
 
 type ChargeRequest struct {
 	UserID      string `json:"user_id"`

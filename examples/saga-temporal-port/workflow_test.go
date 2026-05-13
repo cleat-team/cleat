@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/cleat/cleattest"
+	"github.com/cleat-team/cleat/cleat/cleattest"
 )
 
 func TestTransferMoney_Success(t *testing.T) {

@@ -4,8 +4,8 @@ import (
 	"go/token"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
 )
 
 // ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@ import (
 
 func TestVerifyThreadingPassesForBasic(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestVerifyThreadingPassesForBasic(t *testing.T) {
 
 func TestVerifyThreadingDetectsUnthreadedHelper(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestVerifyThreadingDetectsUnthreadedHelper(t *testing.T) {
 
 	threadingErrors := VerifyThreading(result, cg, cr)
 
-	target := "github.com/rcownie/cleat/testdata/errors.unthreadedHelper"
+	target := "github.com/cleat-team/cleat/testdata/errors.unthreadedHelper"
 	found := false
 	for _, e := range threadingErrors {
 		if e.FuncName == target {
@@ -77,7 +77,7 @@ func TestVerifyThreadingDoesNotReportBadWorkflowAsError(t *testing.T) {
 	// BadWorkflow has h cleat.HostCalls as a first parameter, so even
 	// though it calls unthreadedHelper, it itself is properly threaded.
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestVerifyThreadingDoesNotReportBadWorkflowAsError(t *testing.T) {
 
 	threadingErrors := VerifyThreading(result, cg, cr)
 
-	badWorkflowName := "github.com/rcownie/cleat/testdata/errors.BadWorkflow"
+	badWorkflowName := "github.com/cleat-team/cleat/testdata/errors.BadWorkflow"
 	for _, e := range threadingErrors {
 		if e.FuncName == badWorkflowName {
 			t.Errorf("BadWorkflow should not have a threading error (it has h param): %s", e.Message)
@@ -101,7 +101,7 @@ func TestVerifyThreadingDoesNotReportBadWorkflowAsError(t *testing.T) {
 
 func TestVerifyThreadingDoesNotReportPureFunctions(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestVerifyThreadingDoesNotReportPureFunctions(t *testing.T) {
 
 	threadingErrors := VerifyThreading(result, cg, cr)
 
-	pureName := "github.com/rcownie/cleat/testdata/errors.pureHelper"
+	pureName := "github.com/cleat-team/cleat/testdata/errors.pureHelper"
 	for _, e := range threadingErrors {
 		if e.FuncName == pureName {
 			t.Errorf("pureHelper should not have a threading error (not in closure): %s", e.Message)
@@ -129,7 +129,7 @@ func TestVerifyThreadingDoesNotReportPureFunctions(t *testing.T) {
 
 func TestFindGlobalHostCallsFindsVarHInAutothread(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/autothread", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/autothread", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestFindGlobalHostCallsFindsVarHInAutothread(t *testing.T) {
 
 func TestFindGlobalHostCallsReturnsNilForBasic(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestFindGlobalHostCallsReturnsNilForBasic(t *testing.T) {
 
 func TestFindGlobalHostCallsReturnsNilForErrors(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestFindGlobalHostCallsReturnsNilForErrors(t *testing.T) {
 
 func TestVerifyThreadingAutothreadReportsPassThroughErrors(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/autothread", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/autothread", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -192,16 +192,16 @@ func TestVerifyThreadingAutothreadReportsPassThroughErrors(t *testing.T) {
 	// Functions that directly use the global var h (or have h as a param)
 	// should NOT be reported.
 	directlyThreaded := map[string]bool{
-		"github.com/rcownie/cleat/testdata/autothread.PlaceOrder":              true,
-		"github.com/rcownie/cleat/testdata/autothread.CancelOrder":             true,
-		"github.com/rcownie/cleat/testdata/autothread.checkItemAvailability":   true,
-		"github.com/rcownie/cleat/testdata/autothread.getDefaultPaymentMethod": true,
-		"github.com/rcownie/cleat/testdata/autothread.fulfillOrder":            true,
-		"github.com/rcownie/cleat/testdata/autothread.reserveInventory":        true,
-		"github.com/rcownie/cleat/testdata/autothread.chargeCustomer":          true,
-		"github.com/rcownie/cleat/testdata/autothread.releaseReservation":      true,
-		"github.com/rcownie/cleat/testdata/autothread.refundPayment":           true,
-		"github.com/rcownie/cleat/testdata/autothread.notifyCustomer":          true,
+		"github.com/cleat-team/cleat/testdata/autothread.PlaceOrder":              true,
+		"github.com/cleat-team/cleat/testdata/autothread.CancelOrder":             true,
+		"github.com/cleat-team/cleat/testdata/autothread.checkItemAvailability":   true,
+		"github.com/cleat-team/cleat/testdata/autothread.getDefaultPaymentMethod": true,
+		"github.com/cleat-team/cleat/testdata/autothread.fulfillOrder":            true,
+		"github.com/cleat-team/cleat/testdata/autothread.reserveInventory":        true,
+		"github.com/cleat-team/cleat/testdata/autothread.chargeCustomer":          true,
+		"github.com/cleat-team/cleat/testdata/autothread.releaseReservation":      true,
+		"github.com/cleat-team/cleat/testdata/autothread.refundPayment":           true,
+		"github.com/cleat-team/cleat/testdata/autothread.notifyCustomer":          true,
 	}
 	for _, e := range threadingErrors {
 		if directlyThreaded[e.FuncName] {
@@ -215,8 +215,8 @@ func TestVerifyThreadingAutothreadReportsPassThroughErrors(t *testing.T) {
 	// are correctly reported as unthreaded BEFORE the transform runs. After
 	// the transform they get h added as a parameter.
 	expectedUnthreaded := map[string]bool{
-		"github.com/rcownie/cleat/testdata/autothread.validateAndReserve": true,
-		"github.com/rcownie/cleat/testdata/autothread.processPayment":     true,
+		"github.com/cleat-team/cleat/testdata/autothread.validateAndReserve": true,
+		"github.com/cleat-team/cleat/testdata/autothread.processPayment":     true,
 	}
 
 	for name := range expectedUnthreaded {

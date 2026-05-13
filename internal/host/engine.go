@@ -21,8 +21,8 @@ import (
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/experimental"
 
-	"github.com/rcownie/cleat/internal/plugin"
-	"github.com/rcownie/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/wasm"
 )
 
 // MaxRetryAttempts is the worker-enforced ceiling for DurableCallWithRetry

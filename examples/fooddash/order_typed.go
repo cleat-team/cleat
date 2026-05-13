@@ -9,11 +9,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/cleat/cleat"
-	"github.com/rcownie/cleat/examples/fooddash/clients/dispatch"
-	"github.com/rcownie/cleat/examples/fooddash/clients/menu"
-	"github.com/rcownie/cleat/examples/fooddash/clients/payments"
-	"github.com/rcownie/cleat/examples/fooddash/clients/restaurant"
+	"github.com/cleat-team/cleat/cleat"
+	"github.com/cleat-team/cleat/examples/fooddash/clients/dispatch"
+	"github.com/cleat-team/cleat/examples/fooddash/clients/menu"
+	"github.com/cleat-team/cleat/examples/fooddash/clients/payments"
+	"github.com/cleat-team/cleat/examples/fooddash/clients/restaurant"
 )
 
 // PlaceOrderTyped demonstrates the PlaceOrder workflow using typed service clients.

@@ -9,9 +9,9 @@ keywords:
   - workflow
   - wasm
   - postgres
-home: https://github.com/rcownie/cleat
+home: https://github.com/cleat-team/cleat
 sources:
-  - https://github.com/rcownie/cleat
+  - https://github.com/cleat-team/cleat
 maintainers:
-  - name: rcownie
-    email: rcownie@users.noreply.github.com
+  - name: cleat-team
+    email: team@cleat.dev

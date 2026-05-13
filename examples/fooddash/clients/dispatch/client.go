@@ -2,7 +2,7 @@
 
 package dispatch
 
-import "github.com/rcownie/cleat/cleat"
+import "github.com/cleat-team/cleat/cleat"
 
 type FindDriverRequest struct {
 	Address string `json:"address"`

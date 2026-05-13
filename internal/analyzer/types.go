@@ -56,7 +56,7 @@ type AnalysisResult struct {
 	EntryPoints []string             // fully-qualified names of entry points
 
 	// Module information.
-	ModulePath  string // e.g., "github.com/rcownie/cleat"
+	ModulePath  string // e.g., "github.com/cleat-team/cleat"
 	ModuleDir   string // absolute path to module root (where go.mod lives)
 	GoVersion   string // e.g., "1.26" from go.mod
 

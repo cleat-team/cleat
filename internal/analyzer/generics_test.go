@@ -7,7 +7,7 @@ import (
 
 // genericsFQ returns a fully-qualified name for a function in testdata/generics.
 func genericsFQ(name string) string {
-	return "github.com/rcownie/cleat/testdata/generics." + name
+	return "github.com/cleat-team/cleat/testdata/generics." + name
 }
 
 // genericsFQMethod returns a fully-qualified name for a method on a generic type.
@@ -18,7 +18,7 @@ func genericsFQMethod(typeName, methodName string) string {
 func genericsLoad(t *testing.T) *AnalysisResult {
 	t.Helper()
 	fset := token.NewFileSet()
-	result, err := LoadPackages("github.com/rcownie/cleat/testdata/generics", fset)
+	result, err := LoadPackages("github.com/cleat-team/cleat/testdata/generics", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages(generics) failed: %v", err)
 	}

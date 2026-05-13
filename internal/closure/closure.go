@@ -10,8 +10,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
 )
 
 // Compute computes the cleat closure: the set of all functions that

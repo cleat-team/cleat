@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"unsafe"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 	"durable-wasm-demo/workflow"
 )
 

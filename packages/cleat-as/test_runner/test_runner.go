@@ -7,7 +7,7 @@
 //
 // Usage:
 //
-//	import "github.com/rcownie/cleat/packages/cleat-as/test_runner"
+//	import "github.com/cleat-team/cleat/packages/cleat-as/test_runner"
 //
 //	func TestPlaceOrder(t *testing.T) {
 //	    env := test_runner.NewWASMTestEnv(t, "path/to/workflow.wasm")

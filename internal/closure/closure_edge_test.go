@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
 )
 
 // ---------------------------------------------------------------------------
@@ -101,13 +101,13 @@ func TestNumErrorsAndWarnings(t *testing.T) {
 
 func TestHasHostCallsParam(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
 
 	// PlaceOrder has h cleat.HostCalls as first param.
-	placeOrder := result.Funcs["github.com/rcownie/cleat/testdata/basic.PlaceOrder"]
+	placeOrder := result.Funcs["github.com/cleat-team/cleat/testdata/basic.PlaceOrder"]
 	if placeOrder == nil {
 		t.Fatal("PlaceOrder not found in Funcs")
 	}
@@ -118,7 +118,7 @@ func TestHasHostCallsParam(t *testing.T) {
 	// pure functions like notifyCustomer (wait, it's a leaf)...
 	// Actually let's check a known pure function.
 	// checkItemAvailability should have h as first param.
-	checkItem := result.Funcs["github.com/rcownie/cleat/testdata/basic.checkItemAvailability"]
+	checkItem := result.Funcs["github.com/cleat-team/cleat/testdata/basic.checkItemAvailability"]
 	if checkItem == nil {
 		t.Fatal("checkItemAvailability not found")
 	}
@@ -133,12 +133,12 @@ func TestHasHostCallsParam(t *testing.T) {
 
 func TestResolveImportPath(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
 
-	fd := result.Funcs["github.com/rcownie/cleat/testdata/basic.PlaceOrder"]
+	fd := result.Funcs["github.com/cleat-team/cleat/testdata/basic.PlaceOrder"]
 	if fd == nil || fd.Pkg == nil {
 		t.Fatal("PlaceOrder not found with package info")
 	}
@@ -166,7 +166,7 @@ func TestResolveCallFQNameEdgeCases(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestResolveCallFQNameEdgeCases(t *testing.T) {
 
 func TestFindCallChainEdgeCases(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestFindCallChainEdgeCases(t *testing.T) {
 	}
 
 	// Target is an entry point itself.
-	ep := "github.com/rcownie/cleat/testdata/basic.PlaceOrder"
+	ep := "github.com/cleat-team/cleat/testdata/basic.PlaceOrder"
 	chain = findCallChain(ep, result.EntryPoints, cg)
 	if chain == nil {
 		t.Fatal("expected chain for PlaceOrder")
@@ -293,7 +293,7 @@ func TestStructHasHostCallsField(t *testing.T) {
 
 func TestResultTagsConsistency(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/autothread", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/autothread", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestValidationErrorFullFormat(t *testing.T) {
 
 func TestVetChecksForbiddenNow(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e003_time_now", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/e003_time_now", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -374,7 +374,7 @@ func TestVetChecksForbiddenNow(t *testing.T) {
 
 func TestVetChecksForbiddenNetHTTP(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e005_net_http", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/e005_net_http", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestVetChecksForbiddenNetHTTP(t *testing.T) {
 
 func TestVetChecksForbiddenMathRand(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e007_math_rand", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/e007_math_rand", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestVetChecksForbiddenMathRand(t *testing.T) {
 
 func TestVetChecksForbiddenSyncMutex(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e013_sync_mutex", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/e013_sync_mutex", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -422,7 +422,7 @@ func TestVetChecksForbiddenSyncMutex(t *testing.T) {
 
 func TestVetChecksForbiddenFmtPrintln(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e015_fmt_println", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/e015_fmt_println", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -438,7 +438,7 @@ func TestVetChecksForbiddenFmtPrintln(t *testing.T) {
 
 func TestVetChecksNoErrors(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/no_errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/no_errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -481,7 +481,7 @@ func listErrorCodes(cr *Result) []string {
 
 func TestVetChecksGoroutine(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e001_goroutine", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/e001_goroutine", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -559,7 +559,7 @@ func TestStructHasHostCallsFieldEdgeCases(t *testing.T) {
 
 func TestVetChecksChannelOps(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e002_channel", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/e002_channel", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -582,7 +582,7 @@ func TestVetChecksChannelOps(t *testing.T) {
 
 func TestVetChecksForbiddenPackageRef(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e016_os_reflect", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/e016_os_reflect", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -605,7 +605,7 @@ func TestVetChecksForbiddenPackageRef(t *testing.T) {
 
 func TestVetChecksInitFunction(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/vet-checks/go/e009_init", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/vet-checks/go/e009_init", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}

@@ -25,7 +25,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/microsoft/go-mssqldb"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 func main() {

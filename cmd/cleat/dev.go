@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/analyzer"
 )
 
 // paramInfo describes an entry-point parameter beyond cleat.HostCalls.
@@ -135,7 +135,7 @@ func generateDevMain(result *analyzer.AnalysisResult, funcName string, params []
 		buf.WriteString("\t\"time\"\n")
 	}
 	buf.WriteString("\n")
-	buf.WriteString("\t\"github.com/rcownie/cleat/cleat/localdev\"\n")
+	buf.WriteString("\t\"github.com/cleat-team/cleat/cleat/localdev\"\n")
 	fmt.Fprintf(&buf, "\t%q\n", pkgPath)
 	buf.WriteString(")\n\n")
 

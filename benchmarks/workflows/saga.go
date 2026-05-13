@@ -3,7 +3,7 @@ package workflows
 import (
 	"fmt"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // SagaInput configures the saga compensation workflow.

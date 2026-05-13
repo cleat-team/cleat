@@ -1,16 +1,16 @@
 # cleat
 
-[![CI](https://github.com/rcownie/cleat/actions/workflows/ci.yml/badge.svg)](https://github.com/rcownie/cleat/actions/workflows/ci.yml)
+[![CI](https://github.com/cleat-team/cleat/actions/workflows/ci.yml/badge.svg)](https://github.com/cleat-team/cleat/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/doc/devel/release)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/rcownie/cleat/blob/main/LICENSE)
-[![Go Report Card](https://goreportcard.com/badge/github.com/rcownie/cleat)](https://goreportcard.com/report/github.com/rcownie/cleat)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/cleat-team/cleat/blob/main/LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cleat-team/cleat)](https://goreportcard.com/report/github.com/cleat-team/cleat)
 [![Discord](https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/cleat)
-[![Go Reference](https://pkg.go.dev/badge/github.com/rcownie/cleat.svg)](https://pkg.go.dev/github.com/rcownie/cleat)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cleat-team/cleat.svg)](https://pkg.go.dev/github.com/cleat-team/cleat)
 
 > **Durable workflow engine -- runs on PostgreSQL, MySQL, or SQL Server. Write in Go, compile to WASM, deploy via INSERT.**
 
 ```bash
-go install github.com/rcownie/cleat/cmd/cleat@latest
+go install github.com/cleat-team/cleat/cmd/cleat@latest
 docker compose up -d postgres
 cleat dev start
 ```
@@ -32,7 +32,7 @@ database.
 
 ```bash
 # 1. Install the CLI
-go install github.com/rcownie/cleat/cmd/cleat@latest
+go install github.com/cleat-team/cleat/cmd/cleat@latest
 
 # 2. Compile a workflow package to WASM
 cleat build -o ./out ./testdata/basic/
@@ -90,12 +90,12 @@ Start at the [Documentation Home](docs/index.md) to find the right page for your
 
 ```bash
 # Install all CLI tools
-go install github.com/rcownie/cleat/cmd/cleat@latest
-go install github.com/rcownie/cleat/cmd/cleat-worker@latest
-go install github.com/rcownie/cleat/cmd/cleat-gen@latest
+go install github.com/cleat-team/cleat/cmd/cleat@latest
+go install github.com/cleat-team/cleat/cmd/cleat-worker@latest
+go install github.com/cleat-team/cleat/cmd/cleat-gen@latest
 ```
 
-Or build from source: `git clone https://github.com/rcownie/cleat.git && cd cleat && go install ./cmd/...`
+Or build from source: `git clone https://github.com/cleat-team/cleat.git && cd cleat && go install ./cmd/...`
 
 ## License
 

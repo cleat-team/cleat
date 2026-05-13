@@ -2,14 +2,14 @@
 //
 // These variables are injected at build time via -ldflags:
 //
-//	tinygo build -ldflags="-X 'github.com/rcownie/cleat/cleat.WorkflowName=PlaceOrder'
-//	                          -X 'github.com/rcownie/cleat/cleat.WorkflowVersion=3'
-//	                          -X 'github.com/rcownie/cleat/cleat.MinVersion=1'
-//	                          -X 'github.com/rcownie/cleat/cleat.ABIVersion=1'
-//	                          -X 'github.com/rcownie/cleat/cleat.PluginDeps={\"llm\":\">=1.2.0\"}'"
+//	tinygo build -ldflags="-X 'github.com/cleat-team/cleat/cleat.WorkflowName=PlaceOrder'
+//	                          -X 'github.com/cleat-team/cleat/cleat.WorkflowVersion=3'
+//	                          -X 'github.com/cleat-team/cleat/cleat.MinVersion=1'
+//	                          -X 'github.com/cleat-team/cleat/cleat.ABIVersion=1'
+//	                          -X 'github.com/cleat-team/cleat/cleat.PluginDeps={\"llm\":\">=1.2.0\"}'"
 //	                          ...
 //
-//	go build -ldflags="-X 'github.com/rcownie/cleat/cleat.WorkflowName=PlaceOrder' ..."
+//	go build -ldflags="-X 'github.com/cleat-team/cleat/cleat.WorkflowName=PlaceOrder' ..."
 //
 // Default values are "unknown" / 0 / "{}" so that unconfigured builds still
 // produce valid WASM modules (with obvious placeholder metadata).

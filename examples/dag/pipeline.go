@@ -15,8 +15,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rcownie/cleat/cleat"
-	dagplugin "github.com/rcownie/cleat/plugins/dag"
+	"github.com/cleat-team/cleat/cleat"
+	dagplugin "github.com/cleat-team/cleat/plugins/dag"
 )
 
 // ---- Domain types ----

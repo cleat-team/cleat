@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	dagplugin "github.com/rcownie/cleat/plugins/dag"
+	dagplugin "github.com/cleat-team/cleat/plugins/dag"
 )
 
 // runDag dispatches to the appropriate dag subcommand.
@@ -252,7 +252,7 @@ func generateDevProgram(spec *dagplugin.DAGSpec, inputJSON string) []byte {
 	b.WriteString("\t\"log\"\n")
 	b.WriteString("\t\"os\"\n")
 	b.WriteString("\n")
-	b.WriteString("\tdagplugin \"github.com/rcownie/cleat/plugins/dag\"\n")
+	b.WriteString("\tdagplugin \"github.com/cleat-team/cleat/plugins/dag\"\n")
 	b.WriteString(")\n\n")
 
 	// Generate stub task functions.
@@ -311,8 +311,8 @@ func generateWorkflowFile(spec *dagplugin.DAGSpec) []byte {
 	b.WriteString("\t\"encoding/json\"\n")
 	b.WriteString("\t\"fmt\"\n")
 	b.WriteString("\n")
-	b.WriteString("\t\"github.com/rcownie/cleat/cleat\"\n")
-	b.WriteString("\tdagplugin \"github.com/rcownie/cleat/plugins/dag\"\n")
+	b.WriteString("\t\"github.com/cleat-team/cleat/cleat\"\n")
+	b.WriteString("\tdagplugin \"github.com/cleat-team/cleat/plugins/dag\"\n")
 	b.WriteString(")\n\n")
 
 	// Generate an input type.

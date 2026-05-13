@@ -65,13 +65,13 @@ func TestFullyQualifiedNameTopLevel(t *testing.T) {
 		Name: "PlaceOrder",
 		Pkg: &Package{
 			Name: "workflow",
-			Path: "github.com/rcownie/cleat/workflow",
+			Path: "github.com/cleat-team/cleat/workflow",
 		},
 		RecvType:   nil,
 		IsExported: true,
 	}
 	fq := fd.FullyQualifiedName()
-	expected := "github.com/rcownie/cleat/workflow.PlaceOrder"
+	expected := "github.com/cleat-team/cleat/workflow.PlaceOrder"
 	if fq != expected {
 		t.Errorf("FullyQualifiedName() = %q, want %q", fq, expected)
 	}
@@ -84,11 +84,11 @@ func TestFullyQualifiedNameMethod(t *testing.T) {
 		Name: "Process",
 		Pkg: &Package{
 			Name: "workflow",
-			Path: "github.com/rcownie/cleat/workflow",
+			Path: "github.com/cleat-team/cleat/workflow",
 		},
 	}
 	fq := fd.FullyQualifiedName()
-	expected := "github.com/rcownie/cleat/workflow.Process"
+	expected := "github.com/cleat-team/cleat/workflow.Process"
 	if fq != expected {
 		t.Errorf("FullyQualifiedName() = %q, want %q", fq, expected)
 	}
@@ -107,7 +107,7 @@ func TestFullyQualifiedNameWithReceiver(t *testing.T) {
 		Name: "Process",
 		Pkg: &Package{
 			Name: "workflow",
-			Path: "github.com/rcownie/cleat/workflow",
+			Path: "github.com/cleat-team/cleat/workflow",
 		},
 		RecvType: recvType,
 	}
@@ -122,7 +122,7 @@ func TestFullyQualifiedNameWithReceiver(t *testing.T) {
 func TestFullyQualifiedNameWithSamePackageReceiver(t *testing.T) {
 	// When the receiver type belongs to the same package as the function,
 	// the qualifier returns "" (no package prefix).
-	samePkg := types.NewPackage("github.com/rcownie/cleat/workflow", "workflow")
+	samePkg := types.NewPackage("github.com/cleat-team/cleat/workflow", "workflow")
 	recvType := types.NewNamed(
 		types.NewTypeName(token.Pos(0), samePkg, "MyStruct", nil),
 		types.Typ[types.Int],
@@ -132,7 +132,7 @@ func TestFullyQualifiedNameWithSamePackageReceiver(t *testing.T) {
 		Name: "Process",
 		Pkg: &Package{
 			Name: "workflow",
-			Path: "github.com/rcownie/cleat/workflow",
+			Path: "github.com/cleat-team/cleat/workflow",
 		},
 		RecvType: recvType,
 	}
@@ -202,7 +202,7 @@ func TestShortNameEdgeCases(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsHostCallsTypeWithPointerToHostCalls(t *testing.T) {
-	pkg := types.NewPackage("github.com/rcownie/cleat", "cleat")
+	pkg := types.NewPackage("github.com/cleat-team/cleat", "cleat")
 	obj := types.NewTypeName(token.Pos(0), pkg, "HostCalls", nil)
 	named := types.NewNamed(obj, types.Typ[types.Int], nil)
 	ptr := types.NewPointer(named)
@@ -268,30 +268,30 @@ func TestIsUserPackageEmptyTarget(t *testing.T) {
 }
 
 func TestIsUserPackageExactMatch(t *testing.T) {
-	pkg := &packages.Package{PkgPath: "github.com/rcownie/cleat/workflow"}
-	if !isUserPackage(pkg, "github.com/rcownie/cleat/workflow") {
+	pkg := &packages.Package{PkgPath: "github.com/cleat-team/cleat/workflow"}
+	if !isUserPackage(pkg, "github.com/cleat-team/cleat/workflow") {
 		t.Error("isUserPackage should return true for exact match")
 	}
 }
 
 func TestIsUserPackageSubPackage(t *testing.T) {
-	pkg := &packages.Package{PkgPath: "github.com/rcownie/cleat/workflow/sub"}
-	if !isUserPackage(pkg, "github.com/rcownie/cleat/workflow") {
+	pkg := &packages.Package{PkgPath: "github.com/cleat-team/cleat/workflow/sub"}
+	if !isUserPackage(pkg, "github.com/cleat-team/cleat/workflow") {
 		t.Error("isUserPackage should return true for sub-package")
 	}
 }
 
 func TestIsUserPackageNonMatch(t *testing.T) {
 	pkg := &packages.Package{PkgPath: "other/module/pkg"}
-	if isUserPackage(pkg, "github.com/rcownie/cleat") {
+	if isUserPackage(pkg, "github.com/cleat-team/cleat") {
 		t.Error("isUserPackage should return false for non-matching package")
 	}
 }
 
 func TestIsUserPackageSimilarPrefix(t *testing.T) {
-	// "github.com/rcownie/cleat-extra" should NOT match "github.com/rcownie/cleat"
-	pkg := &packages.Package{PkgPath: "github.com/rcownie/cleat-extra/pkg"}
-	if isUserPackage(pkg, "github.com/rcownie/cleat") {
+	// "github.com/cleat-team/cleat-extra" should NOT match "github.com/cleat-team/cleat"
+	pkg := &packages.Package{PkgPath: "github.com/cleat-team/cleat-extra/pkg"}
+	if isUserPackage(pkg, "github.com/cleat-team/cleat") {
 		t.Error("isUserPackage should return false for package with similar but different prefix")
 	}
 }

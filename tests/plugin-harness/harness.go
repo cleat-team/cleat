@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/host"
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // TestPluginEnv is a complete plugin test environment. It holds all of the

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 package e002
 
 import (
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // Workflow triggers E002 by using channel send.

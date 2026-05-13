@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/host/testutil"
+	"github.com/cleat-team/cleat/internal/host/testutil"
 
 	_ "github.com/microsoft/go-mssqldb"
 )

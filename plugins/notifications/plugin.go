@@ -15,7 +15,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 func init() {

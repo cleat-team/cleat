@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/analyzer"
 )
 
 // paramKind describes how a parameter is passed across the WASM boundary.

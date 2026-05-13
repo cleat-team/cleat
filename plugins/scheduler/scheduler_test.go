@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/internal/plugin"
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 func TestInfo(t *testing.T) {

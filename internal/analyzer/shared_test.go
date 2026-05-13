@@ -13,12 +13,12 @@ import (
 
 func TestIsHostCallsTypeReturnsTrueForInterface(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
 
-	fd := result.Funcs["github.com/rcownie/cleat/testdata/basic.PlaceOrder"]
+	fd := result.Funcs["github.com/cleat-team/cleat/testdata/basic.PlaceOrder"]
 	if fd == nil {
 		t.Fatal("could not find PlaceOrder function")
 	}
@@ -34,12 +34,12 @@ func TestIsHostCallsTypeReturnsTrueForInterface(t *testing.T) {
 
 func TestIsHostCallsTypeReturnsFalseForNonHostCallsType(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
 
-	fd := result.Funcs["github.com/rcownie/cleat/testdata/basic.PlaceOrder"]
+	fd := result.Funcs["github.com/cleat-team/cleat/testdata/basic.PlaceOrder"]
 	if fd == nil {
 		t.Fatal("could not find PlaceOrder function")
 	}
@@ -77,7 +77,7 @@ func TestShortNameExtractsCorrectName(t *testing.T) {
 		want   string
 	}{
 		{"pkg.Func", "Func"},
-		{"github.com/rcownie/cleat/testdata/basic.PlaceOrder", "PlaceOrder"},
+		{"github.com/cleat-team/cleat/testdata/basic.PlaceOrder", "PlaceOrder"},
 		{"basic.checkItemAvailability", "checkItemAvailability"},
 		{"(*pkg.Type).Method", "Method"},
 		{"single", "single"},
@@ -102,7 +102,7 @@ func TestLastComponentExtractsCorrectComponent(t *testing.T) {
 		path string
 		want string
 	}{
-		{"github.com/rcownie/cleat", "cleat"},
+		{"github.com/cleat-team/cleat", "cleat"},
 		{"/usr/local/go", "go"},
 		{"single", "single"},
 		{"", ""},
@@ -124,12 +124,12 @@ func TestLastComponentExtractsCorrectComponent(t *testing.T) {
 
 func TestContainsNodeFindsTarget(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
 
-	fd := result.Funcs["github.com/rcownie/cleat/testdata/basic.checkItemAvailability"]
+	fd := result.Funcs["github.com/cleat-team/cleat/testdata/basic.checkItemAvailability"]
 	if fd == nil {
 		t.Fatal("could not find checkItemAvailability")
 	}
@@ -154,12 +154,12 @@ func TestContainsNodeFindsTarget(t *testing.T) {
 
 func TestContainsNodeReturnsFalseForMissingNode(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
 
-	fd := result.Funcs["github.com/rcownie/cleat/testdata/basic.checkItemAvailability"]
+	fd := result.Funcs["github.com/cleat-team/cleat/testdata/basic.checkItemAvailability"]
 	if fd == nil {
 		t.Fatal("could not find checkItemAvailability")
 	}
@@ -174,12 +174,12 @@ func TestContainsNodeReturnsFalseForMissingNode(t *testing.T) {
 
 func TestContainsNodeHandlesNilTarget(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
 
-	fd := result.Funcs["github.com/rcownie/cleat/testdata/basic.checkItemAvailability"]
+	fd := result.Funcs["github.com/cleat-team/cleat/testdata/basic.checkItemAvailability"]
 	if fd == nil {
 		t.Fatal("could not find checkItemAvailability")
 	}
@@ -198,12 +198,12 @@ func TestContainsNodeHandlesNilTarget(t *testing.T) {
 
 func TestFindEnclosingFuncNameFindsEnclosingFunction(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
 
-	fd := result.Funcs["github.com/rcownie/cleat/testdata/basic.checkItemAvailability"]
+	fd := result.Funcs["github.com/cleat-team/cleat/testdata/basic.checkItemAvailability"]
 	if fd == nil {
 		t.Fatal("could not find checkItemAvailability")
 	}
@@ -231,7 +231,7 @@ func TestFindEnclosingFuncNameFindsEnclosingFunction(t *testing.T) {
 
 func TestFindEnclosingFuncNameReturnsEmptyForMissingNode(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}

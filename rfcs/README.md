@@ -23,7 +23,7 @@ RFC. When in doubt, open a GitHub issue first to discuss.
 
 ### Step 1: Open a GitHub Issue
 
-Open an issue on the [cleat GitHub repository](https://github.com/rcownie/cleat/issues)
+Open an issue on the [cleat GitHub repository](https://github.com/cleat-team/cleat/issues)
 using the RFC template. Include:
 
 - A clear title prefixed with `RFC:` (e.g., `RFC: Task routing for worker pools`)

@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/internal/plugin"
-	"github.com/rcownie/cleat/plugins/llm/providers"
+	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugins/llm/providers"
 )
 
 // RegisterHostFunctions registers workflow-callable functions.

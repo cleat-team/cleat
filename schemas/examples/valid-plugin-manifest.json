@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Content-addressed blob storage with metadata queries",
   "author": "cleat",
-  "repository": "https://github.com/rcownie/cleat",
+  "repository": "https://github.com/cleat-team/cleat",
   "min_cleat_version": ">=1.0.0",
   "capabilities": {
     "database": true,

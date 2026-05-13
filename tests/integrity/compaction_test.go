@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/rcownie/cleat/internal/host"
+	host "github.com/cleat-team/cleat/internal/host"
 )
 
 // TestCompactionReducesEventCount verifies that compacting a workflow's event
