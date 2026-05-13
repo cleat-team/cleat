@@ -62,8 +62,8 @@ func TestWorkflowContextHasHostCalls(t *testing.T) {
 	r := New()
 	r.Register("check_hc", func(ctx *Context) error {
 		h := ctx.H()
-		if h == nil {
-			t.Fatal("H() returned nil")
+		if h.HostCallsImpl == nil {
+			t.Fatal("H() returned nil HostCallsImpl")
 		}
 
 		// DurableLog should not panic.

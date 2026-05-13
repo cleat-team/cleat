@@ -27,8 +27,10 @@ func CallTyped[T any](h HostCalls, service, operation string, request any) (T, e
 		return zero, err
 	}
 	var result T
-	if err := json.Unmarshal([]byte(respJSON), &result); err != nil {
-		return zero, fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
+	if respJSON != "" {
+		if err := json.Unmarshal([]byte(respJSON), &result); err != nil {
+			return zero, fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
+		}
 	}
 	return result, nil
 }
@@ -54,8 +56,10 @@ func PluginCallTyped[T any](h HostCalls, plugin, function string, request any) (
 		return zero, err
 	}
 	var result T
-	if err := json.Unmarshal([]byte(respJSON), &result); err != nil {
-		return zero, fmt.Errorf("durable: unmarshaling response from plugin %s.%s: %w", plugin, function, err)
+	if respJSON != "" {
+		if err := json.Unmarshal([]byte(respJSON), &result); err != nil {
+			return zero, fmt.Errorf("durable: unmarshaling response from plugin %s.%s: %w", plugin, function, err)
+		}
 	}
 	return result, nil
 }

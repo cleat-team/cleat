@@ -15,8 +15,8 @@ func TestNewLocalRunner_CreatesNonNil(t *testing.T) {
 func TestNewLocalRunner_HEqualsNonNil(t *testing.T) {
 	r := NewLocalRunner(WithLogWriter(io.Discard))
 	h := r.H()
-	if h == nil {
-		t.Fatal("H() returned nil")
+	if h.HostCallsImpl == nil {
+		t.Fatal("H() returned nil HostCallsImpl")
 	}
 }
 
@@ -50,8 +50,8 @@ func TestNewLocalRunner_WithWorkflowID(t *testing.T) {
 	// WorkflowID isn't exported on LocalRunner, but we can verify
 	// that the runner is functional.
 	h := r.H()
-	if h == nil {
-		t.Fatal("H() returned nil")
+	if h.HostCallsImpl == nil {
+		t.Fatal("H() returned nil HostCallsImpl")
 	}
 }
 

@@ -641,7 +641,7 @@ func TestRegisterTypedUpdateHandler(t *testing.T) {
 		Greeting string `json:"greeting"`
 	}
 
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{})
 
 	RegisterTypedUpdateHandler(h, "say_hello",
 		func(req MyReq) (MyResp, error) {
@@ -673,7 +673,7 @@ func TestRegisterTypedUpdateHandler(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleUpdateNotFound(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
 	_, err := h.HandleUpdate("no_such_handler", `{}`)
 	if err == nil {
 		t.Fatal("expected error for unknown update handler")
@@ -684,7 +684,7 @@ func TestHandleUpdateNotFound(t *testing.T) {
 }
 
 func TestHandleQueryRegistered(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
 	h.RegisterQueryHandler("get_status", func(payloadJSON string) (string, error) {
 		return `{"status":"ok"}`, nil
 	})
@@ -699,7 +699,7 @@ func TestHandleQueryRegistered(t *testing.T) {
 }
 
 func TestHandleQueryNotFound(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
 	_, err := h.HandleQuery("no_such_query", `{}`)
 	if err == nil {
 		t.Fatal("expected error for unknown query handler")
@@ -717,7 +717,7 @@ func TestHandleQueryDelegatesToField(t *testing.T) {
 			capturedPayload = payload
 			return `{"delegated":true}`, nil
 		},
-	}).(*hostCallsImpl)
+	}).HostCallsImpl
 
 	result, err := h.HandleQuery("my_query", `{"key":"val"}`)
 	if err != nil {

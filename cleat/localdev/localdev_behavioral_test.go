@@ -34,8 +34,8 @@ func TestLR_New_CreatesWithDefaults(t *testing.T) {
 	if r == nil {
 		t.Fatal("NewLocalRunner returned nil")
 	}
-	if r.H() == nil {
-		t.Error("H() returned nil")
+	if r.H().HostCallsImpl == nil {
+		t.Error("H() returned nil HostCallsImpl")
 	}
 	if r.Events() == nil {
 		t.Error("Events() returned nil")

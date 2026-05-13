@@ -936,7 +936,11 @@ func TestListModels_SingleProviderMarshalError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestChatConvenienceFunction(t *testing.T) {
-	h := &mockHostCalls{resp: pluginChatResponseJSON("from convenience", nil, defaultUsage, 0.001)}
+	h := cleat.NewHostCalls(cleat.HostCallsOptions{
+		PluginCall: func(pluginName, functionName, inputJSON string) (string, error) {
+			return pluginChatResponseJSON("from convenience", nil, defaultUsage, 0.001), nil
+		},
+	})
 	resp, err := Chat(h, ChatRequest{
 		Provider: "openai",
 		Model:    "gpt-4o",

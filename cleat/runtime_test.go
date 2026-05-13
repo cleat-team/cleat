@@ -15,8 +15,8 @@ import (
 
 func TestNewHostCallsCreatesNonNil(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{})
-	if h == nil {
-		t.Fatal("NewHostCalls returned nil")
+	if h.HostCallsImpl == nil {
+		t.Fatal("NewHostCalls returned nil HostCallsImpl")
 	}
 }
 
@@ -1398,7 +1398,7 @@ func TestDurableSendPassesThrough(t *testing.T) {
 			capturedRequest = requestJSON
 			return nil
 		},
-	}).(*hostCallsImpl)
+	}).HostCallsImpl
 
 	err := h.DurableSend("my_svc", "my_op", `{"key":"val"}`)
 	if err != nil {
@@ -1410,7 +1410,7 @@ func TestDurableSendPassesThrough(t *testing.T) {
 }
 
 func TestDurableSendNotInitialized(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
 	err := h.DurableSend("svc", "op", "{}")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -1435,7 +1435,7 @@ func TestScheduleInvokePassesThrough(t *testing.T) {
 			capturedDelayMs = delayMs
 			return nil
 		},
-	}).(*hostCallsImpl)
+	}).HostCallsImpl
 
 	err := h.ScheduleInvoke("my_svc", "my_op", `{"key":"val"}`, 5000)
 	if err != nil {
@@ -1447,7 +1447,7 @@ func TestScheduleInvokePassesThrough(t *testing.T) {
 }
 
 func TestScheduleInvokeNotInitialized(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
 	err := h.ScheduleInvoke("svc", "op", "{}", 1000)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -1470,7 +1470,7 @@ func TestAwaitPromiseMsDelegatesToAwaitPromise(t *testing.T) {
 			capturedTimeout = timeout
 			return "resolved_value", false, nil
 		},
-	}).(*hostCallsImpl)
+	}).HostCallsImpl
 
 	result, timedOut, err := h.AwaitPromiseMs("promise_123", 5000)
 	if err != nil {
@@ -1502,7 +1502,7 @@ func TestResolvePromisePassesThrough(t *testing.T) {
 			capturedValue = value
 			return nil
 		},
-	}).(*hostCallsImpl)
+	}).HostCallsImpl
 
 	err := h.ResolvePromise("prom_1", `{"approved":true}`)
 	if err != nil {
@@ -1514,7 +1514,7 @@ func TestResolvePromisePassesThrough(t *testing.T) {
 }
 
 func TestResolvePromiseNotInitialized(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
 	err := h.ResolvePromise("p1", "ok")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -1536,7 +1536,7 @@ func TestRejectPromisePassesThrough(t *testing.T) {
 			capturedErrMsg = errMsg
 			return nil
 		},
-	}).(*hostCallsImpl)
+	}).HostCallsImpl
 
 	err := h.RejectPromise("prom_1", "something went wrong")
 	if err != nil {
@@ -1548,7 +1548,7 @@ func TestRejectPromisePassesThrough(t *testing.T) {
 }
 
 func TestRejectPromiseNotInitialized(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
 	err := h.RejectPromise("p1", "error")
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -2336,7 +2336,7 @@ func TestAwaitConditionFallbackPredicateFalseThenTimeout(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSetScope_ClearsScopeWithEmptyStrings(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
 	prev := h.SetScope("Order", "ord-1")
 	if prev != "" {
 		t.Errorf("expected empty previous scope, got %q", prev)
@@ -2363,7 +2363,7 @@ func TestSetScope_ClearsScopeWithEmptyStrings(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClearScope_WhenNoScopeSet(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{}).(*hostCallsImpl)
+	h := NewHostCalls(HostCallsOptions{}).HostCallsImpl
 	prev := h.ClearScope()
 	if prev != "" {
 		t.Errorf("expected empty previous scope, got %q", prev)
