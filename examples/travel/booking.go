@@ -83,7 +83,7 @@ func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
 	parallelSteps := []cleat.SagaStep{
 		{
 			Forward: func(h cleat.HostCalls) (string, error) {
-				resp, err := h.DurableCall("flights", "Book", toJSON(input.Flight))
+				resp, err := h.Call("flights", "Book", toJSON(input.Flight))
 				if err != nil {
 					return "", fmt.Errorf("flight booking failed: %w", err)
 				}
@@ -100,13 +100,13 @@ func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
 					return nil
 				}
 				h.DurableLog(fmt.Sprintf("Compensating flight: %s", flightRef))
-				h.DurableCall("flights", "Cancel", toJSON(map[string]string{"ref": flightRef}))
+				h.Call("flights", "Cancel", toJSON(map[string]string{"ref": flightRef}))
 				return nil
 			},
 		},
 		{
 			Forward: func(h cleat.HostCalls) (string, error) {
-				resp, err := h.DurableCall("hotels", "Book", toJSON(input.Hotel))
+				resp, err := h.Call("hotels", "Book", toJSON(input.Hotel))
 				if err != nil {
 					return "", fmt.Errorf("hotel booking failed: %w", err)
 				}
@@ -123,7 +123,7 @@ func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
 					return nil
 				}
 				h.DurableLog(fmt.Sprintf("Compensating hotel: %s", hotelRef))
-				h.DurableCall("hotels", "Cancel", toJSON(map[string]string{"ref": hotelRef}))
+				h.Call("hotels", "Cancel", toJSON(map[string]string{"ref": hotelRef}))
 				return nil
 			},
 		},
@@ -132,7 +132,7 @@ func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
 	if input.Car.City != "" {
 		parallelSteps = append(parallelSteps, cleat.SagaStep{
 			Forward: func(h cleat.HostCalls) (string, error) {
-				resp, err := h.DurableCall("cars", "Book", toJSON(input.Car))
+				resp, err := h.Call("cars", "Book", toJSON(input.Car))
 				if err != nil {
 					return "", fmt.Errorf("car booking failed: %w", err)
 				}
@@ -149,7 +149,7 @@ func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
 					return nil
 				}
 				h.DurableLog(fmt.Sprintf("Compensating car: %s", carRef))
-				h.DurableCall("cars", "Cancel", toJSON(map[string]string{"ref": carRef}))
+				h.Call("cars", "Cancel", toJSON(map[string]string{"ref": carRef}))
 				return nil
 			},
 		})
@@ -170,7 +170,7 @@ func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
 	}
 
 	// ---- Confirmation ----
-	h.DurableCall("notifications", "SendConfirmation", toJSON(map[string]interface{}{
+	h.Call("notifications", "SendConfirmation", toJSON(map[string]interface{}{
 		"booking_id": bookingID,
 		"user_id":    input.UserID,
 		"flight_ref": flightRef,
@@ -206,13 +206,13 @@ func validateInput(input BookingInput) error {
 
 func cancelAll(h cleat.HostCalls, flightRef, hotelRef, carRef string) {
 	if flightRef != "" {
-		h.DurableCall("flights", "Cancel", toJSON(map[string]string{"ref": flightRef}))
+		h.Call("flights", "Cancel", toJSON(map[string]string{"ref": flightRef}))
 	}
 	if hotelRef != "" {
-		h.DurableCall("hotels", "Cancel", toJSON(map[string]string{"ref": hotelRef}))
+		h.Call("hotels", "Cancel", toJSON(map[string]string{"ref": hotelRef}))
 	}
 	if carRef != "" {
-		h.DurableCall("cars", "Cancel", toJSON(map[string]string{"ref": carRef}))
+		h.Call("cars", "Cancel", toJSON(map[string]string{"ref": carRef}))
 	}
 }
 

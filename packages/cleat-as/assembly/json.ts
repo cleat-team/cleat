@@ -950,3 +950,59 @@ export function jsonStrArray(json: string): string[] {
 
   return result;
 }
+
+import { HostCalls } from "./host-calls";
+
+/**
+ * TeaVM-safe JSON wrapper that delegates parsing and serialization
+ * to the host runtime via cleat_json_parse and cleat_json_stringify.
+ *
+ * Unlike the pure-AS JsonParser/JsonBuilder classes in this module,
+ * this class uses the host's encoding/json library, which provides
+ * full Unicode handling, proper number precision, and validation.
+ *
+ * All methods are static and thread-safe within a single workflow
+ * execution. No eval or dynamic code generation is used.
+ *
+ * Usage:
+ * ```ts
+ * let valid = JSON.parse('{"key": "value"}');
+ * if (valid !== null) {
+ *   // valid is normalized JSON string
+ * }
+ * ```
+ */
+export class JSON {
+  /**
+   * Parse and normalize a JSON string via the host runtime.
+   *
+   * Validates the input using the host's encoding/json and returns
+   * a normalized JSON string. Returns null on parse error.
+   *
+   * @param json - The JSON string to validate and normalize.
+   * @returns Normalized JSON string, or null on parse error.
+   */
+  static parse(json: string): string | null {
+    let host = new HostCalls();
+    return host.jsonParse(json);
+  }
+
+  /**
+   * Validate and serialize a JSON value via the host runtime.
+   *
+   * Takes a JSON string, validates it, and returns re-serialized
+   * (normalized) JSON. Returns null on parse error.
+   *
+   * ```ts
+   * let output = JSON.stringify('{"key": "value"}');
+   * // output is re-serialized, normalized JSON
+   * ```
+   *
+   * @param value - JSON string to validate and serialize.
+   * @returns Serialized JSON string, or null on parse error.
+   */
+  static stringify(value: string): string | null {
+    let host = new HostCalls();
+    return host.jsonStringify(value);
+  }
+}

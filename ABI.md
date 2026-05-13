@@ -4,7 +4,7 @@ This document defines the exact WebAssembly contract between workflow modules an
 
 ## Version
 
-ABI version: 1. The ABI is versioned separately from the workflow definition version. The host runtime supports all ABI versions it was compiled for.
+ABI version: 4. The ABI is versioned separately from the workflow definition version. The host runtime supports all ABI versions it was compiled for.
 
 ---
 
@@ -1218,6 +1218,58 @@ Perform an HTTP fetch request. The method, URL, headers (JSON), and body are all
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `responseLen` — bytes written to response buffer |
 
+### JSON validation helpers
+
+#### 2.51 `cleat_json_parse`
+
+Parse and validate a JSON string. Returns the canonical (re-serialized) form of the input JSON.
+
+```
+(func (import "env" "cleat_json_parse")
+  (param i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `json_ptr` | `i32` | JSON string pointer |
+| `json_len` | `i32` | JSON string length |
+| `out_ptr` | `i32` | Output buffer for normalized JSON |
+| `out_max_len` | `i32` | Output buffer capacity (65536) |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-31 | `errCode` — 0 = success, non-zero = invalid JSON |
+| 32-63 | `bytesWritten` — bytes written to output buffer |
+
+If `errCode != 0`, the input was not valid JSON and `bytesWritten` is 0.
+
+#### 2.52 `cleat_json_stringify`
+
+Validate and re-serialize a JSON value. Identical behavior to `cleat_json_parse` — both parse then re-serialize via the host's `encoding/json`. Provided as a semantic alias for SDK ergonomics.
+
+```
+(func (import "env" "cleat_json_stringify")
+  (param i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `value_ptr` | `i32` | JSON value pointer |
+| `value_len` | `i32` | JSON value length |
+| `out_ptr` | `i32` | Output buffer for serialized JSON |
+| `out_max_len` | `i32` | Output buffer capacity (65536) |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-31 | `errCode` — 0 = success, non-zero = invalid JSON |
+| 32-63 | `bytesWritten` — bytes written to output buffer |
+
 ### Plugin extensions
 
 #### 2.49 `plugin_call`
@@ -1326,6 +1378,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| 4 | 2026-05-13 | Added `cleat_json_parse` (2.51) and `cleat_json_stringify` (2.52) host functions for JSON validation and normalization via the host runtime. Bumped ABI_VERSION to 4. |
 | 3 | 2026-05-09 | Expanded from 22 to 50 documented host functions. Added all missing imports: `cleat_continue_as_new_versioned`, `cleat_child_workflow_with_options`, `cleat_child_workflow_in_schema`, `cleat_send_signal_and_wait`, `cleat_reply_to_signal`, `cleat_signal_workflow`, `cleat_set_scope`, `cleat_get_scope`, `cleat_uuid`, `cleat_acquire_lock`, `cleat_release_lock`, `cleat_side_effect`, `cleat_workflow_id`, `cleat_run_id`, `cleat_resolve_promise`, `cleat_reject_promise`, `cleat_send`, `cleat_schedule_invoke`, `cleat_register_query_handler`, `cleat_run_detached`, `cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`, `cleat_list_state`, `cleat_fetch`, `plugin_call_streaming`. Reorganized into logical groups. Updated documentation count from 18 to 50. |
 | 2 | 2026-05-06 | Added `cleat_call_retry`, `cleat_call_heartbeat`, `cleat_await_all_children`, and `plugin_call` host functions. Updated documentation count. |
 | 1 | 2026-05-05 | Initial ABI specification. 15 host function imports, export convention, memory layout. |

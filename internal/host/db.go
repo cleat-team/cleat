@@ -536,9 +536,28 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	var wfs []*WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		if err := s.dialect.scanWorkflowInstanceExtra(rows, &wf); err != nil {
+		var nextWakeAt sql.NullTime
+		var tenantID sql.NullString
+		var createdAt sql.NullTime
+			var assignedTo, errorCode, errorOp sql.NullString
+
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
+
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		if tenantID.Valid {
+			wf.TenantID = tenantID.String
+		}
+		if createdAt.Valid {
+			wf.CreatedAt = createdAt.Time
+		}
+		wf.AssignedTo = assignedTo.String
+			wf.ErrorCode = errorCode.String
+			wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -587,9 +606,28 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	var wfs []*WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		if err := s.dialect.scanWorkflowInstanceExtra(rows, &wf); err != nil {
+		var nextWakeAt sql.NullTime
+		var tenantID sql.NullString
+		var createdAt sql.NullTime
+			var assignedTo, errorCode, errorOp sql.NullString
+
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
+
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		if tenantID.Valid {
+			wf.TenantID = tenantID.String
+		}
+			if createdAt.Valid {
+				wf.CreatedAt = createdAt.Time
+			}
+		wf.AssignedTo = assignedTo.String
+			wf.ErrorCode = errorCode.String
+			wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -1042,9 +1080,10 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	// Create the new workflow run.
 	var newRunID string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'))
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
+			'00000000-0000-0000-0000-000000000000')
 		RETURNING id
 	`, defName, defVersion, newInput).Scan(&newRunID)
 	if err != nil {
@@ -1311,16 +1350,17 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	if pluginDepsJSON == nil {
 		pluginDepsJSON = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	tenantID := "00000000-0000-0000-0000-000000000000"
+		_, err = s.db.ExecContext(ctx, `
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (name, version) DO UPDATE SET
 			wasm_bytes = EXCLUDED.wasm_bytes,
 			abi_version = EXCLUDED.abi_version,
 			min_version = EXCLUDED.min_version,
 			plugin_deps = EXCLUDED.plugin_deps,
 			deprecated = EXCLUDED.deprecated
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated)
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, tenantID)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}
@@ -1906,9 +1946,10 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
 			VALUES ($1, $2, $3, 'ready', $4,
-			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'))
+			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
+			'00000000-0000-0000-0000-000000000000')
 		`, runID, defName, defVersion, input)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
@@ -1925,9 +1966,10 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
 		VALUES ($1, $2, $3, 'ready', $4,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'))
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
+			'00000000-0000-0000-0000-000000000000')
 	`, runID, defName, defVersion, input)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
@@ -1936,6 +1978,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 }
 
 // StartChildWorkflow creates a child workflow instance linked to a parent.
+// The child is created with its own independent workflow instance.
 // If defVersion > 0, that version is used explicitly; otherwise the latest
 // non-deprecated version is used (SELECT MAX(version)).
 func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
@@ -1946,13 +1989,14 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	defer tx.Rollback()
 
 	var runID string
-	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue)
+	err = s.db.QueryRowContext(ctx, `
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 		VALUES (gen_random_uuid(), $1,
 		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated) END,
 		        'ready', $2, $3,
 		        COALESCE(NULLIF($5, ''), 'ABANDON'),
-		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'))
+		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
+			'00000000-0000-0000-0000-000000000000')
 		RETURNING id
 	`, defName, inputJSON, parentID, defVersion, parentClosePolicy).Scan(&runID)
 	if err != nil {
@@ -1980,12 +2024,13 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 
 	// 1. INSERT child workflow instance.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 		VALUES ($1, $2,
 		        CASE WHEN $5 > 0 THEN $5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $2 AND NOT deprecated) END,
 		        'ready', $3, $4,
 		        COALESCE(NULLIF($6, ''), 'ABANDON'),
-		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'))
+		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'),
+			'00000000-0000-0000-0000-000000000000')
 	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
@@ -2205,9 +2250,18 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	var workflows []WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		if err := d.scanWorkflowInstance(rows, &wf); err != nil {
+		var nextWakeAt sql.NullTime
+		var assignedTo, errorCode, errorOp sql.NullString
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		wf.AssignedTo = assignedTo.String
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		workflows = append(workflows, wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -2266,7 +2320,7 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt)
 	if err != nil {
 		return err

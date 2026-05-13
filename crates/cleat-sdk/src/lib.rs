@@ -10,6 +10,7 @@ pub mod saga;
 pub mod test;
 pub mod version;
 
+pub use cleat_macro::cleat_test;
 pub use host_calls::{FetchResult, HostCalls, RetryPolicy, SignalResult};
 pub use saga::{Saga, SagaStep};
 pub use plugins::{

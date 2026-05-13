@@ -235,6 +235,20 @@ var importDefs = map[string]importDef{
 			{"key", kindInString},
 		},
 	},
+	"cleat_json_parse": {
+		ImportName: "cleat_json_parse",
+		Params: []paramSpec{
+			{"json", kindInString},
+			{"out", kindOutString},
+		},
+	},
+	"cleat_json_stringify": {
+		ImportName: "cleat_json_stringify",
+		Params: []paramSpec{
+			{"value", kindInString},
+			{"out", kindOutString},
+		},
+	},
 }
 
 const outBufSize = 65536

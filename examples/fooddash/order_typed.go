@@ -38,7 +38,7 @@ func PlaceOrderTyped(h cleat.HostCalls, userID string, restaurantID string,
 
 	// Step 2: Calculate the total.
 	total := calculateOrderTotal(validated)
-	h.LogKV("order total calculated",
+	h.Log("order total calculated",
 		"total_cents", total,
 		"item_count", len(validated),
 	)

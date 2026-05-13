@@ -48,7 +48,7 @@ func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
 	h.SetQueryState("stage", "pending_verification")
 	h.SetQueryState("email", input.Email)
 
-	resp, err := h.DurableCall("users", "CreatePendingRegistration", toJSON(input))
+	resp, err := h.Call("users", "CreatePendingRegistration", toJSON(input))
 	if err != nil {
 		return nil, fmt.Errorf("registration failed: %w", err)
 	}
@@ -59,7 +59,7 @@ func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
 	h.DurableLog(fmt.Sprintf("Pending registration: user=%s email=%s", tempUser.UserID, input.Email))
 
 	// Step 2: Send verification email.
-	h.DurableCall("email", "SendVerification", toJSON(map[string]string{
+	h.Call("email", "SendVerification", toJSON(map[string]string{
 		"user_id": tempUser.UserID,
 		"email":   input.Email,
 		"name":    input.Name,
@@ -84,7 +84,7 @@ func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
 	// Step 4: Create user profile.
 	h.SetQueryState("stage", "creating_profile")
 
-	profileResp, err := h.DurableCall("users", "CreateProfile", toJSON(map[string]string{
+	profileResp, err := h.Call("users", "CreateProfile", toJSON(map[string]string{
 		"user_id":            tempUser.UserID,
 		"email":              input.Email,
 		"name":               input.Name,
@@ -98,7 +98,7 @@ func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
 	json.Unmarshal([]byte(profileResp), &profile)
 
 	// Step 5: Send welcome email (best-effort).
-	h.DurableCall("email", "SendWelcome", toJSON(map[string]string{
+	h.Call("email", "SendWelcome", toJSON(map[string]string{
 		"user_id": tempUser.UserID,
 		"email":   input.Email,
 		"name":    input.Name,
@@ -116,13 +116,13 @@ func handleVerificationTimeout(h cleat.HostCalls, userID string, input SignupInp
 	h.DurableLog(fmt.Sprintf("Verification timed out: user=%s", userID))
 
 	// Send reminder (best-effort).
-	h.DurableCall("email", "SendReminder", toJSON(map[string]string{
+	h.Call("email", "SendReminder", toJSON(map[string]string{
 		"user_id": userID,
 		"email":   input.Email,
 	}))
 
 	// Clean up pending registration.
-	if _, err := h.DurableCall("users", "DeletePendingRegistration", toJSON(map[string]string{
+	if _, err := h.Call("users", "DeletePendingRegistration", toJSON(map[string]string{
 		"user_id": userID,
 	})); err != nil {
 		h.DurableLog(fmt.Sprintf("Warning: failed to clean up pending registration: %v", err))

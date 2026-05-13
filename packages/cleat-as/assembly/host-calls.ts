@@ -625,6 +625,36 @@ export declare function import_cleat_call_heartbeat(
   respMaxLen: i32,
 ): i64;
 
+/**
+ * 48. cleat_json_parse: Validate and normalize a JSON string via the host.
+ * (import "env" "cleat_json_parse") (param i32 i32 i32 i32) (result i64)
+ *
+ * Parses the input JSON using the host's encoding/json library and returns
+ * a normalized JSON string. Returns errCode=1 on parse error.
+ */
+@external("env", "cleat_json_parse")
+export declare function import_cleat_json_parse(
+  jsonPtr: i32,
+  jsonLen: i32,
+  outPtr: i32,
+  outMaxLen: i32,
+): i64;
+
+/**
+ * 49. cleat_json_stringify: Serialize a JSON value via the host.
+ * (import "env" "cleat_json_stringify") (param i32 i32 i32 i32) (result i64)
+ *
+ * Validates the input JSON string and returns a re-serialized (normalized)
+ * JSON string. Returns errCode=1 on parse error.
+ */
+@external("env", "cleat_json_stringify")
+export declare function import_cleat_json_stringify(
+  ptr: i32,
+  len: i32,
+  outPtr: i32,
+  outMaxLen: i32,
+): i64;
+
 // ═══════════════════════════════════════════════
 // High-level result types for HostCalls methods
 // ═══════════════════════════════════════════════
@@ -795,6 +825,14 @@ export class FetchResult {
  *   host.log("payment failed: " + outcome.error);
  * }
  * ```
+ *
+ * <strong>Timeout convention:</strong> This SDK accepts timeout values in
+ * <strong>seconds</strong> for the primary API methods (e.g.,
+ * {@code awaitSignals}, {@code awaitPromise}, {@code cleatSleep}) and
+ * <strong>milliseconds</strong> for the {@code *Ms} variants (e.g.,
+ * {@code awaitSignalsMs}, {@code cleatSleepMs}). Prefer the seconds-based
+ * primary methods for readability. The underlying host ABI always uses
+ * milliseconds; the conversion is handled internally.
  *
  * Mirrors Rust SDK `crates/cleat-sdk/src/host_calls.rs` and
  * Go `durable.HostCalls` interface.
@@ -2858,5 +2896,80 @@ export class HostCalls {
       return null;
     }
     return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+  }
+
+  // ────────────────────────────────────────────
+  // 48. jsonParse — validate and normalize JSON
+  // ────────────────────────────────────────────
+
+  /**
+   * Validate and normalize a JSON string via the host runtime.
+   *
+   * Parses the input JSON string using the host's JSON library and
+   * returns a validated, normalized JSON string. Returns null on
+   * parse error.
+   *
+   * @param jsonStr - JSON string to validate and normalize.
+   * @returns Normalized JSON string, or null on parse error.
+   */
+  jsonParse(jsonStr: string): string | null {
+    let jsonLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, jsonStr);
+
+    let result: i64 = import_cleat_json_parse(
+      SCRATCH_BASE as i32,
+      jsonLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let errCode: u32 = (result as u64 & 0xFFFFFFFF) as u32;
+    let bytesWritten: u32 = ((result as u64 >> 32) & 0xFFFFFFFF) as u32;
+
+    if (errCode !== 0) {
+      return null;
+    }
+
+    if (bytesWritten === 0) {
+      return "";
+    }
+
+    return this.memory.readString(OUTPUT_OFFSET, bytesWritten as i32);
+  }
+
+  // ────────────────────────────────────────────
+  // 49. jsonStringify — serialize JSON value
+  // ────────────────────────────────────────────
+
+  /**
+   * Validate and serialize a JSON value via the host runtime.
+   *
+   * Takes a JSON string, validates it, and returns a re-serialized
+   * (normalized) JSON string. Returns null on parse error.
+   *
+   * @param value - JSON string to validate and serialize.
+   * @returns Serialized JSON string, or null on parse error.
+   */
+  jsonStringify(value: string): string | null {
+    let valueLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, value);
+
+    let result: i64 = import_cleat_json_stringify(
+      SCRATCH_BASE as i32,
+      valueLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let errCode: u32 = (result as u64 & 0xFFFFFFFF) as u32;
+    let bytesWritten: u32 = ((result as u64 >> 32) & 0xFFFFFFFF) as u32;
+
+    if (errCode !== 0) {
+      return null;
+    }
+
+    if (bytesWritten === 0) {
+      return "";
+    }
+
+    return this.memory.readString(OUTPUT_OFFSET, bytesWritten as i32);
   }
 }

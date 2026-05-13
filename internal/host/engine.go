@@ -3838,6 +3838,48 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 	return packSimpleResult(0, written)
 }
 
+func (s *execSession) JsonParse(ctx context.Context, m api.Module, jsonPtr, jsonLen, outPtr, outMaxLen uint32) int64 {
+	mem := m.Memory()
+	input, ok := readWasmStringValidated(mem, jsonPtr, jsonLen, maxWasmStringLen)
+	if !ok {
+		return packSimpleResult(1)
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(input), &v); err != nil {
+		return packSimpleResult(1)
+	}
+	normalized, err := json.Marshal(v)
+	if err != nil {
+		return packSimpleResult(1)
+	}
+	written, err := writeWasmString(mem, outPtr, string(normalized), outMaxLen)
+	if err != nil {
+		return packSimpleResult(1)
+	}
+	return packSimpleResult(0, written)
+}
+
+func (s *execSession) JsonStringify(ctx context.Context, m api.Module, ptr, length, outPtr, outMaxLen uint32) int64 {
+	mem := m.Memory()
+	input, ok := readWasmStringValidated(mem, ptr, length, maxWasmStringLen)
+	if !ok {
+		return packSimpleResult(1)
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(input), &v); err != nil {
+		return packSimpleResult(1)
+	}
+	serialized, err := json.Marshal(v)
+	if err != nil {
+		return packSimpleResult(1)
+	}
+	written, err := writeWasmString(mem, outPtr, string(serialized), outMaxLen)
+	if err != nil {
+		return packSimpleResult(1)
+	}
+	return packSimpleResult(0, written)
+}
+
 // ---- Result packing helpers ----
 
 func packSleepResult(status byte, durationMs int64) int64 {

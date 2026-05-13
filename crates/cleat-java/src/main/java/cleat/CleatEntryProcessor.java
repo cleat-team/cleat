@@ -16,6 +16,7 @@ import javax.tools.Diagnostic;
 import javax.tools.JavaFileObject;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.HashSet;
 import java.util.HashMap;
@@ -61,6 +62,9 @@ public class CleatEntryProcessor extends AbstractProcessor {
     /** Maps wrapper FQCN -> export name for aggregator generation. */
     private final Map<String, String> wrapperExportNames = new HashMap<>();
 
+    /** FQCNs of all classes that contain at least one @CleatEntry method. */
+    private final Set<String> workflowClasses = new LinkedHashSet<>();
+
     /** Whether the aggregator and WorkflowEntry have been generated. */
     private boolean aggregatorGenerated = false;
 
@@ -105,6 +109,13 @@ public class CleatEntryProcessor extends AbstractProcessor {
                 }
 
                 generateExportWrapper(classElement, method, exportName);
+                // Record the enclosing workflow class FQCN for direct
+                // .class references in the generated WorkflowEntry.
+                String wfPkg = processingEnv.getElementUtils()
+                    .getPackageOf(classElement).getQualifiedName().toString();
+                String clsName = classElement.getSimpleName().toString();
+                String classFqcn = wfPkg.isEmpty() ? clsName : wfPkg + "." + clsName;
+                workflowClasses.add(classFqcn);
             }
         }
 
@@ -446,10 +457,11 @@ public class CleatEntryProcessor extends AbstractProcessor {
      * Generate the WorkflowEntry class that the TeaVM compiler uses as its
      * static analysis root.
      * <p>
-     * This class references CleatEntryIndex.WRAPPER_CLASSES, which in turn
-     * references all generated {@code @Export} wrapper classes.  The chain of
-     * references prevents TeaVM from removing the exports during dead-code
-     * elimination.
+     * This class provides both indirect references (via CleatEntryIndex)
+     * and direct {@code .class} references to every workflow class that
+     * contains {@code @CleatEntry} methods.  The chain of references
+     * prevents TeaVM from removing the exports and workflow logic during
+     * dead-code elimination.
      * <p>
      * The generated class is placed in the {@code cleat} package and set as
      * {@code mainClass} in the TeaVM Gradle configuration.
@@ -464,11 +476,13 @@ public class CleatEntryProcessor extends AbstractProcessor {
                 out.println();
                 out.println("/**");
                 out.println(" * Auto-generated analysis root for TeaVM WASM compilation.");
-                out.println(" * References CleatEntryIndex to prevent tree-shaking of");
-                out.println(" * generated @CleatEntry export wrappers.");
+                out.println(" * References all @CleatEntry workflow classes and their");
+                out.println(" * generated export wrappers to prevent tree-shaking.");
                 out.println(" */");
                 out.println("public class WorkflowEntry {");
                 out.println();
+
+                // Indirect reference via CleatEntryIndex (preserves export wrappers).
                 out.println("    /**");
                 out.println("     * Static reference to CleatEntryIndex.WRAPPER_CLASSES");
                 out.println("     * prevents TeaVM from tree-shaking the export wrappers.");
@@ -477,6 +491,38 @@ public class CleatEntryProcessor extends AbstractProcessor {
                 out.println("    private static final Class<?>[] AGGREGATOR_REF =");
                 out.println("        cleat.generated.CleatEntryIndex.WRAPPER_CLASSES;");
                 out.println();
+
+                // Direct .class references to each workflow class (belt-and-suspenders).
+                out.println("    /**");
+                out.println("     * Direct references to all classes that contain");
+                out.println("     * @CleatEntry methods. Prevents TeaVM from");
+                out.println("     * tree-shaking the user's workflow logic.");
+                out.println("     */");
+                out.println("    @SuppressWarnings(\"unused\")");
+                out.println("    private static final Class<?>[] WORKFLOW_CLASSES = new Class<?>[] {");
+                for (String fqcn : workflowClasses) {
+                    out.print("        ");
+                    out.print(fqcn);
+                    out.println(".class,");
+                }
+                out.println("    };");
+                out.println();
+
+                // main method for TeaVM reachability analysis root.
+                out.println("    /**");
+                out.println("     * Main entry point for TeaVM reachability analysis.");
+                out.println("     * References all workflow classes to ensure they");
+                out.println("     * survive tree-shaking during WASM compilation.");
+                out.println("     *");
+                out.println("     * @param args unused");
+                out.println("     */");
+                out.println("    public static void main(String[] args) {");
+                out.println("        java.util.Arrays.stream(WORKFLOW_CLASSES).forEach(c -> {");
+                out.println("            System.out.println(\"Cleat workflow: \" + c.getName());");
+                out.println("        });");
+                out.println("    }");
+                out.println();
+
                 out.println("    private WorkflowEntry() {}");
                 out.println("}");
             }

@@ -681,6 +681,14 @@ func needsJSON(usage *UsageInfo) bool {
 				}
 			}
 		}
+		wdef, ok := hostWrapperDefs[hf.FieldName]
+		if ok {
+			for _, stmt := range wdef.Body {
+				if strings.Contains(stmt, "json.Unmarshal") || strings.Contains(stmt, "json.Marshal") {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }
@@ -708,6 +716,22 @@ func needsTime(usage *UsageInfo) bool {
 		if ok {
 			for _, p := range adef.Params {
 				if p.Type == "time.Duration" {
+					return true
+				}
+			}
+		}
+		wdef, ok := hostWrapperDefs[hf.FieldName]
+		if ok {
+			for _, p := range wdef.Params {
+				if p.Type == "time.Duration" {
+					return true
+				}
+			}
+			if strings.Contains(wdef.ReturnType, "time.") {
+				return true
+			}
+			for _, stmt := range wdef.Body {
+				if strings.Contains(stmt, "time.") {
 					return true
 				}
 			}

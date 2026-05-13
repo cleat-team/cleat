@@ -19,6 +19,7 @@ repositories {
 
 dependencies {
     implementation(project(":cleat-java"))
+    annotationProcessor(project(":cleat-java"))
     implementation("org.teavm:teavm-classlib:0.10.2")
 }
 
@@ -31,7 +32,10 @@ teavm {
     // TeaVM 0.10.2 configuration:
     // - Flat configuration (no nested "wasm {}" block)
     // - Use .set() for Kotlin DSL Property delegates
-    mainClass.set("com.cleat.example.WorkflowEntry")
+    // - Use auto-generated cleat.WorkflowEntry from annotation processor:
+    //   WorkflowEntry -> CleatEntryIndex -> *_Export classes -> user methods
+    //   This chain prevents TeaVM from tree-shaking @CleatEntry exports.
+    mainClass.set("cleat.WorkflowEntry")
     fileName.set("workflow.wasm")
     outputDir.set(layout.buildDirectory.dir("wasm"))
     targetType.set("WASM")

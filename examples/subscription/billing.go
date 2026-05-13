@@ -98,7 +98,7 @@ func chargeWithRetry(h cleat.HostCalls, input SubscriptionInput) error {
 	h.SetQueryState("last_charge_id", cr.ChargeID)
 
 	// Send invoice (best-effort, non-retryable).
-	h.DurableCall("billing", "SendInvoice", toJSON(map[string]string{
+	h.Call("billing", "SendInvoice", toJSON(map[string]string{
 		"user_id":   input.UserID,
 		"charge_id": cr.ChargeID,
 	}))
@@ -113,7 +113,7 @@ func enterGracePeriod(h cleat.HostCalls, input SubscriptionInput) (string, error
 	graceStart := h.Now()
 
 	// Notify user to update payment method.
-	h.DurableCall("notifications", "SendEmail", toJSON(map[string]string{
+	h.Call("notifications", "SendEmail", toJSON(map[string]string{
 		"user_id":  input.UserID,
 		"template": "payment_failed",
 	}))
@@ -125,10 +125,10 @@ func enterGracePeriod(h cleat.HostCalls, input SubscriptionInput) (string, error
 			h.SetQueryState("status", "canceled")
 			h.SetQueryState("cancel_reason", reason)
 			h.DurableLog(fmt.Sprintf("Subscription canceled during grace: %s", reason))
-			h.DurableCall("billing", "DeactivateSubscription", toJSON(map[string]string{
+			h.Call("billing", "DeactivateSubscription", toJSON(map[string]string{
 				"user_id": input.UserID,
 			}))
-			h.DurableCall("notifications", "SendEmail", toJSON(map[string]string{
+			h.Call("notifications", "SendEmail", toJSON(map[string]string{
 				"user_id":  input.UserID,
 				"template": "subscription_canceled",
 			}))
@@ -153,10 +153,10 @@ func enterGracePeriod(h cleat.HostCalls, input SubscriptionInput) (string, error
 	// Grace period exhausted — cancel.
 	h.SetQueryState("status", "canceled")
 	h.DurableLog(fmt.Sprintf("Grace period exhausted, canceling: user=%s", input.UserID))
-	h.DurableCall("billing", "DeactivateSubscription", toJSON(map[string]string{
+	h.Call("billing", "DeactivateSubscription", toJSON(map[string]string{
 		"user_id": input.UserID,
 	}))
-	h.DurableCall("notifications", "SendEmail", toJSON(map[string]string{
+	h.Call("notifications", "SendEmail", toJSON(map[string]string{
 		"user_id":  input.UserID,
 		"template": "subscription_expired",
 	}))

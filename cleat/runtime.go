@@ -47,6 +47,10 @@ type CronSchedule struct {
 // It groups all methods that invoke remote operations (API calls, plugins,
 // HTTP fetches, side effects).
 type Caller interface {
+	// Call is an alias for DurableCall. Makes or replays an API call.
+	// Prefer Call over DurableCall for consistency across SDKs.
+	Call(service, operation, requestJSON string) (responseJSON string, err error)
+
 	// DurableCall makes or replays an API call (service, operation, request).
 	DurableCall(service, operation, requestJSON string) (responseJSON string, err error)
 
@@ -235,6 +239,10 @@ type Lifecycle interface {
 	// LogKV emits a structured key-value log message recorded in the
 	// event history. Keys and values alternate: LogKV("msg", "key1", val1, "key2", val2).
 	LogKV(message string, kvs ...interface{})
+
+	// Log is an alias for LogKV. Emits a structured key-value log message.
+	// Prefer Log over LogKV for consistency across SDKs.
+	Log(message string, kvs ...interface{})
 
 	// PollCancellation checks whether the workflow has been requested to
 	// cancel. Returns true and the reason if so.
@@ -1001,6 +1009,10 @@ type HostCallsOptions struct {
 //   Default: Version, MinVersion — return 1 when nil
 // ----
 
+func (h *HostCallsImpl) Call(service, operation, requestJSON string) (string, error) {
+	return h.DurableCall(service, operation, requestJSON)
+}
+
 func (h *HostCallsImpl) DurableCall(service, operation, requestJSON string) (string, error) {
 	if h.durableCall == nil {
 		return "", errors.New("durable: DurableCall can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
@@ -1319,6 +1331,13 @@ func (h *HostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string,
 	return nil
 }
 
+// CallEphemeral is an alias for PluginCall. Invokes a named function on a
+// registered plugin without journaling (non-durable).
+// Prefer CallEphemeral for consistency across SDKs.
+func (h *HostCallsImpl) CallEphemeral(pluginName, functionName, inputJSON string) (string, error) {
+	return h.PluginCall(pluginName, functionName, inputJSON)
+}
+
 func (h *HostCallsImpl) PluginCall(pluginName, functionName, inputJSON string) (string, error) {
 	if h.pluginCall != nil {
 		return h.pluginCall(pluginName, functionName, inputJSON)
@@ -1571,6 +1590,10 @@ func (h *HostCallsImpl) DurableLog(message string) {
 	if h.durableLog != nil {
 		h.durableLog(message)
 	}
+}
+
+func (h *HostCallsImpl) Log(message string, kvs ...interface{}) {
+	h.LogKV(message, kvs...)
 }
 
 func (h *HostCallsImpl) LogKV(message string, kvs ...interface{}) {

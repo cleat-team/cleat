@@ -525,6 +525,40 @@ func (e *WASMTestEnv) durableAwaitSignals(m api.Module,
 	return encodeAwaitSignalsResult(0, 0, 1, 0)
 }
 
+func (e *WASMTestEnv) durableJSONParse(jsonPtr, jsonLen, outPtr, outMaxLen int32) int64 {
+	input := e.readString(uint32(jsonPtr), uint32(jsonLen))
+	if input == "" {
+		return encodeSimpleResult(0, 1)
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(input), &v); err != nil {
+		return encodeSimpleResult(0, 1)
+	}
+	normalized, err := json.Marshal(v)
+	if err != nil {
+		return encodeSimpleResult(0, 1)
+	}
+	e.writeString(uint32(outPtr), string(normalized))
+	return encodeSimpleResult(int64(len(normalized)), 0)
+}
+
+func (e *WASMTestEnv) durableJSONStringify(ptr, length, outPtr, outMaxLen int32) int64 {
+	input := e.readString(uint32(ptr), uint32(length))
+	if input == "" {
+		return encodeSimpleResult(0, 1)
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(input), &v); err != nil {
+		return encodeSimpleResult(0, 1)
+	}
+	serialized, err := json.Marshal(v)
+	if err != nil {
+		return encodeSimpleResult(0, 1)
+	}
+	e.writeString(uint32(outPtr), string(serialized))
+	return encodeSimpleResult(int64(len(serialized)), 0)
+}
+
 // ---------------------------------------------------------------------------
 // Memory helpers
 // ---------------------------------------------------------------------------

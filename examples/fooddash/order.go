@@ -8,7 +8,7 @@
 //   - Saga-based compensation on failure (refund, release driver, cancel restaurant)
 //   - Signals with SignalResult (wait for driver to accept, pickup confirmation)
 //   - Query handler with SetQueryState (customer checks order status)
-//   - Structured logging with LogKV
+//   - Structured logging with Log/LogKV
 //   - time.Duration for all timeouts/sleeps
 //   - Deep call chains (3-4 levels) for auto-threading
 //   - Child workflows and ContinueAsNew for long-running orders
@@ -104,7 +104,7 @@ func PlaceOrder(h cleat.HostCalls, userID string, restaurantID string,
 
 	// Step 2: Calculate the total.
 	total := calculateOrderTotal(validated)
-	h.LogKV("order total calculated",
+	h.Log("order total calculated",
 		"total_cents", total,
 		"item_count", len(validated),
 	)
@@ -187,7 +187,7 @@ func PlaceOrder(h cleat.HostCalls, userID string, restaurantID string,
 
 // CancelOrder cancels an active order using Saga-based compensation.
 func CancelOrder(h cleat.HostCalls, orderID string) error {
-	h.LogKV("cancelling order", "order_id", orderID)
+	h.Log("cancelling order", "order_id", orderID)
 
 	s := cleat.NewSaga()
 
@@ -234,7 +234,7 @@ func PlaceLargeOrder(h cleat.HostCalls, userID string, items []OrderItem) (strin
 		return "", err
 	}
 
-	h.LogKV("continuing as new", "remaining_items", len(remaining))
+	h.Log("continuing as new", "remaining_items", len(remaining))
 
 	type placeLargeOrderInput struct {
 		UserID string      `json:"user_id"`

@@ -296,8 +296,17 @@ pub struct ChildWorkflowOptions {
 pub struct HostCalls;
 
 impl HostCalls {
+    /// Make a durable API call. Primary name: `call`.
+    /// Mirrors Go's Call. This is the preferred name.
+    /// `cleat_call` is retained for backward compatibility.
+    pub fn call(&self, service: &str, operation: &str, request_json: &str) -> (String, Option<String>) {
+        self.cleat_call(service, operation, request_json)
+    }
+
     /// Make a durable API call. Mirrors Go's DurableCall.
     /// Returns (response_json, error_message).
+    ///
+    /// Deprecated: Use `call` instead.
     pub fn cleat_call(&self, service: &str, operation: &str, request_json: &str) -> (String, Option<String>) {
         let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
@@ -628,8 +637,17 @@ impl HostCalls {
         }
     }
 
+    /// Call a plugin host function (non-journaled). Primary name: `call_ephemeral`.
+    /// Mirrors Go's CallEphemeral. Use for read-only or side-effect-free calls.
+    /// `plugin_call` is retained for backward compatibility.
+    pub fn call_ephemeral(&self, plugin_name: &str, function_name: &str, input_json: &str) -> (String, Option<String>) {
+        self.plugin_call(plugin_name, function_name, input_json)
+    }
+
     /// Call a plugin host function. Mirrors Go's PluginCall (ABI 2.19).
     /// Returns (response_json, error_message).
+    ///
+    /// Deprecated: Use `call_ephemeral` instead.
     pub fn plugin_call(&self, plugin_name: &str, function_name: &str, input_json: &str) -> (String, Option<String>) {
         let mut resp_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {

@@ -80,7 +80,7 @@ func RunPipeline(h cleat.HostCalls, input PipelineInput) (*PipelineResult, error
 		}
 	}
 
-	h.DurableCall("notifications", "PipelineComplete", toJSON(map[string]interface{}{
+	h.Call("notifications", "PipelineComplete", toJSON(map[string]interface{}{
 		"job_id":    input.JobID,
 		"succeeded": succeeded,
 		"failed":    failed,
@@ -144,7 +144,7 @@ func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
 
 	// Step 2: Transform data.
 	h.SetQueryState("stage", "transforming")
-	transformResult, err := h.DurableCall("transform", "Process", toJSON(map[string]string{
+	transformResult, err := h.Call("transform", "Process", toJSON(map[string]string{
 		"item": input.Item,
 		"raw":  fetchData.Raw,
 	}))
@@ -160,7 +160,7 @@ func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
 
 	// Step 3: Store result.
 	h.SetQueryState("stage", "storing")
-	if _, err := h.DurableCall("storage", "Put", toJSON(map[string]interface{}{
+	if _, err := h.Call("storage", "Put", toJSON(map[string]interface{}{
 		"item":   input.Item,
 		"output": transformData.Output,
 		"job_id": input.JobID,

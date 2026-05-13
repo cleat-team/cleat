@@ -358,6 +358,22 @@ public class HostCalls {
     /**
      * Make a durable (deterministically replayed) call to an external service.
      * <p>
+     * This is the preferred name. Alias for {@link #cleatCall(String, String, String)}.
+     * {@code cleatCall} is retained for backward compatibility.
+     *
+     * @param service     the service name (e.g. {@code "orders"})
+     * @param operation   the operation name (e.g. {@code "create"})
+     * @param requestJSON the JSON request payload
+     * @return a result containing the JSON response on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> call(String service, String operation, String requestJSON) {
+        return cleatCall(service, operation, requestJSON);
+    }
+
+    /**
+     * Make a durable (deterministically replayed) call to an external service.
+     * <p>
      * The call is recorded in the workflow event history.  On replay, the
      * recorded response is returned without making the real call, ensuring
      * deterministic re-execution.
@@ -367,6 +383,7 @@ public class HostCalls {
      * @param requestJSON the JSON request payload
      * @return a result containing the JSON response on success, or an error
      *         description on failure
+     * @see #call(String, String, String)
      */
     public CleatResult<String> cleatCall(String service, String operation, String requestJSON) {
         int[] p = packStrings(service, operation, requestJSON);
@@ -964,6 +981,25 @@ public class HostCalls {
     // ========================================================================
 
     /**
+     * Call a plugin host function (non-journaled) and return the response.
+     * <p>
+     * This is the preferred name for non-durable plugin calls. Alias for
+     * {@link #pluginCall(String, String, String)}.
+     * {@code pluginCall} is retained for backward compatibility.
+     *
+     * @param pluginName   name of the plugin (e.g. {@code "blobstore"},
+     *                     {@code "slacknotify"})
+     * @param functionName name of the function within the plugin
+     *                     (e.g. {@code "put"}, {@code "send_message"})
+     * @param inputJson    input JSON for the plugin function
+     * @return a result containing the plugin function's response JSON on
+     *         success, or an error description on failure
+     */
+    public CleatResult<String> callEphemeral(String pluginName, String functionName, String inputJson) {
+        return pluginCall(pluginName, functionName, inputJson);
+    }
+
+    /**
      * Call a plugin host function and return the response.
      * <p>
      * Plugins extend the host runtime with custom functionality beyond the
@@ -978,6 +1014,7 @@ public class HostCalls {
      * @param inputJson    input JSON for the plugin function
      * @return a result containing the plugin function's response JSON on
      *         success, or an error description on failure
+     * @see #callEphemeral(String, String, String)
      */
     public CleatResult<String> pluginCall(String pluginName, String functionName, String inputJson) {
         int[] p = packStrings(pluginName, functionName, inputJson);

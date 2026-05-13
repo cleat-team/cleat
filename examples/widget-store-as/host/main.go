@@ -388,15 +388,15 @@ func runCheckoutWorkflow(h cleat.HostCalls, shop *ShopService, inputJSON string)
 	})
 	reserveReqStr := string(reserveReq)
 
-	_, err := h.DurableCall("shop", "subtractInventory", reserveReqStr)
+	_, err := h.Call("shop", "subtractInventory", reserveReqStr)
 	if err != nil {
 		return fmt.Sprintf(`{"error":"inventory: %s"}`, err.Error())
 	}
 
 	// Step 2: Create order
-	resp, err := h.DurableCall("shop", "createOrder", reserveReqStr)
+	resp, err := h.Call("shop", "createOrder", reserveReqStr)
 	if err != nil {
-		h.DurableCall("shop", "undoSubtractInventory", reserveReqStr)
+		h.Call("shop", "undoSubtractInventory", reserveReqStr)
 		return fmt.Sprintf(`{"error":"order: %s"}`, err.Error())
 	}
 
@@ -405,7 +405,7 @@ func runCheckoutWorkflow(h cleat.HostCalls, shop *ShopService, inputJSON string)
 		PaymentID string `json:"payment_id"`
 	}
 	if err := json.Unmarshal([]byte(resp), &orderInfo); err != nil || orderInfo.OrderID == "" {
-		h.DurableCall("shop", "undoSubtractInventory", reserveReqStr)
+		h.Call("shop", "undoSubtractInventory", reserveReqStr)
 		return `{"error":"invalid order response"}`
 	}
 
@@ -417,14 +417,14 @@ func runCheckoutWorkflow(h cleat.HostCalls, shop *ShopService, inputJSON string)
 	sr := h.AwaitSignals([]string{"PAYMENT_TOPIC"}, 120*time.Second)
 	if sr.TimedOut {
 		h.DurableLog("Payment timeout for order " + orderInfo.OrderID)
-		h.DurableCall("shop", "errorOrder", fmt.Sprintf(`{"order_id":"%s"}`, orderInfo.OrderID))
-		h.DurableCall("shop", "undoSubtractInventory", reserveReqStr)
+		h.Call("shop", "errorOrder", fmt.Sprintf(`{"order_id":"%s"}`, orderInfo.OrderID))
+		h.Call("shop", "undoSubtractInventory", reserveReqStr)
 		return fmt.Sprintf(`{"order_id":"%s","status":"payment_timeout"}`, orderInfo.OrderID)
 	}
 
 	// Step 5a: Payment received
 	h.DurableLog("Payment received for order " + orderInfo.OrderID)
-	h.DurableCall("shop", "markOrderPaid", sr.Payload)
+	h.Call("shop", "markOrderPaid", sr.Payload)
 
 	// Step 6: Start dispatchOrder child workflow
 	childInput, _ := json.Marshal(map[string]string{"order_id": orderInfo.OrderID})
@@ -460,7 +460,7 @@ func runDispatchWorkflow(h cleat.HostCalls, shop *ShopService, inputJSON string)
 			"order_id": input.OrderID,
 			"progress": fmt.Sprintf("step %d/10", step),
 		})
-		h.DurableCall("shop", "updateOrderProgress", string(progressReq))
+		h.Call("shop", "updateOrderProgress", string(progressReq))
 	}
 
 	return fmt.Sprintf(`{"order_id":"%s","status":"delivered"}`, input.OrderID)

@@ -198,9 +198,30 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 	var wfs []*WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		if err := s.dialect.scanWorkflowInstanceExtra(rows, &wf); err != nil {
+		var nextWakeAt sql.NullTime
+		var tenantID sql.NullString
+		var createdAt sql.NullTime
+		var inputStr string
+		var assignedTo, errorCode, errorOp sql.NullString
+
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
+
+		wf.Input = json.RawMessage(inputStr)
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		if tenantID.Valid {
+			wf.TenantID = tenantID.String
+		}
+		if createdAt.Valid {
+			wf.CreatedAt = createdAt.Time
+		}
+		wf.AssignedTo = assignedTo.String
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -255,9 +276,30 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 	var wfs []*WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		if err := s.dialect.scanWorkflowInstanceExtra(rows, &wf); err != nil {
+		var nextWakeAt sql.NullTime
+		var tenantID sql.NullString
+		var createdAt sql.NullTime
+		var inputStr string
+		var assignedTo, errorCode, errorOp sql.NullString
+
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
+
+		wf.Input = json.RawMessage(inputStr)
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		if tenantID.Valid {
+			wf.TenantID = tenantID.String
+		}
+		if createdAt.Valid {
+			wf.CreatedAt = createdAt.Time
+		}
+		wf.AssignedTo = assignedTo.String
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -903,11 +945,10 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	// Create the new workflow run with a Go-generated UUID.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 		VALUES (@p1, @p2, @p3, 'ready', @p4,
-		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
-		        @p5)
-	`, newRunID, defName, defVersion, string(newInput), s.tenantID)
+		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
+	`, newRunID, defName, defVersion, newInput)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -1119,11 +1160,10 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 			VALUES (@p1, @p2, @p3, 'ready', @p4,
-			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
-			        @p5)
-		`, runID, defName, defVersion, string(input), s.tenantID)
+			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
+		`, runID, defName, defVersion, input)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -1139,11 +1179,10 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 		VALUES (@p1, @p2, @p3, 'ready', @p4,
-		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
-		        @p5)
-	`, runID, defName, defVersion, string(input), s.tenantID)
+		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
+	`, runID, defName, defVersion, input)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -1460,14 +1499,13 @@ func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
 	runID := uuid.New().String()
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue)
 		VALUES (@p1, @p2,
 		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0) END,
 		        'ready', @p3, @p4,
 		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),
-		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'),
-		        @p7)
-	`, runID, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID)
+		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'))
+	`, runID, defName, inputJSON, parentID, defVersion, parentClosePolicy)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
@@ -1489,14 +1527,13 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 
 	// 1. INSERT child workflow instance.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue)
 		VALUES (@p1, @p2,
 		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND deprecated = 0) END,
 		        'ready', @p3, @p4,
 		        ISNULL(NULLIF(@p6, ''), 'ABANDON'),
-		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'),
-		        @p7)
-	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID)
+		        ISNULL((SELECT task_queue FROM workflow_instances WHERE id = @p4), 'default'))
+	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
 	}
@@ -1637,9 +1674,18 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	var workflows []WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		if err := d.scanWorkflowInstance(rows, &wf); err != nil {
+		var nextWakeAt sql.NullTime
+		var assignedTo, errorCode, errorOp sql.NullString
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
+		if nextWakeAt.Valid {
+			wf.NextWakeAt = nextWakeAt.Time
+		}
+		wf.AssignedTo = assignedTo.String
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		workflows = append(workflows, wf)
 	}
 	return workflows, rows.Err()

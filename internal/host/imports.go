@@ -102,6 +102,12 @@ type HostHandler interface {
 
 	// HTTP fetch (Stream R)
 	Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64
+
+	// JsonParse validates and normalizes a JSON string via the host's encoding/json.
+	JsonParse(ctx context.Context, m api.Module, jsonPtr, jsonLen, outPtr, outMaxLen uint32) int64
+
+	// JsonStringify validates and re-serializes a JSON string via the host's encoding/json.
+	JsonStringify(ctx context.Context, m api.Module, ptr, len, outPtr, outMaxLen uint32) int64
 }
 
 // registerHostFunctions registers all cleat_* imports on the "env" host module.
@@ -796,7 +802,19 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		return uint64(h.Fetch(ctx, m, method, url, headersJSON, body, responsePtr, responseMaxLen))
 	}).Export("cleat_fetch")
 
-		// cleat_complete signals workflow completion with a result or error.
+		// cleat_json_parse: (ptr,len, ptr,maxLen) -> i64
+		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+			jsonPtr, jsonLen, outPtr, outMaxLen uint32) uint64 {
+			return uint64(handlerFromContext(ctx).JsonParse(ctx, m, jsonPtr, jsonLen, outPtr, outMaxLen))
+		}).Export("cleat_json_parse")
+
+		// cleat_json_stringify: (ptr,len, ptr,maxLen) -> i64
+		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+			ptr, len, outPtr, outMaxLen uint32) uint64 {
+			return uint64(handlerFromContext(ctx).JsonStringify(ctx, m, ptr, len, outPtr, outMaxLen))
+		}).Export("cleat_json_stringify")
+
+			// cleat_complete signals workflow completion with a result or error.
 		// This is called by the WASM export wrapper BEFORE returning, so the
 		// worker can capture the result even if the Go WASI runtime subsequently
 		// calls proc_exit (which would overwrite the normal return value).

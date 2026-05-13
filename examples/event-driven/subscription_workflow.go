@@ -99,7 +99,7 @@ func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
 	h.DurableLog(fmt.Sprintf("Processing signup: user=%s email=%s", input.UserID, input.Email))
 
 	// Step 1: Create user profile via backing service.
-	profileResp, err := h.DurableCall("users", "CreateProfile", toJSON(map[string]interface{}{
+	profileResp, err := h.Call("users", "CreateProfile", toJSON(map[string]interface{}{
 		"user_id": input.UserID,
 		"email":   input.Email,
 		"name":    input.Name,
@@ -121,7 +121,7 @@ func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
 	h.DurableLog(fmt.Sprintf("Profile created: user=%s", input.UserID))
 
 	// Step 2: Send welcome email (best-effort).
-	welcomeResp, err := h.DurableCall("email", "SendWelcome", toJSON(map[string]interface{}{
+	welcomeResp, err := h.Call("email", "SendWelcome", toJSON(map[string]interface{}{
 		"user_id":     input.UserID,
 		"email":       input.Email,
 		"name":        input.Name,

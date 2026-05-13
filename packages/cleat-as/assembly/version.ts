@@ -18,7 +18,7 @@ export const WORKFLOW_VERSION: i32 = 0;
 export const MIN_COMPATIBLE_VERSION: i32 = 1;
 
 /** WASM host ABI version this module targets. */
-export const ABI_VERSION: i32 = 1;
+export const ABI_VERSION: i32 = 4;
 
 /** JSON string of plugin dependencies (map of name -> semver constraint).
  *  Example: '{"llm":">=1.2.0","blobstore":"~2.0.0"}'
