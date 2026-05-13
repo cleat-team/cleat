@@ -74,98 +74,95 @@ func (p *Plugin) Run(ctx context.Context) error {
 	}
 }
 
-// runDueSchedules finds schedules where enabled=true AND next_run_at <= now()
-// and triggers the corresponding workflow. After triggering, it calculates
-// the next future run from the cron expression and updates next_run_at and
-// last_run_at. Returns (schedulesDue, workflowsStarted, workflowsFailed).
+// dueSchedule holds a schedule row claimed from the database.
+type dueSchedule struct {
+	id           uuid.UUID
+	tenantID     uuid.UUID
+	name         string
+	cron         string
+	workflowName string
+	input        []byte
+}
+
+// runDueSchedules finds schedules where enabled=true AND next_run_at <= now(),
+// atomically claims them via FOR UPDATE SKIP LOCKED inside a transaction, then
+// starts the corresponding workflows.  The transaction is committed before
+// StartWorkflow is called so that row locks are not held across external calls.
+// Returns (schedulesDue, workflowsStarted, workflowsFailed).
 func (p *Plugin) runDueSchedules(ctx context.Context) (int, int, int) {
-	rows, err := p.db.Query(ctx, plugin.Rebind(dueSchedulesQuery.For(p.dialect), p.dialect))
+	tx, err := p.db.Begin(ctx)
+	if err != nil {
+		p.logger.Error("scheduler: begin transaction", "error", err)
+		return 0, 0, 0
+	}
+	defer tx.Rollback() // no-op after Commit
+
+	rows, err := tx.Query(ctx, plugin.Rebind(dueSchedulesQuery.For(p.dialect), p.dialect))
 	if err != nil {
 		p.logger.Error("scheduler: query due schedules", "error", err)
 		return 0, 0, 0
 	}
-	defer rows.Close()
 
-	var schedulesDue, workflowsStarted, workflowsFailed int
-
+	var due []dueSchedule
 	for rows.Next() {
-		var (
-			id           uuid.UUID
-			tenantID     uuid.UUID
-			name         string
-			cron         string
-			workflowName string
-			input        []byte
-			nextRunAt    *time.Time
-		)
-		if err := rows.Scan(&id, &tenantID, &name, &cron, &workflowName, &input, &nextRunAt); err != nil {
+		var s dueSchedule
+		var nextRunAt *time.Time
+		if err := rows.Scan(&s.id, &s.tenantID, &s.name, &s.cron,
+			&s.workflowName, &s.input, &nextRunAt); err != nil {
 			p.logger.Error("scheduler: scan due schedule", "error", err)
 			continue
 		}
+		due = append(due, s)
 
-		schedulesDue++
-
-		p.logger.Info("scheduler: triggering schedule",
-			"id", id,
-			"tenant", tenantID,
-			"name", name,
-			"workflow", workflowName,
-			"input", string(input),
-		)
-
-		// Actually start the workflow run.
-		runID, startErr := p.env.StartWorkflow(ctx, workflowName, json.RawMessage(input))
-		if startErr != nil {
-			p.logger.Error("scheduler: start workflow failed",
-				"id", id,
-				"name", name,
-				"workflow", workflowName,
-				"error", startErr,
-			)
-			workflowsFailed++
-			// Continue to update next_run_at so a single bad schedule
-			// does not block the background worker.
-		} else {
-			workflowsStarted++
-			p.logger.Info("scheduler: workflow started",
-				"id", id,
-				"name", name,
-				"workflow", workflowName,
-				"run_id", runID,
-			)
-		}
-
-		// Calculate the next run from the cron expression.
-		// Use the current time as the baseline. If the cron expression cannot
-		// produce a future match, leave next_run_at as NULL (schedule will
-		// no longer fire until updated).
+		// Advance next_run_at under the transaction lock so other
+		// workers skip this row even if this worker crashes before
+		// calling StartWorkflow.
 		now := time.Now()
-		next := nextRun(cron, now)
+		next := nextRun(s.cron, now)
 		var nextRunAtUpdate *time.Time
 		if !next.IsZero() {
 			nextRunAtUpdate = &next
 		}
-
-		_, err := p.db.Exec(ctx, plugin.Rebind(`
+		if _, err := tx.Exec(ctx, plugin.Rebind(`
 			UPDATE schedules
 			SET last_run_at = $1, next_run_at = $2, updated_at = now()
 			WHERE id = $3
-		`, p.dialect), now, nextRunAtUpdate, id)
-		if err != nil {
-			p.logger.Error("scheduler: update schedule after trigger",
-				"id", id, "error", err)
-			continue
+		`, p.dialect), now, nextRunAtUpdate, s.id); err != nil {
+			p.logger.Error("scheduler: update schedule after claim",
+				"id", s.id, "error", err)
 		}
-
-		p.logger.Info("scheduler: completed trigger",
-			"id", id,
-			"name", name,
-			"next_run_at", next,
-		)
 	}
-
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		p.logger.Error("scheduler: rows iteration error", "error", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		p.logger.Error("scheduler: commit transaction", "error", err)
+		return 0, 0, 0
+	}
+
+	// Start workflows outside the transaction so locks are not held
+	// across potentially slow external calls.
+	var schedulesDue, workflowsStarted, workflowsFailed int
+	for _, s := range due {
+		schedulesDue++
+		p.logger.Info("scheduler: triggering schedule",
+			"id", s.id, "tenant", s.tenantID,
+			"name", s.name, "workflow", s.workflowName)
+
+		runID, startErr := p.env.StartWorkflow(ctx, s.workflowName, json.RawMessage(s.input))
+		if startErr != nil {
+			p.logger.Error("scheduler: start workflow failed",
+				"id", s.id, "name", s.name,
+				"workflow", s.workflowName, "error", startErr)
+			workflowsFailed++
+		} else {
+			workflowsStarted++
+			p.logger.Info("scheduler: workflow started",
+				"id", s.id, "name", s.name,
+				"workflow", s.workflowName, "run_id", runID)
+		}
 	}
 
 	return schedulesDue, workflowsStarted, workflowsFailed

@@ -42,7 +42,7 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		duration := time.Since(start)
 
 		tid, _ := auth.TenantIDFromContext(r.Context())
-		go p.recordAudit(r.Context(), tid, r.Method, r.URL.Path, rw.statusCode, r.RemoteAddr, r.UserAgent(), duration)
+		p.enqueueAudit(tid, r.Method, r.URL.Path, rw.statusCode, r.RemoteAddr, r.UserAgent(), duration)
 	})
 }
 
@@ -65,5 +65,28 @@ func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, method, pa
 		`, p.dialect), tenantID, method, path, statusCode, "", ipAddress, userAgent, durationMs)
 	if err != nil && err != sql.ErrNoRows {
 		p.logger.Error("audit-log: record event", "error", err)
+	}
+}
+
+// enqueueAudit enqueues an audit event for deferred writing.
+// If the buffer is nil (backward compat with direct construction),
+// it falls back to calling recordAudit synchronously.
+func (p *Plugin) enqueueAudit(tenantID uuid.UUID, method, path string, statusCode int, ipAddress, userAgent string, duration time.Duration) {
+	if p.buffer == nil {
+		p.recordAudit(context.Background(), tenantID, method, path, statusCode, ipAddress, userAgent, duration)
+		return
+	}
+	select {
+	case p.buffer <- queuedAuditEvent{
+		tenantID:   tenantID,
+		method:     method,
+		path:       path,
+		statusCode: statusCode,
+		ipAddress:  ipAddress,
+		userAgent:  userAgent,
+		duration:   duration,
+	}:
+	default:
+		p.logger.Warn("audit-log: buffer full, dropping event")
 	}
 }

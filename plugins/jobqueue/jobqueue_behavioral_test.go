@@ -137,6 +137,8 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execMarkCompleted(args, true)
 	case strings.Contains(query, "SET status = 'completed'"):
 		return c.execMarkCompleted(args, false)
+	case strings.Contains(query, "SET status = 'pending'") && strings.Contains(query, "started_at = NULL"):
+		return c.execResetStuckJobs()
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec query: %s", query)
 	}
@@ -447,6 +449,24 @@ func (c *fakeConn) execMarkCompleted(args []driver.NamedValue, hasRunID bool) (d
 		row.runID = &runID
 	}
 	return &fakeResult{rowsAffected: 1}, nil
+}
+
+// execResetStuckJobs handles the reaper query:
+//
+//	UPDATE task_queue SET status = 'pending', started_at = NULL
+//	WHERE status = 'running' AND started_at < NOW() - INTERVAL '5 minutes'
+func (c *fakeConn) execResetStuckJobs() (driver.Result, error) {
+	now := c.store.now()
+	cutoff := now.Add(-5 * time.Minute)
+	var count int64
+	for _, row := range c.store.rows {
+		if row.status == "running" && row.startedAt != nil && row.startedAt.Before(cutoff) {
+			row.status = "pending"
+			row.startedAt = nil
+			count++
+		}
+	}
+	return &fakeResult{rowsAffected: count}, nil
 }
 
 // ---------------------------------------------------------------------------

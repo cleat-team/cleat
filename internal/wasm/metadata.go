@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Metadata is embedded in the "cleat.metadata" custom section of compiled
@@ -21,6 +22,7 @@ type Metadata struct {
 	MinCompatibleVersion int               `json:"min_compatible_version"`
 	PluginDeps           map[string]string `json:"plugin_deps,omitempty"`
 	ChildVersions        map[string]int    `json:"child_versions,omitempty"`
+	Language             string            `json:"language,omitempty"`
 }
 
 // CurrentABIVersion is the ABI version produced by this version of cleat.
@@ -245,4 +247,162 @@ func encodeULEB128(v uint32) []byte {
 	var buf [binary.MaxVarintLen32]byte
 	n := binary.PutUvarint(buf[:], uint64(v))
 	return buf[:n]
+}
+
+// DetectLanguage attempts to determine the source language of a WASM binary.
+// It first checks the "cleat.metadata" custom section for an explicit Language
+// field. If absent, it scans the import section for Component Model import
+// patterns (imports with module names starting with "cleat:"). If neither
+// provides a result, "go" is returned as the default.
+func DetectLanguage(wasmBytes []byte) string {
+	// 1. Try cleat.metadata custom section.
+	if meta, err := ReadMetadata(wasmBytes); err == nil && meta.Language != "" {
+		return meta.Language
+	}
+
+	// 2. Scan the import section for Component Model patterns.
+	if hasComponentModelImports(wasmBytes) {
+		return "python"
+	}
+
+	// 3. Default to Go.
+	return "go"
+}
+
+// hasComponentModelImports scans the WASM import section for module names
+// that contain "cleat:" — the prefix used by the Component Model toolchain
+// (e.g., componentize-py).
+func hasComponentModelImports(wasmBytes []byte) bool {
+	imports, err := readImportModuleNames(wasmBytes)
+	if err != nil {
+		return false
+	}
+	for _, mod := range imports {
+		if strings.Contains(mod, "cleat:") {
+			return true
+		}
+	}
+	return false
+}
+
+// readImportModuleNames extracts the module names from the import section
+// (section ID 2) of a WASM binary. It returns only the module names, skipping
+// the full descriptor parsing of each import.
+func readImportModuleNames(wasmBytes []byte) ([]string, error) {
+	if len(wasmBytes) < 8 {
+		return nil, fmt.Errorf("not a valid WASM binary (too short)")
+	}
+	if !hasWasmHeader(wasmBytes) {
+		return nil, fmt.Errorf("not a valid WASM binary (bad magic/version)")
+	}
+
+	var modules []string
+	offset := 8 // skip magic (4) + version (4)
+
+	for offset < len(wasmBytes) {
+		sectionID := wasmBytes[offset]
+		offset++
+		size, n := decodeULEB128(wasmBytes[offset:])
+		if n <= 0 {
+			return nil, fmt.Errorf("corrupt WASM at offset %d: failed to decode section size", offset)
+		}
+		offset += n
+		sectionEnd := offset + int(size)
+		if int(size) > len(wasmBytes)-offset {
+			return nil, fmt.Errorf("corrupt WASM at offset %d: section size %d overflows binary", offset, size)
+		}
+
+		if sectionID != 2 {
+			// Not the import section; skip.
+			offset = sectionEnd
+			continue
+		}
+
+		// Import section.
+		count, nn := decodeULEB128(wasmBytes[offset:])
+		if nn <= 0 {
+			return nil, fmt.Errorf("corrupt WASM import section: failed to decode count")
+		}
+		offset += nn
+
+		for i := uint32(0); i < count; i++ {
+			// Module name.
+			nameLen, nn := decodeULEB128(wasmBytes[offset:])
+			if nn <= 0 {
+				return nil, fmt.Errorf("corrupt WASM import %d: failed to decode name length", i)
+			}
+			offset += nn
+			if offset+int(nameLen) > sectionEnd {
+				return nil, fmt.Errorf("corrupt WASM import %d: name overflows section", i)
+			}
+			moduleName := string(wasmBytes[offset : offset+int(nameLen)])
+			offset += int(nameLen)
+			modules = append(modules, moduleName)
+
+			// Import name (field).
+			fieldLen, nn := decodeULEB128(wasmBytes[offset:])
+			if nn <= 0 {
+				return nil, fmt.Errorf("corrupt WASM import %d: failed to decode field name length", i)
+			}
+			offset += nn
+			if offset+int(fieldLen) > sectionEnd {
+				return nil, fmt.Errorf("corrupt WASM import %d: field name overflows section", i)
+			}
+			offset += int(fieldLen)
+
+			// Import kind and descriptor.
+			if offset >= sectionEnd {
+				return nil, fmt.Errorf("corrupt WASM import %d: truncated at kind byte", i)
+			}
+			kind := wasmBytes[offset]
+			offset++
+
+			switch kind {
+			case 0: // func
+				if _, nn := decodeULEB128(wasmBytes[offset:]); nn <= 0 {
+					return nil, fmt.Errorf("corrupt WASM import %d: bad func type index", i)
+				}
+				offset += nn
+			case 1: // table
+				offset++ // elem type byte
+				flags, nn := decodeULEB128(wasmBytes[offset:])
+				if nn <= 0 {
+					return nil, fmt.Errorf("corrupt WASM import %d: bad table limits", i)
+				}
+				offset += nn
+				if flags&0x01 != 0 { // has max
+					if _, nn := decodeULEB128(wasmBytes[offset:]); nn <= 0 {
+						return nil, fmt.Errorf("corrupt WASM import %d: bad table max", i)
+					}
+					offset += nn
+				}
+			case 2: // memory
+				flags, nn := decodeULEB128(wasmBytes[offset:])
+				if nn <= 0 {
+					return nil, fmt.Errorf("corrupt WASM import %d: bad memory limits", i)
+				}
+				offset += nn
+				// skip min
+				if _, nn := decodeULEB128(wasmBytes[offset:]); nn <= 0 {
+					return nil, fmt.Errorf("corrupt WASM import %d: bad memory min", i)
+				}
+				offset += nn
+				if flags&0x01 != 0 { // has max
+					if _, nn := decodeULEB128(wasmBytes[offset:]); nn <= 0 {
+						return nil, fmt.Errorf("corrupt WASM import %d: bad memory max", i)
+					}
+					offset += nn
+				}
+			case 3: // global
+				if offset+2 > sectionEnd {
+					return nil, fmt.Errorf("corrupt WASM import %d: truncated global import", i)
+				}
+				offset += 2 // content type + mutability
+			default:
+				return nil, fmt.Errorf("corrupt WASM import %d: unknown kind %d", i, kind)
+			}
+		}
+		return modules, nil
+	}
+	return nil, fmt.Errorf("no import section found in WASM binary")
 }

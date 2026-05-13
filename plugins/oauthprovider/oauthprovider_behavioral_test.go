@@ -133,6 +133,10 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	defer c.store.mu.Unlock()
 
 	switch {
+	case strings.Contains(query, "DELETE FROM oauth_sessions") && strings.Contains(query, "expires_at IS NOT NULL"):
+		return c.execDeleteExpiredSessions()
+	case strings.Contains(query, "DELETE FROM oauth_sessions") && strings.Contains(query, "expires_at IS NULL"):
+		return c.execDeleteOldStateSessions()
 	case strings.Contains(query, "DELETE FROM oauth_sessions"):
 		return c.execDeleteSession(args)
 	case strings.Contains(query, "INSERT INTO oauth_sessions"):
@@ -170,6 +174,33 @@ func (c *fakeConn) execDeleteSession(args []driver.NamedValue) (driver.Result, e
 
 	delete(c.store.sessions, id)
 	return &fakeResult{rowsAffected: 1}, nil
+}
+
+func (c *fakeConn) execDeleteExpiredSessions() (driver.Result, error) {
+	now := c.store.now()
+	var affected int64
+	for id, s := range c.store.sessions {
+		if s.ExpiresAt != nil {
+			if expTime, ok := s.ExpiresAt.(time.Time); ok && expTime.Before(now) {
+				delete(c.store.sessions, id)
+				affected++
+			}
+		}
+	}
+	return &fakeResult{rowsAffected: affected}, nil
+}
+
+func (c *fakeConn) execDeleteOldStateSessions() (driver.Result, error) {
+	now := c.store.now()
+	cutoff := now.Add(-24 * time.Hour)
+	var affected int64
+	for id, s := range c.store.sessions {
+		if s.ExpiresAt == nil && s.CreatedAt.Before(cutoff) {
+			delete(c.store.sessions, id)
+			affected++
+		}
+	}
+	return &fakeResult{rowsAffected: affected}, nil
 }
 
 // --- driver.QueryerContext ---

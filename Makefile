@@ -50,7 +50,7 @@ lint-sh:
 # ---- test ------------------------------------------------------------------
 
 .PHONY: test
-test: test-go test-python test-java test-as
+test: test-go test-python test-java test-as test-plugin-harness
 
 .PHONY: test-go
 test-go:
@@ -84,6 +84,30 @@ test-cluster: build-go cluster-up
 	@sleep 10
 	go test -count=1 -timeout=120s ./internal/host/...
 	$(MAKE) cluster-down
+
+# ---- plugin harness -------------------------------------------------------
+
+.PHONY: test-plugin-harness
+test-plugin-harness:
+	go test -race -count=1 -timeout=300s ./tests/plugin-harness/...
+
+.PHONY: test-plugin-harness-all-dbs
+test-plugin-harness-all-dbs:
+	@echo "=== Plugin harness - PostgreSQL ==="
+	@CLEAT_TEST_POSTGRES="$${CLEAT_TEST_POSTGRES:-postgres://localhost:5432/cleat?sslmode=disable}" \
+		go test -count=1 -timeout=300s ./tests/plugin-harness/ -run 'MultiDB' -v
+	@echo "=== Plugin harness - MySQL ==="
+	@CLEAT_TEST_MYSQL="$${CLEAT_TEST_MYSQL:-root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true}" \
+		go test -count=1 -timeout=300s ./tests/plugin-harness/ -run 'MultiDB' -v
+	@echo "=== Plugin harness - MSSQL ==="
+	@CLEAT_TEST_MSSQL="$${CLEAT_TEST_MSSQL:-sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master}" \
+		go test -count=1 -timeout=300s ./tests/plugin-harness/ -run 'MultiDB' -v
+
+.PHONY: test-plugin-harness-check
+test-plugin-harness-check:
+	@echo "Checking plugin harness..."
+	@go build ./tests/plugin-harness/...
+	@echo "OK"
 
 # ---- coverage -------------------------------------------------------------
 
@@ -242,3 +266,89 @@ fmt-python:
 fmt-rust:
 	cd crates/cleat-macro && cargo fmt
 	cd crates/cleat-sdk && cargo fmt
+
+# ---- tools ------------------------------------------------------------------
+
+.PHONY: tools
+tools: tools-tinygo tools-rust tools-python tools-java tools-as
+	@echo "=== All WASM toolchains checked ==="
+
+.PHONY: tools-tinygo
+tools-tinygo:
+	@if command -v tinygo >/dev/null 2>&1; then \
+		echo "[OK] TinyGo $$(tinygo version | head -1)"; \
+	else \
+		echo "[MISSING] TinyGo — install from https://tinygo.org/getting-started/install/"; \
+		echo "  Linux:   wget https://github.com/tinygo-org/tinygo/releases/latest/download/tinygo.linux-amd64.tar.gz && sudo tar -C /usr/local -xzf tinygo.linux-amd64.tar.gz && export PATH=\$$PATH:/usr/local/tinygo/bin"; \
+		echo "  macOS:   brew install tinygo"; \
+	fi
+
+.PHONY: tools-rust
+tools-rust:
+	@if command -v cargo >/dev/null 2>&1; then \
+		echo "[OK] cargo $$(cargo --version | cut -d' ' -f2)"; \
+		rustup target list --installed | grep -q wasm32-unknown-unknown && echo "[OK] rust target wasm32-unknown-unknown" || \
+			(echo "[ADDING] rust target wasm32-unknown-unknown" && rustup target add wasm32-unknown-unknown); \
+	else \
+		echo "[MISSING] Rust — install from https://rustup.rs"; \
+		echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"; \
+	fi
+
+.PHONY: tools-python
+tools-python:
+	@if command -v python3 >/dev/null 2>&1; then \
+		echo "[OK] python3 $$(python3 --version | cut -d' ' -f2)"; \
+	else \
+		echo "[MISSING] Python 3 — install from https://python.org"; \
+	fi
+	@if python3 -c "import componentize" 2>/dev/null; then \
+		echo "[OK] componentize-py"; \
+	else \
+		echo "[MISSING] componentize-py — install with: pip install componentize-py"; \
+	fi
+	@cd python-sdk && python3 -c "import cleat_sdk" 2>/dev/null && echo "[OK] cleat_sdk (editable)" || \
+		echo "[MISSING] cleat_sdk — install with: cd python-sdk && pip install -e ."
+
+.PHONY: tools-java
+tools-java:
+	@if command -v gradle >/dev/null 2>&1; then \
+		echo "[OK] Gradle $$(gradle --version | grep '^Gradle ' | cut -d' ' -f2)"; \
+	elif [ -x crates/cleat-java/gradlew ]; then \
+		echo "[OK] Gradle wrapper (gradlew)"; \
+	else \
+		echo "[MISSING] Gradle — install from https://gradle.org/install/"; \
+	fi
+	@if command -v java >/dev/null 2>&1; then \
+		echo "[OK] Java $$(java -version 2>&1 | head -1)"; \
+	else \
+		echo "[MISSING] JDK 11+ — install from https://adoptium.net"; \
+	fi
+
+.PHONY: tools-as
+tools-as:
+	@if command -v npm >/dev/null 2>&1; then \
+		echo "[OK] npm $$(npm --version)"; \
+	else \
+		echo "[MISSING] Node.js/npm — install from https://nodejs.org"; \
+	fi
+	@if command -v npx >/dev/null 2>&1 && npx --yes asc --version >/dev/null 2>&1; then \
+		echo "[OK] AssemblyScript compiler (asc)"; \
+	else \
+		echo "[MISSING] asc — install with: npm install -g assemblyscript"; \
+	fi
+
+.PHONY: tools-check
+tools-check:
+	@echo "=== WASM Compilation Toolchains ==="
+	@echo ""
+	@$(MAKE) --no-print-directory tools-tinygo
+	@echo ""
+	@$(MAKE) --no-print-directory tools-rust
+	@echo ""
+	@$(MAKE) --no-print-directory tools-python
+	@echo ""
+	@$(MAKE) --no-print-directory tools-java
+	@echo ""
+	@$(MAKE) --no-print-directory tools-as
+	@echo ""
+	@echo "=== Done ==="

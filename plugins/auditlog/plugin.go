@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -24,13 +26,26 @@ func init() {
 	})
 }
 
+// queuedAuditEvent is the internal type used for deferred audit writes.
+// It is distinct from auditEvent in routes.go which is used for JSON serialization.
+type queuedAuditEvent struct {
+	tenantID   uuid.UUID
+	method     string
+	path       string
+	statusCode int
+	ipAddress  string
+	userAgent  string
+	duration   time.Duration
+}
+
 // Plugin implements audit trail recording and querying.
 type Plugin struct {
-	db      plugin.PluginDB
-	mux     *http.ServeMux
-	logger  *slog.Logger
-	config  Config
-	dialect plugin.Dialect
+	db        plugin.PluginDB
+	mux       *http.ServeMux
+	logger    *slog.Logger
+	config    Config
+	dialect   plugin.Dialect
+	buffer    chan queuedAuditEvent // bounded channel acting as ring buffer
 }
 
 // Config controls audit-log behaviour.
@@ -73,6 +88,8 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.logger.Info("audit-log: initialized",
 		"retention_days", p.config.RetentionDays,
 	)
+
+	p.buffer = make(chan queuedAuditEvent, 1000)
 	return nil
 }
 

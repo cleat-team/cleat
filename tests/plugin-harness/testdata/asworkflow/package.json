@@ -1,0 +1,16 @@
+{
+  "name": "asworkflow",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "npx asc assembly/index.ts --target release --transform ./node_modules/@cleat/transform/index.js && node ../../../../packages/cleat-as/scripts/inject-metadata.js dist/workflow.wasm --name CallAllPlugins --version 1 --output dist/workflow.stamped.wasm",
+    "build:debug": "npx asc assembly/index.ts --target debug --transform ./node_modules/@cleat/transform/index.js && node ../../../../packages/cleat-as/scripts/inject-metadata.js dist/workflow.wasm --name CallAllPlugins --version 1 --output dist/workflow.stamped.wasm",
+    "stamp": "node ../../../../packages/cleat-as/scripts/inject-metadata.js dist/workflow.wasm --name CallAllPlugins --version 1",
+    "clean": "rm -rf dist/"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.27.32",
+    "@cleat/sdk": "file:../../../../packages/cleat-as",
+    "@cleat/transform": "file:../../../../packages/cleat-as/transform"
+  }
+}

@@ -15,27 +15,30 @@ func runBuildJava(pattern, outDir string) {
 		javaDir = "."
 	}
 
-	// Validate build.gradle.kts exists.
-	gradlePath := filepath.Join(javaDir, "build.gradle.kts")
-	if _, err := os.Stat(gradlePath); os.IsNotExist(err) {
-		// Also check for build.gradle (Groovy DSL).
-		gradleGroovyPath := filepath.Join(javaDir, "build.gradle")
-		if _, err := os.Stat(gradleGroovyPath); os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "Error: no build.gradle.kts or build.gradle found in %s\n", javaDir)
+	// Validate build file exists (Groovy or Kotlin DSL).
+	gradleFile := filepath.Join(javaDir, "build.gradle")
+	gradleKtsFile := filepath.Join(javaDir, "build.gradle.kts")
+	if _, err := os.Stat(gradleFile); os.IsNotExist(err) {
+		if _, err := os.Stat(gradleKtsFile); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "Error: no build.gradle or build.gradle.kts found in %s\n", javaDir)
 			fmt.Fprintf(os.Stderr, "Java workflows require a Gradle build file with the TeaVM plugin configured.\n")
 			os.Exit(1)
 		}
-		gradlePath = gradleGroovyPath
 	}
 
-	// Check for gradle on PATH.
-	if _, err := exec.LookPath("gradle"); err != nil {
+	// Prefer the Gradle wrapper (gradlew) if present, otherwise fall back to
+	// the system gradle.  The wrapper ensures a compatible Gradle version.
+	gradleBin := "gradle"
+	gradlewPath := filepath.Join(javaDir, "gradlew")
+	if _, err := os.Stat(gradlewPath); err == nil {
+		gradleBin = gradlewPath
+	} else if _, err := exec.LookPath("gradle"); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: gradle not found. Install Gradle: https://gradle.org/install/\n")
 		os.Exit(1)
 	}
 
 	fmt.Printf("  Compiling Java to WASM via TeaVM...\n")
-	cmd := exec.Command("gradle", "build", "-q")
+	cmd := exec.Command(gradleBin, "generateWasm", "-q")
 	cmd.Dir = javaDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

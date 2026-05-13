@@ -11,6 +11,7 @@ import (
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
+	"github.com/tetratelabs/wazero/experimental"
 	"github.com/tetratelabs/wazero/imports/wasi_snapshot_preview1"
 	"github.com/tetratelabs/wazero/sys"
 )
@@ -59,7 +60,9 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 		dummy.Close(context.Background())
 	})
 
-	rt := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfigCompiler())
+	rtCfg := wazero.NewRuntimeConfigCompiler().
+		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExtendedConst)
+	rt := wazero.NewRuntimeWithConfig(ctx, rtCfg)
 
 	// WASI is required by Go wasip1 modules for goroutine/stack management.
 	// We build WASI with clock_time_get and random_get stubbed out so that
@@ -68,12 +71,49 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 	// and h.Random() (imported as cleat_now / cleat_random).
 	wasiBuilder := rt.NewHostModuleBuilder(wasi_snapshot_preview1.ModuleName)
 	wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
+	// Register reset_adapter_state, which is required by core modules
+	// extracted from component model binaries produced by componentize-py.
+	// In the full component model assembly this function is provided by the
+	// WASI preview1 adapter; here we provide a no-op stub since the adapter
+	// layer has been stripped during component decomposition.
+	wasiBuilder.NewFunctionBuilder().WithFunc(
+		func(ctx context.Context, m api.Module) {},
+	).Export("reset_adapter_state")
 	if _, err := wasiBuilder.Instantiate(ctx); err != nil {
 		return nil, fmt.Errorf("host: instantiating WASI module: %w", err)
 	}
 
+	// TeaVM runtime stubs — required by TeaVM-compiled Java WASM modules.
+	// These are minimal no-op stubs that satisfy the "teavm" import namespace.
+	teavmBuilder := rt.NewHostModuleBuilder("teavm")
+	teavmBuilder.NewFunctionBuilder().
+		WithFunc(func(_ context.Context, _ api.Module, chars uint32, count uint32) {}).
+		Export("putwcharsOut")
+	teavmBuilder.NewFunctionBuilder().
+		WithFunc(func(ctx context.Context) float64 { return float64(handlerFromContext(ctx).Now(ctx)) }).
+		Export("currentTimeMillis")
+	teavmBuilder.NewFunctionBuilder().
+		WithFunc(func(_ context.Context, _ api.Module, ptr uint32) {}).
+		Export("logString")
+	teavmBuilder.NewFunctionBuilder().
+		WithFunc(func(_ context.Context, _ api.Module, ptr uint32) {}).
+		Export("logInt")
+	teavmBuilder.NewFunctionBuilder().
+		WithFunc(func(_ context.Context, _ api.Module) {}).
+		Export("logOutOfMemory")
+	if _, err := teavmBuilder.Instantiate(ctx); err != nil {
+		rt.Close(ctx)
+		return nil, fmt.Errorf("host: instantiating teavm module: %w", err)
+	}
+
 	// Build the "env" host module that provides cleat_* imports.
 	envBuilder := rt.NewHostModuleBuilder("env")
+
+	// Stub for AssemblyScript abort — required by AS-compiled WASM modules.
+	envBuilder.NewFunctionBuilder().
+		WithFunc(func(_ context.Context, _ api.Module, msg, file, line, col uint32) {}).
+		Export("abort")
+
 	registerHostFunctions(envBuilder)
 	if _, err := envBuilder.Instantiate(ctx); err != nil {
 		rt.Close(ctx)
@@ -310,7 +350,9 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	if currentSize < needed {
 		pagesNeeded := (needed - currentSize + 65535) / 65536
 		if _, ok := mem.Grow(pagesNeeded); !ok {
-			mem.Grow(1)
+			if _, ok := mem.Grow(1); !ok {
+				return "", false, fmt.Errorf("host: memory grow failed: needed %d bytes (%d pages), current %d bytes", needed, pagesNeeded, currentSize)
+			}
 		}
 	}
 

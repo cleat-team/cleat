@@ -9,9 +9,31 @@ import (
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
+// resetStuckJobsQuery resets running jobs that have been running for more than
+// 5 minutes back to pending, so they can be picked up by another worker.
+var resetStuckJobsQuery = plugin.Query{
+	Default: `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE status = 'running' AND started_at < NOW() - INTERVAL '5 minutes' LIMIT 1000`,
+	MySQL:   `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE status = 'running' AND started_at < NOW() - INTERVAL 5 MINUTE LIMIT 1000`,
+	MSSQL:   `UPDATE task_queue SET status = 'pending', started_at = NULL WHERE id IN (SELECT id FROM task_queue WHERE status = 'running' AND started_at < DATEADD(minute, -5, SYSUTCDATETIME()) ORDER BY id OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY)`,
+}
+
+// runReaper resets stuck running jobs back to pending. Returns the number of
+// jobs reset, or -1 on error (the error is logged internally).
+func (p *Plugin) runReaper(ctx context.Context) int {
+	n, err := p.db.Exec(ctx, plugin.Rebind(resetStuckJobsQuery.For(p.dialect), p.dialect))
+	if err != nil {
+		p.logger.Error("jobqueue: reaper failed",
+			"plugin", p.Info().Name,
+			"error", err,
+		)
+		return -1
+	}
+	return int(n)
+}
+
 // Run starts the background worker goroutine. It polls the task_queue for
-// pending jobs and logs dispatch events (actual workflow dispatch comes later).
-// Returns when ctx is cancelled.
+// pending jobs and runs a periodic reaper to unstuck jobs left running by
+// crashed workers. Returns when ctx is cancelled.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("jobqueue: no database, worker disabled")
@@ -19,10 +41,22 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return nil
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	pollTicker := time.NewTicker(5 * time.Second)
+	defer pollTicker.Stop()
 
-	p.logger.Info("jobqueue: worker started, poll interval=5s")
+	reaperTicker := time.NewTicker(60 * time.Second)
+	defer reaperTicker.Stop()
+
+	p.logger.Info("jobqueue: worker started, poll interval=5s, reaper interval=60s")
+
+	// Run reaper once immediately at startup so stuck jobs from previous crashes
+	// are cleared before the first poll cycle.
+	if n := p.runReaper(ctx); n >= 0 {
+		p.logger.Info("jobqueue: initial reaper cycle completed",
+			"plugin", p.Info().Name,
+			"jobs_reset", n,
+		)
+	}
 
 	for {
 		select {
@@ -30,7 +64,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 			p.logger.Info("jobqueue: worker stopped")
 			return nil
 
-		case <-ticker.C:
+		case <-pollTicker.C:
 			start := time.Now()
 			claimed, dispatched, failed, err := p.pollPending(ctx)
 			if err != nil {
@@ -47,6 +81,16 @@ func (p *Plugin) Run(ctx context.Context) error {
 				"jobs_dispatched", dispatched,
 				"jobs_failed", failed,
 			)
+
+		case <-reaperTicker.C:
+			start := time.Now()
+			if n := p.runReaper(ctx); n >= 0 {
+				p.logger.Info("jobqueue: reaper cycle completed",
+					"plugin", p.Info().Name,
+					"duration_ms", time.Since(start).Milliseconds(),
+					"jobs_reset", n,
+				)
+			}
 		}
 	}
 }

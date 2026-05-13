@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -33,6 +34,22 @@ func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// isPKConflict returns true if the error is a primary key or unique constraint
+// violation. These occur when two concurrent appends compute the same next
+// sequence number — a safe retry scenario.
+func isPKConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "duplicate") ||
+		strings.Contains(s, "unique") ||
+		strings.Contains(s, "PRIMARY KEY") ||
+		strings.Contains(s, "2627") || // MSSQL
+		strings.Contains(s, "1062") || // MySQL
+		strings.Contains(s, "23505") // PostgreSQL
 }
 
 // tenantID extracts the tenant UUID from the request context. Returns the
@@ -83,9 +100,24 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert event with auto-incrementing sequence.
+	// Retry loop handles PK conflicts from concurrent appends.
 	var sequence int64
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(insertEventReturning.For(p.dialect), p.dialect),
-		tid, streamID, string(body)).Scan(&sequence)
+	const maxAppendAttempts = 3
+	backoff := 10 * time.Millisecond
+	for attempt := 1; attempt <= maxAppendAttempts; attempt++ {
+		err = p.db.QueryRow(r.Context(), plugin.Rebind(insertEventReturning.For(p.dialect), p.dialect),
+			tid, streamID, string(body)).Scan(&sequence)
+		if err == nil {
+			break
+		}
+		if !isPKConflict(err) {
+			break
+		}
+		if attempt < maxAppendAttempts {
+			time.Sleep(backoff)
+			backoff *= 2
+		}
+	}
 	if err != nil {
 		p.logger.Error("eventstore: append", "stream", streamID, "error", err)
 		p.writeError(w, 500, "failed to append event")

@@ -12,10 +12,23 @@
 package host
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/tetratelabs/wazero/api"
 )
+
+// wasmMemBufKey is a context key for overriding the WASM linear memory buffer
+// used by writeWasmString. This allows the wasmtime backend to redirect memory
+// writes to wasmtime's memory without passing an api.Module.
+type wasmMemBufKey struct{}
+
+// contextWithRawMemBuf returns a context that makes writeWasmString write to
+// buf (a raw byte slice of WASM linear memory) instead of the api.Memory
+// argument. Used by the wasmtime backend where api.Module is not available.
+func contextWithRawMemBuf(ctx context.Context, buf []byte) context.Context {
+	return context.WithValue(ctx, wasmMemBufKey{}, buf)
+}
 
 const outBufSize = 1048576 // 1 MB; increased to reduce truncation risk
 

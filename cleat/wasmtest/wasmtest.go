@@ -447,6 +447,8 @@ type WasmTestEnv struct {
 	caller  *mockCaller
 	engine  *host.Engine
 
+	pluginRegistry    *host.PluginRegistry
+
 	SignalStore        *InMemorySignalStore
 	PromiseStore       *InMemoryPromiseStore
 	ChildWorkflowStore *InMemoryChildWorkflowStore
@@ -477,6 +479,11 @@ func WithDefName(name string) WasmTestEnvOption {
 // WithDefVersion sets the workflow definition version.
 func WithDefVersion(v int) WasmTestEnvOption {
 	return func(e *WasmTestEnv) { e.DefVersion = v }
+}
+
+// WithPluginRegistry sets the plugin registry for plugin host function dispatch.
+func WithPluginRegistry(pr *host.PluginRegistry) WasmTestEnvOption {
+	return func(e *WasmTestEnv) { e.pluginRegistry = pr }
 }
 
 // NewWasmTestEnv creates a new WasmTestEnv with default in-memory stores
@@ -512,7 +519,7 @@ func NewWasmTestEnv(t *testing.T, opts ...WasmTestEnvOption) *WasmTestEnv {
 		o(env)
 	}
 
-	env.engine = host.NewEngine(rt, env.caller,
+	engineOpts := []host.EngineOption{
 		host.WithSignalStore(env.SignalStore),
 		host.WithPromiseStore(env.PromiseStore),
 		host.WithWorkflowState(env.WorkflowState),
@@ -521,7 +528,11 @@ func NewWasmTestEnv(t *testing.T, opts ...WasmTestEnvOption) *WasmTestEnv {
 		host.WithChildWorkflowStore(env.ChildWorkflowStore),
 		host.WithConcurrencyKeyStore(env.ConcurrencyStore),
 		host.WithDefVersion(env.DefVersion),
-	)
+	}
+	if env.pluginRegistry != nil {
+		engineOpts = append(engineOpts, host.WithPluginRegistry(env.pluginRegistry))
+	}
+	env.engine = host.NewEngine(rt, env.caller, engineOpts...)
 
 	return env
 }

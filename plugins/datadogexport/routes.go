@@ -44,6 +44,15 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 	return tid
 }
 
+// redactAPIKey replaces the API key with "****" unless the caller passes
+// ?show_api_key=true.
+func (p *Plugin) redactAPIKey(r *http.Request, c *configJSON) {
+	if r.URL.Query().Get("show_api_key") == "true" {
+		return
+	}
+	c.APIKey = "****"
+}
+
 // ---- types ----
 
 type configJSON struct {
@@ -123,6 +132,7 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.logger.Info("datadog-export: config created", "id", id, "tenant", tid)
+	// Intentionally return the API key on create — the caller just provided it.
 	p.writeJSON(w, 201, configJSON{
 		ID:            id,
 		TenantID:      tid,
@@ -173,6 +183,10 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		configs = []configJSON{}
 	}
 
+	for i := range configs {
+		p.redactAPIKey(r, &configs[i])
+	}
+
 	p.writeJSON(w, 200, configs)
 }
 
@@ -209,6 +223,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c.TenantID = tid
+	p.redactAPIKey(r, &c)
 	p.writeJSON(w, 200, c)
 }
 
@@ -312,6 +327,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c.TenantID = tid
+	p.redactAPIKey(r, &c)
 	p.writeJSON(w, 200, c)
 }
 

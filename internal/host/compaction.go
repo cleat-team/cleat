@@ -43,7 +43,15 @@ const (
 	EventCodePluginCallStreamChunk = 20
 	EventCodeSideEffect       = 21
 	EventCodeScopeAcquired      = 22
+	EventCodeFetch            = 23
+	EventCodeDurableLog      = 24
+	EventCodeDurableSend           = 25
+	EventCodeDurableScheduleInvoke = 26
 )
+
+// EventCodeSleep (1) is defined above but has no corresponding EventType
+// — sleep events are handled locally in the engine and are never recorded
+// to event history, so the code is reserved/unused.
 
 var eventTypeToCode = map[EventType]int{
 	EventTypeCall:             EventCodeCall,
@@ -68,6 +76,10 @@ var eventTypeToCode = map[EventType]int{
 	EventTypePluginCallStreamChunk: EventCodePluginCallStreamChunk,
 	EventTypeSideEffect:       EventCodeSideEffect,
 	EventTypeScopeAcquired:    EventCodeScopeAcquired,
+	EventTypeFetch:            EventCodeFetch,
+	EventTypeDurableLog:       EventCodeDurableLog,
+	EventTypeDurableSend:           EventCodeDurableSend,
+	EventTypeDurableScheduleInvoke: EventCodeDurableScheduleInvoke,
 }
 
 var codeToEventType = map[int]EventType{
@@ -93,7 +105,11 @@ var codeToEventType = map[int]EventType{
 	EventCodePluginCallStreamChunk: EventTypePluginCallStreamChunk,
 	EventCodeSideEffect:       EventTypeSideEffect,
 	EventCodeScopeAcquired:      EventTypeScopeAcquired,
-}
+	EventCodeFetch:              EventTypeFetch,
+	EventCodeDurableLog:         EventTypeDurableLog,
+	EventCodeDurableSend:           EventTypeDurableSend,
+	EventCodeDurableScheduleInvoke: EventTypeDurableScheduleInvoke,
+	}
 
 // CompactionState holds the minimal state needed to reconstruct the compacted
 // portion of a workflow's event history for deterministic replay.
@@ -288,7 +304,20 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.DurationMs = ev.StateDelta
 			ce.PromiseName = ev.StateOp
 		case EventTypeRunDetached:
-			// No extra fields to store.
+			ce.ChildName = ev.DetachedName
+			ce.ChildInput = ev.DetachedInput
+			ce.RunID = ev.DetachedRunID
+		case EventTypeDurableLog:
+			ce.Response = ev.Message
+			ce.Service = ev.LogLevel
+			ce.Op = ev.LogKV
+		case EventTypeFetch:
+			ce.Service = ev.FetchMethod
+			ce.Op = ev.FetchURL
+			ce.Request = ev.FetchHeaders
+			ce.ChildInput = ev.FetchBody
+			ce.Response = ev.FetchResponse
+			ce.Error = ev.Err
 		case EventTypeAcquireLock:
 			ce.ChildName = ev.LockKey
 			ce.DurationMs = ev.LockTTLMs
@@ -305,6 +334,15 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 			ce.PluginInput = ev.PluginInput
 			ce.PluginOutput = ev.PluginOutput
 			ce.PluginError = ev.PluginError
+		case EventTypeDurableSend:
+			ce.Service = ev.Service
+			ce.Op = ev.Op
+			ce.Request = ev.Request
+		case EventTypeDurableScheduleInvoke:
+			ce.Service = ev.Service
+			ce.Op = ev.Op
+			ce.Request = ev.Request
+			ce.DurationMs = ev.DurationMs
 		}
 		cs.Events = append(cs.Events, ce)
 	}
@@ -412,9 +450,20 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 			rec.StateDelta = ce.DurationMs
 			rec.StateOp = ce.PromiseName
 		case EventCodeRunDetached:
-			// No extra fields to restore.
-			rec.PromiseID = ce.PromiseID
-			rec.PromiseError = ce.PromiseError
+			rec.DetachedName = ce.ChildName
+			rec.DetachedInput = ce.ChildInput
+			rec.DetachedRunID = ce.RunID
+		case EventCodeDurableLog:
+			rec.Message = ce.Response
+			rec.LogLevel = ce.Service
+			rec.LogKV = ce.Op
+		case EventCodeFetch:
+			rec.FetchMethod = ce.Service
+			rec.FetchURL = ce.Op
+			rec.FetchHeaders = ce.Request
+			rec.FetchBody = ce.ChildInput
+			rec.FetchResponse = ce.Response
+			rec.Err = ce.Error
 		case EventCodeAcquireLock:
 			rec.LockKey = ce.ChildName
 			rec.LockTTLMs = ce.DurationMs
@@ -461,7 +510,9 @@ func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID stri
 			SELECT step, event_type, service, operation, request, response, error,
 			       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 			       defer_description, defer_id, child_name, child_input, run_id, new_input,
-			       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error
+			       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+		       promise_name, promise_id, promise_result, promise_error,
+		       payload
 			FROM event_history
 			WHERE workflow_id = $1
 			ORDER BY step
@@ -481,12 +532,16 @@ func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID stri
 			var deferDesc, deferID sql.NullString
 			var childName, childInput, runID, newInput sql.NullString
 			var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
+			var promiseName, promiseID, promiseResult, promiseErr sql.NullString
+			var payload sql.NullString
 
 			if err := rows.Scan(&rec.Step, &rec.EventType,
 				&service, &op, &request, &response, &errMsg,
 				&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
 				&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
-				&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr); err != nil {
+				&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
+					&promiseName, &promiseID, &promiseResult, &promiseErr,
+					&payload); err != nil {
 				rows.Close()
 				return nil, fmt.Errorf("scan compaction events (offset=%d): %w", offset, err)
 			}
@@ -512,6 +567,16 @@ func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID stri
 			rec.PluginInput = pluginInput.String
 			rec.PluginOutput = pluginOutput.String
 			rec.PluginError = pluginErr.String
+			rec.PromiseName = promiseName.String
+			rec.PromiseID = promiseID.String
+			rec.PromiseResult = promiseResult.String
+			rec.PromiseError = promiseErr.String
+
+			// Restore event-type-specific fields from the payload JSON column
+			// (state_key, state_value, fetch_*, lock_*, detached fields, etc.).
+			if payload.Valid {
+				populateFromPayload(&rec, []byte(payload.String))
+			}
 
 			history = append(history, rec)
 		}

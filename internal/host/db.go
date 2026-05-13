@@ -3052,7 +3052,15 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 			payload["state_op"] = rec.StateOp
 		}
 	case "run_detached":
-		// No extra fields to store.
+		if rec.DetachedName != "" {
+			payload["detached_name"] = rec.DetachedName
+		}
+		if rec.DetachedInput != "" {
+			payload["detached_input"] = rec.DetachedInput
+		}
+		if rec.DetachedRunID != "" {
+			payload["detached_run_id"] = rec.DetachedRunID
+		}
 	case "side_effect":
 		if rec.SideEffectResult != "" {
 			payload["side_effect_result"] = rec.SideEffectResult
@@ -3079,6 +3087,70 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 		if rec.Err != "" {
 			payload["error"] = rec.Err
+		}
+	case "durable_log":
+		if rec.Message != "" {
+			payload["message"] = rec.Message
+		}
+		if rec.LogLevel != "" {
+			payload["log_level"] = rec.LogLevel
+		}
+		if rec.LogKV != "" {
+			payload["log_kv"] = rec.LogKV
+		}
+	case "fetch":
+		if rec.FetchMethod != "" {
+			payload["fetch_method"] = rec.FetchMethod
+		}
+		if rec.FetchURL != "" {
+			payload["fetch_url"] = rec.FetchURL
+		}
+		if rec.FetchHeaders != "" {
+			payload["fetch_headers"] = rec.FetchHeaders
+		}
+		if rec.FetchBody != "" {
+			payload["fetch_body"] = rec.FetchBody
+		}
+		if rec.FetchResponse != "" {
+			payload["fetch_response_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.FetchResponse))
+		}
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
+	case "acquire_lock":
+		if rec.LockKey != "" {
+			payload["lock_key"] = rec.LockKey
+		}
+		if rec.LockTTLMs > 0 {
+			payload["lock_ttl_ms"] = rec.LockTTLMs
+		}
+		payload["lock_acquired"] = rec.LockAcquired
+	case "release_lock":
+		if rec.LockKey != "" {
+			payload["lock_key"] = rec.LockKey
+		}
+	case "durable_send":
+		if rec.Service != "" {
+			payload["service"] = rec.Service
+		}
+		if rec.Op != "" {
+			payload["operation"] = rec.Op
+		}
+		if rec.Request != "" {
+			payload["request_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Request))
+		}
+	case "durable_schedule_invoke":
+		if rec.Service != "" {
+			payload["service"] = rec.Service
+		}
+		if rec.Op != "" {
+			payload["operation"] = rec.Op
+		}
+		if rec.Request != "" {
+			payload["request_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Request))
+		}
+		if rec.DurationMs > 0 {
+			payload["duration_ms"] = rec.DurationMs
 		}
 	}
 	return json.Marshal(payload)
@@ -3197,7 +3269,15 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 			rec.StateOp = v
 		}
 	case "run_detached":
-		// No extra fields to restore.
+		if v, ok := m["detached_name"].(string); ok {
+			rec.DetachedName = v
+		}
+		if v, ok := m["detached_input"].(string); ok {
+			rec.DetachedInput = v
+		}
+		if v, ok := m["detached_run_id"].(string); ok {
+			rec.DetachedRunID = v
+		}
 	case "side_effect":
 		if v, ok := m["side_effect_result"].(string); ok {
 			rec.SideEffectResult = v
@@ -3225,6 +3305,52 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["error"].(string); ok {
 			rec.Err = v
 		}
+	case "durable_log":
+		if v, ok := m["message"].(string); ok {
+			rec.Message = v
+		}
+		if v, ok := m["log_level"].(string); ok {
+			rec.LogLevel = v
+		}
+		if v, ok := m["log_kv"].(string); ok {
+			rec.LogKV = v
+		}
+	case "fetch":
+		if v, ok := m["fetch_method"].(string); ok { rec.FetchMethod = v }
+		if v, ok := m["fetch_url"].(string); ok { rec.FetchURL = v }
+		if v, ok := m["fetch_headers"].(string); ok { rec.FetchHeaders = v }
+		if v, ok := m["fetch_body"].(string); ok { rec.FetchBody = v }
+		if v, ok := m["fetch_response_b64"].(string); ok {
+			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+				rec.FetchResponse = string(decoded)
+			}
+		} else if v, ok := m["fetch_response"].(string); ok {
+			rec.FetchResponse = v
+		}
+		if v, ok := m["error"].(string); ok { rec.Err = v }
+	case "acquire_lock":
+		if v, ok := m["lock_key"].(string); ok { rec.LockKey = v }
+		if v, ok := m["lock_ttl_ms"].(float64); ok { rec.LockTTLMs = int64(v) }
+		if v, ok := m["lock_acquired"].(float64); ok { rec.LockAcquired = int(v) }
+	case "release_lock":
+		if v, ok := m["lock_key"].(string); ok { rec.LockKey = v }
+	case "durable_send":
+		if v, ok := m["service"].(string); ok { rec.Service = v }
+		if v, ok := m["operation"].(string); ok { rec.Op = v }
+		if v, ok := m["request_b64"].(string); ok {
+			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+				rec.Request = string(decoded)
+			}
+		}
+	case "durable_schedule_invoke":
+		if v, ok := m["service"].(string); ok { rec.Service = v }
+		if v, ok := m["operation"].(string); ok { rec.Op = v }
+		if v, ok := m["request_b64"].(string); ok {
+			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+				rec.Request = string(decoded)
+			}
+		}
+		if v, ok := m["duration_ms"].(float64); ok { rec.DurationMs = int64(v) }
 	}
 }
 
@@ -3512,6 +3638,18 @@ func tryDecodeBase64(s string) string {
 		return s // not base64-encoded, return raw string
 	}
 	return string(decoded)
+}
+
+// tryEncodeBase64 is a symmetric counterpart to tryDecodeBase64.  It encodes
+// s as base64 so that values read back through tryDecodeBase64 are restored
+// correctly.  Call sites that previously stored plain text can switch to this
+// function: the old (un-encoded) values are still handled by tryDecodeBase64's
+// fallback, and new values are properly round-tripped.
+func tryEncodeBase64(s string) string {
+	if s == "" {
+		return s
+	}
+	return base64.StdEncoding.EncodeToString([]byte(s))
 }
 
 // PostgresStoreFactory implements StoreFactory for PostgreSQL.

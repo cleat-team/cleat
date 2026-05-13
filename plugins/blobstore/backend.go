@@ -90,10 +90,14 @@ func newS3Backend(ctx context.Context, cfg Config) (*s3Backend, error) {
 		})
 	}
 
+	secure := cfg.Secure
+	if cfg.Endpoint == "" {
+		secure = true // AWS S3 always uses TLS
+	}
 	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  creds,
 		Region: cfg.Region,
-		Secure: true,
+		Secure: secure,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("blobstore: create s3 client: %w", err)

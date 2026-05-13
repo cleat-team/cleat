@@ -48,6 +48,7 @@ type Config struct {
 	Endpoint        string `json:"endpoint,omitempty"`          // custom S3 endpoint (for MinIO/GCS)
 	AccessKeyID     string `json:"access_key_id,omitempty"`     // S3 access key; falls back to env/instance profile
 	SecretAccessKey string `json:"secret_access_key,omitempty"` // S3 secret key
+	Secure          bool   `json:"secure"`                      // use HTTPS (default true, set false for local MinIO)
 	MaxBlobSize     int64  `json:"max_blob_size"`               // max blob bytes; default 10 MB
 }
 

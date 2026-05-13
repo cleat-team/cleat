@@ -38,7 +38,10 @@ class CleatEntryTransformer {
   // AssemblyScript transformer hook - called after all sources are parsed
   // ---------------------------------------------------------------
   afterParse(parser) {
-    const program = parser.program;
+    // Use this.program (set on the prototype by AS) instead of parser.program,
+    // because AS 0.27.32+ does not set parser.program.  The parser argument
+    // is still valid for parser.parseFile() calls in _injectWrappers.
+    const program = this.program;
     if (!program || !program.sources) return;
 
     // Phase 1: Find @cleatEntry functions grouped by source file
@@ -494,6 +497,21 @@ class CleatEntryTransformer {
       const wrapperCode = this._generateWrappers(entries);
 
       try {
+        // In AS 0.27.32+, parser.parseFile(sourceText, sourcePath, isLibrary)
+        // parses code into the program but does NOT return the parsed source.
+        // The parsed source is added to parser.sources array.
+        // We capture the count before each call and find the new source after.
+
+        const findNew = (nameHint) => {
+          // Scan the entire sources array for a match
+          for (const s of parser.sources) {
+            if (!s) continue;
+            const sourceName = s.internalPath || s.name || s.normalizedPath || "";
+            if (sourceName.indexOf(nameHint) >= 0) return s;
+          }
+          return null;
+        };
+
         // Insert @cleat/sdk import at the TOP of the source if needed
         if (needsImport) {
           let importLine = 'import { HostCalls, Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended';
@@ -501,13 +519,13 @@ class CleatEntryTransformer {
             importLine += ', JsonParser, JsonVal';
           }
           importLine += ' } from "@cleat/sdk";\n';
-          const importSrc = parser.parseFile(
-            "~lib/generated/cleat-import.ts",
+          parser.parseFile(
             importLine,
+            "generated/cleat-import.ts",
             false
           );
+          const importSrc = findNew("cleat-import");
           if (importSrc && importSrc.statements) {
-            // unshift in reverse order so they appear in original order
             for (let i = importSrc.statements.length - 1; i >= 0; i--) {
               const s = importSrc.statements[i];
               if (s) source.statements.unshift(s);
@@ -516,18 +534,22 @@ class CleatEntryTransformer {
         }
 
         // Append wrapper functions at the END of the source
-        const wrapSrc = parser.parseFile(
-          "~lib/generated/cleat-wrappers.ts",
+        parser.parseFile(
           wrapperCode,
+          "generated/cleat-wrappers.ts",
           false
         );
+        const wrapSrc = findNew("cleat-wrappers");
         if (wrapSrc && wrapSrc.statements) {
           for (const s of wrapSrc.statements) {
             if (s) source.statements.push(s);
           }
+        } else {
+          console.error("[@cleat/transform] Failed to inject wrapper AST; writing fallback file.");
+          this._writeFallback(wrapperCode);
         }
       } catch (e) {
-        console.error("[@cleat/transform] Failed to inject wrappers: " + e.message + ". The generated wrapper code will be written to a file instead. See the next message for the file path.");
+        console.error("[@cleat/transform] Failed to inject wrappers: " + e.message + ".");
         this._writeFallback(wrapperCode);
       }
     }
@@ -550,10 +572,6 @@ class CleatEntryTransformer {
         (stmt.module && (typeof stmt.module === "string" ? stmt.module : stmt.module.text));
 
       if (modName === "@cleat/sdk") return true;
-      // Also detect relative imports that resolve to the cleat SDK
-      if (modName && typeof modName === "string" &&
-          (modName.indexOf("cleat-as/assembly") >= 0 ||
-           modName.indexOf("@cleat/") >= 0)) return true;
 
       if (stmt.namespace && stmt.namespace.text === "@cleat/sdk") return true;
     }

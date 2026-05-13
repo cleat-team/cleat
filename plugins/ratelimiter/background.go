@@ -22,6 +22,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
+	pruneTicker := time.NewTicker(5 * time.Minute)
+	defer pruneTicker.Stop()
+
 	p.logger.Info("rate-limiter: background reload started, interval=30s")
 
 	// Do an initial load so the middleware has data immediately.
@@ -58,6 +61,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 				"duration_ms", time.Since(start).Milliseconds(),
 				"configs_reloaded", n,
 			)
+
+		case <-pruneTicker.C:
+			p.pruneRateCounters(ctx)
 		}
 	}
 }
@@ -98,4 +104,35 @@ func (p *Plugin) reload(ctx context.Context) (int, error) {
 	count := len(newBuckets)
 	p.logger.Debug("rate-limiter: reloaded rate limits", "count", count)
 	return count, nil
+}
+
+// pruneRateCounters deletes rate_counter rows with window_start older than
+// 2× the maximum configured window_seconds (or 5 minutes, whichever is larger).
+// This prevents unbounded growth of the rate_counter table without accidentally
+// pruning active windows.
+func (p *Plugin) pruneRateCounters(ctx context.Context) {
+	maxWindow := 60 // default if no configs loaded
+	p.mu.Lock()
+	for _, b := range p.buckets {
+		w := int(b.maxTokens / b.refillRate)
+		if w > maxWindow {
+			maxWindow = w
+		}
+	}
+	p.mu.Unlock()
+
+	cutoff := time.Now().UTC().Add(-time.Duration(maxWindow*2) * time.Second)
+	minCutoff := time.Now().UTC().Add(-5 * time.Minute)
+	if cutoff.After(minCutoff) {
+		cutoff = minCutoff
+	}
+
+	result, err := p.db.Exec(ctx, plugin.Rebind(`
+		DELETE FROM rate_counter WHERE window_start < $1
+	`, p.dialect), cutoff)
+	if err != nil {
+		p.logger.Error("rate-limiter: prune counters", "error", err)
+	} else if result > 0 {
+		p.logger.Debug("rate-limiter: pruned counters", "count", result)
+	}
 }

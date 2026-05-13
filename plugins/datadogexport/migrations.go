@@ -52,5 +52,33 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS dd_config;
 			`,
 		},
+		{
+			Version: 2,
+			Up: `
+				CREATE TABLE IF NOT EXISTS plugin_lease (
+					name       TEXT PRIMARY KEY,
+					holder     TEXT NOT NULL,
+					expires_at TIMESTAMPTZ NOT NULL
+				);
+			`,
+			UpMySQL: `
+				CREATE TABLE IF NOT EXISTS plugin_lease (
+					name       VARCHAR(255) PRIMARY KEY,
+					holder     VARCHAR(255) NOT NULL,
+					expires_at TIMESTAMP(6) NOT NULL
+				);
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'plugin_lease')
+				CREATE TABLE plugin_lease (
+					name       NVARCHAR(255) PRIMARY KEY,
+					holder     NVARCHAR(255) NOT NULL,
+					expires_at DATETIMEOFFSET NOT NULL
+				);
+			`,
+			Down: `
+				DROP TABLE IF EXISTS plugin_lease;
+			`,
+		},
 	}
 }

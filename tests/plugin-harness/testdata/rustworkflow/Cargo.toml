@@ -1,0 +1,13 @@
+[package]
+name = "rustworkflow"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cleat-sdk = { path = "../../../../crates/cleat-sdk" }
+cleat-macro = { path = "../../../../crates/cleat-macro" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

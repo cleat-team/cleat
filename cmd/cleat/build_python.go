@@ -18,7 +18,9 @@ import (
 //   - "file.py:func_name"     — explicit entry file and function name
 //   - "file.py"               — a single .py file (auto-detects function)
 //   - "path/to/dir/"          — a directory (looks for .py files)
-func runBuildPython(pattern, outDir string) {
+//
+// runtime specifies the target WASM runtime: "wasmtime", "wazero", or "" for both.
+func runBuildPython(pattern, outDir, runtime string) {
 	pyFile := ""
 	funcName := ""
 
@@ -99,7 +101,7 @@ func runBuildPython(pattern, outDir string) {
 	fmt.Printf("  Compiling Python to WASM via componentize-py...\n")
 	fmt.Printf("  Entry: %s\n", entry)
 
-	if err := wasm.BuildPythonWasm(entry, wasmOutput, false); err != nil {
+	if err := wasm.BuildPythonWasmWithRuntime(entry, wasmOutput, runtime, false); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: componentize-py failed: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Make sure the Python file has a @cleat_entry decorated function.\n")
 		fmt.Fprintf(os.Stderr, "Check that (1) the Python file has valid syntax, (2) the @cleat_entry function exists and is not async, (3) all imports are available.\n")

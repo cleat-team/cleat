@@ -70,15 +70,22 @@ func FuzzCompactionEquivalence(f *testing.F) {
 		fuzzSeed(EventCodeAwaitChild, []string{"run-c1", `{"y":2}`, ""}, []int64{}...)...,
 	))
 
-	// Triplet: Defer, ChildWorkflow, AwaitChild with pending child (tests
-	// pending defer and open-children book-keeping).
-	f.Add(append(
-		append(
-			fuzzSeed(EventCodeDefer, []string{"def-1", "rollback"}, []int64{}...),
-			fuzzSeed(EventCodeChildWorkflow, []string{"wf", `{}`, "run-open"}, []int64{}...)...,
-		),
-		fuzzSeed(EventCodeAwaitChild, []string{"run-open", "", ""}, []int64{}...)...,
-	))
+	// Single SideEffect.
+	f.Add(fuzzSeed(EventCodeSideEffect, []string{`"result"`}, []int64{}...))
+	// Single ScopeAcquired.
+	f.Add(fuzzSeed(EventCodeScopeAcquired, []string{"my-scope"}, []int64{}...))
+	// Single AcquireLock.
+	f.Add(fuzzSeed(EventCodeAcquireLock, []string{"lock-key-1"}, 5000))
+	// Single ReleaseLock.
+	f.Add(fuzzSeed(EventCodeReleaseLock, []string{"lock-key-1"}, []int64{}...))
+	// Single Fetch.
+	f.Add(fuzzSeed(EventCodeFetch, []string{"GET", "https://example.com", `{"status":200}`, ""}, []int64{}...))
+	// Single DurableLog.
+	f.Add(fuzzSeed(EventCodeDurableLog, []string{"hello world", "info", "key=val"}, []int64{}...))
+	// Single DurableSend.
+	f.Add(fuzzSeed(EventCodeDurableSend, []string{"svc", "op", `{}`}, []int64{}...))
+	// Single DurableScheduleInvoke.
+	f.Add(fuzzSeed(EventCodeDurableScheduleInvoke, []string{"svc", "op", `{}`}, 5000))
 
 	// ---- fuzz target ----
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -185,7 +192,7 @@ func parseFuzzEvents(data []byte) []EventRecord {
 	r := &byteReader{data: data}
 
 	for step := 0; r.remaining() > 0; step++ {
-		typeCode := int(r.readByte()) % 19 // clamp to [0, 18]
+		typeCode := int(r.readByte()) % 27 // clamp to [0, 26]
 
 		ev := EventRecord{
 			Step:      step,
@@ -251,14 +258,36 @@ func parseFuzzEvents(data []byte) []EventRecord {
 			ev.StateOp = r.readString()
 			ev.StateDelta = r.readInt64()
 		case EventCodeRunDetached: // no string fields
+		case EventCodeFetch: // method, url, response, err (4 strings)
+			ev.FetchMethod = r.readString()
+			ev.FetchURL = r.readString()
+			ev.FetchResponse = r.readString()
+			ev.Err = r.readString()
 		case EventCodePluginCallStreamChunk: // pluginName, pluginFunc, input, output, err (5 strings)
 			ev.PluginName = r.readString()
 			ev.PluginFunc = r.readString()
 			ev.PluginInput = r.readString()
 			ev.PluginOutput = r.readString()
 			ev.PluginError = r.readString()
-		}
+		case EventCodeSideEffect: // sideEffectResult (1 string)
+			ev.SideEffectResult = r.readString()
+		case EventCodeScopeAcquired: // scopeKey (1 string)
+			ev.ScopeKey = r.readString()
+		case EventCodeDurableLog: // message, level, kv (3 strings)
+			ev.Message = r.readString()
+			ev.LogLevel = r.readString()
+			ev.LogKV = r.readString()
+		case EventCodeDurableSend: // svc, op, req (3 strings)
+			ev.Service = r.readString()
+			ev.Op = r.readString()
+			ev.Request = r.readString()
+		case EventCodeDurableScheduleInvoke: // svc, op, req (3 strings), delay (int64)
+			ev.Service = r.readString()
+			ev.Op = r.readString()
+			ev.Request = r.readString()
+			ev.DurationMs = r.readInt64()
 
+		}
 		events = append(events, ev)
 	}
 	return events
@@ -387,8 +416,21 @@ func eventFieldsMatch(a, b EventRecord) bool {
 			a.StateOp == b.StateOp
 
 	case EventTypeRunDetached:
-		// RunDetached stores no compacted fields.
+		if a.DetachedName != b.DetachedName {
+			return false
+		}
+		if a.DetachedInput != b.DetachedInput {
+			return false
+		}
+		if a.DetachedRunID != b.DetachedRunID {
+			return false
+		}
 		return true
+	case EventTypeFetch:
+		return a.FetchMethod == b.FetchMethod &&
+			a.FetchURL == b.FetchURL &&
+			a.FetchResponse == b.FetchResponse &&
+			a.Err == b.Err
 	case EventTypePluginCallStreamChunk:
 		return a.PluginName == b.PluginName &&
 			a.PluginFunc == b.PluginFunc &&
@@ -396,16 +438,32 @@ func eventFieldsMatch(a, b EventRecord) bool {
 			a.PluginOutput == b.PluginOutput &&
 			a.PluginError == b.PluginError
 
-	case EventTypeAcquireLock:
-		return a.LockKey == b.LockKey &&
-			a.LockTTLMs == b.LockTTLMs &&
-			a.LockAcquired == b.LockAcquired
+		case EventTypeAcquireLock:
+			return a.LockKey == b.LockKey &&
+				a.LockTTLMs == b.LockTTLMs &&
+				a.LockAcquired == b.LockAcquired
 
 	case EventTypeReleaseLock:
 		return a.LockKey == b.LockKey
 
 	case EventTypeScopeAcquired:
 		return a.ScopeKey == b.ScopeKey
+
+	case EventTypeDurableLog:
+		return a.Message == b.Message &&
+			a.LogLevel == b.LogLevel &&
+			a.LogKV == b.LogKV
+
+	case EventTypeDurableSend:
+		return a.Service == b.Service &&
+			a.Op == b.Op &&
+			a.Request == b.Request
+
+	case EventTypeDurableScheduleInvoke:
+		return a.Service == b.Service &&
+			a.Op == b.Op &&
+			a.Request == b.Request &&
+			a.DurationMs == b.DurationMs
 	}
 	return false
 }
@@ -454,8 +512,24 @@ func eventSummary(ev EventRecord) string {
 		return fmt.Sprintf("StateMutation{key=%s value=%s op=%s delta=%d}", trunc(ev.StateKey, 8), trunc(ev.StateValue, 8), trunc(ev.StateOp, 8), ev.StateDelta)
 	case EventTypeRunDetached:
 		return "RunDetached{}"
+	case EventTypeFetch:
+		return fmt.Sprintf("Fetch{method=%s url=%s}", trunc(ev.FetchMethod, 8), trunc(ev.FetchURL, 20))
 	case EventTypePluginCallStreamChunk:
 		return fmt.Sprintf("PluginCallStreamChunk{name=%s fn=%s}", trunc(ev.PluginName, 12), trunc(ev.PluginFunc, 12))
+	case EventTypeSideEffect:
+		return fmt.Sprintf("SideEffect{result=%s}", trunc(ev.SideEffectResult, 20))
+	case EventTypeScopeAcquired:
+		return fmt.Sprintf("ScopeAcquired{key=%s}", trunc(ev.ScopeKey, 20))
+	case EventTypeAcquireLock:
+		return fmt.Sprintf("AcquireLock{key=%s ttl=%d acquired=%d}", trunc(ev.LockKey, 12), ev.LockTTLMs, ev.LockAcquired)
+	case EventTypeReleaseLock:
+		return fmt.Sprintf("ReleaseLock{key=%s}", trunc(ev.LockKey, 12))
+	case EventTypeDurableLog:
+		return fmt.Sprintf("DurableLog{msg=%s level=%s}", trunc(ev.Message, 20), trunc(ev.LogLevel, 8))
+	case EventTypeDurableSend:
+		return fmt.Sprintf("DurableSend{svc=%s op=%s}", trunc(ev.Service, 12), trunc(ev.Op, 12))
+	case EventTypeDurableScheduleInvoke:
+		return fmt.Sprintf("DurableScheduleInvoke{svc=%s op=%s delay=%d}", trunc(ev.Service, 12), trunc(ev.Op, 12), ev.DurationMs)
 	default:
 		return fmt.Sprintf("Unknown{%s}", ev.EventType)
 	}
@@ -529,12 +603,40 @@ func dumpEventDiff(t *testing.T, a, b EventRecord) {
 		mismatchStr("StateOp", a.StateOp, b.StateOp, t)
 	case EventTypeRunDetached:
 		// No compacted fields.
+	case EventTypeFetch:
+		mismatchStr("FetchMethod", a.FetchMethod, b.FetchMethod, t)
+		mismatchStr("FetchURL", a.FetchURL, b.FetchURL, t)
+		mismatchStr("FetchResponse", a.FetchResponse, b.FetchResponse, t)
+		mismatchStr("Err", a.Err, b.Err, t)
 	case EventTypePluginCallStreamChunk:
 		mismatchStr("PluginName", a.PluginName, b.PluginName, t)
 		mismatchStr("PluginFunc", a.PluginFunc, b.PluginFunc, t)
 		mismatchStr("PluginInput", a.PluginInput, b.PluginInput, t)
 		mismatchStr("PluginOutput", a.PluginOutput, b.PluginOutput, t)
 		mismatchStr("PluginError", a.PluginError, b.PluginError, t)
+		case EventTypeSideEffect:
+			mismatchStr("SideEffectResult", a.SideEffectResult, b.SideEffectResult, t)
+		case EventTypeScopeAcquired:
+			mismatchStr("ScopeKey", a.ScopeKey, b.ScopeKey, t)
+		case EventTypeAcquireLock:
+			mismatchStr("LockKey", a.LockKey, b.LockKey, t)
+			mismatchInt("LockTTLMs", a.LockTTLMs, b.LockTTLMs, t)
+			mismatchInt("LockAcquired", int64(a.LockAcquired), int64(b.LockAcquired), t)
+		case EventTypeReleaseLock:
+			mismatchStr("LockKey", a.LockKey, b.LockKey, t)
+		case EventTypeDurableLog:
+			mismatchStr("Message", a.Message, b.Message, t)
+			mismatchStr("LogLevel", a.LogLevel, b.LogLevel, t)
+			mismatchStr("LogKV", a.LogKV, b.LogKV, t)
+		case EventTypeDurableSend:
+			mismatchStr("Service", a.Service, b.Service, t)
+			mismatchStr("Op", a.Op, b.Op, t)
+			mismatchStr("Request", a.Request, b.Request, t)
+		case EventTypeDurableScheduleInvoke:
+			mismatchStr("Service", a.Service, b.Service, t)
+			mismatchStr("Op", a.Op, b.Op, t)
+			mismatchStr("Request", a.Request, b.Request, t)
+			mismatchInt("DurationMs", a.DurationMs, b.DurationMs, t)
 	}
 }
 

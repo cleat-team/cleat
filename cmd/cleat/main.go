@@ -85,10 +85,12 @@ func main() {
 		var jsonOut bool
 		var diffOut bool
 		var sizeReport bool
+		var runtime string
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.StringVar(&target, "target", "go", "compilation target: go, tinygo, rust, java, assemblyscript, or python")
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
+		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: produce both)")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
 		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
@@ -103,9 +105,9 @@ func main() {
 		}
 		if entry != "" {
 			// Use --entry as the pattern for Python builds.
-			runBuild(entry, outDir, target, jsonOut, diffOut, sizeReport)
+			runBuild(entry, outDir, target, runtime, jsonOut, diffOut, sizeReport)
 		} else {
-			runBuild(pattern, outDir, target, jsonOut, diffOut, sizeReport)
+			runBuild(pattern, outDir, target, runtime, jsonOut, diffOut, sizeReport)
 		}
 	case "vet":
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
@@ -180,7 +182,7 @@ func main() {
 	}
 }
 
-func runBuild(pattern, outDir, target string, jsonOut bool, diffOut bool, sizeReport bool) {
+func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut bool, sizeReport bool) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
@@ -206,7 +208,7 @@ func runBuild(pattern, outDir, target string, jsonOut bool, diffOut bool, sizeRe
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildPython(pattern, outDir)
+		runBuildPython(pattern, outDir, runtime)
 		return
 	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern, target)

@@ -112,8 +112,10 @@ public final class JsonHelper {
             // Return the raw parsed JSON value for generic consumers.
             return (T) parseValue(trimmed, 0).value;
         }
-        // Attempt POJO deserialization via parseObject(String, Class).
-        return parseObject(json, type);
+        throw new UnsupportedOperationException(
+            "JsonHelper.parse does not support POJO deserialization for type "
+                + type.getName() + ". Use String, Map, List, or primitive "
+                + "types, or manually parse with parseObject() and map fields yourself.");
     }
 
     /**
@@ -136,29 +138,6 @@ public final class JsonHelper {
             throw new RuntimeException("JSON object must start with '{', got: " + json.substring(0, Math.min(10, json.length())));
         }
         return (Map<String, Object>) parseValue(json, 0).value;
-    }
-
-    /**
-     * Parse a JSON object string into a POJO of the given type.
-     * <p>
-     * The target class must have a public no-argument constructor.  Fields
-     * are populated by matching JSON keys to field names (case-sensitive).
-     * Only fields whose type is supported ({@link String}, {@link Integer},
-     * {@link Long}, {@link Double}, {@link Boolean}, {@link Map},
-     * {@link List}, or another POJO with a no-arg constructor) are set.
-     * <p>
-     * This works within TeaVM's limited reflection support on the WASM
-     * target.
-     *
-     * @param json the JSON object string
-     * @param type the target POJO class
-     * @param <T>  the type parameter
-     * @return the deserialized POJO
-     * @throws RuntimeException if parsing or instantiation fails
-     */
-    public static <T> T parseObject(String json, Class<T> type) {
-        Map<String, Object> map = parseObject(json);
-        return mapToPojo(map, type);
     }
 
     /**
@@ -400,113 +379,6 @@ public final class JsonHelper {
         return i;
     }
 
-    // ---- POJO mapping ----
-
-    /**
-     * Populate a POJO of the given type from a {@code Map<String, Object>}.
-     * <p>
-     * Uses the type's public no-argument constructor to create an instance,
-     * then sets public fields whose names match JSON keys.
-     *
-     * @param map  the map of field names to values
-     * @param type the target POJO class
-     * @param <T>  the type parameter
-     * @return the populated POJO
-     * @throws RuntimeException if instantiation or field access fails
-     */
-    @SuppressWarnings("unchecked")
-    private static <T> T mapToPojo(Map<String, Object> map, Class<T> type) {
-        if (map == null || map.isEmpty()) {
-            try {
-                return type.getDeclaredConstructor().newInstance();
-            } catch (Exception e) {
-                throw new RuntimeException("Failed to instantiate " + type.getName() + ". Ensure the class has a public no-argument constructor.", e);
-            }
-        }
-        try {
-            T instance = type.getDeclaredConstructor().newInstance();
-            for (Map.Entry<String, Object> entry : map.entrySet()) {
-                String fieldName = entry.getKey();
-                Object value = entry.getValue();
-                try {
-                    java.lang.reflect.Field field = type.getField(fieldName);
-                    Object converted = convertValue(value, field.getType());
-                    field.set(instance, converted);
-                } catch (NoSuchFieldException ignored) {
-                    // Silently skip fields that don't exist on the POJO.
-                }
-            }
-            return instance;
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to instantiate " + type.getName(), e);
-        }
-    }
-
-    /**
-     * Convert a parsed JSON value to the target field type.
-     * <p>
-     * Supports widening conversions (Integer to Long, etc.) and recursive
-     * POJO deserialization for {@code Map} values.
-     */
-    @SuppressWarnings("unchecked")
-    private static Object convertValue(Object value, Class<?> targetType) {
-        if (value == null) {
-            return null;
-        }
-        if (targetType.isInstance(value)) {
-            return value;
-        }
-        // Numeric widening
-        if (value instanceof Number) {
-            Number num = (Number) value;
-            if (targetType == long.class || targetType == Long.class) {
-                return num.longValue();
-            }
-            if (targetType == int.class || targetType == Integer.class) {
-                return num.intValue();
-            }
-            if (targetType == double.class || targetType == Double.class) {
-                return num.doubleValue();
-            }
-            if (targetType == float.class || targetType == Float.class) {
-                return num.floatValue();
-            }
-            if (targetType == short.class || targetType == Short.class) {
-                return num.shortValue();
-            }
-            if (targetType == byte.class || targetType == Byte.class) {
-                return num.byteValue();
-            }
-        }
-        // Boolean widening
-        if (value instanceof Boolean) {
-            if (targetType == boolean.class || targetType == Boolean.class) {
-                return value;
-            }
-        }
-        // String to String
-        if (value instanceof String && targetType == String.class) {
-            return value;
-        }
-        // Map to POJO
-        if (value instanceof Map) {
-            // Try POJO deserialization for non-Map target types
-            if (targetType != Map.class && targetType != HashMap.class) {
-                return mapToPojo((Map<String, Object>) value, targetType);
-            }
-        }
-        // List to List
-        if (value instanceof List && (targetType == List.class || targetType == ArrayList.class)) {
-            return value;
-        }
-        // Fallback: try string conversion
-        if (targetType == String.class) {
-            return value.toString();
-        }
-        return value;
-    }
 
     // ---- Serialization ----
 

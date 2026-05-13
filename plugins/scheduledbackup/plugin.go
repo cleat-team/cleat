@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/rcownie/cleat/internal/plugin"
 )
@@ -76,8 +77,34 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		return fmt.Errorf("scheduledbackup: create dump dir: %w", err)
 	}
 
+	if err := p.checkDBVersion(ctx); err != nil {
+		return err
+	}
+
 	p.logger.Info("scheduledbackup: initialized",
 		"dump_dir", p.config.DumpDir,
 	)
+	return nil
+}
+
+// checkDBVersion verifies the database meets minimum requirements.
+// MySQL 8.0+ is required for FOR UPDATE SKIP LOCKED.
+func (p *Plugin) checkDBVersion(ctx context.Context) error {
+	if p.db == nil || p.dialect != plugin.DialectMySQL {
+		return nil
+	}
+	var version string
+	if err := p.db.QueryRow(ctx, "SELECT VERSION()").Scan(&version); err != nil {
+		return fmt.Errorf("scheduledbackup: failed to check MySQL version: %w", err)
+	}
+	major := 0
+	for _, part := range strings.Split(version, ".") {
+		if n, err := fmt.Sscanf(part, "%d", &major); err == nil && n == 1 {
+			break
+		}
+	}
+	if major < 8 {
+		return fmt.Errorf("scheduledbackup: MySQL 8.0+ is required (found %s). FOR UPDATE SKIP LOCKED is not available in older MySQL versions", version)
+	}
 	return nil
 }

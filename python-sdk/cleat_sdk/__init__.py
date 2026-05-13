@@ -28,6 +28,7 @@ from .entry import cleat_entry, virtual_object
 from .types import ChildWorkflow, Saga, SagaStep, SagaStepResult, TerminalError, CleatDefer
 from .client import CleatClient
 from .test_harness import CleatTestHarness, CallRecord
+from .local_host import LocalHostCalls
 from .plugins import (
     Plugins,
     BlobPutResult,
@@ -53,6 +54,7 @@ from .langgraph.checkpoint import CleatCheckpointer
 
 __all__ = [
     "HostCalls",
+    "LocalHostCalls",
     "SuspendSentinel",
     "RetryPolicy",
     "SignalResult",

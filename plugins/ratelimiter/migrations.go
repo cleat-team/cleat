@@ -46,5 +46,39 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS rate_limits;
 			`,
 		},
+		{
+			Version: 2,
+			Up: `
+				CREATE TABLE IF NOT EXISTS rate_counter (
+					tenant_id    UUID NOT NULL,
+					limit_key    TEXT NOT NULL,
+					window_start TIMESTAMPTZ NOT NULL,
+					count        INTEGER NOT NULL DEFAULT 0,
+					PRIMARY KEY (tenant_id, limit_key, window_start)
+				);
+			`,
+			UpMySQL: `
+				CREATE TABLE IF NOT EXISTS rate_counter (
+					tenant_id    CHAR(36) NOT NULL,
+					limit_key    VARCHAR(255) NOT NULL,
+					window_start TIMESTAMP(6) NOT NULL,
+					count        INT NOT NULL DEFAULT 0,
+					PRIMARY KEY (tenant_id, limit_key, window_start)
+				);
+			`,
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'rate_counter')
+				CREATE TABLE rate_counter (
+					tenant_id    UNIQUEIDENTIFIER NOT NULL,
+					limit_key    NVARCHAR(255) NOT NULL,
+					window_start DATETIMEOFFSET NOT NULL,
+					count        INT NOT NULL DEFAULT 0,
+					PRIMARY KEY (tenant_id, limit_key, window_start)
+				);
+			`,
+			Down: `
+				DROP TABLE IF EXISTS rate_counter;
+			`,
+		},
 	}
 }

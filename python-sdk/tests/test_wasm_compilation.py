@@ -347,7 +347,7 @@ def test_python_wasm_roundtrip(tmp_path):
     entry = f"{workflow_file}:hello_workflow"
 
     result = subprocess.run(
-        [sys.executable, build_script, "--entry", entry, "--output", output],
+        [sys.executable, build_script, "--entry", entry, "--output", output, "--skip-decompose"],
         capture_output=True,
         text=True,
         timeout=300,

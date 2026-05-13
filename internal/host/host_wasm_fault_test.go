@@ -96,6 +96,11 @@ func wasmWithoutExport() []byte {
 		0x01,       // 1 function
 		0x00,       // type index 0
 	)
+	// Export section: zero exports — function index 0 is not exported.
+	bin = append(bin,
+		0x07, 0x01, // Export, size 1
+		0x00,       // 0 exports
+	)
 	// Code section: empty body (nop + end)
 	bin = append(bin,
 		0x0a, 0x04, // Code, size 4
@@ -103,11 +108,6 @@ func wasmWithoutExport() []byte {
 		0x02,       // body size 2
 		0x00,       // 0 locals
 		0x0b,       // end
-	)
-	// Export section: zero exports — function index 0 is not exported.
-	bin = append(bin,
-		0x07, 0x01, // Export, size 1
-		0x00,       // 0 exports
 	)
 	return bin
 }

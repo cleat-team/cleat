@@ -2,7 +2,7 @@
 
 Cleat's durable workflow engine runs on three production-quality relational
 database backends. All three provide the full `WorkflowStore` interface
-(72 methods) behind a common `StoreFactory` abstraction — application code
+(74 methods) behind a common `StoreFactory` abstraction — application code
 never needs to know which database is in use. Choose the backend that fits
 your existing infrastructure.
 
@@ -64,7 +64,7 @@ type StoreFactory interface {
 | **Signal upsert** | `ON CONFLICT DO UPDATE` | `ON DUPLICATE KEY UPDATE` | `MERGE` |
 | **Timestamp precision** | `TIMESTAMPTZ` (microsecond) | `TIMESTAMP(6)` (microsecond) | `DATETIMEOFFSET` (100 nanosecond) |
 | **UUID generation** | `gen_random_uuid()` or Go-side | Go-side only | `NEWID()` or Go-side |
-| **Full WorkflowStore** | 72/72 methods | 72/72 methods | 72/72 methods |
+| **Full WorkflowStore** | 74/74 methods | 74/74 methods | 74/74 methods |
 | **Migration files** | 10 | 10 | 10 |
 | **CI-tested** | Yes (primary) | Yes (dedicated workflow) | Yes (dedicated workflow) |
 

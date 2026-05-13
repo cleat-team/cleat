@@ -12,6 +12,7 @@ be loaded by the cleat worker runtime.
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -240,6 +241,32 @@ def main():
         dest="plugin_deps",
         help="Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)",
     )
+    parser.add_argument(
+        "--skip-decompose",
+        action="store_true",
+        help="Skip the wasm-tools component decompose step. "
+             "The output will be a WASM Component Model binary.",
+    )
+    parser.add_argument(
+        "--keep-component",
+        action="store_true",
+        help="Keep the original Component Model binary alongside the decomposed core module. "
+             "Saved as <output>.component.wasm.",
+    )
+    parser.add_argument(
+        "--output-core",
+        default=None,
+        help="Path for the decomposed core WASM output file. "
+             "Defaults to the --output path (overwriting the Component Model binary).",
+    )
+    parser.add_argument(
+        "--runtime",
+        default=None,
+        help="Target WASM runtime: 'wasmtime' or 'wazero'. "
+             "When 'wasmtime', the output is a Component Model binary (skip decomposition). "
+             "When 'wazero', the output is a decomposed core WASM module. "
+             "When unset, both formats are produced (default).",
+    )
 
     args = parser.parse_args()
 
@@ -292,14 +319,100 @@ def main():
         print("  3. Try with --verbose for detailed error output", file=sys.stderr)
         sys.exit(1)
 
+    # Resolve output path to absolute. The componentize-py subprocess runs
+    # with entry_dir as CWD, so a relative output path is relative to
+    # entry_dir, not the script's CWD.
+    if not os.path.isabs(output):
+        entry_dir_resolved = Path(entry_file).resolve().parent
+        output = str(entry_dir_resolved / output)
+
     info = get_wasm_info(output)
-    print(f"\nBuild SUCCESS")
-    print(f"  Output: {info['path']}")
-    print(f"  Size:   {info['size_bytes']:,} bytes ({info['size_mb']} MB)")
+    if not info.get("exists"):
+        print(f"\nBuild SUCCESS", file=sys.stderr)
+        print(f"  Warning: WASM output not found at {output}", file=sys.stderr)
+    else:
+        print(f"\nBuild SUCCESS")
+        print(f"  Output: {info['path']}")
+        print(f"  Size:   {info['size_bytes']:,} bytes ({info['size_mb']} MB)")
 
     if info["size_mb"] > 25:
         print(f"  Warning: WASM binary is large ({info['size_mb']} MB).")
         print(f"  This is expected for CPython-in-WASM but may affect load times.")
+
+    # ---- Apply --runtime to control decomposition behavior ----
+    # --runtime wasmtime  -> skip decomposition (Component Model binary is the output)
+    # --runtime wazero    -> decompose, keep only core WASM (no component)
+    # No --runtime        -> produce both (keep component + core WASM)
+    if args.runtime == "wasmtime":
+        args.skip_decompose = True
+    elif args.runtime == "wazero":
+        args.skip_decompose = False
+        args.keep_component = False
+    elif args.runtime is None:
+        # Default: produce both formats.
+        args.keep_component = True
+
+    # ---- Decompose component model to core WASM ----
+    # componentize-py produces a WASM Component Model binary, but wazero
+    # only runs core WASM modules. Use wasm-tools to decompose the component.
+    if args.skip_decompose:
+        print("  Decompose skipped: output is a WASM Component Model binary (not core WASM)")
+    else:
+        # Preserve the component model binary if requested
+        if args.keep_component:
+            component_backup = output + ".component.wasm"
+            shutil.copy2(output, component_backup)
+            print(f"  Preserved component model: {component_backup}")
+
+        # Determine core WASM output path
+        core_output = args.output_core or output
+
+        # When the core output overwrites the component binary, use a temp
+        # intermediate file so a partial write doesn't corrupt the original.
+        use_temp = core_output == output
+        decompose_output = output + ".core" if use_temp else core_output
+
+        try:
+            decompose_result = subprocess.run(
+                ["wasm-tools", "component", "decompose", output, "-o", decompose_output],
+                capture_output=True, text=True, timeout=60,
+            )
+            if decompose_result.returncode == 0:
+                if use_temp:
+                    os.replace(decompose_output, core_output)
+                print("  Decomposed component model to core WASM module")
+            else:
+                stderr = decompose_result.stderr.strip() if decompose_result.stderr else ""
+                # If wasm-tools removed the decompose subcommand (newer versions),
+                # fall back gracefully rather than failing the build.
+                if "unrecognized subcommand" in stderr or "unrecognized" in stderr:
+                    print("  Warning: wasm-tools component decompose not available in this version.",
+                          file=sys.stderr)
+                    print("  The output is a WASM Component Model binary (usable with wasmtime).",
+                          file=sys.stderr)
+                    print("  Install an older wasm-tools or use --runtime wasmtime to skip this step.",
+                          file=sys.stderr)
+                else:
+                    print(f"Error: wasm-tools decompose failed (exit code {decompose_result.returncode})",
+                          file=sys.stderr)
+                    if stderr:
+                        print(f"  stderr: {stderr}", file=sys.stderr)
+                    sys.exit(1)
+        except FileNotFoundError:
+            print("Error: wasm-tools not found", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Install wasm-tools to decompose the Component Model binary to core WASM:",
+                  file=sys.stderr)
+            print("  cargo install wasm-tools", file=sys.stderr)
+            print("  # or on macOS:", file=sys.stderr)
+            print("  brew install wasm-tools", file=sys.stderr)
+            print("", file=sys.stderr)
+            print("Alternatively, use --skip-decompose if you don't need core WASM output.",
+                  file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error: component decomposition failed: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # ---- Post-compile metadata stamping ----
     stamp_name = args.name or os.environ.get("CLEAT_WORKFLOW_NAME")
@@ -314,35 +427,35 @@ def main():
         stamp_abi = int(os.environ["CLEAT_ABI_VERSION"])
     stamp_deps = args.plugin_deps or os.environ.get("CLEAT_PLUGIN_DEPS")
 
-    # If any stamping arg is set, run stamp_metadata.py.
-    if stamp_name is not None or stamp_version is not None:
-        stamp_args = [
-            sys.executable,
-            str(sdk_root / "scripts" / "stamp_metadata.py"),
-            output,
-        ]
-        if stamp_name is not None:
-            stamp_args.extend(["--name", stamp_name])
-        if stamp_version is not None:
-            stamp_args.extend(["--version", str(stamp_version)])
-        if stamp_min is not None:
-            stamp_args.extend(["--min-version", str(stamp_min)])
-        if stamp_abi is not None:
-            stamp_args.extend(["--abi-version", str(stamp_abi)])
-        if stamp_deps is not None:
-            stamp_args.extend(["--plugin-deps", stamp_deps])
-        if args.verbose:
-            stamp_args.append("--verbose")
+    # Always stamp at least the language so consumers can identify the source.
+    stamp_args = [
+        sys.executable,
+        str(sdk_root / "scripts" / "stamp_metadata.py"),
+        output,
+        "--language", "python",
+    ]
+    if stamp_name is not None:
+        stamp_args.extend(["--name", stamp_name])
+    if stamp_version is not None:
+        stamp_args.extend(["--version", str(stamp_version)])
+    if stamp_min is not None:
+        stamp_args.extend(["--min-version", str(stamp_min)])
+    if stamp_abi is not None:
+        stamp_args.extend(["--abi-version", str(stamp_abi)])
+    if stamp_deps is not None:
+        stamp_args.extend(["--plugin-deps", stamp_deps])
+    if args.verbose:
+        stamp_args.append("--verbose")
 
-        try:
-            stamp_result = subprocess.run(stamp_args, capture_output=True, text=True, check=True)
-            print("  Metadata stamped successfully.")
-        except subprocess.CalledProcessError as e:
-            err = e.stderr.strip() if e.stderr else ""
-            reason = f": {err}" if err else ""
-            print(f"  Warning: metadata stamping failed (non-fatal){reason}", file=sys.stderr)
-            if args.verbose and e.stdout:
-                print(e.stdout, file=sys.stderr)
+    try:
+        stamp_result = subprocess.run(stamp_args, capture_output=True, text=True, check=True)
+        print("  Metadata stamped successfully.")
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.strip() if e.stderr else ""
+        reason = f": {err}" if err else ""
+        print(f"  Warning: metadata stamping failed (non-fatal){reason}", file=sys.stderr)
+        if args.verbose and e.stdout:
+            print(e.stdout, file=sys.stderr)
 
 
 if __name__ == "__main__":

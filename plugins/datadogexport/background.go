@@ -12,10 +12,45 @@ import (
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
-// Run starts the background metric export loop. Every 60 seconds it queries
-// all enabled Datadog configs and exports workflow statistics (count by
-// status) as gauge metrics to the Datadog Metrics API. Returns when ctx
-// is cancelled.
+// Lease name for leader election. The plugin with an active lease is the sole
+// worker that exports metrics to Datadog.
+const leaseName = "datadog-export"
+
+// leaseSQL holds dialect-specific SQL statements for leader election via the
+// plugin_lease table. Default (PostgreSQL) uses $N placeholders; MySQL and
+// MSSQL variants use dialect-appropriate placeholders and time functions.
+var leaseSQL = struct {
+	renewIfHolder plugin.Query // UPDATE expires_at WHERE name=$1 AND holder=$2
+	grabExpired   plugin.Query // UPDATE holder,expires_at WHERE name=$1 AND expires_at<now()
+	insertNew     plugin.Query // INSERT INTO plugin_lease (name, holder, expires_at)
+	checkLeader   plugin.Query // SELECT 1 WHERE name=$1 AND holder=$2 AND expires_at>now()
+}{
+	renewIfHolder: plugin.Query{
+		Default: `UPDATE plugin_lease SET expires_at = now() + interval '50 seconds' WHERE name = $1 AND holder = $2`,
+		MySQL:   `UPDATE plugin_lease SET expires_at = DATE_ADD(now(), INTERVAL 50 SECOND) WHERE name = $1 AND holder = $2`,
+		MSSQL:   `UPDATE plugin_lease SET expires_at = DATEADD(second, 50, now()) WHERE name = $1 AND holder = $2`,
+	},
+	grabExpired: plugin.Query{
+		Default: `UPDATE plugin_lease SET holder = $1, expires_at = now() + interval '50 seconds' WHERE name = $2 AND expires_at < now()`,
+		MySQL:   `UPDATE plugin_lease SET holder = $1, expires_at = DATE_ADD(now(), INTERVAL 50 SECOND) WHERE name = $2 AND expires_at < now()`,
+		MSSQL:   `UPDATE plugin_lease SET holder = $1, expires_at = DATEADD(second, 50, now()) WHERE name = $2 AND expires_at < now()`,
+	},
+	insertNew: plugin.Query{
+		Default: `INSERT INTO plugin_lease (name, holder, expires_at) VALUES ($1, $2, now() + interval '50 seconds')`,
+		MySQL:   `INSERT INTO plugin_lease (name, holder, expires_at) VALUES ($1, $2, DATE_ADD(now(), INTERVAL 50 SECOND))`,
+		MSSQL:   `INSERT INTO plugin_lease (name, holder, expires_at) VALUES ($1, $2, DATEADD(second, 50, now()))`,
+	},
+	checkLeader: plugin.Query{
+		Default: `SELECT 1 FROM plugin_lease WHERE name = $1 AND holder = $2 AND expires_at > now()`,
+		MySQL:   `SELECT 1 FROM plugin_lease WHERE name = $1 AND holder = $2 AND expires_at > now()`,
+		MSSQL:   `SELECT 1 FROM plugin_lease WHERE name = $1 AND holder = $2 AND expires_at > now()`,
+	},
+}
+
+// Run starts the background metric export loop. Leader election is performed
+// via the plugin_lease table: every 30 seconds the worker tries to acquire or
+// renew the lease. Only the leader (the worker holding the lease) exports
+// metrics every 60 seconds. Returns when ctx is cancelled.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("datadog-export: no database, export disabled")
@@ -23,8 +58,14 @@ func (p *Plugin) Run(ctx context.Context) error {
 		return nil
 	}
 
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
+	// Attempt to acquire the lease immediately on startup.
+	p.tryAcquireOrRenewLease(ctx)
+
+	leaseTicker := time.NewTicker(30 * time.Second)
+	defer leaseTicker.Stop()
+
+	exportTicker := time.NewTicker(60 * time.Second)
+	defer exportTicker.Stop()
 
 	p.logger.Info("datadog-export: metric export started, interval=60s")
 
@@ -34,9 +75,14 @@ func (p *Plugin) Run(ctx context.Context) error {
 			p.logger.Info("datadog-export: metric export stopped")
 			return nil
 
-		case <-ticker.C:
-			if err := p.exportMetrics(ctx); err != nil {
-				p.logger.Error("datadog-export: export failed", "error", err)
+		case <-leaseTicker.C:
+			p.tryAcquireOrRenewLease(ctx)
+
+		case <-exportTicker.C:
+			if p.isLeader(ctx) {
+				if err := p.exportMetrics(ctx); err != nil {
+					p.logger.Error("datadog-export: export failed", "error", err)
+				}
 			}
 		}
 	}
@@ -76,6 +122,56 @@ type metricSeries struct {
 // ddSeriesPayload is the request body for the Datadog Metrics API.
 type ddSeriesPayload struct {
 	Series []metricSeries `json:"series"`
+}
+
+// ---- leader election via plugin_lease ----
+
+// tryAcquireOrRenewLease attempts to become the leader or renew the current
+// lease. The algorithm is:
+//
+//  1. Try to renew if we are already the holder
+//     (UPDATE ... WHERE name=$1 AND holder=$2)
+//  2. If that fails, try to grab an expired lease
+//     (UPDATE ... WHERE name=$1 AND expires_at < now())
+//  3. If that also fails, try inserting a brand new lease
+//     (INSERT ...)
+//
+// Errors are logged but never returned — the worker must not crash from a
+// lease failure.
+func (p *Plugin) tryAcquireOrRenewLease(ctx context.Context) {
+	// 1. Try to renew if we are already the holder.
+	n, err := p.db.Exec(ctx, plugin.Rebind(leaseSQL.renewIfHolder.For(p.dialect), p.dialect), leaseName, p.workerID)
+	if err == nil && n > 0 {
+		p.logger.Debug("datadog-export: lease renewed", "worker", p.workerID)
+		return
+	}
+
+	// 2. Try to grab an expired lease.
+	n, err = p.db.Exec(ctx, plugin.Rebind(leaseSQL.grabExpired.For(p.dialect), p.dialect), p.workerID, leaseName)
+	if err == nil && n > 0 {
+		p.logger.Debug("datadog-export: acquired expired lease", "worker", p.workerID)
+		return
+	}
+
+	// 3. Try to insert a brand new lease (first worker).
+	_, err = p.db.Exec(ctx, plugin.Rebind(leaseSQL.insertNew.For(p.dialect), p.dialect), leaseName, p.workerID)
+	if err == nil {
+		p.logger.Debug("datadog-export: created new lease", "worker", p.workerID)
+		return
+	}
+
+	// If we get here, another worker holds the active lease.
+	p.logger.Debug("datadog-export: lease held by another worker", "worker", p.workerID)
+}
+
+// isLeader checks whether this worker currently holds a valid lease.
+func (p *Plugin) isLeader(ctx context.Context) bool {
+	row := p.db.QueryRow(ctx, plugin.Rebind(leaseSQL.checkLeader.For(p.dialect), p.dialect), leaseName, p.workerID)
+	var one int
+	if err := row.Scan(&one); err != nil {
+		return false
+	}
+	return one == 1
 }
 
 // exportMetrics queries all enabled Datadog configs and exports workflow

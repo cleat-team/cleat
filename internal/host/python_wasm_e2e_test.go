@@ -182,8 +182,16 @@ func TestPythonWasmAbiBoundary(t *testing.T) {
 		"cleat_acquire_lock",
 		"cleat_release_lock",
 		"cleat_side_effect",
+		// Stream R host functions
+		"cleat_run_detached",
+		"cleat_set_state",
+		"cleat_get_state",
+		"cleat_delete_state",
+		"cleat_incr_state",
+		"cleat_has_state",
+		"cleat_list_state",
+		"cleat_fetch",
 	}
-
 	// The list of host functions that can be discovered through the
 	// registerHostFunctions registrations. We verify every expected
 	// import has a corresponding registration.

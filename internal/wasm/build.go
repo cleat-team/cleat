@@ -352,6 +352,15 @@ func FindRepoRoot(from string) (string, error) {
 // entry should be in "file.py:func_name" format. output is the path to the
 // resulting .wasm file. If verbose is true, componentize-py output is shown.
 func BuildPythonWasm(entry, output string, verbose bool) error {
+	return BuildPythonWasmWithRuntime(entry, output, "", verbose)
+}
+
+// BuildPythonWasmWithRuntime compiles a Python workflow to WASM, selecting
+// the output format based on targetRuntime:
+//   - "wasmtime" — Component Model binary (skip decomposition)
+//   - "wazero"   — decomposed core WASM module
+//   - ""         — both formats (default)
+func BuildPythonWasmWithRuntime(entry, output, targetRuntime string, verbose bool) error {
 	repoRoot, err := FindRepoRoot(".")
 	if err != nil {
 		return fmt.Errorf("finding repo root: %w", err)
@@ -367,6 +376,9 @@ func BuildPythonWasm(entry, output string, verbose bool) error {
 	args := []string{buildScript, "--entry", entry, "--output", output}
 	if verbose {
 		args = append(args, "--verbose")
+	}
+	if targetRuntime != "" {
+		args = append(args, "--runtime", targetRuntime)
 	}
 
 	cmd := exec.Command("python3", args...)

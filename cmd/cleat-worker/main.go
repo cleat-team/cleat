@@ -1889,7 +1889,7 @@ func determineEntryPoint(input json.RawMessage) string {
 }
 
 // runDefers executes registered defer callbacks in LIFO (reverse) order.
-// Each defer is invoked as a WASM export named "__defer_<description>".
+// Each defer is invoked as a WASM export named "cleat_defer_<deferID>".
 // Errors during defer execution are logged but do not prevent other defers
 // from running.
 func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
@@ -1903,19 +1903,33 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 	engine := host.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id})
 
 	// Collect defer IDs sorted by step number for LIFO ordering.
+	// Map iteration order is random in Go, so we always parse the step
+	// number from "defer-N" and sort numerically.
 	type defEntry struct {
-		id   string
-		desc string
+		id     string
+		desc   string
+		stepNo int
 	}
 	var entries []defEntry
 	for id, desc := range deferrals {
-		entries = append(entries, defEntry{id: id, desc: desc})
+		var n int
+		if _, err := fmt.Sscanf(id, "defer-%d", &n); err != nil {
+			n = -1
+		}
+		entries = append(entries, defEntry{id: id, desc: desc, stepNo: n})
 	}
 
-	// Reverse order (LIFO): "defer-3" before "defer-2" before "defer-1".
-	for i := len(entries) - 1; i >= 0; i-- {
-		entry := entries[i]
-		deferName := "__defer_" + entry.desc
+	// Sort descending by step number for LIFO order.
+	for i := 0; i < len(entries); i++ {
+		for j := i + 1; j < len(entries); j++ {
+			if entries[j].stepNo > entries[i].stepNo {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+		}
+	}
+
+	for _, entry := range entries {
+		deferName := "cleat_defer_" + entry.id
 		_, err := engine.RunDefer(w.ctx, wasmBytes, deferName, nil)
 		if err != nil {
 			log.Printf("[worker %s] defer %s (%s) failed: %v", w.id, entry.id, entry.desc, err)

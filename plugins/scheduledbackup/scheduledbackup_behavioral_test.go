@@ -838,6 +838,26 @@ func (c *sbConn) execUpdateConfig(q string, args []driver.NamedValue) (driver.Re
 
 func (c *sbConn) execUpdateHistory(q string, args []driver.NamedValue) (driver.Result, error) {
 	n := len(args)
+
+	// Handle no-arg bulk UPDATE: cleanup orphaned history.
+	// Query contains "'running'" and "started_at <" when called from
+	// cleanupOrphanedHistory.
+	if n == 0 && strings.Contains(q, "'running'") && strings.Contains(q, "started_at <") {
+		now := time.Now()
+		cutoff := now.Add(-1 * time.Hour)
+		var affected int64
+		for _, row := range c.db.history {
+			if row.status == "running" && row.startedAt.Before(cutoff) {
+				row.status = "failed"
+				errMsg := "worker crashed or timed out"
+				row.errorMessage = &errMsg
+				row.completedAt = &now
+				affected++
+			}
+		}
+		return &sbResult{n: affected}, nil
+	}
+
 	if n == 0 {
 		return &sbResult{n: 0}, nil
 	}

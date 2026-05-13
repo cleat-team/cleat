@@ -173,6 +173,7 @@ def build_metadata(args: argparse.Namespace) -> dict:
     min_version = env_or_arg("CLEAT_MIN_COMPATIBLE_VERSION", args.min_version)
     abi_version = env_or_arg("CLEAT_ABI_VERSION", args.abi_version)
     plugin_deps_str = env_or_arg("CLEAT_PLUGIN_DEPS", args.plugin_deps)
+    language = env_or_arg("CLEAT_LANGUAGE", args.language)
 
     # Parse numeric values from env (they come as strings).
     if version is not None:
@@ -206,6 +207,7 @@ def build_metadata(args: argparse.Namespace) -> dict:
         "sdk_language": "python",
         "sdk_version": "0.2.0",
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "language": language or "python",
     }
 
 
@@ -230,6 +232,10 @@ def main():
         "--plugin-deps", help="Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)"
     )
     parser.add_argument("--output", "-o", help="Output WASM path (default: overwrite input)")
+    parser.add_argument(
+        "--language",
+        help="Source language for the WASM binary (or CLEAT_LANGUAGE env var)",
+    )
     parser.add_argument(
         "--read", action="store_true", help="Read and display metadata instead of writing"
     )

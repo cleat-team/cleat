@@ -14,6 +14,29 @@ import (
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
+// cleanupOrphanedHistoryQuery marks running backup_history rows as failed when
+// their started_at is more than 1 hour ago (worker crashed or timed out).
+var cleanupOrphanedHistoryQuery = plugin.Query{
+	Default: `
+		UPDATE backup_history
+		SET status = 'failed', error_message = 'worker crashed or timed out',
+		    completed_at = now()
+		WHERE status = 'running'
+		  AND started_at < now() - INTERVAL '1 hour'`,
+	MySQL: `
+		UPDATE backup_history
+		SET status = 'failed', error_message = 'worker crashed or timed out',
+		    completed_at = NOW()
+		WHERE status = 'running'
+		  AND started_at < NOW() - INTERVAL 1 HOUR`,
+	MSSQL: `
+		UPDATE backup_history
+		SET status = 'failed', error_message = 'worker crashed or timed out',
+		    completed_at = SYSUTCDATETIME()
+		WHERE status = 'running'
+		  AND started_at < DATEADD(hour, -1, SYSUTCDATETIME())`,
+}
+
 // dueBackupsQuery provides dialect-specific FOR UPDATE SKIP LOCKED equivalents.
 var dueBackupsQuery = plugin.Query{
 	Default: `
@@ -68,40 +91,78 @@ func (p *Plugin) Run(ctx context.Context) error {
 	}
 }
 
-// runDueBackups finds enabled backup configs where next_run_at <= now()
-// and executes pg_dump for each. After execution, it updates next_run_at
-// and last_run_at on the config and records the result in backup_history.
+// dueBackup holds a backup config row claimed from the database.
+type dueBackup struct {
+	id       uuid.UUID
+	tenantID uuid.UUID
+	name     string
+	cronExpr string
+}
+
+// cleanupOrphanedHistory marks running backup_history entries with a started_at
+// older than 1 hour as failed, under the assumption that the worker crashed or
+// timed out.
+func (p *Plugin) cleanupOrphanedHistory(ctx context.Context) {
+	result, err := p.db.Exec(ctx, plugin.Rebind(cleanupOrphanedHistoryQuery.For(p.dialect), p.dialect))
+	if err != nil {
+		p.logger.Error("scheduledbackup: cleanup orphaned history", "error", err)
+		return
+	}
+	if result > 0 {
+		p.logger.Info("scheduledbackup: cleaned up orphaned history entries", "count", result)
+	}
+}
+
+// runDueBackups atomically claims due backup configs via FOR UPDATE SKIP
+// LOCKED inside a transaction, advances their next_run_at immediately, then
+// executes pg_dump outside the transaction so row locks are not held across
+// potentially-long backup operations.
 func (p *Plugin) runDueBackups(ctx context.Context) {
-	rows, err := p.db.Query(ctx, plugin.Rebind(dueBackupsQuery.For(p.dialect), p.dialect))
+	p.cleanupOrphanedHistory(ctx)
+
+	tx, err := p.db.Begin(ctx)
+	if err != nil {
+		p.logger.Error("scheduledbackup: begin transaction", "error", err)
+		return
+	}
+	defer tx.Rollback() // no-op after Commit
+
+	rows, err := tx.Query(ctx, plugin.Rebind(dueBackupsQuery.For(p.dialect), p.dialect))
 	if err != nil {
 		p.logger.Error("scheduledbackup: query due backups", "error", err)
 		return
 	}
-	defer rows.Close()
 
+	var due []dueBackup
 	for rows.Next() {
-		var (
-			id       uuid.UUID
-			tenantID uuid.UUID
-			name     string
-			cronExpr string
-		)
-		if err := rows.Scan(&id, &tenantID, &name, &cronExpr); err != nil {
+		var b dueBackup
+		if err := rows.Scan(&b.id, &b.tenantID, &b.name, &b.cronExpr); err != nil {
 			p.logger.Error("scheduledbackup: scan due backup", "error", err)
 			continue
 		}
+		due = append(due, b)
 
-		p.logger.Info("scheduledbackup: running scheduled backup",
-			"config_id", id,
-			"tenant", tenantID,
-			"name", name,
-		)
-
-		p.executeScheduledBackup(context.Background(), id, tenantID, name, cronExpr)
+		// Advance next_run_at under the transaction lock so other
+		// workers skip this config even if this worker crashes
+		// before completing the backup.
+		p.updateNextRunTx(ctx, tx, b.id, b.cronExpr)
 	}
-
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		p.logger.Error("scheduledbackup: rows iteration error", "error", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		p.logger.Error("scheduledbackup: commit transaction", "error", err)
+		return
+	}
+
+	for _, b := range due {
+		p.logger.Info("scheduledbackup: running scheduled backup",
+			"config_id", b.id, "tenant", b.tenantID, "name", b.name)
+		// Use a background context so the backup completes even if
+		// the originating ticker context is cancelled.
+		p.executeScheduledBackup(context.Background(), b.id, b.tenantID, b.name, b.cronExpr)
 	}
 }
 
@@ -185,6 +246,26 @@ func (p *Plugin) updateNextRun(ctx context.Context, configID uuid.UUID, cronExpr
 	`, p.dialect), now, nextRunAt, configID)
 	if err != nil {
 		p.logger.Error("scheduledbackup: update next_run_at",
+			"config_id", configID, "error", err)
+	}
+}
+
+// updateNextRunTx is like updateNextRun but runs on an existing transaction.
+func (p *Plugin) updateNextRunTx(ctx context.Context, tx plugin.PluginTx, configID uuid.UUID, cronExpr string) {
+	now := time.Now()
+	next := nextRun(cronExpr, now)
+	var nextRunAt *time.Time
+	if !next.IsZero() {
+		nextRunAt = &next
+	}
+
+	_, err := tx.Exec(ctx, plugin.Rebind(`
+		UPDATE backup_config
+		SET last_run_at = $1, next_run_at = $2, updated_at = now()
+		WHERE id = $3
+	`, p.dialect), now, nextRunAt, configID)
+	if err != nil {
+		p.logger.Error("scheduledbackup: update next_run_at (tx)",
 			"config_id", configID, "error", err)
 	}
 }

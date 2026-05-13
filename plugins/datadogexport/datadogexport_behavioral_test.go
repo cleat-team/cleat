@@ -44,12 +44,19 @@ type fakeWorkflowRow struct {
 	tenantID string
 }
 
+type fakeLeaseRow struct {
+	name      string
+	holder    string
+	expiresAt time.Time
+}
+
 type fakeDBStore struct {
 	mu                 sync.RWMutex
 	nextID             int64
 	configs            []fakeConfigRow
 	workflowInstances  []fakeWorkflowRow
 	apiKeys            map[string]string // key_hash_hex -> tenant_id
+	leases             map[string]fakeLeaseRow // lease_name -> lease
 	simulateErr        bool
 }
 
@@ -58,6 +65,7 @@ func newFakeDBStore() *fakeDBStore {
 		configs:           make([]fakeConfigRow, 0),
 		workflowInstances: make([]fakeWorkflowRow, 0),
 		apiKeys:           make(map[string]string),
+		leases:            make(map[string]fakeLeaseRow),
 	}
 }
 
@@ -110,6 +118,12 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execUpdateConfig(query, args)
 	case strings.Contains(query, "DELETE FROM dd_config"):
 		return c.execDeleteConfig(args)
+	case strings.Contains(query, "INSERT INTO plugin_lease"):
+		return c.execInsertLease(args)
+	case strings.Contains(query, "UPDATE plugin_lease"):
+		return c.execUpdateLease(query, args)
+	case strings.Contains(query, "DELETE FROM plugin_lease"):
+		return c.execDeleteLease(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec query: %s", query)
 	}
@@ -147,6 +161,10 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryGetConfig(args)
+	case strings.Contains(query, "SELECT 1 FROM plugin_lease"):
+		c.store.mu.RLock()
+		defer c.store.mu.RUnlock()
+		return c.queryCheckLeaseLeader(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Query query: %s", query)
 	}
@@ -300,6 +318,107 @@ func (c *fakeConn) execDeleteConfig(args []driver.NamedValue) (driver.Result, er
 		}
 	}
 	return &fakeResult{rowsAffected: 0}, nil
+}
+
+// --- Lease exec helpers ---
+
+func (c *fakeConn) execInsertLease(args []driver.NamedValue) (driver.Result, error) {
+	name, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	holder, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	if _, exists := c.store.leases[name]; exists {
+		// Simulate PK violation.
+		return nil, fmt.Errorf("fakeConn: lease %q already exists", name)
+	}
+	c.store.leases[name] = fakeLeaseRow{
+		name:      name,
+		holder:    holder,
+		expiresAt: time.Now().Add(50 * time.Second),
+	}
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+func (c *fakeConn) execUpdateLease(query string, args []driver.NamedValue) (driver.Result, error) {
+	// Determine whether this is a "renew by holder" or "grab expired" UPDATE.
+	// renewIfHolder: UPDATE ... SET expires_at = ... WHERE name = $1 AND holder = $2
+	//   → args: [$1=name, $2=holder]
+	// grabExpired: UPDATE ... SET holder = $1, expires_at = ... WHERE name = $2 AND expires_at < now()
+	//   → args: [$1=new_holder, $2=name]
+	// grabExpired has `SET holder` in the query, renewIfHolder does not.
+	renewByHolder := !strings.Contains(query, "SET holder")
+
+	if renewByHolder {
+		name, err := argString(args, 1)
+		if err != nil {
+			return nil, err
+		}
+		holder, err := argString(args, 2)
+		if err != nil {
+			return nil, err
+		}
+		lease, exists := c.store.leases[name]
+		if !exists || lease.holder != holder {
+			return &fakeResult{rowsAffected: 0}, nil
+		}
+		lease.expiresAt = time.Now().Add(50 * time.Second)
+		c.store.leases[name] = lease
+		return &fakeResult{rowsAffected: 1}, nil
+	}
+
+	// grabExpired: UPDATE ... SET holder = $1, expires_at = ... WHERE name = $2 AND expires_at < now()
+	newHolder, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	name, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	lease, exists := c.store.leases[name]
+	if !exists || time.Now().Before(lease.expiresAt) {
+		return &fakeResult{rowsAffected: 0}, nil
+	}
+	// Lease exists and is expired — take it over.
+	c.store.leases[name] = fakeLeaseRow{
+		name:      name,
+		holder:    newHolder,
+		expiresAt: time.Now().Add(50 * time.Second),
+	}
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+func (c *fakeConn) execDeleteLease(args []driver.NamedValue) (driver.Result, error) {
+	name, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	delete(c.store.leases, name)
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+func (c *fakeConn) queryCheckLeaseLeader(args []driver.NamedValue) (driver.Rows, error) {
+	name, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	holder, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	lease, exists := c.store.leases[name]
+	if !exists || lease.holder != holder || time.Now().After(lease.expiresAt) {
+		// No match — return empty result.
+		return &fakeRows{columns: []string{"1"}}, nil
+	}
+	return &fakeRows{
+		columns: []string{"1"},
+		data:    [][]driver.Value{{int64(1)}},
+	}, nil
 }
 
 // ---------------------------------------------------------------------------

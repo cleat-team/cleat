@@ -1,0 +1,43 @@
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        classpath "org.teavm:teavm-gradle-plugin:0.10.2"
+    }
+}
+
+plugins {
+    id "java"
+}
+
+apply plugin: "org.teavm"
+
+group = "com.cleat.example"
+version = "0.1.0"
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation project(":cleat-java")
+    implementation "org.teavm:teavm-classlib:0.10.2"
+
+    // The CleatEntryProcessor annotation processor generates WASM export
+    // wrappers for methods annotated with @CleatEntry.
+    annotationProcessor project(":cleat-java")
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+teavm {
+    wasm {
+        mainClass = "com.cleat.example.WorkflowEntry"
+        targetFileName = "workflow.wasm"
+        outputDir = file("build/wasm")
+    }
+}

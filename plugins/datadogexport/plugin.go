@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rcownie/cleat/internal/plugin"
 )
 
@@ -33,6 +34,7 @@ type Plugin struct {
 	httpClient *http.Client
 	config     Config
 	dialect    plugin.Dialect
+	workerID   string
 }
 
 // Config holds optional configuration for the datadog-export plugin.
@@ -59,6 +61,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.dialect = env.Dialect
+	p.workerID = uuid.New().String()
 	p.httpClient = &http.Client{
 		Timeout: 30 * time.Second,
 	}
