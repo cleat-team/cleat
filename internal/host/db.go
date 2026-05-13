@@ -1351,7 +1351,7 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 		pluginDepsJSON = []byte("{}")
 	}
 	tenantID := "00000000-0000-0000-0000-000000000000"
-		_, err = s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (name, version) DO UPDATE SET
@@ -1989,7 +1989,7 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 	defer tx.Rollback()
 
 	var runID string
-	err = s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 		VALUES (gen_random_uuid(), $1,
 		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated) END,
@@ -2250,18 +2250,22 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 	var workflows []WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var assignedTo, errorCode, errorOp sql.NullString
+		var nextWakeAt, createdAt sql.NullTime
+		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
 		}
+		if createdAt.Valid {
+			wf.CreatedAt = createdAt.Time
+		}
 		wf.AssignedTo = assignedTo.String
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
+		wf.Error = errorMsg.String
 		workflows = append(workflows, wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -2320,7 +2324,7 @@ func (s *PostgresStore) CreateSchedule(ctx context.Context, sch Schedule) error 
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt)
 	if err != nil {
 		return err

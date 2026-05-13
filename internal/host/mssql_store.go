@@ -1674,18 +1674,22 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	var workflows []WorkflowInstance
 	for rows.Next() {
 		var wf WorkflowInstance
-		var nextWakeAt sql.NullTime
-		var assignedTo, errorCode, errorOp sql.NullString
+		var nextWakeAt, createdAt sql.NullTime
+		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
 		}
+		if createdAt.Valid {
+			wf.CreatedAt = createdAt.Time
+		}
 		wf.AssignedTo = assignedTo.String
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
+		wf.Error = errorMsg.String
 		workflows = append(workflows, wf)
 	}
 	return workflows, rows.Err()
