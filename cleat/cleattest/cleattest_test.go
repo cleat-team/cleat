@@ -29,8 +29,8 @@ func (m *mockT) Fatalf(format string, args ...interface{}) {
 
 func TestHReturnsNonNil(t *testing.T) {
 	env := NewTestEnv()
-	if env.H() == nil {
-		t.Fatal("H() returned nil")
+	if env.H().HostCallsImpl == nil {
+		t.Fatal("H() returned nil HostCallsImpl")
 	}
 }
 
@@ -919,20 +919,14 @@ func TestMultipleRapidSignals(t *testing.T) {
 func TestZeroDurationAwaitSignals(t *testing.T) {
 	env := NewTestEnv()
 
-	// AwaitSignals with zero timeout should poll and immediately time out.
+	// AwaitSignals with zero timeout should return an error.
 	result := env.H().AwaitSignals([]string{"test"}, 0)
 
+	if result.Err == nil {
+		t.Fatal("expected error from AwaitSignals with zero timeout (use PollSignals instead)")
+	}
 	if !result.TimedOut {
 		t.Fatal("expected TimedOut from AwaitSignals with zero timeout")
-	}
-	if result.Err != nil {
-		t.Fatalf("unexpected error: %v", result.Err)
-	}
-	if result.Name != "" {
-		t.Fatalf("expected empty Name, got %q", result.Name)
-	}
-	if result.Payload != "" {
-		t.Fatalf("expected empty Payload, got %q", result.Payload)
 	}
 }
 

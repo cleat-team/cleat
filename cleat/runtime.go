@@ -203,6 +203,12 @@ type Signaler interface {
 
 	// PollSignal checks for a non-blocking signal.
 	PollSignal(signalName string) (payload string, found bool, err error)
+
+	// PollSignals checks for any of the named signals without blocking.
+	// Returns immediately. If a matching signal is pending, returns it with
+	// TimedOut=false. If none, returns with TimedOut=true.
+	// This is the non-blocking counterpart to AwaitSignals.
+	PollSignals(names []string) SignalResult
 }
 
 // Lifecycle provides workflow lifecycle management: versioning, child workflows,
@@ -1503,6 +1509,12 @@ func (h *HostCallsImpl) DurableSleepMs(ms int64) {
 }
 
 func (h *HostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration) SignalResult {
+	if timeout <= 0 {
+		return SignalResult{
+			TimedOut: true,
+			Err:      errors.New("AwaitSignals requires a positive timeout. Use PollSignals() for non-blocking signal checks."),
+		}
+	}
 	name, payload, timedOut, err := h.DurableAwaitSignals(signalNames, timeout.Milliseconds())
 	return SignalResult{
 		Name:     name,
@@ -1510,6 +1522,19 @@ func (h *HostCallsImpl) AwaitSignals(signalNames []string, timeout time.Duration
 		TimedOut: timedOut,
 		Err:      err,
 	}
+}
+
+func (h *HostCallsImpl) PollSignals(names []string) SignalResult {
+	for _, name := range names {
+		payload, found, err := h.PollSignal(name)
+		if err != nil {
+			return SignalResult{Err: err}
+		}
+		if found {
+			return SignalResult{Name: name, Payload: payload}
+		}
+	}
+	return SignalResult{TimedOut: true}
 }
 
 func (h *HostCallsImpl) DurableAwaitSignals(signalNames []string, timeoutMs int64) (string, string, bool, error) {
