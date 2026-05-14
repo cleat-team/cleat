@@ -103,8 +103,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     let inner_call_args: Vec<_> = {
         let mut args = vec![quote! { &h }];
         for a in &all_args {
-            if let FnArg::Typed(pt) = a {
-                if let Pat::Ident(pi) = &*pt.pat {
+            if let FnArg::Typed(pt) = a && let Pat::Ident(pi) = &*pt.pat {
                     let name = &pi.ident;
                     args.push(quote! { #name });
                 } else {

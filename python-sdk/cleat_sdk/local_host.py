@@ -39,7 +39,6 @@ from .host_calls import (
     PromiseResult,
     RetryPolicy,
     SignalResult,
-    SuspendSentinel,
 )
 from .host_calls import INFINITE_TIMEOUT_MS
 
