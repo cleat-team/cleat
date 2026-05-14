@@ -202,7 +202,7 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
 		var inputStr string
-		var assignedTo, errorCode, errorOp sql.NullString
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
@@ -279,7 +279,7 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
 		var inputStr string
-		var assignedTo, errorCode, errorOp sql.NullString
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
