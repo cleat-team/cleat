@@ -2,6 +2,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{FnArg, ItemFn, Pat};
 
+#[allow(clippy::collapsible_match)]
 pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     let input_fn: ItemFn = syn::parse2(item).expect("#[cleat_entry] requires a function");
 

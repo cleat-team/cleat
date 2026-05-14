@@ -335,7 +335,7 @@ def main():
 
     if info["size_mb"] > 25:
         print(f"  Warning: WASM binary is large ({info['size_mb']} MB).")
-        print(f"  This is expected for CPython-in-WASM but may affect load times.")
+        print("  This is expected for CPython-in-WASM but may affect load times.")
 
     # ---- Apply --runtime to control decomposition behavior ----
     # --runtime wasmtime  -> skip decomposition (Component Model binary is the output)
@@ -446,7 +446,7 @@ def main():
         stamp_args.append("--verbose")
 
     try:
-        stamp_result = subprocess.run(stamp_args, capture_output=True, text=True, check=True)
+        subprocess.run(stamp_args, capture_output=True, text=True, check=True)
         print("  Metadata stamped successfully.")
     except subprocess.CalledProcessError as e:
         err = e.stderr.strip() if e.stderr else ""
