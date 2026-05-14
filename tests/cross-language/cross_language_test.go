@@ -274,7 +274,7 @@ func TestRustWorkflow_DivergenceDetection(t *testing.T) {
 	defer env.Close()
 
 	ctx := context.Background()
-	rt, err := host.NewRuntime(ctx)
+	rt, err := host.NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}

@@ -216,7 +216,7 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 		return fmt.Errorf("compact: store: %w", err)
 	}
 
-	CompactionEventsDeletedTotal.Add(float64(compactedStep))
+	compactionEventsDeletedTotal.Add(float64(compactedStep))
 	log.Printf("compact: workflow=%s events=%d compacted=%d kept=%d state_size=%d",
 		workflowID, len(events), compactedStep, len(events)-keepStep, len(csJSON))
 	return nil

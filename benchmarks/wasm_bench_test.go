@@ -36,7 +36,7 @@ func BenchmarkCompilationInstantiation(b *testing.B) {
 	ctx := context.Background()
 	wasmBytes := minimalWasm()
 
-	rt, err := host.NewRuntime(ctx)
+	rt, err := host.NewRuntime(ctx, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
@@ -68,7 +68,7 @@ func BenchmarkPayloadRoundTrip(b *testing.B) {
 	ctx := context.Background()
 	wasmBytes := minimalWasmWithMemory()
 
-	rt, err := host.NewRuntime(ctx)
+	rt, err := host.NewRuntime(ctx, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
@@ -139,7 +139,7 @@ func BenchmarkEndToEndLatency(b *testing.B) {
 	wasmBytes := buildBenchWasm(b)
 	ctx := context.Background()
 
-	rt, err := host.NewRuntime(ctx)
+	rt, err := host.NewRuntime(ctx, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
@@ -168,7 +168,7 @@ func BenchmarkFreshThroughput(b *testing.B) {
 	wasmBytes := buildBenchWasm(b)
 	ctx := context.Background()
 
-	rt, err := host.NewRuntime(ctx)
+	rt, err := host.NewRuntime(ctx, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
@@ -206,7 +206,7 @@ func BenchmarkReplayThroughput(b *testing.B) {
 	ctx := context.Background()
 
 	// Step 1: Execute once to capture full event history.
-	rtExecute, err := host.NewRuntime(ctx)
+	rtExecute, err := host.NewRuntime(ctx, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
@@ -227,7 +227,7 @@ func BenchmarkReplayThroughput(b *testing.B) {
 	_ = result
 
 	// Step 2: Create a fresh engine for replay and benchmark the replay loop.
-	rtReplay, err := host.NewRuntime(ctx)
+	rtReplay, err := host.NewRuntime(ctx, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}

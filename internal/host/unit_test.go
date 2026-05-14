@@ -659,7 +659,7 @@ func TestFaultInjector_Context(t *testing.T) {
 
 func TestRuntime_StdoutStderr(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestRuntime_StdoutStderr(t *testing.T) {
 
 func TestRuntime_InstantiateAndInit(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -822,7 +822,7 @@ func TestFaultInjector_CleanupAllFaultTypes(t *testing.T) {
 
 func TestRuntime_InitModuleNoStart(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1116,7 +1116,7 @@ func TestMinU32(t *testing.T) {
 
 func TestWorkflowLoader_CachePutAndGet(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1161,7 +1161,7 @@ func TestWorkflowLoader_CachePutAndGet(t *testing.T) {
 
 func TestWorkflowLoader_CacheRemove(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1191,7 +1191,7 @@ func TestWorkflowLoader_CacheRemove(t *testing.T) {
 
 func TestWorkflowLoader_CacheEviction(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1240,7 +1240,7 @@ func TestWorkflowLoader_CacheEviction(t *testing.T) {
 
 func TestWorkflowLoader_CacheLRUPromotion(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1293,7 +1293,7 @@ func TestWorkflowLoader_EvictLockedEmptyCache(t *testing.T) {
 
 func TestWorkflowLoader_CacheUpdateExisting(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}

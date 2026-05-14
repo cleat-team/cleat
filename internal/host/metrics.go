@@ -30,12 +30,24 @@ var (
 		Name: "cleat_replay_checksum_failures_total",
 		Help: "Number of event history checksum verification failures on replay",
 	})
-	CompactionEventsDeletedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	// Ambiguous calls counter, incremented when replay detects a pending sentinel
+	// (a DurableCall whose external dispatch was recorded but whose outcome was
+	// never persisted before a crash).
+	ambiguousCallsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cleat_ambiguous_calls_total",
+		Help: "Total number of ambiguous call outcomes detected during replay (pending sentinel found)",
+	})
+	compactionEventsDeletedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "cleat_compaction_events_deleted_total",
 		Help: "Number of events deleted by history compaction",
 	})
 )
 
+// AmbiguousCallsTotalCounter returns the ambiguous calls total counter for test access.
+// The counter itself is unexported (ambiguousCallsTotal); this accessor allows tests in
+// external packages (e.g., integrity) to read the metric value.
+func AmbiguousCallsTotalCounter() prometheus.Counter { return ambiguousCallsTotal }
+
 func init() {
-	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, CompactionEventsDeletedTotal)
+	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, compactionEventsDeletedTotal, ambiguousCallsTotal)
 }

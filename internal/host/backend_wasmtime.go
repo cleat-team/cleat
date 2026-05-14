@@ -258,17 +258,25 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		return nil, fmt.Errorf("host: memory export is not a memory")
 	}
 
-	// Reserve scratch space in linear memory at a high offset
-	// (consistent with the wazero backend's convention).
-	const scratchBase = uint32(10 * 1024 * 1024) // 10 MB offset
-	const outBufSz = outBufSize                  // 1 MB
+	// Place scratch buffers at the end of current WASM memory to avoid
+	// collision with the module's heap, but never below the legacy 10 MiB
+	// offset. Some WASM SDKs (Java/TeaVM, AssemblyScript) hardcode the
+	// 10 MiB convention and will break if the buffer moves lower.
+	const outBufSz = outBufSize               // 1 MB
+	const legacyOffset = uint32(10 * 1024 * 1024) // 10 MiB
+
+	currentSize := uint64(mem.DataSize(store))
+	scratchBase := uint32(currentSize + wasmPageSize) // one guard page after current heap
+	if scratchBase < legacyOffset {
+		scratchBase = legacyOffset
+	}
 	inputOffset := scratchBase
 	outputOffset := scratchBase + outBufSz
 
 	// Grow memory if needed to fit the scratch region.
 	needed := uint64(outputOffset + outBufSz)
-	if uint64(mem.DataSize(store)) < needed {
-		pagesNeeded := (needed - uint64(mem.DataSize(store)) + 65535) / 65536
+	if currentSize < needed {
+		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
 		if _, err := mem.Grow(store, pagesNeeded); err != nil {
 			return nil, fmt.Errorf("host: grow memory: %w", err)
 		}

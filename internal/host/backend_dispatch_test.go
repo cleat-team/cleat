@@ -74,7 +74,7 @@ func wasmWithoutLanguage() []byte {
 // that the registered backend is used for execution.
 func TestNewEngineWithBackend(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestNewEngineWithBackend(t *testing.T) {
 // language "python" in its cleat.metadata selects the correct backend.
 func TestNewEngineWithBackendPythonLanguage(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestNewEngineWithBackendPythonLanguage(t *testing.T) {
 // fallback.
 func TestNewEngineWithBackendDefaultFallback(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestNewEngineWithBackendDefaultFallback(t *testing.T) {
 // backend based on language detection.
 func TestEngineBackendForWasm(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestEngineBackendForWasm(t *testing.T) {
 // no default fallback exists, backendForWasm returns nil.
 func TestEngineBackendForWasmNoMatch(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestWasmDetectLanguageExplicitGo(t *testing.T) {
 // TestEngineDispatchReplay verifies that Replay also dispatches to backends.
 func TestEngineDispatchReplay(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestEngineWithWazeroBackend(t *testing.T) {
 	caller := &mockCaller{}
 
 	// Need a Runtime for NewEngine (it is required even when using backends).
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestWasmDetectLanguageInvalidBinary(t *testing.T) {
 // falls through to the legacy wazero path.
 func TestEngineNoBackends(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -387,7 +387,7 @@ func TestEngineBackendErrorPropagation(t *testing.T) {
 	errBackend := &errBackend{err: expectedErr}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}

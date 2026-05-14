@@ -493,7 +493,7 @@ func NewWasmTestEnv(t *testing.T, opts ...WasmTestEnvOption) *WasmTestEnv {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
-	rt, err := host.NewRuntime(ctx)
+	rt, err := host.NewRuntime(ctx, 0)
 	if err != nil {
 		cancel()
 		t.Fatalf("wasmtest: NewRuntime: %v", err)
