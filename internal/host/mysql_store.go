@@ -886,7 +886,7 @@ func (s *MySQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 			VALUES (?, ?, ?, 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = ?), 'default'),
+			        COALESCE((SELECT t.task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS t), 'default'),
 			        ?)
 		`, runID, defName, defVersion, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID)
 	} else {
@@ -894,7 +894,7 @@ func (s *MySQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = ?), 'default'),
+			        COALESCE((SELECT t.task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS t), 'default'),
 			        ?)
 		`, runID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID)
 	}
@@ -923,7 +923,7 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 			VALUES (?, ?, ?, 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = ?), 'default'),
+			        COALESCE((SELECT t.task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS t), 'default'),
 			        ?)
 		`, childID, defName, defVersion, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID)
 	} else {
@@ -931,7 +931,7 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
 			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
-			        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = ?), 'default'),
+			        COALESCE((SELECT t.task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS t), 'default'),
 			        ?)
 		`, childID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID)
 	}
