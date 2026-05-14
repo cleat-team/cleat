@@ -1678,8 +1678,8 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
 			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
-		wf.Input = json.RawMessage(inputStr)
 		}
+		wf.Input = json.RawMessage(inputStr)
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
 		}
