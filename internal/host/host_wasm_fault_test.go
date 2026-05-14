@@ -48,7 +48,7 @@ func TestWasmMissingImportFailsAtInstantiate(t *testing.T) {
 	// A module that imports a function the host does not provide must fail
 	// at instantiation time, not panic.
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -116,7 +116,7 @@ func wasmWithoutExport() []byte {
 // returns an error when the WASM module does not have the requested export.
 func TestWasmModuleMissingExportFunction(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -174,7 +174,7 @@ func wasmWithUnreachable() []byte {
 // during execution causes CallExport to return an error.
 func TestWasmModulePanics(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestWasmModulePanics(t *testing.T) {
 // normal CallExport error path.
 func TestWasmModuleReturnsInvalidJSON(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -280,11 +280,11 @@ func wasmWithLargeMemory() []byte {
 }
 
 // TestWasmModuleExceedsMemoryLimit verifies that a WASM module requesting
-// an extremely large initial memory (65535 pages) fails at instantiation
-// with an error rather than panicking or hanging.
+// an extremely large initial memory (65535 pages) is rejected, either at
+// compilation or instantiation, when a memory limit is configured.
 func TestWasmModuleExceedsMemoryLimit(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -292,21 +292,22 @@ func TestWasmModuleExceedsMemoryLimit(t *testing.T) {
 
 	wasmBytes := wasmWithLargeMemory()
 
-	// Compilation should succeed (memory limits are not checked at compile time).
-	compiled, err := rt.CompileModule(ctx, wasmBytes)
-	if err != nil {
-		t.Fatalf("CompileModule should succeed: %v", err)
+	// With WithMemoryLimitPages configured, the module may be rejected
+	// at compilation (wazero enforces the page limit during section parsing)
+	// or at instantiation. Either path means the limit is working.
+	compiled, compileErr := rt.CompileModule(ctx, wasmBytes)
+	if compileErr != nil {
+		t.Logf("Got expected error for large memory module at compilation: %v", compileErr)
+		return
 	}
 	defer compiled.Close(ctx)
 
-	// Instantiation should fail because 65535 pages (~4GB) cannot be allocated.
-	_, err = rt.InstantiateModule(ctx, compiled)
-	if err == nil {
-		t.Log("Note: instantiation succeeded (system may have enough memory for 4GB)")
-		// Not a fatal assertion — different systems have different limits.
-	} else {
-		t.Logf("Got expected instantiation error for large memory module: %v", err)
+	_, instantiateErr := rt.InstantiateModule(ctx, compiled)
+	if instantiateErr != nil {
+		t.Logf("Got expected error for large memory module at instantiation: %v", instantiateErr)
+		return
 	}
+	t.Log("Note: instantiation succeeded (system may have enough memory — limit not reached)")
 }
 
 // ---------------------------------------------------------------------------

@@ -104,6 +104,9 @@ func main() {
 	wasmCacheMaxMB := flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
 	schemaName := flag.String("schema", "public", "PostgreSQL schema for cleat tables (default \"public\"). Sets search_path on connections; CREATE SCHEMA IF NOT EXISTS on startup.")
 	peerSchemas := flag.String("peer-schemas", "", "Comma-separated list of peer cleat schemas this instance can interact with (cross-instance child workflows, signals)")
+	disableChecksumVerification := flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
+	wasmMemoryMaxMB := flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
+	wasmInstructionLimit := flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; NOT YET IMPLEMENTED — placeholder for future wazero fuel API)")
 	flag.Parse()
 
 
@@ -491,8 +494,11 @@ func main() {
 			retentionDays:       *retentionDays,
 			schemaName:  *schemaName,
 			peerSchemas: parsePeerSchemas(*peerSchemas),
+			disableChecksumVerification: disableChecksumVerification,
 			maxRetries:          *maxRetries,
-			redactionEnabled:    *redact,
+			wasmMemoryMaxMB:       wasmMemoryMaxMB,
+			wasmInstructionLimit:  wasmInstructionLimit,
+		redactionEnabled:    *redact,
 			drainCh:             make(chan struct{}),
 		}
 
@@ -788,6 +794,9 @@ type Worker struct {
 	retentionDays        int
 	schemaName           string
 	peerSchemas          []string
+	disableChecksumVerification *bool
+	wasmMemoryMaxMB       *int
+	wasmInstructionLimit  *int
 
 	drainCh    chan struct{}
 	drainOnce  sync.Once
@@ -1085,7 +1094,15 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 
 	// ---- Create engine ----
-	rt, err := host.NewRuntime(w.ctx)
+	memoryPages := uint32(0)
+	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
+		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
+		if memoryPages > 65536 {
+			log.Printf("[worker %s] %s: warning: wasm-memory-max-mb %d exceeds WASM max (65536 pages), capping to 65536", w.id, wf.ID, *w.wasmMemoryMaxMB)
+			memoryPages = 65536
+		}
+	}
+	rt, err := host.NewRuntime(w.ctx, memoryPages)
 	if err != nil {
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
@@ -1169,6 +1186,11 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	// enable virtual object scope enforcement.
 	if cks, ok := w.store.(host.ConcurrencyKeyStore); ok {
 		engineOpts = append(engineOpts, host.WithConcurrencyKeyStore(cks))
+	}
+	// Enable event history checksum verification on replay by default.
+	// Can be disabled with --disable-checksum-verification.
+	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
+		engineOpts = append(engineOpts, host.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
 	}
 	// Use tenant-scoped database connection for plugin host functions.
 	if w.tenantPools != nil && wf.TenantID != "" {
@@ -1893,7 +1915,15 @@ func determineEntryPoint(input json.RawMessage) string {
 // Errors during defer execution are logged but do not prevent other defers
 // from running.
 func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
-	rt, err := host.NewRuntime(w.ctx)
+	memoryPages := uint32(0)
+	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
+		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
+		if memoryPages > 65536 {
+			log.Printf("[worker %s] runDefers: warning: wasm-memory-max-mb %d exceeds WASM max (65536 pages), capping to 65536", w.id, *w.wasmMemoryMaxMB)
+			memoryPages = 65536
+		}
+	}
+	rt, err := host.NewRuntime(w.ctx, memoryPages)
 	if err != nil {
 		log.Printf("[worker %s] runDefers: create runtime: %v", w.id, err)
 		return

@@ -61,7 +61,7 @@ func TestIntegrationFullPipeline(t *testing.T) {
 	}()
 
 	// Create the runtime and store.
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestIntegrationMultiStepSleep(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 	}()
 
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 	}()
 
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestIntegrationReplayDivergence(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 	}()
 
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}

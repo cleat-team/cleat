@@ -64,7 +64,7 @@ func TestPythonWasmEndToEnd(t *testing.T) {
 	}
 
 	// ---- Step 3: Create runtime and engine ----
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}

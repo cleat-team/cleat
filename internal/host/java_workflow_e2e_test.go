@@ -79,7 +79,7 @@ func TestJavaWorkflowExecute(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0)
 	if err != nil {
 		t.Skipf("NewRuntime failed (best-effort, skipping): %v", err)
 	}

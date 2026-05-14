@@ -624,7 +624,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		}
 			if createdAt.Valid {
 				wf.CreatedAt = createdAt.Time
-			}
+		}
 		wf.AssignedTo = assignedTo.String
 			wf.ErrorCode = errorCode.String
 			wf.ErrorOp = errorOp.String
@@ -863,7 +863,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				errCh <- ctx.Err()
 				return
 			default:
-			}
+		}
 
 			rows, err := s.db.QueryContext(ctx, `
 				SELECT step, event_type, service, operation, request, response, error,
@@ -882,7 +882,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 			if err != nil {
 				errCh <- err
 				return
-			}
+		}
 
 			var pageCount int
 			for rows.Next() {
@@ -909,10 +909,10 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 					rows.Close()
 					errCh <- err
 					return
-				}
+		}
 				if createdAt.Valid {
 					rec.CreatedAt = createdAt.Time
-				}
+		}
 
 				rec.Service = service.String
 				rec.Op = op.String
@@ -942,7 +942,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 
 				if payload.Valid {
 					populateFromPayload(&rec, []byte(payload.String))
-				}
+		}
 
 				select {
 				case eventCh <- rec:
@@ -950,19 +950,19 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 					rows.Close()
 					errCh <- ctx.Err()
 					return
-				}
-			}
+		}
+		}
 			rows.Close()
 
 			if err := rows.Err(); err != nil {
 				errCh <- err
 				return
-			}
+		}
 
 			// If we got fewer rows than the page size, we're done.
 			if pageCount < pageSize {
 				return
-			}
+		}
 			offset += pageSize
 		}
 	}()
@@ -1936,7 +1936,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 				keyHash[:]).Scan(&existingWfID)
 			if err != nil {
 				return "", false, err
-			}
+		}
 			return existingWfID, true, nil
 		}
 
@@ -2873,7 +2873,7 @@ func NextCronTime(cronExpr string, from time.Time) time.Time {
 			// Also verify day-of-month is valid for this month.
 			if t.Day() <= daysInMonth(t.Year(), t.Month()) {
 				return t
-			}
+		}
 		}
 		t = t.Add(time.Minute)
 	}
@@ -2901,7 +2901,7 @@ func matchField(pattern string, value int, min, max int) bool {
 			lo, hi := atoi(rangeParts[0]), atoi(rangeParts[1])
 			if value >= lo && value <= hi {
 				return true
-			}
+		}
 		} else if atoi(part) == value {
 			return true
 		}
@@ -2926,7 +2926,7 @@ func computeEventChecksum(rec EventRecord) string {
 	payload, err := eventRecordToPayload(rec)
 	if err != nil {
 		// Fall back to checksum of the event type and step as a stable identifier.
-		data := fmt.Sprintf("%d:%s", rec.Step, rec.EventType)
+		data := fmt.Sprintf("%d:%s:%s:%s:%s:%s", rec.Step, rec.EventType, rec.Service, rec.Op, rec.Request, rec.Response)
 		hash := sha256.Sum256([]byte(data))
 		return hex.EncodeToString(hash[:])
 	}
@@ -3210,6 +3210,30 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.DurationMs > 0 {
 			payload["duration_ms"] = rec.DurationMs
 		}
+	case "await_child":
+		if rec.RunID != "" {
+			payload["run_id"] = rec.RunID
+		}
+		if rec.Response != "" {
+			payload["response_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Response))
+		}
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
+	case "heartbeat":
+		if rec.Service != "" {
+			payload["service"] = rec.Service
+		}
+		if rec.Op != "" {
+			payload["operation"] = rec.Op
+		}
+	case "await_all_children":
+		if rec.Request != "" {
+			payload["request_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Request))
+		}
+		if rec.Response != "" {
+			payload["response_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Response))
+		}
 	}
 	return json.Marshal(payload)
 }
@@ -3228,14 +3252,14 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["request_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.Request = string(decoded)
-			}
+		}
 		} else if v, ok := m["request"].(string); ok {
 			rec.Request = v
 		}
 		if v, ok := m["response_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.Response = string(decoded)
-			}
+		}
 		} else if v, ok := m["response"].(string); ok {
 			rec.Response = v
 		}
@@ -3381,7 +3405,7 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["fetch_response_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.FetchResponse = string(decoded)
-			}
+		}
 		} else if v, ok := m["fetch_response"].(string); ok {
 			rec.FetchResponse = v
 		}
@@ -3398,7 +3422,7 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["request_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.Request = string(decoded)
-			}
+		}
 		}
 	case "durable_schedule_invoke":
 		if v, ok := m["service"].(string); ok { rec.Service = v }
@@ -3406,9 +3430,37 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["request_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.Request = string(decoded)
-			}
+		}
 		}
 		if v, ok := m["duration_ms"].(float64); ok { rec.DurationMs = int64(v) }
+	case "await_child":
+		if v, ok := m["run_id"].(string); ok { rec.RunID = v }
+		if v, ok := m["response_b64"].(string); ok {
+			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+				rec.Response = string(decoded)
+			}
+		} else if v, ok := m["response"].(string); ok {
+			rec.Response = v
+		}
+		if v, ok := m["error"].(string); ok { rec.Err = v }
+	case "heartbeat":
+		if v, ok := m["service"].(string); ok { rec.Service = v }
+		if v, ok := m["operation"].(string); ok { rec.Op = v }
+	case "await_all_children":
+		if v, ok := m["request_b64"].(string); ok {
+			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+				rec.Request = string(decoded)
+			}
+		} else if v, ok := m["request"].(string); ok {
+			rec.Request = v
+		}
+		if v, ok := m["response_b64"].(string); ok {
+			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
+				rec.Response = string(decoded)
+			}
+		} else if v, ok := m["response"].(string); ok {
+			rec.Response = v
+		}
 	}
 }
 

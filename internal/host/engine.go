@@ -911,8 +911,9 @@ func (e *Engine) executeWithBackend(
 				log.Printf("[engine] workflow %s: checksum verification failed: %v", e.workflowID, verr)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
-					return "", nil, nil, nil, nil, fmt.Errorf("host: checksum verification failed: %w", verr)
+					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, verr)
 				}
+				log.Printf("[engine] workflow %s: checksum verification failed but proceeding (failOnChecksumMismatch=false)", e.workflowID)
 			}
 		}
 
@@ -1037,8 +1038,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				log.Printf("[engine] workflow %s: checksum verification failed: %v", e.workflowID, err)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
-					return "", nil, nil, nil, nil, fmt.Errorf("host: checksum verification failed: %w", err)
+					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, err)
 				}
+				log.Printf("[engine] workflow %s: checksum verification failed but proceeding (failOnChecksumMismatch=false)", e.workflowID)
 			}
 		}
 
@@ -1570,6 +1572,7 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 		// but the outcome was never persisted.  Return ErrAmbiguous so
 		// the caller can check the external service before retrying.
 		if rec.Err == pendingSentinel {
+			ambiguousCallsTotal.Inc()
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)
@@ -2041,6 +2044,7 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 		// but the outcome was never persisted.  Return ErrAmbiguous so
 		// the caller can check the external service before retrying.
 		if rec.Err == pendingSentinel {
+			ambiguousCallsTotal.Inc()
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)
@@ -4063,6 +4067,11 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	// ambiguous — the external service may have processed it.
 	const pendingSentinel = "__CLEAT_PENDING_INTENT__"
 
+	// PendingSentinel is the exported form of pendingSentinel, provided so that
+	// external packages (notably the integrity test suite) can reference it
+	// without duplicating the sentinel value.
+	const PendingSentinel = pendingSentinel
+
 	// flushCallIntent inserts a pending event BEFORE the external call is
 	// dispatched.  This provides a durable record of intent: if the worker
 	// crashes after the external call succeeds but before the response is
@@ -4112,13 +4121,20 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		completed.Err = callErr
 		checksum := computeEventChecksum(completed)
 
-		_, err = tx.ExecContext(ctx, `
+		result, err := tx.ExecContext(ctx, `
 			UPDATE event_history
 			SET response = $1, error = $2, checksum = $6
 			WHERE workflow_id = $3 AND step = $4 AND error = $5
 		`, nullStr(rec.Response), nullStr(callErr), workflowID, rec.Step, pendingSentinel, checksum)
 		if err != nil {
 			return fmt.Errorf("complete call event: exec: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("complete call event: rows affected: %w", err)
+		}
+		if rows == 0 {
+			return fmt.Errorf("completeCallEvent: no rows updated for workflow %s step %d — the event may have been completed by another worker", workflowID, rec.Step)
 		}
 		return tx.Commit()
 	}

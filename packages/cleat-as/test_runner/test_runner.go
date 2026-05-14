@@ -134,7 +134,7 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 		return nil
 	}
 
-	r := wazero.NewRuntime(ctx)
+	r := wazero.NewRuntime(ctx, 0)
 	wasi_snapshot_preview1.MustInstantiate(ctx, r)
 
 	env := &WASMTestEnv{

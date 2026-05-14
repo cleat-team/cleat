@@ -26,6 +26,9 @@ type cleatComplete struct {
 
 var cleatCompleteKey struct{}
 
+// DefaultMemoryLimitPages is the default max WASM linear memory (512 pages = 32 MB).
+const DefaultMemoryLimitPages = 512
+
 var wazeroInitOnce sync.Once
 // Runtime wraps a wazero runtime with pre-registered host function imports.
 type Runtime struct {
@@ -33,6 +36,8 @@ type Runtime struct {
 	stdout        bytes.Buffer
 	stderr        bytes.Buffer
 	callTimeout   time.Duration // per-call WASM execution timeout (0 = none)
+	MemoryLimitPages uint32        // max WASM linear memory in pages (64KB each)
+	InstructionLimit uint64        // NOT YET WIRED — placeholder for future wazero fuel metering; 0 = no limit
 
 		// Fields for cleat_complete host function (see imports.go).
 		// When the WASM export calls cleat_complete before returning,
@@ -54,14 +59,18 @@ func (r *Runtime) Stderr() string { return r.stderr.String() }
 // host function registered on the "env" module. WASI preview1 is also instantiated
 // for Go wasip1 support. Plugin host functions are registered via the Engine's
 // PluginRegistry — not through NewRuntime.
-func NewRuntime(ctx context.Context) (*Runtime, error) {
+func NewRuntime(ctx context.Context, memoryLimitPages uint32) (*Runtime, error) {
+	if memoryLimitPages == 0 {
+		memoryLimitPages = DefaultMemoryLimitPages
+	}
 	wazeroInitOnce.Do(func() {
 		dummy := wazero.NewRuntime(context.Background())
 		dummy.Close(context.Background())
 	})
 
 	rtCfg := wazero.NewRuntimeConfigCompiler().
-		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExtendedConst)
+		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExtendedConst).
+		WithMemoryLimitPages(memoryLimitPages)
 	rt := wazero.NewRuntimeWithConfig(ctx, rtCfg)
 
 	// WASI is required by Go wasip1 modules for goroutine/stack management.
@@ -120,7 +129,7 @@ func NewRuntime(ctx context.Context) (*Runtime, error) {
 		return nil, fmt.Errorf("host: instantiating env module: %w", err)
 	}
 
-	return &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second}, nil
+	return &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second, MemoryLimitPages: memoryLimitPages}, nil
 }
 
 // Close releases all resources held by the runtime.
@@ -338,21 +347,19 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 		return "", false, fmt.Errorf("host: module has no exported memory")
 	}
 
-	// Reserve scratch space. Use high offsets to avoid conflicts with the
-	// Go runtime's own stack/heap (which grows from low addresses).
-	scratchBase := uint32(10 * 1024 * 1024) // 10MB offset
+	// Dynamically place scratch buffers at the end of current WASM memory
+	// to avoid collision with the module's own growing heap.
+	currentSize := mem.Size()
+	scratchBase := currentSize + wasmPageSize // one guard page after current heap
 	inputOffset := scratchBase
 	outputOffset := scratchBase + outBufSize
 
 	// Grow memory to fit our scratch region.
 	needed := outputOffset + outBufSize
-	currentSize := mem.Size()
 	if currentSize < needed {
-		pagesNeeded := (needed - currentSize + 65535) / 65536
+		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
 		if _, ok := mem.Grow(pagesNeeded); !ok {
-			if _, ok := mem.Grow(1); !ok {
-				return "", false, fmt.Errorf("host: memory grow failed: needed %d bytes (%d pages), current %d bytes", needed, pagesNeeded, currentSize)
-			}
+			return "", false, fmt.Errorf("host: memory grow failed: needed %d bytes (%d pages), current %d bytes, memory limit %d pages", needed, pagesNeeded, currentSize, r.MemoryLimitPages)
 		}
 	}
 
