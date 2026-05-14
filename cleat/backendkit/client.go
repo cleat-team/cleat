@@ -19,6 +19,7 @@ import (
 type Client struct {
 	BaseURL    string
 	HTTPClient *http.Client
+	TenantID   string // optional tenant_id; sent to worker for namespace isolation
 }
 
 // WorkflowSummary is a summary of a workflow instance returned by ListWorkflows.
@@ -78,13 +79,21 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 
 // StartWorkflow starts a new workflow instance with the given name, entry point, and input.
 // entryPoint can be empty string to use the default entry point.
+// tenantID is optional; pass "" to use the worker default namespace.
 // Returns the workflow ID.
-func (c *Client) StartWorkflow(ctx context.Context, name string, entryPoint string, input interface{}) (string, error) {
+func (c *Client) StartWorkflow(ctx context.Context, name string, entryPoint string, input interface{}, tenantID string) (string, error) {
 	body := map[string]interface{}{
 		"input": input,
 	}
 	if entryPoint != "" {
 		body["entry_point"] = entryPoint
+	}
+	tid := tenantID
+	if tid == "" {
+		tid = c.TenantID
+	}
+	if tid != "" {
+		body["tenant_id"] = tid
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -115,10 +124,18 @@ func (c *Client) StartWorkflow(ctx context.Context, name string, entryPoint stri
 }
 
 // StartWorkflowRaw starts a new workflow instance with raw JSON input and explicit entry point.
-func (c *Client) StartWorkflowRaw(ctx context.Context, name string, entryPoint string, input json.RawMessage) (string, error) {
+// tenantID is optional; pass "" to use the worker default namespace.
+func (c *Client) StartWorkflowRaw(ctx context.Context, name string, entryPoint string, input json.RawMessage, tenantID string) (string, error) {
 	body := map[string]interface{}{
 		"input":       input,
 		"entry_point": entryPoint,
+	}
+	tid := tenantID
+	if tid == "" {
+		tid = c.TenantID
+	}
+	if tid != "" {
+		body["tenant_id"] = tid
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
