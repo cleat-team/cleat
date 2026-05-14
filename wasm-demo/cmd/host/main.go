@@ -242,7 +242,7 @@ func main() {
 func executeWorkflow(wasmBytes []byte, h *host, inputJSON []byte, _ bool) (string, error) {
 	ctx := context.Background()
 
-	rt := wazero.NewRuntime(ctx, 0)
+	rt := wazero.NewRuntime(ctx)
 	defer rt.Close(ctx)
 
 	// Custom stdin: the host writes responses as they become available.

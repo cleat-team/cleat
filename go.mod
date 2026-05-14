@@ -3,13 +3,14 @@ module github.com/cleat-team/cleat
 go 1.25.7
 
 require (
+	github.com/bytecodealliance/wasmtime-go/v44 v44.0.0
+	github.com/cleat-team/cleat/cleat v0.0.0
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.12.3
 	github.com/microsoft/go-mssqldb v1.10.0
 	github.com/minio/minio-go/v7 v7.1.0
 	github.com/prometheus/client_golang v1.23.2
-	github.com/cleat-team/cleat/cleat v0.0.0
 	github.com/sendgrid/rest v2.6.9+incompatible
 	github.com/sendgrid/sendgrid-go v3.16.1+incompatible
 	github.com/tetratelabs/wazero v1.11.1-0.20260508161934-e6dd6c0c144f
@@ -28,7 +29,6 @@ require (
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/bytecodealliance/wasmtime-go/v44 v44.0.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
@@ -41,6 +41,7 @@ require (
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.11 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
