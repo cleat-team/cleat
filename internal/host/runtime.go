@@ -347,10 +347,16 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 		return "", false, fmt.Errorf("host: module has no exported memory")
 	}
 
-	// Dynamically place scratch buffers at the end of current WASM memory
-	// to avoid collision with the module's own growing heap.
+	// Place scratch buffers at the end of current WASM memory to avoid
+	// collision with the module's heap, but never below the legacy 10 MiB
+	// offset. Some WASM SDKs (Java/TeaVM, AssemblyScript) hardcode the
+	// 10 MiB convention and will break if the buffer moves lower.
 	currentSize := mem.Size()
+	legacyOffset := uint32(10 * 1024 * 1024)
 	scratchBase := currentSize + wasmPageSize // one guard page after current heap
+	if scratchBase < legacyOffset {
+		scratchBase = legacyOffset
+	}
 	inputOffset := scratchBase
 	outputOffset := scratchBase + outBufSize
 
