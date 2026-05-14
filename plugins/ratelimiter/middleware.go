@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/internal/auth"
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/auth"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // tokenBucket implements a simple token bucket rate limiter. All operations

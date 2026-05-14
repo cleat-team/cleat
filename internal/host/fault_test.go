@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/internal/host/testutil"
+	"github.com/cleat-team/cleat/internal/host/testutil"
 )
 
 // These tests require a real PostgreSQL database. Set CLEAT_TEST_DB to run.

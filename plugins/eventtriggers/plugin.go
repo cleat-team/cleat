@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 var currentDialect plugin.Dialect

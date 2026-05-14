@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // RegisterCommands returns CLI subcommands for the job queue.

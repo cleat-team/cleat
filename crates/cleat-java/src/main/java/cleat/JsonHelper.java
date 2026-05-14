@@ -384,6 +384,22 @@ public final class JsonHelper {
 
     /**
      * Serialize an object to its JSON string representation.
+     * Alias for {@link #stringify(Object)}.
+     */
+    public static String toJson(Object obj) {
+        return stringify(obj);
+    }
+
+    /**
+     * Parse a JSON string into an object of the given type.
+     * Alias for {@link #parse(String, Class)}.
+     */
+    public static <T> T fromJson(String json, Class<T> type) {
+        return parse(json, type);
+    }
+
+    /**
+     * Serialize an object to its JSON string representation.
      * <p>
      * This implementation handles {@link String} directly, {@link Map} and
      * {@link List} recursively, and falls back to {@link Object#toString()}

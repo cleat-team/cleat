@@ -3,7 +3,7 @@ replicaCount: 3
 
 # -- Image configuration for the cleat-worker container.
 image:
-  repository: ghcr.io/rcownie/cleat-worker
+  repository: ghcr.io/cleat-team/cleat-worker
   tag: latest
   pullPolicy: IfNotPresent
 

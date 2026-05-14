@@ -1,4 +1,4 @@
-module github.com/rcownie/cleat
+module github.com/cleat-team/cleat
 
 go 1.25.7
 
@@ -9,7 +9,7 @@ require (
 	github.com/microsoft/go-mssqldb v1.10.0
 	github.com/minio/minio-go/v7 v7.1.0
 	github.com/prometheus/client_golang v1.23.2
-	github.com/rcownie/cleat/cleat v0.0.0
+	github.com/cleat-team/cleat/cleat v0.0.0
 	github.com/sendgrid/rest v2.6.9+incompatible
 	github.com/sendgrid/sendgrid-go v3.16.1+incompatible
 	github.com/tetratelabs/wazero v1.11.1-0.20260508161934-e6dd6c0c144f
@@ -68,4 +68,4 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace github.com/rcownie/cleat/cleat => ./cleat
+replace github.com/cleat-team/cleat/cleat => ./cleat

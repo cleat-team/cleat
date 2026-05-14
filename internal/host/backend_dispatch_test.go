@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/internal/wasm"
 )
 
 // ---------------------------------------------------------------------------

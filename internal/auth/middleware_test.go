@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // testTenantID is a well-known UUID used as the test tenant.

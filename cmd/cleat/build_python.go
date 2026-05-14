@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/internal/wasm"
 )
 
 // runBuildPython compiles a Python workflow to WASM using componentize-py

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
-	"github.com/rcownie/cleat/internal/closure"
-	"github.com/rcownie/cleat/internal/transform"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/closure"
+	"github.com/cleat-team/cleat/internal/transform"
 )
 
 // TestGenericsPipelineRunsCleanly runs the generics testdata through all 5
@@ -19,7 +19,7 @@ import (
 func TestGenericsPipelineRunsCleanly(t *testing.T) {
 	// Stage 1: Analyzer
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/generics", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/generics", fset)
 	if err != nil {
 		t.Fatalf("Stage 1 (Analyzer): LoadPackages failed: %v", err)
 	}
@@ -29,9 +29,9 @@ func TestGenericsPipelineRunsCleanly(t *testing.T) {
 
 	// Verify generic functions are present.
 	for _, name := range []string{
-		"github.com/rcownie/cleat/testdata/generics.Process",
-		"github.com/rcownie/cleat/testdata/generics.GenericLeaf",
-		"github.com/rcownie/cleat/testdata/generics.EntryPoint",
+		"github.com/cleat-team/cleat/testdata/generics.Process",
+		"github.com/cleat-team/cleat/testdata/generics.GenericLeaf",
+		"github.com/cleat-team/cleat/testdata/generics.EntryPoint",
 		"*Container[T].Process",
 	} {
 		if result.Funcs[name] == nil {
@@ -49,9 +49,9 @@ func TestGenericsPipelineRunsCleanly(t *testing.T) {
 	}
 
 	// Verify edges from entry point to generic functions.
-	epFQ := "github.com/rcownie/cleat/testdata/generics.EntryPoint"
-	processFQ := "github.com/rcownie/cleat/testdata/generics.Process"
-	leafFQ := "github.com/rcownie/cleat/testdata/generics.GenericLeaf"
+	epFQ := "github.com/cleat-team/cleat/testdata/generics.EntryPoint"
+	processFQ := "github.com/cleat-team/cleat/testdata/generics.Process"
+	leafFQ := "github.com/cleat-team/cleat/testdata/generics.GenericLeaf"
 	methodFQ := "*Container[T].Process"
 
 	if !cg.Calls[epFQ][processFQ] {

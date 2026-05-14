@@ -2,7 +2,7 @@
 
 package orders
 
-import "github.com/rcownie/cleat/cleat"
+import "github.com/cleat-team/cleat/cleat"
 
 type GetStateRequest struct {
 	OrderID string `json:"order_id"`

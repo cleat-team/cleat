@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // Run starts the periodic cleanup goroutine. It logs a cleanup message on a

@@ -22,8 +22,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/benchmarks/workflows"
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/benchmarks/workflows"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // ---------------------------------------------------------------------------

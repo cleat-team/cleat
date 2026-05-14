@@ -26,7 +26,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // osExit is replaced in tests to intercept os.Exit calls.

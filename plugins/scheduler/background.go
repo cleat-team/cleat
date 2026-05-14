@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // dueSchedulesQuery provides dialect-specific FOR UPDATE SKIP LOCKED equivalents.

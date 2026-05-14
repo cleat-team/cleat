@@ -15,7 +15,7 @@ services:
       retries: 10
 
   cleat-worker:
-    image: ghcr.io/rcownie/cleat-worker:latest
+    image: ghcr.io/cleat-team/cleat-worker:latest
     command:
       - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
       - "--api-addr=:8080"

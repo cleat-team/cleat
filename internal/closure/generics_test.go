@@ -4,18 +4,18 @@ import (
 	"go/token"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
 )
 
 func closureGenericsFQ(name string) string {
-	return "github.com/rcownie/cleat/testdata/generics." + name
+	return "github.com/cleat-team/cleat/testdata/generics." + name
 }
 
 func closureLoadGenerics(t *testing.T) (*analyzer.AnalysisResult, *Result) {
 	t.Helper()
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/generics", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/generics", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages(generics) failed: %v", err)
 	}

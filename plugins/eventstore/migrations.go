@@ -1,6 +1,6 @@
 package eventstore
 
-import "github.com/rcownie/cleat/internal/plugin"
+import "github.com/cleat-team/cleat/internal/plugin"
 
 // Migrations returns the database schema for event streams. Tables are
 // idempotent (IF NOT EXISTS) and safe to run multiple times.

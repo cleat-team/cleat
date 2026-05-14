@@ -2,7 +2,7 @@
 
 package restaurant
 
-import "github.com/rcownie/cleat/cleat"
+import "github.com/cleat-team/cleat/cleat"
 
 type NotifyOrderRequest struct {
 	RestaurantID string `json:"restaurant_id"`

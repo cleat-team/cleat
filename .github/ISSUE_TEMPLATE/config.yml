@@ -4,8 +4,8 @@ contact_links:
     url: https://discord.gg/cleat
     about: Ask questions and get help from the community
   - name: GitHub Discussions
-    url: https://github.com/rcownie/cleat/discussions
+    url: https://github.com/cleat-team/cleat/discussions
     about: Share ideas, show what you built, or discuss feature proposals
   - name: Security Vulnerability
-    url: https://github.com/rcownie/cleat/security/advisories/new
+    url: https://github.com/cleat-team/cleat/security/advisories/new
     about: Report a security vulnerability (do not open a public issue)

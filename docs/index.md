@@ -28,7 +28,7 @@
 
 ## Quick Links
 
-- [Go SDK Reference](https://pkg.go.dev/github.com/rcownie/cleat)
-- [GitHub Repository](https://github.com/rcownie/cleat)
-- [Issue Tracker](https://github.com/rcownie/cleat/issues)
+- [Go SDK Reference](https://pkg.go.dev/github.com/cleat-team/cleat)
+- [GitHub Repository](https://github.com/cleat-team/cleat)
+- [Issue Tracker](https://github.com/cleat-team/cleat/issues)
 - [Discord Chat](https://discord.gg/cleat)

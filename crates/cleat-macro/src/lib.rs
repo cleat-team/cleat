@@ -1,3 +1,4 @@
+#![allow(clippy::collapsible_match)]
 mod entry;
 mod test_attr;
 

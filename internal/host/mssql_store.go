@@ -202,7 +202,7 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
 		var inputStr string
-		var assignedTo, errorCode, errorOp sql.NullString
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
@@ -219,7 +219,6 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
-		wf.AssignedTo = assignedTo.String
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
@@ -280,7 +279,7 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
 		var inputStr string
-		var assignedTo, errorCode, errorOp sql.NullString
+		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
@@ -297,7 +296,6 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		if createdAt.Valid {
 			wf.CreatedAt = createdAt.Time
 		}
-		wf.AssignedTo = assignedTo.String
 		wf.ErrorCode = errorCode.String
 		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
@@ -946,7 +944,7 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES (@p1, @p2, @p3, 'ready', @p4,
+		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
 	`, newRunID, defName, defVersion, newInput)
 	if err != nil {
@@ -1161,9 +1159,9 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-			VALUES (@p1, @p2, @p3, 'ready', @p4,
+			VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 			        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
-		`, runID, defName, defVersion, input)
+		`, runID, defName, defVersion, string(input))
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -1180,9 +1178,9 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
-		VALUES (@p1, @p2, @p3, 'ready', @p4,
+		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'))
-	`, runID, defName, defVersion, input)
+	`, runID, defName, defVersion, string(input))
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -1675,11 +1673,13 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	for rows.Next() {
 		var wf WorkflowInstance
 		var nextWakeAt, createdAt sql.NullTime
+		var inputStr string
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
-		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
 			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
+		wf.Input = json.RawMessage(inputStr)
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
 		}

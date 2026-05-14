@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/internal/host/testutil"
+	"github.com/cleat-team/cleat/internal/host/testutil"
 )
 
 // ---------------------------------------------------------------------------

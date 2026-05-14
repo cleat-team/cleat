@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/internal/auth"
-	"github.com/rcownie/cleat/internal/plugin"
-	"github.com/rcownie/cleat/plugins/eventtriggers"
+	"github.com/cleat-team/cleat/internal/auth"
+	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugins/eventtriggers"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {

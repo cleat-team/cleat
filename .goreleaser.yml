@@ -93,14 +93,14 @@ changelog:
 
 release:
   github:
-    owner: rcownie
+    owner: cleat-team
     name: cleat
   prerelease: auto
   make_latest: true
   header: |
     ## cleat {{ .Version }}
 
-    See the [CHANGELOG](https://github.com/rcownie/cleat/blob/main/CHANGELOG.md) for full details.
+    See the [CHANGELOG](https://github.com/cleat-team/cleat/blob/main/CHANGELOG.md) for full details.
 
     ### Downloads
     Pre-built binaries for Linux and macOS (amd64 + arm64) are attached below.

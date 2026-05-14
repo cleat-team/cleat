@@ -8,20 +8,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/cleat/wasmtest"
+	"github.com/cleat-team/cleat/cleat/wasmtest"
 
 	// Blank imports to trigger plugin init() registration so that
 	// plugin.Discover() finds them in the test binary.
-	_ "github.com/rcownie/cleat/plugins/blobstore"
-	_ "github.com/rcownie/cleat/plugins/eventtriggers"
-	_ "github.com/rcownie/cleat/plugins/featureflags"
-	_ "github.com/rcownie/cleat/plugins/kafkaconnect"
-	_ "github.com/rcownie/cleat/plugins/llm"
-	_ "github.com/rcownie/cleat/plugins/notifications"
-	_ "github.com/rcownie/cleat/plugins/pagerdutyalert"
-	_ "github.com/rcownie/cleat/plugins/pgvector"
-	_ "github.com/rcownie/cleat/plugins/slacknotify"
-	_ "github.com/rcownie/cleat/plugins/webhookingest"
+	_ "github.com/cleat-team/cleat/plugins/blobstore"
+	_ "github.com/cleat-team/cleat/plugins/eventtriggers"
+	_ "github.com/cleat-team/cleat/plugins/featureflags"
+	_ "github.com/cleat-team/cleat/plugins/kafkaconnect"
+	_ "github.com/cleat-team/cleat/plugins/llm"
+	_ "github.com/cleat-team/cleat/plugins/notifications"
+	_ "github.com/cleat-team/cleat/plugins/pagerdutyalert"
+	_ "github.com/cleat-team/cleat/plugins/pgvector"
+	_ "github.com/cleat-team/cleat/plugins/slacknotify"
+	_ "github.com/cleat-team/cleat/plugins/webhookingest"
 )
 
 // findProjectRoot walks up from the working directory to locate the repo root

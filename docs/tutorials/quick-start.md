@@ -12,7 +12,7 @@ end-to-end. Every command is a copy-paste snippet.
 - **cleat CLI** -- install with one command:
 
 ```bash
-go install github.com/rcownie/cleat/cmd/cleat@latest
+go install github.com/cleat-team/cleat/cmd/cleat@latest
 ```
 
 Verify the installation:
@@ -69,7 +69,7 @@ It should look similar to:
 ```go
 package main
 
-import "github.com/rcownie/cleat/cleat"
+import "github.com/cleat-team/cleat/cleat"
 
 //go:export greet
 func greet(h cleat.HostCalls, name string) (string, error) {

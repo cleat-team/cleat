@@ -4,7 +4,7 @@ Package `cleat` defines the durable SDK -- the only import a workflow author
 needs. All external interactions go through the `HostCalls` interface, which
 enables deterministic replay.
 
-    import "github.com/rcownie/cleat/cleat"
+    import "github.com/cleat-team/cleat/cleat"
 
 Workflow entry points receive `h cleat.HostCalls` as their first parameter.
 Helper functions in the durable closure receive it through the transformer's

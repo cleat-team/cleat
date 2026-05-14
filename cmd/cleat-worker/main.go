@@ -44,11 +44,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/internal/auth"
-	"github.com/rcownie/cleat/internal/host"
-	"github.com/rcownie/cleat/internal/migration"
-	"github.com/rcownie/cleat/internal/plugin"
-	"github.com/rcownie/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/internal/auth"
+	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/migration"
+	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/wasm"
 	"golang.org/x/time/rate"
 
 	// Database drivers
@@ -56,8 +56,8 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 
 	// Plugins
-	_ "github.com/rcownie/cleat/plugins/llm"
-	// _ "github.com/rcownie/cleat/plugins/pgvector"  // requires pgvector extension
+	_ "github.com/cleat-team/cleat/plugins/llm"
+	// _ "github.com/cleat-team/cleat/plugins/pgvector"  // requires pgvector extension
 )
 
 //go:embed web/dist

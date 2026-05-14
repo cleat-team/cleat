@@ -12,7 +12,7 @@ plugin.
 ```go
 package helloworld
 
-import "github.com/rcownie/cleat/internal/plugin"
+import "github.com/cleat-team/cleat/internal/plugin"
 
 func init() {
     plugin.Register(plugin.PluginInfo{
@@ -376,7 +376,7 @@ package myplugin
 import (
     "context"
     "testing"
-    "github.com/rcownie/cleat/internal/plugin"
+    "github.com/cleat-team/cleat/internal/plugin"
 )
 
 func TestInfo(t *testing.T) {
@@ -406,8 +406,8 @@ To activate a plugin, import it in the worker binary:
 ```go
 // cmd/cleat-worker/main.go
 import (
-    _ "github.com/rcownie/cleat/plugins/blobstore"
-    _ "github.com/rcownie/cleat/plugins/my-plugin"
+    _ "github.com/cleat-team/cleat/plugins/blobstore"
+    _ "github.com/cleat-team/cleat/plugins/my-plugin"
 )
 ```
 

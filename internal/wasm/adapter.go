@@ -709,31 +709,18 @@ func needsUnsafe(usage *UsageInfo) bool {
 	return false
 }
 
-// needsTime returns true if any of the used adapter or wrapper defs use time types.
+// needsTime returns true if any of the used adapter defs use time types.
+// Only checks adapterDefs (not hostWrapperDefs) because this determines
+// imports for gen_host_adapter.go which only uses adapterDefs.
 func needsTime(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
 		adef, ok := adapterDefs[hf.FieldName]
-		if ok {
-			for _, p := range adef.Params {
-				if p.Type == "time.Duration" {
-					return true
-				}
-			}
+		if !ok {
+			continue
 		}
-		wdef, ok := hostWrapperDefs[hf.FieldName]
-		if ok {
-			for _, p := range wdef.Params {
-				if p.Type == "time.Duration" {
-					return true
-				}
-			}
-			if strings.Contains(wdef.ReturnType, "time.") {
+		for _, p := range adef.Params {
+			if p.Type == "time.Duration" {
 				return true
-			}
-			for _, stmt := range wdef.Body {
-				if strings.Contains(stmt, "time.") {
-					return true
-				}
 			}
 		}
 	}
@@ -795,7 +782,7 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo, target string) []byte
 		buf.WriteString("\t\"time\"\n")
 	}
 	buf.WriteString("\n")
-	buf.WriteString("\t\"github.com/rcownie/cleat/cleat\"\n")
+	buf.WriteString("\t\"github.com/cleat-team/cleat/cleat\"\n")
 	buf.WriteString(")\n\n")
 
 	buf.WriteString("const _cleatOutBufSize = 65536\n\n")

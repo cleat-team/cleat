@@ -69,6 +69,22 @@ public class CleatResult<T> {
     }
 
     /**
+     * Returns the success value, or {@code null} if this is an error result.
+     * Alias for {@link #getValue()}.
+     */
+    public T valueOrNull() {
+        return value;
+    }
+
+    /**
+     * Returns the error message, or {@code null} if this is a success result.
+     * Alias for {@link #getError()}.
+     */
+    public String errorOrNull() {
+        return error;
+    }
+
+    /**
      * Unwraps the value as a string, returning a default if this is an error
      * or the value is null.
      *

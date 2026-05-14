@@ -3,7 +3,7 @@ package plugingen
 import (
 	"testing"
 
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 func TestFromManifest_Empty(t *testing.T) {

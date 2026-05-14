@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/rcownie/cleat/cleat"
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/cleat"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // Task represents a single node in the DAG.

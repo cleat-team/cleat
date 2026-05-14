@@ -16,7 +16,7 @@ import (
 	"github.com/tetratelabs/wazero"
 	"golang.org/x/mod/semver"
 
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // ---------------------------------------------------------------------------

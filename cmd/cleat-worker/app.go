@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // StartAPIServer creates and starts the HTTP API server with the given

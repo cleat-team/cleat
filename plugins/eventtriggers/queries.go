@@ -1,6 +1,6 @@
 package eventtriggers
 
-import "github.com/rcownie/cleat/internal/plugin"
+import "github.com/cleat-team/cleat/internal/plugin"
 
 // Dialect-specific query variants for structurally different SQL.
 

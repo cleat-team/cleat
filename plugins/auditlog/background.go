@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // Run starts the background goroutine. It periodically drains the audit

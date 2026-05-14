@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rcownie/cleat/cleat/cleattest"
+	"github.com/cleat-team/cleat/cleat/cleattest"
 )
 
 // Example_awaitSignals_basic demonstrates blocking on signals with a

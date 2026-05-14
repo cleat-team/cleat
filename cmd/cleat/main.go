@@ -27,12 +27,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
-	"github.com/rcownie/cleat/internal/closure"
-	"github.com/rcownie/cleat/internal/host"
-	"github.com/rcownie/cleat/internal/transform"
-	"github.com/rcownie/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/closure"
+	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/transform"
+	"github.com/cleat-team/cleat/internal/wasm"
 )
 
 var dbConnStr string

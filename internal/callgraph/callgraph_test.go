@@ -6,17 +6,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/analyzer"
 )
 
 func cgBasicFQ(name string) string {
-	return "github.com/rcownie/cleat/testdata/basic." + name
+	return "github.com/cleat-team/cleat/testdata/basic." + name
 }
 
 func cgLoadBasic(t *testing.T) (*analyzer.AnalysisResult, *Graph) {
 	t.Helper()
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}

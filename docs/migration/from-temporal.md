@@ -52,7 +52,7 @@ func MyWorkflow(ctx workflow.Context, input MyInput) (MyOutput, error) {
 // workflow.go
 package workflow
 
-import "github.com/rcownie/cleat"
+import "github.com/cleat-team/cleat"
 
 var h cleat.HostCalls // auto-threaded by transformer
 

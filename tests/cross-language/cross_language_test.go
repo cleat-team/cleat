@@ -19,8 +19,8 @@ import (
 
 	"testing"
 
-	"github.com/rcownie/cleat/cleat/wasmtest"
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/cleat/wasmtest"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // findProjectRoot walks up from the working directory to find the repo root.

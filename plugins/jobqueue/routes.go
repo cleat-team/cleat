@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/internal/auth"
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/auth"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // RegisterRoutes registers the job queue HTTP handlers on the given mux.

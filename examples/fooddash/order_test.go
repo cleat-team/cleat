@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/cleat/cleattest"
+	"github.com/cleat-team/cleat/cleat/cleattest"
 )
 
 // setupEnv creates a test environment and wires it into the package-level h

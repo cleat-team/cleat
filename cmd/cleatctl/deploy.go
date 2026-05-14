@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 func runDeploy(ctx context.Context, store host.WorkflowStore, db *sql.DB, args []string) {

@@ -1,10 +1,10 @@
-module github.com/rcownie/cleat/cleat
+module github.com/cleat-team/cleat/cleat
 
 go 1.25.7
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/rcownie/cleat v0.0.0
+	github.com/cleat-team/cleat v0.0.0
 )
 
 require (
@@ -35,4 +35,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/rcownie/cleat => ../
+replace github.com/cleat-team/cleat => ../

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/rcownie/cleat/internal/host"
+	host "github.com/cleat-team/cleat/internal/host"
 )
 
 // numConcurrentWorkflows returns the number of workflows to create for

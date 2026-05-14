@@ -1,7 +1,7 @@
 package e009
 
 import (
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // durableHelper is a durable leaf function that uses HostCalls.

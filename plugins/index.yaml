@@ -2,7 +2,7 @@ plugins:
   - name: llm
     description: Unified LLM interface (chat, embedding, model listing)
     author: cleat
-    repository: https://github.com/rcownie/cleat
+    repository: https://github.com/cleat-team/cleat
     versions:
       - version: 1.0.0
         bundled: true
@@ -11,7 +11,7 @@ plugins:
   - name: pgvector
     description: Vector search on PostgreSQL
     author: cleat
-    repository: https://github.com/rcownie/cleat
+    repository: https://github.com/cleat-team/cleat
     versions:
       - version: 1.0.0
         bundled: true
@@ -20,7 +20,7 @@ plugins:
   - name: blobstore
     description: Content-addressed blob storage with S3 backend
     author: cleat
-    repository: https://github.com/rcownie/cleat
+    repository: https://github.com/cleat-team/cleat
     versions:
       - version: 1.0.0
         bundled: true
@@ -29,7 +29,7 @@ plugins:
   - name: kvstore
     description: Versioned JSONB key-value store with optimistic concurrency
     author: cleat
-    repository: https://github.com/rcownie/cleat
+    repository: https://github.com/cleat-team/cleat
     versions:
       - version: 1.0.0
         bundled: true

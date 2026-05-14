@@ -7,19 +7,19 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
-	"github.com/rcownie/cleat/internal/closure"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/closure"
 )
 
 func basicFQ(name string) string {
-	return "github.com/rcownie/cleat/testdata/basic." + name
+	return "github.com/cleat-team/cleat/testdata/basic." + name
 }
 
 func loadBasic(t *testing.T) (*analyzer.AnalysisResult, *closure.Result) {
 	t.Helper()
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -34,7 +34,7 @@ func loadBasic(t *testing.T) (*analyzer.AnalysisResult, *closure.Result) {
 func loadErrors(t *testing.T) (*analyzer.AnalysisResult, *closure.Result) {
 	t.Helper()
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestGenerateHostAdapterBasic(t *testing.T) {
 	usage := AnalyzeUsage(result, cr)
 	code := string(GenerateHostAdapter("basic", usage, "go"))
 	for _, c := range []string{"//go:build wasip1", "package basic",
-		`"fmt"`, `"unsafe"`, `"github.com/rcownie/cleat/cleat"`,
+		`"fmt"`, `"unsafe"`, `"github.com/cleat-team/cleat/cleat"`,
 		"func makeHostCalls() cleat.HostCalls {",
 		"DurableCall: func(service string, operation string, requestJSON string) (string, error)",
 	} {
@@ -783,7 +783,7 @@ func TestNeedsTimeWithUnmappedField(t *testing.T) {
 func TestGenerateExportsResultOnlyReturn(t *testing.T) {
 	fset := token.NewFileSet()
 	result, err := analyzer.LoadPackages(
-		"github.com/rcownie/cleat/testdata/vet-checks/go/e009_init", fset)
+		"github.com/cleat-team/cleat/testdata/vet-checks/go/e009_init", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages(e009_init): %v", err)
 	}

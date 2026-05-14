@@ -25,13 +25,13 @@ import, rebuild the worker.
 package main
 
 import (
-    "github.com/rcownie/cleat/cmd/cleat-worker"
+    "github.com/cleat-team/cleat/cmd/cleat-worker"
     
     // Built-in plugins
-    _ "github.com/rcownie/cleat/plugins/blobstore"   // S3-backed blob storage
-    _ "github.com/rcownie/cleat/plugins/eventstore"   // event streams + SSE
-    _ "github.com/rcownie/cleat/plugins/jobqueue"     // standalone job queue
-    _ "github.com/rcownie/cleat/plugins/kvstore"      // versioned KV store
+    _ "github.com/cleat-team/cleat/plugins/blobstore"   // S3-backed blob storage
+    _ "github.com/cleat-team/cleat/plugins/eventstore"   // event streams + SSE
+    _ "github.com/cleat-team/cleat/plugins/jobqueue"     // standalone job queue
+    _ "github.com/cleat-team/cleat/plugins/kvstore"      // versioned KV store
     
     // Community plugins
     _ "github.com/example/cleat-plugin-slack"         // Slack notifications
@@ -188,7 +188,7 @@ func List() []PluginInfo
 package blobstore
 
 import (
-    "github.com/rcownie/cleat/internal/plugin"
+    "github.com/cleat-team/cleat/internal/plugin"
 )
 
 func init() {
