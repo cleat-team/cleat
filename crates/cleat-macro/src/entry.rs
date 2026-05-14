@@ -127,6 +127,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     let deser_code = if all_args.len() == 1 {
         if let FnArg::Typed(pt) = &all_args[0] {
             let ty = &pt.ty;
+		    #[allow(clippy::collapsible_match)]
             if let Pat::Ident(pi) = &*pt.pat {
                 let name = &pi.ident;
                 quote! {
