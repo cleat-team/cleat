@@ -2356,6 +2356,8 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		Input          json.RawMessage `json:"input"`
 		EntryPoint     string          `json:"entry_point"`
 		ConcurrencyKey string          `json:"concurrency_key"`
+		TenantID       string          `json:"tenant_id"`
+		Namespace      string          `json:"namespace"` // deprecated; use tenant_id
 	}
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
@@ -2372,6 +2374,15 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if input.Input == nil {
 		input.Input = json.RawMessage("{}")
 	}
+
+	// Resolve tenant_id: prefer tenant_id, fall back to deprecated namespace.
+	tenantID := input.TenantID
+	if tenantID == "" {
+		tenantID = input.Namespace
+	}
+	// TODO: wire tenantID through the store (StartNewRun) for namespace-
+	// scoped workflow isolation. Currently parsed but not yet stored.
+	_ = tenantID
 
 	// Find the latest version of this workflow.
 	versions, err := s.store.ListVersions(r.Context(), name)
