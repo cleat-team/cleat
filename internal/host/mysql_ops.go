@@ -190,10 +190,10 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	keyHash := hash[:]
 	expiration := time.Now().Add(ttl)
 
-	// Step 1: delete any expired key for this hash (consistent with Postgres/MSSQL).
+	// Step 1: delete any expired key for this hash (tenant-scoped).
 	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM concurrency_keys WHERE key_hash = ? AND expires_at <= NOW(6)
-	`, keyHash)
+		DELETE FROM concurrency_keys WHERE key_hash = ? AND expires_at <= NOW(6) AND tenant_id = ?
+	`, keyHash, s.tenantID)
 	if err != nil {
 		return false, fmt.Errorf("AcquireConcurrencyKey: cleanup expired: %w", err)
 	}
@@ -201,18 +201,21 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	// Step 2: try to insert. If the key_hash already exists (held by another
 	// workflow with a still-valid expiry), INSERT IGNORE is a silent no-op.
 	_, err = s.db.ExecContext(ctx, `
-		INSERT IGNORE INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at)
-		VALUES (?, ?, ?, ?)
-	`, keyHash, key, workflowID, expiration)
+		INSERT IGNORE INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+		VALUES (?, ?, ?, ?, ?)
+	`, keyHash, key, workflowID, expiration, s.tenantID)
 	if err != nil {
 		return false, fmt.Errorf("AcquireConcurrencyKey: %w", err)
 	}
 
-	// Step 3: check who owns the key now.
+	// Step 3: check who owns the key now (tenant-scoped).
 	var ownerID string
 	err = s.db.QueryRowContext(ctx, `
-		SELECT workflow_id FROM concurrency_keys WHERE key_hash = ?
-	`, keyHash).Scan(&ownerID)
+		SELECT workflow_id FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?
+	`, keyHash, s.tenantID).Scan(&ownerID)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("AcquireConcurrencyKey: verify: %w", err)
 	}
@@ -225,20 +228,20 @@ func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key string) erro
 	hash := sha256.Sum256([]byte(key))
 	keyHash := hash[:]
 	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM concurrency_keys WHERE key_hash = ?
-	`, keyHash)
+		DELETE FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?
+	`, keyHash, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("ReleaseConcurrencyKey: %w", err)
 	}
 	return nil
 }
 
-// ReapExpiredConcurrencyKeys deletes all expired concurrency keys.
-// Returns the number of keys deleted.
+// ReapExpiredConcurrencyKeys deletes all expired concurrency keys
+// for the current tenant. Returns the number of keys deleted.
 func (s *MySQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
-		DELETE FROM concurrency_keys WHERE expires_at < NOW(6)
-	`)
+		DELETE FROM concurrency_keys WHERE expires_at < NOW(6) AND tenant_id = ?
+	`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("ReapExpiredConcurrencyKeys: %w", err)
 	}
@@ -1076,8 +1079,8 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 		    error_msg = ?,
 		    completed_at = NOW(),
 		    assigned_to = NULL
-		WHERE id = ?
-	`, reason, workflowID)
+		WHERE id = ? AND tenant_id = ?
+	`, reason, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("terminate workflow: %w", err)
 	}
@@ -1135,8 +1138,8 @@ func (s *MySQLStore) GetChildCount(ctx context.Context, parentWorkflowID string)
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
-		WHERE parent_workflow_id = ? AND status NOT IN ('done', 'failed', 'dead_lettered')
-	`, parentWorkflowID).Scan(&count)
+		WHERE parent_workflow_id = ? AND status NOT IN ('done', 'failed', 'dead_lettered') AND tenant_id = ?
+	`, parentWorkflowID, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get child count for %s: %w", parentWorkflowID, err)
 	}
@@ -1149,8 +1152,8 @@ func (s *MySQLStore) GetConcurrencyKeyCount(ctx context.Context, workflowID stri
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM concurrency_keys
-		WHERE workflow_id = ? AND expires_at > NOW(6)
-	`, workflowID).Scan(&count)
+		WHERE workflow_id = ? AND expires_at > NOW(6) AND tenant_id = ?
+	`, workflowID, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get concurrency key count for %s: %w", workflowID, err)
 	}

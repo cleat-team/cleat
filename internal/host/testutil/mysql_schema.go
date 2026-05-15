@@ -141,6 +141,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			key_hash     VARBINARY(32) PRIMARY KEY,
 			key_text     TEXT NOT NULL,
 			workflow_id  VARCHAR(255) NOT NULL,
+			tenant_id    VARCHAR(255) NOT NULL DEFAULT '',
 			acquired_at  TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 			expires_at   TIMESTAMP(6) NOT NULL
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,

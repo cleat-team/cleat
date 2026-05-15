@@ -153,7 +153,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
              key_text NVARCHAR(MAX) NOT NULL,
              workflow_id NVARCHAR(900) NOT NULL,
              acquired_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-             expires_at DATETIMEOFFSET NOT NULL
+             expires_at DATETIMEOFFSET NOT NULL,
+             tenant_id NVARCHAR(128)
          )`,
 
 		// workflow_promises

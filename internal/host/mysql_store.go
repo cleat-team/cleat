@@ -1639,8 +1639,8 @@ func (s *MySQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 // UpdateStickyWorker sets the sticky worker for a workflow.
 func (s *MySQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_instances SET sticky_worker_id = ? WHERE id = ?
-	`, workerID, workflowID)
+		UPDATE workflow_instances SET sticky_worker_id = ? WHERE id = ? AND tenant_id = ?
+	`, workerID, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("update sticky worker: %w", err)
 	}
@@ -1650,8 +1650,8 @@ func (s *MySQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerI
 // ClearStickyWorker removes the sticky worker assignment.
 func (s *MySQLStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = ?
-	`, workflowID)
+		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = ? AND tenant_id = ?
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("clear sticky worker: %w", err)
 	}
@@ -1687,7 +1687,7 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 // ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.
 // Runs as a best-effort operation.
 func (s *MySQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = ?`, workflowID)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = ? AND tenant_id = ?`, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: %w", err)
 	}
