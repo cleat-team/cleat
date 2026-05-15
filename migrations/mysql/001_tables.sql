@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     compaction_step INTEGER,
     plugin_vers JSON NOT NULL DEFAULT ('{}'),
     event_count BIGINT NOT NULL DEFAULT 0,
+    allowed_signals JSON DEFAULT NULL,
     FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version),
     PRIMARY KEY (id)
 ) ENGINE=InnoDB;

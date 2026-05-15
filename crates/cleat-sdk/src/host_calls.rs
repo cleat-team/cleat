@@ -276,6 +276,21 @@ mod imports {
             input_ptr: *const u8, input_len: u32,
             response_ptr: *mut u8, response_max_len: u32,
         ) -> i64;
+
+        // cleat_json_parse - (ptr,len, ptr,maxLen) -> i64 (ABI 2.51)
+        // Validates and canonicalizes JSON via the host's encoding/json.
+        pub fn cleat_json_parse(
+            json_ptr: *const u8, json_len: u32,
+            out_ptr: *mut u8, out_max_len: u32,
+        ) -> i64;
+
+        // cleat_json_stringify - (ptr,len, ptr,maxLen) -> i64 (ABI 2.52)
+        // Validates and re-serializes JSON via the host's encoding/json.
+        // Identical behavior to cleat_json_parse; provided as a semantic alias.
+        pub fn cleat_json_stringify(
+            ptr: *const u8, len: u32,
+            out_ptr: *mut u8, out_max_len: u32,
+        ) -> i64;
     }
 }
 
@@ -1352,6 +1367,49 @@ impl HostCalls {
             return Err(e);
         }
         serde_json::from_str(&resp_json).map_err(|e| format!("deserialize response: {}", e))
+    }
+
+    /// Validate and canonicalize a JSON string via the host's encoding/json.
+    ///
+    /// Parses the input JSON, then re-serializes it with sorted keys and
+    /// canonical formatting. Returns `Some(normalized_json)` on success,
+    /// `None` if the input is not valid JSON or exceeds the 65536-byte
+    /// output buffer.
+    pub fn json_parse(&self, json: &str) -> Option<String> {
+        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_json_parse(
+                json.as_ptr(), json.len() as u32,
+                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (_, err_code, written) = memory::decode_cleat_call_result(result);
+        if err_code != 0 || written == 0 {
+            return None;
+        }
+        Some(unsafe { memory::read_string(out_buf.as_ptr(), written) })
+    }
+
+    /// Validate and re-serialize a JSON value via the host's encoding/json.
+    ///
+    /// Identical behavior to `json_parse` — both parse then re-serialize
+    /// through the host's `encoding/json`. Provided as a semantic alias for
+    /// SDK ergonomics. Returns `Some(normalized_json)` on success,
+    /// `None` if the input is not valid JSON or exceeds the 65536-byte
+    /// output buffer.
+    pub fn json_stringify(&self, value: &str) -> Option<String> {
+        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_json_stringify(
+                value.as_ptr(), value.len() as u32,
+                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (_, err_code, written) = memory::decode_cleat_call_result(result);
+        if err_code != 0 || written == 0 {
+            return None;
+        }
+        Some(unsafe { memory::read_string(out_buf.as_ptr(), written) })
     }
 }
 

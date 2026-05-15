@@ -52,7 +52,7 @@ func TestTenantSelfAccess(t *testing.T) {
 		// Start a workflow as the default tenant (from Setup).
 		runID, _, err := store.StartNewRun(ctx, "", "test-isolation", 1,
 			json.RawMessage(`{"owner":"tenant-a"}`),
-			"idempotency-tenant-a-1")
+			"idempotency-tenant-a-1", DefaultTenantUUID)
 		if err != nil {
 			t.Fatalf("StartNewRun: %v", err)
 		}
@@ -137,7 +137,7 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-isolation", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"iso-test-a-1")
+				"iso-test-a-1", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -145,7 +145,7 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-isolation", 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
-				"iso-test-b-1")
+				"iso-test-b-1", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}
@@ -247,7 +247,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-signals", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"signal-test-a-1")
+				"signal-test-a-1", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -255,7 +255,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-signals", 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
-				"signal-test-b-1")
+				"signal-test-b-1", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}
@@ -430,7 +430,7 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-promises", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"promise-test-a-1")
+				"promise-test-a-1", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -438,7 +438,7 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-promises", 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
-				"promise-test-b-1")
+				"promise-test-b-1", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}

@@ -101,3 +101,7 @@ IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_
 
 IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'namespace')
     ALTER TABLE dbo.workflow_instances DROP COLUMN namespace;
+
+-- Add allowed_signals column for signal authorization (migration 014).
+IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'allowed_signals')
+    ALTER TABLE dbo.workflow_instances ADD allowed_signals NVARCHAR(MAX) NULL;

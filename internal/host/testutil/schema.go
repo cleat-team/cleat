@@ -45,6 +45,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				compaction_state JSONB, compacted_at TIMESTAMPTZ, compaction_step INTEGER,
 				plugin_vers JSONB NOT NULL DEFAULT '{}',
 				event_count BIGINT NOT NULL DEFAULT 0,
+				allowed_signals JSONB DEFAULT NULL,
 					generation BIGINT NOT NULL DEFAULT 0)`,
 			`CREATE TABLE IF NOT EXISTS event_history (
 				workflow_id TEXT NOT NULL, step INTEGER NOT NULL,
@@ -103,6 +104,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				compaction_state JSON, compacted_at TIMESTAMP(6), compaction_step INTEGER,
 				plugin_vers JSON NOT NULL DEFAULT ('{}'),
 				event_count BIGINT NOT NULL DEFAULT 0,
+				allowed_signals JSON DEFAULT NULL,
 					generation BIGINT NOT NULL DEFAULT 0)`,
 			`CREATE TABLE IF NOT EXISTS event_history (
 				workflow_id VARCHAR(255) NOT NULL, step INTEGER NOT NULL,
