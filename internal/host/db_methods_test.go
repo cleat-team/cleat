@@ -1904,7 +1904,7 @@ func TestPostgresStore_StartNewRun_NoIdempotencyKey(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "")
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}
@@ -1929,7 +1929,7 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_NewRun(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123")
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123", DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}
@@ -1952,7 +1952,7 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_AlreadyExists(t *testing.T
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123")
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123", DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}

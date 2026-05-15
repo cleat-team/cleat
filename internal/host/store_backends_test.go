@@ -162,14 +162,14 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 
 	// A "ready" workflow instance
 	readyWfID, _, err := store.StartNewRun(context.Background(), "", "test-workflow", 1,
-		json.RawMessage(`{"key":"value"}`), "setup-ready-1")
+		json.RawMessage(`{"key":"value"}`), "setup-ready-1", DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("setupTestData: StartNewRun ready: %v", err)
 	}
 
 	// A "running" workflow instance
 	_, _, err = store.StartNewRun(context.Background(), "", "test-workflow", 1,
-		json.RawMessage(`{"key":"running"}`), "setup-running-1")
+		json.RawMessage(`{"key":"running"}`), "setup-running-1", DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("setupTestData: StartNewRun running: %v", err)
 	}
