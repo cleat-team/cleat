@@ -167,7 +167,7 @@ func RedactMap(m map[string]interface{}) {
 		} else {
 			switch nested := v.(type) {
 			case map[string]interface{}:
-				redactMapDepth(nested, 1)
+				m[k] = redactMapDepth(nested, 1)
 			case []interface{}:
 				m[k] = redactSliceDepth(nested, 1)
 			}
