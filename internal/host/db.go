@@ -230,11 +230,16 @@ type WorkflowStore interface {
 	// PollAndClaimSignal atomically checks for and claims a pending signal.
 	PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
 
+	// DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
+	DefaultTenantUUID = "00000000-0000-0000-0000-000000000000"
+
 	// StartNewRun creates a new workflow instance.
 	// If idempotencyKey is non-empty, provides exactly-once semantics: a
 	// subsequent call with the same key returns the existing workflow ID
 	// without creating a duplicate.
-	StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
+	// tenantID must be a valid UUID; the all-zeros default is accepted
+	// for single-tenant installations without RLS.
+	StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error)
 
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
 	// defVersion is the explicit workflow definition version to use, or 0 to use
@@ -2127,7 +2132,7 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 // If idempotencyKey is non-empty, provides exactly-once semantics: a subsequent
 // call with the same key returns the existing workflow ID without creating a
 // duplicate. Returns the workflow ID, whether it already existed, and any error.
-func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error) {
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -2190,8 +2195,8 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
 			VALUES ($1, $2, $3, 'ready', $4,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
-			'00000000-0000-0000-0000-000000000000')
-		`, runID, defName, defVersion, input)
+			$5)
+		`, runID, defName, defVersion, input, tenantID)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -2210,8 +2215,8 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
 		VALUES ($1, $2, $3, 'ready', $4,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
-			'00000000-0000-0000-0000-000000000000')
-	`, runID, defName, defVersion, input)
+			$5)
+	`, runID, defName, defVersion, input, tenantID)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -2237,9 +2242,9 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 		        'ready', $2, $3,
 		        COALESCE(NULLIF($5, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
-			'00000000-0000-0000-0000-000000000000')
+			$6)
 		RETURNING id
-	`, defName, inputJSON, parentID, defVersion, parentClosePolicy).Scan(&runID)
+	`, defName, inputJSON, parentID, defVersion, parentClosePolicy, DefaultTenantUUID).Scan(&runID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
@@ -2271,8 +2276,8 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		        'ready', $3, $4,
 		        COALESCE(NULLIF($6, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'),
-			'00000000-0000-0000-0000-000000000000')
-	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy)
+			$7)
+	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy, DefaultTenantUUID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
 	}

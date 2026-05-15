@@ -1100,7 +1100,7 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
 		        @p5)
-	`, newRunID, defName, defVersion, newInput, s.tenantID)
+	`, newRunID, defName, defVersion, newInput, tenantID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -1258,7 +1258,7 @@ func (s *MSSQLStore) CheckCancellation(ctx context.Context, workflowID string) (
 
 // StartNewRun creates a new workflow instance.
 // If idempotencyKey is non-empty, provides exactly-once semantics.
-func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error) {
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -1606,7 +1606,7 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		WHEN MATCHED THEN UPDATE SET payload = source.payload, delivered_at = SYSUTCDATETIME()
 		WHEN NOT MATCHED THEN INSERT (workflow_id, signal_name, payload, tenant_id)
 		     VALUES (source.workflow_id, source.signal_name, source.payload, @p4);
-	`, workflowID, signalName, payload, s.tenantID)
+	`, workflowID, signalName, payload, tenantID)
 	if err != nil {
 		return err
 	}
@@ -1621,7 +1621,7 @@ func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName stri
 	err := s.db.QueryRowContext(ctx, `
 		SELECT payload FROM workflow_signals
 		WHERE workflow_id = @p1 AND signal_name = @p2 AND tenant_id = @p3
-	`, workflowID, signalName, s.tenantID).Scan(&payload)
+	`, workflowID, signalName, tenantID).Scan(&payload)
 	if err == sql.ErrNoRows {
 		return "", false, nil
 	}
@@ -1725,7 +1725,7 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 		)
 	`, parentID, event.Step, string(event.EventType),
 		nullStr(event.ChildName), nullStr(event.ChildInput), nullStr(childID),
-		time.UnixMilli(event.TimestampMs), checksum, s.tenantID)
+		time.UnixMilli(event.TimestampMs), checksum, tenantID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
 	}
@@ -1927,7 +1927,7 @@ func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID)
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, tenantID)
 	return err
 }
 
