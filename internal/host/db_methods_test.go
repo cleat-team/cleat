@@ -1272,7 +1272,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, int64(0), nil, nil, nil, nil},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0)},
 			},
 		},
 	}, nil)
@@ -1296,7 +1296,7 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, int64(0), nil, nil, nil, nil},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0)},
 			},
 		},
 	}, nil)
@@ -1582,7 +1582,7 @@ func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, int64(0), nil, nil},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0)},
 			},
 		},
 	}, nil)
@@ -1607,7 +1607,7 @@ func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, int64(0), nil, nil, nil, nil},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0)},
 			},
 		},
 	}, nil)
@@ -1646,7 +1646,7 @@ func TestPostgresStore_ClaimStickyWorkflows_Success(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"stickywf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, "tenant-1", nil, nil, nil},
+				{"stickywf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, "tenant-1", nil, nil, nil, int64(0)},
 			},
 		},
 	}, nil)
@@ -1689,7 +1689,7 @@ func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0)},
 			},
 		},
 	}, nil)
