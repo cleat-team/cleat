@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/analyzer"
 )
 
 // ---------------------------------------------------------------------------

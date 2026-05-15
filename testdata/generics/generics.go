@@ -13,7 +13,7 @@
 package generics
 
 import (
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // ---- Generic functions ----

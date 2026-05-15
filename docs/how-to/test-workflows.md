@@ -15,7 +15,7 @@ package myworkflow_test
 
 import (
     "testing"
-    "github.com/rcownie/cleat/cleat/cleattest"
+    "github.com/cleat-team/cleat/cleat/cleattest"
 )
 
 func TestMyWorkflow(t *testing.T) {
@@ -232,7 +232,7 @@ import (
     "testing"
     "time"
 
-    "github.com/rcownie/cleat/cleat/cleattest"
+    "github.com/cleat-team/cleat/cleat/cleattest"
 )
 
 func TestApprovalWorkflow_Success(t *testing.T) {
@@ -355,5 +355,5 @@ Because `cleattest` tests run against your Go source code directly (not compiled
 ## Next steps
 
 - See the [common patterns guide](common-patterns.md) for workflow patterns to test
-- See the [cleattest package documentation](https://pkg.go.dev/github.com/rcownie/cleat/cleat/cleattest) for the full API reference
-- See the [test suite](https://github.com/rcownie/cleat/tree/main/cleat/cleattest) for more examples
+- See the [cleattest package documentation](https://pkg.go.dev/github.com/cleat-team/cleat/cleat/cleattest) for the full API reference
+- See the [test suite](https://github.com/cleat-team/cleat/tree/main/cleat/cleattest) for more examples

@@ -31,6 +31,7 @@ func contextWithRawMemBuf(ctx context.Context, buf []byte) context.Context {
 }
 
 const outBufSize = 1048576 // 1 MB; increased to reduce truncation risk
+const wasmPageSize = 65536   // 64 KB WASM page size
 
 // Maximum size of any string parameter read from WASM linear memory.
 // This prevents a malicious or buggy WASM module from causing the host to

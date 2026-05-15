@@ -8,7 +8,7 @@ import (
 	"go/ast"
 	"go/types"
 
-	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/analyzer"
 )
 
 // Graph represents the directed call graph of functions.

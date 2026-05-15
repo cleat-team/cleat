@@ -49,7 +49,7 @@ interface change.
 
 Two mechanical changes per affected file:
 
-1. **Missing `host` import** — add `"github.com/rcownie/cleat/internal/host"` to
+1. **Missing `host` import** — add `"github.com/cleat-team/cleat/internal/host"` to
    the import block.
 
 2. **`*sql.DB` → `PluginDB` mismatch** — wrap `*sql.DB` values in

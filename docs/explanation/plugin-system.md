@@ -131,8 +131,8 @@ The worker imports the plugins in `main.go`:
 
 ```go
 import (
-    _ "github.com/rcownie/cleat/plugins/llm"
-    _ "github.com/rcownie/cleat/plugins/pgvector"
+    _ "github.com/cleat-team/cleat/plugins/llm"
+    _ "github.com/cleat-team/cleat/plugins/pgvector"
 )
 ```
 

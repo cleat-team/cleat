@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/internal/host/testutil"
+	"github.com/cleat-team/cleat/internal/host/testutil"
 )
 
 // These tests require a real PostgreSQL database. Set CLEAT_TEST_DB to run.
@@ -172,7 +172,7 @@ func TestFaultHeartbeatOwnership(t *testing.T) {
 	}
 
 	// Worker A heartbeats — should succeed.
-	alive, err := store.Heartbeat(ctx, runID, "worker-a")
+	alive, err := store.Heartbeat(ctx, runID, "worker-a", wfA.Generation)
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestFaultHeartbeatOwnership(t *testing.T) {
 	}
 
 	// Worker B tries to heartbeat — should fail.
-	alive, err = store.Heartbeat(ctx, runID, "worker-b")
+	alive, err = store.Heartbeat(ctx, runID, "worker-b", wfA.Generation)
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}

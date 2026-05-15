@@ -513,7 +513,7 @@ langchain = ["langchain>=0.3.0", "langchain-openai>=0.2.0"]
 langgraph = ["langgraph>=0.2.0"]
 
 [project.urls]
-Repository = "https://github.com/rcownie/cleat"
+Repository = "https://github.com/cleat-team/cleat"
 ```
 
 ### Publishing

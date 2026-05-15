@@ -129,7 +129,7 @@ dependabot or with the `bot` label are exempt.
 
 ```bash
 # Clone the repo
-git clone https://github.com/rcownie/cleat.git
+git clone https://github.com/cleat-team/cleat.git
 cd cleat
 
 # Build all Go packages
@@ -435,7 +435,7 @@ regressions before they reach production users.
 ## Finding work
 
 Good first issues are tagged `good-first-issue` and `help-wanted` in the
-[GitHub issue tracker](https://github.com/rcownie/cleat/issues). The project
+[GitHub issue tracker](https://github.com/cleat-team/cleat/issues). The project
 uses these labels:
 
 - `good-first-issue` — Well-scoped tasks with clear acceptance criteria,
@@ -447,7 +447,7 @@ uses these labels:
 - `area/ui` — Svelte web UI.
 - `area/docs` — Documentation improvements.
 
-Check the [Discussions](https://github.com/rcownie/cleat/discussions) page for
+Check the [Discussions](https://github.com/cleat-team/cleat/discussions) page for
 RFCs and design proposals that need implementation.
 
 ## Questions?

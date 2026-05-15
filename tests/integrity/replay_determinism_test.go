@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/rcownie/cleat/internal/host"
+	host "github.com/cleat-team/cleat/internal/host"
 )
 
 // TestReplayProducesIdenticalHistory verifies that loading the same event

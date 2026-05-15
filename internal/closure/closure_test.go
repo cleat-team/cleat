@@ -4,19 +4,19 @@ import (
 	"go/token"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
 )
 
 // basicFQ builds a fully-qualified name for a function in the
 // testdata/basic package.
 func basicFQ(name string) string {
-	return "github.com/rcownie/cleat/testdata/basic." + name
+	return "github.com/cleat-team/cleat/testdata/basic." + name
 }
 
 func TestComputeBasicIdentifiesDurableLeaves(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestComputeBasicIdentifiesDurableLeaves(t *testing.T) {
 
 func TestComputeBasicIdentifiesDurableClosure(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestComputeBasicIdentifiesDurableClosure(t *testing.T) {
 
 func TestComputeBasicCorrectlyTagsPureFunctions(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestComputeBasicCorrectlyTagsPureFunctions(t *testing.T) {
 
 func TestComputeBasicTagsAreConsistentWithFuncDecl(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/basic", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/basic", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestComputeBasicTagsAreConsistentWithFuncDecl(t *testing.T) {
 
 func TestComputeErrorsDetectsGoroutine(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestComputeErrorsDetectsGoroutine(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	badName := "github.com/rcownie/cleat/testdata/errors.BadWithGoroutine"
+	badName := "github.com/cleat-team/cleat/testdata/errors.BadWithGoroutine"
 
 	errs := cr.Errors[badName]
 	if len(errs) == 0 {
@@ -220,7 +220,7 @@ func TestComputeErrorsDetectsGoroutine(t *testing.T) {
 
 func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -233,11 +233,11 @@ func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 	cr := Compute(result, cg)
 
 	expectedLeaves := map[string]bool{
-		"github.com/rcownie/cleat/testdata/errors.leafFunc":                   true,
-		"github.com/rcownie/cleat/testdata/errors.BadWithGoroutine":           true,
-		"github.com/rcownie/cleat/testdata/errors.BadWithInterfaceDispatch":   true,
-		"github.com/rcownie/cleat/testdata/errors.BadWithFuncValue":           true,
-		"github.com/rcownie/cleat/testdata/errors.BadWithFloatCondition":      true,
+		"github.com/cleat-team/cleat/testdata/errors.leafFunc":                   true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithGoroutine":           true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithInterfaceDispatch":   true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithFuncValue":           true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithFloatCondition":      true,
 	}
 
 	for name := range expectedLeaves {
@@ -260,7 +260,7 @@ func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 
 func TestComputeErrorsDetectsClosure(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -273,8 +273,8 @@ func TestComputeErrorsDetectsClosure(t *testing.T) {
 	cr := Compute(result, cg)
 
 	expectedClosure := map[string]bool{
-		"github.com/rcownie/cleat/testdata/errors.BadWorkflow":      true,
-		"github.com/rcownie/cleat/testdata/errors.unthreadedHelper": true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWorkflow":      true,
+		"github.com/cleat-team/cleat/testdata/errors.unthreadedHelper": true,
 	}
 
 	for name := range expectedClosure {
@@ -286,7 +286,7 @@ func TestComputeErrorsDetectsClosure(t *testing.T) {
 
 func TestComputeErrorsCorrectlyTagsPure(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestComputeErrorsCorrectlyTagsPure(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	pureName := "github.com/rcownie/cleat/testdata/errors.pureHelper"
+	pureName := "github.com/cleat-team/cleat/testdata/errors.pureHelper"
 	if !cr.Pure[pureName] {
 		t.Errorf("expected %s to be pure", pureName)
 	}
@@ -306,7 +306,7 @@ func TestComputeErrorsCorrectlyTagsPure(t *testing.T) {
 
 func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -318,7 +318,7 @@ func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	badName := "github.com/rcownie/cleat/testdata/errors.BadWithInterfaceDispatch"
+	badName := "github.com/cleat-team/cleat/testdata/errors.BadWithInterfaceDispatch"
 
 	errs := cr.Errors[badName]
 	if len(errs) == 0 {
@@ -342,7 +342,7 @@ func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
 
 func TestComputeErrorsDetectsFuncValueCall(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestComputeErrorsDetectsFuncValueCall(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	badName := "github.com/rcownie/cleat/testdata/errors.BadWithFuncValue"
+	badName := "github.com/cleat-team/cleat/testdata/errors.BadWithFuncValue"
 
 	errs := cr.Errors[badName]
 	if len(errs) == 0 {
@@ -378,7 +378,7 @@ func TestComputeErrorsDetectsFuncValueCall(t *testing.T) {
 
 func TestComputeErrorsDetectsFloatInCondition(t *testing.T) {
 	fset := token.NewFileSet()
-	result, err := analyzer.LoadPackages("github.com/rcownie/cleat/testdata/errors", fset)
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
 	if err != nil {
 		t.Fatalf("LoadPackages failed: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestComputeErrorsDetectsFloatInCondition(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	badName := "github.com/rcownie/cleat/testdata/errors.BadWithFloatCondition"
+	badName := "github.com/cleat-team/cleat/testdata/errors.BadWithFloatCondition"
 
 	warns := cr.Warnings[badName]
 	if len(warns) == 0 {

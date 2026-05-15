@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 	"github.com/tetratelabs/wazero"
 )
 
@@ -659,7 +659,7 @@ func TestFaultInjector_Context(t *testing.T) {
 
 func TestRuntime_StdoutStderr(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestRuntime_StdoutStderr(t *testing.T) {
 
 func TestRuntime_InstantiateAndInit(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -699,7 +699,7 @@ func TestRuntime_InstantiateAndInit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewWorkflowLoader_Defaults(t *testing.T) {
-	l := NewWorkflowLoader(nil, nil)
+	l := NewWorkflowLoader(nil, nil, nil)
 	if l == nil {
 		t.Fatal("NewWorkflowLoader returned nil")
 	}
@@ -716,7 +716,7 @@ func TestNewWorkflowLoader_Defaults(t *testing.T) {
 }
 
 func TestNewWorkflowLoader_CustomMaxSize(t *testing.T) {
-	l := NewWorkflowLoader(nil, nil, 42)
+	l := NewWorkflowLoader(nil, nil, nil, 42)
 	stats := l.CacheStats()
 	if stats.MaxSize != 42 {
 		t.Errorf("expected MaxSize 42, got %d", stats.MaxSize)
@@ -724,7 +724,7 @@ func TestNewWorkflowLoader_CustomMaxSize(t *testing.T) {
 }
 
 func TestNewWorkflowLoader_ZeroMaxSize(t *testing.T) {
-	l := NewWorkflowLoader(nil, nil, 0)
+	l := NewWorkflowLoader(nil, nil, nil, 0)
 	stats := l.CacheStats()
 	if stats.MaxSize != 100 {
 		t.Errorf("zero maxSize should default to 100, got %d", stats.MaxSize)
@@ -822,7 +822,7 @@ func TestFaultInjector_CleanupAllFaultTypes(t *testing.T) {
 
 func TestRuntime_InitModuleNoStart(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1116,7 +1116,7 @@ func TestMinU32(t *testing.T) {
 
 func TestWorkflowLoader_CachePutAndGet(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1128,7 +1128,7 @@ func TestWorkflowLoader_CachePutAndGet(t *testing.T) {
 	}
 	defer compiled.Close(ctx)
 
-	l := NewWorkflowLoader(nil, rt, 10)
+	l := NewWorkflowLoader(nil, rt, nil, 10)
 
 	key := defKey{Name: "test-wf", Version: 1}
 
@@ -1161,7 +1161,7 @@ func TestWorkflowLoader_CachePutAndGet(t *testing.T) {
 
 func TestWorkflowLoader_CacheRemove(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1172,7 +1172,7 @@ func TestWorkflowLoader_CacheRemove(t *testing.T) {
 		t.Fatalf("CompileModule: %v", err)
 	}
 
-	l := NewWorkflowLoader(nil, rt, 10)
+	l := NewWorkflowLoader(nil, rt, nil, 10)
 
 	key := defKey{Name: "test-wf", Version: 1}
 	l.cachePut(key, compiled)
@@ -1191,14 +1191,14 @@ func TestWorkflowLoader_CacheRemove(t *testing.T) {
 
 func TestWorkflowLoader_CacheEviction(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	defer rt.Close(ctx)
 
 	// Max size 1 means the second insert should evict the first.
-	l := NewWorkflowLoader(nil, rt, 1)
+	l := NewWorkflowLoader(nil, rt, nil, 1)
 
 	mod1, err := rt.CompileModule(ctx, minimalWasm())
 	if err != nil {
@@ -1240,14 +1240,14 @@ func TestWorkflowLoader_CacheEviction(t *testing.T) {
 
 func TestWorkflowLoader_CacheLRUPromotion(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	defer rt.Close(ctx)
 
 	// Max size 2.
-	l := NewWorkflowLoader(nil, rt, 2)
+	l := NewWorkflowLoader(nil, rt, nil, 2)
 
 	mods := make([]wazero.CompiledModule, 3)
 	for i := 0; i < 3; i++ {
@@ -1286,14 +1286,14 @@ func TestWorkflowLoader_CacheLRUPromotion(t *testing.T) {
 }
 
 func TestWorkflowLoader_EvictLockedEmptyCache(t *testing.T) {
-	l := NewWorkflowLoader(nil, nil, 10)
+	l := NewWorkflowLoader(nil, nil, nil, 10)
 	// Evict on empty cache should not panic.
 	l.evictLocked()
 }
 
 func TestWorkflowLoader_CacheUpdateExisting(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1309,7 +1309,7 @@ func TestWorkflowLoader_CacheUpdateExisting(t *testing.T) {
 		t.Fatalf("CompileModule mod2: %v", err)
 	}
 
-	l := NewWorkflowLoader(nil, rt, 10)
+	l := NewWorkflowLoader(nil, rt, nil, 10)
 	key := defKey{Name: "wf", Version: 1}
 
 	// Put first module.
@@ -1392,16 +1392,16 @@ func (s *stubWorkflowStore) LoadWASM(ctx context.Context, defName string, defVer
 func (s *stubWorkflowStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	return nil, nil
 }
-func (s *stubWorkflowStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
+func (s *stubWorkflowStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	return false, nil
 }
-func (s *stubWorkflowStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
+func (s *stubWorkflowStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
 	return nil
 }
-func (s *stubWorkflowStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+func (s *stubWorkflowStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
-func (s *stubWorkflowStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+func (s *stubWorkflowStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 	return nil
 }
 func (s *stubWorkflowStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
@@ -1586,11 +1586,11 @@ func (s *stubWorkflowStore) StreamEventHistory(ctx context.Context, workflowID s
 	return eventCh, errCh
 }
 
-func (s *stubWorkflowStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
+func (s *stubWorkflowStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
 	return "", nil
 }
 
-func (s *stubWorkflowStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (s *stubWorkflowStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	return nil
 }
 
@@ -2437,10 +2437,15 @@ func (m *mockPurgeStore) BatchHeartbeat(ctx context.Context, workerID string) (i
 
 func (s *stubWorkflowStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) { return nil, nil }
 func (s *stubWorkflowStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
-func (s *stubWorkflowStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
+func (s *stubWorkflowStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
 func (s *stubWorkflowStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (s *stubWorkflowStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
 func (s *stubWorkflowStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
+
+func (s *stubWorkflowStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) { return 0, nil }
+
+func (s *stubWorkflowStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
+func (s *stubWorkflowStore) GetEventCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
@@ -2451,11 +2456,11 @@ func (m *mockCollectMetricsStore) AppendEventHistoryBatch(ctx context.Context, w
 func (m *mockCollectMetricsStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockCollectMetricsStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
-func (m *mockCollectMetricsStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) { return false, nil }
-func (m *mockCollectMetricsStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error { return nil }
-func (m *mockCollectMetricsStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
-func (m *mockCollectMetricsStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
-func (m *mockCollectMetricsStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error { return nil }
+func (m *mockCollectMetricsStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
+func (m *mockCollectMetricsStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
+func (m *mockCollectMetricsStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
+func (m *mockCollectMetricsStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockCollectMetricsStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error { return nil }
 func (m *mockCollectMetricsStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
 func (m *mockCollectMetricsStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockCollectMetricsStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
@@ -2516,11 +2521,11 @@ func (m *mockCheckStaleStore) AppendEventHistoryBatch(ctx context.Context, workf
 func (m *mockCheckStaleStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockCheckStaleStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
 func (m *mockCheckStaleStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
-func (m *mockCheckStaleStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) { return false, nil }
-func (m *mockCheckStaleStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error { return nil }
-func (m *mockCheckStaleStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
-func (m *mockCheckStaleStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
-func (m *mockCheckStaleStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error { return nil }
+func (m *mockCheckStaleStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
+func (m *mockCheckStaleStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
+func (m *mockCheckStaleStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
+func (m *mockCheckStaleStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockCheckStaleStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error { return nil }
 func (m *mockCheckStaleStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
 func (m *mockCheckStaleStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockCheckStaleStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
@@ -2581,12 +2586,12 @@ func (m *mockGCStore) AppendEventHistoryBatch(ctx context.Context, workflowID st
 func (m *mockGCStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockGCStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
 func (m *mockGCStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
-func (m *mockGCStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) { return false, nil }
-func (m *mockGCStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error { return nil }
-func (m *mockGCStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
-func (m *mockGCStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockGCStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
+func (m *mockGCStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
+func (m *mockGCStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
+func (m *mockGCStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
 func (m *mockGCStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
-func (m *mockGCStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error { return nil }
+func (m *mockGCStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error { return nil }
 func (m *mockGCStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
 func (m *mockGCStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockGCStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
@@ -2646,11 +2651,11 @@ func (m *mockPurgeStore) AppendEventHistoryBatch(ctx context.Context, workflowID
 func (m *mockPurgeStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockPurgeStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
 func (m *mockPurgeStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
-func (m *mockPurgeStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) { return false, nil }
-func (m *mockPurgeStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error { return nil }
-func (m *mockPurgeStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
-func (m *mockPurgeStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
-func (m *mockPurgeStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error { return nil }
+func (m *mockPurgeStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
+func (m *mockPurgeStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
+func (m *mockPurgeStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
+func (m *mockPurgeStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockPurgeStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error { return nil }
 func (m *mockPurgeStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
 func (m *mockPurgeStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockPurgeStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }

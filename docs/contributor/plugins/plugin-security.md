@@ -437,7 +437,7 @@ plugins and your private index for internal plugins:
 
 ```
 cleat config set plugin_index_urls [
-  "https://raw.githubusercontent.com/rcownie/cleat-plugins/main/index.yaml",
+  "https://raw.githubusercontent.com/cleat-team/cleat-plugins/main/index.yaml",
   "https://git.internal/my-company/cleat-private-index/raw/main/index.yaml"
 ]
 ```

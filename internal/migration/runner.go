@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // Runner applies pending SQL migrations to a database.

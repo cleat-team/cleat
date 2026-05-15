@@ -3,7 +3,7 @@ package e015
 import (
 	"fmt"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // Workflow triggers E015 by using fmt.Println.

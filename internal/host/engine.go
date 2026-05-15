@@ -21,8 +21,8 @@ import (
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/experimental"
 
-	"github.com/rcownie/cleat/internal/plugin"
-	"github.com/rcownie/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/wasm"
 )
 
 // MaxRetryAttempts is the worker-enforced ceiling for DurableCallWithRetry
@@ -561,7 +561,19 @@ type Engine struct {
 	// between the engine returning and the worker calling store.ContinueAsNew.
 	// When set, the engine handles ContinueAsNew inline and marks the
 	// SuspendResult as ContinueAsNewHandled.
-	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)
+	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)
+
+	// Encryption at rest for sensitive event payloads.
+	encryption              *PayloadEncryption
+	encryptSensitivePayloads bool
+
+	// WorkflowStore for per-backend-aware event count operations.
+	workflowStore WorkflowStore
+
+	// Per-workflow resource quotas.
+	maxQuotaEvents          int
+	maxQuotaChildren        int
+	maxQuotaConcurrencyKeys int
 
 	// backends maps language strings (e.g., "go", "python") to WasmBackend
 	// implementations. When a backend is registered for the detected language,
@@ -571,6 +583,15 @@ type Engine struct {
 	// defaultBackend is the language key used as fallback when no backend
 	// matches the detected language. Defaults to "go".
 	defaultBackend string
+
+	// maxEventsPerWorkflow is the maximum number of events per workflow run.
+	// When this limit is reached, auto-ContinueAsNew is triggered.
+	// Zero means unlimited.
+	maxEventsPerWorkflow int
+
+	// initialEventCount is the event count at session start, loaded from
+	// the store so the session can track events locally without DB queries.
+	initialEventCount int
 }
 
 // EngineOption configures an Engine.
@@ -669,11 +690,54 @@ func WithDB(db *sql.DB) EngineOption {
 	return func(e *Engine) { e.db = db }
 }
 
+// WithWorkflowStore sets the workflow store used for backend-aware event count
+// quota checks. Required when MaxQuotaEvents > 0.
+func WithWorkflowStore(store WorkflowStore) EngineOption {
+	return func(e *Engine) { e.workflowStore = store }
+}
+
+// WithEncryption sets encryption at rest for sensitive event payloads.
+func WithEncryption(enc *PayloadEncryption, enabled bool) EngineOption {
+	return func(e *Engine) {
+		e.encryption = enc
+		e.encryptSensitivePayloads = enabled
+	}
+}
+
+// WithMaxQuotaEvents sets the maximum number of events per workflow before
+// quota enforcement kicks in and before auto-ContinueAsNew triggers.
+// Zero means unlimited.
+func WithMaxQuotaEvents(n int) EngineOption {
+	return func(e *Engine) {
+		e.maxQuotaEvents = n
+		e.maxEventsPerWorkflow = n
+	}
+}
+
+// WithMaxQuotaChildren sets the maximum number of child workflows per workflow
+// before quota enforcement kicks in. Zero means unlimited.
+func WithMaxQuotaChildren(n int) EngineOption {
+	return func(e *Engine) { e.maxQuotaChildren = n }
+}
+
+// WithMaxQuotaConcurrencyKeys sets the maximum number of concurrency keys per
+// workflow before quota enforcement kicks in. Zero means unlimited.
+func WithMaxQuotaConcurrencyKeys(n int) EngineOption {
+	return func(e *Engine) { e.maxQuotaConcurrencyKeys = n }
+}
+
 // WithMaxRetryAttempts sets a worker-configured ceiling on retry attempts
 // for DurableCallWithRetry, overriding MaxRetryAttempts when set to a
 // positive value less than the constant.
 func WithMaxRetryAttempts(n int) EngineOption {
 	return func(e *Engine) { e.maxRetries = n }
+}
+
+// WithInitialEventCount sets the starting event count for the session.
+// The session tracks events locally (no DB queries) and triggers
+// auto-ContinueAsNew when the count reaches maxEventsPerWorkflow.
+func WithInitialEventCount(n int) EngineOption {
+	return func(e *Engine) { e.initialEventCount = n }
 }
 
 // WithVersionValidation sets an optional function called at the start of
@@ -729,7 +793,7 @@ func WithDefaultWorkflowTimeout(d time.Duration) EngineOption {
 // transition atomically (events + new run + old run completion).
 // When set, the engine calls this from its suspend path, eliminating
 // the race between engine return and worker-side store.ContinueAsNew call.
-func WithContinueAsNewHandler(fn func(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)) EngineOption {
+func WithContinueAsNewHandler(fn func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)) EngineOption {
 	return func(e *Engine) { e.continueAsNewHandler = fn }
 }
 
@@ -911,8 +975,9 @@ func (e *Engine) executeWithBackend(
 				log.Printf("[engine] workflow %s: checksum verification failed: %v", e.workflowID, verr)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
-					return "", nil, nil, nil, nil, fmt.Errorf("host: checksum verification failed: %w", verr)
+					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, verr)
 				}
+				log.Printf("[engine] workflow %s: checksum verification failed but proceeding (failOnChecksumMismatch=false)", e.workflowID)
 			}
 		}
 
@@ -955,7 +1020,10 @@ func (e *Engine) executeWithBackend(
 		}
 		if se.Reason == "continue_as_new" && e.continueAsNewHandler != nil && !session.isReplay {
 			newEvents := session.history[len(replayHistory):]
-			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, e.defName, e.defVersion, se.NewInput, newEvents, res.Result, session.queryState)
+			// generation is 0 because the engine does not yet track generation
+			// for continue-as-new; this code path is dormant (handler is never
+			// wired in current deployments).
+			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, res.Result, session.queryState)
 			if cnErr != nil {
 				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
 			}
@@ -1009,6 +1077,8 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		defName:    e.defName,
 		execRunID:  e.workflowID,
 		tenantID:   e.tenantID,
+		originalInput: string(input),
+		eventCount:    e.initialEventCount,
 	}
 
 	execCtx := withHandler(ctx, session)
@@ -1037,8 +1107,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				log.Printf("[engine] workflow %s: checksum verification failed: %v", e.workflowID, err)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
-					return "", nil, nil, nil, nil, fmt.Errorf("host: checksum verification failed: %w", err)
+					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, err)
 				}
+				log.Printf("[engine] workflow %s: checksum verification failed but proceeding (failOnChecksumMismatch=false)", e.workflowID)
 			}
 		}
 
@@ -1071,8 +1142,11 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				Deferrals:    session.deferrals,
 			}
 			if se.Reason == "continue_as_new" && e.continueAsNewHandler != nil && !session.isReplay {
+			// generation is 0 because the engine does not yet track generation
+			// for continue-as-new; this code path is dormant (handler is never
+			// wired in current deployments).
 				newEvents := session.history[len(replayHistory):]
-				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState)
+				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState)
 				if cnErr != nil {
 					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
 				}
@@ -1331,8 +1405,11 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 				Deferrals:    session.deferrals,
 			}
 			if se.Reason == "continue_as_new" && e.continueAsNewHandler != nil && !session.isReplay {
+			// generation is 0 because the engine does not yet track generation
+			// for continue-as-new; this code path is dormant (handler is never
+			// wired in current deployments).
 				newEvents := session.history
-				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState)
+				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState)
 				if cnErr != nil {
 					return "", session.history, nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
 				}
@@ -1455,6 +1532,18 @@ type execSession struct {
 	scopeInstKey string // current instance key in scope
 	scopeSet     bool   // true when scope is active
 	heldScopes   []string // concurrency keys held for virtual object scopes
+
+	// originalInput stores the initial workflow input for auto-ContinueAsNew.
+	originalInput string
+
+	// autoContinueAsNewTriggered is set to true after the event cap is hit
+	// to prevent repeated triggers during the same execution segment.
+	autoContinueAsNewTriggered bool
+
+	// eventCount tracks the number of durable call events in this session.
+	// Incremented per freshCall; compared against maxEventsPerWorkflow for
+	// auto-ContinueAsNew without querying the database.
+	eventCount int
 }
 
 var _ HostHandler = (*execSession)(nil)
@@ -1504,6 +1593,21 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 			return packDurableCallResult(int(written), 1, 1)
 		}
 	}
+
+	// Check event cap: if the number of events has reached the limit, auto-trigger
+	// ContinueAsNew to start a fresh run with reset event_count. Events are
+	// tracked locally in the session (no DB query per call).
+	if s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow && !s.autoContinueAsNewTriggered {
+		s.autoContinueAsNewTriggered = true
+		continueAsNewTotal.WithLabelValues("event_cap").Inc()
+		log.Printf("[engine] workflow %s: auto-ContinueAsNew triggered (event_count=%d, max=%d)",
+			s.workflowID, s.eventCount, s.engine.maxEventsPerWorkflow)
+		s.ContinueAsNew(ctx, m, s.originalInput)
+		m.CloseWithExitCode(ctx, 0)
+		written, _ := s.writeResult(ctx, m, responsePtr, "", responseMaxLen)
+		return packDurableCallResult(int(written), 0, 0)
+	}
+	s.eventCount++
 
 	resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
 
@@ -1570,6 +1674,7 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 		// but the outcome was never persisted.  Return ErrAmbiguous so
 		// the caller can check the external service before retrying.
 		if rec.Err == pendingSentinel {
+			ambiguousCallsTotal.Inc()
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)
@@ -2041,6 +2146,7 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 		// but the outcome was never persisted.  Return ErrAmbiguous so
 		// the caller can check the external service before retrying.
 		if rec.Err == pendingSentinel {
+			ambiguousCallsTotal.Inc()
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)
@@ -2418,6 +2524,23 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	}
 
 	if s.engine.childWfStore != nil {
+		// Check child workflow quota before creating the child.
+		if s.engine.maxQuotaChildren > 0 && s.engine.workflowStore != nil {
+			count, err := s.engine.workflowStore.GetChildCount(ctx, s.workflowID)
+			if err != nil {
+				errMsg := fmt.Sprintf("workflow %s: failed to check child quota: %v", s.workflowID, err)
+				log.Printf("[engine] %s", errMsg)
+				errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+				return int64(uint64(errWritten)<<32 | 4)
+			}
+			if count >= s.engine.maxQuotaChildren {
+				errMsg := fmt.Sprintf("workflow %s: child workflow quota exceeded (current %d, max %d)", s.workflowID, count, s.engine.maxQuotaChildren)
+				log.Printf("[engine] %s", errMsg)
+				errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+				return int64(uint64(errWritten)<<32 | 4)
+			}
+		}
+
 		// Build the event record before the store call so the store can
 		// INSERT it atomically with the child row.
 		rec := EventRecord{
@@ -3242,6 +3365,38 @@ func (s *execSession) AcquireLock(ctx context.Context, m api.Module, key string,
 func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64 {
 	var acquired bool
 	if s.engine.concurrencyKeyStore != nil {
+		// Check concurrency key quota before acquiring.
+		if s.engine.maxQuotaConcurrencyKeys > 0 && s.engine.workflowStore != nil {
+			count, err := s.engine.workflowStore.GetConcurrencyKeyCount(ctx, s.workflowID)
+			if err != nil {
+				log.Printf("[engine] workflow %s: failed to check concurrency key quota: %v", s.workflowID, err)
+				rec := EventRecord{
+					Step:         s.stepCount,
+					EventType:    EventTypeAcquireLock,
+					LockKey:      key,
+					LockTTLMs:    ttlMs,
+					LockAcquired: 0,
+					Err:          err.Error(),
+				}
+				s.recordEvent(rec)
+				return packAcquireLockResult(false, 1)
+			}
+			if count >= s.engine.maxQuotaConcurrencyKeys {
+				errMsg := fmt.Sprintf("workflow %s: concurrency key quota exceeded (current %d, max %d)", s.workflowID, count, s.engine.maxQuotaConcurrencyKeys)
+				log.Printf("[engine] %s", errMsg)
+				rec := EventRecord{
+					Step:         s.stepCount,
+					EventType:    EventTypeAcquireLock,
+					LockKey:      key,
+					LockTTLMs:    ttlMs,
+					LockAcquired: 0,
+					Err:          errMsg,
+				}
+				s.recordEvent(rec)
+				return packAcquireLockResult(false, 1)
+			}
+		}
+
 		var err error
 		acquired, err = s.engine.concurrencyKeyStore.AcquireConcurrencyKey(ctx, key, s.workflowID, time.Duration(ttlMs)*time.Millisecond)
 		if err != nil {
@@ -3976,6 +4131,11 @@ func stripCompactedEvents(history []EventRecord, compactedStep int) []EventRecor
 // This guarantees exactly-once: if the worker crashes before the workflow
 // completes, replay will find this event and return the cached response.
 // Retries with [100ms, 200ms, 400ms] backoff on transient failures.
+//
+// NOTE: flushEvent, flushCallIntent, and completeCallEvent use Postgres-specific
+// SQL syntax ($N placeholders, ON CONFLICT). This is a known portability
+// constraint -- MySQL and MSSQL workers use the batch path (appendEventsInTx
+// via FinalizeWorkflowSegment) which is fully dialect-abstracted.
 func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRecord) error {
 	if e.db == nil {
 		return nil
@@ -4002,12 +4162,167 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			break
 		}
 
-		checksum := computeEventChecksum(rec)
+		var prevChecksum string
+		if rec.Step > 1 {
+			tx.QueryRowContext(ctx, `SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = $1 AND step = $2`,
+				workflowID, rec.Step-1).Scan(&prevChecksum)
+		}
+		checksum := computeEventChecksum(rec, prevChecksum)
 		payloadJSON, _ := eventRecordToPayload(rec)
 		payloadArg := nullStr("")
 		if len(payloadJSON) > 0 {
 			payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
 		}
+
+		requestStr := tryEncodeBase64(rec.Request)
+		responseStr := tryEncodeBase64(rec.Response)
+		errStr := rec.Err
+		sigPayload := rec.SignalPayload
+		childInput := rec.ChildInput
+		newInput := rec.NewInput
+		pluginInput := rec.PluginInput
+		pluginOutput := rec.PluginOutput
+		promiseResult := rec.PromiseResult
+		promiseError := rec.PromiseError
+
+		// Encrypt sensitive payload fields when encryption is enabled.
+		// On any encryption failure, abort the flush (fail-secure). Silently
+		// storing plaintext when encryption is enabled would be a data leak.
+		if e.encryptSensitivePayloads && e.encryption != nil {
+			var encErr error
+
+			if requestStr, encErr = e.encryption.EncryptString(rec.Request); encErr != nil {
+				log.Printf("[engine] encryption failed for field request in workflow %s: %v", workflowID, encErr)
+				encryptionErrorsTotal.Inc()
+				tx.Rollback()
+				lastErr = fmt.Errorf("flush event: encrypt request: %w", encErr)
+				if attempt < len(backoff) { continue }
+				break
+			}
+			if responseStr, encErr = e.encryption.EncryptString(rec.Response); encErr != nil {
+				log.Printf("[engine] encryption failed for field response in workflow %s: %v", workflowID, encErr)
+				encryptionErrorsTotal.Inc()
+				tx.Rollback()
+				lastErr = fmt.Errorf("flush event: encrypt response: %w", encErr)
+				if attempt < len(backoff) { continue }
+				break
+			}
+			if errStr, encErr = e.encryption.EncryptString(rec.Err); encErr != nil {
+				log.Printf("[engine] encryption failed for field err in workflow %s: %v", workflowID, encErr)
+				encryptionErrorsTotal.Inc()
+				tx.Rollback()
+				lastErr = fmt.Errorf("flush event: encrypt err: %w", encErr)
+				if attempt < len(backoff) { continue }
+				break
+			}
+			if rec.SignalPayload != "" {
+				if sigPayload, encErr = e.encryption.EncryptString(rec.SignalPayload); encErr != nil {
+					log.Printf("[engine] encryption failed for field signal_payload in workflow %s: %v", workflowID, encErr)
+					encryptionErrorsTotal.Inc()
+					tx.Rollback()
+					lastErr = fmt.Errorf("flush event: encrypt signal_payload: %w", encErr)
+					if attempt < len(backoff) { continue }
+					break
+				}
+			}
+			if rec.ChildInput != "" {
+				if childInput, encErr = e.encryption.EncryptString(rec.ChildInput); encErr != nil {
+					log.Printf("[engine] encryption failed for field child_input in workflow %s: %v", workflowID, encErr)
+					encryptionErrorsTotal.Inc()
+					tx.Rollback()
+					lastErr = fmt.Errorf("flush event: encrypt child_input: %w", encErr)
+					if attempt < len(backoff) { continue }
+					break
+				}
+			}
+			if rec.NewInput != "" {
+				if newInput, encErr = e.encryption.EncryptString(rec.NewInput); encErr != nil {
+					log.Printf("[engine] encryption failed for field new_input in workflow %s: %v", workflowID, encErr)
+					encryptionErrorsTotal.Inc()
+					tx.Rollback()
+					lastErr = fmt.Errorf("flush event: encrypt new_input: %w", encErr)
+					if attempt < len(backoff) { continue }
+					break
+				}
+			}
+			if rec.PluginInput != "" {
+				if pluginInput, encErr = e.encryption.EncryptString(rec.PluginInput); encErr != nil {
+					log.Printf("[engine] encryption failed for field plugin_input in workflow %s: %v", workflowID, encErr)
+					encryptionErrorsTotal.Inc()
+					tx.Rollback()
+					lastErr = fmt.Errorf("flush event: encrypt plugin_input: %w", encErr)
+					if attempt < len(backoff) { continue }
+					break
+				}
+			}
+			if rec.PluginOutput != "" {
+				if pluginOutput, encErr = e.encryption.EncryptString(rec.PluginOutput); encErr != nil {
+					log.Printf("[engine] encryption failed for field plugin_output in workflow %s: %v", workflowID, encErr)
+					encryptionErrorsTotal.Inc()
+					tx.Rollback()
+					lastErr = fmt.Errorf("flush event: encrypt plugin_output: %w", encErr)
+					if attempt < len(backoff) { continue }
+					break
+				}
+			}
+			if rec.PromiseResult != "" {
+				if promiseResult, encErr = e.encryption.EncryptString(rec.PromiseResult); encErr != nil {
+					log.Printf("[engine] encryption failed for field promise_result in workflow %s: %v", workflowID, encErr)
+					encryptionErrorsTotal.Inc()
+					tx.Rollback()
+					lastErr = fmt.Errorf("flush event: encrypt promise_result: %w", encErr)
+					if attempt < len(backoff) { continue }
+					break
+				}
+			}
+			if rec.PromiseError != "" {
+				if promiseError, encErr = e.encryption.EncryptString(rec.PromiseError); encErr != nil {
+					log.Printf("[engine] encryption failed for field promise_error in workflow %s: %v", workflowID, encErr)
+					encryptionErrorsTotal.Inc()
+					tx.Rollback()
+					lastErr = fmt.Errorf("flush event: encrypt promise_error: %w", encErr)
+					if attempt < len(backoff) { continue }
+					break
+				}
+			}
+			// Encrypt payload JSON when present.
+			if len(payloadJSON) > 0 {
+				var encrypted []byte
+				if encrypted, encErr = e.encryption.EncryptJSON(payloadJSON); encErr != nil {
+					log.Printf("[engine] encryption failed for field payload in workflow %s: %v", workflowID, encErr)
+					encryptionErrorsTotal.Inc()
+					tx.Rollback()
+					lastErr = fmt.Errorf("flush event: encrypt payload: %w", encErr)
+					if attempt < len(backoff) { continue }
+					break
+				}
+				payloadArg = sql.NullString{String: string(encrypted), Valid: true}
+			}
+		}
+
+			// Quota check: read current count without incrementing.
+			// Increment happens in appendEventsInTx (via FinalizeWorkflowSegment)
+			// to avoid double-counting with flushEvent's own increment.
+			// Note: event_count is read before appendEventsInTx increments it.
+			// Within a single execution segment, multiple flushEvent calls see the
+			// same count, allowing the quota to be exceeded by the segment size.
+			// This is intentional: the quota is a soft backstop, not an exact cap.
+			// The atomic increment in appendEventsInTx determines the final count.
+			if e.maxQuotaEvents > 0 && e.workflowStore != nil {
+				var currentCount int
+				qErr := tx.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = $1`, workflowID).Scan(&currentCount)
+				if qErr != nil {
+					tx.Rollback()
+					lastErr = fmt.Errorf("flush event: quota check: %w", qErr)
+					if attempt < len(backoff) { continue }
+					break
+				}
+				if currentCount >= e.maxQuotaEvents {
+					tx.Rollback()
+					return fmt.Errorf("flush event: event quota exceeded (max %d)", e.maxQuotaEvents)
+				}
+			}
+
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 				duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
@@ -4021,13 +4336,13 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				$30, NOW())
 			ON CONFLICT (workflow_id, step) DO NOTHING
 		`, workflowID, rec.Step, rec.EventType,
-			nullStr(rec.Service), nullStr(rec.Op), nullStr(tryEncodeBase64(rec.Request)), nullStr(tryEncodeBase64(rec.Response)), nullStr(rec.Err),
+			nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-			nullStr(rec.SignalName), nullStr(rec.SignalPayload),
+			nullStr(rec.SignalName), nullStr(sigPayload),
 			nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-			nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
-			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
-			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
+			nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
+			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
+			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
 			payloadArg,
 			checksum)
 		if err != nil {
@@ -4051,10 +4366,11 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		return nil
 	}
 
-	// All retries exhausted — log a structured error that can be alerted on.
+	// All retries exhausted --- log a structured error that can be alerted on.
 	log.Printf("[engine] flushEvent: all %d retries exhausted for workflow=%s step=%d type=%s: %v",
 		len(backoff), workflowID, rec.Step, rec.EventType, lastErr)
 	return lastErr
+
 }
 
 	// pendingSentinel is stored in the error column of event_history to mark a
@@ -4062,6 +4378,11 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	// not yet persisted.  On replay, a pending event means the call outcome is
 	// ambiguous — the external service may have processed it.
 	const pendingSentinel = "__CLEAT_PENDING_INTENT__"
+
+	// PendingSentinel is the exported form of pendingSentinel, provided so that
+	// external packages (notably the integrity test suite) can reference it
+	// without duplicating the sentinel value.
+	const PendingSentinel = pendingSentinel
 
 	// flushCallIntent inserts a pending event BEFORE the external call is
 	// dispatched.  This provides a durable record of intent: if the worker
@@ -4077,7 +4398,12 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		}
 		defer tx.Rollback()
 
-		checksum := computeEventChecksum(rec)
+		var prevChecksum string
+		if rec.Step > 1 {
+			tx.QueryRowContext(ctx, `SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = $1 AND step = $2`,
+				workflowID, rec.Step-1).Scan(&prevChecksum)
+		}
+		checksum := computeEventChecksum(rec, prevChecksum)
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error, checksum)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -4110,15 +4436,48 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		// Recompute the checksum with the actual response.
 		completed := rec
 		completed.Err = callErr
-		checksum := computeEventChecksum(completed)
+		var prevChecksum string
+		if completed.Step > 1 {
+			tx.QueryRowContext(ctx, `SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = $1 AND step = $2`,
+				workflowID, completed.Step-1).Scan(&prevChecksum)
+		}
+		checksum := computeEventChecksum(completed, prevChecksum)
 
-		_, err = tx.ExecContext(ctx, `
+		responseStr := nullStr(rec.Response)
+		errorStr := nullStr(callErr)
+		if e.encryptSensitivePayloads && e.encryption != nil {
+			s, err := e.encryption.EncryptString(rec.Response)
+			if err != nil {
+				log.Printf("[engine] encryption failed for response in workflow %s step %d: %v", workflowID, rec.Step, err)
+				encryptionErrorsTotal.Inc()
+				tx.Rollback()
+				return fmt.Errorf("complete call event: encrypt response: %w", err)
+			}
+			responseStr = nullStr(s)
+			s, err = e.encryption.EncryptString(callErr)
+			if err != nil {
+				log.Printf("[engine] encryption failed for error in workflow %s step %d: %v", workflowID, rec.Step, err)
+				encryptionErrorsTotal.Inc()
+				tx.Rollback()
+				return fmt.Errorf("complete call event: encrypt error: %w", err)
+			}
+			errorStr = nullStr(s)
+		}
+
+		result, err := tx.ExecContext(ctx, `
 			UPDATE event_history
 			SET response = $1, error = $2, checksum = $6
 			WHERE workflow_id = $3 AND step = $4 AND error = $5
-		`, nullStr(rec.Response), nullStr(callErr), workflowID, rec.Step, pendingSentinel, checksum)
+		`, responseStr, errorStr, workflowID, rec.Step, pendingSentinel, checksum)
 		if err != nil {
 			return fmt.Errorf("complete call event: exec: %w", err)
+		}
+		rows, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("complete call event: rows affected: %w", err)
+		}
+		if rows == 0 {
+			return fmt.Errorf("completeCallEvent: no rows updated for workflow %s step %d — the event may have been completed by another worker", workflowID, rec.Step)
 		}
 		return tx.Commit()
 	}

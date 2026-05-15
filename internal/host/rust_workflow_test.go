@@ -64,7 +64,7 @@ func TestRustWorkflowExecute(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestRustWorkflowReplay(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestRustWorkflowCancelOrder(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestRustWorkflowCompensation(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}

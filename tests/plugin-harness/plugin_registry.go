@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/host"
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // BuildPluginRegistry discovers, initialises, and registers all plugins. It

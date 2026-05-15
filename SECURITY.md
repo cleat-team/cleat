@@ -124,7 +124,7 @@ Cleat follows a **90-day disclosure policy**:
 ## Contact
 
 - **Email**: security@cleat.dev (placeholder -- not yet monitored)
-- **GitHub Security Advisories**: https://github.com/rcownie/cleat/security/advisories/new
+- **GitHub Security Advisories**: https://github.com/cleat-team/cleat/security/advisories/new
   (preferred reporting method)
 
 We encrypt sensitive communications using PGP. Our security team's PGP key
@@ -221,7 +221,7 @@ If a `cleat-worker` process is compromised:
 ## Reporting Process
 
 1. **Do not file a public GitHub issue** for security vulnerabilities.
-2. Submit a report via [GitHub Security Advisories](https://github.com/rcownie/cleat/security/advisories/new)
+2. Submit a report via [GitHub Security Advisories](https://github.com/cleat-team/cleat/security/advisories/new)
    or email **security@cleat.dev**.
 3. You will receive an acknowledgement within 72 hours.
 4. We will maintain confidentiality throughout the investigation and fix process.

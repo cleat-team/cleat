@@ -13,7 +13,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 func runEmbedded(args []string) {
@@ -82,7 +82,7 @@ func runEmbedded(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rt, rtErr := host.NewRuntime(ctx)
+	rt, rtErr := host.NewRuntime(ctx, 0, 0)
 	if rtErr != nil {
 		fmt.Fprintf(os.Stderr, "Error creating runtime: %v\n", rtErr)
 		os.Exit(1)

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // TestingT is the interface required by AssertCalled and AssertNotCalled.

@@ -15,8 +15,8 @@ import (
 	"go/token"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/closure"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/closure"
 )
 
 // PythonTarget identifies the Python WASM compilation target.

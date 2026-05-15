@@ -270,7 +270,7 @@ A third-party plugin author's workflow:
 
 ### The plugin index
 
-The index is a single Git repository (`github.com/rcownie/cleat-plugins`)
+The index is a single Git repository (`github.com/cleat-team/cleat-plugins`)
 containing an `index.yaml` file:
 
 ```yaml
@@ -295,7 +295,7 @@ plugins:
   - name: cleat/llm
     description: Unified LLM interface (chat, embedding, model listing)
     author: cleat
-    repository: https://github.com/rcownie/cleat
+    repository: https://github.com/cleat-team/cleat
     versions:
       - version: 1.0.0
         bundled: true
@@ -808,8 +808,8 @@ plugins they need, just as they do today:
 ```go
 // my-worker/main.go
 import (
-    _ "github.com/rcownie/cleat/plugins/kvstore"
-    _ "github.com/rcownie/cleat/plugins/blobstore"
+    _ "github.com/cleat-team/cleat/plugins/kvstore"
+    _ "github.com/cleat-team/cleat/plugins/blobstore"
 )
 ```
 

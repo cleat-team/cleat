@@ -189,7 +189,7 @@ way as before:
 ```go
 // cmd/cleat-worker/main.go (unchanged)
 import (
-    _ "github.com/rcownie/cleat/plugins/myplugin"
+    _ "github.com/cleat-team/cleat/plugins/myplugin"
 )
 ```
 

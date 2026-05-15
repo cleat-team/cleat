@@ -7,8 +7,8 @@ import (
 	"go/types"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
 )
 
 // ThreadingError records a function in the cleat closure that lacks

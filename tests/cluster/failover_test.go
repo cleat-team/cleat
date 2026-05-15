@@ -15,7 +15,7 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // requireDB is like testStore but skips if CLEAT_TEST_DB is unavailable.
@@ -100,7 +100,7 @@ func TestKillWorkerMidExecution(t *testing.T) {
 	// Simulate worker-1 crash: release its workflows back to ready.
 	for id, workerID := range claimed {
 		if workerID == "worker-1" {
-			if err := store.ReleaseWorkflow(ctx, id, "worker-1", time.Now()); err != nil {
+			if err := store.ReleaseWorkflow(ctx, id, "worker-1", 0, time.Now()); err != nil {
 				t.Logf("ReleaseWorkflow for %s: %v", id, err)
 			}
 		}
@@ -251,7 +251,7 @@ func TestFullClusterRestart(t *testing.T) {
 	}
 
 	// Release the workflow (simulating worker restart before completion).
-	if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", time.Now()); err != nil {
+	if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", 0, time.Now()); err != nil {
 		t.Fatalf("ReleaseWorkflow: %v", err)
 	}
 

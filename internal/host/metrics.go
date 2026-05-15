@@ -30,12 +30,40 @@ var (
 		Name: "cleat_replay_checksum_failures_total",
 		Help: "Number of event history checksum verification failures on replay",
 	})
-	CompactionEventsDeletedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	// Ambiguous calls counter, incremented when replay detects a pending sentinel
+	// (a DurableCall whose external dispatch was recorded but whose outcome was
+	// never persisted before a crash).
+	ambiguousCallsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cleat_ambiguous_calls_total",
+		Help: "Total number of ambiguous call outcomes detected during replay (pending sentinel found)",
+	})
+	compactionEventsDeletedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "cleat_compaction_events_deleted_total",
 		Help: "Number of events deleted by history compaction",
 	})
+	encryptionErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cleat_encryption_errors_total",
+		Help: "Total number of encryption failures during event flush (fail-secure aborts)",
+	})
+	decryptionErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cleat_decryption_errors_total",
+		Help: "Total number of decryption failures on the read path",
+	})
+	continueAsNewTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cleat_continue_as_new_total",
+		Help: "Total ContinueAsNew triggers by reason",
+	}, []string{"reason"})
+	wasmFuelExhaustedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cleat_wasm_fuel_exhausted_total",
+		Help: "Total number of WASM fuel exhaustion events",
+	})
 )
 
+// AmbiguousCallsTotalCounter returns the ambiguous calls total counter for test access.
+// The counter itself is unexported (ambiguousCallsTotal); this accessor allows tests in
+// external packages (e.g., integrity) to read the metric value.
+func AmbiguousCallsTotalCounter() prometheus.Counter { return ambiguousCallsTotal }
+
 func init() {
-	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, CompactionEventsDeletedTotal)
+	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, compactionEventsDeletedTotal, ambiguousCallsTotal, encryptionErrorsTotal, decryptionErrorsTotal, continueAsNewTotal, wasmFuelExhaustedTotal)
 }

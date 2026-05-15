@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/analyzer"
 )
 
 // BuildConfig holds the parameters for assembling a build directory.
@@ -23,7 +23,7 @@ type BuildConfig struct {
 	PkgName string
 
 	// ModulePath is the module path from the project's go.mod
-	// (e.g., "github.com/rcownie/cleat").
+	// (e.g., "github.com/cleat-team/cleat").
 	ModulePath string
 
 	// ProjectRoot is the absolute path to the project root (where go.mod lives).
@@ -190,7 +190,7 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		}
 
 			// Copy cleat/go.mod and go.sum into .deps/cleat/ so that
-			// github.com/rcownie/cleat/cleat is a proper submodule
+			// github.com/cleat-team/cleat/cleat is a proper submodule
 			// resolvable via the replace directive for the root module.
 			for _, modFile := range []string{"go.mod", "go.sum"} {
 				srcMod := filepath.Join(srcCleat, modFile)

@@ -2,6 +2,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{FnArg, ItemFn, Pat};
 
+#[allow(clippy::collapsible_match)]
 pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     let input_fn: ItemFn = syn::parse2(item).expect("#[cleat_entry] requires a function");
 
@@ -103,6 +104,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     let inner_call_args: Vec<_> = {
         let mut args = vec![quote! { &h }];
         for a in &all_args {
+            #[allow(clippy::collapsible_match)]
             if let FnArg::Typed(pt) = a {
                 if let Pat::Ident(pi) = &*pt.pat {
                     let name = &pi.ident;
@@ -125,6 +127,7 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
     let deser_code = if all_args.len() == 1 {
         if let FnArg::Typed(pt) = &all_args[0] {
             let ty = &pt.ty;
+		    #[allow(clippy::collapsible_match)]
             if let Pat::Ident(pi) = &*pt.pat {
                 let name = &pi.ident;
                 quote! {

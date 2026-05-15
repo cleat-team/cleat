@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ func TestDispatchLoop_CapacityLimit(t *testing.T) {
 	w.cancel = cancel
 
 	done := make(chan struct{})
-		w.wg.Add(1)
+	w.wg.Add(1)
 	go func() {
 		w.dispatchLoop()
 		close(done)
@@ -79,7 +79,7 @@ func TestDispatchLoop_StickyReclaim(t *testing.T) {
 		<-loadWASMCh
 		return nil, nil
 	}
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 		return nil
 	}
 
@@ -132,7 +132,7 @@ func TestHeartbeatLoop_SuccessPreservesInflight(t *testing.T) {
 	w.inflight.Store("wf-alive-1", &host.WorkflowInstance{ID: "wf-alive-1"})
 
 	done := make(chan struct{})
-		w.wg.Add(1)
+	w.wg.Add(1)
 	go func() {
 		w.heartbeatLoop()
 		close(done)
@@ -177,7 +177,7 @@ func TestHeartbeatLoop_LostOwnership(t *testing.T) {
 	w.inflight.Store("wf-keep-1", &host.WorkflowInstance{ID: "wf-keep-1"})
 
 	done := make(chan struct{})
-		w.wg.Add(1)
+	w.wg.Add(1)
 	go func() {
 		w.heartbeatLoop()
 		close(done)
@@ -267,11 +267,11 @@ func TestReleaseOrFail_NoError(t *testing.T) {
 	ms := &mockStore{}
 	released := false
 	failed := false
-	ms.releaseWorkflowFn = func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+	ms.releaseWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 		released = true
 		return nil
 	}
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 		failed = true
 		return nil
 	}

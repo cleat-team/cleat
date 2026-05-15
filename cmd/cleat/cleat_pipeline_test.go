@@ -13,11 +13,11 @@ import (
 	"strings"
 	"testing"
 
-	dagplugin "github.com/rcownie/cleat/plugins/dag"
+	dagplugin "github.com/cleat-team/cleat/plugins/dag"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/closure"
-	"github.com/rcownie/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/closure"
+	"github.com/cleat-team/cleat/internal/wasm"
 )
 
 // ---------------------------------------------------------------------------

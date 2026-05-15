@@ -10,12 +10,10 @@ be loaded by the cleat worker runtime.
 """
 
 import argparse
-import json
 import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -300,7 +298,7 @@ def main():
     # Determine output path
     output = args.output or f"{func_name}.wasm"
 
-    print(f"Building WASM component...")
+    print("Building WASM component...")
     print(f"  Entry:  {entry_file}:{func_name}")
     print(f"  Output: {output}")
     print(f"  WIT:    {wit_dir}")
@@ -328,16 +326,16 @@ def main():
 
     info = get_wasm_info(output)
     if not info.get("exists"):
-        print(f"\nBuild SUCCESS", file=sys.stderr)
+        print("\nBuild SUCCESS", file=sys.stderr)
         print(f"  Warning: WASM output not found at {output}", file=sys.stderr)
     else:
-        print(f"\nBuild SUCCESS")
+        print("\nBuild SUCCESS")
         print(f"  Output: {info['path']}")
         print(f"  Size:   {info['size_bytes']:,} bytes ({info['size_mb']} MB)")
 
     if info["size_mb"] > 25:
         print(f"  Warning: WASM binary is large ({info['size_mb']} MB).")
-        print(f"  This is expected for CPython-in-WASM but may affect load times.")
+        print("  This is expected for CPython-in-WASM but may affect load times.")
 
     # ---- Apply --runtime to control decomposition behavior ----
     # --runtime wasmtime  -> skip decomposition (Component Model binary is the output)
@@ -448,7 +446,7 @@ def main():
         stamp_args.append("--verbose")
 
     try:
-        stamp_result = subprocess.run(stamp_args, capture_output=True, text=True, check=True)
+        subprocess.run(stamp_args, capture_output=True, text=True, check=True)
         print("  Metadata stamped successfully.")
     except subprocess.CalledProcessError as e:
         err = e.stderr.strip() if e.stderr else ""

@@ -28,7 +28,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // h is the package-level context object. The transformer auto-threads it

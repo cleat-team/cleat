@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // FromManifest converts a plugin.Manifest to the code-generation IR.

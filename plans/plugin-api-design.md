@@ -156,7 +156,7 @@ Existing OSS library: `github.com/slack-go/slack` (4K+ stars, mature)
 package slacknotify
 
 import (
-    "github.com/rcownie/cleat/internal/plugin"
+    "github.com/cleat-team/cleat/internal/plugin"
     "github.com/slack-go/slack"
 )
 
@@ -226,8 +226,8 @@ package ratelimiter
 
 import (
     "net/http"
-    "github.com/rcownie/cleat/internal/plugin"
-    "github.com/rcownie/cleat/internal/auth"
+    "github.com/cleat-team/cleat/internal/plugin"
+    "github.com/cleat-team/cleat/internal/auth"
     "github.com/ulule/limiter/v3"
     "github.com/ulule/limiter/v3/drivers/store/memory"
 )
@@ -271,7 +271,7 @@ package kafkaconnect
 
 import (
     "github.com/segmentio/kafka-go"
-    "github.com/rcownie/cleat/internal/plugin"
+    "github.com/cleat-team/cleat/internal/plugin"
 )
 
 type Plugin struct {

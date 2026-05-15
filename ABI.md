@@ -107,6 +107,19 @@ Make a recorded API call to an external service.
 
 If `errCode == 0`, the response buffer contains valid JSON. If `errCode == 1`, the response buffer contains an error message string.
 
+##### At-Least-Once Semantics
+
+`cleat_call` provides at-least-once execution, not exactly-once. There is a crash window between the external call completing and the event being persisted to `event_history`. If the worker crashes during this window, replay will not find a recorded event for this step and will re-execute the call.
+
+A write-ahead intent mechanism (`flushCallIntent` / `completeCallEvent` with the `pendingSentinel` sentinel) is being introduced to narrow this window and signal ambiguous outcomes. On replay, if the replay path finds a step whose error field equals the `pendingSentinel` sentinel, it returns an `ErrAmbiguous` error to inform the caller that the outcome is unknown.
+
+Applications must:
+- Design external services to be idempotent (include an idempotency key in every call).
+- Handle the `ErrAmbiguous` error by checking the external service's state.
+- Never assume a `DurableCall` happens exactly once.
+
+See [docs/durable-calls.md](docs/durable-calls.md) for a detailed explanation of the at-least-once contract, the crash window, ambiguity detection, idempotency patterns, and comparison with other frameworks.
+
 #### 2.2 `cleat_call_retry`
 
 Server-side retry variant of `cleat_call`. Retries happen inside the host; one event is recorded regardless of attempt count.

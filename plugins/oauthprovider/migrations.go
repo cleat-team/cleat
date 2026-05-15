@@ -1,6 +1,6 @@
 package oauthprovider
 
-import "github.com/rcownie/cleat/internal/plugin"
+import "github.com/cleat-team/cleat/internal/plugin"
 
 // Migrations returns the database schema for OAuth configuration and sessions.
 // Tables are idempotent (IF NOT EXISTS) and safe to run multiple times.

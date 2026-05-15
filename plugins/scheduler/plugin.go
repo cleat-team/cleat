@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 func init() {

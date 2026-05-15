@@ -35,8 +35,8 @@ langgraph = ["langgraph>=0.2.0"]
 all = ["cleat-sdk[langchain,langgraph,dev]"]
 
 [project.urls]
-Repository = "https://github.com/rcownie/cleat"
-Issues = "https://github.com/rcownie/cleat/issues"
+Repository = "https://github.com/cleat-team/cleat"
+Issues = "https://github.com/cleat-team/cleat/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

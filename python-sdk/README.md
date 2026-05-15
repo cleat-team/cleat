@@ -1,6 +1,6 @@
 # Cleat Python SDK
 
-Python SDK for the [Cleat](https://github.com/rcownie/cleat) durable execution framework. Write workflows in Python, compile to WASM, and run on the Cleat engine.
+Python SDK for the [Cleat](https://github.com/cleat-team/cleat) durable execution framework. Write workflows in Python, compile to WASM, and run on the Cleat engine.
 
 ```python
 from cleat_sdk import HostCalls, cleat_entry

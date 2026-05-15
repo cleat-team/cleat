@@ -28,24 +28,24 @@ Every `go.mod` and `go.sum` in the repo and sub-modules.
 
 **What changes**:
 ```
-github.com/rcownie/cleat          → github.com/rcownie/cleat
-github.com/rcownie/cleat/durable  → github.com/rcownie/cleat/cleat
-github.com/rcownie/cleat/...      → github.com/rcownie/cleat/...
+github.com/cleat-team/cleat          → github.com/cleat-team/cleat
+github.com/cleat-team/cleat/durable  → github.com/cleat-team/cleat/cleat
+github.com/cleat-team/cleat/...      → github.com/cleat-team/cleat/...
 ```
 
 **Files to change**:
 
 | Scope | Count | Method |
 |-------|-------|--------|
-| Root `go.mod` line 1 | 1 | Edit `module github.com/rcownie/cleat` → `module github.com/rcownie/cleat` |
-| `.go` files importing `github.com/rcownie/cleat/...` | ~182 | `find . -name '*.go' -exec sed -i 's|github.com/rcownie/cleat|github.com/rcownie/cleat|g'` |
+| Root `go.mod` line 1 | 1 | Edit `module github.com/cleat-team/cleat` → `module github.com/cleat-team/cleat` |
+| `.go` files importing `github.com/cleat-team/cleat/...` | ~182 | `find . -name '*.go' -exec sed -i 's|github.com/cleat-team/cleat|github.com/cleat-team/cleat|g'` |
 | Sub-module `go.mod` files | ~8 | Manual edit each: `wasm-demo/go.mod`, `ports-round2/*/go.mod`, `benchmarks/comparative/*/temporal/go.mod` |
 | `go.sum` | 1 | Delete and run `go mod tidy` |
 
 **Post-rename verification**:
 ```bash
 # Verify no old import paths remain
-grep -r 'github.com/rcownie/cleat' --include='*.go' .
+grep -r 'github.com/cleat-team/cleat' --include='*.go' .
 # should produce no output
 
 # Rebuild everything
@@ -61,7 +61,7 @@ renamed to match. This is a two-step:
 2. Rename `durable/durabletest/` → `cleat/cleattest/`
 3. Within those files, rename `package durable` → `package cleat` and
    `package durabletest` → `package cleattest`
-4. Update all imports from `github.com/rcownie/cleat/durable` → `github.com/rcownie/cleat/cleat`
+4. Update all imports from `github.com/cleat-team/cleat/durable` → `github.com/cleat-team/cleat/cleat`
 
 ---
 
@@ -123,7 +123,7 @@ package name and its exported types change:
 | `durable.ChildResult` | `cleat.ChildResult` |
 | `durable.HostCallsOptions` | `cleat.HostCallsOptions` |
 | `durable.Saga` | `cleat.Saga` |
-| `import "github.com/rcownie/cleat/cleat"` | (new import path) |
+| `import "github.com/cleat-team/cleat/cleat"` | (new import path) |
 | `durabletest` package | `cleattest` package |
 
 **Files affected**: Every `.go` file that references `durable.` — ~50+
@@ -324,7 +324,7 @@ cmd/cleat/templates/agent/docker-compose.yml — image name
 |------|------|
 | `monitoring/grafana/dashboard.json` | Tags: remove `'durable'` from tags array; description: "Cleat Durable Workflow Engine" → "Cleat Workflow Engine" |
 | `monitoring/grafana-dashboard.json` | Title: "Cleat Durable Execution" → "Cleat Workflow Execution"; tags: remove `'durable-execution'` |
-| `monitoring/prometheus/metrics.go` | Meter path string references old repo path — update to `github.com/rcownie/cleat/monitoring/prometheus` |
+| `monitoring/prometheus/metrics.go` | Meter path string references old repo path — update to `github.com/cleat-team/cleat/monitoring/prometheus` |
 
 ---
 

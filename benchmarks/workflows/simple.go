@@ -8,7 +8,7 @@
 package workflows
 
 import (
-	"github.com/rcownie/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat"
 )
 
 // SimpleInput configures the simple sequential workflow.

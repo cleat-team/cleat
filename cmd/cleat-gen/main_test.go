@@ -218,7 +218,7 @@ func TestGenerateCode(t *testing.T) {
 	// Check key elements are present.
 	checks := []string{
 		"package payments",
-		`import "github.com/rcownie/cleat/cleat"`,
+		`import "github.com/cleat-team/cleat/cleat"`,
 		"type ChargeRequest struct",
 		`json:"user_id"`,
 		"type ChargeResponse struct",

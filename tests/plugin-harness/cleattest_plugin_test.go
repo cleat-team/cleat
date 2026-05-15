@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/rcownie/cleat/cleat/cleattest"
+	"github.com/cleat-team/cleat/cleat/cleattest"
 )
 
 func TestPluginCalls_Cleattest(t *testing.T) {

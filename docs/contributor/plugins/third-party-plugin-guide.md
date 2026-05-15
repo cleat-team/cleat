@@ -510,7 +510,7 @@ sha256sum plugin.wasm
 
 ### Step 3: Submit a PR to the plugin index
 
-1. Fork `github.com/rcownie/cleat-plugins`
+1. Fork `github.com/cleat-team/cleat-plugins`
 2. Add your plugin to `index.yaml`:
 
 ```yaml

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/rcownie/cleat/cleat"
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/cleat"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 func TestInfo(t *testing.T) {

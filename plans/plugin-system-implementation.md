@@ -414,7 +414,7 @@ hand-written.
 ### P5.5: Plugin index repository
 
 **Changes:**
-- Create `github.com/rcownie/cleat-plugins` repository
+- Create `github.com/cleat-team/cleat-plugins` repository
 - `index.yaml` with initial entries for all official plugins
 - `README.md` explaining how to submit a plugin
 - GitHub Actions workflow that validates every PR:

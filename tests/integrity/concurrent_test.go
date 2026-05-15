@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/rcownie/cleat/internal/host"
+	host "github.com/cleat-team/cleat/internal/host"
 )
 
 // TestConcurrentEventAppends verifies that multiple goroutines appending events
@@ -134,7 +134,7 @@ func TestConcurrentClaimAndHeartbeat(t *testing.T) {
 			if wf != nil && wf.ID == runID {
 				// Successfully claimed — heartbeat a few times.
 				for h := 0; h < 3; h++ {
-					alive, err := store.Heartbeat(ctx, runID, workerID)
+					alive, err := store.Heartbeat(ctx, runID, workerID, 0)
 					if err != nil {
 						return
 					}
@@ -227,12 +227,12 @@ func TestConcurrentStatusUpdates(t *testing.T) {
 
 				// Alternate between completing and failing.
 				if iter%2 == 0 {
-					if err := store.CompleteWorkflow(ctx, id, workerID, `{"status":"done"}`, nil); err != nil {
+					if err := store.CompleteWorkflow(ctx, id, workerID, 0, `{"status":"done"}`, nil); err != nil {
 						errCh <- fmt.Errorf("complete %s iter %d: %w", id, iter, err)
 					}
 				} else {
 					// Re-create as ready for next iteration by releasing.
-					if err := store.ReleaseWorkflow(ctx, id, workerID, time.Now()); err != nil {
+					if err := store.ReleaseWorkflow(ctx, id, workerID, 0, time.Now()); err != nil {
 						errCh <- fmt.Errorf("release %s iter %d: %w", id, iter, err)
 					}
 				}

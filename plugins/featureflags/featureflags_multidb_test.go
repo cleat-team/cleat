@@ -22,10 +22,10 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/rcownie/cleat/internal/auth"
-	"github.com/rcownie/cleat/internal/host"
-	"github.com/rcownie/cleat/internal/host/testutil"
-	"github.com/rcownie/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/auth"
+	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host/testutil"
+	"github.com/cleat-team/cleat/internal/plugin"
 )
 
 // testBackendTenantID is the tenant UUID used for multi-backend test requests.

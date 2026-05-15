@@ -1,8 +1,8 @@
 package plugin_test
 import (
 	"testing"
-	"github.com/rcownie/cleat/internal/plugin"
-	"github.com/rcownie/cleat/internal/plugingen"
+	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugingen"
 )
 // TestManifestRoundTrip verifies: manifest --> IR --> code generation -->
 // structurally valid output for all languages.

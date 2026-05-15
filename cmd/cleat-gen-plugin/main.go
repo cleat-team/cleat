@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/rcownie/cleat/internal/plugin"
-	"github.com/rcownie/cleat/internal/plugingen"
+	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/plugingen"
 )
 
 // Flags are registered at package init time so they are available to both

@@ -110,7 +110,7 @@ func TestFaultSlowNetwork(t *testing.T) {
 	}()
 
 	// While the slow query is running, heartbeat should still succeed.
-	alive, err := store.Heartbeat(ctx, runID, "slow-worker")
+	alive, err := store.Heartbeat(ctx, runID, "slow-worker", wf.Generation)
 	if err != nil {
 		t.Fatalf("Heartbeat during slow network: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestFaultSlowNetwork(t *testing.T) {
 	wg.Wait()
 
 	// Verify heartbeat still works after slow query completes.
-	alive, err = store.Heartbeat(ctx, runID, "slow-worker")
+	alive, err = store.Heartbeat(ctx, runID, "slow-worker", wf.Generation)
 	if err != nil {
 		t.Fatalf("Heartbeat after slow network: %v", err)
 	}

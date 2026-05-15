@@ -26,7 +26,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // osExit is replaced in tests to intercept os.Exit calls.
@@ -79,6 +79,8 @@ func main() {
 		runCost(args[1:])
 	case "restore-workflow":
 		runRestoreWorkflow(ctx, store, db, args[1:])
+	case "check-db":
+		runCheckDB(ctx, db, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -100,6 +102,7 @@ Commands:
   deploy plugin <name> <wasm>     deploy a plugin WASM binary
   cost [flags]                    estimate monthly operational costs
   restore-workflow <id> <file>    restore a single workflow from NDJSON backup
+  check-db [--verbose]            verify database connectivity and schema health
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

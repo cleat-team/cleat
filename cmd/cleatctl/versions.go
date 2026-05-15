@@ -8,7 +8,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 func runVersions(ctx context.Context, store host.WorkflowStore, args []string) {
@@ -255,4 +255,3 @@ func gcVersions(ctx context.Context, store host.WorkflowStore, args []string) {
 		}
 	}
 }
-

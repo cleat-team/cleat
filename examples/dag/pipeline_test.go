@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	dagexample "github.com/rcownie/cleat/examples/dag"
-	"github.com/rcownie/cleat/cleat/cleattest"
+	dagexample "github.com/cleat-team/cleat/examples/dag"
+	"github.com/cleat-team/cleat/cleat/cleattest"
 
-	dagplugin "github.com/rcownie/cleat/plugins/dag"
+	dagplugin "github.com/cleat-team/cleat/plugins/dag"
 )
 
 // ---------------------------------------------------------------------------

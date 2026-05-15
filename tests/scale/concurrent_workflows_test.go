@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/rcownie/cleat/internal/host"
+	host "github.com/cleat-team/cleat/internal/host"
 )
 
 // numConcurrentWorkflows returns the number of workflows to create for
@@ -87,7 +87,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 				}
 
 				// Complete the workflow.
-				if err := store.CompleteWorkflow(ctx, wfID, workerID, `{"status":"success"}`, nil); err != nil {
+				if err := store.CompleteWorkflow(ctx, wfID, workerID, 0, `{"status":"success"}`, nil); err != nil {
 					errCh <- fmt.Errorf("complete %s: %w", wfID, err)
 				}
 			}

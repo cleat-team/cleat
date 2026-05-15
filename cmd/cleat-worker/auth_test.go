@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/rcownie/cleat/internal/auth"
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/auth"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // TestAuthMiddlewareRejectsInvalidKey verifies that when auth middleware is

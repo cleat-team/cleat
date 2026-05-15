@@ -20,9 +20,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/rcownie/cleat/internal/analyzer"
-	"github.com/rcownie/cleat/internal/callgraph"
-	"github.com/rcownie/cleat/internal/closure"
+	"github.com/cleat-team/cleat/internal/analyzer"
+	"github.com/cleat-team/cleat/internal/callgraph"
+	"github.com/cleat-team/cleat/internal/closure"
 )
 
 // Result holds the output of the transformation pass.
@@ -336,9 +336,9 @@ func isHostCallsField(field *ast.Field) bool {
 	return ok && pkg.Name == "durable" && sel.Sel.Name == "HostCalls"
 }
 
-// ensureHostCallsImport ensures the file imports "github.com/rcownie/cleat/cleat".
+// ensureHostCallsImport ensures the file imports "github.com/cleat-team/cleat/cleat".
 func ensureHostCallsImport(file *ast.File, result *analyzer.AnalysisResult) {
-	importPath := "github.com/rcownie/cleat/cleat"
+	importPath := "github.com/cleat-team/cleat/cleat"
 
 	for _, imp := range file.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)

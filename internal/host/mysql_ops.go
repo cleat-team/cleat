@@ -1128,3 +1128,41 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 	}
 	return totalDeleted, nil
 }
+
+// GetChildCount returns the number of active (non-terminal) child workflows
+// for the given parent workflow. Terminal statuses are excluded.
+func (s *MySQLStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM workflow_instances
+		WHERE parent_workflow_id = ? AND status NOT IN ('done', 'failed', 'dead_lettered')
+	`, parentWorkflowID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get child count for %s: %w", parentWorkflowID, err)
+	}
+	return count, nil
+}
+
+// GetConcurrencyKeyCount returns the number of non-expired concurrency keys
+// held by the given workflow.
+func (s *MySQLStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM concurrency_keys
+		WHERE workflow_id = ? AND expires_at > NOW(6)
+	`, workflowID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get concurrency key count for %s: %w", workflowID, err)
+	}
+	return count, nil
+}
+
+// GetEventCount returns the event_count for a workflow instance.
+func (s *MySQLStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = ? AND tenant_id = ?`, workflowID, s.tenantID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get event count for %s: %w", workflowID, err)
+	}
+	return count, nil
+}

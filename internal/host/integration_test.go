@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rcownie/cleat/internal/host/testutil"
+	"github.com/cleat-team/cleat/internal/host/testutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ func TestIntegrationFullPipeline(t *testing.T) {
 	}()
 
 	// Create the runtime and store.
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestIntegrationMultiStepSleep(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 	}()
 
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -313,7 +313,7 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 	}()
 
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -435,7 +435,7 @@ func TestIntegrationReplayDivergence(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 	}()
 
-	rt, err := NewRuntime(ctx)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -731,7 +731,7 @@ func TestRLSTenantIsolation(t *testing.T) {
 		}
 
 		// Release tenant A's workflow so it doesn't affect the tenant B test.
-		if err := storeA.ReleaseWorkflow(ctx, wfsA[0].ID, "worker-a", time.Now()); err != nil {
+		if err := storeA.ReleaseWorkflow(ctx, wfsA[0].ID, "worker-a", 0, time.Now()); err != nil {
 			t.Fatalf("ReleaseWorkflow tenant A: %v", err)
 		}
 	}

@@ -175,13 +175,13 @@ Pushing the tag triggers the CI pipeline (GoReleaser), which:
 3. Publishes the release to the GitHub Release page
 
 Monitor the CI pipeline at:
-https://github.com/rcownie/cleat/actions
+https://github.com/cleat-team/cleat/actions
 
 ### 7. Verify the release
 
 Once CI completes:
 
-1. Navigate to https://github.com/rcownie/cleat/releases/tag/vX.Y.Z
+1. Navigate to https://github.com/cleat-team/cleat/releases/tag/vX.Y.Z
 2. Verify:
    - Release title and description are correct
    - Binary assets are attached for all target platforms
@@ -190,7 +190,7 @@ Once CI completes:
 3. Run the release binary locally for a smoke test:
 
 ```bash
-go install github.com/rcownie/cleat/cmd/cleat@vX.Y.Z
+go install github.com/cleat-team/cleat/cmd/cleat@vX.Y.Z
 cleat version  # should show vX.Y.Z
 ```
 
@@ -206,8 +206,8 @@ Highlights:
 - Feature 2: brief description
 - Bug fix: brief description
 
-Install: go install github.com/rcownie/cleat/cmd/cleat@latest
-Release notes: https://github.com/rcownie/cleat/releases/tag/vX.Y.Z
+Install: go install github.com/cleat-team/cleat/cmd/cleat@latest
+Release notes: https://github.com/cleat-team/cleat/releases/tag/vX.Y.Z
 ```
 
 Update the `#release-notes` thread with the changelog.

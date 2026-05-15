@@ -9,7 +9,7 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/rcownie/cleat/internal/host"
+	"github.com/cleat-team/cleat/internal/host"
 )
 
 // testStore returns a *sql.DB and a PostgresStore for tests.
@@ -234,7 +234,7 @@ func TestClusterBasicWorkflowExecution(t *testing.T) {
 	}
 
 	// Complete the workflow.
-	if err := store.CompleteWorkflow(ctx, wf.ID, "worker-1", `{"result":"done"}`, nil); err != nil {
+	if err := store.CompleteWorkflow(ctx, wf.ID, "worker-1", 0, `{"result":"done"}`, nil); err != nil {
 		t.Fatalf("CompleteWorkflow: %v", err)
 	}
 
