@@ -3499,7 +3499,7 @@ func (s *execSession) replayReleaseLock(ctx context.Context, m api.Module, key s
 
 func (s *execSession) SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
 	if s.isReplay {
-		return s.replaySideEffect(ctx, m, respPtr, respMaxLen)
+		return s.replaySideEffect(ctx, m, computedResult, respPtr, respMaxLen)
 	}
 	return s.freshSideEffect(ctx, m, computedResult, respPtr, respMaxLen)
 }
@@ -3518,15 +3518,31 @@ func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, compute
 	return packSimpleResult(0, written)
 }
 
-func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, respPtr, respMaxLen uint32) int64 {
-
-
+func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
 		s.stepCount++
 
 		if rec.EventType != EventTypeSideEffect {
-			return packSimpleResult(1, 0)
+			replayFailuresTotal.Inc()
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected side_effect event, got %s", rec.Step, rec.EventType)
+			written, _ := s.writeResult(ctx, m, respPtr, errMsg, respMaxLen)
+			return packSimpleResult(int(written), 1)
+		}
+
+		// Verify that the replayed SideEffect computedResult matches the
+		// recorded value. A mismatch means the WASM module produced a
+		// different result on replay — a non-determinism bug.
+		if rec.SideEffectResult != computedResult {
+			replayFailuresTotal.Inc()
+			errMsg := fmt.Sprintf(
+				"replay divergence at step %d: SideEffect produced %q but history recorded %q. "+
+					"Your workflow may have a non-determinism bug (time.Now(), random values, "+
+					"map iteration, goroutines). Run 'cleat vet' to check for common issues.",
+				rec.Step, computedResult, rec.SideEffectResult,
+			)
+			written, _ := s.writeResult(ctx, m, respPtr, errMsg, respMaxLen)
+			return packSimpleResult(int(written), 1)
 		}
 
 		written, _ := s.writeResult(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)
@@ -3534,7 +3550,7 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, respPt
 	}
 
 	s.exitReplay()
-	return s.freshSideEffect(ctx, m, "", respPtr, respMaxLen)
+	return s.freshSideEffect(ctx, m, computedResult, respPtr, respMaxLen)
 }
 
 func (s *execSession) WorkflowID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
