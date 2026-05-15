@@ -1416,7 +1416,7 @@ func (s *stubWorkflowStore) DeliverSignal(ctx context.Context, workflowID, signa
 func (s *stubWorkflowStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
 	return "", false, nil
 }
-func (s *stubWorkflowStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (s *stubWorkflowStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string) (string, bool, error) {
 	return "", false, nil
 }
 func (s *stubWorkflowStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
@@ -2465,7 +2465,7 @@ func (m *mockCollectMetricsStore) RequestCancellation(ctx context.Context, workf
 func (m *mockCollectMetricsStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockCollectMetricsStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
 func (m *mockCollectMetricsStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error) { return "", false, nil }
-func (m *mockCollectMetricsStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
+func (m *mockCollectMetricsStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string) (string, bool, error) { return "", false, nil }
 func (m *mockCollectMetricsStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error) { return "", nil }
 func (m *mockCollectMetricsStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy) }
 func (m *mockCollectMetricsStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) { return "", false, nil }
@@ -2530,7 +2530,7 @@ func (m *mockCheckStaleStore) RequestCancellation(ctx context.Context, workflowI
 func (m *mockCheckStaleStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockCheckStaleStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
 func (m *mockCheckStaleStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error) { return "", false, nil }
-func (m *mockCheckStaleStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
+func (m *mockCheckStaleStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string) (string, bool, error) { return "", false, nil }
 func (m *mockCheckStaleStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error) { return "", nil }
 func (m *mockCheckStaleStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy) }
 func (m *mockCheckStaleStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) { return "", false, nil }
@@ -2596,7 +2596,7 @@ func (m *mockGCStore) RequestCancellation(ctx context.Context, workflowID, reaso
 func (m *mockGCStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockGCStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
 func (m *mockGCStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error) { return "", false, nil }
-func (m *mockGCStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
+func (m *mockGCStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string) (string, bool, error) { return "", false, nil }
 func (m *mockGCStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error) { return "", nil }
 func (m *mockGCStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy) }
 func (m *mockGCStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) { return "", false, nil }
@@ -2660,7 +2660,7 @@ func (m *mockPurgeStore) RequestCancellation(ctx context.Context, workflowID, re
 func (m *mockPurgeStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockPurgeStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
 func (m *mockPurgeStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error) { return "", false, nil }
-func (m *mockPurgeStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) { return "", false, nil }
+func (m *mockPurgeStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string) (string, bool, error) { return "", false, nil }
 func (m *mockPurgeStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error) { return "", nil }
 func (m *mockPurgeStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy) }
 func (m *mockPurgeStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) { return "", false, nil }
