@@ -3527,7 +3527,7 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, comput
 			replayFailuresTotal.Inc()
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected side_effect event, got %s", rec.Step, rec.EventType)
 			written, _ := s.writeResult(ctx, m, respPtr, errMsg, respMaxLen)
-			return packSimpleResult(int(written), 1)
+			return packSimpleResult(1, written)
 		}
 
 		// Verify that the replayed SideEffect computedResult matches the
@@ -3542,7 +3542,7 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, comput
 				rec.Step, computedResult, rec.SideEffectResult,
 			)
 			written, _ := s.writeResult(ctx, m, respPtr, errMsg, respMaxLen)
-			return packSimpleResult(int(written), 1)
+			return packSimpleResult(1, written)
 		}
 
 		written, _ := s.writeResult(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)

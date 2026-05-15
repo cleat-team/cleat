@@ -230,9 +230,6 @@ type WorkflowStore interface {
 	// PollAndClaimSignal atomically checks for and claims a pending signal.
 	PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
 
-	// DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
-	DefaultTenantUUID = "00000000-0000-0000-0000-000000000000"
-
 	// StartNewRun creates a new workflow instance.
 	// If idempotencyKey is non-empty, provides exactly-once semantics: a
 	// subsequent call with the same key returns the existing workflow ID
@@ -451,6 +448,9 @@ type WorkflowStore interface {
 	// Used by the engine for auto-ContinueAsNew when the event cap is hit.
 	GetEventCount(ctx context.Context, workflowID string) (int, error)
 }
+
+// DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
+const DefaultTenantUUID = "00000000-0000-0000-0000-000000000000"
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
 type PostgresStore struct {
