@@ -484,15 +484,18 @@ func (s *ShardedStore) PollAndClaimSignal(ctx context.Context, workflowID, signa
 // shard determined by its own ID (not its definition name). This ensures all
 // subsequent operations (LoadEventHistory, child workflows, signals, etc.)
 // route to the same shard.
-func (s *ShardedStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (s *ShardedStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error) {
 	if runID == "" {
 		runID = uuid.New().String()
+	}
+	if tenantID == "" {
+		tenantID = DefaultTenantUUID
 	}
 	shard := s.getShard(runID)
 	if shard == nil {
 		return "", false, fmt.Errorf("start_new_run: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.StartNewRun(ctx, runID, defName, defVersion, input, idempotencyKey)
+	return shard.Store.StartNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID)
 }
 
 // StartChildWorkflow places the child on the same shard as the parent.

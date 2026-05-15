@@ -500,7 +500,7 @@ func (s *MySQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID s
 // If idempotencyKey is non-empty, provides exactly-once semantics: a subsequent
 // call with the same key returns the existing workflow ID without creating a
 // duplicate. Returns the workflow ID, whether it already existed, and any error.
-func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error) {
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -557,7 +557,7 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 			VALUES (?, ?, ?, 'ready', ?,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
 			        ?)
-		`, runID, defName, defVersion, input, defName, defVersion, s.tenantID)
+		`, runID, defName, defVersion, input, defName, defVersion, tenantID)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -577,7 +577,7 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		VALUES (?, ?, ?, 'ready', ?,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = ? AND version = ?), 'default'),
 		        ?)
-	`, runID, defName, defVersion, input, defName, defVersion, s.tenantID)
+	`, runID, defName, defVersion, input, defName, defVersion, tenantID)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}

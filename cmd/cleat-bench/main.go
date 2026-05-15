@@ -136,7 +136,7 @@ func runBenchmark(ctx context.Context, store host.WorkflowStore, defName string,
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "")
+			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", host.DefaultTenantUUID)
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return
@@ -201,7 +201,7 @@ func runReplayBenchmark(ctx context.Context, store host.WorkflowStore, defName s
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "")
+			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", host.DefaultTenantUUID)
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return

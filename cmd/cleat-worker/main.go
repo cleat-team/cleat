@@ -477,7 +477,7 @@ func main() {
 			if len(versions) == 0 {
 				return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
 			}
-			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "")
+			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "", host.DefaultTenantUUID)
 			return runID, err
 		},
 
@@ -1806,7 +1806,7 @@ func (w *Worker) scheduleLoop() {
 					continue
 				}
 
-				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "")
+				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "", host.DefaultTenantUUID)
 				if serr != nil {
 					log.Printf("[worker %s] Scheduler: failed to start %s for schedule %s: %v",
 						w.id, sch.DefName, sch.Name, serr)
@@ -2933,9 +2933,9 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if tenantID == "" {
 		tenantID = input.Namespace
 	}
-	// TODO: wire tenantID through the store (StartNewRun) for namespace-
-	// scoped workflow isolation. Currently parsed but not yet stored.
-	_ = tenantID
+	if tenantID == "" {
+		tenantID = host.DefaultTenantUUID
+	}
 
 	// Find the latest version of this workflow.
 	versions, err := s.store.ListVersions(r.Context(), name)
@@ -2971,7 +2971,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	// Redact sensitive fields in the input before storing.
 	in = json.RawMessage(host.Redact(string(in)))
-	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey)
+	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey, tenantID)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
