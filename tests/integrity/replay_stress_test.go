@@ -165,7 +165,7 @@ func TestReplayStressBasic(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{"UserID":"stress-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
-	rt, err := host.NewRuntime(ctx, 0)
+	rt, err := host.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestReplayStressRandomCrashPoints(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{"UserID":"crash-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
-	rt, err := host.NewRuntime(ctx, 0)
+	rt, err := host.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -485,7 +485,7 @@ func TestReplayDivergenceDetection(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{"UserID":"div-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
-	rt, err := host.NewRuntime(ctx, 0)
+	rt, err := host.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -633,7 +633,7 @@ func TestReplayHashConsistency(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{"UserID":"hash-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
-	rt, err := host.NewRuntime(ctx, 0)
+	rt, err := host.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}

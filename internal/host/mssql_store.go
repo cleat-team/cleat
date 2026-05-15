@@ -2324,6 +2324,16 @@ func (s *MSSQLStore) GetConcurrencyKeyCount(ctx context.Context, workflowID stri
 	return count, nil
 }
 
+// GetEventCount returns the event_count for a workflow instance.
+func (s *MSSQLStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get event count for %s: %w", workflowID, err)
+	}
+	return count, nil
+}
+
 // ---- Sticky Session methods ----
 
 // UpdateStickyWorker sets the sticky worker for a workflow.

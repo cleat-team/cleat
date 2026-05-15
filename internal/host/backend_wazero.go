@@ -18,7 +18,7 @@ type wazeroBackend struct {
 
 // NewWazeroBackend creates a new wazeroBackend with a fresh Runtime.
 func NewWazeroBackend(ctx context.Context) (*wazeroBackend, error) {
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		return nil, err
 	}

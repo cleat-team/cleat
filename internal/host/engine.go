@@ -583,6 +583,15 @@ type Engine struct {
 	// defaultBackend is the language key used as fallback when no backend
 	// matches the detected language. Defaults to "go".
 	defaultBackend string
+
+	// maxEventsPerWorkflow is the maximum number of events per workflow run.
+	// When this limit is reached, auto-ContinueAsNew is triggered.
+	// Zero means unlimited.
+	maxEventsPerWorkflow int
+
+	// initialEventCount is the event count at session start, loaded from
+	// the store so the session can track events locally without DB queries.
+	initialEventCount int
 }
 
 // EngineOption configures an Engine.
@@ -696,9 +705,13 @@ func WithEncryption(enc *PayloadEncryption, enabled bool) EngineOption {
 }
 
 // WithMaxQuotaEvents sets the maximum number of events per workflow before
-// quota enforcement kicks in. Zero means unlimited.
+// quota enforcement kicks in and before auto-ContinueAsNew triggers.
+// Zero means unlimited.
 func WithMaxQuotaEvents(n int) EngineOption {
-	return func(e *Engine) { e.maxQuotaEvents = n }
+	return func(e *Engine) {
+		e.maxQuotaEvents = n
+		e.maxEventsPerWorkflow = n
+	}
 }
 
 // WithMaxQuotaChildren sets the maximum number of child workflows per workflow
@@ -718,6 +731,13 @@ func WithMaxQuotaConcurrencyKeys(n int) EngineOption {
 // positive value less than the constant.
 func WithMaxRetryAttempts(n int) EngineOption {
 	return func(e *Engine) { e.maxRetries = n }
+}
+
+// WithInitialEventCount sets the starting event count for the session.
+// The session tracks events locally (no DB queries) and triggers
+// auto-ContinueAsNew when the count reaches maxEventsPerWorkflow.
+func WithInitialEventCount(n int) EngineOption {
+	return func(e *Engine) { e.initialEventCount = n }
 }
 
 // WithVersionValidation sets an optional function called at the start of
@@ -1057,6 +1077,8 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		defName:    e.defName,
 		execRunID:  e.workflowID,
 		tenantID:   e.tenantID,
+		originalInput: string(input),
+		eventCount:    e.initialEventCount,
 	}
 
 	execCtx := withHandler(ctx, session)
@@ -1510,6 +1532,18 @@ type execSession struct {
 	scopeInstKey string // current instance key in scope
 	scopeSet     bool   // true when scope is active
 	heldScopes   []string // concurrency keys held for virtual object scopes
+
+	// originalInput stores the initial workflow input for auto-ContinueAsNew.
+	originalInput string
+
+	// autoContinueAsNewTriggered is set to true after the event cap is hit
+	// to prevent repeated triggers during the same execution segment.
+	autoContinueAsNewTriggered bool
+
+	// eventCount tracks the number of durable call events in this session.
+	// Incremented per freshCall; compared against maxEventsPerWorkflow for
+	// auto-ContinueAsNew without querying the database.
+	eventCount int
 }
 
 var _ HostHandler = (*execSession)(nil)
@@ -1559,6 +1593,21 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 			return packDurableCallResult(int(written), 1, 1)
 		}
 	}
+
+	// Check event cap: if the number of events has reached the limit, auto-trigger
+	// ContinueAsNew to start a fresh run with reset event_count. Events are
+	// tracked locally in the session (no DB query per call).
+	if s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow && !s.autoContinueAsNewTriggered {
+		s.autoContinueAsNewTriggered = true
+		continueAsNewTotal.WithLabelValues("event_cap").Inc()
+		log.Printf("[engine] workflow %s: auto-ContinueAsNew triggered (event_count=%d, max=%d)",
+			s.workflowID, s.eventCount, s.engine.maxEventsPerWorkflow)
+		s.ContinueAsNew(ctx, m, s.originalInput)
+		m.CloseWithExitCode(ctx, 0)
+		written, _ := s.writeResult(ctx, m, responsePtr, "", responseMaxLen)
+		return packDurableCallResult(int(written), 0, 0)
+	}
+	s.eventCount++
 
 	resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
 

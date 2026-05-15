@@ -1156,3 +1156,13 @@ func (s *MySQLStore) GetConcurrencyKeyCount(ctx context.Context, workflowID stri
 	}
 	return count, nil
 }
+
+// GetEventCount returns the event_count for a workflow instance.
+func (s *MySQLStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = ? AND tenant_id = ?`, workflowID, s.tenantID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get event count for %s: %w", workflowID, err)
+	}
+	return count, nil
+}

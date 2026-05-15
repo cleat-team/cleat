@@ -65,7 +65,7 @@ func mockAmbigResponse(service, operation string) string {
 // setupEngine creates a Runtime and Engine with a fresh ambigRecorder.
 func setupEngine(t *testing.T, ctx context.Context) (*host.Runtime, *host.Engine, *ambigRecorder) {
 	t.Helper()
-	rt, err := host.NewRuntime(ctx, 0)
+	rt, err := host.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 			truncated := loadedHistory[:K]
 
 			replayCaller := &ambigRecorder{}
-			rt2, err := host.NewRuntime(ctx, 0)
+			rt2, err := host.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				t.Fatalf("NewRuntime: %v", err)
 			}
@@ -308,7 +308,7 @@ func TestPendingSentinelDetection(t *testing.T) {
 			modifiedHistory[tt.injectStep].Err = pendingSentinel
 			modifiedHistory[tt.injectStep].Response = ""
 
-			rt2, err := host.NewRuntime(ctx, 0)
+			rt2, err := host.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				t.Fatalf("NewRuntime: %v", err)
 			}
@@ -387,7 +387,7 @@ func TestAmbiguityMetricIncrements(t *testing.T) {
 	modifiedHistory[0].Err = pendingSentinel
 	modifiedHistory[0].Response = ""
 
-	rt2, err := host.NewRuntime(ctx, 0)
+	rt2, err := host.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -478,7 +478,7 @@ func TestReplayWithInjectedCrashPoints(t *testing.T) {
 			truncated := history[:K]
 
 			replayCaller := &ambigRecorder{}
-			rt2, err := host.NewRuntime(ctx, 0)
+			rt2, err := host.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				t.Fatalf("NewRuntime: %v", err)
 			}

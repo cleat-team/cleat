@@ -45,6 +45,92 @@ PITR provides the lowest data loss because it replays WAL segments up to the
 moment of failure. The RPO is determined by the WAL archiving frequency (see
 [RPO and RTO](#rpo-and-rto)).
 
+#### Detailed PITR procedure
+
+**Prerequisites:**
+
+- WAL archiving must be configured on the primary before the failure occurs
+- Archive destination must be accessible from the recovery server (S3, NFS,
+  or local storage)
+- You need the base backup taken before the point of failure
+
+**Step-by-step:**
+
+1. **Prepare the recovery server** -- install the same PostgreSQL major version
+   as the primary:
+
+   ```bash
+   # Install PostgreSQL 16 (same version as the primary)
+   apt install postgresql-16
+   ```
+
+2. **Restore the base backup**:
+
+   ```bash
+   # Ensure the data directory exists and is empty
+   rm -rf /var/lib/postgresql/16/main
+   pg_basebackup -h primary-or-s3 -D /var/lib/postgresql/16/main \
+       -X fetch -P -U replicator
+   ```
+
+3. **Configure recovery settings** -- create `postgresql.conf` entries or
+   `recovery.signal` (PostgreSQL 12+). Set the restore command to fetch archived
+   WAL:
+
+   ```bash
+   # In postgresql.conf or recovery.conf (PG < 12)
+   restore_command = 'aws s3 cp s3://my-bucket/wal/%f %p'
+   recovery_target_time = '2025-03-01 14:30:00 UTC'  # Omit for latest
+   recovery_target_action = 'promote'
+   ```
+
+   To recover to the latest possible transaction (minimal data loss), omit
+   `recovery_target_time`:
+
+   ```bash
+   restore_command = 'aws s3 cp s3://my-bucket/wal/%f %p'
+   ```
+
+4. **Set recovery.signal** (PostgreSQL 12+) to indicate this is a recovery:
+
+   ```bash
+   touch /var/lib/postgresql/16/main/recovery.signal
+   ```
+
+5. **Start PostgreSQL** -- the server enters recovery mode and replays WAL:
+
+   ```bash
+   pg_ctlcluster 16 main start
+   ```
+
+   Monitor the recovery progress:
+
+   ```bash
+   # Check if still in recovery and current replayed LSN
+   SELECT pg_is_in_recovery(),
+          pg_last_wal_replay_lsn(),
+          pg_last_wal_receive_lsn();
+   ```
+
+6. **Verify recovery target is reached**:
+
+   ```bash
+   # When recovery completes, the server promotes itself automatically
+   # (if recovery_target_action = 'promote') or you can promote manually:
+   pg_ctlcluster 16 main promote
+   ```
+
+7. **Validate the recovered database**:
+
+   ```bash
+   # Check table accessibility
+   cleatctl check-db --db "$RECOVERED_DATABASE_URL"
+
+   # Verify row counts
+   psql "$RECOVERED_DATABASE_URL" -c "SELECT COUNT(*) FROM workflow_instances;"
+   psql "$RECOVERED_DATABASE_URL" -c "SELECT COUNT(*) FROM event_history;"
+   ```
+
 ### 2. All running workflows at backup time are now stale
 
 After a restore, every workflow instance with `status = 'running'` is stale:
@@ -207,6 +293,22 @@ WHERE status = 'running'
 ```
 
 ## RPO and RTO
+
+### Recommended RPO/RTO targets
+
+The following targets are recommended for production deployments. Adjust based
+on your business requirements.
+
+| Deployment tier | RPO target | RTO target | Recommended backup strategy |
+|-----------------|------------|------------|---------------------------|
+| Development | 24 hours | 2 hours | Daily pg_dump |
+| Staging | 1 hour | 30 minutes | Hourly pg_dump |
+| Production (standard) | 5 minutes | 15 minutes | Continuous WAL archiving |
+| Production (mission-critical) | 0 (zero) | 5 minutes | Synchronous replica |
+
+These targets assume the database is the failure point and do not include
+cross-region networking delays. For regional failover, add 1-5 minutes for DNS
+propagation and worker connection re-establishment.
 
 ### Recovery Point Objective (RPO)
 
@@ -500,6 +602,222 @@ When failing over, ensure the old primary is isolated and cannot accept writes:
 
 After the old primary is recovered, treat it as a standby candidate and verify
 replication catches up before promoting it.
+
+## Backup verification with cleatctl
+
+The `cleatctl check-db` command verifies database connectivity and schema
+health after a restore:
+
+```bash
+# Verify database connectivity and schema version
+cleatctl check-db --db "postgres://user:pass@db-host:5432/cleat?sslmode=require"
+
+# Example output:
+# Database: connected
+# Schema version: 003
+# Workflow instances: 42 (running: 3, ready: 10, completed: 29)
+# Tables accessible: all 12
+# Event history size: 156 MB
+```
+
+Additional verification queries:
+
+```bash
+# Verify all expected tables exist
+cleatctl check-db --db "$DATABASE_URL" --verbose
+
+# Check that the schema version is current
+cleatctl versions list | head -20
+```
+
+For automated backup validation in CI/CD:
+
+```bash
+#!/bin/bash
+# validate-backup.sh -- validate a backup is restorable
+
+BACKUP_FILE="$1"
+TEST_DB="cleat_validate_$(date +%Y%m%d_%H%M%S)"
+
+# Restore into a temporary database
+createdb "$TEST_DB"
+pg_restore -d "$TEST_DB" "$BACKUP_FILE"
+
+# Verify connectivity and schema
+cleatctl check-db --db "postgres://localhost/${TEST_DB}?sslmode=disable"
+
+# Clean up
+dropdb "$TEST_DB"
+```
+
+## DR runbook
+
+### Detect failure
+
+Monitor the following signals to detect a database failure:
+
+| Signal | What to check | Threshold |
+|--------|---------------|-----------|
+| Worker disconnects | Worker logs show `connection refused` or `EOF` | More than 50% of workers |
+| Heartbeat failures | `cleat_workflows_active` drops to 0 while `cleat_workflows_claimed_total` does not increase | Sustained for >30 seconds |
+| Database metrics | PG connection count drops, query errors spike | >10 errors/minute |
+| Alertmanager/PagerDuty | Cleat worker health check endpoint returns 503 | Any occurrence |
+
+```bash
+# Check worker health
+curl -s http://worker:8080/health | jq '.database_connected'
+
+# Check metrics for anomaly
+curl -s http://worker:8080/metrics | grep cleat_workflows_active
+```
+
+### Failover
+
+When a database failure is confirmed, initiate failover to a standby:
+
+```bash
+# Step 1: Verify the standby has the latest data
+psql "$STANDBY_URL" -c "SELECT pg_is_in_recovery(), pg_last_wal_replay_lsn();"
+
+# Step 2: Promote the standby to primary
+pg_ctlcluster 16 main promote
+
+# Step 3: Verify the promoted standby is writable
+psql "$STANDBY_URL" -c "SELECT pg_is_in_recovery();"
+# Should return: f (false = not in recovery = writable)
+
+# Step 4: Update worker connection strings (DNS-based or config-based)
+export DATABASE_URL="postgres://user:pass@promoted-standby:5432/cleat?sslmode=require"
+
+# Step 5: Restart workers pointing at the new primary
+pkill -TERM cleat-worker
+cleat-worker --db "$DATABASE_URL" --concurrency 20
+
+# Step 6: Verify failover
+cleatctl check-db --db "$DATABASE_URL"
+```
+
+### Validate
+
+After failover, validate the system:
+
+```bash
+# 1. Database connectivity
+cleatctl check-db --db "$DATABASE_URL"
+
+# 2. Schema health
+psql "$DATABASE_URL" -c "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
+
+# 3. Workflow distribution
+curl -s http://worker:8080/api/admin/stats
+
+# 4. Check for stuck workflows
+curl -s http://worker:8080/api/workflows?status=running | jq '. | length'
+
+# 5. Verify the reaper has cycled (60 seconds after worker start)
+psql "$DATABASE_URL" -c "
+    SELECT status, COUNT(*) FROM workflow_instances GROUP BY status;
+"
+```
+
+### Failback
+
+After the original primary is restored, fail back to it:
+
+```bash
+# Step 1: Set up the original primary as a standby of the promoted server
+# On the original primary host:
+pg_ctlcluster 16 main stop
+rm -rf /var/lib/postgresql/16/main
+pg_basebackup -h promoted-standby -D /var/lib/postgresql/16/main \
+    -U replicator -X stream -P
+touch /var/lib/postgresql/16/main/standby.signal
+pg_ctlcluster 16 main start
+
+# Step 2: Wait for replication to catch up
+psql "$STANDBY_URL" -c "
+    SELECT pg_size_pretty(pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())) AS lag;
+"
+# Wait until lag is near zero
+
+# Step 3: Promote the original primary
+pg_ctlcluster 16 main promote
+
+# Step 4: Redirect workers back to the original primary
+export DATABASE_URL="postgres://user:pass@original-primary:5432/cleat?sslmode=require"
+pkill -TERM cleat-worker
+cleat-worker --db "$DATABASE_URL" --concurrency 20
+
+# Step 5: Verify
+cleatctl check-db --db "$DATABASE_URL"
+```
+
+## Backup validation procedure
+
+Regularly validate that backups can be restored successfully. This should be
+automated as part of your CI/CD pipeline.
+
+### Automated validation
+
+```bash
+#!/bin/bash
+# validate-latest-backup.sh
+set -euo pipefail
+
+BACKUP_DIR="/backups"
+LATEST=$(ls -t "${BACKUP_DIR}"/*.dump | head -1)
+TEST_DB="cleat_restore_test_$(date +%Y%m%d)"
+
+echo "=== Validating backup: ${LATEST} ==="
+
+# Create test database
+createdb "${TEST_DB}"
+
+# Restore backup
+pg_restore -d "${TEST_DB}" --jobs=4 "${LATEST}" 2>&1
+echo "pg_restore: OK"
+
+# Verify database
+cleatctl check-db --db "postgres://localhost/${TEST_DB}?sslmode=disable" --verbose
+echo "cleatctl check-db: OK"
+
+# Run smoke test queries
+psql -d "${TEST_DB}" -c "SELECT COUNT(*) FROM workflow_instances;" > /dev/null
+psql -d "${TEST_DB}" -c "SELECT COUNT(*) FROM event_history;" > /dev/null
+psql -d "${TEST_DB}" -c "SELECT version, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 1;" > /dev/null
+echo "Smoke queries: OK"
+
+# Simulate workflow replay: start a worker in dry-run mode against the test DB
+# and verify the reaper reclaims stale instances
+cleat-worker --db "postgres://localhost/${TEST_DB}?sslmode=disable" \
+    --concurrency=2 \
+    --dry-run \
+    --timeout=30s 2>&1 | head -20
+echo "Replay simulation: OK"
+
+# Clean up
+dropdb "${TEST_DB}"
+echo "=== Validation complete ==="
+```
+
+### Validation schedule
+
+| Environment | Frequency | Method |
+|-------------|-----------|--------|
+| Development | Weekly | Automated CI job |
+| Staging | Daily | Automated CI job |
+| Production | Weekly | Automated, plus quarterly manual DR drill |
+
+### Validation checklist
+
+- [ ] Backup file is readable and not corrupted
+- [ ] All tables are accessible after restore
+- [ ] Schema migrations are at the expected version
+- [ ] Workflow instances are present with correct status values
+- [ ] Event history rows are present
+- [ ] The reaper can reclaim stale instances
+- [ ] RTO is within the target (measure restore start to worker ready)
+- [ ] Logs contain no unexpected errors
 
 ## Recovery testing
 

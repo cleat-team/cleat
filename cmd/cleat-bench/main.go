@@ -142,7 +142,7 @@ func runBenchmark(ctx context.Context, store host.WorkflowStore, defName string,
 				return
 			}
 
-			rt, err := host.NewRuntime(ctx, 0)
+			rt, err := host.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				log.Printf("NewRuntime error: %v", err)
 				return
@@ -207,7 +207,7 @@ func runReplayBenchmark(ctx context.Context, store host.WorkflowStore, defName s
 				return
 			}
 
-			rt, err := host.NewRuntime(ctx, 0)
+			rt, err := host.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				log.Printf("NewRuntime error: %v", err)
 				return
@@ -233,7 +233,7 @@ func runReplayBenchmark(ctx context.Context, store host.WorkflowStore, defName s
 			store.AppendEventHistoryBatch(ctx, runID, history)
 
 			// Replay from history.
-			rt2, _ := host.NewRuntime(ctx, 0)
+			rt2, _ := host.NewRuntime(ctx, 0, 0)
 			defer rt2.Close(ctx)
 			engine2 := host.NewEngine(rt2, caller,
 				host.WithSignalStore(store),
