@@ -48,7 +48,7 @@ func TestWasmMissingImportFailsAtInstantiate(t *testing.T) {
 	// A module that imports a function the host does not provide must fail
 	// at instantiation time, not panic.
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -116,7 +116,7 @@ func wasmWithoutExport() []byte {
 // returns an error when the WASM module does not have the requested export.
 func TestWasmModuleMissingExportFunction(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -174,7 +174,7 @@ func wasmWithUnreachable() []byte {
 // during execution causes CallExport to return an error.
 func TestWasmModulePanics(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestWasmModulePanics(t *testing.T) {
 // normal CallExport error path.
 func TestWasmModuleReturnsInvalidJSON(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -284,7 +284,7 @@ func wasmWithLargeMemory() []byte {
 // compilation or instantiation, when a memory limit is configured.
 func TestWasmModuleExceedsMemoryLimit(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}

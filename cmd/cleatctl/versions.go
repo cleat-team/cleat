@@ -255,4 +255,3 @@ func gcVersions(ctx context.Context, store host.WorkflowStore, args []string) {
 		}
 	}
 }
-

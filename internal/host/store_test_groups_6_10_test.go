@@ -260,7 +260,7 @@ func TestGetChildResult_Completed(t *testing.T) {
 			}
 
 			// Complete the claimed workflow.
-			if err := store.CompleteWorkflow(ctx, claimed.ID, "test-worker", 0, `{"child":"done"}`, nil); err != nil {
+			if err := store.CompleteWorkflow(ctx, claimed.ID, "test-worker", claimed.Generation, `{"child":"done"}`, nil); err != nil {
 				t.Fatalf("CompleteWorkflow: %v", err)
 			}
 

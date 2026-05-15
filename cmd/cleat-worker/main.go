@@ -106,7 +106,9 @@ func main() {
 	peerSchemas := flag.String("peer-schemas", "", "Comma-separated list of peer cleat schemas this instance can interact with (cross-instance child workflows, signals)")
 	disableChecksumVerification := flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
 	wasmMemoryMaxMB := flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
-	wasmInstructionLimit := flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; NOT YET IMPLEMENTED — placeholder for future wazero fuel API)")
+	wasmInstructionLimit := flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; monitored via wazero function listener)")
+	wasmCacheDir := flag.String("wasm-cache-dir", "", "Directory for disk-backed compiled WASM module cache (empty disables)")
+	wasmDiskCacheMaxFiles := flag.Int("wasm-disk-cache-max-files", 100, "Max files in the disk-backed compiled WASM module cache (LRU eviction)")
 	redactPatternsFile := flag.String("redact-patterns-file", "", "Path to file with custom redaction patterns (one per line)")
 	dbCredentialProvider := flag.String("db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
 	dbCredentialPath := flag.String("db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
@@ -122,6 +124,7 @@ func main() {
 
 	// Health check interval for watchdog.
 	healthCheckInterval := flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
+	maxPluginConnections := flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
 
 	flag.Parse()
 
@@ -182,6 +185,7 @@ func main() {
 
 	var store host.WorkflowStore
 	var db *sql.DB
+	var pluginDB *sql.DB
 	var tenantPools *plugin.TenantPools
 	var factory host.StoreFactory
 	var payloadEncryption *host.PayloadEncryption
@@ -197,27 +201,26 @@ func main() {
 			}
 		}
 
-
-			// Load encryption key if configured (sharded path).
-			var payloadEncryption *host.PayloadEncryption
-			if *encryptSensitivePayloads {
-				if *encryptionKeyFile == "" {
-					log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
-				}
+		// Load encryption key if configured (sharded path).
+		var payloadEncryption *host.PayloadEncryption
+		if *encryptSensitivePayloads {
+			if *encryptionKeyFile == "" {
+				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
 			}
-			if *encryptionKeyFile != "" {
-				keyData, kerr := os.ReadFile(*encryptionKeyFile)
-				if kerr != nil {
-					log.Fatalf("[worker %s] Failed to read encryption key file: %v", workerID, kerr)
-				}
-				keyStr := strings.TrimSpace(string(keyData))
-				pe, perr := host.NewPayloadEncryption(keyStr)
-				if perr != nil {
-					log.Fatalf("[worker %s] Invalid encryption key: %v", workerID, perr)
-				}
-				payloadEncryption = pe
-				log.Printf("[worker %s] Encryption at rest enabled for sensitive payload fields", workerID)
+		}
+		if *encryptionKeyFile != "" {
+			keyData, kerr := os.ReadFile(*encryptionKeyFile)
+			if kerr != nil {
+				log.Fatalf("[worker %s] Failed to read encryption key file: %v", workerID, kerr)
 			}
+			keyStr := strings.TrimSpace(string(keyData))
+			pe, perr := host.NewPayloadEncryption(keyStr)
+			if perr != nil {
+				log.Fatalf("[worker %s] Invalid encryption key: %v", workerID, perr)
+			}
+			payloadEncryption = pe
+			log.Printf("[worker %s] Encryption at rest enabled for sensitive payload fields", workerID)
+		}
 		// Build stores, DB connections, and closers for each shard.
 		stores := make([]host.WorkflowStore, len(configs))
 		closers := make([]func() error, len(configs))
@@ -245,9 +248,9 @@ func main() {
 
 			shardDBs[i] = sdb
 			f := host.NewPostgresStoreFactory(sdb, cfg.Schema)
-				if payloadEncryption != nil {
-					f.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
-				}
+			if payloadEncryption != nil {
+				f.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
+			}
 			if i == 0 {
 				factory = f
 			}
@@ -273,7 +276,21 @@ func main() {
 		if len(shardDBs) > 0 {
 			db = shardDBs[0]
 		}
-
+		// Create plugin-dedicated connection pool from the first shard's DSN.
+		if *maxPluginConnections > 0 && len(configs) > 0 {
+			pdb, pErr := sql.Open("postgres", configs[0].ConnStr)
+			if pErr != nil {
+				log.Printf("[worker %s] Warning: failed to open plugin connection pool: %v", workerID, pErr)
+			} else {
+				pluginDB = pdb
+				pluginDB.SetMaxOpenConns(*maxPluginConnections)
+				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
+				pluginDB.SetConnMaxLifetime(5 * time.Minute)
+				pluginConnectionsMax.Set(float64(*maxPluginConnections))
+				defer pluginDB.Close()
+				log.Printf("[worker %s] Plugin DB pool created: max_connections=%d", workerID, *maxPluginConnections)
+			}
+		}
 		// Start idempotency key cleanup on each shard.
 		for _, sdb := range shardDBs {
 			go idempotencyCleanupLoop(ctx, sdb, 1*time.Hour)
@@ -319,6 +336,19 @@ func main() {
 				tenantPools = plugin.NewTenantPools(db, baseDSN)
 			}
 
+			// Create plugin-dedicated connection pool.
+			if *maxPluginConnections > 0 {
+				pluginDB, err = sql.Open(sqlDriver, dbDSN)
+				if err != nil {
+					log.Fatalf("[worker %s] Failed to open plugin connection pool: %v", workerID, err)
+				}
+				pluginDB.SetMaxOpenConns(*maxPluginConnections)
+				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
+				pluginDB.SetConnMaxLifetime(5 * time.Minute)
+				pluginConnectionsMax.Set(float64(*maxPluginConnections))
+				defer pluginDB.Close()
+				log.Printf("[worker %s] Plugin DB pool: max_connections=%d", workerID, *maxPluginConnections)
+			}
 		case "mysql":
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -330,6 +360,19 @@ func main() {
 			db.SetConnMaxLifetime(5 * time.Minute)
 			factory = host.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL))
 
+			// Create plugin-dedicated connection pool.
+			if *maxPluginConnections > 0 {
+				pluginDB, err = sql.Open(sqlDriver, *dbURL)
+				if err != nil {
+					log.Fatalf("[worker %s] Failed to open plugin connection pool: %v", workerID, err)
+				}
+				pluginDB.SetMaxOpenConns(*maxPluginConnections)
+				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
+				pluginDB.SetConnMaxLifetime(5 * time.Minute)
+				pluginConnectionsMax.Set(float64(*maxPluginConnections))
+				defer pluginDB.Close()
+				log.Printf("[worker %s] Plugin DB pool: max_connections=%d", workerID, *maxPluginConnections)
+			}
 		case "mssql":
 			factory = host.NewMSSQLStoreFactory(*dbURL)
 			// Open a connection to verify and for plugin/migration use.
@@ -342,6 +385,19 @@ func main() {
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
 
+			// Create plugin-dedicated connection pool.
+			if *maxPluginConnections > 0 {
+				pluginDB, err = sql.Open(sqlDriver, *dbURL)
+				if err != nil {
+					log.Fatalf("[worker %s] Failed to open plugin connection pool: %v", workerID, err)
+				}
+				pluginDB.SetMaxOpenConns(*maxPluginConnections)
+				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
+				pluginDB.SetConnMaxLifetime(5 * time.Minute)
+				pluginConnectionsMax.Set(float64(*maxPluginConnections))
+				defer pluginDB.Close()
+				log.Printf("[worker %s] Plugin DB pool: max_connections=%d", workerID, *maxPluginConnections)
+			}
 		default:
 			log.Fatalf("[worker %s] Invalid --driver %q; must be postgres, mysql, or mssql", workerID, *driver)
 		}
@@ -351,9 +407,9 @@ func main() {
 			if *driver != "postgres" {
 				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --driver=postgres (MySQL and MSSQL are not yet supported for encryption at rest)", workerID)
 			}
-				if *encryptionKeyFile == "" {
-					log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
-				}
+			if *encryptionKeyFile == "" {
+				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
+			}
 		}
 		if *encryptionKeyFile != "" {
 			keyData, kerr := os.ReadFile(*encryptionKeyFile)
@@ -407,7 +463,7 @@ func main() {
 	}
 
 	pluginEnv := &plugin.Environment{
-		DB:      &host.SQLDBAdapter{DB: db},
+		DB:      getPluginDB(db, pluginDB),
 		Mux:     plugMux,
 		Config:  rawPluginConfig,
 		Logger:  slog.Default(),
@@ -476,9 +532,9 @@ func main() {
 		case plugin.DatabaseAccessNone:
 			envCopy.DB = nil
 		case plugin.DatabaseAccessReadOnly:
-			envCopy.DB = &host.ReadOnlyDB{Inner: db}
+			envCopy.DB = getPluginReadOnlyDB(db, pluginDB)
 		default: // DatabaseAccessReadWrite or empty (backward compat)
-			envCopy.DB = &host.SQLDBAdapter{DB: db}
+			envCopy.DB = getPluginDB(db, pluginDB)
 		}
 		func() {
 			defer func() {
@@ -560,6 +616,36 @@ func main() {
 		}
 	}
 
+	// Start plugin connection pool monitor (only when a separate pool exists).
+	if pluginDB != nil {
+		bgWg.Add(1)
+		go func() {
+			defer bgWg.Done()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					stats := pluginDB.Stats()
+					pluginConnectionsInUse.Set(float64(stats.InUse))
+					openConns := stats.OpenConnections
+					if openConns > 0 && *maxPluginConnections > 0 && float64(openConns) > 0.8*float64(*maxPluginConnections) {
+						log.Printf("[worker %s] WARNING: plugin DB connections at %d/%d (%.0f%%), consider increasing --max-plugin-connections",
+							workerID, openConns, *maxPluginConnections, 100*float64(openConns)/float64(*maxPluginConnections))
+					}
+				}
+			}
+		}()
+	}
+
+	// Create disk-backed compiled WASM module cache.
+	wasmDiskCache := host.NewWasmDiskCache(*wasmCacheDir, *wasmDiskCacheMaxFiles)
+	if wasmDiskCache != nil {
+		log.Printf("[worker %s] WASM disk cache: dir=%s max_files=%d", workerID, *wasmCacheDir, *wasmDiskCacheMaxFiles)
+	}
+
 	w := &Worker{
 		id:                          workerID,
 		store:                       store,
@@ -583,6 +669,7 @@ func main() {
 		maxRetries:                  *maxRetries,
 		wasmMemoryMaxMB:             wasmMemoryMaxMB,
 		wasmInstructionLimit:        wasmInstructionLimit,
+		wasmDiskCache:               wasmDiskCache,
 		maxQuotaEvents:              *maxQuotaEvents,
 		maxQuotaChildren:            *maxQuotaChildren,
 		maxQuotaConcurrencyKeys:     *maxQuotaConcurrencyKeys,
@@ -892,6 +979,7 @@ type Worker struct {
 	disableChecksumVerification *bool
 	wasmMemoryMaxMB             *int
 	wasmInstructionLimit        *int
+	wasmDiskCache               *host.WasmDiskCache
 
 	drainCh   chan struct{}
 	drainOnce sync.Once
@@ -1025,7 +1113,6 @@ func (w *Worker) Run() {
 		go w.withPanicRecovery("watchdog", w.watchdogLoop)()
 	}
 
-
 	log.Printf("[worker %s] Running", w.id)
 
 	<-w.ctx.Done()
@@ -1113,7 +1200,7 @@ func (w *Worker) dispatchLoop() {
 				}
 				log.Printf("[worker %s] DB unreachable during sticky claim, backing off %v", w.id, backoff)
 				select {
-			case <-w.ctx.Done():
+				case <-w.ctx.Done():
 					return
 				case <-time.After(backoff):
 				}
@@ -1302,7 +1389,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			memoryPages = 65536
 		}
 	}
-	rt, err := host.NewRuntime(w.ctx, memoryPages)
+	rt, err := host.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 	if err != nil {
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
@@ -1432,6 +1519,12 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			engineOpts = append(engineOpts, host.WithVersionValidation(func() error {
 				return host.ValidateVersionCompatibility(oldDef, newDef)
 			}))
+		}
+	}
+	// Load initial event count so the engine tracks events locally.
+	if w.maxQuotaEvents > 0 {
+		if count, err := w.store.GetEventCount(w.ctx, wf.ID); err == nil {
+			engineOpts = append(engineOpts, host.WithInitialEventCount(count))
 		}
 	}
 	engine := host.NewEngine(rt, caller, engineOpts...)
@@ -1933,15 +2026,31 @@ func (w *Worker) dispatchPendingUpdates() {
 func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 	key := fmt.Sprintf("%s:%d", defName, defVersion)
 
+	// Check in-memory cache first.
 	if cached, ok := w.wasmCache.get(key); ok {
 		wasmCacheHits.Inc()
 		return cached, nil
 	}
+
+	// Check disk cache before going to the database.
+	if w.wasmDiskCache != nil {
+		if cached := w.wasmDiskCache.LookupDef(defName, defVersion); cached != nil {
+			wasmCacheMisses.Inc()
+			w.wasmCache.put(key, cached)
+			return cached, nil
+		}
+	}
+
 	wasmCacheMisses.Inc()
 
 	wasmBytes, err := w.store.LoadWASM(w.ctx, defName, defVersion)
 	if err != nil {
 		return nil, err
+	}
+
+	// Store to disk cache for future restarts.
+	if w.wasmDiskCache != nil {
+		w.wasmDiskCache.StoreDef(defName, defVersion, wasmBytes)
 	}
 
 	w.wasmCache.put(key, wasmBytes)
@@ -2142,7 +2251,7 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 			memoryPages = 65536
 		}
 	}
-	rt, err := host.NewRuntime(w.ctx, memoryPages)
+	rt, err := host.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 	if err != nil {
 		log.Printf("[worker %s] runDefers: create runtime: %v", w.id, err)
 		return
@@ -3409,6 +3518,24 @@ func (s *apiServer) inflightCount() int {
 	count := 0
 	s.worker.inflight.Range(func(_, _ interface{}) bool { count++; return true })
 	return count
+}
+
+// getPluginDB returns the plugin DB adapter, using pluginDB if available
+// (separate pool), falling back to the main db otherwise.
+func getPluginDB(db, pluginDB *sql.DB) *host.SQLDBAdapter {
+	if pluginDB != nil {
+		return &host.SQLDBAdapter{DB: pluginDB}
+	}
+	return &host.SQLDBAdapter{DB: db}
+}
+
+// getPluginReadOnlyDB returns the read-only plugin DB adapter, using pluginDB
+// if available (separate pool), falling back to the main db otherwise.
+func getPluginReadOnlyDB(db, pluginDB *sql.DB) *host.ReadOnlyDB {
+	if pluginDB != nil {
+		return &host.ReadOnlyDB{Inner: pluginDB}
+	}
+	return &host.ReadOnlyDB{Inner: db}
 }
 
 // handleMetrics serves Prometheus-format metrics.

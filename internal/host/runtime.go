@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tetratelabs/wazero"
@@ -37,7 +38,7 @@ type Runtime struct {
 	stderr        bytes.Buffer
 	callTimeout   time.Duration // per-call WASM execution timeout (0 = none)
 	MemoryLimitPages uint32        // max WASM linear memory in pages (64KB each)
-	InstructionLimit uint64        // NOT YET WIRED — placeholder for future wazero fuel metering; 0 = no limit
+	fuelLimit         uint64        // max WASM fuel (function calls) per invocation; 0 = no limit
 
 		// Fields for cleat_complete host function (see imports.go).
 		// When the WASM export calls cleat_complete before returning,
@@ -83,7 +84,7 @@ func (r *Runtime) Stderr() string { return r.stderr.String() }
 // Best practice: avoid floating-point in workflow control flow conditions.
 // Use math.Float64bits()/math.Float32bits() for exact bitwise comparison, or
 // use integer arithmetic. See docs/determinism.md for more details.
-func NewRuntime(ctx context.Context, memoryLimitPages uint32) (*Runtime, error) {
+func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit uint64) (*Runtime, error) {
 	if memoryLimitPages == 0 {
 		memoryLimitPages = DefaultMemoryLimitPages
 	}
@@ -153,7 +154,7 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32) (*Runtime, error) 
 		return nil, fmt.Errorf("host: instantiating env module: %w", err)
 	}
 
-	return &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second, MemoryLimitPages: memoryLimitPages}, nil
+	return &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second, MemoryLimitPages: memoryLimitPages, fuelLimit: instructionLimit}, nil
 }
 
 // Close releases all resources held by the runtime.
@@ -334,6 +335,37 @@ func formatWasmCallError(err error) error {
 	return &wasmTrapError{cause: err, msg: fmt.Sprintf("wasm trap: %s", errMsg)}
 }
 
+// fuelMeter implements wazero's FunctionListenerFactory and FunctionListener
+// to provide fuel-based instruction metering. It tracks consumed function calls
+// and shuts down the module when the fuel budget is exhausted.
+type fuelMeter struct {
+	remaining atomic.Uint64
+}
+
+// NewFunctionListener satisfies FunctionListenerFactory. It returns itself as
+// a shared listener since the meter is not per-function.
+func (fm *fuelMeter) NewFunctionListener(_ api.FunctionDefinition) experimental.FunctionListener {
+	return fm
+}
+
+// Before implements FunctionListener. Each function call consumes one unit of
+// fuel. When the budget is exhausted, the module is closed to stop execution.
+func (fm *fuelMeter) Before(_ context.Context, mod api.Module, _ api.FunctionDefinition, _ []uint64, _ experimental.StackIterator) {
+	if fm.remaining.Add(^uint64(0)) == 0 { // decrement by 1
+		wasmFuelExhaustedTotal.Inc()
+		mod.CloseWithExitCode(context.Background(), 1)
+	}
+}
+
+// After implements FunctionListener (no-op).
+func (fm *fuelMeter) After(_ context.Context, _ api.Module, _ api.FunctionDefinition, _ []uint64) {}
+
+// Abort implements FunctionListener (no-op).
+func (fm *fuelMeter) Abort(_ context.Context, _ api.Module, _ api.FunctionDefinition, _ error) {}
+
+// fuelExhaustedError is returned when a WASM module exhausts its fuel budget.
+var fuelExhaustedError = fmt.Errorf("wasm trap: instruction limit exceeded (fuel exhausted)")
+
 // ErrSuspended is returned by CallExport when the workflow suspends.
 var ErrSuspended = fmt.Errorf("workflow suspended")
 
@@ -417,7 +449,18 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// locations. If DWARF is unavailable (stripped binary), the
 	// trace falls back to raw function indices and offsets.
 	// See formatWasmCallError for the formatting logic.
-		// Create a cleatComplete struct and put it in the context.
+
+	// Set up fuel metering if an instruction limit is configured.
+	// wazero's function listener API is used to count function calls;
+	// each call consumes one unit of fuel. When the budget is exhausted,
+	// the module is closed, which surfaces as an ExitError to the caller.
+	if r.fuelLimit > 0 {
+		fm := &fuelMeter{}
+		fm.remaining.Store(r.fuelLimit)
+		callCtx = experimental.WithFunctionListenerFactory(callCtx, fm)
+	}
+
+	// Create a cleatComplete struct and put it in the context.
 	// The WASM export wrapper calls cleat_complete host import to store
 	// the result before returning, so even if Go WASI subsequently calls
 	// proc_exit (which returns as a fn.Call error), we can retrieve the result.
@@ -430,21 +473,28 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 		uint64(outputOffset),
 		uint64(outBufSize),
 	)
-		if err != nil {
-			// Check for cleat_complete result before treating as error.
-			// Go WASI runtime may call proc_exit after the export wrapper
-			// has already stored the result via cleat_complete host import.
-			if complete.Result != nil {
-				return *complete.Result, false, nil
-			}
-			if complete.Error != nil {
-				return "", false, fmt.Errorf("host: export %q failed: %s", exportName, *complete.Error)
-			}
-			if errors.Is(err, context.DeadlineExceeded) {
-				return "", false, fmt.Errorf("host: export %q timed out after %v", exportName, r.callTimeout)
-			}
-			return "", false, formatWasmCallError(err)
+	if err != nil {
+		// Check for cleat_complete result before treating as error.
+		// Go WASI runtime may call proc_exit after the export wrapper
+		// has already stored the result via cleat_complete host import.
+		if complete.Result != nil {
+			return *complete.Result, false, nil
 		}
+		if complete.Error != nil {
+			return "", false, fmt.Errorf("host: export %q failed: %s", exportName, *complete.Error)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", false, fmt.Errorf("host: export %q timed out after %v", exportName, r.callTimeout)
+		}
+		// Detect fuel exhaustion from module close within function listener.
+		if r.fuelLimit > 0 {
+			var exitErr *sys.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+				return "", false, fuelExhaustedError
+			}
+		}
+		return "", false, formatWasmCallError(err)
+	}
 
 	if len(results) == 0 {
 		return "", false, fmt.Errorf("host: export %q returned no results. The WASM module may have panicked or returned void.", exportName)

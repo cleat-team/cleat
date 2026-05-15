@@ -441,6 +441,10 @@ type WorkflowStore interface {
 	// held by the given workflow. This is used for per-workflow concurrency key
 	// quota enforcement. Keys whose expires_at is in the past are excluded.
 	GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error)
+
+	// GetEventCount returns the event_count for a workflow instance.
+	// Used by the engine for auto-ContinueAsNew when the event cap is hit.
+	GetEventCount(ctx context.Context, workflowID string) (int, error)
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
@@ -3006,6 +3010,16 @@ func (s *PostgresStore) GetConcurrencyKeyCount(ctx context.Context, workflowID s
 	`, workflowID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get concurrency key count for %s: %w", workflowID, err)
+	}
+	return count, nil
+}
+
+// GetEventCount returns the event_count for a workflow instance.
+func (s *PostgresStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = $1`, workflowID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get event count for %s: %w", workflowID, err)
 	}
 	return count, nil
 }

@@ -55,7 +55,7 @@ func mockResponse(service, operation string) string {
 
 func TestNewRuntime(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestRuntimeCompileAndInstantiate(t *testing.T) {
 	// Compile a minimal valid WASM module.
 	wasmBytes := minimalWasm()
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestRuntimeCompileAndInstantiate(t *testing.T) {
 
 func TestCallExportNotFound(t *testing.T) {
 	ctx := context.Background()
-	rt, _ := NewRuntime(ctx, 0)
+	rt, _ := NewRuntime(ctx, 0, 0)
 	defer rt.Close(ctx)
 
 	compiled, _ := rt.CompileModule(ctx, minimalWasm())
@@ -116,7 +116,7 @@ func TestEngineExecute(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestEngineReplay(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestEngineReplayDivergence(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestEngineExecuteCancelOrder(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
