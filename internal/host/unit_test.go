@@ -1392,16 +1392,16 @@ func (s *stubWorkflowStore) LoadWASM(ctx context.Context, defName string, defVer
 func (s *stubWorkflowStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	return nil, nil
 }
-func (s *stubWorkflowStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
+func (s *stubWorkflowStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	return false, nil
 }
-func (s *stubWorkflowStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
+func (s *stubWorkflowStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
 	return nil
 }
-func (s *stubWorkflowStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+func (s *stubWorkflowStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
-func (s *stubWorkflowStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+func (s *stubWorkflowStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 	return nil
 }
 func (s *stubWorkflowStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
@@ -1586,11 +1586,11 @@ func (s *stubWorkflowStore) StreamEventHistory(ctx context.Context, workflowID s
 	return eventCh, errCh
 }
 
-func (s *stubWorkflowStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
+func (s *stubWorkflowStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
 	return "", nil
 }
 
-func (s *stubWorkflowStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (s *stubWorkflowStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	return nil
 }
 
@@ -2437,10 +2437,14 @@ func (m *mockPurgeStore) BatchHeartbeat(ctx context.Context, workerID string) (i
 
 func (s *stubWorkflowStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) { return nil, nil }
 func (s *stubWorkflowStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
-func (s *stubWorkflowStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
+func (s *stubWorkflowStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
 func (s *stubWorkflowStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (s *stubWorkflowStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
 func (s *stubWorkflowStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
+
+func (s *stubWorkflowStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) { return 0, nil }
+
+func (s *stubWorkflowStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
@@ -2451,11 +2455,11 @@ func (m *mockCollectMetricsStore) AppendEventHistoryBatch(ctx context.Context, w
 func (m *mockCollectMetricsStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockCollectMetricsStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
-func (m *mockCollectMetricsStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) { return false, nil }
-func (m *mockCollectMetricsStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error { return nil }
-func (m *mockCollectMetricsStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
-func (m *mockCollectMetricsStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
-func (m *mockCollectMetricsStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error { return nil }
+func (m *mockCollectMetricsStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
+func (m *mockCollectMetricsStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
+func (m *mockCollectMetricsStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
+func (m *mockCollectMetricsStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockCollectMetricsStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error { return nil }
 func (m *mockCollectMetricsStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
 func (m *mockCollectMetricsStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockCollectMetricsStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
@@ -2516,11 +2520,11 @@ func (m *mockCheckStaleStore) AppendEventHistoryBatch(ctx context.Context, workf
 func (m *mockCheckStaleStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockCheckStaleStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
 func (m *mockCheckStaleStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
-func (m *mockCheckStaleStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) { return false, nil }
-func (m *mockCheckStaleStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error { return nil }
-func (m *mockCheckStaleStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
-func (m *mockCheckStaleStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
-func (m *mockCheckStaleStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error { return nil }
+func (m *mockCheckStaleStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
+func (m *mockCheckStaleStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
+func (m *mockCheckStaleStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
+func (m *mockCheckStaleStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockCheckStaleStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error { return nil }
 func (m *mockCheckStaleStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
 func (m *mockCheckStaleStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockCheckStaleStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
@@ -2581,12 +2585,12 @@ func (m *mockGCStore) AppendEventHistoryBatch(ctx context.Context, workflowID st
 func (m *mockGCStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockGCStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
 func (m *mockGCStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
-func (m *mockGCStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) { return false, nil }
-func (m *mockGCStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error { return nil }
-func (m *mockGCStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
-func (m *mockGCStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockGCStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
+func (m *mockGCStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
+func (m *mockGCStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
+func (m *mockGCStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
 func (m *mockGCStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
-func (m *mockGCStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error { return nil }
+func (m *mockGCStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error { return nil }
 func (m *mockGCStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
 func (m *mockGCStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockGCStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
@@ -2646,11 +2650,11 @@ func (m *mockPurgeStore) AppendEventHistoryBatch(ctx context.Context, workflowID
 func (m *mockPurgeStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockPurgeStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
 func (m *mockPurgeStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
-func (m *mockPurgeStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) { return false, nil }
-func (m *mockPurgeStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error { return nil }
-func (m *mockPurgeStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
-func (m *mockPurgeStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
-func (m *mockPurgeStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error { return nil }
+func (m *mockPurgeStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
+func (m *mockPurgeStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
+func (m *mockPurgeStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
+func (m *mockPurgeStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockPurgeStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error { return nil }
 func (m *mockPurgeStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
 func (m *mockPurgeStore) CheckCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error) { return false, "", nil }
 func (m *mockPurgeStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }

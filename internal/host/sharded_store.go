@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"crypto/sha256"
+	// "database/sql"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -283,6 +284,7 @@ func (s *ShardedStore) AppendEventHistoryBatch(ctx context.Context, workflowID s
 	return shard.Store.AppendEventHistoryBatch(ctx, workflowID, recs)
 }
 
+
 // LoadWASM tries each shard (WASM definitions are replicated across all shards).
 func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	var lastErr error
@@ -326,12 +328,12 @@ func (s *ShardedStore) ListVersions(ctx context.Context, defName string) ([]int,
 }
 
 // Heartbeat routes by workflow ID.
-func (s *ShardedStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
+func (s *ShardedStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return false, fmt.Errorf("heartbeat: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.Heartbeat(ctx, workflowID, workerID)
+	return shard.Store.Heartbeat(ctx, workflowID, workerID, generation)
 }
 
 // BatchHeartbeat fans out to all shards, aggregating the total count.
@@ -379,12 +381,12 @@ func (s *ShardedStore) VerifyWorkflowEvents(ctx context.Context, workflowID stri
 }
 
 // MoveToDeadLetterQueue routes by workflow ID.
-func (s *ShardedStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error {
+func (s *ShardedStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return fmt.Errorf("no shard available for workflow %s", workflowID)
 	}
-	return shard.Store.MoveToDeadLetterQueue(ctx, workflowID, workerID, errMsg, errorCode, errorOp)
+	return shard.Store.MoveToDeadLetterQueue(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp)
 }
 
 // RetryWorkflow routes by workflow ID.
@@ -397,49 +399,49 @@ func (s *ShardedStore) RetryWorkflow(ctx context.Context, workflowID string) err
 }
 
 // CompleteWorkflow routes by workflow ID.
-func (s *ShardedStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
+func (s *ShardedStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return fmt.Errorf("complete_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.CompleteWorkflow(ctx, workflowID, workerID, result, queryState)
+	return shard.Store.CompleteWorkflow(ctx, workflowID, workerID, generation, result, queryState)
 }
 
 // FailWorkflow routes by workflow ID.
-func (s *ShardedStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+func (s *ShardedStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return fmt.Errorf("fail_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.FailWorkflow(ctx, workflowID, workerID, errorMsg, errorCode, errorOp, queryState)
+	return shard.Store.FailWorkflow(ctx, workflowID, workerID, generation, errorMsg, errorCode, errorOp, queryState)
 }
 
 // ReleaseWorkflow routes by workflow ID.
-func (s *ShardedStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+func (s *ShardedStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return fmt.Errorf("release_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.ReleaseWorkflow(ctx, workflowID, workerID, nextWakeAt)
+	return shard.Store.ReleaseWorkflow(ctx, workflowID, workerID, generation, nextWakeAt)
 }
 
 // ContinueAsNew routes by current run ID so that both the new-run insert and
 // the old-run completion land on the same shard.
-func (s *ShardedStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
+func (s *ShardedStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
 	shard := s.getShard(currentRunID)
 	if shard == nil {
 		return "", fmt.Errorf("continue_as_new: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.ContinueAsNew(ctx, currentRunID, workerID, defName, defVersion, newInput, newEvents, result, queryState)
+	return shard.Store.ContinueAsNew(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, newEvents, result, queryState)
 }
 
 // FinalizeWorkflowSegment routes by workflow ID.
-func (s *ShardedStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (s *ShardedStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	shard := s.getShard(runID)
 	if shard == nil {
 		return fmt.Errorf("finalize_workflow_segment: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.FinalizeWorkflowSegment(ctx, runID, workerID, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
+	return shard.Store.FinalizeWorkflowSegment(ctx, runID, workerID, generation, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
 }
 
 // RequestCancellation routes by workflow ID.
@@ -837,8 +839,26 @@ func (s *ShardedStore) ListPromises(ctx context.Context, workflowID string) ([]P
 }
 
 // ---------------------------------------------------------------------------
-// Concurrency Key methods (Feature 5)
+// Quota methods
 // ---------------------------------------------------------------------------
+
+// GetChildCount routes by parent workflow ID.
+func (s *ShardedStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
+	shard := s.getShard(parentWorkflowID)
+	if shard == nil {
+		return 0, fmt.Errorf("get_child_count: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.GetChildCount(ctx, parentWorkflowID)
+}
+
+// GetConcurrencyKeyCount routes by workflow ID.
+func (s *ShardedStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return 0, fmt.Errorf("get_concurrency_key_count: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.GetConcurrencyKeyCount(ctx, workflowID)
+}
 
 // AcquireConcurrencyKey routes by key text hash for consistent sharding.
 func (s *ShardedStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
@@ -1128,8 +1148,6 @@ func (s *ShardedStore) DeleteExpiredEvents(ctx context.Context, olderThan time.T
 	}
 	return total, nil
 }
-
-
 
 // TerminateWorkflow routes by workflow ID.
 func (s *ShardedStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {

@@ -83,13 +83,13 @@ func TestRollingWorkerRestart(t *testing.T) {
 			if err := store.AppendEventHistory(ctx, wf.ID, rec); err != nil {
 				errCh <- fmt.Errorf("worker %s append: %w", workerID, err)
 				// Release the workflow so another worker can pick it up.
-				store.ReleaseWorkflow(ctx, wf.ID, workerID, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, workerID, 0, time.Now())
 				continue
 			}
 
-			if err := store.CompleteWorkflow(ctx, wf.ID, workerID, `{"status":"done"}`, nil); err != nil {
+			if err := store.CompleteWorkflow(ctx, wf.ID, workerID, 0, `{"status":"done"}`, nil); err != nil {
 				errCh <- fmt.Errorf("worker %s complete: %w", workerID, err)
-				store.ReleaseWorkflow(ctx, wf.ID, workerID, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, workerID, 0, time.Now())
 				continue
 			}
 
@@ -216,14 +216,14 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 			}
 			if err := store.AppendEventHistory(ctx, wf.ID, rec); err != nil {
 				errCh <- fmt.Errorf("append: %w", err)
-				store.ReleaseWorkflow(ctx, wf.ID, workerID, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, workerID, 0, time.Now())
 				atomic.AddInt32(&state.executeCount, -1)
 				continue
 			}
 
-			if err := store.CompleteWorkflow(ctx, wf.ID, workerID, `{"status":"done"}`, nil); err != nil {
+			if err := store.CompleteWorkflow(ctx, wf.ID, workerID, 0, `{"status":"done"}`, nil); err != nil {
 				errCh <- fmt.Errorf("complete: %w", err)
-				store.ReleaseWorkflow(ctx, wf.ID, workerID, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, workerID, 0, time.Now())
 				atomic.AddInt32(&state.executeCount, -1)
 				continue
 			}

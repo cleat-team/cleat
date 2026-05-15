@@ -74,7 +74,7 @@ type DB interface {
 	// SQL: UPDATE workflow_instances SET heartbeat_at = now()
 	//      WHERE id = $1 AND assigned_to = $2
 	// Returns false if the workflow is no longer assigned to this worker.
-	Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error)
+	Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
 
 	// CheckOwnership verifies this worker still owns the workflow.
 	// SQL: SELECT assigned_to FROM workflow_instances WHERE id = $1
@@ -169,7 +169,7 @@ func (db *simulatedDB) AppendEventHistory(ctx context.Context, workflowID string
 	return nil
 }
 
-func (db *simulatedDB) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
+func (db *simulatedDB) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 	if err := db.maybeFail("heartbeat"); err != nil {
@@ -396,7 +396,7 @@ func (w *Worker) executeWorkflow(wf *WorkflowInstance) {
 		}
 
 		// ---------- HEARTBEAT ----------
-		alive, err := w.db.Heartbeat(w.ctx, wf.ID, w.id)
+		alive, err := w.db.Heartbeat(w.ctx, wf.ID, w.id, wf.Generation)
 		if err != nil {
 			if isConnectionError(err) {
 				fmt.Printf("[worker %s] 💔 DB connection lost mid-workflow (%s, step %d)\n",
@@ -555,7 +555,7 @@ func (w *Worker) heartbeatLoop() {
 		case <-ticker.C:
 			w.inflight.Range(func(key, value interface{}) bool {
 				wf := value.(*WorkflowInstance)
-				alive, err := w.db.Heartbeat(w.ctx, wf.ID, w.id)
+				alive, err := w.db.Heartbeat(w.ctx, wf.ID, w.id, wf.Generation)
 				if err != nil && isConnectionError(err) {
 					fmt.Printf("[worker %s] Heartbeat failed for %s — DB appears down\n", w.id, wf.ID)
 				} else if !alive {

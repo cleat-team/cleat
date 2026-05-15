@@ -90,7 +90,7 @@ func TestTenantSelfAccess(t *testing.T) {
 			t.Fatalf("ClaimWorkflow: %v", err)
 		}
 		if claimed != nil {
-			store.CompleteWorkflow(ctx, runID, "test-worker", `{"done":true}`, nil)
+			store.CompleteWorkflow(ctx, runID, "test-worker", 0, `{"done":true}`, nil)
 		}
 	})
 }
@@ -197,11 +197,11 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			// Cleanup.
 			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker")
 			if claimedA != nil {
-				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", `{"done":true}`, nil)
+				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", 0, `{"done":true}`, nil)
 			}
 			claimedB, _ := storeB.ClaimWorkflow(ctx, "test-worker")
 			if claimedB != nil {
-				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", `{"done":true}`, nil)
+				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", 0, `{"done":true}`, nil)
 			}
 		})
 	}
@@ -286,11 +286,11 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			// Cleanup.
 			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker")
 			if claimedA != nil {
-				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", `{"done":true}`, nil)
+				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", 0, `{"done":true}`, nil)
 			}
 			claimedB, _ := storeB.ClaimWorkflow(ctx, "test-worker")
 			if claimedB != nil {
-				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", `{"done":true}`, nil)
+				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", 0, `{"done":true}`, nil)
 			}
 		})
 	}
@@ -478,11 +478,11 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			// Cleanup.
 			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker")
 			if claimedA != nil {
-				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", `{"done":true}`, nil)
+				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", 0, `{"done":true}`, nil)
 			}
 			claimedB, _ := storeB.ClaimWorkflow(ctx, "test-worker")
 			if claimedB != nil {
-				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", `{"done":true}`, nil)
+				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", 0, `{"done":true}`, nil)
 			}
 		})
 	}

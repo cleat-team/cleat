@@ -99,7 +99,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 			if releasedCount >= 5 {
 				break
 			}
-			if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", time.Now()); err == nil {
+			if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", 0, time.Now()); err == nil {
 				releasedCount++
 			}
 		}
@@ -127,7 +127,7 @@ func TestAddRemoveWorkers(t *testing.T) {
 	if err == nil {
 		for _, wf := range wfs2 {
 			if wf.AssignedTo == "worker-2" || wf.AssignedTo == "worker-3" {
-				store.ReleaseWorkflow(ctx, wf.ID, wf.AssignedTo, time.Now())
+				store.ReleaseWorkflow(ctx, wf.ID, wf.AssignedTo, 0, time.Now())
 			}
 		}
 	}
@@ -214,7 +214,7 @@ func TestScaleUpWorkers(t *testing.T) {
 	wfs, err := store.ListWorkflows(ctx, host.WorkflowFilter{Status: "running", Limit: 1000})
 	if err == nil {
 		for _, wf := range wfs {
-			store.ReleaseWorkflow(ctx, wf.ID, "worker-1", time.Now())
+			store.ReleaseWorkflow(ctx, wf.ID, "worker-1", 0, time.Now())
 		}
 	}
 

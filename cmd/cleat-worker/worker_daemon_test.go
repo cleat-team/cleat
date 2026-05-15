@@ -38,11 +38,11 @@ type mockStore struct {
 	appendEventHistoryBatchFn         func(ctx context.Context, workflowID string, recs []host.EventRecord) error
 	loadWASMFn                        func(ctx context.Context, defName string, defVersion int) ([]byte, error)
 	listVersionsFn                    func(ctx context.Context, defName string) ([]int, error)
-	heartbeatFn                       func(ctx context.Context, workflowID, workerID string) (bool, error)
+	heartbeatFn                       func(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
 	batchHeartbeatFn                 func(ctx context.Context, workerID string) (int64, error)
-	completeWorkflowFn                func(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
-	failWorkflowFn                    func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error
-	releaseWorkflowFn                 func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error
+	completeWorkflowFn                func(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
+	failWorkflowFn                    func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
+	releaseWorkflowFn                 func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
 	requestCancellationFn             func(ctx context.Context, workflowID, reason string) error
 	checkCancellationFn               func(ctx context.Context, workflowID string) (bool, string, error)
 	deliverSignalFn                   func(ctx context.Context, workflowID, signalName, payload string) error
@@ -93,8 +93,8 @@ type mockStore struct {
 	loadMemoryStatsFn                  func(ctx context.Context) ([]host.WorkflowMemoryStats, error)
 	queueDepthFn                       func(ctx context.Context) (int64, error)
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
-	continueAsNewFn             func(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error)
-	finalizeWorkflowSegmentFn   func(ctx context.Context, runID, workerID string, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
+	continueAsNewFn             func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error)
+	finalizeWorkflowSegmentFn   func(ctx context.Context, runID, workerID string, generation int64, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 }
 
 func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID string) (*host.WorkflowInstance, error) {
@@ -153,30 +153,30 @@ func (m *mockStore) ListVersions(ctx context.Context, defName string) ([]int, er
 	return []int{1}, nil
 }
 
-func (m *mockStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
+func (m *mockStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	if m.heartbeatFn != nil {
-		return m.heartbeatFn(ctx, workflowID, workerID)
+		return m.heartbeatFn(ctx, workflowID, workerID, generation)
 	}
 	return true, nil
 }
 
-func (m *mockStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
+func (m *mockStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
 	if m.completeWorkflowFn != nil {
-		return m.completeWorkflowFn(ctx, workflowID, workerID, result, queryState)
+		return m.completeWorkflowFn(ctx, workflowID, workerID, generation, result, queryState)
 	}
 	return nil
 }
 
-func (m *mockStore) FailWorkflow(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+func (m *mockStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	if m.failWorkflowFn != nil {
-		return m.failWorkflowFn(ctx, workflowID, workerID, errMsg, errorCode, errorOp, queryState)
+		return m.failWorkflowFn(ctx, workflowID, workerID, generation, errorMsg, errorCode, errorOp, queryState)
 	}
 	return nil
 }
 
-func (m *mockStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+func (m *mockStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 	if m.releaseWorkflowFn != nil {
-		return m.releaseWorkflowFn(ctx, workflowID, workerID, nextWakeAt)
+		return m.releaseWorkflowFn(ctx, workflowID, workerID, generation, nextWakeAt)
 	}
 	return nil
 }
@@ -545,16 +545,16 @@ func (m *mockStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time
 	return 0, nil
 }
 
-func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []host.EventRecord, result string, queryState map[string]string) (string, error) {
+func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []host.EventRecord, result string, queryState map[string]string) (string, error) {
 	if m.continueAsNewFn != nil {
-		return m.continueAsNewFn(ctx, currentRunID, workerID, defName, defVersion, newInput, result, queryState)
+		return m.continueAsNewFn(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, result, queryState)
 	}
 	return "new-run-id", nil
 }
 
-func (m *mockStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (m *mockStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	if m.finalizeWorkflowSegmentFn != nil {
-		return m.finalizeWorkflowSegmentFn(ctx, runID, workerID, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
+		return m.finalizeWorkflowSegmentFn(ctx, runID, workerID, generation, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
 	}
 	return nil
 }
@@ -656,7 +656,7 @@ func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 		<-loadWASMCh
 		return nil, nil
 	}
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 		return nil
 	}
 
@@ -2132,7 +2132,7 @@ func TestDispatchPendingUpdates_NoEngine(t *testing.T) {
 func TestReleaseOrFail_WithError(t *testing.T) {
 	ms := &mockStore{}
 	failed := false
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 		failed = true
 		if errMsg != "test error" {
 			t.Errorf("expected errMsg 'test error', got %q", errMsg)
@@ -2152,7 +2152,7 @@ func TestReleaseOrFail_WithError(t *testing.T) {
 func TestReleaseOrFail_WithoutError(t *testing.T) {
 	ms := &mockStore{}
 	released := false
-	ms.releaseWorkflowFn = func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+	ms.releaseWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 		released = true
 		return nil
 	}
@@ -2914,7 +2914,7 @@ func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID st
 	return nil, nil
 }
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
-func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
 func (m *mockStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
 func (m *mockStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) { return 0, nil }
 func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) { return true, nil }
@@ -2934,3 +2934,5 @@ func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, p
 	return nil, nil
 }
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error { return nil }
+func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) { return 0, nil }
+func (m *mockStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }

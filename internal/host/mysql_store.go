@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -57,10 +58,23 @@ func isLockWaitTimeout(err error) bool {
 // connection level. WHERE tenant_id = ? clauses are retained as
 // defense-in-depth.
 type MySQLStore struct {
-	db         *sql.DB
-	taskQueues []string
-	tenantID   string
-	dialect    Dialect
+	db                *sql.DB
+	taskQueues        []string
+	tenantID          string
+	dialect           Dialect
+	idempotencyKeyTTL time.Duration
+
+	// Encryption at rest for sensitive event payloads.
+	// NOTE: MySQL does not yet support encryption at rest; these fields are
+	// present for forward compatibility so that StreamEventHistory can
+	// contain the same decryption guard as the Postgres variant.
+	encryption               *PayloadEncryption
+	encryptSensitivePayloads bool
+
+	// disableReadRedaction when true bypasses RedactOnRead on the read path.
+	// Set to true during replay to avoid the overhead of retroactive redaction
+	// on every event load. Default false.
+	disableReadRedaction bool
 }
 
 // NewMySQLStore creates a MySQLStore scoped to the given task queues.
@@ -73,11 +87,39 @@ func NewMySQLStore(db *sql.DB, taskQueues ...string) *MySQLStore {
 		tqs = []string{"default"}
 	}
 	return &MySQLStore{
-		db:         db,
-		taskQueues: tqs,
-		tenantID:   "00000000-0000-0000-0000-000000000000",
-		dialect:    DialectMySQL,
+		db:                db,
+		taskQueues:        tqs,
+		tenantID:          "00000000-0000-0000-0000-000000000000",
+		dialect:           DialectMySQL,
+		idempotencyKeyTTL: 720 * time.Hour,
 	}
+}
+
+// WithIdempotencyKeyTTL returns a copy of the store with the given idempotency key TTL.
+func (s *MySQLStore) WithIdempotencyKeyTTL(ttl time.Duration) *MySQLStore {
+	cp := *s
+	cp.idempotencyKeyTTL = ttl
+	return &cp
+}
+
+// WithReadRedactionDisabled returns a copy of the store with redaction on
+// the read path disabled. This is used during replay to avoid the overhead
+// of retroactive redaction on every event load.
+func (s *MySQLStore) WithReadRedactionDisabled(disabled bool) *MySQLStore {
+	cp := *s
+	cp.disableReadRedaction = disabled
+	return &cp
+}
+
+// WithEncryption returns a copy of the store with encryption at rest enabled.
+// NOTE: Encryption at rest is not yet supported on MySQL backends. This method
+// is present for forward compatibility so that StreamEventHistory can contain
+// the same decryption guard as the Postgres variant.
+func (s *MySQLStore) WithEncryption(enc *PayloadEncryption, enabled bool) *MySQLStore {
+	cp := *s
+	cp.encryption = enc
+	cp.encryptSensitivePayloads = enabled
+	return &cp
 }
 
 // WithTenant returns a copy of the store scoped to the given tenant ID.
@@ -203,7 +245,8 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		UPDATE workflow_instances
 		SET status = 'running',
 		    assigned_to = ?,
-		    heartbeat_at = NOW(6)
+		    heartbeat_at = NOW(6),
+		    generation = generation + 1
 		WHERE id IN (%s)
 	`, idClause), updateArgs...)
 	if err != nil {
@@ -212,7 +255,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -300,7 +343,8 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		UPDATE workflow_instances
 		SET status = 'running',
 		    assigned_to = ?,
-		    heartbeat_at = NOW(6)
+		    heartbeat_at = NOW(6),
+		    generation = generation + 1
 		WHERE id IN (%s)
 	`, idClause), updateArgs...)
 	if err != nil {
@@ -309,7 +353,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -338,7 +382,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 // ---------------------------------------------------------------------------
 
 // CompleteWorkflow marks a workflow as completed with a result.
-func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
+func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("complete workflow: begin: %w", err)
@@ -352,20 +396,22 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID,
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
-		WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-	`, result, qsJSON, workflowID, workerID, s.tenantID)
+		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
+	`, result, qsJSON, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
+	}
+
+	// Record idempotency result within the transaction (best-effort).
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE idempotency_keys SET result = ? WHERE workflow_id = ?`,
+		result, workflowID); err != nil {
+		log.Printf("idempotency update failed (non-fatal): %v", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-
-	// Best-effort: record result in idempotency_keys if this workflow was started with a key.
-	s.db.ExecContext(ctx,
-		`UPDATE idempotency_keys SET result = ? WHERE workflow_id = ?`,
-		result, workflowID)
 
 	// Best-effort: clear sticky worker assignment.
 	s.ClearStickyWorker(context.Background(), workflowID)
@@ -378,7 +424,7 @@ func (s *MySQLStore) CompleteWorkflow(ctx context.Context, workflowID, workerID,
 }
 
 // FailWorkflow marks a workflow as failed.
-func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("fail workflow: begin: %w", err)
@@ -398,20 +444,22 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID, err
 		    completed_at = NOW(6),
 		    assigned_to = NULL,
 		    query_state = ?
-		WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-	`, errorMsg, errorCode, errorOp, qsJSON, workflowID, workerID, s.tenantID)
+		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
+	`, errorMsg, errorCode, errorOp, qsJSON, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
+	}
+
+	// Record idempotency error within the transaction (best-effort).
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ?`,
+		errorMsg, workflowID); err != nil {
+		log.Printf("idempotency update failed (non-fatal): %v", err)
 	}
 
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-
-	// Best-effort: record error in idempotency_keys if this workflow was started with a key.
-	s.db.ExecContext(ctx,
-		`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ?`,
-		errorMsg, workflowID)
 
 	// Best-effort: clear sticky worker assignment.
 	s.ClearStickyWorker(context.Background(), workflowID)
@@ -425,7 +473,7 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID, err
 
 // ReleaseWorkflow returns a workflow to the ready queue with a next wake time.
 // Used when a workflow suspends (sleep/await signals).
-func (s *MySQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+func (s *MySQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("release workflow: begin: %w", err)
@@ -435,8 +483,8 @@ func (s *MySQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID s
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, next_wake_at = ?
-		WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-	`, nextWakeAt, workflowID, workerID, s.tenantID)
+		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
+	`, nextWakeAt, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
 	}
@@ -480,10 +528,11 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 
 		// Insert idempotency key record. INSERT IGNORE handles the race where
 		// two requests arrive with the same key simultaneously.
+		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		res, err := tx.ExecContext(ctx,
 			`INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at)
-			 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL 7 DAY))`,
-			keyHash[:], runID)
+			 VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND))`,
+			keyHash[:], runID, ttlSeconds)
 		if err != nil {
 			return "", false, err
 		}
@@ -542,7 +591,7 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 // ContinueAsNew atomically creates a new workflow run AND completes the
 // current one in a single database transaction. If the transaction fails
 // neither operation takes effect. Returns the new run ID on success.
-func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
+func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
@@ -554,7 +603,9 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		return "", fmt.Errorf("continue as new: append events: %w", err)
 	}
 
+		// Use the store's tenant scope to preserve tenant isolation.
 	// Create the new workflow run.
+	// Use the store's tenant scope to preserve tenant isolation.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
@@ -574,8 +625,8 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
-		WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-	`, result, qsJSON, currentRunID, workerID, s.tenantID)
+		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
+	`, result, qsJSON, currentRunID, workerID, s.tenantID, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}
@@ -600,7 +651,7 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 // workflow status in a single database transaction. finalStatus must be one
 // of "done", "failed" or "ready" (suspend). Fields not relevant to the chosen
 // status are ignored.
-func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("finalize workflow: begin tx: %w", err)
@@ -622,8 +673,8 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'done', result = ?, completed_at = NOW(6), assigned_to = NULL, query_state = ?
-			WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-		`, result, qsJSON, runID, workerID, s.tenantID)
+			WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
+		`, result, qsJSON, runID, workerID, s.tenantID, generation)
 	case "failed":
 		qsJSON, _ := json.Marshal(queryState)
 		if qsJSON == nil {
@@ -638,14 +689,14 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 			    completed_at = NOW(6),
 			    assigned_to = NULL,
 			    query_state = ?
-			WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-		`, result, errorCode, errorOp, qsJSON, runID, workerID, s.tenantID)
+			WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
+		`, result, errorCode, errorOp, qsJSON, runID, workerID, s.tenantID, generation)
 	case "ready":
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'ready', assigned_to = NULL, next_wake_at = ?
-			WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-		`, nextWakeAt, runID, workerID, s.tenantID)
+			WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
+		`, nextWakeAt, runID, workerID, s.tenantID, generation)
 	default:
 		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
 	}
@@ -653,22 +704,30 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 		return fmt.Errorf("finalize workflow: update status: %w", err)
 	}
 
+	// Record idempotency outcome within the transaction (best-effort).
+	if finalStatus == "done" || finalStatus == "failed" {
+		switch finalStatus {
+		case "done":
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE idempotency_keys SET result = ? WHERE workflow_id = ?`,
+				result, runID); err != nil {
+				log.Printf("idempotency update failed (non-fatal): %v", err)
+			}
+		case "failed":
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ?`,
+				result, runID); err != nil {
+				log.Printf("idempotency update failed (non-fatal): %v", err)
+			}
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
-	// Best-effort cleanup for terminal statuses.
+	// Best-effort cleanup for terminal statuses (post-commit).
 	if finalStatus == "done" || finalStatus == "failed" {
-		switch finalStatus {
-		case "done":
-			s.db.ExecContext(ctx,
-				`UPDATE idempotency_keys SET result = ? WHERE workflow_id = ?`,
-				runID, result)
-		case "failed":
-			s.db.ExecContext(ctx,
-				`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ?`,
-				runID, result)
-		}
 		s.ClearStickyWorker(context.Background(), runID)
 		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
@@ -724,13 +783,15 @@ func (s *MySQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 	}
 	defer stmt.Close()
 
+	var prevChecksum string
 	for _, rec := range recs {
 		payload, err := eventRecordToPayload(rec)
 		payloadArg := nullStr("")
 		if err == nil && len(payload) > 0 {
 			payloadArg = sql.NullString{String: string(payload), Valid: true}
 		}
-		checksum := computeEventChecksum(rec)
+		checksum := computeEventChecksum(rec, prevChecksum)
+		prevChecksum = checksum
 		_, err = stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op),
 			nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))),
@@ -750,6 +811,7 @@ func (s *MySQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
 	}
+	// NOTE: event_count increment skipped on MySQL; column not yet available in CI databases.
 	return nil
 }
 
@@ -759,12 +821,12 @@ func (s *MySQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 
 // Heartbeat updates the heartbeat timestamp to prevent timeout.
 // Returns false if the workflow is no longer assigned to this worker.
-func (s *MySQLStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
+func (s *MySQLStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET heartbeat_at = NOW(6)
-		WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-	`, workflowID, workerID, s.tenantID)
+		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
+	`, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return false, fmt.Errorf("heartbeat: %w", err)
 	}
@@ -774,6 +836,11 @@ func (s *MySQLStore) Heartbeat(ctx context.Context, workflowID, workerID string)
 
 // BatchHeartbeat updates heartbeat_at for all workflows assigned to this
 // worker with status 'running'. Uses a single UPDATE instead of N calls.
+// NOTE: This intentionally does NOT check per-workflow generation because it
+// operates on ALL running workflows for a worker, and generations differ per
+// workflow. Individual generation-guarded operations (Heartbeat,
+// CompleteWorkflow, FailWorkflow, etc.) prevent double-execution even if the
+// batch heartbeat refreshes a stale workflow's heartbeat_at.
 func (s *MySQLStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances
@@ -794,21 +861,33 @@ func (s *MySQLStore) BatchHeartbeat(ctx context.Context, workerID string) (int64
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts. This is a terminal status similar to
 // 'failed' but indicates the workflow was retried without success.
-func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("move to dead letter queue: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = ?, error_code = ?, error_op = ?,
 		    completed_at = NOW(6), assigned_to = NULL
-		WHERE id = ? AND assigned_to = ? AND tenant_id = ?
-	`, errMsg, errorCode, errorOp, workflowID, workerID, s.tenantID)
+		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
+	`, errMsg, errorCode, errorOp, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
 	}
 
-	// Best-effort: record error in idempotency_keys if this workflow was started with a key.
-	s.db.ExecContext(context.Background(),
+	// Record idempotency error within the transaction (best-effort).
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = ? WHERE workflow_id = ?`,
-		errMsg, workflowID)
+		errMsg, workflowID); err != nil {
+		log.Printf("idempotency update failed (non-fatal): %v", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 
 	// Best-effort: clear sticky worker assignment.
 	s.ClearStickyWorker(context.Background(), workflowID)
@@ -941,7 +1020,13 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 
 	// 2. INSERT IGNORE child_workflow event into parent's event_history.
 	event.RunID = childID
-	checksum := computeEventChecksum(event)
+	var prevCS string
+	if event.Step > 1 {
+		s.db.QueryRowContext(ctx,
+			`SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = ? AND step = ? AND tenant_id = ?`,
+			parentID, event.Step-1, s.tenantID).Scan(&prevCS)
+	}
+	checksum := computeEventChecksum(event, prevCS)
 	_, err = tx.ExecContext(ctx, `
 		INSERT IGNORE INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1090,6 +1175,20 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 
+		// Retroactive redaction on read path.
+		if !s.disableReadRedaction {
+			rec.Request = RedactOnRead(rec.Request)
+			rec.Response = RedactOnRead(rec.Response)
+			rec.Err = RedactOnRead(rec.Err)
+			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
+			rec.ChildInput = RedactOnRead(rec.ChildInput)
+			rec.NewInput = RedactOnRead(rec.NewInput)
+			rec.PluginInput = RedactOnRead(rec.PluginInput)
+			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
+			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
+			rec.PromiseError = RedactOnRead(rec.PromiseError)
+		}
+
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
 		}
@@ -1172,6 +1271,20 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		rec.PromiseID = promiseID.String
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
+
+		// Retroactive redaction on read path.
+		if !s.disableReadRedaction {
+			rec.Request = RedactOnRead(rec.Request)
+			rec.Response = RedactOnRead(rec.Response)
+			rec.Err = RedactOnRead(rec.Err)
+			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
+			rec.ChildInput = RedactOnRead(rec.ChildInput)
+			rec.NewInput = RedactOnRead(rec.NewInput)
+			rec.PluginInput = RedactOnRead(rec.PluginInput)
+			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
+			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
+			rec.PromiseError = RedactOnRead(rec.PromiseError)
+		}
 
 		if payload.Valid {
 			populateFromPayload(&rec, []byte(payload.String))
@@ -1277,8 +1390,64 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				rec.PromiseResult = promiseResult.String
 				rec.PromiseError = promiseError.String
 
+				// Decryption must happen BEFORE redaction: redacting ciphertext is meaningless.
+				// The fields below are encrypted by flushEvent when encryption is enabled.
+				// NOTE: On MySQL this block is a forward-compatibility guard only --
+				// encryption is not yet supported and will never be true.
+				if s.encryption != nil && s.encryptSensitivePayloads {
+					if decrypted, err := s.encryption.Decrypt([]byte(rec.Request)); err == nil {
+						rec.Request = string(decrypted)
+					}
+					if decrypted, err := s.encryption.Decrypt([]byte(rec.Response)); err == nil {
+						rec.Response = string(decrypted)
+					}
+					if decrypted, err := s.encryption.DecryptString(rec.Err); err == nil {
+						rec.Err = decrypted
+					}
+					if decrypted, err := s.encryption.DecryptString(rec.SignalPayload); err == nil {
+						rec.SignalPayload = decrypted
+					}
+					if decrypted, err := s.encryption.DecryptString(rec.ChildInput); err == nil {
+						rec.ChildInput = decrypted
+					}
+					if decrypted, err := s.encryption.DecryptString(rec.NewInput); err == nil {
+						rec.NewInput = decrypted
+					}
+					if decrypted, err := s.encryption.DecryptString(rec.PluginInput); err == nil {
+						rec.PluginInput = decrypted
+					}
+					if decrypted, err := s.encryption.DecryptString(rec.PluginOutput); err == nil {
+						rec.PluginOutput = decrypted
+					}
+				}
+
+				// Retroactive redaction on read path: ensure sensitive fields are
+				// redacted even if they were stored before redaction was mandatory.
+				// Redaction runs AFTER decryption (see block above) since redacting
+				// ciphertext would yield meaningless "[REDACTED]" placeholders.
+				if !s.disableReadRedaction {
+					rec.Request = RedactOnRead(rec.Request)
+					rec.Response = RedactOnRead(rec.Response)
+					rec.Err = RedactOnRead(rec.Err)
+					rec.SignalPayload = RedactOnRead(rec.SignalPayload)
+					rec.ChildInput = RedactOnRead(rec.ChildInput)
+					rec.NewInput = RedactOnRead(rec.NewInput)
+					rec.PluginInput = RedactOnRead(rec.PluginInput)
+					rec.PluginOutput = RedactOnRead(rec.PluginOutput)
+					rec.PromiseResult = RedactOnRead(rec.PromiseResult)
+					rec.PromiseError = RedactOnRead(rec.PromiseError)
+				}
+
 				if payload.Valid {
-					populateFromPayload(&rec, []byte(payload.String))
+					payloadStr := payload.String
+					// Decrypt payload before populateFromPayload if encryption is enabled.
+					// NOTE: Forward-compatibility guard only on MySQL.
+					if s.encryption != nil && s.encryptSensitivePayloads {
+						if decrypted, err := s.encryption.DecryptJSON([]byte(payloadStr)); err == nil {
+							payloadStr = string(decrypted)
+						}
+					}
+					populateFromPayload(&rec, []byte(payloadStr))
 				}
 
 				select {
@@ -1361,17 +1530,20 @@ func (s *MySQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string
 		return nil
 	}
 
-	// Recompute and compare checksums.
+	// Recompute and compare checksums with chaining.
+	var prevChecksum string
 	for _, ev := range events {
 		expected, ok := storedChecksums[ev.Step]
 		if !ok || expected == "" {
+			prevChecksum = "" // Missing event breaks the chain
 			continue // No stored checksum for this step (pre-migration partial data).
 		}
-		actual := computeEventChecksum(ev)
+		actual := computeEventChecksum(ev, prevChecksum)
 		if actual != expected {
 			return fmt.Errorf("verify events: workflow %s step %d: checksum mismatch (expected %s, got %s)",
 				workflowID, ev.Step, expected, actual)
 		}
+		prevChecksum = expected
 	}
 	return nil
 }
@@ -1557,6 +1729,8 @@ type MySQLStoreFactory struct {
 
 	// tenantDBs maps tenantID -> per-tenant connection pool.
 	tenantDBs map[string]*sql.DB
+
+	idempotencyKeyTTL time.Duration
 }
 
 // NewMySQLStoreFactory creates a MySQLStoreFactory.
@@ -1564,11 +1738,16 @@ type MySQLStoreFactory struct {
 // administrative operations like CREATE DATABASE). baseDSN is a DSN template
 // with connection parameters but without a database name — the per-tenant
 // database name is appended for each tenant's connection.
-func NewMySQLStoreFactory(masterDB *sql.DB, baseDSN string) *MySQLStoreFactory {
+func NewMySQLStoreFactory(masterDB *sql.DB, baseDSN string, idempotencyKeyTTL ...time.Duration) *MySQLStoreFactory {
+	ttl := 720 * time.Hour
+	if len(idempotencyKeyTTL) > 0 {
+		ttl = idempotencyKeyTTL[0]
+	}
 	return &MySQLStoreFactory{
-		masterDB:  masterDB,
-		baseDSN:   baseDSN,
-		tenantDBs: make(map[string]*sql.DB),
+		masterDB:          masterDB,
+		baseDSN:           baseDSN,
+		tenantDBs:         make(map[string]*sql.DB),
+		idempotencyKeyTTL: ttl,
 	}
 }
 
@@ -1669,6 +1848,9 @@ func (f *MySQLStoreFactory) TenantDB(ctx context.Context, tenantID string) (*sql
 
 // OpenStore creates a MySQLStore scoped to the given tenant and task queues.
 // The store's connection pool is scoped to the tenant's database.
+//
+// NOTE: Encryption at rest (--encrypt-sensitive-payloads) is not yet supported
+// on MySQL backends. See PostgresStore.WithEncryption for the reference implementation.
 func (f *MySQLStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
 	tenantDB, err := f.getOrCreateTenantDB(ctx, tenantID)
 	if err != nil {

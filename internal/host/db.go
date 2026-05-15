@@ -46,6 +46,7 @@ type WorkflowInstance struct {
 	NextWakeAt time.Time       `json:"next_wake_at"`
 	TenantID   string          `json:"tenant_id,omitempty"`
 	CreatedAt  time.Time       `json:"created_at,omitempty"`
+	Generation int64           `json:"generation"`
 }
 
 // Schedule is a row from workflow_schedules.
@@ -166,23 +167,29 @@ type WorkflowStore interface {
 	ListVersions(ctx context.Context, defName string) ([]int, error)
 
 	// Heartbeat updates the heartbeat timestamp to prevent timeout.
-	// Returns false if the workflow is no longer assigned to this worker.
-	Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error)
+	// Returns false if the workflow is no longer assigned to this worker
+	// or if the generation does not match (workflow was reaped).
+	Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
 
 	// BatchHeartbeat updates heartbeat_at for all workflows assigned to this
 	// worker with status 'running'. Uses a single UPDATE instead of N calls.
+	// NOTE: This intentionally does NOT check per-workflow generation because
+	// it operates on ALL workflows for a worker, and generations differ per
+	// workflow. Individual generation-guarded operations (Heartbeat,
+	// CompleteWorkflow, FailWorkflow, etc.) prevent double-execution even if
+	// the batch heartbeat refreshes a stale workflow's heartbeat_at.
 	BatchHeartbeat(ctx context.Context, workerID string) (int64, error)
 
 	// CompleteWorkflow marks a workflow as completed with a result.
-	CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error
+	CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
 
 	// FailWorkflow marks a workflow as failed.
-	FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error
+	FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 
 	// MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 	// after exhausting all retry attempts. This is a terminal status similar to
 	// 'failed' but indicates the workflow was retried without success.
-	MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error
+	MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error
 
 	// RetryWorkflow moves a dead_lettered workflow back to a runnable state.
 	// Resets status to 'ready', clears the assigned worker and all error fields,
@@ -191,19 +198,19 @@ type WorkflowStore interface {
 
 	// ReleaseWorkflow returns a workflow to the ready queue.
 	// Used when a workflow suspends (sleep/await signals).
-	ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error
+	ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
 
 	// ContinueAsNew atomically creates a new workflow run AND completes the
 	// current one in a single database transaction.  If the transaction fails
 	// neither operation takes effect.  Returns the new run ID on success.
-	ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)
+	ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)
 
 	// FinalizeWorkflowSegment atomically appends new events and updates the
 	// workflow status in a single database transaction.  finalStatus is one of
 	// "done", "failed" or "ready" (suspend).  Fields not relevant to the chosen
 	// status are ignored.  If the transaction fails neither events nor status
 	// are written.
-	FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
+	FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 
 	// RequestCancellation sets the cancellation flag on a workflow.
 	RequestCancellation(ctx context.Context, workflowID, reason string) error
@@ -423,14 +430,39 @@ type WorkflowStore interface {
 	// caller reads from the channel. The channel is closed when all events have
 	// been sent. The context can be used to cancel the stream mid-way.
 	StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error)
+
+	// GetChildCount returns the number of active (non-terminal) child workflows
+	// for the given parent workflow. This is used for per-workflow child quota
+	// enforcement. Terminal statuses ('done', 'failed', 'dead_lettered')
+	// are excluded from the count.
+	GetChildCount(ctx context.Context, parentWorkflowID string) (int, error)
+
+	// GetConcurrencyKeyCount returns the number of non-expired concurrency keys
+	// held by the given workflow. This is used for per-workflow concurrency key
+	// quota enforcement. Keys whose expires_at is in the past are excluded.
+	GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error)
 }
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
 type PostgresStore struct {
-	db         *sql.DB
-	taskQueues []string
-	tenantID   string
-	dialect    Dialect
+	db                *sql.DB
+	taskQueues        []string
+	tenantID          string
+	dialect           Dialect
+	idempotencyKeyTTL time.Duration
+
+	// Encryption at rest for sensitive event payloads.
+	encryption               *PayloadEncryption
+		// NOTE: encryption currently applies only to the per-event write path
+		// (flushEvent). The batch write path (appendEventsInTx) stores events
+		// in plaintext; adding encryption there would double-encrypt events
+		// that flow through both paths. Until the paths are unified or
+		// exclusive, full coverage requires routing all events through the per-event path.
+	encryptSensitivePayloads bool
+
+	// disableReadRedaction when true bypasses RedactOnRead on the read path.
+	// Set to true during replay to avoid the overhead of retroactive redaction.
+	disableReadRedaction bool
 }
 
 // NewPostgresStore creates a PostgresStore scoped to the given task queues.
@@ -443,11 +475,19 @@ func NewPostgresStore(db *sql.DB, taskQueues ...string) *PostgresStore {
 		tqs = []string{"default"}
 	}
 	return &PostgresStore{
-		db:         db,
-		taskQueues: tqs,
-		tenantID:   "00000000-0000-0000-0000-000000000000",
-		dialect:    DialectPostgres,
+		db:                db,
+		taskQueues:        tqs,
+		tenantID:          "00000000-0000-0000-0000-000000000000",
+		dialect:           DialectPostgres,
+		idempotencyKeyTTL: 720 * time.Hour,
 	}
+}
+
+// WithIdempotencyKeyTTL returns a copy of the store with the given idempotency key TTL.
+func (s *PostgresStore) WithIdempotencyKeyTTL(ttl time.Duration) *PostgresStore {
+	cp := *s
+	cp.idempotencyKeyTTL = ttl
+	return &cp
 }
 
 // WithTenant returns a copy of the store scoped to the given tenant ID.
@@ -459,6 +499,135 @@ func (s *PostgresStore) WithTenant(tenantID string) *PostgresStore {
 	cp.tenantID = tenantID
 	return &cp
 }
+
+// WithEncryption returns a copy of the store with encryption at rest enabled.
+func (s *PostgresStore) WithEncryption(enc *PayloadEncryption, enabled bool) *PostgresStore {
+	cp := *s
+	cp.encryption = enc
+	cp.encryptSensitivePayloads = enabled
+	return &cp
+}
+
+// WithReadRedactionDisabled returns a copy of the store with redaction on
+// the read path disabled. Used during replay to avoid overhead.
+func (s *PostgresStore) WithReadRedactionDisabled(disabled bool) *PostgresStore {
+	cp := *s
+	cp.disableReadRedaction = disabled
+	return &cp
+}
+// decryptAndRedactEventRecord decrypts sensitive event record fields (when
+// encryption is enabled) and applies retroactive redaction. Decryption errors
+// are logged and the field is set to "[DECRYPTION_FAILED]" so it is clear the
+// data is unreadable rather than silently keeping ciphertext.
+func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID string) {
+	if s.encryption != nil && s.encryptSensitivePayloads {
+		// Request and Response are base64-decoded by tryDecodeBase64,
+		// so they hold raw ciphertext bytes and must be decrypted via Decrypt.
+		if decrypted, err := s.encryption.Decrypt([]byte(rec.Request)); err == nil {
+			rec.Request = string(decrypted)
+		} else {
+			log.Printf("[store] decrypt Request failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.Request = "[DECRYPTION_FAILED]"
+		}
+		if decrypted, err := s.encryption.Decrypt([]byte(rec.Response)); err == nil {
+			rec.Response = string(decrypted)
+		} else {
+			log.Printf("[store] decrypt Response failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.Response = "[DECRYPTION_FAILED]"
+		}
+		// Err, SignalPayload, ChildInput, NewInput, PluginInput, PluginOutput,
+		// PromiseResult, PromiseError are stored as base64-encoded ciphertexts
+		// (no extra base64 layer), so DecryptString is correct.
+		if decrypted, err := s.encryption.DecryptString(rec.Err); err == nil {
+			rec.Err = decrypted
+		} else {
+			log.Printf("[store] decrypt Err failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.Err = "[DECRYPTION_FAILED]"
+		}
+		if decrypted, err := s.encryption.DecryptString(rec.SignalPayload); err == nil {
+			rec.SignalPayload = decrypted
+		} else {
+			log.Printf("[store] decrypt SignalPayload failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.SignalPayload = "[DECRYPTION_FAILED]"
+		}
+		if decrypted, err := s.encryption.DecryptString(rec.ChildInput); err == nil {
+			rec.ChildInput = decrypted
+		} else {
+			log.Printf("[store] decrypt ChildInput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.ChildInput = "[DECRYPTION_FAILED]"
+		}
+		if decrypted, err := s.encryption.DecryptString(rec.NewInput); err == nil {
+			rec.NewInput = decrypted
+		} else {
+			log.Printf("[store] decrypt NewInput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.NewInput = "[DECRYPTION_FAILED]"
+		}
+		if decrypted, err := s.encryption.DecryptString(rec.PluginInput); err == nil {
+			rec.PluginInput = decrypted
+		} else {
+			log.Printf("[store] decrypt PluginInput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.PluginInput = "[DECRYPTION_FAILED]"
+		}
+		if decrypted, err := s.encryption.DecryptString(rec.PluginOutput); err == nil {
+			rec.PluginOutput = decrypted
+		} else {
+			log.Printf("[store] decrypt PluginOutput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.PluginOutput = "[DECRYPTION_FAILED]"
+		}
+		if decrypted, err := s.encryption.DecryptString(rec.PromiseResult); err == nil {
+			rec.PromiseResult = decrypted
+		} else {
+			log.Printf("[store] decrypt PromiseResult failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.PromiseResult = "[DECRYPTION_FAILED]"
+		}
+		if decrypted, err := s.encryption.DecryptString(rec.PromiseError); err == nil {
+			rec.PromiseError = decrypted
+		} else {
+			log.Printf("[store] decrypt PromiseError failed for workflow %s step %d: %v", workflowID, rec.Step, err)
+			decryptionErrorsTotal.Inc()
+			rec.PromiseError = "[DECRYPTION_FAILED]"
+		}
+	}
+
+	// Retroactive redaction on read path.
+	if !s.disableReadRedaction {
+		rec.Request = RedactOnRead(rec.Request)
+		rec.Response = RedactOnRead(rec.Response)
+		rec.Err = RedactOnRead(rec.Err)
+		rec.SignalPayload = RedactOnRead(rec.SignalPayload)
+		rec.ChildInput = RedactOnRead(rec.ChildInput)
+		rec.NewInput = RedactOnRead(rec.NewInput)
+		rec.PluginInput = RedactOnRead(rec.PluginInput)
+		rec.PluginOutput = RedactOnRead(rec.PluginOutput)
+		rec.PromiseResult = RedactOnRead(rec.PromiseResult)
+		rec.PromiseError = RedactOnRead(rec.PromiseError)
+	}
+}
+
+// decryptPayloadJSON decrypts the payload JSONB column if encryption is
+// enabled and returns the decrypted (or original) payload string.
+func (s *PostgresStore) decryptPayloadJSON(payloadStr string) string {
+	if s.encryption != nil && s.encryptSensitivePayloads && payloadStr != "" {
+		if decrypted, err := s.encryption.DecryptJSON([]byte(payloadStr)); err == nil {
+			return string(decrypted)
+		} else {
+			log.Printf("[store] decrypt payload JSON failed: %v", err)
+			decryptionErrorsTotal.Inc()
+		}
+	}
+	return payloadStr
+}
+
+
 
 // setRLSOnTx executes SELECT set_config to set the RLS tenant_id
 // for the given transaction. This ensures the RLS policy on tenant-scoped
@@ -516,7 +685,8 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		UPDATE workflow_instances
 		SET status = 'running',
 		    assigned_to = $1,
-		    heartbeat_at = now()
+		    heartbeat_at = now(),
+		    generation = generation + 1
 		WHERE id IN (
 			SELECT id FROM workflow_instances
 			WHERE status = 'ready'
@@ -526,7 +696,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
@@ -539,10 +709,10 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
-			var assignedTo, errorCode, errorOp sql.NullString
+		var assignedTo, errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -556,8 +726,8 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			wf.CreatedAt = createdAt.Time
 		}
 		wf.AssignedTo = assignedTo.String
-			wf.ErrorCode = errorCode.String
-			wf.ErrorOp = errorOp.String
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -585,7 +755,8 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		UPDATE workflow_instances
 		SET status = 'running',
 		    assigned_to = $1,
-		    heartbeat_at = now()
+		    heartbeat_at = now(),
+		    generation = generation + 1
 		WHERE id IN (
 			SELECT id FROM workflow_instances
 			WHERE status = 'ready'
@@ -596,7 +767,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
@@ -609,10 +780,10 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		var nextWakeAt sql.NullTime
 		var tenantID sql.NullString
 		var createdAt sql.NullTime
-			var assignedTo, errorCode, errorOp sql.NullString
+		var assignedTo, errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
@@ -622,12 +793,12 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		if tenantID.Valid {
 			wf.TenantID = tenantID.String
 		}
-			if createdAt.Valid {
-				wf.CreatedAt = createdAt.Time
+		if createdAt.Valid {
+			wf.CreatedAt = createdAt.Time
 		}
 		wf.AssignedTo = assignedTo.String
-			wf.ErrorCode = errorCode.String
-			wf.ErrorOp = errorOp.String
+		wf.ErrorCode = errorCode.String
+		wf.ErrorOp = errorOp.String
 		wfs = append(wfs, &wf)
 	}
 	if err := rows.Err(); err != nil {
@@ -720,8 +891,29 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 
+			// Decrypt and redact event record.
+		s.decryptAndRedactEventRecord(&rec, workflowID)
+
+		// Retroactive redaction on read path: ensure sensitive fields are
+		// redacted even if they were stored before redaction was mandatory.
+		// Redaction runs AFTER decryption (see block above) since redacting
+		// ciphertext would yield meaningless "[REDACTED]" placeholders.
+		if !s.disableReadRedaction {
+			rec.Request = RedactOnRead(rec.Request)
+			rec.Response = RedactOnRead(rec.Response)
+			rec.Err = RedactOnRead(rec.Err)
+			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
+			rec.ChildInput = RedactOnRead(rec.ChildInput)
+			rec.NewInput = RedactOnRead(rec.NewInput)
+			rec.PluginInput = RedactOnRead(rec.PluginInput)
+			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
+			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
+			rec.PromiseError = RedactOnRead(rec.PromiseError)
+		}
+
 		if payload.Valid {
-			populateFromPayload(&rec, []byte(payload.String))
+			payloadStr := s.decryptPayloadJSON(payload.String)
+			populateFromPayload(&rec, []byte(payloadStr))
 		}
 
 		history = append(history, rec)
@@ -818,8 +1010,27 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 			rec.CreatedAt = createdAt.Time
 		}
 
+			// Decrypt and redact event record.
+		s.decryptAndRedactEventRecord(&rec, workflowID)
+
+		// Retroactive redaction on read path.
+		// Redaction runs AFTER decryption (see block above) since redacting
+		// ciphertext would yield meaningless "[REDACTED]" placeholders.
+		if !s.disableReadRedaction {
+			rec.Request = RedactOnRead(rec.Request)
+			rec.Response = RedactOnRead(rec.Response)
+			rec.Err = RedactOnRead(rec.Err)
+			rec.SignalPayload = RedactOnRead(rec.SignalPayload)
+			rec.ChildInput = RedactOnRead(rec.ChildInput)
+			rec.NewInput = RedactOnRead(rec.NewInput)
+			rec.PluginInput = RedactOnRead(rec.PluginInput)
+			rec.PluginOutput = RedactOnRead(rec.PluginOutput)
+			rec.PromiseResult = RedactOnRead(rec.PromiseResult)
+			rec.PromiseError = RedactOnRead(rec.PromiseError)
+		}
 		if payload.Valid {
-			populateFromPayload(&rec, []byte(payload.String))
+			payloadStr := s.decryptPayloadJSON(payload.String)
+			populateFromPayload(&rec, []byte(payloadStr))
 		}
 
 		history = append(history, rec)
@@ -863,7 +1074,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				errCh <- ctx.Err()
 				return
 			default:
-		}
+			}
 
 			rows, err := s.db.QueryContext(ctx, `
 				SELECT step, event_type, service, operation, request, response, error,
@@ -882,7 +1093,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 			if err != nil {
 				errCh <- err
 				return
-		}
+			}
 
 			var pageCount int
 			for rows.Next() {
@@ -909,10 +1120,10 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 					rows.Close()
 					errCh <- err
 					return
-		}
+				}
 				if createdAt.Valid {
 					rec.CreatedAt = createdAt.Time
-		}
+				}
 
 				rec.Service = service.String
 				rec.Op = op.String
@@ -938,11 +1149,15 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				rec.PromiseName = promiseName.String
 				rec.PromiseID = promiseID.String
 				rec.PromiseResult = promiseResult.String
-		rec.PromiseError = promiseError.String
+				rec.PromiseError = promiseError.String
+
+				// Decrypt and redact event record.
+				s.decryptAndRedactEventRecord(&rec, workflowID)
 
 				if payload.Valid {
-					populateFromPayload(&rec, []byte(payload.String))
-		}
+					payloadStr := s.decryptPayloadJSON(payload.String)
+					populateFromPayload(&rec, []byte(payloadStr))
+				}
 
 				select {
 				case eventCh <- rec:
@@ -950,19 +1165,19 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 					rows.Close()
 					errCh <- ctx.Err()
 					return
-		}
-		}
+				}
+			}
 			rows.Close()
 
 			if err := rows.Err(); err != nil {
 				errCh <- err
 				return
-		}
+			}
 
 			// If we got fewer rows than the page size, we're done.
 			if pageCount < pageSize {
 				return
-		}
+			}
 			offset += pageSize
 		}
 	}()
@@ -1036,13 +1251,15 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 	}
 	defer stmt.Close()
 
+	var prevChecksum string
 	for _, rec := range recs {
 		payload, err := eventRecordToPayload(rec)
 		payloadArg := nullStr("")
 		if err == nil && len(payload) > 0 {
 			payloadArg = sql.NullString{String: string(payload), Valid: true}
 		}
-		checksum := computeEventChecksum(rec)
+		checksum := computeEventChecksum(rec, prevChecksum)
+		prevChecksum = checksum
 		_, err = stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
@@ -1058,6 +1275,14 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
 	}
+	// Increment event_count on workflow_instances so quota enforcement
+	// has an up-to-date count.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE workflow_instances SET event_count = event_count + $1 WHERE id = $2`,
+		len(recs), workflowID); err != nil {
+		return fmt.Errorf("append events in tx: increment event_count: %w", err)
+	}
+
 	return nil
 }
 
@@ -1065,7 +1290,7 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 // completes the current run in a single database transaction.  If the
 // transaction fails, neither events, the new run, nor the completion takes
 // effect.  Returns the new run ID on success.
-func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
+func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
@@ -1078,14 +1303,15 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	}
 
 	// Create the new workflow run.
+	// Use the store's tenant scope to preserve tenant isolation.
 	var newRunID string
 	err = tx.QueryRowContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
-			'00000000-0000-0000-0000-000000000000')
+			$4)
 		RETURNING id
-	`, defName, defVersion, newInput).Scan(&newRunID)
+	`, defName, defVersion, newInput, s.tenantID).Scan(&newRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -1098,8 +1324,8 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
-		WHERE id = $1 AND assigned_to = $2
-	`, currentRunID, workerID, result, qsJSON)
+		WHERE id = $1 AND assigned_to = $2 AND generation = $5
+	`, currentRunID, workerID, result, qsJSON, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}
@@ -1125,8 +1351,9 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 //   - "done"   — marks the workflow as completed with the given result
 //   - "failed" — marks the workflow as failed with the given error info
 //   - "ready"  — returns the workflow to the ready queue (suspend)
+//
 // Fields not relevant to the chosen status are ignored.
-func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("finalize workflow: begin tx: %w", err)
@@ -1152,8 +1379,8 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
-			WHERE id = $1 AND assigned_to = $2
-		`, runID, workerID, result, qsJSON)
+			WHERE id = $1 AND assigned_to = $2 AND generation = $5
+		`, runID, workerID, result, qsJSON, generation)
 	case "failed":
 		qsJSON, _ := json.Marshal(queryState)
 		if qsJSON == nil {
@@ -1168,14 +1395,14 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 			    completed_at = now(),
 			    assigned_to = NULL,
 			    query_state = $6
-			WHERE id = $1 AND assigned_to = $2
-		`, runID, workerID, result, errorCode, errorOp, qsJSON)
+			WHERE id = $1 AND assigned_to = $2 AND generation = $7
+		`, runID, workerID, result, errorCode, errorOp, qsJSON, generation)
 	case "ready":
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'ready', assigned_to = NULL, next_wake_at = $3
-			WHERE id = $1 AND assigned_to = $2
-		`, runID, workerID, nextWakeAt)
+			WHERE id = $1 AND assigned_to = $2 AND generation = $4
+		`, runID, workerID, nextWakeAt, generation)
 	default:
 		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
 	}
@@ -1183,26 +1410,30 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		return fmt.Errorf("finalize workflow: update status: %w", err)
 	}
 
+	// Record idempotency outcome within the transaction (best-effort).
+	if finalStatus == "done" || finalStatus == "failed" {
+		switch finalStatus {
+		case "done":
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1`,
+				runID, result); err != nil {
+				log.Printf("idempotency update failed (non-fatal): %v", err)
+			}
+		case "failed":
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
+				runID, result); err != nil {
+				log.Printf("idempotency update failed (non-fatal): %v", err)
+			}
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
-	// Best-effort cleanup for terminal statuses.
+	// Best-effort cleanup for terminal statuses (post-commit).
 	if finalStatus == "done" || finalStatus == "failed" {
-		// Record result/error in idempotency_keys if this workflow was started with a key.
-		switch finalStatus {
-		case "done":
-			s.db.ExecContext(ctx,
-				`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1`,
-				runID, result)
-		case "failed":
-			// Note: `result` (the function parameter) is intentionally used here as the
-			// idempotency error_msg — when finalStatus is "failed", the result parameter
-			// carries the error message rather than a success result.
-			s.db.ExecContext(ctx,
-				`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
-				runID, result)
-		}
 		s.ClearStickyWorker(context.Background(), runID)
 		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
@@ -1576,7 +1807,7 @@ func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, def
 }
 
 // Heartbeat updates the heartbeat timestamp.
-func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID string) (bool, error) {
+func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return false, fmt.Errorf("heartbeat: begin: %w", err)
@@ -1586,8 +1817,8 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET heartbeat_at = now()
-		WHERE id = $1 AND assigned_to = $2
-	`, workflowID, workerID)
+		WHERE id = $1 AND assigned_to = $2 AND generation = $3
+	`, workflowID, workerID, generation)
 	if err != nil {
 		return false, fmt.Errorf("heartbeat: %w", err)
 	}
@@ -1596,6 +1827,11 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workflowID, workerID stri
 }
 
 // BatchHeartbeat updates heartbeat_at for all workflows assigned to this worker.
+// NOTE: This intentionally does NOT check per-workflow generation because it
+// operates on ALL running workflows for a worker, and generations differ per
+// workflow. Individual generation-guarded operations (Heartbeat,
+// CompleteWorkflow, FailWorkflow, etc.) prevent double-execution even if the
+// batch heartbeat refreshes a stale workflow's heartbeat_at.
 func (s *PostgresStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -1616,7 +1852,7 @@ func (s *PostgresStore) BatchHeartbeat(ctx context.Context, workerID string) (in
 }
 
 // CompleteWorkflow marks a workflow as done.
-func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, workerID, result string, queryState map[string]string) error {
+func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("complete workflow: begin: %w", err)
@@ -1630,21 +1866,21 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
-		WHERE id = $1 AND assigned_to = $2
-	`, workflowID, workerID, result, qsJSON)
+		WHERE id = $1 AND assigned_to = $2 AND generation = $5
+	`, workflowID, workerID, result, qsJSON, generation)
 	if err != nil {
 		return err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	// Best-effort: record result in idempotency_keys if this workflow was started with a key.
-	if _, err := s.db.ExecContext(ctx,
+	// Record idempotency result within the transaction (best-effort).
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1`,
 		workflowID, result); err != nil {
-		log.Printf("CompleteWorkflow: record idempotency result: %v", err)
+		log.Printf("idempotency update failed (non-fatal): %v", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 
 	// Best-effort: clear sticky worker assignment (Feature 10).
@@ -1659,7 +1895,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 }
 
 // FailWorkflow marks a workflow as failed.
-func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("fail workflow: begin: %w", err)
@@ -1679,21 +1915,21 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID, 
 		    completed_at = now(),
 		    assigned_to = NULL,
 		    query_state = $6
-		WHERE id = $1 AND assigned_to = $2
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsJSON)
+		WHERE id = $1 AND assigned_to = $2 AND generation = $7
+	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsJSON, generation)
 	if err != nil {
 		return err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	// Best-effort: record error in idempotency_keys if this workflow was started with a key.
-	if _, err := s.db.ExecContext(ctx,
+	// Record idempotency error within the transaction (best-effort).
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
 		workflowID, errorMsg); err != nil {
-		log.Printf("FailWorkflow: record idempotency error: %v", err)
+		log.Printf("idempotency update failed (non-fatal): %v", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 
 	// Best-effort: clear sticky worker assignment (Feature 10).
@@ -1737,7 +1973,7 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
-func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string) error {
+func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("move to dead letter queue: begin: %w", err)
@@ -1748,20 +1984,20 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
 		    completed_at = now(), assigned_to = NULL
-		WHERE id = $1 AND assigned_to = $2
-	`, workflowID, workerID, errMsg, errorCode, errorOp)
+		WHERE id = $1 AND assigned_to = $2 AND generation = $6
+	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
 	if err != nil {
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-
-	// Best-effort: record error in idempotency_keys if this workflow was started with a key.
-	if _, err := s.db.ExecContext(context.Background(),
+	// Record idempotency error within the transaction (best-effort).
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE idempotency_keys SET error_msg = $2 WHERE workflow_id = $1`,
 		workflowID, errMsg); err != nil {
-		log.Printf("MoveToDeadLetterQueue: record idempotency error: %v", err)
+		log.Printf("idempotency update failed (non-fatal): %v", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 
 	// Best-effort: clear sticky worker assignment (Feature 10).
@@ -1797,7 +2033,7 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 }
 
 // ReleaseWorkflow returns a workflow to the queue with a next wake time.
-func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("release workflow: begin: %w", err)
@@ -1807,8 +2043,8 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, next_wake_at = $3
-		WHERE id = $1 AND assigned_to = $2
-	`, workflowID, workerID, nextWakeAt)
+		WHERE id = $1 AND assigned_to = $2 AND generation = $4
+	`, workflowID, workerID, nextWakeAt, generation)
 	if err != nil {
 		return err
 	}
@@ -1917,11 +2153,12 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 
 		// Insert idempotency key record. ON CONFLICT DO NOTHING handles the
 		// race where two requests arrive with the same key simultaneously.
+		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at)
-			 VALUES ($1, $2, now() + INTERVAL '7 days')
+			 VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'))
 			 ON CONFLICT (key_hash) DO NOTHING`,
-			keyHash[:], runID)
+			keyHash[:], runID, ttlSeconds)
 		if err != nil {
 			return "", false, err
 		}
@@ -1936,7 +2173,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 				keyHash[:]).Scan(&existingWfID)
 			if err != nil {
 				return "", false, err
-		}
+			}
 			return existingWfID, true, nil
 		}
 
@@ -2038,7 +2275,13 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 
 	// 2. INSERT child_workflow event into the parent's event_history.
 	event.RunID = childID
-	checksum := computeEventChecksum(event)
+	var prevCS string
+	if event.Step > 1 {
+		s.db.QueryRowContext(ctx,
+			`SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = $1 AND step = $2`,
+			parentID, event.Step-1).Scan(&prevCS)
+	}
+	checksum := computeEventChecksum(event, prevCS)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -2079,6 +2322,20 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (strin
 		return result, true, tx.Commit()
 	}
 	return "", false, tx.Commit()
+}
+
+// GetChildCount returns the number of active (non-terminal) child workflows
+// for the given parent workflow. Terminal statuses are excluded.
+func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM workflow_instances
+		WHERE parent_workflow_id = $1 AND status NOT IN ('done', 'failed', 'dead_lettered')
+	`, parentWorkflowID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get child count for %s: %w", parentWorkflowID, err)
+	}
+	return count, nil
 }
 
 // StartChildWorkflowInSchema creates a child workflow in the given target schema.
@@ -2253,7 +2510,7 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		var nextWakeAt, createdAt sql.NullTime
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {
@@ -2739,6 +2996,20 @@ func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, 
 	return n, nil
 }
 
+// GetConcurrencyKeyCount returns the number of non-expired concurrency keys
+// held by the given workflow.
+func (s *PostgresStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM concurrency_keys
+		WHERE workflow_id = $1 AND expires_at > now()
+	`, workflowID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get concurrency key count for %s: %w", workflowID, err)
+	}
+	return count, nil
+}
+
 // ---- Sticky Session implementations (Feature 10) ----
 
 // UpdateStickyWorker sets the sticky worker for a workflow.
@@ -2873,7 +3144,7 @@ func NextCronTime(cronExpr string, from time.Time) time.Time {
 			// Also verify day-of-month is valid for this month.
 			if t.Day() <= daysInMonth(t.Year(), t.Month()) {
 				return t
-		}
+			}
 		}
 		t = t.Add(time.Minute)
 	}
@@ -2901,7 +3172,7 @@ func matchField(pattern string, value int, min, max int) bool {
 			lo, hi := atoi(rangeParts[0]), atoi(rangeParts[1])
 			if value >= lo && value <= hi {
 				return true
-		}
+			}
 		} else if atoi(part) == value {
 			return true
 		}
@@ -2919,19 +3190,33 @@ func atoi(s string) int {
 	return n
 }
 
-// computeEventChecksum computes a SHA-256 checksum of the event record's data
-// (the JSON payload produced by eventRecordToPayload). The checksum is used for
-// integrity verification via VerifyWorkflowEvents.
-func computeEventChecksum(rec EventRecord) string {
+// computeEventChecksum computes a SHA-256 checksum of the event record's data,
+// chained with the previous event's checksum so that deleting an event breaks
+// the chain for all subsequent events. When previousChecksum is empty (first
+// event or unavailable), it is omitted from the computation.
+func computeEventChecksum(rec EventRecord, previousChecksum string) string {
 	payload, err := eventRecordToPayload(rec)
 	if err != nil {
 		// Fall back to checksum of the event type and step as a stable identifier.
+		// The fallback path is a safety net; json.Marshal on the payload map never
+		// fails in practice because all values are primitive types. The field list
+		// here is a stable subset for defense-in-depth.
 		data := fmt.Sprintf("%d:%s:%s:%s:%s:%s", rec.Step, rec.EventType, rec.Service, rec.Op, rec.Request, rec.Response)
 		hash := sha256.Sum256([]byte(data))
-		return hex.EncodeToString(hash[:])
+		if previousChecksum == "" {
+			return hex.EncodeToString(hash[:])
+		}
+		chain := fmt.Sprintf("%s:%s", previousChecksum, hex.EncodeToString(hash[:]))
+		hash2 := sha256.Sum256([]byte(chain))
+		return hex.EncodeToString(hash2[:])
 	}
 	hash := sha256.Sum256(payload)
-	return hex.EncodeToString(hash[:])
+	if previousChecksum == "" {
+		return hex.EncodeToString(hash[:])
+	}
+	chain := fmt.Sprintf("%s:%s", previousChecksum, hex.EncodeToString(hash[:]))
+	hash2 := sha256.Sum256([]byte(chain))
+	return hex.EncodeToString(hash2[:])
 }
 
 // VerifyWorkflowEvents loads all events for a workflow, recomputes their
@@ -2988,17 +3273,20 @@ func (s *PostgresStore) VerifyWorkflowEvents(ctx context.Context, workflowID str
 		return nil
 	}
 
-	// Recompute and compare checksums.
+	// Recompute and compare checksums with chaining.
+	var prevChecksum string
 	for _, ev := range events {
 		expected, ok := storedChecksums[ev.Step]
 		if !ok || expected == "" {
+			prevChecksum = "" // Missing event breaks the chain
 			continue // No stored checksum for this step (pre-migration partial data).
 		}
-		actual := computeEventChecksum(ev)
+		actual := computeEventChecksum(ev, prevChecksum)
 		if actual != expected {
 			return fmt.Errorf("verify events: workflow %s step %d: checksum mismatch (expected %s, got %s)",
 				workflowID, ev.Step, expected, actual)
 		}
+		prevChecksum = expected
 	}
 	return tx.Commit()
 }
@@ -3246,25 +3534,33 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 	}
 	switch rec.EventType {
 	case "call":
-		if v, ok := m["service"].(string); ok { rec.Service = v }
-		if v, ok := m["operation"].(string); ok { rec.Op = v }
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["operation"].(string); ok {
+			rec.Op = v
+		}
 		// Try base64-encoded fields first, fall back to raw strings for backward compat.
 		if v, ok := m["request_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.Request = string(decoded)
-		}
+			}
 		} else if v, ok := m["request"].(string); ok {
 			rec.Request = v
 		}
 		if v, ok := m["response_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.Response = string(decoded)
-		}
+			}
 		} else if v, ok := m["response"].(string); ok {
 			rec.Response = v
 		}
-		if v, ok := m["error"].(string); ok { rec.Err = v }
-		if v, ok := m["duration_ms"].(float64); ok { rec.DurationMs = int64(v) }
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
+		if v, ok := m["duration_ms"].(float64); ok {
+			rec.DurationMs = int64(v)
+		}
 	case "sleep":
 		if v, ok := m["duration_ms"].(float64); ok {
 			rec.DurationMs = int64(v)
@@ -3398,43 +3694,73 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 			rec.LogKV = v
 		}
 	case "fetch":
-		if v, ok := m["fetch_method"].(string); ok { rec.FetchMethod = v }
-		if v, ok := m["fetch_url"].(string); ok { rec.FetchURL = v }
-		if v, ok := m["fetch_headers"].(string); ok { rec.FetchHeaders = v }
-		if v, ok := m["fetch_body"].(string); ok { rec.FetchBody = v }
+		if v, ok := m["fetch_method"].(string); ok {
+			rec.FetchMethod = v
+		}
+		if v, ok := m["fetch_url"].(string); ok {
+			rec.FetchURL = v
+		}
+		if v, ok := m["fetch_headers"].(string); ok {
+			rec.FetchHeaders = v
+		}
+		if v, ok := m["fetch_body"].(string); ok {
+			rec.FetchBody = v
+		}
 		if v, ok := m["fetch_response_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.FetchResponse = string(decoded)
-		}
+			}
 		} else if v, ok := m["fetch_response"].(string); ok {
 			rec.FetchResponse = v
 		}
-		if v, ok := m["error"].(string); ok { rec.Err = v }
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
 	case "acquire_lock":
-		if v, ok := m["lock_key"].(string); ok { rec.LockKey = v }
-		if v, ok := m["lock_ttl_ms"].(float64); ok { rec.LockTTLMs = int64(v) }
-		if v, ok := m["lock_acquired"].(float64); ok { rec.LockAcquired = int(v) }
+		if v, ok := m["lock_key"].(string); ok {
+			rec.LockKey = v
+		}
+		if v, ok := m["lock_ttl_ms"].(float64); ok {
+			rec.LockTTLMs = int64(v)
+		}
+		if v, ok := m["lock_acquired"].(float64); ok {
+			rec.LockAcquired = int(v)
+		}
 	case "release_lock":
-		if v, ok := m["lock_key"].(string); ok { rec.LockKey = v }
+		if v, ok := m["lock_key"].(string); ok {
+			rec.LockKey = v
+		}
 	case "durable_send":
-		if v, ok := m["service"].(string); ok { rec.Service = v }
-		if v, ok := m["operation"].(string); ok { rec.Op = v }
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["operation"].(string); ok {
+			rec.Op = v
+		}
 		if v, ok := m["request_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.Request = string(decoded)
-		}
+			}
 		}
 	case "durable_schedule_invoke":
-		if v, ok := m["service"].(string); ok { rec.Service = v }
-		if v, ok := m["operation"].(string); ok { rec.Op = v }
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["operation"].(string); ok {
+			rec.Op = v
+		}
 		if v, ok := m["request_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.Request = string(decoded)
+			}
 		}
+		if v, ok := m["duration_ms"].(float64); ok {
+			rec.DurationMs = int64(v)
 		}
-		if v, ok := m["duration_ms"].(float64); ok { rec.DurationMs = int64(v) }
 	case "await_child":
-		if v, ok := m["run_id"].(string); ok { rec.RunID = v }
+		if v, ok := m["run_id"].(string); ok {
+			rec.RunID = v
+		}
 		if v, ok := m["response_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
 				rec.Response = string(decoded)
@@ -3442,10 +3768,16 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		} else if v, ok := m["response"].(string); ok {
 			rec.Response = v
 		}
-		if v, ok := m["error"].(string); ok { rec.Err = v }
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
 	case "heartbeat":
-		if v, ok := m["service"].(string); ok { rec.Service = v }
-		if v, ok := m["operation"].(string); ok { rec.Op = v }
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["operation"].(string); ok {
+			rec.Op = v
+		}
 	case "await_all_children":
 		if v, ok := m["request_b64"].(string); ok {
 			if decoded, err := base64.StdEncoding.DecodeString(v); err == nil {
@@ -3610,7 +3942,6 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 	return totalDeleted, nil
 }
 
-
 // DeleteExpiredEvents deletes event history rows for completed/failed workflows
 // whose completed_at is older than the cutoff. It uses batching to avoid
 // locking the event_history table when there are millions of rows to delete.
@@ -3764,21 +4095,38 @@ func tryEncodeBase64(s string) string {
 
 // PostgresStoreFactory implements StoreFactory for PostgreSQL.
 type PostgresStoreFactory struct {
-	db         *sql.DB
-	schemaName string
+	db                *sql.DB
+	schemaName        string
+	idempotencyKeyTTL time.Duration
+
+	encryption               *PayloadEncryption
+	encryptSensitivePayloads bool
 }
 
 // NewPostgresStoreFactory creates a PostgresStoreFactory.
 // The db connection must already be open. schemaName is the PostgreSQL
 // schema for cleat tables (defaults to "public").
-func NewPostgresStoreFactory(db *sql.DB, schemaName string) *PostgresStoreFactory {
+func NewPostgresStoreFactory(db *sql.DB, schemaName string, idempotencyKeyTTL ...time.Duration) *PostgresStoreFactory {
 	if schemaName == "" {
 		schemaName = "public"
 	}
-	return &PostgresStoreFactory{
-		db:         db,
-		schemaName: schemaName,
+	ttl := 720 * time.Hour
+	if len(idempotencyKeyTTL) > 0 {
+		ttl = idempotencyKeyTTL[0]
 	}
+	return &PostgresStoreFactory{
+		db:                db,
+		schemaName:        schemaName,
+		idempotencyKeyTTL: ttl,
+	}
+}
+
+// WithEncryption sets encryption at rest on the factory. When enabled,
+// sensitive payload fields are encrypted before being written to the database.
+func (f *PostgresStoreFactory) WithEncryption(enc *PayloadEncryption, enabled bool) *PostgresStoreFactory {
+	f.encryption = enc
+	f.encryptSensitivePayloads = enabled
+	return f
 }
 
 // OpenStore creates a PostgresStore scoped to the given tenant and task queues.
@@ -3791,6 +4139,10 @@ func (f *PostgresStoreFactory) OpenStore(ctx context.Context, tenantID string, t
 	}
 	store := NewPostgresStore(f.db, taskQueues...)
 	store.tenantID = tenantID
+	if f.encryption != nil && f.encryptSensitivePayloads {
+		store = store.WithEncryption(f.encryption, true)
+	}
+	store = store.WithIdempotencyKeyTTL(f.idempotencyKeyTTL)
 	return store, nopCloser{}, nil
 }
 

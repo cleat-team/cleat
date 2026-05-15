@@ -79,7 +79,7 @@ func TestDispatchLoop_StickyReclaim(t *testing.T) {
 		<-loadWASMCh
 		return nil, nil
 	}
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 		return nil
 	}
 
@@ -267,11 +267,11 @@ func TestReleaseOrFail_NoError(t *testing.T) {
 	ms := &mockStore{}
 	released := false
 	failed := false
-	ms.releaseWorkflowFn = func(ctx context.Context, workflowID, workerID string, nextWakeAt time.Time) error {
+	ms.releaseWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 		released = true
 		return nil
 	}
-	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
 		failed = true
 		return nil
 	}

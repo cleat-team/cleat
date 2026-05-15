@@ -44,7 +44,8 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				tenant_id UUID,
 				compaction_state JSONB, compacted_at TIMESTAMPTZ, compaction_step INTEGER,
 				plugin_vers JSONB NOT NULL DEFAULT '{}',
-				event_count BIGINT NOT NULL DEFAULT 0)`,
+				event_count BIGINT NOT NULL DEFAULT 0,
+					generation BIGINT NOT NULL DEFAULT 0)`,
 			`CREATE TABLE IF NOT EXISTS event_history (
 				workflow_id TEXT NOT NULL, step INTEGER NOT NULL,
 				event_type TEXT NOT NULL DEFAULT 'call',
@@ -101,7 +102,8 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				tenant_id VARCHAR(36),
 				compaction_state JSON, compacted_at TIMESTAMP(6), compaction_step INTEGER,
 				plugin_vers JSON NOT NULL DEFAULT ('{}'),
-				event_count BIGINT NOT NULL DEFAULT 0)`,
+				event_count BIGINT NOT NULL DEFAULT 0,
+					generation BIGINT NOT NULL DEFAULT 0)`,
 			`CREATE TABLE IF NOT EXISTS event_history (
 				workflow_id VARCHAR(255) NOT NULL, step INTEGER NOT NULL,
 				event_type VARCHAR(255) NOT NULL DEFAULT 'call',
@@ -167,7 +169,8 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					tenant_id UNIQUEIDENTIFIER,
 					compaction_state NVARCHAR(MAX), compacted_at DATETIMEOFFSET, compaction_step INTEGER,
 					plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
-					event_count BIGINT NOT NULL DEFAULT 0)`,
+					event_count BIGINT NOT NULL DEFAULT 0,
+					generation BIGINT NOT NULL DEFAULT 0)`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_history')
 				CREATE TABLE event_history (
 					workflow_id NVARCHAR(64) NOT NULL, step INTEGER NOT NULL,
@@ -248,7 +251,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				result JSONB,
 				error_msg TEXT,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-				expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + INTERVAL '7 days')`,
+				expires_at TIMESTAMPTZ NOT NULL) // TTL is application-configured (default 720h)`,
 			`CREATE TABLE IF NOT EXISTS workflow_update_requests (
 				workflow_id TEXT NOT NULL, update_name TEXT NOT NULL,
 				payload JSONB NOT NULL DEFAULT '{}',
@@ -328,7 +331,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				result JSON,
 				error_msg TEXT,
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				expires_at TIMESTAMP(6) NOT NULL DEFAULT (NOW(6) + INTERVAL 7 DAY))`,
+				expires_at TIMESTAMP(6) NOT NULL) /* TTL is application-configured (default 720h) */`,
 			`CREATE TABLE IF NOT EXISTS workflow_update_requests (
 				workflow_id VARCHAR(255) NOT NULL, update_name VARCHAR(255) NOT NULL,
 				payload JSON NOT NULL DEFAULT ('{}'),
@@ -399,7 +402,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					result NVARCHAR(MAX),
 					error_msg NVARCHAR(MAX),
 					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					expires_at DATETIMEOFFSET NOT NULL DEFAULT DATEADD(DAY, 7, SYSUTCDATETIME()))`,
+					expires_at DATETIMEOFFSET NOT NULL) -- TTL is application-configured (default 720h)`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_update_requests')
 				CREATE TABLE workflow_update_requests (
 					workflow_id NVARCHAR(64) NOT NULL, update_name NVARCHAR(255) NOT NULL,
