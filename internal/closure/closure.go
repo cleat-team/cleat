@@ -239,16 +239,21 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 		case *ast.RangeStmt:
 			if stmt.Key != nil && stmt.X != nil && fd.Pkg.Info != nil {
 				if tv, ok := fd.Pkg.Info.Types[stmt.X]; ok {
-					if _, isMap := tv.Type.Underlying().(*types.Map); isMap {
+					if mapType, isMap := tv.Type.Underlying().(*types.Map); isMap {
 						line := 0
+						pos := ""
 						if fset != nil {
-							line = fset.Position(stmt.Pos()).Line
+							p := fset.Position(stmt.Pos())
+							line = p.Line
+							pos = p.String()
 						}
-						cr.Warnings[name] = append(cr.Warnings[name], ValidationWarning{
-							Code:     "W001",
-							FuncName: name,
-							Message:  "map iteration order is non-deterministic; use sorted slices for deterministic replay",
-							Line:     line,
+						typeStr := fmt.Sprintf("map[%s]%s", mapType.Key(), mapType.Elem())
+						cr.Errors[name] = append(cr.Errors[name], ValidationError{
+							Code:       "E021",
+							FuncName:   name,
+							Message:    fmt.Sprintf("non-deterministic map iteration at %s: ranging over %s of type %s produces non-deterministic iteration order", pos, typeStr, typeStr),
+							Suggestion: fmt.Sprintf("collect keys via slices.Sorted(maps.Keys(%s)), then iterate over sorted keys", typeStr),
+							Line:       line,
 						})
 					}
 				}
@@ -553,6 +558,9 @@ func checkForbiddenPackageRef(sel *ast.SelectorExpr, fd *analyzer.FuncDecl, func
 
 // checkFloatInExpr walks an expression looking for identifiers whose type
 // is float32 or float64 and issues a W002 warning if any are found.
+// Floats in control flow conditions can cause non-deterministic replay because
+// IEEE 754 compliance does not guarantee identical NaN payloads or denormal
+// handling across all hardware. See docs/determinism.md for details.
 func checkFloatInExpr(expr ast.Expr, fd *analyzer.FuncDecl, funcName string, cr *Result, fset *token.FileSet) {
 	if fd.Pkg == nil || fd.Pkg.Info == nil {
 		return
@@ -589,7 +597,7 @@ func checkFloatInExpr(expr ast.Expr, fd *analyzer.FuncDecl, funcName string, cr 
 			Code:       "W002",
 			FuncName:   funcName,
 			Message:    "floating-point value in control flow condition may cause non-deterministic replay",
-			Suggestion: "Replace float comparisons with integer arithmetic, or compare using math.Float64bits() for exact bitwise equality.",
+			Suggestion: "Floating-point comparisons can produce different results across hardware or during replay due to NaN payload variation and denormal handling. Replace float comparisons with integer arithmetic, or compare exact bit patterns using math.Float64bits() / math.Float32bits(). See docs/determinism.md for details.",
 			Line:       line,
 		})
 	}

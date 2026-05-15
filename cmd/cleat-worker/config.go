@@ -21,7 +21,7 @@ type Config struct {
 	WASMInstanceTimeout    time.Duration
 	WASMCacheMaxEntries    int
 	WASMCacheMaxBytes      int64
-	RedactionEnabled       bool
+	RedactPatternsFile     string
 	DBMaxOpenConns         int
 	DBMaxIdleConns         int
 	LogLevel               string

@@ -41,6 +41,14 @@ var (
 		Name: "cleat_compaction_events_deleted_total",
 		Help: "Number of events deleted by history compaction",
 	})
+	encryptionErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cleat_encryption_errors_total",
+		Help: "Total number of encryption failures during event flush (fail-secure aborts)",
+	})
+	decryptionErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cleat_decryption_errors_total",
+		Help: "Total number of decryption failures on the read path",
+	})
 )
 
 // AmbiguousCallsTotalCounter returns the ambiguous calls total counter for test access.
@@ -49,5 +57,5 @@ var (
 func AmbiguousCallsTotalCounter() prometheus.Counter { return ambiguousCallsTotal }
 
 func init() {
-	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, compactionEventsDeletedTotal, ambiguousCallsTotal)
+	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, compactionEventsDeletedTotal, ambiguousCallsTotal, encryptionErrorsTotal, decryptionErrorsTotal)
 }

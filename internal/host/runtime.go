@@ -59,6 +59,30 @@ func (r *Runtime) Stderr() string { return r.stderr.String() }
 // host function registered on the "env" module. WASI preview1 is also instantiated
 // for Go wasip1 support. Plugin host functions are registered via the Engine's
 // PluginRegistry — not through NewRuntime.
+//
+// Floating-point determinism architecture:
+//
+// WASM floating-point (f32/f64) operations follow IEEE 754-2019, which guarantees
+// bit-identical results for the same operations on the same inputs across all
+// compliant hardware. wazero's interpreter mode (the default for cleat workflows)
+// implements strict IEEE 754 semantics without any "fast math" optimizations that
+// could break determinism.
+//
+// However, there are important gotchas:
+//  1. NaN payloads: IEEE 754 allows multiple bit patterns for NaN. WASM f32/f64
+//     operations that produce NaN may return different NaN payloads across CPU
+//     architectures or wazero versions. This is only a problem if NaN payloads
+//     affect control flow (e.g., comparing NaN values).
+//  2. Denormal numbers: Some CPUs implement "flush-to-zero" for denormals,
+//     while others preserve them. wazero's interpreter preserves denormals.
+//  3. Compiler optimizations: The host Go compiler may apply FMA (fused
+//     multiply-add) or other optimizations that change the exact order of
+//     floating-point operations. wazero's WASM interpreter does not apply
+//     such optimizations to WASM code.
+//
+// Best practice: avoid floating-point in workflow control flow conditions.
+// Use math.Float64bits()/math.Float32bits() for exact bitwise comparison, or
+// use integer arithmetic. See docs/determinism.md for more details.
 func NewRuntime(ctx context.Context, memoryLimitPages uint32) (*Runtime, error) {
 	if memoryLimitPages == 0 {
 		memoryLimitPages = DefaultMemoryLimitPages

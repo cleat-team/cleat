@@ -36,9 +36,13 @@ import (
 )
 
 var dbConnStr string
+var dbCredProviderName = "env"
+var dbCredPath string
 
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
+	flag.StringVar(&dbCredProviderName, "db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
+	flag.StringVar(&dbCredPath, "db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
@@ -1202,11 +1206,23 @@ func derivePluginDeps(usage *wasm.UsageInfo) map[string]string {
 	return nil
 }
 
-// getDBConnStr returns the database connection string from the --db flag
-// or the CLEAT_DATABASE_URL environment variable.
+// getDBConnStr returns the database connection string using the configured
+// credential provider. It checks --db first, then the provider, then
+// CLEAT_DATABASE_URL.
 func getDBConnStr() string {
 	if dbConnStr != "" {
 		return dbConnStr
+	}
+	// Fall back to credential provider.
+	// For the "env" provider this checks --db, DATABASE_URL, then CLEAT_DATABASE_URL.
+	if dbCredProviderName != "" {
+		provider, err := host.NewDBCredentialProvider(dbCredProviderName, "", dbCredPath)
+		if err == nil {
+			connStr, err := provider.GetConnectionString(context.Background())
+			if err == nil && connStr != "" {
+				return connStr
+			}
+		}
 	}
 	return os.Getenv("CLEAT_DATABASE_URL")
 }

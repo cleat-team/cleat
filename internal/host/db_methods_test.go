@@ -402,7 +402,7 @@ func TestPostgresStore_ReleaseWorkflow(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ReleaseWorkflow(testCtx, "wf-1", "worker-1", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	err := store.ReleaseWorkflow(testCtx, "wf-1", "worker-1", 0, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("ReleaseWorkflow: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestPostgresStore_Heartbeat_NotOwned(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	owned, err := store.Heartbeat(testCtx, "wf-1", "worker-1")
+	owned, err := store.Heartbeat(testCtx, "wf-1", "worker-1", 0)
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestPostgresStore_Heartbeat_Owned(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	owned, err := store.Heartbeat(testCtx, "wf-1", "worker-1")
+	owned, err := store.Heartbeat(testCtx, "wf-1", "worker-1", 0)
 	if err != nil {
 		t.Fatalf("Heartbeat: %v", err)
 	}
@@ -2013,7 +2013,7 @@ func TestPostgresStore_CompleteWorkflow(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", `{"result":"ok"}`, map[string]string{"key": "val"})
+	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", 0, `{"result":"ok"}`, map[string]string{"key": "val"})
 	if err != nil {
 		t.Fatalf("CompleteWorkflow: %v", err)
 	}
@@ -2024,7 +2024,7 @@ func TestPostgresStore_CompleteWorkflow_NilQueryState(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", `{}`, nil)
+	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", 0, `{}`, nil)
 	if err != nil {
 		t.Fatalf("CompleteWorkflow (nil qs): %v", err)
 	}
@@ -2035,7 +2035,7 @@ func TestPostgresStore_CompleteWorkflow_EmptyQueryState(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", `{}`, map[string]string{})
+	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", 0, `{}`, map[string]string{})
 	if err != nil {
 		t.Fatalf("CompleteWorkflow (empty qs): %v", err)
 	}
@@ -2046,7 +2046,7 @@ func TestPostgresStore_FailWorkflow(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", "something broke", "", "", map[string]string{"key": "val"})
+	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", 0, "something broke", "", "", map[string]string{"key": "val"})
 	if err != nil {
 		t.Fatalf("FailWorkflow: %v", err)
 	}
@@ -2057,7 +2057,7 @@ func TestPostgresStore_FailWorkflow_NilQueryState(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", "error", "", "", nil)
+	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", 0, "error", "", "", nil)
 	if err != nil {
 		t.Fatalf("FailWorkflow (nil qs): %v", err)
 	}

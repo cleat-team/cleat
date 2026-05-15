@@ -731,7 +731,7 @@ func TestRLSTenantIsolation(t *testing.T) {
 		}
 
 		// Release tenant A's workflow so it doesn't affect the tenant B test.
-		if err := storeA.ReleaseWorkflow(ctx, wfsA[0].ID, "worker-a", time.Now()); err != nil {
+		if err := storeA.ReleaseWorkflow(ctx, wfsA[0].ID, "worker-a", 0, time.Now()); err != nil {
 			t.Fatalf("ReleaseWorkflow tenant A: %v", err)
 		}
 	}

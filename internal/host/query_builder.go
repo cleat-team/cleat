@@ -129,13 +129,14 @@ func (d Dialect) batchLimit(limitPos int) string {
 
 // workflowInstanceColumns returns the column list for SELECT queries that
 // return WorkflowInstance rows. Includes id, def_name, def_version, status,
-// input, assigned_to, next_wake_at, error_code, error_op, error_msg, and created_at.
+// input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at,
+// and generation.
 func (d Dialect) workflowInstanceColumns() string {
 	switch d {
 	case DialectPostgres:
-		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at"
+		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at, generation"
 	case DialectMySQL, DialectMSSQL:
-		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at"
+		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation"
 	default:
 		panic("unknown dialect: " + d)
 	}
@@ -145,9 +146,9 @@ func (d Dialect) workflowInstanceColumns() string {
 func (d Dialect) workflowInstanceColumnsExtra() string {
 	switch d {
 	case DialectPostgres:
-		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op"
+		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation"
 	case DialectMySQL, DialectMSSQL:
-		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op"
+		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation"
 	default:
 		panic("unknown dialect: " + d)
 	}
@@ -235,7 +236,7 @@ type scanner interface {
 // scanWorkflowInstance scans a row into a WorkflowInstance, handling
 // NullString/NullTime boilerplate and the MSSQL input-as-string quirk.
 // Expects columns: id, def_name, def_version, status, input, assigned_to,
-// next_wake_at, error_code, error_op, error_msg, created_at.
+// next_wake_at, error_code, error_op, error_msg, created_at, generation.
 func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 	var nextWakeAt, createdAt sql.NullTime
 	var errorCode, errorOp, errorMsg sql.NullString
@@ -245,7 +246,7 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 		if err := row.Scan(
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
-			&errorMsg, &createdAt,
+			&errorMsg, &createdAt, &wf.Generation,
 		); err != nil {
 			return err
 		}
@@ -254,7 +255,7 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 		if err := row.Scan(
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&wf.Input, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
-			&errorMsg, &createdAt,
+			&errorMsg, &createdAt, &wf.Generation,
 		); err != nil {
 			return err
 		}
@@ -284,7 +285,7 @@ func (d Dialect) scanWorkflowInstanceExtra(row scanner, wf *WorkflowInstance) er
 		if err := row.Scan(
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt,
-			&tenantID, &createdAt, &errorCode, &errorOp,
+			&tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation,
 		); err != nil {
 			return err
 		}
@@ -293,7 +294,7 @@ func (d Dialect) scanWorkflowInstanceExtra(row scanner, wf *WorkflowInstance) er
 		if err := row.Scan(
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&wf.Input, &wf.AssignedTo, &nextWakeAt,
-			&tenantID, &createdAt, &errorCode, &errorOp,
+			&tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation,
 		); err != nil {
 			return err
 		}

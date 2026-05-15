@@ -35,20 +35,21 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-		"sort"
-		"strconv"
+	"runtime/debug"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/internal/auth"
 	"github.com/cleat-team/cleat/internal/host"
 	"github.com/cleat-team/cleat/internal/migration"
 	"github.com/cleat-team/cleat/internal/plugin"
 	"github.com/cleat-team/cleat/internal/wasm"
+	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
 	// Database drivers
@@ -98,7 +99,6 @@ func main() {
 	rateLimit := flag.Float64("rate-limit", 100, "Requests/second/IP rate limit (only when --api-addr is set)")
 	rateLimitBurst := flag.Int("rate-limit-burst", 200, "Rate limit burst size")
 	maxRetries := flag.Int("max-retries", 100, "Maximum retry attempts for DurableCallWithRetry")
-	redact := flag.Bool("redact", true, "Enable redaction of sensitive fields in event history (default: true)")
 	retentionDays := flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables)")
 	wasmCacheMaxEntries := flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
 	wasmCacheMaxMB := flag.Int("wasm-cache-max-mb", 500, "Max WASM byte cache total size in MB (LRU eviction)")
@@ -107,8 +107,23 @@ func main() {
 	disableChecksumVerification := flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
 	wasmMemoryMaxMB := flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
 	wasmInstructionLimit := flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; NOT YET IMPLEMENTED — placeholder for future wazero fuel API)")
-	flag.Parse()
+	redactPatternsFile := flag.String("redact-patterns-file", "", "Path to file with custom redaction patterns (one per line)")
+	dbCredentialProvider := flag.String("db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
+	dbCredentialPath := flag.String("db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 
+	// Encryption at rest flags.
+	encryptionKeyFile := flag.String("encryption-key-file", "", "Path to file containing base64-encoded AES-256-GCM encryption key (32 bytes after decode)")
+	encryptSensitivePayloads := flag.Bool("encrypt-sensitive-payloads", false, "Enable encryption of sensitive event payload fields")
+
+	// Per-workflow resource quota flags.
+	maxQuotaEvents := flag.Int("max-quota-events", 0, "Max events per workflow (0 = unlimited)")
+	maxQuotaChildren := flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
+	maxQuotaConcurrencyKeys := flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
+
+	// Health check interval for watchdog.
+	healthCheckInterval := flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
+
+	flag.Parse()
 
 	workerID := generateWorkerID()
 	log.Printf("[worker %s] Starting with concurrency=%d", workerID, *concurrency)
@@ -157,10 +172,10 @@ func main() {
 		pluginRegistry       = host.NewPluginRegistry()
 		pluginStreamRegistry = host.NewPluginStreamRegistry()
 		plugList             []*plugin.LoadedPlugin
-		plugHandler    http.Handler
-		plugMux        *http.ServeMux
-		bgWg          sync.WaitGroup
-		ratelim       *ipRateLimiter
+		plugHandler          http.Handler
+		plugMux              *http.ServeMux
+		bgWg                 sync.WaitGroup
+		ratelim              *ipRateLimiter
 	)
 
 	defaultTenantID := "00000000-0000-0000-0000-000000000000"
@@ -169,6 +184,7 @@ func main() {
 	var db *sql.DB
 	var tenantPools *plugin.TenantPools
 	var factory host.StoreFactory
+	var payloadEncryption *host.PayloadEncryption
 	if *shardsFile != "" {
 		configs, err := loadShardConfigs(*shardsFile)
 		if err != nil {
@@ -181,6 +197,27 @@ func main() {
 			}
 		}
 
+
+			// Load encryption key if configured (sharded path).
+			var payloadEncryption *host.PayloadEncryption
+			if *encryptSensitivePayloads {
+				if *encryptionKeyFile == "" {
+					log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
+				}
+			}
+			if *encryptionKeyFile != "" {
+				keyData, kerr := os.ReadFile(*encryptionKeyFile)
+				if kerr != nil {
+					log.Fatalf("[worker %s] Failed to read encryption key file: %v", workerID, kerr)
+				}
+				keyStr := strings.TrimSpace(string(keyData))
+				pe, perr := host.NewPayloadEncryption(keyStr)
+				if perr != nil {
+					log.Fatalf("[worker %s] Invalid encryption key: %v", workerID, perr)
+				}
+				payloadEncryption = pe
+				log.Printf("[worker %s] Encryption at rest enabled for sensitive payload fields", workerID)
+			}
 		// Build stores, DB connections, and closers for each shard.
 		stores := make([]host.WorkflowStore, len(configs))
 		closers := make([]func() error, len(configs))
@@ -191,7 +228,7 @@ func main() {
 				sep := "?"
 				if strings.Contains(dsn, "?") {
 					sep = "&"
-			}
+				}
 				dsn = dsn + sep + "search_path=" + cfg.Schema
 			}
 			sdb, err := sql.Open("postgres", dsn)
@@ -208,6 +245,9 @@ func main() {
 
 			shardDBs[i] = sdb
 			f := host.NewPostgresStoreFactory(sdb, cfg.Schema)
+				if payloadEncryption != nil {
+					f.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
+				}
 			if i == 0 {
 				factory = f
 			}
@@ -239,6 +279,16 @@ func main() {
 			go idempotencyCleanupLoop(ctx, sdb, 1*time.Hour)
 		}
 	} else {
+		// Resolve DB connection string via the configured credential provider.
+		credProvider, credErr := host.NewDBCredentialProvider(*dbCredentialProvider, *dbURL, *dbCredentialPath)
+		if credErr != nil {
+			log.Fatalf("[worker %s] credential provider: %v", workerID, credErr)
+		}
+		resolvedURL, credErr := credProvider.GetConnectionString(ctx)
+		if credErr != nil {
+			log.Fatalf("[worker %s] failed to resolve credentials: %v", workerID, credErr)
+		}
+		*dbURL = resolvedURL
 		if *dbURL == "" {
 			*dbURL = os.Getenv("DATABASE_URL")
 		}
@@ -296,6 +346,34 @@ func main() {
 			log.Fatalf("[worker %s] Invalid --driver %q; must be postgres, mysql, or mssql", workerID, *driver)
 		}
 
+		// Load encryption key if configured.
+		if *encryptSensitivePayloads {
+			if *driver != "postgres" {
+				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --driver=postgres (MySQL and MSSQL are not yet supported for encryption at rest)", workerID)
+			}
+				if *encryptionKeyFile == "" {
+					log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
+				}
+		}
+		if *encryptionKeyFile != "" {
+			keyData, kerr := os.ReadFile(*encryptionKeyFile)
+			if kerr != nil {
+				log.Fatalf("[worker %s] Failed to read encryption key file: %v", workerID, kerr)
+			}
+			keyStr := strings.TrimSpace(string(keyData))
+			pe, perr := host.NewPayloadEncryption(keyStr)
+			if perr != nil {
+				log.Fatalf("[worker %s] Invalid encryption key: %v", workerID, perr)
+			}
+			payloadEncryption = pe
+			log.Printf("[worker %s] Encryption at rest enabled for sensitive payload fields", workerID)
+		}
+
+		// Propagate encryption to the store factory.
+		if pgFactory, ok := factory.(*host.PostgresStoreFactory); ok && payloadEncryption != nil {
+			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
+		}
+
 		s, _, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
 		if err != nil {
 			log.Fatalf("[worker %s] Failed to open store: %v", workerID, err)
@@ -329,11 +407,11 @@ func main() {
 	}
 
 	pluginEnv := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: db},
-		Mux:    plugMux,
-		Config: rawPluginConfig,
-		Logger: slog.Default(),
-		Done:   ctx.Done(),
+		DB:      &host.SQLDBAdapter{DB: db},
+		Mux:     plugMux,
+		Config:  rawPluginConfig,
+		Logger:  slog.Default(),
+		Done:    ctx.Done(),
 		Dialect: plugin.Dialect(factory.Dialect()),
 		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
 			versions, err := store.ListVersions(ctx, defName)
@@ -358,11 +436,11 @@ func main() {
 		log.Fatalf("[worker %s] plugin: %v", workerID, err)
 	}
 
-		// Run core schema migrations before plugin migrations.
-		migrator := migration.NewRunner(db, factory.Dialect(), "migrations")
-		if err := migrator.Run(ctx); err != nil {
-			log.Fatalf("[worker %s] core migrations: %v", workerID, err)
-		}
+	// Run core schema migrations before plugin migrations.
+	migrator := migration.NewRunner(db, factory.Dialect(), "migrations")
+	if err := migrator.Run(ctx); err != nil {
+		log.Fatalf("[worker %s] core migrations: %v", workerID, err)
+	}
 
 	if err := plugin.RunMigrations(ctx, db, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
 		log.Fatalf("[worker %s] plugin migrations: %v", workerID, err)
@@ -408,7 +486,7 @@ func main() {
 					lp.Healthy = false
 					lp.Error = fmt.Errorf("panic during Init: %v", r)
 					log.Printf("[worker %s] plugin %s init panicked: %v", workerID, lp.Plugin.Info().Name, r)
-			}
+				}
 			}()
 			if err := lp.Plugin.Init(ctx, &envCopy); err != nil {
 				lp.Healthy = false
@@ -470,39 +548,49 @@ func main() {
 				if berr := bg.Run(ctx); berr != nil {
 					log.Printf("[worker %s] plugin %s: background worker exited: %v",
 						workerID, bg.Info().Name, berr)
-			}
+				}
 			}(p)
 		}
 	}
 
-	w := &Worker{
-		id:                  workerID,
-		store:               store,
-		concurrency:         *concurrency,
-		heartbeatInterval:   *heartbeatInterval,
-		pollInterval:        *pollInterval,
-		ctx:                 ctx,
-		cancel:              cancel,
-		wasmCache:           newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
-		scheduleInterval:    15 * time.Second,
-		compactionThreshold: *compactionThreshold,
-		compactionInterval:  *compactionInterval,
-		pluginRegistry:       pluginRegistry,
-			plugList:             plugList,
-			tenantPools:          tenantPools,
-			memorySampleRetention: *memorySampleRetention,
-			retentionDays:       *retentionDays,
-			schemaName:  *schemaName,
-			peerSchemas: parsePeerSchemas(*peerSchemas),
-			disableChecksumVerification: disableChecksumVerification,
-			maxRetries:          *maxRetries,
-			wasmMemoryMaxMB:       wasmMemoryMaxMB,
-			wasmInstructionLimit:  wasmInstructionLimit,
-		redactionEnabled:    *redact,
-			drainCh:             make(chan struct{}),
+	// Load custom redaction patterns from file (if configured).
+	if *redactPatternsFile != "" {
+		if err := host.LoadRedactPatterns(*redactPatternsFile); err != nil {
+			log.Fatalf("[worker %s] redact patterns: %v", workerID, err)
 		}
+	}
 
-		log.Printf("[worker %s] Redaction %s", workerID, map[bool]string{true: "enabled", false: "disabled"}[*redact])
+	w := &Worker{
+		id:                          workerID,
+		store:                       store,
+		concurrency:                 *concurrency,
+		heartbeatInterval:           *heartbeatInterval,
+		pollInterval:                *pollInterval,
+		ctx:                         ctx,
+		cancel:                      cancel,
+		wasmCache:                   newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
+		scheduleInterval:            15 * time.Second,
+		compactionThreshold:         *compactionThreshold,
+		compactionInterval:          *compactionInterval,
+		pluginRegistry:              pluginRegistry,
+		plugList:                    plugList,
+		tenantPools:                 tenantPools,
+		memorySampleRetention:       *memorySampleRetention,
+		retentionDays:               *retentionDays,
+		schemaName:                  *schemaName,
+		peerSchemas:                 parsePeerSchemas(*peerSchemas),
+		disableChecksumVerification: disableChecksumVerification,
+		maxRetries:                  *maxRetries,
+		wasmMemoryMaxMB:             wasmMemoryMaxMB,
+		wasmInstructionLimit:        wasmInstructionLimit,
+		maxQuotaEvents:              *maxQuotaEvents,
+		maxQuotaChildren:            *maxQuotaChildren,
+		maxQuotaConcurrencyKeys:     *maxQuotaConcurrencyKeys,
+		healthCheckInterval:         *healthCheckInterval,
+		encryption:                  payloadEncryption,
+		encryptSensitivePayloads:    *encryptSensitivePayloads,
+		drainCh:                     make(chan struct{}),
+	}
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
@@ -514,7 +602,7 @@ func main() {
 	atomic.StoreInt64(&metricsDesiredConcurrency, int64(*concurrency))
 	globalWorker = w
 
-		// Start HTTP API server if configured.
+	// Start HTTP API server if configured.
 	if *apiAddr != "" {
 		api := &apiServer{store: store, worker: w, maxBodySize: *maxBodySize, db: db}
 
@@ -552,10 +640,10 @@ func main() {
 				ps := pluginStatus{
 					PluginInfo: lp.Plugin.Info(),
 					Healthy:    lp.Healthy,
-			}
+				}
 				if lp.Error != nil {
 					ps.Error = lp.Error.Error()
-			}
+				}
 				statuses = append(statuses, ps)
 			}
 			json.NewEncoder(w).Encode(statuses)
@@ -572,9 +660,9 @@ func main() {
 				f, ferr := webFS.Open(path)
 				if ferr != nil {
 					r.URL.Path = "/"
-			} else {
+				} else {
 					f.Close()
-			}
+				}
 				fileServer.ServeHTTP(w, r)
 			})
 		}
@@ -607,7 +695,7 @@ func main() {
 					fmt.Println("Store this key securely. It will NOT be shown again.")
 					fmt.Printf("Use it in the Authorization header: Authorization: Bearer %s\n", key)
 					fmt.Println()
-			}
+				}
 			}
 		}
 
@@ -688,9 +776,9 @@ type wasmLRUEntry struct {
 // wasmLRUCache is a bounded LRU cache for WASM byte slices keyed by
 // "defName:version". Evicts LRU when entry count or total bytes exceeded.
 type wasmLRUCache struct {
-	mu      sync.Mutex
-	list    *list.List
-	index   map[string]*list.Element
+	mu       sync.Mutex
+	list     *list.List
+	index    map[string]*list.Element
 	maxBytes int64
 	maxEnts  int
 }
@@ -755,21 +843,29 @@ func (c *wasmLRUCache) remove(key string) {
 	}
 }
 
+// loopContext holds a per-loop cancellation signal and a done channel used by
+// restartLoop to synchronise replacement of a stale background goroutine.
+type loopContext struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 type Worker struct {
-	id                string
-	store             host.WorkflowStore
-	concurrency       int
-	heartbeatInterval time.Duration
-	pollInterval      time.Duration
+	id                   string
+	store                host.WorkflowStore
+	concurrency          int
+	heartbeatInterval    time.Duration
+	pollInterval         time.Duration
 	pluginRegistry       *host.PluginRegistry
 	pluginStreamRegistry *host.PluginStreamRegistry
 	tenantPools          *plugin.TenantPools
 	plugList             []*plugin.LoadedPlugin
 
-	ctx    context.Context
-	cancel context.CancelFunc
-		draining atomic.Bool
-	wg     sync.WaitGroup
+	ctx      context.Context
+	cancel   context.CancelFunc
+	draining atomic.Bool
+	wg       sync.WaitGroup
 
 	inflight    sync.Map // map[workflowID]*host.WorkflowInstance
 	execEngines sync.Map // map[workflowID]*host.Engine
@@ -787,19 +883,40 @@ type Worker struct {
 	compactionThreshold int
 	compactionInterval  time.Duration
 
-	memoryController    *MemoryController
-	maxRetries          int
-	redactionEnabled    bool
-	memorySampleRetention int
-	retentionDays        int
-	schemaName           string
-	peerSchemas          []string
+	memoryController            *MemoryController
+	maxRetries                  int
+	memorySampleRetention       int
+	retentionDays               int
+	schemaName                  string
+	peerSchemas                 []string
 	disableChecksumVerification *bool
-	wasmMemoryMaxMB       *int
-	wasmInstructionLimit  *int
+	wasmMemoryMaxMB             *int
+	wasmInstructionLimit        *int
 
-	drainCh    chan struct{}
-	drainOnce  sync.Once
+	drainCh   chan struct{}
+	drainOnce sync.Once
+
+	// Encryption at rest for sensitive event payloads.
+	encryption               *host.PayloadEncryption
+	encryptSensitivePayloads bool
+
+	// Per-workflow resource quotas.
+	maxQuotaEvents          int
+	maxQuotaChildren        int
+	maxQuotaConcurrencyKeys int
+
+	// Health check interval for watchdog.
+	healthCheckInterval time.Duration
+
+	// healthTracker records the last run time of each background loop for
+	// watchdog monitoring and auto-restart.
+	healthTracker healthTracker
+
+	// loopFuncs maps loop names to restart functions for the watchdog.
+	loopFuncs map[string]func()
+
+	// loopCtxMap holds per-loop cancellation contexts for clean restart.
+	loopCtxMap map[string]*loopContext
 }
 
 // DrainComplete returns a channel that is closed when the drain completes
@@ -808,44 +925,106 @@ func (w *Worker) DrainComplete() <-chan struct{} {
 	return w.drainCh
 }
 
+// getLoopCtx returns the per-loop context for the named background loop.
+// If no per-loop context has been set up yet (initial startup), it falls
+// back to the worker-level context so that shutdown still works.
+func (w *Worker) getLoopCtx(name string) context.Context {
+	if lc, ok := w.loopCtxMap[name]; ok {
+		return lc.ctx
+	}
+	return w.ctx
+}
+
 func (w *Worker) Run() {
 	// Initialize the global time seed so the first workflow execution
 	// (before the dispatch loop updates it) sees a real wall clock.
 	host.UpdateNowMs()
 
+	// Initialize health tracker and loop registry for watchdog.
+	w.healthTracker = newHealthTracker()
+	w.loopFuncs = make(map[string]func())
+	w.loopCtxMap = make(map[string]*loopContext)
+
+	// initLoopCtx creates a cancellable per-loop context derived from the
+	// worker context. The initial done channel is never closed (the initial
+	// goroutines are started inline, not via restartLoop); the 5s timeout in
+	// restartLoop guards the wait.
+	initLoopCtx := func(name string) {
+		ctx, cancel := context.WithCancel(w.ctx)
+		w.loopCtxMap[name] = &loopContext{
+			ctx:    ctx,
+			cancel: cancel,
+			done:   make(chan struct{}),
+		}
+	}
+	initLoopCtx("heartbeat")
+	initLoopCtx("reaper")
+	initLoopCtx("concurrency_key_reaper")
+	initLoopCtx("dispatch")
+	initLoopCtx("schedule")
+	initLoopCtx("compaction")
+	initLoopCtx("memory_reload")
+	initLoopCtx("memory_cleanup")
+	initLoopCtx("retention")
+	initLoopCtx("update_dispatch")
+
 	// Background heartbeat goroutine.
+	w.loopFuncs["heartbeat"] = w.heartbeatLoop
 	w.wg.Add(1)
-	go w.heartbeatLoop()
+	go w.withPanicRecovery("heartbeat", w.heartbeatLoop)()
 
 	// Background zombie reaper goroutine.
+	w.loopFuncs["reaper"] = w.reaperLoop
 	w.wg.Add(1)
-	go w.reaperLoop()
+	go w.withPanicRecovery("reaper", w.reaperLoop)()
 
 	// Background concurrency key reaper goroutine (Feature 5).
+	w.loopFuncs["concurrency_key_reaper"] = w.concurrencyKeyReaperLoop
 	w.wg.Add(1)
-	go w.concurrencyKeyReaperLoop()
+	go w.withPanicRecovery("concurrency_key_reaper", w.concurrencyKeyReaperLoop)()
 
 	// Dispatch loop.
+	w.loopFuncs["dispatch"] = w.dispatchLoop
 	w.wg.Add(1)
-	go w.dispatchLoop()
+	go w.withPanicRecovery("dispatch", w.dispatchLoop)()
 
 	// Cron schedule loop.
+	w.loopFuncs["schedule"] = w.scheduleLoop
 	w.wg.Add(1)
-	go w.scheduleLoop()
+	go w.withPanicRecovery("schedule", w.scheduleLoop)()
 
 	// Compaction loop.
+	w.loopFuncs["compaction"] = w.compactionLoop
 	w.wg.Add(1)
-	go w.compactionLoop()
+	go w.withPanicRecovery("compaction", w.compactionLoop)()
 
 	// Memory estimate reload loop.
+	w.loopFuncs["memory_reload"] = w.memoryReloadLoop
 	w.wg.Add(1)
-	go w.memoryReloadLoop()
+	go w.withPanicRecovery("memory_reload", w.memoryReloadLoop)()
 
 	// Memory sample cleanup loop.
+	w.loopFuncs["memory_cleanup"] = func() { w.memoryCleanupLoop(w.memorySampleRetention) }
 	w.wg.Add(1)
-	go w.memoryCleanupLoop(w.memorySampleRetention)
+	go w.withPanicRecovery("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })()
+
+	// Retention loop.
+	w.loopFuncs["retention"] = func() { w.retentionLoop(w.retentionDays) }
 	w.wg.Add(1)
-	go w.retentionLoop(w.retentionDays)
+	go w.withPanicRecovery("retention", func() { w.retentionLoop(w.retentionDays) })()
+
+	// Update dispatch loop (Feature 3: Update Handler).
+	w.loopFuncs["update_dispatch"] = func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) }
+	w.wg.Add(1)
+	go w.withPanicRecovery("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })()
+
+	// Watchdog loop for background loop health monitoring.
+	if w.healthCheckInterval > 0 {
+		w.loopFuncs["watchdog"] = w.watchdogLoop
+		w.wg.Add(1)
+		go w.withPanicRecovery("watchdog", w.watchdogLoop)()
+	}
+
 
 	log.Printf("[worker %s] Running", w.id)
 
@@ -858,6 +1037,7 @@ func (w *Worker) Run() {
 
 func (w *Worker) dispatchLoop() {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("dispatch", w.pollInterval)
 
 	// Keep the global time seed fresh for workflow sessions.
 	host.UpdateNowMs()
@@ -868,11 +1048,12 @@ func (w *Worker) dispatchLoop() {
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.getLoopCtx("dispatch").Done():
 			return
 		default:
 		}
 
+		w.healthTracker.recordRun("dispatch")
 
 		// If draining and no in-flight work, exit cleanly.
 		if w.draining.Load() {
@@ -929,13 +1110,13 @@ func (w *Worker) dispatchLoop() {
 				backoff := time.Duration(w.consecutiveDBErrors) * time.Second
 				if backoff > 30*time.Second {
 					backoff = 30 * time.Second
-			}
+				}
 				log.Printf("[worker %s] DB unreachable during sticky claim, backing off %v", w.id, backoff)
 				select {
-				case <-w.ctx.Done():
+			case <-w.ctx.Done():
 					return
 				case <-time.After(backoff):
-			}
+				}
 				continue
 			}
 			log.Printf("[worker %s] sticky claim error: %v", w.id, err)
@@ -956,15 +1137,15 @@ func (w *Worker) dispatchLoop() {
 					backoff := time.Duration(w.consecutiveDBErrors) * time.Second
 					if backoff > 30*time.Second {
 						backoff = 30 * time.Second
-			}
+					}
 					log.Printf("[worker %s] DB unreachable during claim, backing off %v", w.id, backoff)
 					select {
 					case <-w.ctx.Done():
 						return
 					case <-time.After(backoff):
-			}
+					}
 					continue
-			}
+				}
 				log.Printf("[worker %s] claim error: %v", w.id, err)
 				time.Sleep(time.Second)
 				continue
@@ -1058,12 +1239,31 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		}
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "retries exhausted") {
-			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp)
+			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
 			workflowsDeadLettered.Inc()
 		} else {
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp, nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
 		}
 		return
+	}
+
+	// ---- Memory cap check ----
+	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
+		requiredPages := wasm.ReadMemoryInitialPages(wasmBytes)
+		allowedPages := uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
+		if allowedPages > 65536 {
+			allowedPages = 65536
+		}
+		if requiredPages > allowedPages {
+			requiredMB := float64(requiredPages) * 65536 / 1024 / 1024
+			errMsg := fmt.Sprintf("module requires %d pages (%.0f MB) but max is %d pages (%d MB); increase --wasm-memory-max-mb or reduce module memory usage",
+				requiredPages, requiredMB, allowedPages, *w.wasmMemoryMaxMB)
+			log.Printf("[worker %s] %s: %s", w.id, wf.ID, errMsg)
+			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, host.ErrUnknown.String(), "", nil)
+			return
+		}
 	}
 
 	// ---- Load event history ----
@@ -1071,12 +1271,12 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if err != nil {
 		if isConnectionError(err) {
 			log.Printf("[worker %s] DB down loading history for %s — releasing", w.id, wf.ID)
-			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
+			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 			return
 		}
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("history load: %v", err), host.ErrUnknown.String(), "", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("history load: %v", err), host.ErrUnknown.String(), "", nil)
 		return
 	}
 
@@ -1106,7 +1306,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if err != nil {
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("create runtime: %v", err), host.ErrUnknown.String(), "", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("create runtime: %v", err), host.ErrUnknown.String(), "", nil)
 		return
 	}
 	defer rt.Close(w.ctx)
@@ -1131,7 +1331,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		log.Printf("[worker %s] %s: %v", w.id, wf.ID, err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), host.ErrPermanent.String(), "version_check", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "version_check", nil)
 		return
 	}
 
@@ -1154,7 +1354,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				log.Printf("[worker %s] %s: %v", w.id, wf.ID, err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
 				return
 			}
 			if workerVersion != requiredVersion {
@@ -1164,7 +1364,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				log.Printf("[worker %s] %s: %v", w.id, wf.ID, err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
 				return
 			}
 		}
@@ -1176,11 +1376,16 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, childVersions: childVersions}),
 		host.WithWorkflowID(wf.ID),
 		host.WithTenantID(wf.TenantID),
+		host.WithWorkflowStore(w.store),
 		host.WithChildWorkflowStore(w.store),
 		host.WithPluginRegistry(w.pluginRegistry),
 		host.WithMaxRetryAttempts(w.maxRetries),
-			host.WithSchema(w.schemaName),
-			host.WithPeerSchemas(w.peerSchemas),
+		host.WithSchema(w.schemaName),
+		host.WithPeerSchemas(w.peerSchemas),
+		host.WithEncryption(w.encryption, w.encryptSensitivePayloads),
+		host.WithMaxQuotaEvents(w.maxQuotaEvents),
+		host.WithMaxQuotaChildren(w.maxQuotaChildren),
+		host.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
 	}
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
@@ -1201,7 +1406,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				log.Printf("[worker %s] %s: cannot get tenant pool for %s: %v", w.id, wf.ID, wf.TenantID, err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("tenant pool: %v", err), host.ErrUnknown.String(), "", nil)
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), host.ErrUnknown.String(), "", nil)
 				return
 			}
 			engineOpts = append(engineOpts, host.WithDB(tenantDB))
@@ -1254,10 +1459,10 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		}
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "retries exhausted") {
-			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp)
+			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
 			workflowsDeadLettered.Inc()
 		} else {
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp, nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
 		}
 		return
 	}
@@ -1271,11 +1476,9 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if len(resultHistory) > len(history) {
 		newEvents = resultHistory[len(history):]
 		// Redact sensitive fields in new events before persisting.
-		if w.redactionEnabled {
-			for i := range newEvents {
-				newEvents[i].Request = host.Redact(newEvents[i].Request)
-				newEvents[i].Response = host.Redact(newEvents[i].Response)
-			}
+		for i := range newEvents {
+			newEvents[i].Request = host.Redact(newEvents[i].Request)
+			newEvents[i].Response = host.Redact(newEvents[i].Response)
 		}
 	}
 
@@ -1283,12 +1486,12 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		// ContinueAsNew: atomically append events, create a new run, and
 		// complete the current one — all in a single database transaction.
 		log.Printf("[worker %s] %s: continue_as_new → starting new run", w.id, wf.ID)
-		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState)
+		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState)
 		if err != nil {
 			log.Printf("[worker %s] %s: continue_as_new failed: %v", w.id, wf.ID, err)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, fmt.Sprintf("continue_as_new: %v", err), host.ErrUnknown.String(), "", nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("continue_as_new: %v", err), host.ErrUnknown.String(), "", nil)
 			return
 		}
 		log.Printf("[worker %s] %s: continued as new run %s", w.id, wf.ID, newRunID)
@@ -1307,12 +1510,12 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 
 	queryStart := time.Now()
-	err = w.store.FinalizeWorkflowSegment(w.ctx, wf.ID, w.id, newEvents, finalStatus, result, "", "", queryState, nextWakeAt)
+	err = w.store.FinalizeWorkflowSegment(w.ctx, wf.ID, w.id, wf.Generation, newEvents, finalStatus, result, "", "", queryState, nextWakeAt)
 	if err != nil {
 		dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
 		if isConnectionError(err) {
 			log.Printf("[worker %s] DB down finalizing %s — releasing", w.id, wf.ID)
-			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
+			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 			return
 		}
 		log.Printf("[worker %s] %s: finalize error: %v", w.id, wf.ID, err)
@@ -1327,10 +1530,10 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		}
 		errMsg := err.Error()
 		if strings.Contains(errMsg, "retries exhausted") {
-			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp)
+			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
 			workflowsDeadLettered.Inc()
 		} else {
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, errorCode, errorOp, nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
 		}
 		return
 	}
@@ -1355,14 +1558,16 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 
 func (w *Worker) heartbeatLoop() {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("heartbeat", w.heartbeatInterval)
 	ticker := time.NewTicker(w.heartbeatInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.getLoopCtx("heartbeat").Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("heartbeat")
 			hbStart := time.Now()
 			_, err := w.store.BatchHeartbeat(w.ctx, w.id)
 			if err != nil {
@@ -1371,7 +1576,7 @@ func (w *Worker) heartbeatLoop() {
 					log.Printf("[worker %s] BatchHeartbeat failed — DB appears down", w.id)
 				} else {
 					log.Printf("[worker %s] BatchHeartbeat error: %v", w.id, err)
-			}
+				}
 			} else {
 				backgroundLoopsTotal.WithLabelValues("heartbeat", "ok").Inc()
 			}
@@ -1386,14 +1591,16 @@ func (w *Worker) reaperLoop() {
 	// heartbeat interval so that the reaper never runs more often than
 	// the heartbeat (but at least every 10s).
 	interval := max(w.heartbeatInterval, 10*time.Second)
+	w.healthTracker.setInterval("reaper", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.getLoopCtx("reaper").Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("reaper")
 			reaperStart := time.Now()
 			// A workflow must miss at least two consecutive heartbeats
 			// before it is considered stale — otherwise a slow heartbeat
@@ -1403,9 +1610,9 @@ func (w *Worker) reaperLoop() {
 			if err != nil {
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Reaper: DB appears down", w.id)
-			} else {
+				} else {
 					log.Printf("[worker %s] Reaper: %v", w.id, err)
-			}
+				}
 				backgroundLoopsTotal.WithLabelValues("reaper", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("reaper").Set(time.Since(reaperStart).Seconds())
 				continue
@@ -1423,22 +1630,24 @@ func (w *Worker) reaperLoop() {
 func (w *Worker) concurrencyKeyReaperLoop() {
 	defer w.wg.Done()
 	// Reap expired concurrency keys every 60 seconds.
+	w.healthTracker.setInterval("concurrency_key_reaper", 60*time.Second)
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.getLoopCtx("concurrency_key_reaper").Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("concurrency_key_reaper")
 			ckStart := time.Now()
 			reaped, err := w.store.ReapExpiredConcurrencyKeys(w.ctx)
 			if err != nil {
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Concurrency key reaper: DB appears down", w.id)
-			} else {
+				} else {
 					log.Printf("[worker %s] Concurrency key reaper: %v", w.id, err)
-			}
+				}
 				backgroundLoopsTotal.WithLabelValues("concurrency_key_reaper", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("concurrency_key_reaper").Set(time.Since(ckStart).Seconds())
 				continue
@@ -1455,14 +1664,16 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 
 func (w *Worker) scheduleLoop() {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("schedule", w.scheduleInterval)
 	ticker := time.NewTicker(w.scheduleInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.getLoopCtx("schedule").Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("schedule")
 			schStart := time.Now()
 			w.scheduleMu.Lock()
 			schedules, err := w.store.GetDueSchedules(w.ctx)
@@ -1470,9 +1681,9 @@ func (w *Worker) scheduleLoop() {
 				w.scheduleMu.Unlock()
 				if isConnectionError(err) {
 					log.Printf("[worker %s] Scheduler: DB appears down", w.id)
-			} else {
+				} else {
 					log.Printf("[worker %s] Scheduler: %v", w.id, err)
-			}
+				}
 				backgroundLoopsTotal.WithLabelValues("schedule", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("schedule").Set(time.Since(schStart).Seconds())
 				continue
@@ -1483,16 +1694,16 @@ func (w *Worker) scheduleLoop() {
 				input := sch.Input
 				if len(input) == 0 {
 					input = json.RawMessage("{}")
-			}
+				}
 				if sch.EntryPoint != "" {
 					var m map[string]interface{}
 					json.Unmarshal(input, &m)
 					if m == nil {
 						m = make(map[string]interface{})
-			}
+					}
 					m["__entry_point"] = sch.EntryPoint
 					input, _ = json.Marshal(m)
-			}
+				}
 
 				// Find latest version.
 				versions, verr := w.store.ListVersions(w.ctx, sch.DefName)
@@ -1500,21 +1711,21 @@ func (w *Worker) scheduleLoop() {
 					log.Printf("[worker %s] Scheduler: definition %s not found for schedule %s",
 						w.id, sch.DefName, sch.Name)
 					continue
-			}
+				}
 
 				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "")
 				if serr != nil {
 					log.Printf("[worker %s] Scheduler: failed to start %s for schedule %s: %v",
 						w.id, sch.DefName, sch.Name, serr)
 					continue
-			}
+				}
 
 				// Compute next run time and update.
 				nextRun := host.NextCronTime(sch.CronExpression, time.Now())
 				if uerr := w.store.UpdateScheduleNextRun(w.ctx, sch.Name, nextRun); uerr != nil {
 					log.Printf("[worker %s] Scheduler: failed to update next run for %s: %v",
 						w.id, sch.Name, uerr)
-			}
+				}
 
 				log.Printf("[worker %s] Scheduler: fired %s → %s (next at %s)",
 					w.id, sch.Name, runID, nextRun.Format(time.RFC3339))
@@ -1529,14 +1740,16 @@ func (w *Worker) scheduleLoop() {
 
 func (w *Worker) compactionLoop() {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("compaction", w.compactionInterval)
 	ticker := time.NewTicker(w.compactionInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.getLoopCtx("compaction").Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("compaction")
 			compStart := time.Now()
 			candidates, err := w.store.GetCompactionCandidates(w.ctx, w.compactionThreshold, 10)
 			if err != nil {
@@ -1548,7 +1761,7 @@ func (w *Worker) compactionLoop() {
 			for _, wfID := range candidates {
 				if err := host.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold); err != nil {
 					log.Printf("[worker %s] compaction: error compacting %s: %v", w.id, wfID, err)
-			}
+				}
 			}
 			backgroundLoopsTotal.WithLabelValues("compaction", "ok").Inc()
 			backgroundLoopDuration.WithLabelValues("compaction").Set(time.Since(compStart).Seconds())
@@ -1559,14 +1772,16 @@ func (w *Worker) compactionLoop() {
 
 func (w *Worker) memoryReloadLoop() {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("memory_reload", 5*time.Minute)
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.getLoopCtx("memory_reload").Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("memory_reload")
 			mrStart := time.Now()
 			if err := w.memoryController.LoadEstimates(w.ctx); err != nil {
 				log.Printf("[worker %s] memory reload: %v", w.id, err)
@@ -1585,14 +1800,16 @@ func (w *Worker) retentionLoop(retentionDays int) {
 		return
 	}
 	interval := 24 * time.Hour
+	w.healthTracker.setInterval("retention", interval)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.getLoopCtx("retention").Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("retention")
 			cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
 			deleted, err := w.store.DeleteExpiredEvents(w.ctx, cutoff)
 			if err != nil {
@@ -1608,14 +1825,16 @@ func (w *Worker) retentionLoop(retentionDays int) {
 
 func (w *Worker) memoryCleanupLoop(maxSamples int) {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("memory_cleanup", 10*time.Minute)
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-w.getLoopCtx("memory_cleanup").Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("memory_cleanup")
 			mcStart := time.Now()
 			deleted, err := w.store.CleanupMemorySamples(w.ctx, maxSamples)
 			if err != nil {
@@ -1628,21 +1847,21 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 				backgroundLoopsTotal.WithLabelValues("memory_cleanup", "ok").Inc()
 				if deleted > 0 {
 					backgroundLoopItemsProcessed.WithLabelValues("memory_cleanup").Set(float64(deleted))
-			}
+				}
 			}
 			backgroundLoopDuration.WithLabelValues("memory_cleanup").Set(time.Since(mcStart).Seconds())
 		}
 	}
 }
 
-func (w *Worker) updateDispatchLoop() {
+func (w *Worker) updateDispatchLoop(ctx context.Context) {
 	defer w.wg.Done()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-w.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			w.dispatchPendingUpdates()
@@ -1699,12 +1918,12 @@ func (w *Worker) dispatchPendingUpdates() {
 				if dErr != nil {
 					if rErr := w.store.RejectPromise(ctx, wfID, upd.PromiseID, errStr); rErr != nil {
 						log.Printf("[worker %s] %s: error rejecting promise %s: %v", w.id, wfID, upd.PromiseID, rErr)
-			}
+					}
 				} else {
 					if rErr := w.store.ResolvePromise(ctx, wfID, upd.PromiseID, resultStr); rErr != nil {
 						log.Printf("[worker %s] %s: error resolving promise %s: %v", w.id, wfID, upd.PromiseID, rErr)
-			}
-			}
+					}
+				}
 			}
 		}
 		return true
@@ -1754,13 +1973,13 @@ func (w *Worker) waitForDB() {
 func (w *Worker) releaseOrFail(wf *host.WorkflowInstance, errMsg string) {
 	if errMsg != "" {
 		if strings.Contains(errMsg, "retries exhausted") {
-			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, errMsg, "", "")
+			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, "", "")
 			workflowsDeadLettered.Inc()
 		} else {
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, errMsg, "", "", nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, "", "", nil)
 		}
 	} else {
-		w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.NextWakeAt)
+		w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 	}
 }
 
@@ -2039,6 +2258,192 @@ func isConnectionError(err error) bool {
 	return false
 }
 
+// ---- Health tracker for background loop watchdog ----
+
+// healthTracker records the last run time and panic status of each background loop
+// for watchdog monitoring and auto-restart.
+type healthTracker struct {
+	mu        sync.Mutex
+	lastRun   map[string]time.Time     // loop_name -> last successful run time
+	panicked  map[string]bool          // loop_name -> has panicked
+	restarts  map[string]int           // loop_name -> restart count
+	intervals map[string]time.Duration // loop_name -> expected run interval
+}
+
+func newHealthTracker() healthTracker {
+	return healthTracker{
+		lastRun:   make(map[string]time.Time),
+		panicked:  make(map[string]bool),
+		restarts:  make(map[string]int),
+		intervals: make(map[string]time.Duration),
+	}
+}
+
+func (ht *healthTracker) recordRun(name string) {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	ht.lastRun[name] = time.Now()
+}
+
+func (ht *healthTracker) recordPanic(name string) {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	ht.panicked[name] = true
+}
+
+func (ht *healthTracker) recordRestart(name string) {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	ht.restarts[name]++
+}
+
+func (ht *healthTracker) setInterval(name string, interval time.Duration) {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	ht.intervals[name] = interval
+}
+
+// maxAge returns the maximum allowed time since the last run for a loop,
+// defined as 3x the expected interval, or 60s if no interval is set.
+func (ht *healthTracker) maxAge(name string) time.Duration {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	interval, ok := ht.intervals[name]
+	if ok && interval > 0 {
+		return interval * 3
+	}
+	return 60 * time.Second
+}
+
+// staleLoops returns names of loops that haven't run within their maxAge.
+func (ht *healthTracker) staleLoops() []string {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	var stale []string
+	now := time.Now()
+	for name, lastRun := range ht.lastRun {
+		interval, ok := ht.intervals[name]
+		maxAge := 60 * time.Second
+		if ok && interval > 0 {
+			maxAge = interval * 3
+		}
+		if now.Sub(lastRun) > maxAge {
+			stale = append(stale, name)
+		}
+	}
+	return stale
+}
+
+// snapshot returns a copy of the health tracker state for metrics reporting.
+func (ht *healthTracker) snapshot() (map[string]time.Time, map[string]bool, map[string]int) {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	lastRun := make(map[string]time.Time)
+	panicked := make(map[string]bool)
+	restarts := make(map[string]int)
+	for k, v := range ht.lastRun {
+		lastRun[k] = v
+	}
+	for k, v := range ht.panicked {
+		panicked[k] = v
+	}
+	for k, v := range ht.restarts {
+		restarts[k] = v
+	}
+	return lastRun, panicked, restarts
+}
+
+// withPanicRecovery wraps a background loop function with panic recovery.
+// The recovered panic is logged with stack trace, recorded in the health
+// tracker, and the loop exits (the watchdog will restart it).
+func (w *Worker) withPanicRecovery(name string, fn func()) func() {
+	return func() {
+		defer func() {
+			if r := recover(); r != nil {
+				stack := string(debug.Stack())
+				log.Printf("[worker %s] PANIC in %s loop: %v\n%s", w.id, name, r, stack)
+				w.healthTracker.recordPanic(name)
+				backgroundLoopsTotal.WithLabelValues(name, "panic").Inc()
+			}
+		}()
+		fn()
+	}
+}
+
+// watchdogLoop periodically checks the health of all background loops.
+// If a loop has not run within its expected interval, it is considered
+// stale and gets restarted.
+func (w *Worker) watchdogLoop() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(w.healthCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			stale := w.healthTracker.staleLoops()
+			for _, name := range stale {
+				log.Printf("[worker %s] watchdog: %s loop is stale, restarting", w.id, name)
+				w.restartLoop(name)
+			}
+			// Report health metrics.
+			lastRun, panicked, restarts := w.healthTracker.snapshot()
+			for name, t := range lastRun {
+				backgroundLoopLastRun.WithLabelValues(name).Set(float64(t.Unix()))
+			}
+			for name, count := range restarts {
+				backgroundLoopRestarts.WithLabelValues(name).Add(float64(count))
+			}
+			for name := range panicked {
+				_ = name // available for future alerting
+			}
+		}
+	}
+}
+
+// restartLoop re-launches a background loop by name using the loopFuncs registry.
+// restartLoop cancels the running loop (if any), waits for it to exit, then
+// launches a replacement goroutine using a fresh per-loop context. This
+// prevents goroutine leaks and double execution when the watchdog detects a
+// stale loop.
+func (w *Worker) restartLoop(name string) {
+	w.healthTracker.recordRestart(name)
+	fn, ok := w.loopFuncs[name]
+	if !ok {
+		log.Printf("[worker %s] watchdog: no restart function registered for %s", w.id, name)
+		return
+	}
+
+	// Cancel the old loop context (if one exists) and wait for the old goroutine
+	// to acknowledge cancellation via its done channel.
+	if prev, ok := w.loopCtxMap[name]; ok {
+		prev.cancel()
+		select {
+		case <-prev.done:
+			// old goroutine exited cleanly
+		case <-time.After(5 * time.Second):
+			log.Printf("[worker %s] WATCHDOG: loop %s did not exit within 5s of cancellation", w.id, name)
+		}
+	}
+
+	// Create a fresh per-loop context and done channel.
+	ctx, cancel := context.WithCancel(w.ctx)
+	done := make(chan struct{})
+	w.loopCtxMap[name] = &loopContext{ctx: ctx, cancel: cancel, done: done}
+
+	w.wg.Add(1)
+	go func() {
+		defer close(done)
+		defer cancel()
+		w.withPanicRecovery(name, fn)()
+	}()
+	log.Printf("[worker %s] watchdog: restarted %s loop", w.id, name)
+}
+
+// ---- HTTP API server ----
+
 // loadShardConfigs reads a JSON file containing an array of ShardConfig.
 // The file format is:
 //
@@ -2079,11 +2484,11 @@ type rateLimiterEntry struct {
 }
 
 type ipRateLimiter struct {
-	mu       sync.Mutex
-	limits   map[string]*rateLimiterEntry
-	rate     rate.Limit
-	burst    int
-	stopCh   chan struct{}
+	mu     sync.Mutex
+	limits map[string]*rateLimiterEntry
+	rate   rate.Limit
+	burst  int
+	stopCh chan struct{}
 }
 
 func newIPRateLimiter(r rate.Limit, burst int) *ipRateLimiter {
@@ -2103,11 +2508,11 @@ func newIPRateLimiter(r rate.Limit, burst int) *ipRateLimiter {
 			case <-ticker.C:
 				rl.mu.Lock()
 				now := time.Now()
-						for ip, entry := range rl.limits {
+				for ip, entry := range rl.limits {
 					if now.Sub(entry.lastUsed) > time.Hour {
 						delete(rl.limits, ip)
-			}
-			}
+					}
+				}
 				rl.mu.Unlock()
 			case <-rl.stopCh:
 				return
@@ -2192,6 +2597,15 @@ func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	stale := s.worker.healthTracker.staleLoops()
+	if len(stale) > 0 {
+		s.writeJSON(w, 503, map[string]interface{}{
+			"ok":          false,
+			"stale_loops": stale,
+			"reason":      "background_loop_stuck",
+		})
+		return
+	}
 	if s.worker.memoryController != nil && s.worker.memoryController.Pressure() > 0 {
 		s.writeJSON(w, 200, map[string]interface{}{
 			"ok":       true,
@@ -2338,7 +2752,7 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 			case parts[3] == "reject" && r.Method == http.MethodPost:
 				s.handleRejectPromise(w, r, id, promiseID)
 			default:
-			s.writeError(w, 404, "not found")
+				s.writeError(w, 404, "not found")
 			}
 		} else {
 			s.writeError(w, 404, "not found")
@@ -2447,9 +2861,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// Support Idempotency-Key header for exactly-once semantics.
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	// Redact sensitive fields in the input before storing.
-	if s.worker.redactionEnabled {
-		in = json.RawMessage(host.Redact(string(in)))
-	}
+	in = json.RawMessage(host.Redact(string(in)))
 	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
@@ -2470,7 +2882,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		}
 		if !acquired {
 			// Key already held by another workflow — fail the new run and return conflict.
-			s.store.FailWorkflow(context.Background(), runID, "", "concurrency key conflict: "+concurrencyKey, "", "", nil)
+			s.store.FailWorkflow(context.Background(), runID, "", 0, "concurrency key conflict: "+concurrencyKey, "", "", nil)
 			s.writeError(w, 409, "workflow already running with key "+concurrencyKey)
 			return
 		}
@@ -2501,9 +2913,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	payload := req.Payload
-	if s.worker.redactionEnabled {
-		payload = host.Redact(payload)
-	}
+	payload = host.Redact(payload)
 	if err := s.store.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -2705,9 +3115,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 		payload = "{}"
 	}
 	// Redact sensitive fields from the payload before persisting.
-	if s.worker.redactionEnabled {
-		payload = host.Redact(payload)
-	}
+	payload = host.Redact(payload)
 
 	// Check if there's already a pending update with the same name.
 	pending, pErr := s.store.GetPendingUpdateRequests(r.Context(), id)
@@ -2880,13 +3288,13 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type defResponse struct {
-		Name            string                   `json:"name"`
-		Version         int                      `json:"version"`
-		ABIVersion      int                      `json:"abi_version"`
-		MinVersion      int                      `json:"min_version"`
-		CreatedAt       time.Time                `json:"created_at"`
-		Deprecated      bool                     `json:"deprecated"`
-		ActiveInstances int                      `json:"active_instances"`
+		Name            string                    `json:"name"`
+		Version         int                       `json:"version"`
+		ABIVersion      int                       `json:"abi_version"`
+		MinVersion      int                       `json:"min_version"`
+		CreatedAt       time.Time                 `json:"created_at"`
+		Deprecated      bool                      `json:"deprecated"`
+		ActiveInstances int                       `json:"active_instances"`
 		Memory          *host.WorkflowMemoryStats `json:"memory,omitempty"`
 	}
 

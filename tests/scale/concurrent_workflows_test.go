@@ -87,7 +87,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 				}
 
 				// Complete the workflow.
-				if err := store.CompleteWorkflow(ctx, wfID, workerID, `{"status":"success"}`, nil); err != nil {
+				if err := store.CompleteWorkflow(ctx, wfID, workerID, 0, `{"status":"success"}`, nil); err != nil {
 					errCh <- fmt.Errorf("complete %s: %w", wfID, err)
 				}
 			}

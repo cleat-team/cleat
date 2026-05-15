@@ -9,10 +9,10 @@ import (
 // adapterDef describes how to generate the closure for a single HostCalls
 // method, bridging the clean Go interface to the //go:wasmimport call.
 type adapterDef struct {
-	FieldName   string          // HostCallsOptions field name
-	ReturnType  string          // Go return type for the closure, e.g. "(string, error)"
-	Params      []adapterParam  // closure parameter descriptions
-	ResultStmts []string        // lines of Go code for result processing
+	FieldName   string         // HostCallsOptions field name
+	ReturnType  string         // Go return type for the closure, e.g. "(string, error)"
+	Params      []adapterParam // closure parameter descriptions
+	ResultStmts []string       // lines of Go code for result processing
 }
 
 type adapterParam struct {
@@ -328,152 +328,152 @@ var adapterDefs = map[string]adapterDef{
 			"return result",
 		},
 	},
-		"CreatePromise": {
-			FieldName:  "CreatePromise",
-			ReturnType: "(string, error)",
-			Params: []adapterParam{
-				{"name", "string"},
-			},
-			ResultStmts: []string{
-				"promiseIDLen := uint32(uint64(result) >> 32)",
-				"errCode := uint32(result)",
-				"if errCode != 0 {",
-				"return \"\", fmt.Errorf(\"cleat_create_promise: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)\", errCode)",
-				"}",
-				"return unsafe.String(&promiseIDOutBuf[0], int(promiseIDLen)), nil",
-			},
+	"CreatePromise": {
+		FieldName:  "CreatePromise",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"name", "string"},
 		},
-		"AwaitPromise": {
-			FieldName:  "AwaitPromise",
-			ReturnType: "(string, bool, error)",
-			Params: []adapterParam{
-				{"promiseID", "string"},
-				{"timeoutMs", "int64"},
-			},
-			ResultStmts: []string{
-				"resultLen := uint32(uint64(result) >> 32)",
-				"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
-				"errCode := uint32(result & 0xFFFF)",
-				"if errCode != 0 {",
-				"return \"\", false, fmt.Errorf(\"cleat_await_promise: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)\", errCode)",
-				"}",
-				"return unsafe.String(&resultOutBuf[0], int(resultLen)), timedOut, nil",
-			},
+		ResultStmts: []string{
+			"promiseIDLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			"return \"\", fmt.Errorf(\"cleat_create_promise: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)\", errCode)",
+			"}",
+			"return unsafe.String(&promiseIDOutBuf[0], int(promiseIDLen)), nil",
 		},
-		"RegisterUpdateHandler": {
-			FieldName: "RegisterUpdateHandler",
-			Params: []adapterParam{
-				{"name", "string"},
-			},
-			ResultStmts: []string{
-				"_ = result",
-			},
+	},
+	"AwaitPromise": {
+		FieldName:  "AwaitPromise",
+		ReturnType: "(string, bool, error)",
+		Params: []adapterParam{
+			{"promiseID", "string"},
+			{"timeoutMs", "int64"},
 		},
-		"PluginCall": {
-			FieldName:  "PluginCall",
-			ReturnType: "(string, error)",
-			Params: []adapterParam{
-				{"pluginName", "string"},
-				{"functionName", "string"},
-				{"inputJSON", "string"},
-			},
-			ResultStmts: []string{
-				"responseLen := uint32(uint64(result) >> 40)",
-				"errCode := uint32(result & 0xFF)",
-				"if errCode != 0 {",
-				`	return "", fmt.Errorf("plugin_call: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
-				"}",
-				"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
-			},
+		ResultStmts: []string{
+			"resultLen := uint32(uint64(result) >> 32)",
+			"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
+			"errCode := uint32(result & 0xFFFF)",
+			"if errCode != 0 {",
+			"return \"\", false, fmt.Errorf(\"cleat_await_promise: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)\", errCode)",
+			"}",
+			"return unsafe.String(&resultOutBuf[0], int(resultLen)), timedOut, nil",
 		},
-		"AcquireLock": {
-			FieldName:  "AcquireLock",
-			ReturnType: "(bool, error)",
-			Params: []adapterParam{
-				{"key", "string"},
-				{"ttlMs", "int64"},
-			},
-			ResultStmts: []string{
-				"errCode := uint32(result & 0xFF)",
-				"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
-				"if errCode != 0 {",
-				`    return false, fmt.Errorf("cleat_acquire_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
-				"}",
-				"return acquired, nil",
-			},
+	},
+	"RegisterUpdateHandler": {
+		FieldName: "RegisterUpdateHandler",
+		Params: []adapterParam{
+			{"name", "string"},
 		},
-		"AcquireLockMs": {
-			FieldName:  "AcquireLockMs",
-			ReturnType: "(bool, error)",
-			Params: []adapterParam{
-				{"key", "string"},
-				{"ttlMs", "int64"},
-			},
-			ResultStmts: []string{
-				"errCode := uint32(result & 0xFF)",
-				"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
-				"if errCode != 0 {",
-				`    return false, fmt.Errorf("cleat_acquire_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
-				"}",
-				"return acquired, nil",
-			},
+		ResultStmts: []string{
+			"_ = result",
 		},
-		"ReleaseLock": {
-			FieldName:  "ReleaseLock",
-			ReturnType: "error",
-			Params: []adapterParam{
-				{"key", "string"},
-			},
-			ResultStmts: []string{
-				"errCode := uint32(result & 0xFF)",
-				"if errCode != 0 {",
-				`    return fmt.Errorf("cleat_release_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
-				"}",
-				"return nil",
-			},
+	},
+	"PluginCall": {
+		FieldName:  "PluginCall",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"pluginName", "string"},
+			{"functionName", "string"},
+			{"inputJSON", "string"},
 		},
-		"SideEffect": {
-			FieldName:  "SideEffect",
-			ReturnType: "(string, error)",
-			Params: []adapterParam{
-				{"fn", "func() (string, error)"},
-			},
-			ResultStmts: []string{
-				"cachedResultLen := uint32(uint64(result) >> 32)",
-				"errCode := uint32(result)",
-				"if errCode != 0 {",
-				`    return "", fmt.Errorf("cleat_side_effect: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
-				"}",
-				"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), nil",
-			},
+		ResultStmts: []string{
+			"responseLen := uint32(uint64(result) >> 40)",
+			"errCode := uint32(result & 0xFF)",
+			"if errCode != 0 {",
+			`	return "", fmt.Errorf("plugin_call: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			"}",
+			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
 		},
-		"PluginCallStreaming": {
-			FieldName:  "PluginCallStreaming",
-			ReturnType: "(<-chan cleat.StreamEvent, error)",
-			Params: []adapterParam{
-				{"pluginName", "string"},
-				{"functionName", "string"},
-				{"inputJSON", "string"},
-			},
-			ResultStmts: []string{
-				"responseLen := uint32(uint64(result) >> 40)",
-				"errCode := uint32(result & 0xFF)",
-				"if errCode != 0 {",
-				`		return nil, fmt.Errorf("plugin_call_streaming: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
-				"}",
-				"var events []cleat.StreamEvent",
-				`if err := json.Unmarshal(responseBuf[:responseLen], &events); err != nil {`,
-				`		return nil, fmt.Errorf("plugin_call_streaming: bad chunk data: %w", err)`,
-				"}",
-				"ch := make(chan cleat.StreamEvent, len(events))",
-				"for _, ev := range events {",
-				"		ch <- ev",
-				"}",
-				"close(ch)",
-				"return ch, nil",
-			},
+	},
+	"AcquireLock": {
+		FieldName:  "AcquireLock",
+		ReturnType: "(bool, error)",
+		Params: []adapterParam{
+			{"key", "string"},
+			{"ttlMs", "int64"},
 		},
-		}
+		ResultStmts: []string{
+			"errCode := uint32(result & 0xFF)",
+			"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
+			"if errCode != 0 {",
+			`    return false, fmt.Errorf("cleat_acquire_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			"}",
+			"return acquired, nil",
+		},
+	},
+	"AcquireLockMs": {
+		FieldName:  "AcquireLockMs",
+		ReturnType: "(bool, error)",
+		Params: []adapterParam{
+			{"key", "string"},
+			{"ttlMs", "int64"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result & 0xFF)",
+			"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
+			"if errCode != 0 {",
+			`    return false, fmt.Errorf("cleat_acquire_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			"}",
+			"return acquired, nil",
+		},
+	},
+	"ReleaseLock": {
+		FieldName:  "ReleaseLock",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"key", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result & 0xFF)",
+			"if errCode != 0 {",
+			`    return fmt.Errorf("cleat_release_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
+	"SideEffect": {
+		FieldName:  "SideEffect",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"fn", "func() (string, error)"},
+		},
+		ResultStmts: []string{
+			"cachedResultLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`    return "", fmt.Errorf("cleat_side_effect: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			"}",
+			"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), nil",
+		},
+	},
+	"PluginCallStreaming": {
+		FieldName:  "PluginCallStreaming",
+		ReturnType: "(<-chan cleat.StreamEvent, error)",
+		Params: []adapterParam{
+			{"pluginName", "string"},
+			{"functionName", "string"},
+			{"inputJSON", "string"},
+		},
+		ResultStmts: []string{
+			"responseLen := uint32(uint64(result) >> 40)",
+			"errCode := uint32(result & 0xFF)",
+			"if errCode != 0 {",
+			`		return nil, fmt.Errorf("plugin_call_streaming: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			"}",
+			"var events []cleat.StreamEvent",
+			`if err := json.Unmarshal(responseBuf[:responseLen], &events); err != nil {`,
+			`		return nil, fmt.Errorf("plugin_call_streaming: bad chunk data: %w", err)`,
+			"}",
+			"ch := make(chan cleat.StreamEvent, len(events))",
+			"for _, ev := range events {",
+			"		ch <- ev",
+			"}",
+			"close(ch)",
+			"return ch, nil",
+		},
+	},
+}
 
 // hostWrapperDef describes how to generate a host_ wrapper function for a
 // higher-level HostCalls method that isn't a direct WASM import wrapper.
@@ -646,47 +646,35 @@ var hostWrapperDefs = map[string]hostWrapperDef{
 func needsFmt(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
 		adef, ok := adapterDefs[hf.FieldName]
-		if ok {
-			for _, stmt := range adef.ResultStmts {
-				if strings.Contains(stmt, "fmt.Errorf") || strings.Contains(stmt, "fmt.Sprintf") {
-					return true
-				}
-			}
+		if !ok {
+			continue
 		}
-		wdef, ok := hostWrapperDefs[hf.FieldName]
-		if ok {
-			for _, stmt := range wdef.Body {
-				if strings.Contains(stmt, "fmt.Errorf") || strings.Contains(stmt, "fmt.Sprintf") {
-					return true
-				}
+		for _, stmt := range adef.ResultStmts {
+			if strings.Contains(stmt, "fmt.Errorf") || strings.Contains(stmt, "fmt.Sprintf") {
+				return true
 			}
 		}
 	}
 	return false
 }
 
-// needsJSON returns true if any of the used adapter or wrapper defs use encoding/json.
+// needsJSON returns true if any of the used adapter defs use encoding/json.
+// Only checks adapterDefs (not hostWrapperDefs) because this determines
+// imports for gen_host_adapter.go which only uses adapterDefs.
 func needsJSON(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
 		adef, ok := adapterDefs[hf.FieldName]
-		if ok {
-			for _, p := range adef.Params {
-				if p.Type == "[]string" {
-					return true
-				}
-			}
-			for _, stmt := range adef.ResultStmts {
-				if strings.Contains(stmt, "json.Unmarshal") || strings.Contains(stmt, "json.Marshal") {
-					return true
-				}
+		if !ok {
+			continue
+		}
+		for _, p := range adef.Params {
+			if p.Type == "[]string" {
+				return true
 			}
 		}
-		wdef, ok := hostWrapperDefs[hf.FieldName]
-		if ok {
-			for _, stmt := range wdef.Body {
-				if strings.Contains(stmt, "json.Unmarshal") || strings.Contains(stmt, "json.Marshal") {
-					return true
-				}
+		for _, stmt := range adef.ResultStmts {
+			if strings.Contains(stmt, "json.Unmarshal") || strings.Contains(stmt, "json.Marshal") {
+				return true
 			}
 		}
 	}

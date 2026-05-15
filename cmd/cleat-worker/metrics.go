@@ -63,6 +63,14 @@ var (
 		Name: "cleat_background_loop_items_processed",
 		Help: "Items processed in the last background loop iteration by loop_name",
 	}, []string{"loop_name"})
+	backgroundLoopLastRun = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "cleat_background_loop_last_run_seconds",
+		Help: "Unix timestamp of the last successful background loop run by loop_name",
+	}, []string{"loop_name"})
+	backgroundLoopRestarts = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cleat_background_loop_restarts_total",
+		Help: "Total background loop restarts by loop_name",
+	}, []string{"loop_name"})
 
 	// ---- Replay / Fresh step metrics ----
 	replayDuration = prometheus.NewHistogram(prometheus.HistogramOpts{
@@ -157,6 +165,7 @@ func init() {
 		dbQueryDuration, wasmCompileDuration, dispatchLatency, pollWaitDuration,
 		wasmCacheEntries, wasmCacheBytes, wasmCacheHits, wasmCacheMisses,
 		backgroundLoopsTotal, backgroundLoopDuration, backgroundLoopItemsProcessed,
+		backgroundLoopLastRun, backgroundLoopRestarts,
 		eventsDeletedTotal, retentionLastRunTimestamp,
 		workerCount,
 		workflowsStuck,

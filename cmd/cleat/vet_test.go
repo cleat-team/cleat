@@ -129,6 +129,11 @@ func TestVetGo_E005_NetHttp(t *testing.T) {
 	vetFixture(t, "e005_net_http", "E005")
 }
 
+// TestVetGo_E021_MapIteration verifies that map iteration triggers E021.
+func TestVetGo_E021_MapIteration(t *testing.T) {
+	vetFixture(t, "e021_map_iter", "E021")
+}
+
 // TestVetGo_NoErrors verifies that a clean package produces no errors.
 func TestVetGo_NoErrors(t *testing.T) {
 	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "no_errors")

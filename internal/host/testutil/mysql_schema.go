@@ -64,6 +64,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			compaction_step        INTEGER,
 			plugin_vers            JSON NOT NULL DEFAULT ('{}'),
 			tenant_id              VARCHAR(255),
+			generation             BIGINT NOT NULL DEFAULT 0,
 			PRIMARY KEY (id),
 			FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
