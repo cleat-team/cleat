@@ -245,9 +245,9 @@ func insertEventHistory(ctx context.Context, db *sql.DB, rowJSON []byte) error {
 
 func insertWorkflowSignal(ctx context.Context, db *sql.DB, rowJSON []byte) error {
 	var row struct {
-		WorkflowID   string `json:"workflow_id"`
-		SignalName   string `json:"signal_name"`
-		Payload      string `json:"payload,omitempty"`
+		WorkflowID    string `json:"workflow_id"`
+		SignalName    string `json:"signal_name"`
+		Payload       string `json:"payload,omitempty"`
 		CorrelationID string `json:"correlation_id,omitempty"`
 	}
 	if err := json.Unmarshal(rowJSON, &row); err != nil {

@@ -49,7 +49,7 @@ func TestGetQueryState(t *testing.T) {
 			}
 
 			// Complete the workflow with query state.
-			err = store.CompleteWorkflow(ctx, target.ID, "qstate-worker", 0,
+			err = store.CompleteWorkflow(ctx, target.ID, "qstate-worker", target.Generation,
 				`{"result":"ok"}`, map[string]string{"mykey": "myval"})
 			if err != nil {
 				t.Fatalf("CompleteWorkflow: %v", err)
@@ -395,7 +395,7 @@ func TestDeleteExpiredEvents(t *testing.T) {
 				t.Fatal("did not claim our workflow instance")
 			}
 
-			err = store.CompleteWorkflow(ctx, target.ID, "expired-worker", 0,
+			err = store.CompleteWorkflow(ctx, target.ID, "expired-worker", target.Generation,
 				`{"result":"done"}`, nil)
 			if err != nil {
 				t.Fatalf("CompleteWorkflow: %v", err)

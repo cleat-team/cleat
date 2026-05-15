@@ -156,6 +156,16 @@ var (
 		Name: "cleat_concurrency_keys_expiring_soon",
 		Help: "Number of concurrency keys approaching expiry while owning workflow is still running",
 	})
+
+	// ---- P3.6 Plugin connection pool metrics ----
+	pluginConnectionsInUse = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_plugin_connections_in_use",
+		Help: "Current number of open plugin database connections",
+	})
+	pluginConnectionsMax = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_plugin_connections_max",
+		Help: "Maximum configured plugin database connections",
+	})
 )
 
 func init() {
@@ -172,6 +182,7 @@ func init() {
 		memoryPressureRatio, eventHistorySizeBytes, eventHistoryRowCount,
 		reaperInstancesClaimedTotal,
 		concurrencyKeysTotal, concurrencyKeysExpiringSoon,
+		pluginConnectionsInUse, pluginConnectionsMax,
 	)
 }
 

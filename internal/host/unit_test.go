@@ -659,7 +659,7 @@ func TestFaultInjector_Context(t *testing.T) {
 
 func TestRuntime_StdoutStderr(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestRuntime_StdoutStderr(t *testing.T) {
 
 func TestRuntime_InstantiateAndInit(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -699,7 +699,7 @@ func TestRuntime_InstantiateAndInit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestNewWorkflowLoader_Defaults(t *testing.T) {
-	l := NewWorkflowLoader(nil, nil)
+	l := NewWorkflowLoader(nil, nil, nil)
 	if l == nil {
 		t.Fatal("NewWorkflowLoader returned nil")
 	}
@@ -716,7 +716,7 @@ func TestNewWorkflowLoader_Defaults(t *testing.T) {
 }
 
 func TestNewWorkflowLoader_CustomMaxSize(t *testing.T) {
-	l := NewWorkflowLoader(nil, nil, 42)
+	l := NewWorkflowLoader(nil, nil, nil, 42)
 	stats := l.CacheStats()
 	if stats.MaxSize != 42 {
 		t.Errorf("expected MaxSize 42, got %d", stats.MaxSize)
@@ -724,7 +724,7 @@ func TestNewWorkflowLoader_CustomMaxSize(t *testing.T) {
 }
 
 func TestNewWorkflowLoader_ZeroMaxSize(t *testing.T) {
-	l := NewWorkflowLoader(nil, nil, 0)
+	l := NewWorkflowLoader(nil, nil, nil, 0)
 	stats := l.CacheStats()
 	if stats.MaxSize != 100 {
 		t.Errorf("zero maxSize should default to 100, got %d", stats.MaxSize)
@@ -822,7 +822,7 @@ func TestFaultInjector_CleanupAllFaultTypes(t *testing.T) {
 
 func TestRuntime_InitModuleNoStart(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1116,7 +1116,7 @@ func TestMinU32(t *testing.T) {
 
 func TestWorkflowLoader_CachePutAndGet(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1128,7 +1128,7 @@ func TestWorkflowLoader_CachePutAndGet(t *testing.T) {
 	}
 	defer compiled.Close(ctx)
 
-	l := NewWorkflowLoader(nil, rt, 10)
+	l := NewWorkflowLoader(nil, rt, nil, 10)
 
 	key := defKey{Name: "test-wf", Version: 1}
 
@@ -1161,7 +1161,7 @@ func TestWorkflowLoader_CachePutAndGet(t *testing.T) {
 
 func TestWorkflowLoader_CacheRemove(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1172,7 +1172,7 @@ func TestWorkflowLoader_CacheRemove(t *testing.T) {
 		t.Fatalf("CompileModule: %v", err)
 	}
 
-	l := NewWorkflowLoader(nil, rt, 10)
+	l := NewWorkflowLoader(nil, rt, nil, 10)
 
 	key := defKey{Name: "test-wf", Version: 1}
 	l.cachePut(key, compiled)
@@ -1191,14 +1191,14 @@ func TestWorkflowLoader_CacheRemove(t *testing.T) {
 
 func TestWorkflowLoader_CacheEviction(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	defer rt.Close(ctx)
 
 	// Max size 1 means the second insert should evict the first.
-	l := NewWorkflowLoader(nil, rt, 1)
+	l := NewWorkflowLoader(nil, rt, nil, 1)
 
 	mod1, err := rt.CompileModule(ctx, minimalWasm())
 	if err != nil {
@@ -1240,14 +1240,14 @@ func TestWorkflowLoader_CacheEviction(t *testing.T) {
 
 func TestWorkflowLoader_CacheLRUPromotion(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	defer rt.Close(ctx)
 
 	// Max size 2.
-	l := NewWorkflowLoader(nil, rt, 2)
+	l := NewWorkflowLoader(nil, rt, nil, 2)
 
 	mods := make([]wazero.CompiledModule, 3)
 	for i := 0; i < 3; i++ {
@@ -1286,14 +1286,14 @@ func TestWorkflowLoader_CacheLRUPromotion(t *testing.T) {
 }
 
 func TestWorkflowLoader_EvictLockedEmptyCache(t *testing.T) {
-	l := NewWorkflowLoader(nil, nil, 10)
+	l := NewWorkflowLoader(nil, nil, nil, 10)
 	// Evict on empty cache should not panic.
 	l.evictLocked()
 }
 
 func TestWorkflowLoader_CacheUpdateExisting(t *testing.T) {
 	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0)
+	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -1309,7 +1309,7 @@ func TestWorkflowLoader_CacheUpdateExisting(t *testing.T) {
 		t.Fatalf("CompileModule mod2: %v", err)
 	}
 
-	l := NewWorkflowLoader(nil, rt, 10)
+	l := NewWorkflowLoader(nil, rt, nil, 10)
 	key := defKey{Name: "wf", Version: 1}
 
 	// Put first module.
@@ -2445,6 +2445,7 @@ func (s *stubWorkflowStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash
 func (s *stubWorkflowStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) { return 0, nil }
 
 func (s *stubWorkflowStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
+func (s *stubWorkflowStore) GetEventCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }

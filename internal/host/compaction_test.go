@@ -1502,3 +1502,4 @@ func (m *mockCompactStore) ValidateVersion(ctx context.Context, defName string, 
 func (m *mockCompactStore) IncrementEventCount(ctx context.Context, tx *sql.Tx, workflowID string, delta int, maxQuota int) (bool, error) { return true, nil }
 func (m *mockCompactStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) { return 0, nil }
 func (m *mockCompactStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
+func (m *mockCompactStore) GetEventCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }

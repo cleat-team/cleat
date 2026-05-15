@@ -49,6 +49,14 @@ var (
 		Name: "cleat_decryption_errors_total",
 		Help: "Total number of decryption failures on the read path",
 	})
+	continueAsNewTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "cleat_continue_as_new_total",
+		Help: "Total ContinueAsNew triggers by reason",
+	}, []string{"reason"})
+	wasmFuelExhaustedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "cleat_wasm_fuel_exhausted_total",
+		Help: "Total number of WASM fuel exhaustion events",
+	})
 )
 
 // AmbiguousCallsTotalCounter returns the ambiguous calls total counter for test access.
@@ -57,5 +65,5 @@ var (
 func AmbiguousCallsTotalCounter() prometheus.Counter { return ambiguousCallsTotal }
 
 func init() {
-	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, compactionEventsDeletedTotal, ambiguousCallsTotal, encryptionErrorsTotal, decryptionErrorsTotal)
+	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, compactionEventsDeletedTotal, ambiguousCallsTotal, encryptionErrorsTotal, decryptionErrorsTotal, continueAsNewTotal, wasmFuelExhaustedTotal)
 }

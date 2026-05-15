@@ -215,7 +215,7 @@ func BenchmarkClaimQuery(b *testing.B) {
 				go func() {
 					defer wg.Done()
 					defer func() { <-sem }()
-					_, err := benchStore.ClaimWorkflow(ctx, "bench-worker", "")
+					_, err := benchStore.ClaimWorkflow(ctx, "bench-worker")
 					if err != nil && err.Error() != "no available workflows" {
 						// Ignore "no available" errors (normal at end of queue).
 					}

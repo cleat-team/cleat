@@ -860,6 +860,15 @@ func (s *ShardedStore) GetConcurrencyKeyCount(ctx context.Context, workflowID st
 	return shard.Store.GetConcurrencyKeyCount(ctx, workflowID)
 }
 
+// GetEventCount returns the event_count for a workflow instance.
+func (s *ShardedStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return 0, fmt.Errorf("get_event_count: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.GetEventCount(ctx, workflowID)
+}
+
 // AcquireConcurrencyKey routes by key text hash for consistent sharding.
 func (s *ShardedStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	shard := s.getShard(key)

@@ -52,6 +52,10 @@ type CacheStats struct {
 // compiles the WASM bytes via the wazero runtime, and caches the compiled
 // modules in an LRU cache keyed by (name, version).
 //
+// The loader also supports a disk-backed cache (WasmDiskCache) that survives
+// worker restarts. Cache entries are content-addressed by sha256(wasm_bytes)
+// so version changes automatically invalidate stale entries.
+//
 // Thread-safety: the LRU cache is protected by a mutex. Compiled modules
 // themselves are safe for concurrent instantiation per wazero guarantees.
 type WorkflowLoader struct {
@@ -65,22 +69,27 @@ type WorkflowLoader struct {
 
 	hits   atomic.Int64
 	misses atomic.Int64
+
+	// diskCache persists compiled modules to disk across restarts.
+	diskCache *WasmDiskCache
 }
 
 // NewWorkflowLoader creates a WorkflowLoader backed by the given database
 // connection and wazero runtime. maxSize is the maximum number of compiled
-// modules to keep in the LRU cache (defaults to 100 if <= 0).
-func NewWorkflowLoader(db *sql.DB, rt *Runtime, maxSize ...int) *WorkflowLoader {
+// modules to keep in the LRU cache (defaults to 100 if <= 0). diskCache is
+// an optional disk-backed cache for persistence across restarts (nil disables).
+func NewWorkflowLoader(db *sql.DB, rt *Runtime, diskCache *WasmDiskCache, maxSize ...int) *WorkflowLoader {
 	sz := 100
 	if len(maxSize) > 0 && maxSize[0] > 0 {
 		sz = maxSize[0]
 	}
 	return &WorkflowLoader{
-		db:      db,
-		rt:      rt,
-		cache:   make(map[defKey]*cacheEntry),
-		lruList: list.New(),
-		maxSize: sz,
+		db:        db,
+		rt:        rt,
+		cache:     make(map[defKey]*cacheEntry),
+		lruList:   list.New(),
+		maxSize:   sz,
+		diskCache: diskCache,
 	}
 }
 
@@ -89,34 +98,50 @@ func NewWorkflowLoader(db *sql.DB, rt *Runtime, maxSize ...int) *WorkflowLoader 
 // and caches the result. Returns an error if the definition is not found or
 // is deprecated.
 //
+// The disk cache (if configured) is checked after the LRU cache and before
+// the database: if raw WASM bytes are found on disk, the database query is
+// skipped. Compilation still occurs since the current wazero version does
+// not support compiled module serialization.
+//
 // SQL: SELECT wasm_bytes, abi_version, plugin_deps, min_version
 //      FROM workflow_defs
 //      WHERE name = $1 AND version = $2 AND NOT deprecated
 func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wazero.CompiledModule, error) {
 	key := defKey{Name: name, Version: version}
 
-	// Fast path: check cache.
+	// Fast path: check LRU cache.
 	if cm, ok := l.cacheGet(key); ok {
 		return cm, nil
 	}
 
-	// Slow path: query database.
-	// We need a context that won't be cancelled abruptly; use the provided one.
+	// Check disk cache before querying database (saves DB round-trip).
 	var wasmBytes []byte
-	var abiVersion int
-	var pluginDepsJSON, minVer sql.NullInt64
-	err := l.db.QueryRowContext(ctx, `
-		SELECT wasm_bytes, abi_version, plugin_deps, min_version
-		FROM workflow_defs
-		WHERE name = $1 AND version = $2 AND NOT deprecated
-	`, name, version).Scan(&wasmBytes, &abiVersion, &pluginDepsJSON, &minVer)
-	if err == sql.ErrNoRows {
-		l.misses.Add(1)
-		return nil, fmt.Errorf("workflow def not found or deprecated: %s v%d", name, version)
+	if l.diskCache != nil {
+		wasmBytes = l.diskCache.LookupDef(name, version)
 	}
-	if err != nil {
-		l.misses.Add(1)
-		return nil, fmt.Errorf("load workflow def %s v%d: %w", name, version, err)
+
+	if wasmBytes == nil {
+		// Query database for WASM bytes.
+		var abiVersion int
+		var pluginDepsJSON, minVer sql.NullInt64
+		err := l.db.QueryRowContext(ctx, `
+			SELECT wasm_bytes, abi_version, plugin_deps, min_version
+			FROM workflow_defs
+			WHERE name = $1 AND version = $2 AND NOT deprecated
+		`, name, version).Scan(&wasmBytes, &abiVersion, &pluginDepsJSON, &minVer)
+		if err == sql.ErrNoRows {
+			l.misses.Add(1)
+			return nil, fmt.Errorf("workflow def not found or deprecated: %s v%d", name, version)
+		}
+		if err != nil {
+			l.misses.Add(1)
+			return nil, fmt.Errorf("load workflow def %s v%d: %w", name, version, err)
+		}
+
+		// Store to disk cache for future restarts.
+		if l.diskCache != nil {
+			l.diskCache.StoreDef(name, version, wasmBytes)
+		}
 	}
 
 	// Compile the WASM module.
@@ -125,7 +150,6 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 		return nil, fmt.Errorf("compile %s v%d: %w", name, version, err)
 	}
 
-	// Cache the compiled module.
 	l.cachePut(key, compiled)
 
 	return compiled, nil

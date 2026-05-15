@@ -618,7 +618,7 @@ func TestCompleteWorkflow(t *testing.T) {
 			}
 
 			result := `{"done":true}`
-			if err := store.CompleteWorkflow(ctx, wf.ID, "worker-1", 0, result, map[string]string{"key": "val"}); err != nil {
+			if err := store.CompleteWorkflow(ctx, wf.ID, "worker-1", wf.Generation, result, map[string]string{"key": "val"}); err != nil {
 				t.Fatalf("CompleteWorkflow: %v", err)
 			}
 
@@ -666,7 +666,7 @@ func TestFailWorkflow(t *testing.T) {
 			errMsg := "something went wrong"
 			errCode := "ERR_001"
 			errOp := "test-op"
-			if err := store.FailWorkflow(ctx, wf.ID, "worker-1", 0, errMsg, errCode, errOp, nil); err != nil {
+			if err := store.FailWorkflow(ctx, wf.ID, "worker-1", wf.Generation, errMsg, errCode, errOp, nil); err != nil {
 				t.Fatalf("FailWorkflow: %v", err)
 			}
 
@@ -712,7 +712,7 @@ func TestReleaseWorkflow(t *testing.T) {
 			}
 
 			nextWakeAt := time.Now().Add(1 * time.Hour)
-			if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", 0, nextWakeAt); err != nil {
+			if err := store.ReleaseWorkflow(ctx, wf.ID, "worker-1", wf.Generation, nextWakeAt); err != nil {
 				t.Fatalf("ReleaseWorkflow: %v", err)
 			}
 
@@ -762,7 +762,7 @@ func TestContinueAsNew_Atomic(t *testing.T) {
 			}
 
 			newInput := json.RawMessage(`{"v":2}`)
-			newRunID, err := store.ContinueAsNew(ctx, wf.ID, "worker-1", 0, "test-workflow", 1, newInput, nil, `{"result":"ok"}`, nil)
+			newRunID, err := store.ContinueAsNew(ctx, wf.ID, "worker-1", wf.Generation, "test-workflow", 1, newInput, nil, `{"result":"ok"}`, nil)
 			if err != nil {
 				t.Fatalf("ContinueAsNew: %v", err)
 			}
@@ -825,7 +825,7 @@ func TestFinalizeWorkflowSegment(t *testing.T) {
 				{Step: 0, EventType: EventTypeCall, Service: "s", Op: "o1", Request: `{}`},
 				{Step: 1, EventType: EventTypeCall, Service: "s", Op: "o2", Request: `{}`},
 			}
-			if err := store.FinalizeWorkflowSegment(ctx, wf.ID, "worker-1", 0, events, "done", `{"done":true}`, "", "", nil, time.Time{}); err != nil {
+			if err := store.FinalizeWorkflowSegment(ctx, wf.ID, "worker-1", wf.Generation, events, "done", `{"done":true}`, "", "", nil, time.Time{}); err != nil {
 				t.Fatalf("FinalizeWorkflowSegment: %v", err)
 			}
 
@@ -967,7 +967,7 @@ func TestMoveToDeadLetterQueue(t *testing.T) {
 				t.Fatal("ClaimWorkflow returned nil")
 			}
 
-			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", 0, "exhausted retries", "retries_exhausted", "DurableCall"); err != nil {
+			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", wf.Generation, "exhausted retries", "retries_exhausted", "DurableCall"); err != nil {
 				t.Fatalf("MoveToDeadLetterQueue: %v", err)
 			}
 
