@@ -1,6 +1,8 @@
 package host
 
 import (
+	"sync/atomic"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -57,7 +59,25 @@ var (
 		Name: "cleat_wasm_fuel_exhausted_total",
 		Help: "Total number of WASM fuel exhaustion events",
 	})
+	pluginCallDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "cleat_plugin_call_duration_seconds",
+		Help:    "Plugin call duration by plugin and function",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 30},
+	}, []string{"plugin", "func"})
 )
+
+// Atomic counters for throughput computation. Incremented alongside the
+// Prometheus step counters so the worker can sample them without prometheus.Collect.
+var (
+	replayStepCount int64
+	freshStepCount  int64
+)
+
+// ReplayStepCount returns the total replay step count from the atomic counter.
+func ReplayStepCount() int64 { return atomic.LoadInt64(&replayStepCount) }
+
+// FreshStepCount returns the total fresh step count from the atomic counter.
+func FreshStepCount() int64 { return atomic.LoadInt64(&freshStepCount) }
 
 // AmbiguousCallsTotalCounter returns the ambiguous calls total counter for test access.
 // The counter itself is unexported (ambiguousCallsTotal); this accessor allows tests in
@@ -65,5 +85,9 @@ var (
 func AmbiguousCallsTotalCounter() prometheus.Counter { return ambiguousCallsTotal }
 
 func init() {
-	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, compactionEventsDeletedTotal, ambiguousCallsTotal, encryptionErrorsTotal, decryptionErrorsTotal, continueAsNewTotal, wasmFuelExhaustedTotal)
+	prometheus.MustRegister(durableCallsTotal, replayStepsTotal, freshStepsTotal, replayFailuresTotal, replayChecksumFailuresTotal, compactionEventsDeletedTotal, ambiguousCallsTotal, encryptionErrorsTotal, decryptionErrorsTotal, continueAsNewTotal, wasmFuelExhaustedTotal, pluginCallDuration)
 }
+
+// PluginCallDuration returns the plugin call duration histogram for use by the
+// engine and tests.
+func PluginCallDuration() *prometheus.HistogramVec { return pluginCallDuration }

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -504,6 +505,7 @@ type Engine struct {
 	pluginStreamRegistry *PluginStreamRegistry
 	updateHandler         func(name, payload string) (string, error)
 	pluginCallGuard      *PluginCallGuard
+	pluginCallObserver   PluginCallObserver
 	tenantID             string
 	db                   *sql.DB // tenant-scoped database connection for plugin host functions
 	maxRetries           int     // worker-configured ceiling for retry attempts; 0 means use MaxRetryAttempts
@@ -679,10 +681,20 @@ func WithTenantID(id string) EngineOption {
 	return func(e *Engine) { e.tenantID = id }
 }
 
+// PluginCallObserver is called after every plugin function invocation with the
+// call details and duration. Set via WithPluginCallObserver to record metrics.
+type PluginCallObserver func(pluginName, functionName string, d time.Duration, err error)
+
 // WithPluginCallGuard sets the plugin call guard for enforcing call_plugin
 // capability restrictions on WASM plugins.
 func WithPluginCallGuard(g *PluginCallGuard) EngineOption {
 	return func(e *Engine) { e.pluginCallGuard = g }
+}
+
+// WithPluginCallObserver sets an observer called after each plugin function
+// invocation with timing information. Useful for recording latency metrics.
+func WithPluginCallObserver(o PluginCallObserver) EngineOption {
+	return func(e *Engine) { e.pluginCallObserver = o }
 }
 
 // WithSchema sets the PostgreSQL schema name for this cleat instance.
@@ -1619,6 +1631,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 
 	durableCallsTotal.Inc()
 	freshStepsTotal.Inc()
+	atomic.AddInt64(&freshStepCount, 1)
 
 	// Check cancellation before making the call.
 	callCtx := ctx
@@ -1689,6 +1702,7 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 
 
 	replayStepsTotal.WithLabelValues(s.defName).Inc()
+	atomic.AddInt64(&replayStepCount, 1)
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
@@ -1859,7 +1873,9 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			// Actually call the plugin.
 			step := s.stepCount
 			callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "plugin_call", pluginName, functionName)
+			t0 := time.Now()
 			outputJSON, fnErr = fn(callCtx, inputJSON)
+			pluginCallDuration.WithLabelValues(pluginName, functionName).Observe(time.Since(t0).Seconds())
 			eventSpan.End()
 		}
 	}
@@ -4064,7 +4080,7 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 
 func (s *execSession) JsonParse(ctx context.Context, m api.Module, jsonPtr, jsonLen, outPtr, outMaxLen uint32) int64 {
 	mem := m.Memory()
-	input, ok := readWasmStringValidated(mem, jsonPtr, jsonLen, maxWasmStringLen)
+	input, ok := readWasmStringValidated(mem, jsonPtr, jsonLen, MaxWasmStringLen)
 	if !ok {
 		return packSimpleResult(1)
 	}
@@ -4085,7 +4101,7 @@ func (s *execSession) JsonParse(ctx context.Context, m api.Module, jsonPtr, json
 
 func (s *execSession) JsonStringify(ctx context.Context, m api.Module, ptr, length, outPtr, outMaxLen uint32) int64 {
 	mem := m.Memory()
-	input, ok := readWasmStringValidated(mem, ptr, length, maxWasmStringLen)
+	input, ok := readWasmStringValidated(mem, ptr, length, MaxWasmStringLen)
 	if !ok {
 		return packSimpleResult(1)
 	}
