@@ -546,6 +546,21 @@ func main() {
 		default: // DatabaseAccessReadWrite or empty (backward compat)
 			envCopy.DB = getPluginDB(db, pluginDB)
 		}
+		// Wrap SignalWorkflow with signal authorization.
+		// The plugin name is the caller identity checked against allowed_signals.
+		if *requireSignalAuth {
+			pluginName := lp.Plugin.Info().Name
+			envCopy.SignalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+				callers, err := store.GetAllowedSignalCallers(ctx, workflowID)
+				if err != nil {
+					return err
+				}
+				if !signalCallerAllowed(callers, pluginName) {
+					return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
+				}
+				return store.DeliverSignal(ctx, workflowID, signalName, payload)
+			}
+		}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
@@ -1517,10 +1532,8 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				if len(callers) == 0 {
 					return fmt.Errorf("signal auth denied: workflow %s has no allowed callers configured", targetWorkflowID)
 				}
-				for _, c := range callers {
-					if c == callerDefName {
-						return nil
-					}
+				if signalCallerAllowed(callers, callerDefName) {
+					return nil
 				}
 				return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", callerDefName, targetWorkflowID)
 			}),
@@ -2612,6 +2625,17 @@ func (w *Worker) restartLoop(name string) {
 	log.Printf("[worker %s] watchdog: restarted %s loop", w.id, name)
 }
 
+// signalCallerAllowed checks whether a caller (by defName or "*" wildcard)
+// is permitted to signal a target workflow based on its allowed_signals list.
+func signalCallerAllowed(callers []string, callerDefName string) bool {
+	for _, c := range callers {
+		if c == "*" || c == callerDefName {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- HTTP API server ----
 
 // loadShardConfigs reads a JSON file containing an array of ShardConfig.
@@ -3161,6 +3185,19 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	}
 	payload := req.Payload
 	payload = host.Redact(payload)
+	// Check signal authorization for HTTP API callers.
+	// External callers have no defName; they must be allowed via "*" wildcard.
+	if s.worker.requireSignalAuth != nil && *s.worker.requireSignalAuth {
+		callers, err := s.store.GetAllowedSignalCallers(r.Context(), id)
+		if err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		if !signalCallerAllowed(callers, "*") {
+			s.writeError(w, 403, "signal auth denied: external HTTP callers not in allowed_signals (add \"*\" to allow)")
+			return
+		}
+	}
 	if err := s.store.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
 		s.writeError(w, 500, err.Error())
 		return

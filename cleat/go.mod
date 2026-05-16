@@ -3,8 +3,8 @@ module github.com/cleat-team/cleat/cleat
 go 1.25.7
 
 require (
-	github.com/google/uuid v1.6.0
 	github.com/cleat-team/cleat v0.0.0
+	github.com/google/uuid v1.6.0
 )
 
 require (
@@ -15,6 +15,7 @@ require (
 	github.com/go-sql-driver/mysql v1.8.1 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
+	github.com/kr/text v0.2.0 // indirect
 	github.com/lib/pq v1.12.3 // indirect
 	github.com/microsoft/go-mssqldb v1.10.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect

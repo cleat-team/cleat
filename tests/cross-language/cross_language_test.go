@@ -371,8 +371,9 @@ func TestCrossReplay_GoExec_RustReplay(t *testing.T) {
 	goEnv := wasmtest.NewWasmTestEnv(t, wasmtest.WithDefName("go-crosslang"))
 	defer goEnv.Close()
 
-	// The Go crosslang workflow uses PascalCase input (cleat convention).
-	goInput := `{"UserID":"cross-test","Cart":[{"SKU":"SKU-001","Quantity":2}]}`
+	// Go crosslang uses Pattern B (single struct param "input"). Outer key
+	// matches the Go parameter name; inner keys match snake_case struct tags.
+	goInput := `{"input":{"user_id":"cross-test","cart":[{"sku":"SKU-001","quantity":2}]}}`
 	goResult, goHistory, err := goEnv.Execute(t, goWasmBytes, "place_order", goInput)
 	if err != nil {
 		t.Fatalf("Execute Go crosslang workflow: %v", err)
@@ -450,7 +451,8 @@ func TestCrossReplay_RustExec_GoReplay(t *testing.T) {
 	goEnv := wasmtest.NewWasmTestEnv(t, wasmtest.WithDefName("go-crosslang"))
 	defer goEnv.Close()
 
-	goInput := `{"UserID":"cross-test","Cart":[{"SKU":"SKU-001","Quantity":2}]}`
+	// Go crosslang uses Pattern B (single struct param "input").
+	goInput := `{"input":{"user_id":"cross-test","cart":[{"sku":"SKU-001","quantity":2}]}}`
 	goReplayResult, err := goEnv.Replay(t, goWasmBytes, "place_order", goInput, rustHistory)
 	if err != nil {
 		t.Fatalf("Replay Rust history against Go WASM: %v", err)

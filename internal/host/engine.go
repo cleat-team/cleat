@@ -605,6 +605,11 @@ type Engine struct {
 	// authorized to signal a target workflow. Returns nil if authorized,
 	// or an error if denied. Only consulted when requireSignalAuth is true.
 	signalAuthCheck func(ctx context.Context, targetWorkflowID, callerDefName string) error
+
+	// traceID is the W3C Trace Context trace-id propagated from the HTTP API
+	// through to workflow execution spans. When non-empty, WorkflowSpan creates
+	// a parent-linked span for end-to-end trace correlation.
+	traceID string
 }
 
 // EngineOption configures an Engine.
@@ -628,6 +633,13 @@ func WithWorkflowState(ws WorkflowState) EngineOption {
 // WithWorkflowID sets the workflow instance ID for parent-child tracking.
 func WithWorkflowID(id string) EngineOption {
 	return func(e *Engine) { e.workflowID = id }
+}
+
+// WithTraceID sets the W3C Trace Context trace-id for this workflow execution.
+// When non-empty, the trace-id is assigned to generated OpenTelemetry spans,
+// enabling end-to-end trace correlation.
+func WithTraceID(id string) EngineOption {
+	return func(e *Engine) { e.traceID = id }
 }
 
 // WithChildWorkflowStore sets the store used to create and poll child workflows.
@@ -989,7 +1001,7 @@ func (e *Engine) executeWithBackend(
 	execCtx := withHandler(ctx, session)
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
-		e.workflowID, e.defName, e.defVersion, e.tenantID, "")
+		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
 	defer workflowSpan.End()
 
 	// Apply overall workflow execution timeout if configured.
@@ -1124,7 +1136,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	execCtx := withHandler(ctx, session)
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
-		e.workflowID, e.defName, e.defVersion, e.tenantID, "")
+		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
 	defer workflowSpan.End()
 
 	// Apply overall workflow execution timeout if configured.
@@ -1268,7 +1280,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 	execCtx := withHandler(ctx, session)
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
-		e.workflowID, e.defName, e.defVersion, e.tenantID, "")
+		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
 	defer workflowSpan.End()
 
 	if e.defaultWorkflowTimeout > 0 {
@@ -1660,8 +1672,8 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 
 	step := s.stepCount
 	callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "call", service, operation)
+	defer eventSpan.End()
 	resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
-	eventSpan.End()
 
 	var callErr string
 	if err != nil {
