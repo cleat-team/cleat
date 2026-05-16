@@ -565,7 +565,7 @@ func TestSendSignalAndWaitAuthAllowed(t *testing.T) {
 		t.Fatalf("expected 1 event in history, got %d", len(s.history))
 	}
 	if s.history[0].EventType != EventTypeAwaitSignals {
-		t.Fatalf("expected AwaitSignals event, got %d", s.history[0].EventType)
+		t.Fatalf("expected AwaitSignals event, got %v", s.history[0].EventType)
 	}
 }
 

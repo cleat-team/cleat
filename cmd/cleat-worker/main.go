@@ -1498,6 +1498,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithSignalStore(w.store.(host.SignalStore)),
 		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, childVersions: childVersions}),
 		host.WithWorkflowID(wf.ID),
+		host.WithTraceID(traceID),
 		host.WithTenantID(wf.TenantID),
 		host.WithWorkflowStore(w.store),
 		host.WithChildWorkflowStore(w.store),

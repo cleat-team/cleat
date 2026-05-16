@@ -603,7 +603,7 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		return "", fmt.Errorf("continue as new: append events: %w", err)
 	}
 
-		// Use the store's tenant scope to preserve tenant isolation.
+	// Use the store's tenant scope to preserve tenant isolation.
 	// Create the new workflow run.
 	// Use the store's tenant scope to preserve tenant isolation.
 	newRunID := uuid.New().String()
@@ -1536,7 +1536,7 @@ func (s *MySQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string
 		expected, ok := storedChecksums[ev.Step]
 		if !ok || expected == "" {
 			prevChecksum = "" // Missing event breaks the chain
-			continue // No stored checksum for this step (pre-migration partial data).
+			continue          // No stored checksum for this step (pre-migration partial data).
 		}
 		actual := computeEventChecksum(ev, prevChecksum)
 		if actual != expected {

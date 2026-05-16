@@ -466,12 +466,12 @@ type PostgresStore struct {
 	idempotencyKeyTTL time.Duration
 
 	// Encryption at rest for sensitive event payloads.
-	encryption               *PayloadEncryption
-		// NOTE: encryption currently applies only to the per-event write path
-		// (flushEvent). The batch write path (appendEventsInTx) stores events
-		// in plaintext; adding encryption there would double-encrypt events
-		// that flow through both paths. Until the paths are unified or
-		// exclusive, full coverage requires routing all events through the per-event path.
+	encryption *PayloadEncryption
+	// NOTE: encryption currently applies only to the per-event write path
+	// (flushEvent). The batch write path (appendEventsInTx) stores events
+	// in plaintext; adding encryption there would double-encrypt events
+	// that flow through both paths. Until the paths are unified or
+	// exclusive, full coverage requires routing all events through the per-event path.
 	encryptSensitivePayloads bool
 
 	// disableReadRedaction when true bypasses RedactOnRead on the read path.
@@ -529,6 +529,7 @@ func (s *PostgresStore) WithReadRedactionDisabled(disabled bool) *PostgresStore 
 	cp.disableReadRedaction = disabled
 	return &cp
 }
+
 // decryptAndRedactEventRecord decrypts sensitive event record fields (when
 // encryption is enabled) and applies retroactive redaction. Decryption errors
 // are logged and the field is set to "[DECRYPTION_FAILED]" so it is clear the
@@ -640,8 +641,6 @@ func (s *PostgresStore) decryptPayloadJSON(payloadStr string) string {
 	}
 	return payloadStr
 }
-
-
 
 // setRLSOnTx executes SELECT set_config to set the RLS tenant_id
 // for the given transaction. This ensures the RLS policy on tenant-scoped
@@ -905,7 +904,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 
-			// Decrypt and redact event record.
+		// Decrypt and redact event record.
 		s.decryptAndRedactEventRecord(&rec, workflowID)
 
 		// Retroactive redaction on read path: ensure sensitive fields are
@@ -1024,7 +1023,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 			rec.CreatedAt = createdAt.Time
 		}
 
-			// Decrypt and redact event record.
+		// Decrypt and redact event record.
 		s.decryptAndRedactEventRecord(&rec, workflowID)
 
 		// Retroactive redaction on read path.
@@ -2602,10 +2601,12 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, result::text, error_msg, error_code, error_op
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, result::text, error_msg, error_code, error_op,
+		       COALESCE(trace_id, '')
 		FROM workflow_instances WHERE id = $1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp)
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
+		&wf.TraceID)
 	if err == sql.ErrNoRows {
 		return nil, tx.Commit()
 	}
@@ -3379,7 +3380,7 @@ func (s *PostgresStore) VerifyWorkflowEvents(ctx context.Context, workflowID str
 		expected, ok := storedChecksums[ev.Step]
 		if !ok || expected == "" {
 			prevChecksum = "" // Missing event breaks the chain
-			continue // No stored checksum for this step (pre-migration partial data).
+			continue          // No stored checksum for this step (pre-migration partial data).
 		}
 		actual := computeEventChecksum(ev, prevChecksum)
 		if actual != expected {

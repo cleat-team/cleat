@@ -527,11 +527,12 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
 		       assigned_to, heartbeat_at, next_wake_at, completed_at,
-		       CAST(result AS CHAR), error_msg, error_code, error_op
+		       CAST(result AS CHAR), error_msg, error_code, error_op,
+		       COALESCE(trace_id, '')
 		FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg,
-		&errorCode, &errorOp)
+		&errorCode, &errorOp, &wf.TraceID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

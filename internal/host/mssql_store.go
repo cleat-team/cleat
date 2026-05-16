@@ -1098,7 +1098,7 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		return "", fmt.Errorf("continue as new: append events: %w", err)
 	}
 
-		// Use the store's tenant scope to preserve tenant isolation.
+	// Use the store's tenant scope to preserve tenant isolation.
 	// Create the new workflow run with a Go-generated UUID.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
@@ -1939,10 +1939,12 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op,
+		       COALESCE(trace_id, '')
 		FROM workflow_instances WHERE id = @p1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp)
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
+		&wf.TraceID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

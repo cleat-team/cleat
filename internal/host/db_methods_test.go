@@ -951,6 +951,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				"",                         // error_msg
 				nil,                        // error_code
 				nil,                        // error_op
+					"",                         // trace_id
 			}},
 		},
 	}, nil)
@@ -2203,6 +2204,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 				nil,          // error_msg (NULL)
 				nil,          // error_code (NULL)
 				nil,          // error_op (NULL)
+				"",          // trace_id (COALESCE)
 			}},
 		},
 	}, nil)
