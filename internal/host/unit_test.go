@@ -2446,6 +2446,7 @@ func (s *stubWorkflowStore) GetChildCount(ctx context.Context, parentWorkflowID 
 
 func (s *stubWorkflowStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (s *stubWorkflowStore) GetEventCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
+func (s *stubWorkflowStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
 func (m *mockCollectMetricsStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }

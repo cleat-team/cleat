@@ -172,6 +172,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					compaction_state NVARCHAR(MAX), compacted_at DATETIMEOFFSET, compaction_step INTEGER,
 					plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
 					event_count BIGINT NOT NULL DEFAULT 0,
+					allowed_signals NVARCHAR(MAX) NULL,
 					generation BIGINT NOT NULL DEFAULT 0)`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_history')
 				CREATE TABLE event_history (
@@ -292,6 +293,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`,
 			`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS tenant_id UUID`,
 			`ALTER TABLE concurrency_keys ADD COLUMN IF NOT EXISTS tenant_id TEXT`,
+			`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS allowed_signals JSONB DEFAULT NULL`,
 			// Memory statistics tables (migration 010)
 			`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
 				id BIGSERIAL PRIMARY KEY,

@@ -22,6 +22,7 @@ import (
 	"github.com/tetratelabs/wazero/experimental"
 
 	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/internal/telemetry"
 	"github.com/cleat-team/cleat/internal/wasm"
 )
 
@@ -592,6 +593,16 @@ type Engine struct {
 	// initialEventCount is the event count at session start, loaded from
 	// the store so the session can track events locally without DB queries.
 	initialEventCount int
+
+	// requireSignalAuth enables signal authorization checks. When true,
+	// SignalWorkflow verifies the calling workflow's identity against the
+	// target's allowed_signals before delivering.
+	requireSignalAuth bool
+
+	// signalAuthCheck is called to verify that a caller (by defName) is
+	// authorized to signal a target workflow. Returns nil if authorized,
+	// or an error if denied. Only consulted when requireSignalAuth is true.
+	signalAuthCheck func(ctx context.Context, targetWorkflowID, callerDefName string) error
 }
 
 // EngineOption configures an Engine.
@@ -694,6 +705,19 @@ func WithDB(db *sql.DB) EngineOption {
 // quota checks. Required when MaxQuotaEvents > 0.
 func WithWorkflowStore(store WorkflowStore) EngineOption {
 	return func(e *Engine) { e.workflowStore = store }
+}
+
+// WithRequireSignalAuth enables or disables signal authorization checks.
+// When enabled, SignalWorkflow verifies the calling workflow's identity
+// against the target's allowed_signals before delivering. Default false.
+func WithRequireSignalAuth(v bool) EngineOption {
+	return func(e *Engine) { e.requireSignalAuth = v }
+}
+
+// WithSignalAuthCheck sets the function used to verify that a caller
+// (by defName) is authorized to signal a target workflow.
+func WithSignalAuthCheck(fn func(ctx context.Context, targetWorkflowID, callerDefName string) error) EngineOption {
+	return func(e *Engine) { e.signalAuthCheck = fn }
 }
 
 // WithEncryption sets encryption at rest for sensitive event payloads.
@@ -952,6 +976,10 @@ func (e *Engine) executeWithBackend(
 
 	execCtx := withHandler(ctx, session)
 
+	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
+		e.workflowID, e.defName, e.defVersion, e.tenantID, "")
+	defer workflowSpan.End()
+
 	// Apply overall workflow execution timeout if configured.
 	if e.defaultWorkflowTimeout > 0 {
 		var cancel context.CancelFunc
@@ -1082,6 +1110,10 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 	}
 
 	execCtx := withHandler(ctx, session)
+
+	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
+		e.workflowID, e.defName, e.defVersion, e.tenantID, "")
+	defer workflowSpan.End()
 
 	// Apply overall workflow execution timeout if configured.
 	// This wraps the entire execution including replay and fresh run.
@@ -1222,6 +1254,10 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		tenantID:   e.tenantID,
 	}
 	execCtx := withHandler(ctx, session)
+
+	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
+		e.workflowID, e.defName, e.defVersion, e.tenantID, "")
+	defer workflowSpan.End()
 
 	if e.defaultWorkflowTimeout > 0 {
 		var cancel context.CancelFunc
@@ -1609,7 +1645,10 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	}
 	s.eventCount++
 
+	step := s.stepCount
+	callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "call", service, operation)
 	resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
+	eventSpan.End()
 
 	var callErr string
 	if err != nil {
@@ -1617,7 +1656,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	}
 
 	rec := EventRecord{
-		Step:      s.stepCount,
+		Step:      step,
 		EventType: EventTypeCall,
 		Service:   service,
 		Op:        operation,
@@ -1818,7 +1857,10 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			callCtx = plugin.WithCallContext(callCtx, cc)
 
 			// Actually call the plugin.
+			step := s.stepCount
+			callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "plugin_call", pluginName, functionName)
 			outputJSON, fnErr = fn(callCtx, inputJSON)
+			eventSpan.End()
 		}
 	}
 
@@ -2043,6 +2085,9 @@ func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module
 
 func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
 
+	step := s.stepCount
+	ctx, eventSpan := telemetry.EventSpan(ctx, step, "call_heartbeat", service, operation)
+	defer eventSpan.End()
 
 	type callResult struct {
 		resp string
@@ -3138,6 +3183,14 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 			}
 		}
 		s.exitReplay()
+	}
+
+	// Check signal authorization before delivering.
+	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
+		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
+			log.Printf("[engine] signal_auth: %v", err)
+			return errSignalAuthRequiredInt
+		}
 	}
 
 	rec := EventRecord{

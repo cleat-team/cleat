@@ -219,7 +219,8 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
 		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at,
-		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation
+		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
+		       INSERTED.trace_id
 		WHERE id IN (
 			SELECT id
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
@@ -245,7 +246,7 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -296,7 +297,8 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
 		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at,
-		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation
+		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
+		       INSERTED.trace_id
 		WHERE id IN (
 			SELECT id
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
@@ -323,7 +325,7 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		var errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
@@ -1636,6 +1638,27 @@ func (s *MSSQLStore) PollCancellation(ctx context.Context, workflowID string) (b
 	return s.CheckCancellation(ctx, workflowID)
 }
 
+// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+func (s *MSSQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT allowed_signals FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: %w", err)
+	}
+	if !raw.Valid || raw.String == "" || raw.String == "null" {
+		return nil, nil
+	}
+	var callers []string
+	if err := json.Unmarshal([]byte(raw.String), &callers); err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: parse: %w", err)
+	}
+	return callers, nil
+}
+
 // PollAndClaimSignal atomically checks for and claims a pending signal.
 func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -1880,7 +1903,7 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		var inputStr string
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		wf.Input = json.RawMessage(inputStr)

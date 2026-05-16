@@ -47,6 +47,7 @@ type WorkflowInstance struct {
 	TenantID   string          `json:"tenant_id,omitempty"`
 	CreatedAt  time.Time       `json:"created_at,omitempty"`
 	Generation int64           `json:"generation"`
+	TraceID    string          `json:"trace_id,omitempty"`
 }
 
 // Schedule is a row from workflow_schedules.
@@ -447,6 +448,10 @@ type WorkflowStore interface {
 	// GetEventCount returns the event_count for a workflow instance.
 	// Used by the engine for auto-ContinueAsNew when the event cap is hit.
 	GetEventCount(ctx context.Context, workflowID string) (int, error)
+
+	// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+	// Returns nil when allowed_signals is NULL or empty (deny-all semantics).
+	GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error)
 }
 
 // DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
@@ -705,7 +710,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
@@ -721,7 +726,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		var assignedTo, errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -776,7 +781,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
@@ -792,7 +797,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		var assignedTo, errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
@@ -2444,6 +2449,34 @@ func (s *PostgresStore) PollCancellation(ctx context.Context, workflowID string)
 	return s.CheckCancellation(ctx, workflowID)
 }
 
+// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+// Returns nil when allowed_signals is NULL or the target workflow doesn't exist.
+func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var raw sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT allowed_signals FROM workflow_instances WHERE id = $1`, workflowID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, tx.Commit()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: %w", err)
+	}
+	if !raw.Valid || raw.String == "" || raw.String == "null" {
+		return nil, tx.Commit()
+	}
+	var callers []string
+	if err := json.Unmarshal([]byte(raw.String), &callers); err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: parse: %w", err)
+	}
+	return callers, tx.Commit()
+}
+
 // GetQueryState returns the value for a key in the workflow's query_state JSONB.
 func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -2531,7 +2564,7 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		var nextWakeAt, createdAt sql.NullTime
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {

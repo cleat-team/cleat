@@ -1503,3 +1503,4 @@ func (m *mockCompactStore) IncrementEventCount(ctx context.Context, tx *sql.Tx, 
 func (m *mockCompactStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) { return 0, nil }
 func (m *mockCompactStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockCompactStore) GetEventCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
+func (m *mockCompactStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) { return nil, nil }

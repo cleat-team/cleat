@@ -89,6 +89,7 @@ func main() {
 	memoryCheckInterval := flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
 	memorySampleRetention := flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
 	requireAuth := flag.Bool("require-auth", true, "Require API key authentication (default: true when --api-addr is set)")
+	requireSignalAuth := flag.Bool("require-signal-auth", true, "Require signal authorization: checks caller identity against target's allowed_signals (default: true)")
 	generateAPIKeyFor := flag.String("generate-api-key", "", "Generate a new API key for the given tenant UUID and exit")
 	maxBodySize := flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
 	httpReadTimeout := flag.Duration("http-read-timeout", 30*time.Second, "HTTP read timeout")
@@ -666,6 +667,7 @@ func main() {
 		schemaName:                  *schemaName,
 		peerSchemas:                 parsePeerSchemas(*peerSchemas),
 		disableChecksumVerification: disableChecksumVerification,
+		requireSignalAuth:           requireSignalAuth,
 		maxRetries:                  *maxRetries,
 		wasmMemoryMaxMB:             wasmMemoryMaxMB,
 		wasmInstructionLimit:        wasmInstructionLimit,
@@ -977,6 +979,7 @@ type Worker struct {
 	schemaName                  string
 	peerSchemas                 []string
 	disableChecksumVerification *bool
+	requireSignalAuth           *bool
 	wasmMemoryMaxMB             *int
 	wasmInstructionLimit        *int
 	wasmDiskCache               *host.WasmDiskCache
@@ -1302,11 +1305,12 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}()
 
 	// ---- Assign trace ID ----
-	traceID := generateTraceID()
-	if true {
-		if err := w.store.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
-			log.Printf("[worker %s] %s: failed to set trace_id: %v", w.id, wf.ID, err)
-		}
+	traceID := wf.TraceID
+	if traceID == "" {
+		traceID = generateTraceID()
+	}
+	if err := w.store.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
+		log.Printf("[worker %s] %s: failed to set trace_id: %v", w.id, wf.ID, err)
 	}
 
 	// ---- Load WASM ----
@@ -1483,6 +1487,27 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	// Can be disabled with --disable-checksum-verification.
 	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
 		engineOpts = append(engineOpts, host.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
+	}
+	// Enable signal authorization if --require-signal-auth is set.
+	if w.requireSignalAuth != nil && *w.requireSignalAuth {
+		engineOpts = append(engineOpts,
+			host.WithRequireSignalAuth(true),
+			host.WithSignalAuthCheck(func(ctx context.Context, targetWorkflowID, callerDefName string) error {
+				callers, err := w.store.GetAllowedSignalCallers(ctx, targetWorkflowID)
+				if err != nil {
+					return err
+				}
+				if len(callers) == 0 {
+					return fmt.Errorf("signal auth denied: workflow %s has no allowed callers configured", targetWorkflowID)
+				}
+				for _, c := range callers {
+					if c == callerDefName {
+						return nil
+					}
+				}
+				return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", callerDefName, targetWorkflowID)
+			}),
+		)
 	}
 	// Use tenant-scoped database connection for plugin host functions.
 	if w.tenantPools != nil && wf.TenantID != "" {
@@ -2343,6 +2368,16 @@ func generateTraceID() string {
 	return hex.EncodeToString(b)
 }
 
+// extractTraceIDFromTraceParent extracts the trace-id from a W3C traceparent header.
+// Format: "00-{trace-id}-{parent-id}-{trace-flags}"
+func extractTraceIDFromTraceParent(tp string) string {
+	parts := strings.Split(tp, "-")
+	if len(parts) >= 2 && len(parts[1]) == 32 {
+		return parts[1]
+	}
+	return ""
+}
+
 func isConnectionError(err error) bool {
 	if err == nil {
 		return false
@@ -2979,6 +3014,13 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if alreadyExisted {
 		s.writeJSON(w, 200, map[string]string{"workflow_id": runID, "already_started": "true"})
 		return
+	}
+
+	// Propagate W3C trace context from incoming request.
+	if traceID := extractTraceIDFromTraceParent(r.Header.Get("traceparent")); traceID != "" {
+		if err := s.store.TraceWorkflow(r.Context(), runID, traceID); err != nil {
+			log.Printf("failed to set trace_id for %s: %v", runID, err)
+		}
 	}
 
 	// If concurrency key is specified, try to acquire it for the new run.

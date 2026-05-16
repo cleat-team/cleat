@@ -15,6 +15,7 @@ type Config struct {
 	ShardsFile             string
 	PluginConfigFile       string
 	RequireAuth            bool
+	RequireSignalAuth      bool
 	MaxBodySize            int64
 	MaxAttempts            int
 	DefaultWorkflowTimeout time.Duration

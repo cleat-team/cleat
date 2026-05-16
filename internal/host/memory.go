@@ -64,6 +64,16 @@ func validServiceName(name string) bool {
 // error code, which propagates as an error in the workflow's error handling.
 const errBadParam uint64 = 0xFFFFFFFF_00000001
 
+// errSignalAuthRequired is returned by cleat_signal_workflow when the caller
+// is not authorized to signal the target workflow (requireSignalAuth is enabled
+// and the caller's defName is not in the target's allowed_signals).
+const errSignalAuthRequired uint64 = 0xFFFFFFFF_00000002
+
+// errSignalAuthRequiredInt is the int64 equivalent of errSignalAuthRequired.
+// errSignalAuthRequired overflows int64 so it cannot be used directly in
+// execSession methods that return int64.
+const errSignalAuthRequiredInt int64 = -4294967294
+
 // readWasmString reads a Go string from WASM linear memory at (ptr, length).
 func readWasmString(mem api.Memory, ptr, length uint32) string {
 	if length == 0 {

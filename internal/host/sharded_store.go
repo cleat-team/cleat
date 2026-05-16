@@ -796,6 +796,15 @@ func (s *ShardedStore) PollCancellation(ctx context.Context, workflowID string) 
 	return shard.Store.PollCancellation(ctx, workflowID)
 }
 
+// GetAllowedSignalCallers routes by workflow ID.
+func (s *ShardedStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return nil, fmt.Errorf("get_allowed_signal_callers: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.GetAllowedSignalCallers(ctx, workflowID)
+}
+
 // CreatePromise routes by workflow ID.
 func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	shard := s.getShard(workflowID)

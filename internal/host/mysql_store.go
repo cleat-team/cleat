@@ -255,7 +255,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -353,7 +353,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -1593,6 +1593,27 @@ func (s *MySQLStore) PollSignal(ctx context.Context, workflowID, signalName stri
 // PollCancellation checks whether the workflow has been cancelled.
 func (s *MySQLStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	return s.CheckCancellation(ctx, workflowID)
+}
+
+// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+func (s *MySQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT allowed_signals FROM workflow_instances WHERE id = ?`, workflowID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: %w", err)
+	}
+	if !raw.Valid || raw.String == "" || raw.String == "null" {
+		return nil, nil
+	}
+	var callers []string
+	if err := json.Unmarshal([]byte(raw.String), &callers); err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: parse: %w", err)
+	}
+	return callers, nil
 }
 
 // PollAndClaimSignal atomically checks for and claims a pending signal.
