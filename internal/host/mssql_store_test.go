@@ -3,10 +3,12 @@ package host
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"testing"
 
 	"github.com/cleat-team/cleat/internal/host/testutil"
+	"github.com/google/uuid"
 
 	_ "github.com/microsoft/go-mssqldb"
 )
@@ -89,5 +91,82 @@ func TestMSSQLStoreWithTenant(t *testing.T) {
 	}
 	if store.tenantID != "00000000-0000-0000-0000-000000000000" {
 		t.Fatal("WithTenant mutated original store")
+	}
+}
+
+// TestMSSQLStore_StartNewRun_TenantID verifies that StartNewRun stores the
+// tenant_id correctly for both the non-idempotent and idempotent-key code paths.
+func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
+
+	db := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLFullSchema(t, db)
+	defer testutil.CleanupMSSQLTestData(t, db)
+
+	// Insert a workflow_defs row (required by FK constraint).
+	_, err := db.Exec(`
+		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue, tenant_id)
+		VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
+		"test-wf", 1, []byte("wasm"), "[]", "default", nil)
+	if err != nil {
+		t.Fatalf("insert workflow_def: %v", err)
+	}
+
+	nonDefaultTenant := "11111111-1111-1111-1111-111111111111"
+	store := NewMSSQLStore(db, "default")
+
+	// --- Non-idempotent path ---
+	runID := uuid.New().String()
+	id, isDup, err := store.StartNewRun(context.Background(), runID,
+		"test-wf", 1, json.RawMessage(`{"key":"val"}`), "", nonDefaultTenant)
+	if err != nil {
+		t.Fatalf("StartNewRun (no idemkey): %v", err)
+	}
+	if isDup {
+		t.Fatal("StartNewRun (no idemkey): unexpected duplicate")
+	}
+	if id != runID {
+		t.Fatalf("StartNewRun (no idemkey): got runID %s, want %s", id, runID)
+	}
+
+	// Verify tenant_id was stored correctly.
+	var storedTenant sql.NullString
+	err = db.QueryRow(`SELECT tenant_id FROM workflow_instances WHERE id = @p1`, runID).Scan(&storedTenant)
+	if err != nil {
+		t.Fatalf("query tenant_id (no idemkey): %v", err)
+	}
+	if !storedTenant.Valid {
+		t.Fatal("StartNewRun (no idemkey): tenant_id is NULL")
+	}
+	if storedTenant.String != nonDefaultTenant {
+		t.Fatalf("StartNewRun (no idemkey): tenant_id = %q, want %q", storedTenant.String, nonDefaultTenant)
+	}
+
+	// --- Idempotent-key path ---
+	idemRunID := uuid.New().String()
+	idemID, isDup, err := store.StartNewRun(context.Background(), idemRunID,
+		"test-wf", 1, json.RawMessage(`{"key":"val"}`), "idem-key-214", nonDefaultTenant)
+	if err != nil {
+		t.Fatalf("StartNewRun (idemkey): %v", err)
+	}
+	if isDup {
+		t.Fatal("StartNewRun (idemkey): unexpected duplicate")
+	}
+	if idemID != idemRunID {
+		t.Fatalf("StartNewRun (idemkey): got runID %s, want %s", idemID, idemRunID)
+	}
+
+	// Verify tenant_id was stored correctly.
+	err = db.QueryRow(`SELECT tenant_id FROM workflow_instances WHERE id = @p1`, idemRunID).Scan(&storedTenant)
+	if err != nil {
+		t.Fatalf("query tenant_id (idemkey): %v", err)
+	}
+	if !storedTenant.Valid {
+		t.Fatal("StartNewRun (idemkey): tenant_id is NULL")
+	}
+	if storedTenant.String != nonDefaultTenant {
+		t.Fatalf("StartNewRun (idemkey): tenant_id = %q, want %q", storedTenant.String, nonDefaultTenant)
 	}
 }
