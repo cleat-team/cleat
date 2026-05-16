@@ -8,6 +8,7 @@ UPDATE workflow_instances SET tenant_id = '00000000-0000-0000-0000-000000000000'
 UPDATE event_history SET tenant_id = '00000000-0000-0000-0000-000000000000' WHERE tenant_id IS NULL;
 UPDATE workflow_signals SET tenant_id = '00000000-0000-0000-0000-000000000000' WHERE tenant_id IS NULL;
 UPDATE workflow_schedules SET tenant_id = '00000000-0000-0000-0000-000000000000' WHERE tenant_id IS NULL;
+UPDATE concurrency_keys SET tenant_id = '00000000-0000-0000-0000-000000000000' WHERE tenant_id IS NULL;
 DO $$
 DECLARE
     t RECORD;
