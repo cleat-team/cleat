@@ -47,7 +47,7 @@ type mockStore struct {
 	checkCancellationFn                func(ctx context.Context, workflowID string) (bool, string, error)
 	deliverSignalFn                    func(ctx context.Context, workflowID, signalName, payload string) error
 	pollAndClaimSignalFn               func(ctx context.Context, workflowID, signalName string) (string, bool, error)
-	startNewRunFn                      func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
+	startNewRunFn                      func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error)
 	startChildWorkflowFn               func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
 	getChildResultFn                   func(ctx context.Context, runID string) (string, bool, error)
 	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
@@ -84,6 +84,7 @@ type mockStore struct {
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
 	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error)
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
+	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
 }
 
 // ---- mockStore interface methods ----
@@ -208,9 +209,9 @@ func (m *mockStore) PollCancellation(ctx context.Context, workflowID string) (bo
 	return m.CheckCancellation(ctx, workflowID)
 }
 
-func (m *mockStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (m *mockStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error) {
 	if m.startNewRunFn != nil {
-		return m.startNewRunFn(ctx, runID, defName, defVersion, input, idempotencyKey)
+		return m.startNewRunFn(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID)
 	}
 	return "test-run-id", false, nil
 }
@@ -1743,4 +1744,10 @@ func (m *mockStore) GetConcurrencyKeyCount(ctx context.Context, workflowID strin
 }
 func (m *mockStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
+}
+func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	if m.getAllowedSignalCallersFn != nil {
+		return m.getAllowedSignalCallersFn(ctx, workflowID)
+	}
+	return nil, nil
 }
