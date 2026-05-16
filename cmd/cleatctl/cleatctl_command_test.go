@@ -47,7 +47,7 @@ type mockStore struct {
 	checkCancellationFn                func(ctx context.Context, workflowID string) (bool, string, error)
 	deliverSignalFn                    func(ctx context.Context, workflowID, signalName, payload string) error
 	pollAndClaimSignalFn               func(ctx context.Context, workflowID, signalName string) (string, bool, error)
-	startNewRunFn                      func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string) (string, bool, error)
+	startNewRunFn                      func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error)
 	startChildWorkflowFn               func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
 	getChildResultFn                   func(ctx context.Context, runID string) (string, bool, error)
 	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
@@ -209,18 +209,11 @@ func (m *mockStore) PollCancellation(ctx context.Context, workflowID string) (bo
 	return m.CheckCancellation(ctx, workflowID)
 }
 
-func (m *mockStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string) (string, bool, error) {
+func (m *mockStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error) {
 	if m.startNewRunFn != nil {
 		return m.startNewRunFn(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID)
 	}
 	return "test-run-id", false, nil
-}
-
-func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
-	if m.getAllowedSignalCallersFn != nil {
-		return m.getAllowedSignalCallersFn(ctx, workflowID)
-	}
-	return nil, nil
 }
 
 func (m *mockStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
@@ -1751,4 +1744,10 @@ func (m *mockStore) GetConcurrencyKeyCount(ctx context.Context, workflowID strin
 }
 func (m *mockStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
+}
+func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	if m.getAllowedSignalCallersFn != nil {
+		return m.getAllowedSignalCallersFn(ctx, workflowID)
+	}
+	return nil, nil
 }

@@ -279,6 +279,7 @@ mod imports {
 
         // cleat_json_parse - (ptr,len, ptr,maxLen) -> i64 (ABI 2.51)
         // Validates and canonicalizes JSON via the host's encoding/json.
+        #[cfg(target_arch = "wasm32")]
         pub fn cleat_json_parse(
             json_ptr: *const u8, json_len: u32,
             out_ptr: *mut u8, out_max_len: u32,
@@ -287,6 +288,7 @@ mod imports {
         // cleat_json_stringify - (ptr,len, ptr,maxLen) -> i64 (ABI 2.52)
         // Validates and re-serializes JSON via the host's encoding/json.
         // Identical behavior to cleat_json_parse; provided as a semantic alias.
+        #[cfg(target_arch = "wasm32")]
         pub fn cleat_json_stringify(
             ptr: *const u8, len: u32,
             out_ptr: *mut u8, out_max_len: u32,
@@ -1375,6 +1377,7 @@ impl HostCalls {
     /// canonical formatting. Returns `Some(normalized_json)` on success,
     /// `None` if the input is not valid JSON or exceeds the 65536-byte
     /// output buffer.
+    #[cfg(target_arch = "wasm32")]
     pub fn json_parse(&self, json: &str) -> Option<String> {
         let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
@@ -1390,6 +1393,13 @@ impl HostCalls {
         Some(unsafe { memory::read_string(out_buf.as_ptr(), written) })
     }
 
+    /// Non-WASM stub for `json_parse`.
+    /// Returns the input unchanged (no host normalization available on native targets).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn json_parse(&self, json: &str) -> Option<String> {
+        Some(json.to_string())
+    }
+
     /// Validate and re-serialize a JSON value via the host's encoding/json.
     ///
     /// Identical behavior to `json_parse` — both parse then re-serialize
@@ -1397,6 +1407,7 @@ impl HostCalls {
     /// SDK ergonomics. Returns `Some(normalized_json)` on success,
     /// `None` if the input is not valid JSON or exceeds the 65536-byte
     /// output buffer.
+    #[cfg(target_arch = "wasm32")]
     pub fn json_stringify(&self, value: &str) -> Option<String> {
         let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
@@ -1410,6 +1421,13 @@ impl HostCalls {
             return None;
         }
         Some(unsafe { memory::read_string(out_buf.as_ptr(), written) })
+    }
+
+    /// Non-WASM stub for `json_stringify`.
+    /// Returns the input unchanged (no host normalization available on native targets).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn json_stringify(&self, value: &str) -> Option<String> {
+        Some(value.to_string())
     }
 }
 
