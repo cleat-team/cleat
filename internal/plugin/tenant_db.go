@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -37,6 +38,13 @@ func NewTenantPools(ownerDB *sql.DB, baseDSN string) *TenantPools {
 // For returns a tenant-scoped *sql.DB. Pools are created lazily and cached.
 // Caller does NOT close the returned DB — TenantPools manages the lifecycle.
 func (tp *TenantPools) For(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error) {
+	// In single-tenant mode, all workflows run under the default tenant
+	// (zero UUID) and share the owner connection pool. No per-tenant
+	// roles exist on managed PostgreSQL services.
+	if tenantID == uuid.Nil {
+		return tp.OwnerDB, nil
+	}
+
 	tp.mu.Lock()
 	pool, ok := tp.pools[tenantID]
 	tp.mu.Unlock()
@@ -50,6 +58,10 @@ func (tp *TenantPools) For(ctx context.Context, tenantID uuid.UUID) (*sql.DB, er
 		`SELECT role_name, password FROM admin.tenant_roles WHERE tenant_id = $1`,
 		tenantID).Scan(&roleName, &password)
 	if err != nil {
+		if err == sql.ErrNoRows {
+			log.Printf("tenant pool: no role for tenant %s — falling back to owner pool (single-tenant mode)", tenantID)
+			return tp.OwnerDB, nil
+		}
 		return nil, fmt.Errorf("tenant pool: no role for tenant %s: %w", tenantID, err)
 	}
 

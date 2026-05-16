@@ -14,7 +14,11 @@ DECLARE
 BEGIN
     FOR t IN SELECT tenant_id FROM admin.tenants LOOP
         IF NOT EXISTS (SELECT 1 FROM admin.tenant_roles WHERE tenant_id = t.tenant_id) THEN
-            PERFORM admin.create_tenant_role(t.tenant_id);
+            BEGIN
+                PERFORM admin.create_tenant_role(t.tenant_id);
+            EXCEPTION WHEN OTHERS THEN
+                RAISE WARNING 'create_tenant_role failed for tenant % (SQLSTATE: %) — skipping (single-tenant mode)', t.tenant_id, SQLSTATE;
+            END;
         END IF;
     END LOOP;
 END $$;

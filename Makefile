@@ -267,6 +267,24 @@ fmt-rust:
 	cd crates/cleat-macro && cargo fmt
 	cd crates/cleat-sdk && cargo fmt
 
+# ---- clew (Neon-backed durable dev) -----------------------------------------
+
+.PHONY: clew
+clew:
+	@go build -o cleat-worker ./cmd/cleat-worker
+	@if [ -z "$${CLEW_DATABASE_URL:-}" ]; then \
+		echo "ERROR: CLEW_DATABASE_URL is not set."; \
+		echo ""; \
+		echo "Create a .env file in the cleat repo root with:"; \
+		echo '  CLEW_DATABASE_URL="postgresql://user:pass@ep-xxx.us-east-1.aws.neon.tech/neondb?sslmode=require"'; \
+		echo ""; \
+		echo "Or export it directly:"; \
+		echo "  export CLEW_DATABASE_URL=\"...\""; \
+		exit 1; \
+	fi
+	@echo "Starting cleat-worker against Neon (migrations run automatically)..."
+	./cleat-worker --db "$${CLEW_DATABASE_URL}" --api-addr=:8080
+
 # ---- tools ------------------------------------------------------------------
 
 .PHONY: tools

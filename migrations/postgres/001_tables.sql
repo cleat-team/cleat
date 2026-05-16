@@ -10,10 +10,15 @@ BEGIN
     v_password := encode(gen_random_bytes(32), 'hex');
 
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role_name) THEN
-        EXECUTE format(
-            'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 10',
-            v_role_name, v_password
-        );
+        BEGIN
+            EXECUTE format(
+                'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 10',
+                v_role_name, v_password
+            );
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'create_tenant_role: cannot create role % (SQLSTATE: %) — skipping (single-tenant mode)', v_role_name, SQLSTATE;
+            RETURN NULL;
+        END;
     END IF;
 
     EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I AUTHORIZATION %I',
