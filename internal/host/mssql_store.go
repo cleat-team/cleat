@@ -244,11 +244,13 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		var createdAt sql.NullTime
 		var inputStr string
 		var errorCode, errorOp sql.NullString
+		var traceID sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &traceID); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
+		wf.TraceID = traceID.String
 
 		wf.Input = json.RawMessage(inputStr)
 		if nextWakeAt.Valid {
@@ -323,11 +325,13 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		var createdAt sql.NullTime
 		var inputStr string
 		var errorCode, errorOp sql.NullString
+		var traceID sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &traceID); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
+		wf.TraceID = traceID.String
 
 		wf.Input = json.RawMessage(inputStr)
 		if nextWakeAt.Valid {
@@ -1902,10 +1906,12 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		var nextWakeAt, createdAt sql.NullTime
 		var inputStr string
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
+		var traceID sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.TraceID); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &traceID); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
+		wf.TraceID = traceID.String
 		wf.Input = json.RawMessage(inputStr)
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
