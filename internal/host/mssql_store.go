@@ -219,7 +219,8 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
 		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at,
-		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation
+		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
+		       INSERTED.trace_id
 		WHERE id IN (
 			SELECT id
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
@@ -243,11 +244,13 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		var createdAt sql.NullTime
 		var inputStr string
 		var errorCode, errorOp sql.NullString
+		var traceID sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &traceID); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
+		wf.TraceID = traceID.String
 
 		wf.Input = json.RawMessage(inputStr)
 		if nextWakeAt.Valid {
@@ -296,7 +299,8 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		OUTPUT INSERTED.id, INSERTED.def_name, INSERTED.def_version,
 		       INSERTED.status, INSERTED.input, INSERTED.assigned_to,
 		       INSERTED.next_wake_at, INSERTED.tenant_id, INSERTED.created_at,
-		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation
+		       INSERTED.error_code, INSERTED.error_op, INSERTED.generation,
+		       INSERTED.trace_id
 		WHERE id IN (
 			SELECT id
 			FROM workflow_instances WITH (READPAST, UPDLOCK, ROWLOCK)
@@ -321,11 +325,13 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		var createdAt sql.NullTime
 		var inputStr string
 		var errorCode, errorOp sql.NullString
+		var traceID sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &traceID); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
+		wf.TraceID = traceID.String
 
 		wf.Input = json.RawMessage(inputStr)
 		if nextWakeAt.Valid {
@@ -1092,7 +1098,7 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		return "", fmt.Errorf("continue as new: append events: %w", err)
 	}
 
-		// Use the store's tenant scope to preserve tenant isolation.
+	// Use the store's tenant scope to preserve tenant isolation.
 	// Create the new workflow run with a Go-generated UUID.
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
@@ -1100,7 +1106,7 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
 		        @p5)
-	`, newRunID, defName, defVersion, newInput, tenantID)
+	`, newRunID, defName, defVersion, newInput, s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -1606,7 +1612,7 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		WHEN MATCHED THEN UPDATE SET payload = source.payload, delivered_at = SYSUTCDATETIME()
 		WHEN NOT MATCHED THEN INSERT (workflow_id, signal_name, payload, tenant_id)
 		     VALUES (source.workflow_id, source.signal_name, source.payload, @p4);
-	`, workflowID, signalName, payload, tenantID)
+	`, workflowID, signalName, payload, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -1621,7 +1627,7 @@ func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName stri
 	err := s.db.QueryRowContext(ctx, `
 		SELECT payload FROM workflow_signals
 		WHERE workflow_id = @p1 AND signal_name = @p2 AND tenant_id = @p3
-	`, workflowID, signalName, tenantID).Scan(&payload)
+	`, workflowID, signalName, s.tenantID).Scan(&payload)
 	if err == sql.ErrNoRows {
 		return "", false, nil
 	}
@@ -1634,6 +1640,27 @@ func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName stri
 // PollCancellation checks whether the workflow has been cancelled.
 func (s *MSSQLStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	return s.CheckCancellation(ctx, workflowID)
+}
+
+// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+func (s *MSSQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT allowed_signals FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: %w", err)
+	}
+	if !raw.Valid || raw.String == "" || raw.String == "null" {
+		return nil, nil
+	}
+	var callers []string
+	if err := json.Unmarshal([]byte(raw.String), &callers); err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: parse: %w", err)
+	}
+	return callers, nil
 }
 
 // PollAndClaimSignal atomically checks for and claims a pending signal.
@@ -1725,7 +1752,7 @@ func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 		)
 	`, parentID, event.Step, string(event.EventType),
 		nullStr(event.ChildName), nullStr(event.ChildInput), nullStr(childID),
-		time.UnixMilli(event.TimestampMs), checksum, tenantID)
+		time.UnixMilli(event.TimestampMs), checksum, s.tenantID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
 	}
@@ -1758,20 +1785,32 @@ func (s *MSSQLStore) GetChildResult(ctx context.Context, runID string) (string, 
 // GetChildCount returns the number of active (non-terminal) child workflows
 // for the given parent workflow. Terminal statuses are excluded.
 func (s *MSSQLStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get child count for %s: begin: %w", parentWorkflowID, err)
+	}
+	defer tx.Rollback()
+
 	var count int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
 		WHERE parent_workflow_id = @p1 AND status NOT IN ('done', 'failed', 'dead_lettered')
 	`, parentWorkflowID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get child count for %s: %w", parentWorkflowID, err)
 	}
-	return count, nil
+	return count, tx.Commit()
 }
 
 // ReapStaleInstances reclaims workflow instances with stale heartbeats.
 func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
 		WHERE status = 'running'
@@ -1781,7 +1820,7 @@ func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
 	n, _ := result.RowsAffected()
-	return int(n), nil
+	return int(n), tx.Commit()
 }
 
 // GetQueryState returns the query state for a workflow instance key.
@@ -1867,10 +1906,12 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		var nextWakeAt, createdAt sql.NullTime
 		var inputStr string
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
+		var traceID sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &traceID); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
+		wf.TraceID = traceID.String
 		wf.Input = json.RawMessage(inputStr)
 		if nextWakeAt.Valid {
 			wf.NextWakeAt = nextWakeAt.Time
@@ -1898,10 +1939,12 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op,
+		       COALESCE(trace_id, '')
 		FROM workflow_instances WHERE id = @p1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp)
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
+		&wf.TraceID)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1927,7 +1970,7 @@ func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, tenantID)
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID)
 	return err
 }
 
@@ -2244,37 +2287,40 @@ func (s *MSSQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, upda
 func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	keyHash := sha256.Sum256([]byte(key))
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
-		return false, fmt.Errorf("acquire concurrency key: begin tx: %w", err)
+		return false, fmt.Errorf("acquire concurrency key: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	// Release expired keys during acquisition.
+	// Release expired keys for this tenant during acquisition.
 	_, err = tx.ExecContext(ctx, `
-		DELETE FROM concurrency_keys WHERE key_hash = @p1 AND expires_at < SYSUTCDATETIME()
-	`, keyHash[:])
+		DELETE FROM concurrency_keys WHERE key_hash = @p1 AND expires_at < SYSUTCDATETIME() AND tenant_id = @p2
+	`, keyHash[:], s.tenantID)
 	if err != nil {
 		return false, fmt.Errorf("acquire concurrency key: cleanup expired: %w", err)
 	}
 
 	// Try to insert with a unique constraint.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at)
-		SELECT @p1, @p2, @p3, DATEADD(SECOND, @p4, SYSUTCDATETIME())
+		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+		SELECT @p1, @p2, @p3, DATEADD(SECOND, @p4, SYSUTCDATETIME()), @p5
 		WHERE NOT EXISTS (
 			SELECT 1 FROM concurrency_keys WHERE key_hash = @p1
 		)
-	`, keyHash[:], key, workflowID, int(ttl.Seconds()))
+	`, keyHash[:], key, workflowID, int(ttl.Seconds()), s.tenantID)
 	if err != nil {
 		return false, fmt.Errorf("acquire concurrency key: %w", err)
 	}
 
-	// Check if our insert succeeded.
+	// Check if our insert succeeded (tenant-scoped).
 	var wkID string
 	err = tx.QueryRowContext(ctx, `
-		SELECT workflow_id FROM concurrency_keys WHERE key_hash = @p1
-	`, keyHash[:]).Scan(&wkID)
+		SELECT workflow_id FROM concurrency_keys WHERE key_hash = @p1 AND tenant_id = @p2
+	`, keyHash[:], s.tenantID).Scan(&wkID)
+	if err == sql.ErrNoRows {
+		return false, tx.Commit()
+	}
 	if err != nil {
 		return false, fmt.Errorf("acquire concurrency key: verify: %w", err)
 	}
@@ -2284,78 +2330,121 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 // ReleaseConcurrencyKey releases a specific concurrency key.
 func (s *MSSQLStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
 	keyHash := sha256.Sum256([]byte(key))
-	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = @p1`, keyHash[:])
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("release concurrency key: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = @p1 AND tenant_id = @p2`, keyHash[:], s.tenantID)
 	if err != nil {
 		return fmt.Errorf("release concurrency key: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.
 func (s *MSSQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = @p1`, workflowID)
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("release workflow concurrency keys: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = @p1 AND tenant_id = @p2`, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
-// ReapExpiredConcurrencyKeys deletes all expired concurrency keys.
+// ReapExpiredConcurrencyKeys deletes all expired concurrency keys
+// for the current tenant.
 func (s *MSSQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE expires_at < SYSUTCDATETIME()`)
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reap expired concurrency keys: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE expires_at < SYSUTCDATETIME() AND tenant_id = @p1`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("reap expired concurrency keys: %w", err)
 	}
 	n, _ := result.RowsAffected()
-	return n, nil
+	return n, tx.Commit()
 }
 
 // GetConcurrencyKeyCount returns the number of non-expired concurrency keys
 // held by the given workflow.
 func (s *MSSQLStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get concurrency key count for %s: begin: %w", workflowID, err)
+	}
+	defer tx.Rollback()
+
 	var count int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM concurrency_keys
-		WHERE workflow_id = @p1 AND expires_at > SYSUTCDATETIME()
-	`, workflowID).Scan(&count)
+		WHERE workflow_id = @p1 AND expires_at > SYSUTCDATETIME() AND tenant_id = @p2
+	`, workflowID, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get concurrency key count for %s: %w", workflowID, err)
 	}
-	return count, nil
+	return count, tx.Commit()
 }
 
 // GetEventCount returns the event_count for a workflow instance.
 func (s *MSSQLStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get event count for %s: begin: %w", workflowID, err)
+	}
+	defer tx.Rollback()
+
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&count)
+	err = tx.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get event count for %s: %w", workflowID, err)
 	}
-	return count, nil
+	return count, tx.Commit()
 }
 
 // ---- Sticky Session methods ----
 
 // UpdateStickyWorker sets the sticky worker for a workflow.
 func (s *MSSQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("update sticky worker: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET sticky_worker_id = @p2 WHERE id = @p1
 	`, workflowID, workerID)
 	if err != nil {
 		return fmt.Errorf("update sticky worker: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ClearStickyWorker removes the sticky worker assignment.
 func (s *MSSQLStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("clear sticky worker: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = @p1
 	`, workflowID)
 	if err != nil {
 		return fmt.Errorf("clear sticky worker: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ---- Version Management methods ----
@@ -2746,7 +2835,13 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 
 // TerminateWorkflow force-terminates a workflow, setting status to 'terminated'.
 func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("terminate workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'terminated',
 		    error_msg = @p2,
@@ -2756,6 +2851,9 @@ func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 	`, sql.Named("p1", workflowID), sql.Named("p2", reason))
 	if err != nil {
 		return fmt.Errorf("terminate workflow: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("terminate workflow commit: %w", err)
 	}
 	// Best-effort cleanup.
 	s.ClearStickyWorker(context.Background(), workflowID)

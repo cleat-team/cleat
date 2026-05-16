@@ -47,6 +47,28 @@ func TestGenerateTraceID(t *testing.T) {
 	}
 }
 
+func TestExtractTraceIDFromTraceParent(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"valid", "00-abcdef0123456789abcdef0123456789-0123456789abcdef-01", "abcdef0123456789abcdef0123456789"},
+		{"empty header", "", ""},
+		{"single part", "00", ""},
+		{"short trace ID", "00-abc-123-01", ""},
+		{"long trace ID", "00-abcdef0123456789abcdef0123456789ff-123-01", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractTraceIDFromTraceParent(tt.header)
+			if got != tt.want {
+				t.Errorf("extractTraceIDFromTraceParent(%q) = %q, want %q", tt.header, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsConnectionError(t *testing.T) {
 	connectionErrors := []string{
 		"dial tcp: connection refused",

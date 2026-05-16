@@ -154,6 +154,27 @@ Auto-generates an API key on first startup if no keys exist.
 
 ---
 
+### --require-signal-auth
+
+| Type | Default | Description |
+|------|---------|-------------|
+| bool | `true` | Require signal authorization for cross-workflow signals |
+
+When enabled, a workflow or external caller can only signal a target
+workflow if its identity appears in the target's `allowed_signals` list.
+Applies to WASM `cleat_signal_workflow`, `SendSignalAndWait`, plugin
+`env.SignalWorkflow`, and HTTP API signal delivery.
+
+- Workflow identity = its `defName` (definition name).
+- Plugins identify by their plugin name (e.g. `"slack-notify"`).
+- External HTTP API callers have no `defName`; add `"*"` (wildcard) to
+  `allowed_signals` to permit them.
+- An empty `allowed_signals` means deny all (fail-secure).
+
+Set to `false` to disable signal authorization (backward compatible).
+
+---
+
 ### --tenant-resolver
 
 | Type | Default | Description |

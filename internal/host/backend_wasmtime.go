@@ -262,7 +262,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// collision with the module's heap, but never below the legacy 10 MiB
 	// offset. Some WASM SDKs (Java/TeaVM, AssemblyScript) hardcode the
 	// 10 MiB convention and will break if the buffer moves lower.
-	const outBufSz = outBufSize               // 1 MB
+	outBufSz := OutBufSize // 1 MB default, configurable
 	const legacyOffset = uint32(10 * 1024 * 1024) // 10 MiB
 
 	currentSize := uint64(mem.DataSize(store))
@@ -404,7 +404,7 @@ func wasmtimeReadStringValidated(buf []byte, ptr, length, maxLen uint32) (string
 
 // wasmtimeReadServiceName reads and validates a service/operation name.
 func wasmtimeReadServiceName(buf []byte, ptr, length uint32) (string, bool) {
-	s, ok := wasmtimeReadStringValidated(buf, ptr, length, maxWasmStringLen)
+	s, ok := wasmtimeReadStringValidated(buf, ptr, length, MaxWasmStringLen)
 	if !ok {
 		return "", false
 	}
@@ -561,7 +561,7 @@ func (b *wasmtimeBackend) registerCleatCall(linker *wasmtime.Linker, completeRes
 		if !ok {
 			return errBadParam, nil
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -612,7 +612,7 @@ func (b *wasmtimeBackend) registerCleatLog(linker *wasmtime.Linker) error {
 		if err != nil {
 			return 0, err
 		}
-		msg, ok := wasmtimeReadStringValidated(buf, msgPtr, msgLen, maxWasmStringLen)
+		msg, ok := wasmtimeReadStringValidated(buf, msgPtr, msgLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -650,7 +650,7 @@ func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
 		if err != nil {
 			return 0, err
 		}
-		desc, ok := wasmtimeReadStringValidated(buf, descPtr, descLen, maxWasmStringLen)
+		desc, ok := wasmtimeReadStringValidated(buf, descPtr, descLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -709,7 +709,7 @@ func (b *wasmtimeBackend) registerCleatContinueAsNew(linker *wasmtime.Linker) er
 		if err != nil {
 			return 0, err
 		}
-		newInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, maxWasmStringLen)
+		newInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -729,7 +729,7 @@ func (b *wasmtimeBackend) registerCleatContinueAsNewVersioned(linker *wasmtime.L
 		if err != nil {
 			return 0, err
 		}
-		newInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, maxWasmStringLen)
+		newInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -753,7 +753,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflow(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParam, nil
 		}
-		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, maxWasmStringLen)
+		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -779,7 +779,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 		if !ok {
 			return errBadParam, nil
 		}
-		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, maxWasmStringLen)
+		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -813,7 +813,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Li
 		if !ok {
 			return errBadParam, nil
 		}
-		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, maxWasmStringLen)
+		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -859,7 +859,7 @@ func (b *wasmtimeBackend) registerCleatAwaitAllChildren(linker *wasmtime.Linker)
 		if err != nil {
 			return 0, err
 		}
-		runIDsJSON, ok := wasmtimeReadStringValidated(buf, idsPtr, idsLen, maxWasmStringLen)
+		runIDsJSON, ok := wasmtimeReadStringValidated(buf, idsPtr, idsLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -891,11 +891,11 @@ func (b *wasmtimeBackend) registerCleatCallRetry(linker *wasmtime.Linker) error 
 		if !ok {
 			return errBadParam, nil
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
-		nonRetryableErrorsJSON, ok := wasmtimeReadStringValidated(buf, nonRetryPtr, nonRetryLen, maxWasmStringLen)
+		nonRetryableErrorsJSON, ok := wasmtimeReadStringValidated(buf, nonRetryPtr, nonRetryLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -919,7 +919,7 @@ func (b *wasmtimeBackend) registerCleatAwaitSignals(linker *wasmtime.Linker) err
 		if err != nil {
 			return 0, err
 		}
-		names, ok := wasmtimeReadStringValidated(buf, namesPtr, namesLen, maxWasmStringLen)
+		names, ok := wasmtimeReadStringValidated(buf, namesPtr, namesLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -945,7 +945,7 @@ func (b *wasmtimeBackend) registerCleatSetQueryState(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParam, nil
 		}
-		val, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, maxWasmStringLen)
+		val, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -975,7 +975,7 @@ func (b *wasmtimeBackend) registerCleatCallHeartbeat(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParam, nil
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1007,7 +1007,7 @@ func (b *wasmtimeBackend) registerCleatPluginCall(linker *wasmtime.Linker) error
 		if !ok {
 			return errBadParam, nil
 		}
-		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, maxWasmStringLen)
+		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1039,7 +1039,7 @@ func (b *wasmtimeBackend) registerCleatPluginCallStreaming(linker *wasmtime.Link
 		if !ok {
 			return errBadParam, nil
 		}
-		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, maxWasmStringLen)
+		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1133,7 +1133,7 @@ func (b *wasmtimeBackend) registerCleatSendSignalAndWait(linker *wasmtime.Linker
 		if !ok {
 			return errBadParam, nil
 		}
-		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, maxWasmStringLen)
+		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1158,7 +1158,7 @@ func (b *wasmtimeBackend) registerCleatReplyToSignal(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParam, nil
 		}
-		response, ok := wasmtimeReadStringValidated(buf, respPtr, respLen, maxWasmStringLen)
+		response, ok := wasmtimeReadStringValidated(buf, respPtr, respLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1186,7 +1186,7 @@ func (b *wasmtimeBackend) registerCleatSignalWorkflow(linker *wasmtime.Linker) e
 		if !ok {
 			return errBadParam, nil
 		}
-		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, maxWasmStringLen)
+		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1249,7 +1249,7 @@ func (b *wasmtimeBackend) registerCleatUUID(linker *wasmtime.Linker) error {
 		if err != nil {
 			return 0, err
 		}
-		seed, ok := wasmtimeReadStringValidated(buf, seedPtr, seedLen, maxWasmStringLen)
+		seed, ok := wasmtimeReadStringValidated(buf, seedPtr, seedLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1310,7 +1310,7 @@ func (b *wasmtimeBackend) registerCleatSideEffect(linker *wasmtime.Linker) error
 		if err != nil {
 			return 0, err
 		}
-		result, ok := wasmtimeReadStringValidated(buf, resultPtr, resultLen, maxWasmStringLen)
+		result, ok := wasmtimeReadStringValidated(buf, resultPtr, resultLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1370,7 +1370,7 @@ func (b *wasmtimeBackend) registerCleatResolvePromise(linker *wasmtime.Linker) e
 		if !ok {
 			return errBadParam, nil
 		}
-		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, maxWasmStringLen)
+		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1390,7 +1390,7 @@ func (b *wasmtimeBackend) registerCleatRejectPromise(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParam, nil
 		}
-		errMsg, ok := wasmtimeReadStringValidated(buf, errPtr, errLen, maxWasmStringLen)
+		errMsg, ok := wasmtimeReadStringValidated(buf, errPtr, errLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1418,7 +1418,7 @@ func (b *wasmtimeBackend) registerCleatSend(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParam, nil
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1446,7 +1446,7 @@ func (b *wasmtimeBackend) registerCleatScheduleInvoke(linker *wasmtime.Linker) e
 		if !ok {
 			return errBadParam, nil
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1490,7 +1490,7 @@ func (b *wasmtimeBackend) registerCleatRunDetached(linker *wasmtime.Linker) erro
 		if !ok {
 			return errBadParam, nil
 		}
-		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, maxWasmStringLen)
+		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1517,7 +1517,7 @@ func (b *wasmtimeBackend) registerCleatSetState(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParam, nil
 		}
-		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, maxWasmStringLen)
+		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1602,7 +1602,7 @@ func (b *wasmtimeBackend) registerCleatListState(linker *wasmtime.Linker) error 
 		if err != nil {
 			return 0, err
 		}
-		prefix, ok := wasmtimeReadStringValidated(buf, prefixPtr, prefixLen, maxWasmStringLen)
+		prefix, ok := wasmtimeReadStringValidated(buf, prefixPtr, prefixLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
@@ -1628,15 +1628,15 @@ func (b *wasmtimeBackend) registerCleatFetch(linker *wasmtime.Linker) error {
 		if !ok {
 			return errBadParam, nil
 		}
-		url, ok := wasmtimeReadStringValidated(buf, urlPtr, urlLen, maxWasmStringLen)
+		url, ok := wasmtimeReadStringValidated(buf, urlPtr, urlLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
-		headersJSON, ok := wasmtimeReadStringValidated(buf, headersPtr, headersLen, maxWasmStringLen)
+		headersJSON, ok := wasmtimeReadStringValidated(buf, headersPtr, headersLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}
-		body, ok := wasmtimeReadStringValidated(buf, bodyPtr, bodyLen, maxWasmStringLen)
+		body, ok := wasmtimeReadStringValidated(buf, bodyPtr, bodyLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam, nil
 		}

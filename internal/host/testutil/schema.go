@@ -45,6 +45,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				compaction_state JSONB, compacted_at TIMESTAMPTZ, compaction_step INTEGER,
 				plugin_vers JSONB NOT NULL DEFAULT '{}',
 				event_count BIGINT NOT NULL DEFAULT 0,
+				allowed_signals JSONB DEFAULT NULL,
 					generation BIGINT NOT NULL DEFAULT 0)`,
 			`CREATE TABLE IF NOT EXISTS event_history (
 				workflow_id TEXT NOT NULL, step INTEGER NOT NULL,
@@ -103,6 +104,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				compaction_state JSON, compacted_at TIMESTAMP(6), compaction_step INTEGER,
 				plugin_vers JSON NOT NULL DEFAULT ('{}'),
 				event_count BIGINT NOT NULL DEFAULT 0,
+				allowed_signals JSON DEFAULT NULL,
 					generation BIGINT NOT NULL DEFAULT 0)`,
 			`CREATE TABLE IF NOT EXISTS event_history (
 				workflow_id VARCHAR(255) NOT NULL, step INTEGER NOT NULL,
@@ -170,6 +172,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					compaction_state NVARCHAR(MAX), compacted_at DATETIMEOFFSET, compaction_step INTEGER,
 					plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
 					event_count BIGINT NOT NULL DEFAULT 0,
+					allowed_signals NVARCHAR(MAX) NULL,
 					generation BIGINT NOT NULL DEFAULT 0)`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_history')
 				CREATE TABLE event_history (
@@ -238,7 +241,8 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`CREATE TABLE IF NOT EXISTS concurrency_keys (
 				key_hash BYTEA PRIMARY KEY, key_text TEXT NOT NULL,
 				workflow_id TEXT NOT NULL, acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-				expires_at TIMESTAMPTZ NOT NULL)`,
+				expires_at TIMESTAMPTZ NOT NULL,
+				tenant_id TEXT)`,
 			`CREATE TABLE IF NOT EXISTS workflow_promises (
 				workflow_id TEXT NOT NULL, promise_id TEXT NOT NULL,
 				promise_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
@@ -288,6 +292,8 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS payload JSONB`,
 			`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`,
 			`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS tenant_id UUID`,
+			`ALTER TABLE concurrency_keys ADD COLUMN IF NOT EXISTS tenant_id TEXT`,
+			`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS allowed_signals JSONB DEFAULT NULL`,
 			// Memory statistics tables (migration 010)
 			`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
 				id BIGSERIAL PRIMARY KEY,
@@ -316,7 +322,8 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				key_hash VARBINARY(255) PRIMARY KEY, key_text TEXT NOT NULL,
 				workflow_id TEXT NOT NULL,
 				acquired_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				expires_at TIMESTAMP(6) NOT NULL)`,
+				expires_at TIMESTAMP(6) NOT NULL,
+				tenant_id VARCHAR(255))`,
 			`CREATE TABLE IF NOT EXISTS workflow_promises (
 				workflow_id VARCHAR(255) NOT NULL, promise_id VARCHAR(255) NOT NULL,
 				promise_name TEXT NOT NULL,
@@ -385,7 +392,8 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					key_text NVARCHAR(MAX) NOT NULL,
 					workflow_id NVARCHAR(64) NOT NULL,
 					acquired_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					expires_at DATETIMEOFFSET NOT NULL)`,
+					expires_at DATETIMEOFFSET NOT NULL,
+					tenant_id NVARCHAR(128))`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_promises')
 				CREATE TABLE workflow_promises (
 					workflow_id NVARCHAR(64) NOT NULL, promise_id NVARCHAR(64) NOT NULL,
@@ -431,6 +439,8 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				ALTER TABLE workflow_instances ADD error_code NVARCHAR(MAX) NULL`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_instances') AND name = 'error_op')
 				ALTER TABLE workflow_instances ADD error_op NVARCHAR(MAX) NULL`,
+			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('concurrency_keys') AND name = 'tenant_id')
+				ALTER TABLE concurrency_keys ADD tenant_id NVARCHAR(128) NULL`,
 			// Memory statistics tables
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_samples')
 				CREATE TABLE workflow_memory_samples (

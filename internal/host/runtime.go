@@ -414,10 +414,10 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 		scratchBase = legacyOffset
 	}
 	inputOffset := scratchBase
-	outputOffset := scratchBase + outBufSize
+	outputOffset := scratchBase + OutBufSize
 
 	// Grow memory to fit our scratch region.
-	needed := outputOffset + outBufSize
+	needed := outputOffset + OutBufSize
 	if currentSize < needed {
 		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
 		if _, ok := mem.Grow(pagesNeeded); !ok {
@@ -471,7 +471,7 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 		uint64(inputOffset),
 		uint64(len(inputJSON)),
 		uint64(outputOffset),
-		uint64(outBufSize),
+		uint64(OutBufSize),
 	)
 	if err != nil {
 		// Check for cleat_complete result before treating as error.
@@ -509,15 +509,15 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 
 	// Detect output overflow: if WASM wrote more bytes than the buffer can hold,
 	// the output was silently truncated. Return an error instead of partial data.
-	if actualLen > outBufSize {
-		return "", false, fmt.Errorf("host: %s: output overflow: wrote %d bytes, buffer is %d bytes", exportName, actualLen, outBufSize)
+	if actualLen > OutBufSize {
+		return "", false, fmt.Errorf("host: %s: output overflow: wrote %d bytes, buffer is %d bytes", exportName, actualLen, OutBufSize)
 	}
 
 	if errCode != 0 {
-		errMsg := readWasmString(mem, outputOffset, minU32(actualLen, outBufSize))
+		errMsg := readWasmString(mem, outputOffset, minU32(actualLen, OutBufSize))
 		return "", false, fmt.Errorf("host: %s: %s", exportName, errMsg)
 	}
 
-	response := readWasmString(mem, outputOffset, minU32(actualLen, outBufSize))
+	response := readWasmString(mem, outputOffset, minU32(actualLen, OutBufSize))
 	return response, false, nil
 }

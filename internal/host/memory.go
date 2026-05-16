@@ -30,13 +30,23 @@ func contextWithRawMemBuf(ctx context.Context, buf []byte) context.Context {
 	return context.WithValue(ctx, wasmMemBufKey{}, buf)
 }
 
-const outBufSize = 1048576 // 1 MB; increased to reduce truncation risk
-const wasmPageSize = 65536   // 64 KB WASM page size
+// DefaultOutBufSize is the default WASM output buffer size (1 MiB).
+const DefaultOutBufSize = 1048576
 
-// Maximum size of any string parameter read from WASM linear memory.
-// This prevents a malicious or buggy WASM module from causing the host to
-// allocate excessive memory via a single host function call.
-const maxWasmStringLen = 1048576 // 1 MB
+// OutBufSize is the output buffer size in bytes for WASM export calls.
+// Set before creating any Runtime to configure. Default: 1 MiB.
+var OutBufSize uint32 = 1048576
+
+const wasmPageSize = 65536 // 64 KB WASM page size
+
+// DefaultMaxWasmStringLen is the default maximum WASM string length (1 MiB).
+const DefaultMaxWasmStringLen = 1048576
+
+// MaxWasmStringLen is the maximum size of any string parameter read from WASM
+// linear memory. This prevents a malicious or buggy WASM module from causing
+// the host to allocate excessive memory via a single host function call.
+// Set before creating any Runtime to configure. Default: 1 MiB.
+var MaxWasmStringLen uint32 = 1048576
 
 // validServiceName checks that a name contains only allowed characters:
 // alphanumeric, dot, underscore, and hyphen. Service and operation names
@@ -63,6 +73,16 @@ func validServiceName(name string) bool {
 // parameter fails validation. This causes the workflow to see a non-zero
 // error code, which propagates as an error in the workflow's error handling.
 const errBadParam uint64 = 0xFFFFFFFF_00000001
+
+// errSignalAuthRequired is returned by cleat_signal_workflow when the caller
+// is not authorized to signal the target workflow (requireSignalAuth is enabled
+// and the caller's defName is not in the target's allowed_signals).
+const errSignalAuthRequired uint64 = 0xFFFFFFFF_00000002
+
+// errSignalAuthRequiredInt is the int64 equivalent of errSignalAuthRequired.
+// errSignalAuthRequired overflows int64 so it cannot be used directly in
+// execSession methods that return int64.
+const errSignalAuthRequiredInt int64 = -4294967294
 
 // readWasmString reads a Go string from WASM linear memory at (ptr, length).
 func readWasmString(mem api.Memory, ptr, length uint32) string {
@@ -93,10 +113,10 @@ func readWasmStringValidated(mem api.Memory, ptr, length, maxLen uint32) (string
 }
 
 // readServiceName reads a service or operation name from WASM linear memory
-// and validates both its length (must not exceed maxWasmStringLen) and
+// and validates both its length (must not exceed MaxWasmStringLen) and
 // character set (must match [a-zA-Z0-9._-]+).
 func readServiceName(mem api.Memory, ptr, length uint32) (string, bool) {
-	s, ok := readWasmStringValidated(mem, ptr, length, maxWasmStringLen)
+	s, ok := readWasmStringValidated(mem, ptr, length, MaxWasmStringLen)
 	if !ok {
 		return "", false
 	}

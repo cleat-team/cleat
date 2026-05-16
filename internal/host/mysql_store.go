@@ -255,7 +255,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -353,7 +353,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 
 	// Step 3: Fetch the full rows.
 	rows2, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation
+		SELECT id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
 		FROM workflow_instances
 		WHERE id IN (%s)
 	`, idClause), idArgs...)
@@ -603,7 +603,7 @@ func (s *MySQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 		return "", fmt.Errorf("continue as new: append events: %w", err)
 	}
 
-		// Use the store's tenant scope to preserve tenant isolation.
+	// Use the store's tenant scope to preserve tenant isolation.
 	// Create the new workflow run.
 	// Use the store's tenant scope to preserve tenant isolation.
 	newRunID := uuid.New().String()
@@ -1536,7 +1536,7 @@ func (s *MySQLStore) VerifyWorkflowEvents(ctx context.Context, workflowID string
 		expected, ok := storedChecksums[ev.Step]
 		if !ok || expected == "" {
 			prevChecksum = "" // Missing event breaks the chain
-			continue // No stored checksum for this step (pre-migration partial data).
+			continue          // No stored checksum for this step (pre-migration partial data).
 		}
 		actual := computeEventChecksum(ev, prevChecksum)
 		if actual != expected {
@@ -1595,6 +1595,27 @@ func (s *MySQLStore) PollCancellation(ctx context.Context, workflowID string) (b
 	return s.CheckCancellation(ctx, workflowID)
 }
 
+// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+func (s *MySQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT allowed_signals FROM workflow_instances WHERE id = ?`, workflowID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: %w", err)
+	}
+	if !raw.Valid || raw.String == "" || raw.String == "null" {
+		return nil, nil
+	}
+	var callers []string
+	if err := json.Unmarshal([]byte(raw.String), &callers); err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: parse: %w", err)
+	}
+	return callers, nil
+}
+
 // PollAndClaimSignal atomically checks for and claims a pending signal.
 // Uses SELECT ... FOR UPDATE followed by DELETE in a transaction to emulate
 // PostgreSQL's DELETE ... RETURNING.
@@ -1639,8 +1660,8 @@ func (s *MySQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 // UpdateStickyWorker sets the sticky worker for a workflow.
 func (s *MySQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_instances SET sticky_worker_id = ? WHERE id = ?
-	`, workerID, workflowID)
+		UPDATE workflow_instances SET sticky_worker_id = ? WHERE id = ? AND tenant_id = ?
+	`, workerID, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("update sticky worker: %w", err)
 	}
@@ -1650,8 +1671,8 @@ func (s *MySQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerI
 // ClearStickyWorker removes the sticky worker assignment.
 func (s *MySQLStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = ?
-	`, workflowID)
+		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = ? AND tenant_id = ?
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("clear sticky worker: %w", err)
 	}
@@ -1687,7 +1708,7 @@ func (s *MySQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 // ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.
 // Runs as a best-effort operation.
 func (s *MySQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = ?`, workflowID)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = ? AND tenant_id = ?`, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: %w", err)
 	}

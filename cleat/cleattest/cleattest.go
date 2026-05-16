@@ -9,6 +9,7 @@ package cleattest
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -440,9 +441,10 @@ func (e *TestEnv) AfterSignal(delay time.Duration, name, payload string) {
 }
 
 // Signal delivers a signal immediately (at the current simulated time).
+// After delivering, it yields to the scheduler so that any workflow goroutine
+// blocked on AwaitSignals can process the signal before the caller continues.
 func (e *TestEnv) Signal(name, payload string) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	sig := scheduledSignal{
 		name:    name,
 		payload: payload,
@@ -450,6 +452,8 @@ func (e *TestEnv) Signal(name, payload string) {
 	}
 	e.pendingSignals = append(e.pendingSignals, sig)
 	e.deliverSignals()
+	e.mu.Unlock()
+	runtime.Gosched()
 }
 
 // SetCancelled configures the test environment to report cancellation.
@@ -493,6 +497,29 @@ func (e *TestEnv) AdvanceTime(d time.Duration) {
 
 	// Deliver signals that become due or whose waiters have timed out
 	e.deliverSignals()
+}
+
+// AdvanceTimeAndDrain advances the clock and best-effort blocks until
+// pending goroutines (DurableSleep, AwaitSignals waiters) have been
+// serviced. It spins with runtime.Gosched for up to 100 iterations or
+// until no sleepers/waiters remain.
+//
+// This is best-effort: in edge cases where a workflow immediately
+// re-enters a sleep or signal loop, the count may never reach zero,
+// and the function returns after the spin limit. Tests that need
+// deterministic drain should use a sync.WaitGroup or other explicit
+// synchronization.
+func (e *TestEnv) AdvanceTimeAndDrain(d time.Duration) {
+	e.AdvanceTime(d)
+	for i := 0; i < 100; i++ {
+		runtime.Gosched()
+		e.mu.Lock()
+		pending := len(e.sleepRecs) + len(e.signalWaiters)
+		e.mu.Unlock()
+		if pending == 0 {
+			return
+		}
+	}
 }
 
 // SetTime sets the simulated clock to the given time.

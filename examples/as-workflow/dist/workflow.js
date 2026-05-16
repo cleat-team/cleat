@@ -29,22 +29,22 @@ export async function instantiate(module, imports = {}) {
   const { exports } = await WebAssembly.instantiate(module, adaptedImports);
   const memory = exports.memory || imports.env.memory;
   const adaptedExports = Object.setPrototypeOf({
-    place_order(h, input) {
-      // assembly/index/place_order(../../packages/cleat-as/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+    __durable_inner_place_order(h, input) {
+      // assembly/index/__durable_inner_place_order(../../packages/cleat-as/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
       h = __retain(__lowerInternref(h) || __notnull());
       input = __lowerString(input) || __notnull();
       try {
-        return __liftString(exports.place_order(h, input) >>> 0);
+        return __liftString(exports.__durable_inner_place_order(h, input) >>> 0);
       } finally {
         __release(h);
       }
     },
-    cancel_order(h, input) {
-      // assembly/index/cancel_order(../../packages/cleat-as/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
+    __durable_inner_cancel_order(h, input) {
+      // assembly/index/__durable_inner_cancel_order(../../packages/cleat-as/assembly/host-calls/HostCalls, ~lib/string/String) => ~lib/string/String
       h = __retain(__lowerInternref(h) || __notnull());
       input = __lowerString(input) || __notnull();
       try {
-        return __liftString(exports.cancel_order(h, input) >>> 0);
+        return __liftString(exports.__durable_inner_cancel_order(h, input) >>> 0);
       } finally {
         __release(h);
       }

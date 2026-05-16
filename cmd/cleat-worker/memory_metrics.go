@@ -21,7 +21,6 @@ var (
 	metricsMemoryPressure     int64 // gauge: 0-1000 (scaled from 0.0-1.0)
 	metricsConcurrencyLimit   int64 // gauge: current effective concurrency cap
 	metricsScalingPressure    int64 // gauge: 0-1000 (scaled from 0.0-1.0)
-	metricsQueueDepth         int64 // gauge: ready workflows in task queues
 	metricsDesiredConcurrency int64 // gauge: configured --concurrency
 )
 
@@ -51,10 +50,6 @@ func emitMemoryMetrics(w io.Writer, state MemoryControllerState, defEstimates ma
 	fmt.Fprintf(w, "# TYPE cleat_scaling_pressure gauge\n")
 	fmt.Fprintf(w, "cleat_scaling_pressure %f\n\n", state.ScalingPressure)
 
-	fmt.Fprintf(w, "# HELP cleat_queue_depth Ready workflows waiting in task queues\n")
-	fmt.Fprintf(w, "# TYPE cleat_queue_depth gauge\n")
-	fmt.Fprintf(w, "cleat_queue_depth %d\n\n", state.QueueDepth)
-
 	fmt.Fprintf(w, "# HELP cleat_concurrency_limit Current effective concurrency cap\n")
 	fmt.Fprintf(w, "# TYPE cleat_concurrency_limit gauge\n")
 	fmt.Fprintf(w, "cleat_concurrency_limit %d\n\n", state.DynamicConcurrency)
@@ -81,5 +76,4 @@ func updateMemoryMetrics(state MemoryControllerState) {
 	atomic.StoreInt64(&metricsMemoryPressure, int64(state.Pressure*1000))
 	atomic.StoreInt64(&metricsConcurrencyLimit, int64(state.DynamicConcurrency))
 	atomic.StoreInt64(&metricsScalingPressure, int64(state.ScalingPressure*1000))
-	atomic.StoreInt64(&metricsQueueDepth, state.QueueDepth)
 }

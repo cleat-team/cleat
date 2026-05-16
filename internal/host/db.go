@@ -47,6 +47,7 @@ type WorkflowInstance struct {
 	TenantID   string          `json:"tenant_id,omitempty"`
 	CreatedAt  time.Time       `json:"created_at,omitempty"`
 	Generation int64           `json:"generation"`
+	TraceID    string          `json:"trace_id,omitempty"`
 }
 
 // Schedule is a row from workflow_schedules.
@@ -229,9 +230,6 @@ type WorkflowStore interface {
 
 	// PollAndClaimSignal atomically checks for and claims a pending signal.
 	PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
-
-	// DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
-	DefaultTenantUUID = "00000000-0000-0000-0000-000000000000"
 
 	// StartNewRun creates a new workflow instance.
 	// If idempotencyKey is non-empty, provides exactly-once semantics: a
@@ -450,7 +448,14 @@ type WorkflowStore interface {
 	// GetEventCount returns the event_count for a workflow instance.
 	// Used by the engine for auto-ContinueAsNew when the event cap is hit.
 	GetEventCount(ctx context.Context, workflowID string) (int, error)
+
+	// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+	// Returns nil when allowed_signals is NULL or empty (deny-all semantics).
+	GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error)
 }
+
+// DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.
+const DefaultTenantUUID = "00000000-0000-0000-0000-000000000000"
 
 // PostgresStore implements WorkflowStore using a PostgreSQL database.
 type PostgresStore struct {
@@ -461,12 +466,12 @@ type PostgresStore struct {
 	idempotencyKeyTTL time.Duration
 
 	// Encryption at rest for sensitive event payloads.
-	encryption               *PayloadEncryption
-		// NOTE: encryption currently applies only to the per-event write path
-		// (flushEvent). The batch write path (appendEventsInTx) stores events
-		// in plaintext; adding encryption there would double-encrypt events
-		// that flow through both paths. Until the paths are unified or
-		// exclusive, full coverage requires routing all events through the per-event path.
+	encryption *PayloadEncryption
+	// NOTE: encryption currently applies only to the per-event write path
+	// (flushEvent). The batch write path (appendEventsInTx) stores events
+	// in plaintext; adding encryption there would double-encrypt events
+	// that flow through both paths. Until the paths are unified or
+	// exclusive, full coverage requires routing all events through the per-event path.
 	encryptSensitivePayloads bool
 
 	// disableReadRedaction when true bypasses RedactOnRead on the read path.
@@ -524,6 +529,7 @@ func (s *PostgresStore) WithReadRedactionDisabled(disabled bool) *PostgresStore 
 	cp.disableReadRedaction = disabled
 	return &cp
 }
+
 // decryptAndRedactEventRecord decrypts sensitive event record fields (when
 // encryption is enabled) and applies retroactive redaction. Decryption errors
 // are logged and the field is set to "[DECRYPTION_FAILED]" so it is clear the
@@ -636,8 +642,6 @@ func (s *PostgresStore) decryptPayloadJSON(payloadStr string) string {
 	return payloadStr
 }
 
-
-
 // setRLSOnTx executes SELECT set_config to set the RLS tenant_id
 // for the given transaction. This ensures the RLS policy on tenant-scoped
 // tables correctly filters rows by the current tenant. Must be called
@@ -705,7 +709,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
@@ -721,7 +725,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		var assignedTo, errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -776,7 +780,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
@@ -792,7 +796,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		var assignedTo, errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
@@ -900,7 +904,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 
-			// Decrypt and redact event record.
+		// Decrypt and redact event record.
 		s.decryptAndRedactEventRecord(&rec, workflowID)
 
 		// Retroactive redaction on read path: ensure sensitive fields are
@@ -1019,7 +1023,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 			rec.CreatedAt = createdAt.Time
 		}
 
-			// Decrypt and redact event record.
+		// Decrypt and redact event record.
 		s.decryptAndRedactEventRecord(&rec, workflowID)
 
 		// Retroactive redaction on read path.
@@ -2336,15 +2340,21 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (strin
 // GetChildCount returns the number of active (non-terminal) child workflows
 // for the given parent workflow. Terminal statuses are excluded.
 func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get child count for %s: begin: %w", parentWorkflowID, err)
+	}
+	defer tx.Rollback()
+
 	var count int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
 		WHERE parent_workflow_id = $1 AND status NOT IN ('done', 'failed', 'dead_lettered')
 	`, parentWorkflowID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get child count for %s: %w", parentWorkflowID, err)
 	}
-	return count, nil
+	return count, tx.Commit()
 }
 
 // StartChildWorkflowInSchema creates a child workflow in the given target schema.
@@ -2387,7 +2397,13 @@ func (s *PostgresStore) GetChildResultInSchema(ctx context.Context, targetSchema
 
 // ReapStaleInstances reclaims workflow instances with stale heartbeats.
 func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
 		WHERE status = 'running'
@@ -2397,7 +2413,7 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
 	n, _ := result.RowsAffected()
-	return int(n), nil
+	return int(n), tx.Commit()
 }
 
 // ---- SignalStore interface implementation ----
@@ -2430,6 +2446,34 @@ func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName s
 // PollCancellation satisfies the SignalStore interface.
 func (s *PostgresStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	return s.CheckCancellation(ctx, workflowID)
+}
+
+// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+// Returns nil when allowed_signals is NULL or the target workflow doesn't exist.
+func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var raw sql.NullString
+	err = tx.QueryRowContext(ctx,
+		`SELECT allowed_signals FROM workflow_instances WHERE id = $1`, workflowID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, tx.Commit()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: %w", err)
+	}
+	if !raw.Valid || raw.String == "" || raw.String == "null" {
+		return nil, tx.Commit()
+	}
+	var callers []string
+	if err := json.Unmarshal([]byte(raw.String), &callers); err != nil {
+		return nil, fmt.Errorf("get allowed signal callers: parse: %w", err)
+	}
+	return callers, tx.Commit()
 }
 
 // GetQueryState returns the value for a key in the workflow's query_state JSONB.
@@ -2519,7 +2563,7 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		var nextWakeAt, createdAt sql.NullTime
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {
@@ -2557,10 +2601,12 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, result::text, error_msg, error_code, error_op
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, result::text, error_msg, error_code, error_op,
+		       COALESCE(trace_id, '')
 		FROM workflow_instances WHERE id = $1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp)
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
+		&wf.TraceID)
 	if err == sql.ErrNoRows {
 		return nil, tx.Commit()
 	}
@@ -2951,8 +2997,14 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 // AcquireConcurrencyKey tries to acquire a concurrency key for a workflow.
 // Returns true if acquired, false if already held by another workflow.
 func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
-	// First delete expired keys for this key hash.
-	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256') AND expires_at < now()`, key)
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return false, fmt.Errorf("acquire concurrency key: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Delete expired keys for this key hash within the current tenant.
+	_, err = tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256') AND expires_at < now() AND tenant_id = $2`, key, s.tenantID)
 	if err != nil {
 		return false, fmt.Errorf("acquire concurrency key: delete expired: %w", err)
 	}
@@ -2960,12 +3012,12 @@ func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflow
 	// Try to insert. ON CONFLICT DO NOTHING means if the key_hash already exists,
 	// the RETURNING clause returns no rows.
 	var returnedWorkflowID string
-	err = s.db.QueryRowContext(ctx, `
-		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at)
-		VALUES (digest($1, 'sha256'), $1, $2, now() + $3::interval)
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+		VALUES (digest($1, 'sha256'), $1, $2, now() + $3::interval, $4)
 		ON CONFLICT (key_hash) DO NOTHING
 		RETURNING workflow_id
-	`, key, workflowID, fmt.Sprintf("%d seconds", int(ttl.Seconds()))).Scan(&returnedWorkflowID)
+	`, key, workflowID, fmt.Sprintf("%d seconds", int(ttl.Seconds())), s.tenantID).Scan(&returnedWorkflowID)
 
 	if err == sql.ErrNoRows {
 		return false, nil
@@ -2973,60 +3025,90 @@ func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflow
 	if err != nil {
 		return false, fmt.Errorf("acquire concurrency key: %w", err)
 	}
-	return true, nil
+	return true, tx.Commit()
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
 func (s *PostgresStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256')`, key)
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("release concurrency key: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE key_hash = digest($1, 'sha256') AND tenant_id = $2`, key, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("release concurrency key: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.
 func (s *PostgresStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = $1`, workflowID)
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("release workflow concurrency keys: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE workflow_id = $1 AND tenant_id = $2`, workflowID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
-// ReapExpiredConcurrencyKeys deletes all expired concurrency keys.
-// Returns the number of keys deleted.
+// ReapExpiredConcurrencyKeys deletes all expired concurrency keys
+// for the current tenant. Returns the number of keys deleted.
 func (s *PostgresStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE expires_at < now()`)
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reap expired concurrency keys: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE expires_at < now() AND tenant_id = $1`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("reap expired concurrency keys: %w", err)
 	}
 	n, _ := result.RowsAffected()
-	return n, nil
+	return n, tx.Commit()
 }
 
 // GetConcurrencyKeyCount returns the number of non-expired concurrency keys
 // held by the given workflow.
 func (s *PostgresStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get concurrency key count for %s: begin: %w", workflowID, err)
+	}
+	defer tx.Rollback()
+
 	var count int
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM concurrency_keys
-		WHERE workflow_id = $1 AND expires_at > now()
-	`, workflowID).Scan(&count)
+		WHERE workflow_id = $1 AND expires_at > now() AND tenant_id = $2
+	`, workflowID, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get concurrency key count for %s: %w", workflowID, err)
 	}
-	return count, nil
+	return count, tx.Commit()
 }
 
 // GetEventCount returns the event_count for a workflow instance.
 func (s *PostgresStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("get event count for %s: begin: %w", workflowID, err)
+	}
+	defer tx.Rollback()
+
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = $1`, workflowID).Scan(&count)
+	err = tx.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = $1`, workflowID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get event count for %s: %w", workflowID, err)
 	}
-	return count, nil
+	return count, tx.Commit()
 }
 
 // ---- Sticky Session implementations (Feature 10) ----
@@ -3298,7 +3380,7 @@ func (s *PostgresStore) VerifyWorkflowEvents(ctx context.Context, workflowID str
 		expected, ok := storedChecksums[ev.Step]
 		if !ok || expected == "" {
 			prevChecksum = "" // Missing event breaks the chain
-			continue // No stored checksum for this step (pre-migration partial data).
+			continue          // No stored checksum for this step (pre-migration partial data).
 		}
 		actual := computeEventChecksum(ev, prevChecksum)
 		if actual != expected {
@@ -4016,7 +4098,13 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 // TerminateWorkflow force-terminates a workflow, setting status to 'terminated'.
 // Unlike FailWorkflow, this does not require the worker to own the workflow.
 func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("terminate workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'terminated',
 		    error_msg = $2,
@@ -4026,6 +4114,9 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 	`, workflowID, reason)
 	if err != nil {
 		return fmt.Errorf("terminate workflow: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("terminate workflow commit: %w", err)
 	}
 	// Best-effort cleanup.
 	s.ClearStickyWorker(context.Background(), workflowID)

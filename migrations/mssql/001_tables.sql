@@ -132,6 +132,7 @@ CREATE TABLE dbo.workflow_instances (
     compaction_step INT             NULL,
     plugin_vers     NVARCHAR(MAX)   NOT NULL DEFAULT '{}',
     event_count     BIGINT          NOT NULL DEFAULT 0,
+    allowed_signals NVARCHAR(MAX)   NULL,
     CONSTRAINT pk_workflow_instances PRIMARY KEY (id),
     CONSTRAINT fk_instances_def FOREIGN KEY (def_name, def_version)
         REFERENCES dbo.workflow_defs(name, version),

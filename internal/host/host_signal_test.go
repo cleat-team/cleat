@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -14,11 +15,12 @@ import (
 // using an in-memory map. It supports DeliverSignal, PollSignal (non-destructive),
 // PollAndClaimSignal (destructive), and PollCancellation.
 type mockSignalWorkflowStore struct {
-	mu           sync.Mutex
-	signals      map[string]string // key = "workflowID:signalName" -> payload
-	pollCount    int               // total PollSignal calls
-	claimCount   int               // total PollAndClaimSignal calls
-	deliverCount int               // total DeliverSignal calls
+	mu             sync.Mutex
+	signals        map[string]string // key = "workflowID:signalName" -> payload
+	pollCount      int               // total PollSignal calls
+	claimCount     int               // total PollAndClaimSignal calls
+	deliverCount   int               // total DeliverSignal calls
+	allowedCallers []string          // for GetAllowedSignalCallers
 }
 
 func newMockSignalWorkflowStore() *mockSignalWorkflowStore {
@@ -73,6 +75,14 @@ func (m *mockSignalWorkflowStore) PollAndClaimSignal(_ context.Context, workflow
 func (m *mockSignalWorkflowStore) PollCancellation(_ context.Context, _ string) (bool, string, error) {
 	return false, "", nil
 }
+
+// GetAllowedSignalCallers returns the pre-configured allowed callers list.
+func (m *mockSignalWorkflowStore) GetAllowedSignalCallers(_ context.Context, _ string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.allowedCallers, nil
+}
+
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -392,5 +402,217 @@ func TestPollSignalForNeverDeliveredSignal(t *testing.T) {
 	}
 	if found {
 		t.Fatal("expected found=false for other never-delivered signal")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Signal auth tests
+// ---------------------------------------------------------------------------
+
+// TestSignalAuthAllowsCallerInList verifies the auth check closure allows
+// a caller whose defName is in the allowed_signals list.
+func TestSignalAuthAllowsCallerInList(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	store.allowedCallers = []string{"payment-service", "order-service"}
+
+	check := makeSignalAuthCheck(store)
+	err := check(context.Background(), "target-wf", "payment-service")
+	if err != nil {
+		t.Fatalf("expected caller to be allowed, got: %v", err)
+	}
+}
+
+// TestSignalAuthDeniesCallerNotInList verifies the auth check closure denies
+// a caller whose defName is not in the allowed_signals list.
+func TestSignalAuthDeniesCallerNotInList(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	store.allowedCallers = []string{"payment-service", "order-service"}
+
+	check := makeSignalAuthCheck(store)
+	err := check(context.Background(), "target-wf", "fraud-service")
+	if err == nil {
+		t.Fatal("expected caller to be denied")
+	}
+}
+
+// TestSignalAuthDeniesWhenAllowedCallersEmpty verifies the auth check closure
+// denies all callers when allowed_signals is empty (fail-secure).
+func TestSignalAuthDeniesWhenAllowedCallersEmpty(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	store.allowedCallers = nil // empty
+
+	check := makeSignalAuthCheck(store)
+	err := check(context.Background(), "target-wf", "any-service")
+	if err == nil {
+		t.Fatal("expected caller to be denied when allowed_signals is empty")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// F56 plugin call duration metric
+// ---------------------------------------------------------------------------
+
+// TestPluginCallDurationMetric verifies the cleat_plugin_call_duration_seconds
+// histogram is registered and observable.
+func TestPluginCallDurationMetric(t *testing.T) {
+	if pluginCallDuration == nil {
+		t.Fatal("pluginCallDuration histogram is nil — not registered")
+	}
+	// Observe a value.
+	pluginCallDuration.WithLabelValues("test-plugin", "test-func").Observe(0.5)
+}
+
+// makeSignalAuthCheck returns a signalAuthCheck function backed by the store.
+// This mirrors the closure wired in cmd/cleat-worker/main.go.
+func makeSignalAuthCheck(store *mockSignalWorkflowStore) func(ctx context.Context, targetWorkflowID, callerDefName string) error {
+	return func(ctx context.Context, targetWorkflowID, callerDefName string) error {
+		callers, err := store.GetAllowedSignalCallers(ctx, targetWorkflowID)
+		if err != nil {
+			return err
+		}
+		if len(callers) == 0 {
+			return fmt.Errorf("signal auth denied: workflow %s has no allowed callers configured", targetWorkflowID)
+		}
+		for _, c := range callers {
+			if c == "*" || c == callerDefName {
+				return nil
+			}
+		}
+		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", callerDefName, targetWorkflowID)
+	}
+}
+// ---------------------------------------------------------------------------
+// Wildcard signal auth tests
+// ---------------------------------------------------------------------------
+
+// TestSignalAuthAllowsWildcard verifies that "*" in allowed_signals permits
+// any caller, regardless of their defName.
+func TestSignalAuthAllowsWildcard(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	store.allowedCallers = []string{"*"}
+
+	check := makeSignalAuthCheck(store)
+	err := check(context.Background(), "target-wf", "any-service")
+	if err != nil {
+		t.Fatalf("expected wildcard to allow any caller, got: %v", err)
+	}
+}
+
+// TestSignalAuthWildcardWithOtherCallers verifies that "*" in a mixed
+// allowed_signals list still permits any caller.
+func TestSignalAuthWildcardWithOtherCallers(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	store.allowedCallers = []string{"payment-service", "*", "order-service"}
+
+	check := makeSignalAuthCheck(store)
+	err := check(context.Background(), "target-wf", "unknown-service")
+	if err != nil {
+		t.Fatalf("expected wildcard to allow any caller even in mixed list, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SendSignalAndWait auth tests
+// ---------------------------------------------------------------------------
+
+// TestSendSignalAndWaitAuthDenied verifies that SendSignalAndWait returns an
+// auth error code when the caller is not in the target's allowed_signals.
+func TestSendSignalAndWaitAuthDenied(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	store.allowedCallers = []string{"payment-service"}
+
+	e := &Engine{
+		requireSignalAuth: true,
+		signalAuthCheck:   makeSignalAuthCheck(store),
+		signalStore:       store,
+	}
+	s := &execSession{
+		engine:  e,
+		defName: "fraud-service",
+	}
+
+	result := s.SendSignalAndWait(context.Background(), nil,
+		"target-wf", "test-signal", `{"key":"value"}`, 10000, 0, 0)
+
+	if result != errSignalAuthRequiredInt {
+		t.Fatalf("expected errSignalAuthRequiredInt (%d), got %d", errSignalAuthRequiredInt, result)
+	}
+}
+
+// TestSendSignalAndWaitAuthAllowed verifies that SendSignalAndWait proceeds
+// normally when the caller is in the target's allowed_signals.
+func TestSendSignalAndWaitAuthAllowed(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	store.allowedCallers = []string{"payment-service", "order-service"}
+
+	e := &Engine{
+		requireSignalAuth: true,
+		signalAuthCheck:   makeSignalAuthCheck(store),
+		signalStore:       store,
+	}
+	s := &execSession{
+		engine:  e,
+		defName: "payment-service",
+	}
+
+	result := s.SendSignalAndWait(context.Background(), nil,
+		"target-wf", "test-signal", `{"key":"value"}`, 10000, 0, 0)
+
+	if result == errSignalAuthRequiredInt {
+		t.Fatal("expected auth to pass, but got errSignalAuthRequiredInt")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeAwaitSignals {
+		t.Fatalf("expected AwaitSignals event, got %v", s.history[0].EventType)
+	}
+}
+
+// TestSendSignalAndWaitAuthDisabled verifies that SendSignalAndWait proceeds
+// without auth check when requireSignalAuth is false.
+func TestSendSignalAndWaitAuthDisabled(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	store.allowedCallers = []string{}
+
+	e := &Engine{
+		requireSignalAuth: false,
+		signalAuthCheck:   makeSignalAuthCheck(store),
+		signalStore:       store,
+	}
+	s := &execSession{
+		engine:  e,
+		defName: "any-service",
+	}
+
+	result := s.SendSignalAndWait(context.Background(), nil,
+		"target-wf", "test-signal", `{"key":"value"}`, 10000, 0, 0)
+
+	if result == errSignalAuthRequiredInt {
+		t.Fatal("expected auth to be skipped when disabled, but got errSignalAuthRequiredInt")
+	}
+}
+
+// TestSendSignalAndWaitAuthWithWildcard verifies that SendSignalAndWait
+// succeeds when the target's allowed_signals includes "*".
+func TestSendSignalAndWaitAuthWithWildcard(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	store.allowedCallers = []string{"*"}
+
+	e := &Engine{
+		requireSignalAuth: true,
+		signalAuthCheck:   makeSignalAuthCheck(store),
+		signalStore:       store,
+	}
+	s := &execSession{
+		engine:  e,
+		defName: "any-service",
+	}
+
+	result := s.SendSignalAndWait(context.Background(), nil,
+		"target-wf", "test-signal", `{"key":"value"}`, 10000, 0, 0)
+
+	if result == errSignalAuthRequiredInt {
+		t.Fatal("expected wildcard to allow any caller, but got errSignalAuthRequiredInt")
 	}
 }

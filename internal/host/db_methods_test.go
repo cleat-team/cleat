@@ -951,6 +951,7 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 				"",                         // error_msg
 				nil,                        // error_code
 				nil,                        // error_op
+					"",                         // trace_id
 			}},
 		},
 	}, nil)
@@ -1272,7 +1273,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0)},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), ""},
 			},
 		},
 	}, nil)
@@ -1296,7 +1297,7 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0)},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0), ""},
 			},
 		},
 	}, nil)
@@ -1582,7 +1583,7 @@ func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0)},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0), ""},
 			},
 		},
 	}, nil)
@@ -1607,7 +1608,7 @@ func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0)},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), ""},
 			},
 		},
 	}, nil)
@@ -1646,7 +1647,7 @@ func TestPostgresStore_ClaimStickyWorkflows_Success(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"stickywf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, "tenant-1", nil, nil, nil, int64(0)},
+				{"stickywf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, "tenant-1", nil, nil, nil, int64(0), ""},
 			},
 		},
 	}, nil)
@@ -1689,7 +1690,7 @@ func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0)},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), ""},
 			},
 		},
 	}, nil)
@@ -1904,7 +1905,7 @@ func TestPostgresStore_StartNewRun_NoIdempotencyKey(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "")
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}
@@ -1929,7 +1930,7 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_NewRun(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123")
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123", DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}
@@ -1952,7 +1953,7 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_AlreadyExists(t *testing.T
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123")
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-123", DefaultTenantUUID)
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}
@@ -2203,6 +2204,7 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 				nil,          // error_msg (NULL)
 				nil,          // error_code (NULL)
 				nil,          // error_op (NULL)
+				"",          // trace_id (COALESCE)
 			}},
 		},
 	}, nil)

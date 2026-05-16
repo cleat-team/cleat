@@ -552,3 +552,29 @@ func (m *mockResponseWriter) Write(b []byte) (int, error) {
 
 // Stub imports that would otherwise be unused.
 var _ io.Writer
+
+// ---------------------------------------------------------------------------
+// F56 queue depth gauge
+// ---------------------------------------------------------------------------
+
+func TestQueueDepthGauge(t *testing.T) {
+	// Set and verify the queue depth gauge.
+	SetQueueDepth(42)
+	if queueDepth == nil {
+		t.Fatal("queueDepth gauge is nil — not initialized")
+	}
+	SetQueueDepth(0)
+}
+
+// ---------------------------------------------------------------------------
+// F57 throughput gauges
+// ---------------------------------------------------------------------------
+
+func TestThroughputGaugesRegistered(t *testing.T) {
+	if replayThroughput == nil {
+		t.Fatal("replayThroughput gauge is nil — not registered")
+	}
+	if freshThroughput == nil {
+		t.Fatal("freshThroughput gauge is nil — not registered")
+	}
+}

@@ -125,7 +125,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -150,7 +150,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	// cleat_log: (ptr,len) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module, msgPtr, msgLen uint32) uint64 {
 		mem := m.Memory()
-		msg, ok := readWasmStringValidated(mem, msgPtr, msgLen, maxWasmStringLen)
+		msg, ok := readWasmStringValidated(mem, msgPtr, msgLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -171,7 +171,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		descPtr, descLen, deferIDPtr, deferIDMaxLen uint32) uint64 {
 		mem := m.Memory()
-		desc, ok := readWasmStringValidated(mem, descPtr, descLen, maxWasmStringLen)
+		desc, ok := readWasmStringValidated(mem, descPtr, descLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -199,7 +199,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		inputPtr, inputLen uint32) uint64 {
 		mem := m.Memory()
-		newInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		newInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -210,7 +210,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		inputPtr, inputLen, newVersion uint32) uint64 {
 		mem := m.Memory()
-		newInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		newInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -225,7 +225,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -241,7 +241,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -266,7 +266,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 			if !ok {
 				return errBadParam
 			}
-			wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+			wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
 			if !ok {
 				return errBadParam
 			}
@@ -304,11 +304,11 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
-		nonRetryableErrorsJSON, ok := readWasmStringValidated(mem, nonRetryPtr, nonRetryLen, maxWasmStringLen)
+		nonRetryableErrorsJSON, ok := readWasmStringValidated(mem, nonRetryPtr, nonRetryLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -322,7 +322,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		namesPtr, namesLen uint32, timeoutMs int64,
 		sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen uint32) uint64 {
 		mem := m.Memory()
-		names, ok := readWasmStringValidated(mem, namesPtr, namesLen, maxWasmStringLen)
+		names, ok := readWasmStringValidated(mem, namesPtr, namesLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -338,7 +338,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		val, ok := readWasmStringValidated(mem, valPtr, valLen, maxWasmStringLen)
+		val, ok := readWasmStringValidated(mem, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -360,7 +360,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -373,7 +373,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		resultsPtr, resultsMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		runIDsJSON, ok := readWasmStringValidated(mem, idsPtr, idsLen, maxWasmStringLen)
+		runIDsJSON, ok := readWasmStringValidated(mem, idsPtr, idsLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -396,7 +396,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -419,7 +419,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -474,7 +474,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, maxWasmStringLen)
+		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -490,7 +490,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		response, ok := readWasmStringValidated(mem, respPtr, respLen, maxWasmStringLen)
+		response, ok := readWasmStringValidated(mem, respPtr, respLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -510,7 +510,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, maxWasmStringLen)
+		payload, ok := readWasmStringValidated(mem, payloadPtr, payloadLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -546,7 +546,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		seedPtr, seedLen, uuidPtr, uuidMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		seed, ok := readWasmStringValidated(mem, seedPtr, seedLen, maxWasmStringLen)
+		seed, ok := readWasmStringValidated(mem, seedPtr, seedLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -582,7 +582,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		resultPtr, resultLen, outPtr, outMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		result, ok := readWasmStringValidated(mem, resultPtr, resultLen, maxWasmStringLen)
+		result, ok := readWasmStringValidated(mem, resultPtr, resultLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -610,7 +610,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		value, ok := readWasmStringValidated(mem, valPtr, valLen, maxWasmStringLen)
+		value, ok := readWasmStringValidated(mem, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -626,7 +626,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		errMsg, ok := readWasmStringValidated(mem, errPtr, errLen, maxWasmStringLen)
+		errMsg, ok := readWasmStringValidated(mem, errPtr, errLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -646,7 +646,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -666,7 +666,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, maxWasmStringLen)
+		req, ok := readWasmStringValidated(mem, reqPtr, reqLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -694,7 +694,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, maxWasmStringLen)
+		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -710,7 +710,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		value, ok := readWasmStringValidated(mem, valPtr, valLen, maxWasmStringLen)
+		value, ok := readWasmStringValidated(mem, valPtr, valLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -770,7 +770,7 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		prefixPtr, prefixLen, keysPtr, keysMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		prefix, ok := readWasmStringValidated(mem, prefixPtr, prefixLen, maxWasmStringLen)
+		prefix, ok := readWasmStringValidated(mem, prefixPtr, prefixLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
@@ -787,15 +787,15 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		url, ok := readWasmStringValidated(mem, urlPtr, urlLen, maxWasmStringLen)
+		url, ok := readWasmStringValidated(mem, urlPtr, urlLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
-		headersJSON, ok := readWasmStringValidated(mem, headersPtr, headersLen, maxWasmStringLen)
+		headersJSON, ok := readWasmStringValidated(mem, headersPtr, headersLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
-		body, ok := readWasmStringValidated(mem, bodyPtr, bodyLen, maxWasmStringLen)
+		body, ok := readWasmStringValidated(mem, bodyPtr, bodyLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}

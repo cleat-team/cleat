@@ -3,6 +3,8 @@ package telemetry
 import (
 	"context"
 	"testing"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestInitTracingEmptyEndpoint(t *testing.T) {
@@ -89,6 +91,40 @@ func TestEventSpanWithOperationOnly(t *testing.T) {
 		t.Fatal("expected non-nil span")
 	}
 	defer span.End()
+}
+
+func TestSpanContextFromTraceIDValid(t *testing.T) {
+	sc, err := spanContextFromTraceID("abcdef0123456789abcdef0123456789")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !sc.IsValid() {
+		t.Error("expected valid SpanContext")
+	}
+	if sc.TraceFlags() != trace.TraceFlags(1) {
+		t.Error("expected TraceFlags to be 1 (sampled)")
+	}
+}
+
+func TestSpanContextFromTraceIDInvalid(t *testing.T) {
+	tests := []struct {
+		name    string
+		traceID string
+	}{
+		{"empty", ""},
+		{"too short", "abc"},
+		{"non-hex", "ghijklmnopqrstuvwxyz0123456789"},
+		{"wrong length 31", "abcdef0123456789abcdef012345678"},
+		{"wrong length 33", "abcdef0123456789abcdef0123456789a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := spanContextFromTraceID(tt.traceID)
+			if err == nil {
+				t.Error("expected error for invalid trace ID")
+			}
+		})
+	}
 }
 
 func TestTracerIsSetAfterInit(t *testing.T) {

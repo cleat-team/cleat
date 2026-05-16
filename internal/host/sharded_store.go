@@ -284,7 +284,6 @@ func (s *ShardedStore) AppendEventHistoryBatch(ctx context.Context, workflowID s
 	return shard.Store.AppendEventHistoryBatch(ctx, workflowID, recs)
 }
 
-
 // LoadWASM tries each shard (WASM definitions are replicated across all shards).
 func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	var lastErr error
@@ -794,6 +793,15 @@ func (s *ShardedStore) PollCancellation(ctx context.Context, workflowID string) 
 		return false, "", fmt.Errorf("poll_cancellation: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
 	return shard.Store.PollCancellation(ctx, workflowID)
+}
+
+// GetAllowedSignalCallers routes by workflow ID.
+func (s *ShardedStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return nil, fmt.Errorf("get_allowed_signal_callers: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	return shard.Store.GetAllowedSignalCallers(ctx, workflowID)
 }
 
 // CreatePromise routes by workflow ID.

@@ -1,4 +1,5 @@
 -- cleat MySQL constraints, indexes
+ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS allowed_signals JSON DEFAULT NULL;
 CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at);
 CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at);
 CREATE INDEX idx_defs_active ON workflow_defs(name, version);

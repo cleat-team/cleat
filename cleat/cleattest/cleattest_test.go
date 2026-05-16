@@ -1152,3 +1152,125 @@ func TestAcquireConcurrencyKeyReset(t *testing.T) {
 		t.Fatal("expected acquire after reset to succeed")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// AdvanceTimeAndDrain tests
+// ---------------------------------------------------------------------------
+
+func TestAdvanceTimeAndDrainSleeps(t *testing.T) {
+	env := NewTestEnv()
+
+	slept := make(chan struct{})
+	go func() {
+		env.H().DurableSleep(1 * time.Second)
+		close(slept)
+	}()
+
+	// Give goroutine time to enter sleep.
+	time.Sleep(5 * time.Millisecond)
+
+	// AdvanceTimeAndDrain should block until the sleeper is drained.
+	env.AdvanceTimeAndDrain(2 * time.Second)
+
+	// The sleeper should be done without any additional sleep.
+	select {
+	case <-slept:
+		// success
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("DurableSleep did not complete after AdvanceTimeAndDrain")
+	}
+}
+
+func TestAdvanceTimeAndDrainPreScheduledSignal(t *testing.T) {
+	env := NewTestEnv()
+
+	done := make(chan struct{})
+	go func() {
+		env.H().DurableSleep(1 * time.Second)
+		sr := env.H().AwaitSignals([]string{"wake"}, 500*time.Millisecond)
+		if sr.TimedOut {
+			t.Error("expected signal, got timeout")
+		}
+		close(done)
+	}()
+
+	// Pre-schedule a signal to arrive at the same time the goroutine wakes.
+	env.AfterSignal(1*time.Second, "wake", `{"msg":"hello"}`)
+
+	time.Sleep(5 * time.Millisecond)
+
+	// Advance past the sleep; the pre-scheduled signal should be delivered.
+	env.AdvanceTimeAndDrain(2 * time.Second)
+
+	select {
+	case <-done:
+		// success
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("goroutine did not finish after AdvanceTimeAndDrain")
+	}
+}
+
+func TestAdvanceTimeAndDrainMultipleSleeps(t *testing.T) {
+	env := NewTestEnv()
+
+	slept1 := make(chan struct{})
+	slept2 := make(chan struct{})
+
+	go func() {
+		env.H().DurableSleep(1 * time.Second)
+		close(slept1)
+		env.H().DurableSleep(1 * time.Second)
+		close(slept2)
+	}()
+
+	time.Sleep(5 * time.Millisecond)
+
+	// First advance: should drain first sleep.
+	env.AdvanceTimeAndDrain(1 * time.Second)
+	select {
+	case <-slept1:
+		// success
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("first DurableSleep did not complete")
+	}
+
+	// Second advance: should drain second sleep.
+	env.AdvanceTimeAndDrain(1 * time.Second)
+	select {
+	case <-slept2:
+		// success
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("second DurableSleep did not complete")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Signal synchronous delivery test
+// ---------------------------------------------------------------------------
+
+func TestSignalSynchronousDelivery(t *testing.T) {
+	env := NewTestEnv()
+
+	received := make(chan struct{})
+	go func() {
+		sr := env.H().AwaitSignals([]string{"greeting"}, 1*time.Second)
+		if sr.TimedOut {
+			t.Error("expected signal, got timeout")
+		}
+		close(received)
+	}()
+
+	// Let goroutine reach AwaitSignals.
+	time.Sleep(5 * time.Millisecond)
+
+	// Signal should be delivered synchronously via Gosched.
+	env.Signal("greeting", `{"msg":"hello"}`)
+
+	// Signal delivery should complete quickly without additional sleep.
+	select {
+	case <-received:
+		// success
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("signal was not received within expected window")
+	}
+}

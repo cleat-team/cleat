@@ -34,7 +34,7 @@ func TestCreatePromise(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "create-promise-test", 1,
-				json.RawMessage(`{}`), "create-promise-run")
+				json.RawMessage(`{}`), "create-promise-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -77,7 +77,7 @@ func TestResolvePromise(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "resolve-promise-test", 1,
-				json.RawMessage(`{}`), "resolve-promise-run")
+				json.RawMessage(`{}`), "resolve-promise-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -122,7 +122,7 @@ func TestRejectPromise(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "reject-promise-test", 1,
-				json.RawMessage(`{}`), "reject-promise-run")
+				json.RawMessage(`{}`), "reject-promise-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -167,7 +167,7 @@ func TestGetPromise(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "get-promise-test", 1,
-				json.RawMessage(`{}`), "get-promise-run")
+				json.RawMessage(`{}`), "get-promise-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -210,7 +210,7 @@ func TestListPromises(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "list-promises-test", 1,
-				json.RawMessage(`{}`), "list-promises-run")
+				json.RawMessage(`{}`), "list-promises-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -259,7 +259,7 @@ func TestCreateUpdateRequest(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "create-update-test", 1,
-				json.RawMessage(`{}`), "create-update-run")
+				json.RawMessage(`{}`), "create-update-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -289,7 +289,7 @@ func TestGetPendingUpdateRequests(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "pending-updates-test", 1,
-				json.RawMessage(`{}`), "pending-updates-run")
+				json.RawMessage(`{}`), "pending-updates-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -334,7 +334,7 @@ func TestCompleteUpdateRequest(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "complete-update-test", 1,
-				json.RawMessage(`{}`), "complete-update-run")
+				json.RawMessage(`{}`), "complete-update-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -556,7 +556,7 @@ func TestGetCompactionCandidates(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "compaction-candidates-test", 1,
-				json.RawMessage(`{}`), "compaction-candidates-run")
+				json.RawMessage(`{}`), "compaction-candidates-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -623,7 +623,7 @@ func TestLoadCompactionState(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "load-compaction-state-test", 1,
-				json.RawMessage(`{}`), "load-compaction-state-run")
+				json.RawMessage(`{}`), "load-compaction-state-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -659,7 +659,7 @@ func TestCompactHistory(t *testing.T) {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
 			runID, _, err := store.StartNewRun(ctx, "", "compact-history-test", 1,
-				json.RawMessage(`{}`), "compact-history-run")
+				json.RawMessage(`{}`), "compact-history-run", DefaultTenantUUID)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -923,7 +923,7 @@ func TestCountActiveInstances(t *testing.T) {
 			// Create two workflow instances via StartNewRun.
 			for _, key := range []string{"vcount-run-1", "vcount-run-2"} {
 				_, _, err := store.StartNewRun(ctx, "", "vcount", 1,
-					json.RawMessage(`{}`), key)
+					json.RawMessage(`{}`), key, DefaultTenantUUID)
 				if err != nil {
 					t.Fatalf("StartNewRun %s: %v", key, err)
 				}
