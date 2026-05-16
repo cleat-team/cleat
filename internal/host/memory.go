@@ -30,13 +30,23 @@ func contextWithRawMemBuf(ctx context.Context, buf []byte) context.Context {
 	return context.WithValue(ctx, wasmMemBufKey{}, buf)
 }
 
-const outBufSize = 1048576 // 1 MB; increased to reduce truncation risk
-const wasmPageSize = 65536   // 64 KB WASM page size
+// DefaultOutBufSize is the default WASM output buffer size (1 MiB).
+const DefaultOutBufSize = 1048576
 
-// Maximum size of any string parameter read from WASM linear memory.
-// This prevents a malicious or buggy WASM module from causing the host to
-// allocate excessive memory via a single host function call.
-const maxWasmStringLen = 1048576 // 1 MB
+// OutBufSize is the output buffer size in bytes for WASM export calls.
+// Set before creating any Runtime to configure. Default: 1 MiB.
+var OutBufSize uint32 = 1048576
+
+const wasmPageSize = 65536 // 64 KB WASM page size
+
+// DefaultMaxWasmStringLen is the default maximum WASM string length (1 MiB).
+const DefaultMaxWasmStringLen = 1048576
+
+// MaxWasmStringLen is the maximum size of any string parameter read from WASM
+// linear memory. This prevents a malicious or buggy WASM module from causing
+// the host to allocate excessive memory via a single host function call.
+// Set before creating any Runtime to configure. Default: 1 MiB.
+var MaxWasmStringLen uint32 = 1048576
 
 // validServiceName checks that a name contains only allowed characters:
 // alphanumeric, dot, underscore, and hyphen. Service and operation names
@@ -103,10 +113,10 @@ func readWasmStringValidated(mem api.Memory, ptr, length, maxLen uint32) (string
 }
 
 // readServiceName reads a service or operation name from WASM linear memory
-// and validates both its length (must not exceed maxWasmStringLen) and
+// and validates both its length (must not exceed MaxWasmStringLen) and
 // character set (must match [a-zA-Z0-9._-]+).
 func readServiceName(mem api.Memory, ptr, length uint32) (string, bool) {
-	s, ok := readWasmStringValidated(mem, ptr, length, maxWasmStringLen)
+	s, ok := readWasmStringValidated(mem, ptr, length, MaxWasmStringLen)
 	if !ok {
 		return "", false
 	}
