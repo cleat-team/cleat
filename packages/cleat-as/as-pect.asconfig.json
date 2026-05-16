@@ -10,7 +10,7 @@
     "exportStart": "_start",
     "runtime": "stub",
     "outFile": "output.wasm",
-    "textFile": "output.wat",
+    "optimize": false,
     "paths": {
       "@cleat/sdk": "./assembly"
     }
