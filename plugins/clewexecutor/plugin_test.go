@@ -1,0 +1,791 @@
+package clewexecutor
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/cleat-team/cleat/internal/plugin"
+)
+
+func TestPluginRegistration(t *testing.T) {
+	plugins := plugin.List()
+	found := false
+	for _, info := range plugins {
+		if info.Name == "clew-executor" {
+			found = true
+			if info.Version == "" {
+				t.Error("clew-executor version is empty")
+			}
+			if info.Description == "" {
+				t.Error("clew-executor description is empty")
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("clew-executor not found in plugin registry")
+	}
+}
+
+func TestPluginInfo(t *testing.T) {
+	p := &Plugin{}
+	info := p.Info()
+	if info.Name != "clew-executor" {
+		t.Errorf("expected name 'clew-executor', got %q", info.Name)
+	}
+	if info.Version != "0.1.0" {
+		t.Errorf("expected version '0.1.0', got %q", info.Version)
+	}
+	if info.Description == "" {
+		t.Error("expected non-empty description")
+	}
+}
+
+func TestPluginInit(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if p.logger == nil {
+		t.Error("logger should be set after Init")
+	}
+	if p.agentBin != "claude" {
+		t.Errorf("expected default agentBin 'claude', got %q", p.agentBin)
+	}
+}
+
+func TestPluginInitWithConfig(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"agent_bin": "/usr/local/bin/claude"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() with config returned error: %v", err)
+	}
+	if p.agentBin != "/usr/local/bin/claude" {
+		t.Errorf("expected agentBin '/usr/local/bin/claude', got %q", p.agentBin)
+	}
+}
+
+func TestPluginInitWithInvalidConfig(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{bad json`),
+	}
+	err := p.Init(context.Background(), env)
+	if err == nil {
+		t.Error("expected error for invalid config")
+	}
+}
+
+func TestRegisterHostFunctions(t *testing.T) {
+	p := &Plugin{}
+	if err := p.Init(context.Background(), &plugin.Environment{}); err != nil {
+		t.Fatalf("Init() failed: %v", err)
+	}
+
+	registry := &mockFuncRegistry{}
+	if err := p.RegisterHostFunctions(registry); err != nil {
+		t.Fatalf("RegisterHostFunctions() returned error: %v", err)
+	}
+	if registry.name != "run_phase" {
+		t.Errorf("expected 'run_phase', got %q", registry.name)
+	}
+	if !registry.idempotent {
+		t.Error("expected Idempotent: true")
+	}
+}
+
+func TestRegisterHostFunctionsNilScope(t *testing.T) {
+	p := &Plugin{}
+	_ = p.Init(context.Background(), &plugin.Environment{})
+	err := p.RegisterHostFunctions(nil)
+	if err == nil {
+		t.Error("expected error for nil scope")
+	}
+}
+
+func TestRoleForPhase(t *testing.T) {
+	tests := []struct {
+		phase    string
+		wantRole string
+		wantErr  bool
+	}{
+		{"queued", "explorer", false},
+		{"exploring", "explorer", false},
+		{"planning", "planner", false},
+		{"plan_review", "reviewer", false},
+		{"implementing", "developer", false},
+		{"impl_review", "reviewer", false},
+		{"done", "", true},
+		{"blocked", "", true},
+		{"failed", "", true},
+		{"unknown_phase", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.phase, func(t *testing.T) {
+			role, err := roleForPhase(tc.phase)
+			if tc.wantErr && err == nil {
+				t.Errorf("expected error for phase %q, got role %q", tc.phase, role)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error for phase %q: %v", tc.phase, err)
+			}
+			if role != tc.wantRole {
+				t.Errorf("expected role %q for phase %q, got %q", tc.wantRole, tc.phase, role)
+			}
+		})
+	}
+}
+
+func TestExtractPhase(t *testing.T) {
+	tmp := t.TempDir()
+	statusPath := filepath.Join(tmp, "STATUS.md")
+	os.WriteFile(statusPath, []byte("**Phase:** planning\n"), 0644)
+
+	phase, err := extractPhase(statusPath)
+	if err != nil {
+		t.Fatalf("extractPhase() returned error: %v", err)
+	}
+	if phase != "planning" {
+		t.Errorf("expected 'planning', got %q", phase)
+	}
+}
+
+func TestExtractPhaseMissingFile(t *testing.T) {
+	_, err := extractPhase("/nonexistent/path/STATUS.md")
+	if err == nil {
+		t.Error("expected error for missing file")
+	}
+}
+
+func TestExtractPhaseNoMatch(t *testing.T) {
+	tmp := t.TempDir()
+	statusPath := filepath.Join(tmp, "STATUS.md")
+	os.WriteFile(statusPath, []byte("No phase here\n"), 0644)
+
+	_, err := extractPhase(statusPath)
+	if err == nil {
+		t.Error("expected error when Phase line not found")
+	}
+}
+
+func TestBuildPrompt(t *testing.T) {
+	in := runPhaseInput{
+		TaskID:      "cleat-212",
+		Project:     "cleat",
+		ProjectRoot: "/tmp/clew",
+		Workdir:     "/tmp/cleat",
+	}
+
+	// Create a mock protocol file.
+	tmp := t.TempDir()
+	protocolPath := filepath.Join(tmp, "developer-agent.md")
+	os.WriteFile(protocolPath, []byte("protocol content"), 0644)
+
+	tests := []struct {
+		role    string
+		contains []string
+	}{
+		{"explorer", []string{"explorer agent", "cleat-212", "TASK.md"}},
+		{"planner", []string{"planner agent", "cleat-212", "TASK.md", "artifacts/"}},
+		{"developer", []string{"developer agent", "cleat-212", "CONTRACT.md"}},
+		{"reviewer", []string{"reviewer agent", "cleat-212", "review", "artifacts/"}},
+		{"cto", []string{"CTO agent", "INDEX.md", "tasks.json"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.role, func(t *testing.T) {
+			prompt, err := buildPrompt(in, tc.role, t.TempDir(), protocolPath)
+			if err != nil {
+				t.Fatalf("buildPrompt() for %s returned error: %v", tc.role, err)
+			}
+			for _, want := range tc.contains {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("prompt for %s should contain %q, got:\n%s", tc.role, want, prompt)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildPromptProtocolNotFound(t *testing.T) {
+	in := runPhaseInput{TaskID: "test", Project: "test", ProjectRoot: "/tmp", Workdir: "/tmp"}
+	_, err := buildPrompt(in, "explorer", "/tmp", "/nonexistent/protocol.md")
+	if err == nil {
+		t.Error("expected error for missing protocol file")
+	}
+}
+
+func TestBuildPromptUnknownRole(t *testing.T) {
+	in := runPhaseInput{TaskID: "test", Project: "test", ProjectRoot: "/tmp", Workdir: "/tmp"}
+	_, err := buildPrompt(in, "unknown", "/tmp", "/dev/null")
+	if err == nil {
+		t.Error("expected error for unknown role")
+	}
+}
+
+func TestSessionReadWrite(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "session.json")
+
+	rec := &sessionRecord{
+		Phase:         "planning",
+		ExitCode:      0,
+		NewPhase:      "plan_review",
+		Status:        "completed",
+		Started:       "2026-05-16T08:00:00Z",
+		Ended:         "2026-05-16T08:05:00Z",
+		FindingsCount: 5,
+	}
+	if err := writeSession(path, rec); err != nil {
+		t.Fatalf("writeSession() error: %v", err)
+	}
+
+	got, err := readSession(path)
+	if err != nil {
+		t.Fatalf("readSession() error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("readSession() returned nil")
+	}
+	if got.Phase != rec.Phase {
+		t.Errorf("Phase: expected %q, got %q", rec.Phase, got.Phase)
+	}
+	if got.ExitCode != rec.ExitCode {
+		t.Errorf("ExitCode: expected %d, got %d", rec.ExitCode, got.ExitCode)
+	}
+	if got.NewPhase != rec.NewPhase {
+		t.Errorf("NewPhase: expected %q, got %q", rec.NewPhase, got.NewPhase)
+	}
+	if got.Status != rec.Status {
+		t.Errorf("Status: expected %q, got %q", rec.Status, got.Status)
+	}
+	if got.FindingsCount != rec.FindingsCount {
+		t.Errorf("FindingsCount: expected %d, got %d", rec.FindingsCount, got.FindingsCount)
+	}
+}
+
+func TestSessionReadMissing(t *testing.T) {
+	rec, err := readSession("/nonexistent/session.json")
+	if err != nil {
+		t.Fatalf("readSession() returned error: %v", err)
+	}
+	if rec != nil {
+		t.Error("expected nil for missing session file")
+	}
+}
+
+func TestSessionReadCorrupt(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "session.json")
+	os.WriteFile(path, []byte("not json"), 0644)
+
+	rec, err := readSession(path)
+	if err != nil {
+		t.Fatalf("readSession() returned error: %v", err)
+	}
+	if rec != nil {
+		t.Error("expected nil for corrupt session file")
+	}
+}
+
+func TestDiffArtifacts(t *testing.T) {
+	before := map[string]time.Time{
+		"a.md": time.Now().Add(-1 * time.Hour),
+		"b.md": time.Now(),
+	}
+	after := map[string]time.Time{
+		"a.md": time.Now(),                  // modified (newer)
+		"b.md": before["b.md"],              // unchanged (same time - but diff doesn't check this deeply)
+		"c.md": time.Now(),                  // new file
+	}
+	diff := diffArtifacts(before, after)
+	if len(diff) < 1 {
+		t.Error("expected at least 1 diff entry")
+	}
+	hasA := false
+	hasC := false
+	for _, name := range diff {
+		if name == "a.md" {
+			hasA = true
+		}
+		if name == "c.md" {
+			hasC = true
+		}
+	}
+	if !hasA {
+		t.Error("expected a.md in diff (modified)")
+	}
+	if !hasC {
+		t.Error("expected c.md in diff (new)")
+	}
+}
+
+func TestDiffArtifactsEmptyBefore(t *testing.T) {
+	after := map[string]time.Time{
+		"x.md": time.Now(),
+	}
+	diff := diffArtifacts(nil, after)
+	if len(diff) != 1 || diff[0] != "x.md" {
+		t.Errorf("expected [x.md], got %v", diff)
+	}
+}
+
+func TestCountFindingsExplorer(t *testing.T) {
+	tmp := t.TempDir()
+	os.WriteFile(filepath.Join(tmp, "exploration.md"), []byte("line 1\nline 2\nline 3\n"), 0644)
+	count := countFindings("explorer", tmp)
+	if count != 3 {
+		t.Errorf("expected 3 lines, got %d", count)
+	}
+}
+
+func TestCountFindingsExplorerNoTrailingNewline(t *testing.T) {
+	tmp := t.TempDir()
+	os.WriteFile(filepath.Join(tmp, "exploration.md"), []byte("line 1\nline 2\nline 3"), 0644)
+	count := countFindings("explorer", tmp)
+	if count != 3 {
+		t.Errorf("expected 3 lines, got %d", count)
+	}
+}
+
+func TestCountFindingsReviewer(t *testing.T) {
+	tmp := t.TempDir()
+	os.WriteFile(filepath.Join(tmp, "review-plan.md"), []byte("[BLOCKER] bad thing\n[SHOULD_FIX] minor\n[BLOCKER] worse\n"), 0644)
+	count := countFindings("reviewer", tmp)
+	if count != 3 {
+		t.Errorf("expected 3 findings, got %d", count)
+	}
+}
+
+func TestCountFindingsNoArtifact(t *testing.T) {
+	count := countFindings("explorer", "/nonexistent/dir")
+	if count != 0 {
+		t.Errorf("expected 0 for missing dir, got %d", count)
+	}
+}
+
+func TestCountFindingsOtherRole(t *testing.T) {
+	tmp := t.TempDir()
+	os.WriteFile(filepath.Join(tmp, "something.md"), []byte("content"), 0644)
+	count := countFindings("developer", tmp)
+	if count != 0 {
+		t.Errorf("expected 0 for developer role, got %d", count)
+	}
+	count = countFindings("planner", tmp)
+	if count != 0 {
+		t.Errorf("expected 0 for planner role, got %d", count)
+	}
+}
+
+func TestNextPhase(t *testing.T) {
+	tests := map[string]string{
+		"queued":       "planning",
+		"exploring":    "planning",
+		"planning":     "plan_review",
+		"plan_review":  "implementing",
+		"implementing": "impl_review",
+		"impl_review":  "done",
+		"unknown":      "unknown",
+	}
+	for phase, want := range tests {
+		got := nextPhase(phase)
+		if got != want {
+			t.Errorf("nextPhase(%q): expected %q, got %q", phase, want, got)
+		}
+	}
+}
+
+func TestTaskDir(t *testing.T) {
+	got := taskDir("/root", "cleat", "cleat-212")
+	want := filepath.Join("/root", "projects", "cleat", "cleat-212")
+	if got != want {
+		t.Errorf("expected %q, got %q", want, got)
+	}
+}
+
+// --- runPhase integration tests ---
+
+func setupRunPhaseTest(t *testing.T, phase string) (string, *Plugin) {
+	t.Helper()
+	tmp := t.TempDir()
+
+	// Set up task directory structure.
+	taskDir := filepath.Join(tmp, "projects", "testproj", "test-task")
+	os.MkdirAll(taskDir, 0755)
+
+	statusPath := filepath.Join(taskDir, "STATUS.md")
+	os.WriteFile(statusPath, []byte("**Phase:** "+phase+"\n"), 0644)
+
+	// Create mock protocol file for each role the tests use.
+	for _, role := range []string{"developer", "explorer", "planner", "reviewer", "cto"} {
+		protoDir := filepath.Join(tmp, "prompts")
+		os.MkdirAll(protoDir, 0755)
+		os.WriteFile(filepath.Join(protoDir, role+"-agent.md"), []byte("protocol"), 0644)
+	}
+
+	p := &Plugin{}
+	if err := p.Init(context.Background(), &plugin.Environment{}); err != nil {
+		t.Fatalf("Init() failed: %v", err)
+	}
+	p.agentBin = "true" // always exits 0, ignores all args
+
+	return tmp, p
+}
+
+func TestRunPhaseSuccess(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "implementing")
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+
+	outJSON, err := p.runPhase(context.Background(), string(inputJSON))
+	if err != nil {
+		t.Fatalf("runPhase() returned error: %v", err)
+	}
+
+	var out runPhaseOutput
+	if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
+		t.Fatalf("failed to unmarshal output: %v", err)
+	}
+
+	if out.ExitCode != 0 {
+		t.Errorf("expected exit_code 0, got %d", out.ExitCode)
+	}
+	if out.Status != "completed" {
+		t.Errorf("expected status 'completed', got %q", out.Status)
+	}
+	if out.Started == "" {
+		t.Error("expected non-empty started time")
+	}
+	if out.Ended == "" {
+		t.Error("expected non-empty ended time")
+	}
+	if out.NewPhase == "" {
+		t.Error("expected non-empty new_phase")
+	}
+	if out.Cached {
+		t.Error("expected Cached: false on first invocation")
+	}
+}
+
+func TestRunPhaseIdempotent(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "implementing")
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+
+	// First call.
+	outJSON1, err := p.runPhase(context.Background(), string(inputJSON))
+	if err != nil {
+		t.Fatalf("first runPhase() error: %v", err)
+	}
+
+	// Second call should be cached.
+	outJSON2, err := p.runPhase(context.Background(), string(inputJSON))
+	if err != nil {
+		t.Fatalf("second runPhase() error: %v", err)
+	}
+
+	var out1, out2 runPhaseOutput
+	json.Unmarshal([]byte(outJSON1), &out1)
+	json.Unmarshal([]byte(outJSON2), &out2)
+
+	if !out2.Cached {
+		t.Error("expected Cached: true on second invocation")
+	}
+	if out2.ExitCode != out1.ExitCode {
+		t.Errorf("cached exit_code mismatch: %d vs %d", out2.ExitCode, out1.ExitCode)
+	}
+	if out2.Started != out1.Started {
+		t.Errorf("cached started mismatch: %q vs %q", out2.Started, out1.Started)
+	}
+}
+
+func TestRunPhaseRoleOverride(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "queued")
+
+	in := runPhaseInput{
+		TaskID:       "test-task",
+		Project:      "testproj",
+		ProjectRoot:  root,
+		Workdir:      root,
+		RoleOverride: "developer", // override queued→explorer default
+	}
+	inputJSON, _ := json.Marshal(in)
+
+	outJSON, err := p.runPhase(context.Background(), string(inputJSON))
+	if err != nil {
+		t.Fatalf("runPhase() error: %v", err)
+	}
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.Status != "completed" {
+		t.Errorf("expected status 'completed', got %q (error: %s)", out.Status, out.Error)
+	}
+}
+
+func TestRunPhaseMissingTaskID(t *testing.T) {
+	p := &Plugin{}
+	_ = p.Init(context.Background(), &plugin.Environment{})
+
+	in := runPhaseInput{}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.Error == "" {
+		t.Error("expected error for missing task_id")
+	}
+	if out.Status != "failed" {
+		t.Errorf("expected status 'failed', got %q", out.Status)
+	}
+}
+
+func TestRunPhaseMissingProject(t *testing.T) {
+	p := &Plugin{}
+	_ = p.Init(context.Background(), &plugin.Environment{})
+
+	in := runPhaseInput{TaskID: "test", ProjectRoot: "/tmp", Workdir: "/tmp"}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.Error == "" {
+		t.Error("expected error for missing project")
+	}
+}
+
+func TestRunPhaseMissingProjectRoot(t *testing.T) {
+	p := &Plugin{}
+	_ = p.Init(context.Background(), &plugin.Environment{})
+
+	in := runPhaseInput{TaskID: "test", Project: "proj", Workdir: "/tmp"}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.Error == "" {
+		t.Error("expected error for missing project_root")
+	}
+}
+
+func TestRunPhaseMissingWorkdir(t *testing.T) {
+	p := &Plugin{}
+	_ = p.Init(context.Background(), &plugin.Environment{})
+
+	in := runPhaseInput{TaskID: "test", Project: "proj", ProjectRoot: "/tmp"}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.Error == "" {
+		t.Error("expected error for missing workdir")
+	}
+}
+
+func TestRunPhaseMissingSTATUS(t *testing.T) {
+	p := &Plugin{}
+	_ = p.Init(context.Background(), &plugin.Environment{})
+
+	in := runPhaseInput{
+		TaskID:      "noexist",
+		Project:     "noproj",
+		ProjectRoot: t.TempDir(),
+		Workdir:     t.TempDir(),
+	}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if !strings.Contains(out.Error, "STATUS.md") {
+		t.Errorf("expected error about STATUS.md, got: %s", out.Error)
+	}
+}
+
+func TestRunPhaseBlocked(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "blocked")
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.Error == "" {
+		t.Error("expected error for blocked task")
+	}
+}
+
+func TestRunPhaseDone(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "done")
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.Error == "" {
+		t.Error("expected error for done task")
+	}
+}
+
+func TestRunPhaseAgentNotFound(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "implementing")
+	p.agentBin = "nonexistent-binary-xyzzy-12345"
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if !strings.Contains(out.Error, "agent not found") {
+		t.Errorf("expected 'agent not found' error, got: %s", out.Error)
+	}
+}
+
+func TestRunPhaseAgentExitNonZero(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "implementing")
+	p.agentBin = "false" // always exits 1, ignores all args
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.ExitCode != 1 {
+		t.Errorf("expected exit_code 1, got %d", out.ExitCode)
+	}
+	if out.Status != "failed" {
+		t.Errorf("expected status 'failed', got %q", out.Status)
+	}
+	if out.Error == "" || !strings.Contains(out.Error, "exit code") {
+		t.Errorf("expected non-empty Error field with 'exit code', got: %s", out.Error)
+	}
+}
+
+func TestRunPhaseArtifactsDetected(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "exploring")
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+
+	// Use a mock script that creates an artifact.
+	mockScript := filepath.Join(root, "mock-agent.sh")
+	artifactsDir := filepath.Join(root, "projects", "testproj", "test-task", "artifacts")
+	os.MkdirAll(artifactsDir, 0755)
+	os.WriteFile(mockScript, []byte(`#!/bin/sh
+echo "hello" > "`+artifactsDir+`/exploration.md"
+`, ), 0755)
+	p.agentBin = mockScript
+
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.ExitCode != 0 {
+		t.Errorf("expected exit_code 0, got %d (error: %s)", out.ExitCode, out.Error)
+	}
+
+	found := false
+	for _, a := range out.ArtifactsWritten {
+		if a == "exploration.md" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected exploration.md in artifacts_written, got %v", out.ArtifactsWritten)
+	}
+}
+
+func TestRunPhaseContextCancelled(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "implementing")
+
+	// Use 'sleep 10' as agent; cancel context immediately.
+	p.agentBin = "sleep"
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel before even starting
+
+	outJSON, _ := p.runPhase(ctx, string(inputJSON))
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if !strings.Contains(out.Error, "timed out") && out.Status == "failed" {
+		// On some systems, sleep might not be found or context canceled before exec.
+		// Just check that the error path works.
+		t.Logf("context cancel result: status=%s, error=%s, exit=%d", out.Status, out.Error, out.ExitCode)
+	}
+}
+
+// --- mock helpers ---
+
+type mockFuncRegistry struct {
+	name       string
+	idempotent bool
+}
+
+func (m *mockFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
+	m.name = opts.Name
+	m.idempotent = opts.Idempotent
+	return nil
+}

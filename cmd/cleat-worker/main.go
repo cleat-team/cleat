@@ -57,6 +57,7 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 
 	// Plugins
+	_ "github.com/cleat-team/cleat/plugins/clewexecutor"
 	_ "github.com/cleat-team/cleat/plugins/llm"
 	// _ "github.com/cleat-team/cleat/plugins/pgvector"  // requires pgvector extension
 )
