@@ -10,7 +10,6 @@ import (
 )
 
 // sessionRecord stores the full output plus phase for idempotent caching.
-// When a cache hit occurs, these fields are returned directly as runPhaseOutput.
 type sessionRecord struct {
 	Phase            string   `json:"phase"`
 	ExitCode         int      `json:"exit_code"`
@@ -22,8 +21,7 @@ type sessionRecord struct {
 	Status           string   `json:"status"`
 }
 
-// readSession reads and unmarshals session.json. Returns nil if file doesn't
-// exist, is corrupt, or can't be parsed.
+// readSession reads and unmarshals session.json.
 func readSession(path string) (*sessionRecord, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -34,13 +32,12 @@ func readSession(path string) (*sessionRecord, error) {
 	}
 	var rec sessionRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return nil, nil // corrupt JSON → treat as missing
+		return nil, nil
 	}
 	return &rec, nil
 }
 
-// writeSession writes session record as JSON to path atomically (write to
-// temp file + rename to avoid partial writes).
+// writeSession writes session record as JSON to path atomically.
 func writeSession(path string, rec *sessionRecord) error {
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
@@ -75,7 +72,7 @@ func extractPhase(statusPath string) (string, error) {
 	return string(matches[1]), nil
 }
 
-// roleForPhase maps Clew task phases to agent roles (matching clew-run.sh).
+// roleForPhase maps Clew task phases to agent roles.
 func roleForPhase(phase string) (string, error) {
 	switch phase {
 	case "queued", "exploring":
@@ -84,20 +81,54 @@ func roleForPhase(phase string) (string, error) {
 		return "planner", nil
 	case "plan_review":
 		return "reviewer", nil
+	case "plan_approved":
+		return "developer", nil
 	case "implementing":
 		return "developer", nil
 	case "impl_review":
 		return "reviewer", nil
-	case "done":
-		return "", fmt.Errorf("task is already done")
+	case "done", "complete", "completed", "merged":
+		return "", fmt.Errorf("task is already done/completed")
 	case "blocked", "failed":
 		return "", fmt.Errorf("task is %s — unblock or re-scope before running", phase)
+	case "implemented, awaiting commit/push", "implemented":
+		return "developer", nil
+	case "review_plan", "review":
+		return "reviewer", nil
 	default:
-		return "", fmt.Errorf("unknown phase: %s", phase)
+		if contains(phase, "implement") {
+			return "developer", nil
+		}
+		if contains(phase, "review") {
+			return "reviewer", nil
+		}
+		if contains(phase, "plan") {
+			return "planner", nil
+		}
+		if contains(phase, "explor") {
+			return "explorer", nil
+		}
+		return "developer", nil
 	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && searchSubstring(s, substr)
+}
+
+func searchSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 // taskDir returns the task directory path.
 func taskDir(projectRoot, project, taskID string) string {
+	if project == "clew" {
+		return filepath.Join(projectRoot, "task_state", taskID)
+	}
 	return filepath.Join(projectRoot, "projects", project, taskID)
 }

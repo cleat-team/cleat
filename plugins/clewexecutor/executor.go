@@ -26,7 +26,9 @@ type runPhaseInput struct {
 // runPhaseOutput is the JSON output from the run_phase host function.
 type runPhaseOutput struct {
 	ExitCode         int      `json:"exit_code"`
+	PhaseChanged     bool     `json:"phase_changed"`
 	NewPhase         string   `json:"new_phase"`
+	ReviewOutcome    string   `json:"review_outcome"`
 	ArtifactsWritten []string `json:"artifacts_written"`
 	FindingsCount    int      `json:"findings_count"`
 	Started          string   `json:"started"`
@@ -80,7 +82,9 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		rec.Phase == phase && rec.Status == "completed" {
 		out := runPhaseOutput{
 			ExitCode:         rec.ExitCode,
+			PhaseChanged:     true,
 			NewPhase:         rec.NewPhase,
+			ReviewOutcome:    "",
 			ArtifactsWritten: rec.ArtifactsWritten,
 			FindingsCount:    rec.FindingsCount,
 			Started:          rec.Started,
@@ -104,7 +108,15 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		role = r
 	}
 
-	protocolPath := filepath.Join(in.ProjectRoot, "prompts", role+"-agent.md")
+	// Prompts live in the clew repo. Resolve clew root from workdir.
+	clewRoot := in.Workdir
+	if filepath.Base(clewRoot) != "clew" {
+		clewRoot = filepath.Join(filepath.Dir(clewRoot), "clew")
+	}
+	if _, err := os.Stat(filepath.Join(clewRoot, "prompts")); err != nil {
+		clewRoot = filepath.Join(filepath.Dir(in.ProjectRoot), "clew")
+	}
+	protocolPath := filepath.Join(clewRoot, "prompts", role+"-agent.md")
 	prompt, err := buildPrompt(in, role, td, protocolPath)
 	if err != nil {
 		out := runPhaseOutput{Status: "failed", Error: err.Error()}
@@ -133,7 +145,11 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		args = append(args, "--model", in.Model)
 	}
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	// Use a long timeout independent of the workflow's WASM execution context.
+	execCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(execCtx, bin, args...)
 	cmd.Dir = in.Workdir
 	cmd.Stdin = strings.NewReader(prompt)
 
@@ -164,22 +180,34 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	if np, err := extractPhase(statusPath); err == nil {
 		newPhase = np
 	}
-	// If unchanged, default to the next logical phase based on current phase.
-	if newPhase == phase {
+	phaseWasChanged := newPhase != phase
+	if !phaseWasChanged {
 		newPhase = nextPhase(phase)
+		phaseWasChanged = newPhase != phase
 	}
 
 	newSnapshot := listArtifactFiles(artifactsDir)
 	artifactsWritten := diffArtifacts(snapshot, newSnapshot)
 	findingsCount := countFindings(role, artifactsDir)
 
+	reviewOutcome := ""
+	if role == "reviewer" {
+		reviewOutcome = determineReviewOutcome(artifactsDir, artifactsWritten)
+	}
+
 	var errStr string
 	if runErr != nil && exitCode != 0 {
 		errStr = buildErrorDetail(exitCode, stdout.String(), stderr.String())
 	}
 	if ctx.Err() != nil {
-		errStr = fmt.Sprintf("phase timed out: %v", ctx.Err())
-		status = "failed"
+		// WASM context expired but subprocess may have completed.
+		// Don't override a successful completion.
+		if exitCode == 0 && status == "completed" {
+			errStr = fmt.Sprintf("warning: WASM context expired but subprocess completed: %v", ctx.Err())
+		} else if status != "completed" {
+			errStr = fmt.Sprintf("phase timed out: %v", ctx.Err())
+			status = "failed"
+		}
 	}
 
 	startedStr := started.Format(time.RFC3339)
@@ -199,7 +227,9 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 
 	out := runPhaseOutput{
 		ExitCode:         exitCode,
+		PhaseChanged:     phaseWasChanged,
 		NewPhase:         newPhase,
+		ReviewOutcome:    reviewOutcome,
 		ArtifactsWritten: artifactsWritten,
 		FindingsCount:    findingsCount,
 		Started:          startedStr,
@@ -217,66 +247,108 @@ func buildPrompt(in runPhaseInput, role, td, protocolPath string) (string, error
 		return "", fmt.Errorf("protocol file not found: %s", protocolPath)
 	}
 
-	taskPath := filepath.Join("projects", in.Project, in.TaskID)
+	taskMD := filepath.Join(td, "TASK.md")
+	statusMD := filepath.Join(td, "STATUS.md")
+	contractMD := filepath.Join(td, "CONTRACT.md")
+	artifactsDir := filepath.Join(td, "artifacts")
+	indexMD := filepath.Join(filepath.Dir(td), "INDEX.md")
+	tasksJSON := filepath.Join(filepath.Dir(td), "tasks.json")
 
 	switch role {
 	case "explorer":
 		return fmt.Sprintf(
-			"You are an explorer agent in the Clew system. Project: %s. Read %s for your full protocol. Then read %s/TASK.md and %s/STATUS.md. Your task ID is %s. The code is in this repository (your working directory). Follow the protocol.",
-			in.Project, protocolPath, taskPath, taskPath, in.TaskID,
+			"You are an explorer agent in the Clew system. Project: %s. Read %s for your full protocol. Then read %s and %s. Your task ID is %s. The code is in this repository (your working directory). Follow the protocol.",
+			in.Project, protocolPath, taskMD, statusMD, in.TaskID,
 		), nil
 	case "planner":
 		return fmt.Sprintf(
-			"You are a planner agent in the Clew system. Project: %s. Read %s for your full protocol. Then read %s/TASK.md, %s/STATUS.md, and any artifacts in %s/artifacts/. Your task ID is %s. Follow the protocol.",
-			in.Project, protocolPath, taskPath, taskPath, taskPath, in.TaskID,
+			"You are a planner agent in the Clew system. Project: %s. Read %s for your full protocol. Then read %s, %s, and any artifacts in %s. Your task ID is %s. Follow the protocol.",
+			in.Project, protocolPath, taskMD, statusMD, artifactsDir, in.TaskID,
 		), nil
 	case "developer":
 		return fmt.Sprintf(
-			"You are a developer agent in the Clew system. Project: %s. Read %s for your full protocol. Then read %s/TASK.md, %s/STATUS.md, and %s/CONTRACT.md (if it exists). Your task ID is %s. The code to modify is in this repository (your working directory). Follow the protocol exactly, including iteration to convergence at each review phase. Commit and push your changes when done.",
-			in.Project, protocolPath, taskPath, taskPath, taskPath, in.TaskID,
+			"You are a developer agent in the Clew system. Project: %s. Read %s for your full protocol. Then read %s, %s, and %s (if it exists). Your task ID is %s. The code to modify is in this repository (your working directory). Follow the protocol exactly, including iteration to convergence at each review phase. Commit and push your changes when done.",
+			in.Project, protocolPath, taskMD, statusMD, contractMD, in.TaskID,
 		), nil
 	case "reviewer":
 		reviewType := "implementation"
-		statusPath := filepath.Join(td, "STATUS.md")
-		if data, err := os.ReadFile(statusPath); err == nil && bytes.Contains(data, []byte("plan_review")) {
+		if data, err := os.ReadFile(statusMD); err == nil && bytes.Contains(data, []byte("plan_review")) {
 			reviewType = "plan"
 		}
 		return fmt.Sprintf(
-			"You are a reviewer agent in the Clew system. Project: %s. Read %s for your full protocol. You are reviewing task %s (%s review). Read %s/TASK.md, %s/STATUS.md, and all artifacts in %s/artifacts/. Your task ID is %s. Follow the protocol, iterating to convergence.",
-			in.Project, protocolPath, in.TaskID, reviewType, taskPath, taskPath, taskPath, in.TaskID,
+			"You are a reviewer agent in the Clew system. Project: %s. Read %s for your full protocol. You are reviewing task %s (%s review). Read %s, %s, and all artifacts in %s. Your task ID is %s. Follow the protocol, iterating to convergence. End your review with exactly one of: [OUTCOME:PASS], [OUTCOME:BLOCKER], or [OUTCOME:SHOULD_FIX].",
+			in.Project, protocolPath, in.TaskID, reviewType, taskMD, statusMD, artifactsDir, in.TaskID,
 		), nil
 	case "cto":
 		return fmt.Sprintf(
-			"You are the CTO agent in the Clew system. Project: %s. Read %s for your full protocol. Read %s/INDEX.md and %s/tasks.json. Follow the CTO lap protocol exactly. Write your CEO brief to the current task's log.",
-			in.Project, protocolPath, taskPath, taskPath,
+			"You are the CTO agent in the Clew system. Project: %s. Read %s for your full protocol. Read %s and %s. Follow the CTO lap protocol exactly. Write your CEO brief to the current task's log.",
+			in.Project, protocolPath, indexMD, tasksJSON,
 		), nil
 	default:
 		return "", fmt.Errorf("unknown role: %s", role)
 	}
 }
 
-// nextPhase returns the next logical phase after a given phase, used when
-// STATUS.md phase hasn't changed after a run (the agent ran but didn't
-// update STATUS.md — the caller's workflow can still advance).
+// nextPhase returns the next logical phase after a given phase.
 func nextPhase(phase string) string {
 	switch phase {
 	case "queued", "exploring":
 		return "planning"
 	case "planning":
 		return "plan_review"
-	case "plan_review":
+	case "plan_review", "plan_approved":
 		return "implementing"
 	case "implementing":
 		return "impl_review"
-	case "impl_review":
+	case "impl_review", "impl_approved":
 		return "done"
 	default:
+		if strings.Contains(phase, "approved") {
+			if strings.Contains(phase, "plan") {
+				return "implementing"
+			}
+			return "done"
+		}
 		return phase
 	}
 }
 
-// listArtifactFiles returns a map of artifact filename → modtime.
-// Returns empty map if directory doesn't exist.
+// determineReviewOutcome scans review artifacts for outcome markers.
+// Returns "PASS", "BLOCKER", "SHOULD_FIX", or "" if indeterminate.
+func determineReviewOutcome(artifactsDir string, newArtifacts []string) string {
+	hasBlocker := false
+	hasShouldFix := false
+	for _, name := range newArtifacts {
+		if !strings.HasPrefix(name, "review-") || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(artifactsDir, name))
+		if err != nil {
+			continue
+		}
+		if bytes.Contains(data, []byte("[OUTCOME:BLOCKER]")) || bytes.Contains(data, []byte("[BLOCKER]")) {
+			hasBlocker = true
+		}
+		if bytes.Contains(data, []byte("[OUTCOME:SHOULD_FIX]")) || bytes.Contains(data, []byte("[SHOULD_FIX]")) {
+			hasShouldFix = true
+		}
+		if bytes.Contains(data, []byte("[OUTCOME:PASS]")) {
+			return "PASS"
+		}
+	}
+	if hasBlocker {
+		return "BLOCKER"
+	}
+	if hasShouldFix {
+		return "SHOULD_FIX"
+	}
+	if len(newArtifacts) > 0 {
+		return "PASS"
+	}
+	return ""
+}
+
+// listArtifactFiles returns a map of artifact filename to modtime.
 func listArtifactFiles(dir string) map[string]time.Time {
 	out := make(map[string]time.Time)
 	entries, err := os.ReadDir(dir)
@@ -309,9 +381,6 @@ func diffArtifacts(before, after map[string]time.Time) []string {
 }
 
 // countFindings estimates finding count based on role and artifact content.
-// For explorer: counts lines in exploration.md.
-// For review roles: counts [BLOCKER] and [SHOULD_FIX] markers in review-*.md.
-// For all other roles, returns 0.
 func countFindings(role, artifactsDir string) int {
 	switch role {
 	case "explorer":
@@ -321,7 +390,7 @@ func countFindings(role, artifactsDir string) int {
 		}
 		lines := bytes.Count(data, []byte("\n"))
 		if len(data) > 0 && data[len(data)-1] != '\n' {
-			lines++ // count the last line even without trailing newline
+			lines++
 		}
 		return lines
 	case "reviewer":
@@ -360,7 +429,7 @@ func buildErrorDetail(exitCode int, stdout, stderr string) string {
 	return strings.Join(parts, "; ")
 }
 
-// cappedBuffer is a bytes.Buffer that caps at 1MB to prevent memory exhaustion.
+// cappedBuffer is a bytes.Buffer that caps at 1MB.
 type cappedBuffer struct {
 	buf   bytes.Buffer
 	total int
@@ -370,7 +439,7 @@ const maxCap = 1 << 20 // 1 MB
 
 func (c *cappedBuffer) Write(p []byte) (int, error) {
 	if c.total >= maxCap {
-		return len(p), nil // silently discard
+		return len(p), nil
 	}
 	remain := maxCap - c.total
 	if len(p) > remain {
@@ -388,4 +457,3 @@ func (c *cappedBuffer) String() string {
 func (c *cappedBuffer) Bytes() []byte {
 	return c.buf.Bytes()
 }
-
