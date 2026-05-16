@@ -1383,7 +1383,7 @@ impl HostCalls {
                 out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
-        let (_, err_code, written) = memory::decode_cleat_call_result(result);
+        let (written, err_code) = memory::decode_simple_result(result);
         if err_code != 0 || written == 0 {
             return None;
         }
@@ -1405,7 +1405,7 @@ impl HostCalls {
                 out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
         };
-        let (_, err_code, written) = memory::decode_cleat_call_result(result);
+        let (written, err_code) = memory::decode_simple_result(result);
         if err_code != 0 || written == 0 {
             return None;
         }

@@ -177,8 +177,16 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
                 Ok(inner_result) => {
                     match cleat_sdk::format_cleat_result(inner_result) {
                         Ok(output_json) => {
-                            let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &output_json) };
-                            cleat_sdk::memory::encode_export_result(0, n)
+                            // Normalize through host encoding/json for cross-language
+                            // determinism (sorted keys, canonical float representation).
+                            if let Some(canonical) = cleat_sdk::HostCalls.json_stringify(&output_json) {
+                                let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &canonical) };
+                                cleat_sdk::memory::encode_export_result(0, n)
+                            } else {
+                                // Fallback: write original JSON if normalization fails.
+                                let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &output_json) };
+                                cleat_sdk::memory::encode_export_result(0, n)
+                            }
                         }
                         Err(err_msg) => {
                             let err_json = serde_json::json!({"error": err_msg}).to_string();
