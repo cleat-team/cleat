@@ -1,5 +1,9 @@
 -- cleat MySQL constraints, indexes
-ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS allowed_signals JSON DEFAULT NULL;
+-- MySQL doesn't support ADD COLUMN IF NOT EXISTS; use a conditional prepared statement.
+SET @s = IF((SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'workflow_instances' AND COLUMN_NAME = 'allowed_signals') = 0, 'ALTER TABLE workflow_instances ADD COLUMN allowed_signals JSON DEFAULT NULL', 'SELECT 1');
+PREPARE stmt FROM @s;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
 CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at);
 CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at);
 CREATE INDEX idx_defs_active ON workflow_defs(name, version);
