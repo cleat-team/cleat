@@ -133,7 +133,7 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 
 	// Verify tenant_id was stored correctly.
 	var storedTenant sql.NullString
-	err = db.QueryRow(`SELECT tenant_id FROM workflow_instances WHERE id = @p1`, runID).Scan(&storedTenant)
+	err = db.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, runID).Scan(&storedTenant)
 	if err != nil {
 		t.Fatalf("query tenant_id (no idemkey): %v", err)
 	}
@@ -159,7 +159,7 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	}
 
 	// Verify tenant_id was stored correctly.
-	err = db.QueryRow(`SELECT tenant_id FROM workflow_instances WHERE id = @p1`, idemRunID).Scan(&storedTenant)
+	err = db.QueryRow(`SELECT CAST(tenant_id AS NVARCHAR(36)) FROM workflow_instances WHERE id = @p1`, idemRunID).Scan(&storedTenant)
 	if err != nil {
 		t.Fatalf("query tenant_id (idemkey): %v", err)
 	}
