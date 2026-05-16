@@ -390,6 +390,89 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 	}
 }
 
+// TestTenantIsolation_EventHistory verifies that a tenant's event_history rows
+// are not visible to other tenants (cross-tenant RLS enforcement).
+func TestTenantIsolation_EventHistory(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			if !backend.Enabled() {
+				t.Skipf("%s backend not enabled", backend.Name())
+			}
+
+			mtBackend, ok := backend.(MultiTenantStoreBackend)
+			if !ok {
+				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+			}
+
+			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			defer teardownA()
+			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			defer teardownB()
+
+			ctx := context.Background()
+
+			// Deploy workflow def in both stores.
+			def := &WorkflowDef{
+				Name:       "test-event-history-iso",
+				Version:    1,
+				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				ABIVersion: 1,
+				MinVersion: 1,
+			}
+			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store A: %v", err)
+			}
+			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store B: %v", err)
+			}
+
+			// Create a workflow in store A.
+			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-event-history-iso", 1,
+				json.RawMessage(`{"owner":"tenant-a"}`),
+				"event-history-test-a-1", DefaultTenantUUID)
+			if err != nil {
+				t.Fatalf("StartNewRun on store A: %v", err)
+			}
+
+			// Append an event to store A's workflow event history.
+			eventA := EventRecord{
+				Step:      1,
+				EventType: "call",
+				Service:   "test-svc",
+				Op:        "test-op",
+			}
+			if err := storeA.AppendEventHistory(ctx, runIDA, eventA); err != nil {
+				t.Fatalf("AppendEventHistory on store A: %v", err)
+			}
+
+			// Store A should be able to read its own event history.
+			eventsA, err := storeA.LoadEventHistory(ctx, runIDA)
+			if err != nil {
+				t.Fatalf("LoadEventHistory on store A: %v", err)
+			}
+			if len(eventsA) == 0 {
+				t.Fatal("store A cannot see its own event history")
+			}
+
+			// Store B should NOT be able to read store A's event history.
+			eventsB, err := storeB.LoadEventHistory(ctx, runIDA)
+			if err != nil {
+				t.Fatalf("LoadEventHistory on store B: %v", err)
+			}
+			if len(eventsB) > 0 {
+				t.Errorf("ISOLATION BREACH: store B can read tenant A's event history for workflow %s (got %d events)", runIDA, len(eventsB))
+			}
+
+			// Cleanup.
+			claimedA, _ := storeA.ClaimWorkflow(ctx, "test-worker")
+			if claimedA != nil {
+				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", 0, `{"done":true}`, nil)
+			}
+		})
+	}
+}
+
 // TestTenantIsolation_Promises verifies that promises created by one tenant
 // are not visible to another tenant.
 func TestTenantIsolation_Promises(t *testing.T) {

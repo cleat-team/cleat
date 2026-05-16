@@ -105,3 +105,55 @@ IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_
 -- Add allowed_signals column for signal authorization (migration 014).
 IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workflow_instances') AND name = N'allowed_signals')
     ALTER TABLE dbo.workflow_instances ADD allowed_signals NVARCHAR(MAX) NULL;
+
+-- ===========================================================================
+-- Row-Level Security via SECURITY POLICY (MSSQL native RLS, migration 015).
+-- Matches PostgreSQL RLS from migrations/postgres/002_constraints.sql.
+-- Requires sp_set_session_context 'tenant_id' on each connection (set by
+-- tenantSessionConnector in mssql_store.go). Provides defense-in-depth:
+-- application-level WHERE tenant_id = ? already enforces isolation; SECURITY
+-- POLICY ensures no future query path can accidentally bypass it.
+-- ===========================================================================
+
+-- Inline TVF: returns a row only when the table's tenant_id column matches
+-- the session-scoped tenant_id. Applied as a FILTER PREDICATE on each table.
+-- When SESSION_CONTEXT returns NULL (no tenant set), the predicate blocks
+-- all access (NULL = <value> evaluates to UNKNOWN → row filtered out).
+CREATE OR ALTER FUNCTION dbo.fn_tenant_filter(@tenant_id UNIQUEIDENTIFIER)
+RETURNS TABLE
+WITH SCHEMABINDING
+AS
+RETURN SELECT 1 AS access
+    WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER);
+
+-- Security policies (drop+recreate for idempotency).
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
+    DROP SECURITY POLICY dbo.TenantFilter_Defs;
+CREATE SECURITY POLICY dbo.TenantFilter_Defs
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_defs
+WITH (STATE = ON);
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Instances')
+    DROP SECURITY POLICY dbo.TenantFilter_Instances;
+CREATE SECURITY POLICY dbo.TenantFilter_Instances
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_instances
+WITH (STATE = ON);
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_EventHistory')
+    DROP SECURITY POLICY dbo.TenantFilter_EventHistory;
+CREATE SECURITY POLICY dbo.TenantFilter_EventHistory
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.event_history
+WITH (STATE = ON);
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Signals')
+    DROP SECURITY POLICY dbo.TenantFilter_Signals;
+CREATE SECURITY POLICY dbo.TenantFilter_Signals
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_signals
+WITH (STATE = ON);
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Schedules')
+    DROP SECURITY POLICY dbo.TenantFilter_Schedules;
+CREATE SECURITY POLICY dbo.TenantFilter_Schedules
+    ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_schedules
+WITH (STATE = ON);

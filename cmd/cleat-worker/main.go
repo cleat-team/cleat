@@ -99,6 +99,8 @@ func main() {
 		"Tenant resolution mode: 'single-tenant' (default), 'header:<name>' (header-based), 'api-key' (from API key)")
 	rateLimit := flag.Float64("rate-limit", 100, "Requests/second/IP rate limit (only when --api-addr is set)")
 	rateLimitBurst := flag.Int("rate-limit-burst", 200, "Rate limit burst size")
+	rateLimitPerTenant := flag.Float64("rate-limit-per-tenant", 0, "Requests/second per tenant (0 = disabled; requires --require-auth)")
+	rateLimitPerTenantBurst := flag.Int("rate-limit-per-tenant-burst", 0, "Burst size for per-tenant rate limit")
 	maxRetries := flag.Int("max-retries", 100, "Maximum retry attempts for DurableCallWithRetry")
 	retentionDays := flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables)")
 	wasmCacheMaxEntries := flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
@@ -108,6 +110,8 @@ func main() {
 	disableChecksumVerification := flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
 	wasmMemoryMaxMB := flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
 	wasmInstructionLimit := flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; monitored via wazero function listener)")
+	wasmOutputBufferSize := flag.Int("wasm-output-buffer-size", host.DefaultOutBufSize, "WASM output buffer size in bytes (default 1 MiB)")
+	wasmMaxStringLen := flag.Int("wasm-max-string-len", host.DefaultMaxWasmStringLen, "Maximum WASM string parameter length in bytes (default 1 MiB)")
 	wasmCacheDir := flag.String("wasm-cache-dir", "", "Directory for disk-backed compiled WASM module cache (empty disables)")
 	wasmDiskCacheMaxFiles := flag.Int("wasm-disk-cache-max-files", 100, "Max files in the disk-backed compiled WASM module cache (LRU eviction)")
 	redactPatternsFile := flag.String("redact-patterns-file", "", "Path to file with custom redaction patterns (one per line)")
@@ -128,6 +132,10 @@ func main() {
 	maxPluginConnections := flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
 
 	flag.Parse()
+
+	// Set WASM output buffer size before any Runtime is created.
+	host.OutBufSize = uint32(*wasmOutputBufferSize)
+	host.MaxWasmStringLen = uint32(*wasmMaxStringLen)
 
 	workerID := generateWorkerID()
 	log.Printf("[worker %s] Starting with concurrency=%d", workerID, *concurrency)
@@ -180,6 +188,7 @@ func main() {
 		plugMux              *http.ServeMux
 		bgWg                 sync.WaitGroup
 		ratelim              *ipRateLimiter
+		tenantLim            *keyedRateLimiter
 	)
 
 	defaultTenantID := "00000000-0000-0000-0000-000000000000"
@@ -786,6 +795,8 @@ func main() {
 					fmt.Println()
 				}
 			}
+		} else {
+			log.Printf("[worker %s] WARNING: authentication disabled (--require-auth=false). All API endpoints are open without authentication.", workerID)
 		}
 
 		// Tenant resolver middleware.
@@ -803,9 +814,10 @@ func main() {
 			})
 		}
 
-		// Create rate limiter and wrap handler.
+		// Create rate limiters and wrap handler.
 		ratelim = newIPRateLimiter(rate.Limit(*rateLimit), *rateLimitBurst)
-		handler = rateLimitMiddleware(ratelim)(handler)
+		tenantLim = newKeyedRateLimiter()
+		handler = rateLimitMiddleware(ratelim, tenantLim, rate.Limit(*rateLimitPerTenant), *rateLimitPerTenantBurst)(handler)
 
 		srv := &http.Server{
 			Addr:         *apiAddr,
@@ -835,6 +847,9 @@ func main() {
 		cancel()
 		if ratelim != nil {
 			ratelim.stop()
+		}
+		if tenantLim != nil {
+			tenantLim.stop()
 		}
 		log.Printf("[worker %s] waiting for background workers to stop...", workerID)
 		done := make(chan struct{})
@@ -1161,6 +1176,8 @@ func (w *Worker) dispatchLoop() {
 		w.memoryController.Tick(w.ctx)
 		state := w.memoryController.State()
 		updateMemoryMetrics(state)
+		SetQueueDepth(state.QueueDepth)
+		updateThroughputGauges()
 
 		if !w.memoryController.CanClaim() {
 			time.Sleep(w.pollInterval)
@@ -1563,6 +1580,15 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		replayDuration.Observe(engineElapsed.Seconds())
 	} else {
 		freshDuration.WithLabelValues(wf.DefName).Observe(engineElapsed.Seconds())
+	}
+	// Update throughput gauges (events/sec).
+	if engineElapsed.Seconds() > 0 {
+		eventsPerSec := float64(len(resultHistory)) / engineElapsed.Seconds()
+		if len(history) > 0 {
+			SetReplayThroughput(eventsPerSec)
+		} else {
+			SetFreshThroughput(eventsPerSec)
+		}
 	}
 	if err != nil {
 		log.Printf("[worker %s] %s: execution error: %v", w.id, wf.ID, err)
@@ -2699,22 +2725,92 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// keyedRateLimiter provides per-key token-bucket rate limiting. Each key
+// (tenant UUID, API key hash, etc.) gets its own rate.Limiter with the given
+// rate and burst. Includes periodic cleanup of stale entries.
+type keyedRateLimiter struct {
+	mu     sync.Mutex
+	limits map[string]*rateLimiterEntry
+	stopCh chan struct{}
+}
+
+func newKeyedRateLimiter() *keyedRateLimiter {
+	rl := &keyedRateLimiter{
+		limits: make(map[string]*rateLimiterEntry),
+		stopCh: make(chan struct{}),
+	}
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				rl.mu.Lock()
+				now := time.Now()
+				for key, entry := range rl.limits {
+					if now.Sub(entry.lastUsed) > time.Hour {
+						delete(rl.limits, key)
+					}
+				}
+				rl.mu.Unlock()
+			case <-rl.stopCh:
+				return
+			}
+		}
+	}()
+	return rl
+}
+
+func (rl *keyedRateLimiter) stop() {
+	close(rl.stopCh)
+}
+
+// allow checks whether the key has a token available. If the key has no
+// existing limiter, one is created with the given rate and burst.
+func (rl *keyedRateLimiter) allow(key string, r rate.Limit, burst int) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	entry, ok := rl.limits[key]
+	if !ok {
+		entry = &rateLimiterEntry{
+			limiter: rate.NewLimiter(r, burst),
+		}
+		rl.limits[key] = entry
+	}
+	entry.lastUsed = time.Now()
+	return entry.limiter.Allow()
+}
+
+// write429 sends a JSON 429 Too Many Requests response.
+func write429(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", "1")
+	w.WriteHeader(http.StatusTooManyRequests)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error":          msg,
+		"retry_after_ms": 1000,
+	})
+}
+
 // rateLimitMiddleware returns an HTTP middleware that rate-limits requests
-// per client IP. On rate limit exceeded, it returns HTTP 429 with a JSON
-// error body and a Retry-After header.
-func rateLimitMiddleware(rl *ipRateLimiter) func(http.Handler) http.Handler {
+// per client IP, and optionally per tenant. On rate limit exceeded, it returns
+// HTTP 429 with a JSON error body and a Retry-After header.
+func rateLimitMiddleware(ipLim *ipRateLimiter, tenantLim *keyedRateLimiter, tenantRate rate.Limit, tenantBurst int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := clientIP(r)
-			if !rl.allow(ip) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Retry-After", "1")
-				w.WriteHeader(http.StatusTooManyRequests)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"error":          "rate limit exceeded",
-					"retry_after_ms": 1000,
-				})
+			// Tier 1: IP-based rate limit (always active).
+			if !ipLim.allow(clientIP(r)) {
+				write429(w, "rate limit exceeded")
 				return
+			}
+			// Tier 2: per-tenant rate limit (only when configured).
+			if tenantRate > 0 {
+				if tid, ok := auth.TenantIDFromContext(r.Context()); ok {
+					if !tenantLim.allow(tid.String(), tenantRate, tenantBurst) {
+						write429(w, "tenant rate limit exceeded")
+						return
+					}
+				}
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -3668,4 +3764,36 @@ func baseDSNFromDSN(dsn string) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+// Throughput gauge state — periodically updated from the dispatch loop.
+var (
+	lastReplayStepCount int64
+	lastFreshStepCount  int64
+	lastThroughputTime  time.Time
+)
+
+// updateThroughputGauges computes the current replay and fresh step throughput
+// from the atomic step counters in the host package and sets the gauges.
+func updateThroughputGauges() {
+	now := time.Now()
+	elapsed := now.Sub(lastThroughputTime).Seconds()
+	if elapsed < 5 {
+		return
+	}
+	replayCur := host.ReplayStepCount()
+	freshCur := host.FreshStepCount()
+	if lastThroughputTime.IsZero() {
+		lastReplayStepCount = replayCur
+		lastFreshStepCount = freshCur
+		lastThroughputTime = now
+		return
+	}
+	replayDelta := float64(replayCur - lastReplayStepCount)
+	freshDelta := float64(freshCur - lastFreshStepCount)
+	replayThroughput.Set(replayDelta / elapsed)
+	freshThroughput.Set(freshDelta / elapsed)
+	lastReplayStepCount = replayCur
+	lastFreshStepCount = freshCur
+	lastThroughputTime = now
 }
