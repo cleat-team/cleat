@@ -3,6 +3,7 @@ package auditlog
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"time"
 
@@ -63,7 +64,7 @@ func (p *Plugin) recordAudit(ctx context.Context, tenantID uuid.UUID, method, pa
 			INSERT INTO audit_events (tenant_id, method, path, status_code, user_id, ip_address, user_agent, duration_ms)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		`, p.dialect), tenantID, method, path, statusCode, "", ipAddress, userAgent, durationMs)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		p.logger.Error("audit-log: record event", "error", err)
 	}
 }

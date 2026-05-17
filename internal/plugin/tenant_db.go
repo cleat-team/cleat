@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -58,7 +59,7 @@ func (tp *TenantPools) For(ctx context.Context, tenantID uuid.UUID) (*sql.DB, er
 		`SELECT role_name, password FROM admin.tenant_roles WHERE tenant_id = $1`,
 		tenantID).Scan(&roleName, &password)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			log.Printf("tenant pool: no role for tenant %s — falling back to owner pool (single-tenant mode)", tenantID)
 			return tp.OwnerDB, nil
 		}

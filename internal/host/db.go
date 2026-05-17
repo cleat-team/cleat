@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1472,7 +1473,7 @@ func (s *PostgresStore) LoadWASM(ctx context.Context, defName string, defVersion
 	err = tx.QueryRowContext(ctx, `
 		SELECT wasm_bytes FROM workflow_defs WHERE name = $1 AND version = $2
 	`, defName, defVersion).Scan(&wasmBytes)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
@@ -1522,7 +1523,7 @@ func (s *PostgresStore) LoadWorkflowConfig(ctx context.Context, defName string, 
 	err = tx.QueryRowContext(ctx, `
 		SELECT max_history_length FROM workflow_defs WHERE name = $1 AND version = $2
 	`, defName, defVersion).Scan(&maxHistoryLength)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
@@ -1543,7 +1544,7 @@ func (s *PostgresStore) LoadDAGSpec(ctx context.Context, defName string, defVers
 	err = tx.QueryRowContext(ctx, `
 		SELECT dag_spec FROM workflow_defs WHERE name = $1 AND version = $2
 	`, defName, defVersion).Scan(&spec)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
@@ -1678,7 +1679,7 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 		FROM workflow_defs WHERE name = $1 AND version = $2
 	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
 		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.Deprecated)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
 	if err != nil {
@@ -2123,7 +2124,7 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 		WHERE workflow_id = $1 AND signal_name = $2
 		RETURNING payload
 	`, workflowID, signalName).Scan(&payload)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, tx.Rollback()
 	}
 	if err != nil {
@@ -2152,7 +2153,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		if err == nil {
 			return existingWfID, true, nil
 		}
-		if err != sql.ErrNoRows {
+		if !errors.Is(err, sql.ErrNoRows) {
 			return "", false, err
 		}
 
@@ -2325,7 +2326,7 @@ func (s *PostgresStore) GetChildResult(ctx context.Context, runID string) (strin
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(result, '{}'), status FROM workflow_instances WHERE id = $1
 	`, runID).Scan(&result, &status)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, tx.Commit()
 	}
 	if err != nil {
@@ -2383,7 +2384,7 @@ func (s *PostgresStore) GetChildResultInSchema(ctx context.Context, targetSchema
 	q := fmt.Sprintf(`SELECT COALESCE(result, '{}'), status FROM %s.workflow_instances WHERE id = $1`,
 		pq.QuoteIdentifier(targetSchema))
 	err := s.db.QueryRowContext(ctx, q, runID).Scan(&result, &status)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
@@ -2460,7 +2461,7 @@ func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID 
 	var raw sql.NullString
 	err = tx.QueryRowContext(ctx,
 		`SELECT allowed_signals FROM workflow_instances WHERE id = $1`, workflowID).Scan(&raw)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
 	if err != nil {
@@ -2488,7 +2489,7 @@ func (s *PostgresStore) GetQueryState(ctx context.Context, workflowID, key strin
 	err = tx.QueryRowContext(ctx, `
 		SELECT query_state ->> $2 FROM workflow_instances WHERE id = $1
 	`, workflowID, key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", tx.Commit()
 	}
 	if err != nil {
@@ -2607,7 +2608,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.TraceID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
 	if err != nil {
@@ -2842,7 +2843,7 @@ func (s *PostgresStore) LoadCompactionState(ctx context.Context, workflowID stri
 		SELECT compaction_state FROM workflow_instances
 		WHERE id = $1
 	`, workflowID).Scan(&rawJSON)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
 	if err != nil {
@@ -2946,7 +2947,7 @@ func (s *PostgresStore) GetPromise(ctx context.Context, workflowID, promiseID st
 		SELECT status, result::text, error_msg FROM workflow_promises
 		WHERE workflow_id = $1 AND promise_id = $2
 	`, workflowID, promiseID).Scan(&status, &resultStr, &errStr)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "pending", "", "", tx.Commit()
 	}
 	if err != nil {
@@ -3019,7 +3020,7 @@ func (s *PostgresStore) AcquireConcurrencyKey(ctx context.Context, key, workflow
 		RETURNING workflow_id
 	`, key, workflowID, fmt.Sprintf("%d seconds", int(ttl.Seconds())), s.tenantID).Scan(&returnedWorkflowID)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {

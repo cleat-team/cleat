@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -82,7 +83,7 @@ func (s *MySQLStore) GetPromise(ctx context.Context, workflowID, promiseID strin
 		SELECT status, CAST(result AS CHAR), error_msg FROM workflow_promises
 		WHERE workflow_id = ? AND promise_id = ?
 	`, workflowID, promiseID).Scan(&status, &resultStr, &errStr)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "pending", "", "", nil
 	}
 	if err != nil {
@@ -213,7 +214,7 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	err = s.db.QueryRowContext(ctx, `
 		SELECT workflow_id FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?
 	`, keyHash, s.tenantID).Scan(&ownerID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -401,7 +402,7 @@ func (s *MySQLStore) LoadCompactionState(ctx context.Context, workflowID string)
 		SELECT compaction_state FROM workflow_instances
 		WHERE id = ? AND tenant_id = ?
 	`, workflowID, s.tenantID).Scan(&rawJSON)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -533,7 +534,7 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg,
 		&errorCode, &errorOp, &wf.TraceID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -561,7 +562,7 @@ func (s *MySQLStore) LoadWASM(ctx context.Context, defName string, defVersion in
 	err := s.db.QueryRowContext(ctx, `
 		SELECT wasm_bytes FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
 	`, defName, defVersion, s.tenantID).Scan(&wasmBytes)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
@@ -597,7 +598,7 @@ func (s *MySQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 	err := s.db.QueryRowContext(ctx, `
 		SELECT max_history_length FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
 	`, defName, defVersion, s.tenantID).Scan(&maxHistoryLength)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
@@ -612,7 +613,7 @@ func (s *MySQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion
 	err := s.db.QueryRowContext(ctx, `
 		SELECT dag_spec FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
 	`, defName, defVersion, s.tenantID).Scan(&spec)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
@@ -709,7 +710,7 @@ func (s *MySQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 		FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
 	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
 		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.Deprecated)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

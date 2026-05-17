@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -414,7 +415,7 @@ func checkSinglePluginUpdate(ctx context.Context, db *sql.DB, idx *plugin.Plugin
 	err := db.QueryRowContext(ctx,
 		`SELECT version FROM plugin_defs WHERE name = $1 AND NOT deprecated ORDER BY version DESC LIMIT 1`,
 		name).Scan(&currentVersion)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		fmt.Printf("%s: not installed\n", name)
 		return
 	}

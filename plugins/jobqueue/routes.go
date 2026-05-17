@@ -2,6 +2,7 @@ package jobqueue
 
 import (
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -243,7 +244,7 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		&payloadRaw, &j.CreatedAt,
 		&startedAt, &completedAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "job not found")
 		return
 	}

@@ -3,6 +3,7 @@ package scheduledbackup
 import (
 	"bytes"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -80,7 +81,7 @@ func (p *Plugin) cliBackupRun(cmds []string) error {
 		SELECT name, cron, s3_bucket, s3_prefix, retention_days
 		FROM backup_config WHERE id = $1 AND tenant_id = $2
 	`, configID, tenantID).Scan(&name, &cronExpr, &s3Bucket, &s3Prefix, &retentionDays)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("backup config not found")
 	}
 	if err != nil {

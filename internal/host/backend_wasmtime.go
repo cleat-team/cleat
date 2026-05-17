@@ -342,7 +342,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	}
 
 	if callErr != nil {
-		return nil, fmt.Errorf("host: export %q: %v", entryPoint, callErr)
+		return nil, fmt.Errorf("host: export %q: %w", entryPoint, callErr)
 	}
 
 	if results == nil {

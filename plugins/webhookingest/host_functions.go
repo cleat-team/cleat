@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -98,7 +99,7 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 	err := p.db.QueryRow(ctx, plugin.Rebind(query, p.dialect), args...).Scan(
 		&eventID, &eventType, &payloadRaw, &receivedAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		output := awaitWebhookOutput{Found: false}
 		outJSON, _ := json.Marshal(output)
 		return string(outJSON), nil

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -107,7 +108,7 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	`, p.dialect), sourceID).Scan(&source.ID, &source.TenantID, &source.Name, &source.SourceType,
 		&source.Secret, &source.Enabled, &source.SignalWorkflowID, &source.SignalName,
 		&source.CreatedAt, &source.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "source not found")
 		return
 	}
@@ -408,7 +409,7 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 	`, p.dialect), id, tid).Scan(&s.ID, &s.TenantID, &s.Name, &s.SourceType,
 		&s.Secret, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
 		&s.CreatedAt, &s.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "source not found")
 		return
 	}

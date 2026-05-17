@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -103,7 +104,7 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 		FROM pgvector_collections
 		WHERE name = $1
 	`, input.Collection).Scan(&collectionID, &dimensions)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
 	if err != nil {
@@ -206,7 +207,7 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 	err := p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
 	`, input.Collection).Scan(&collectionID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
 	if err != nil {
@@ -306,7 +307,7 @@ func (p *Plugin) delete(ctx context.Context, inputJSON string) (string, error) {
 	err := p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
 	`, input.Collection).Scan(&collectionID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
 	if err != nil {

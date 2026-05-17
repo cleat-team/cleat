@@ -2,6 +2,7 @@ package featureflags
 
 import (
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -219,7 +220,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 			WHERE id = $1 AND tenant_id = $2
 		`, p.dialect), id, tid).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 		&f.Enabled, &f.Rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "feature flag not found")
 		return
 	}
@@ -410,7 +411,7 @@ func (p *Plugin) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 			WHERE tenant_id = $1 AND key = $2
 		`, p.dialect), tid, req.Key).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 		&f.Enabled, &f.Rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "feature flag not found")
 		return
 	}

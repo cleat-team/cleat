@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -129,7 +130,7 @@ func (l *WorkflowLoader) Load(ctx context.Context, name string, version int) (wa
 			FROM workflow_defs
 			WHERE name = $1 AND version = $2 AND NOT deprecated
 		`, name, version).Scan(&wasmBytes, &abiVersion, &pluginDepsJSON, &minVer)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			l.misses.Add(1)
 			return nil, fmt.Errorf("workflow def not found or deprecated: %s v%d", name, version)
 		}

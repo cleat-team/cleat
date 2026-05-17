@@ -516,7 +516,7 @@ func (s *MySQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		if err == nil {
 			return existingWfID, true, nil
 		}
-		if err != sql.ErrNoRows {
+		if !errors.Is(err, sql.ErrNoRows) {
 			return "", false, err
 		}
 
@@ -1050,7 +1050,7 @@ func (s *MySQLStore) GetChildResult(ctx context.Context, runID string) (string, 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(result, '{}'), status FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, runID, s.tenantID).Scan(&result, &status)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
@@ -1094,7 +1094,7 @@ func (s *MySQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT JSON_UNQUOTE(JSON_EXTRACT(query_state, ?)) FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, "$."+key, workflowID, s.tenantID).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
@@ -1581,7 +1581,7 @@ func (s *MySQLStore) PollSignal(ctx context.Context, workflowID, signalName stri
 		SELECT payload FROM workflow_signals
 		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
 	`, workflowID, signalName, s.tenantID).Scan(&payload)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
@@ -1600,7 +1600,7 @@ func (s *MySQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID str
 	var raw sql.NullString
 	err := s.db.QueryRowContext(ctx,
 		`SELECT allowed_signals FROM workflow_instances WHERE id = ?`, workflowID).Scan(&raw)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -1633,7 +1633,7 @@ func (s *MySQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
 		FOR UPDATE
 	`, workflowID, signalName, s.tenantID).Scan(&payload)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		tx.Rollback()
 		return "", false, nil
 	}

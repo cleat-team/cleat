@@ -3,6 +3,7 @@ package featureflags
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 
@@ -75,7 +76,7 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		&id, &tenantID, &key, &name, &description,
 		&enabled, &rulesJSON, &rolloutPercentage,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("feature-flags: flag not found: %s", input.Key)
 	}
 	if err != nil {

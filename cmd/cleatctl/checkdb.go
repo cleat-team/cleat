@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -57,10 +58,10 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 		ORDER BY version DESC
 		LIMIT 1
 	`).Scan(&schemaVersion, &appliedAt)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		fmt.Fprintf(os.Stderr, "SCHEMA: WARNING: cannot read schema version: %v\n", err)
 		issues = append(issues, fmt.Sprintf("schema version check failed: %v", err))
-	} else if err == sql.ErrNoRows {
+	} else if errors.Is(err, sql.ErrNoRows) {
 		fmt.Println("SCHEMA: no migrations applied yet (empty or fresh database)")
 		if verbose {
 			fmt.Println("  version: (none)")

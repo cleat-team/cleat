@@ -2,6 +2,7 @@ package slacknotify
 
 import (
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -191,7 +192,7 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			FROM slack_config
 			WHERE id = $1 AND tenant_id = $2
 		`, p.dialect), id, tid).Scan(&c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "config not found")
 		return
 	}

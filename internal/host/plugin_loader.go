@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -297,7 +298,7 @@ func (l *PluginLoader) LoadPlugin(ctx context.Context, name string, version stri
 		SELECT wasm_bytes FROM plugin_defs
 		WHERE name = $1 AND version = $2 AND NOT deprecated
 	`, name, version).Scan(&wasmBytes)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("plugin not found or deprecated: %s v%s", name, version)
 	}
 	if err != nil {

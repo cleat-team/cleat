@@ -7,6 +7,7 @@ import (
 	"database/sql/driver"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1280,7 +1281,7 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 		if err == nil {
 			return existingWfID, true, nil
 		}
-		if err != sql.ErrNoRows {
+		if !errors.Is(err, sql.ErrNoRows) {
 			return "", false, err
 		}
 
@@ -1516,7 +1517,7 @@ func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion in
 	err := s.db.QueryRowContext(ctx, `
 		SELECT wasm_bytes FROM workflow_defs WHERE name = @p1 AND version = @p2
 	`, defName, defVersion).Scan(&wasmBytes)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
@@ -1552,7 +1553,7 @@ func (s *MSSQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 	err := s.db.QueryRowContext(ctx, `
 		SELECT max_history_length FROM workflow_defs WHERE name = @p1 AND version = @p2
 	`, defName, defVersion).Scan(&maxHistoryLength)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
@@ -1567,7 +1568,7 @@ func (s *MSSQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion
 	err := s.db.QueryRowContext(ctx, `
 		SELECT dag_spec FROM workflow_defs WHERE name = @p1 AND version = @p2
 	`, defName, defVersion).Scan(&spec)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
@@ -1628,7 +1629,7 @@ func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName stri
 		SELECT payload FROM workflow_signals
 		WHERE workflow_id = @p1 AND signal_name = @p2 AND tenant_id = @p3
 	`, workflowID, signalName, s.tenantID).Scan(&payload)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
@@ -1647,7 +1648,7 @@ func (s *MSSQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID str
 	var raw sql.NullString
 	err := s.db.QueryRowContext(ctx,
 		`SELECT allowed_signals FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&raw)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -1681,7 +1682,7 @@ func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 		OUTPUT DELETED.payload
 		WHERE workflow_id = @p1 AND signal_name = @p2
 	`, workflowID, signalName).Scan(&payload)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, tx.Rollback()
 	}
 	if err != nil {
@@ -1770,7 +1771,7 @@ func (s *MSSQLStore) GetChildResult(ctx context.Context, runID string) (string, 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT ISNULL(result, '{}'), status FROM workflow_instances WHERE id = @p1
 	`, runID).Scan(&result, &status)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
 	if err != nil {
@@ -1836,7 +1837,7 @@ func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT JSON_VALUE(query_state, '$.' + @p2) FROM workflow_instances WHERE id = @p1
 	`, workflowID, key).Scan(&value)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
@@ -1945,7 +1946,7 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.TraceID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
@@ -2093,7 +2094,7 @@ func (s *MSSQLStore) LoadCompactionState(ctx context.Context, workflowID string)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT CAST(compaction_state AS NVARCHAR(MAX)) FROM workflow_instances WHERE id = @p1
 	`, workflowID).Scan(&stateRaw)
-	if err == sql.ErrNoRows || !stateRaw.Valid || stateRaw.String == "" {
+	if errors.Is(err, sql.ErrNoRows) || !stateRaw.Valid || stateRaw.String == "" {
 		return nil, nil
 	}
 	if err != nil {
@@ -2193,7 +2194,7 @@ func (s *MSSQLStore) GetPromise(ctx context.Context, workflowID, promiseID strin
 		FROM workflow_promises
 		WHERE workflow_id = @p1 AND promise_id = @p2
 	`, workflowID, promiseID).Scan(&status, &result, &errMsg)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "pending", "", "", nil
 	}
 	if err != nil {
@@ -2318,7 +2319,7 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	err = tx.QueryRowContext(ctx, `
 		SELECT workflow_id FROM concurrency_keys WHERE key_hash = @p1 AND tenant_id = @p2
 	`, keyHash[:], s.tenantID).Scan(&wkID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, tx.Commit()
 	}
 	if err != nil {
@@ -2526,7 +2527,7 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 		FROM workflow_defs WHERE name = @p1 AND version = @p2
 	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
 		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.Deprecated)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {

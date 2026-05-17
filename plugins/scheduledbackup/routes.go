@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -224,7 +225,7 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 		&c.RetentionDays, &c.Enabled, &c.LastRunAt, &c.NextRunAt,
 		&c.CreatedAt, &c.UpdatedAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "backup config not found")
 		return
 	}
@@ -265,7 +266,7 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT cron, enabled FROM backup_config WHERE id = $1 AND tenant_id = $2
 	`, p.dialect), id, tid).Scan(&currentCron, &currentEnabled)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "backup config not found")
 		return
 	}
@@ -482,7 +483,7 @@ func (p *Plugin) handleRunBackup(w http.ResponseWriter, r *http.Request) {
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT name, cron FROM backup_config WHERE id = $1 AND tenant_id = $2
 	`, p.dialect), id, tid).Scan(&name, &cron)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "backup config not found")
 		return
 	}

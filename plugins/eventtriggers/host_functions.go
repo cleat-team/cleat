@@ -3,6 +3,7 @@ package eventtriggers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -80,7 +81,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		LIMIT 1
 	`, p.dialect), cc.TenantID, input.EventType).Scan(&eventID, &eventType, &eventData, &receivedAt)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		// No matching event found -- register as an awaiter so the publish
 		// handler can signal this workflow when a matching event arrives.
 		if cc.WorkflowID != "" {

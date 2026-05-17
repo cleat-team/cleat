@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -187,7 +188,7 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 		JOIN blob_content c ON i.sha256 = c.sha256
 		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
 	`, p.dialect), input.Key, cc.TenantID).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("blobstore: blob not found: %s", input.Key)
 	}
 	if err != nil {
