@@ -277,6 +277,9 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 // Default: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
 func MSSQLTestDB(t *testing.T) *sql.DB {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("Skipping MSSQL database test in short mode")
+	}
 
 	connStr := os.Getenv("CLEAT_TEST_MSSQL")
 	if connStr == "" {

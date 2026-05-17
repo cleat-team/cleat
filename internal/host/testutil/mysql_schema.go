@@ -253,6 +253,9 @@ func CleanupMySQLTestData(t *testing.T, db *sql.DB) {
 // Default: root:cleat@tcp(127.0.0.1:3306)/cleat
 func MySQLTestDB(t *testing.T) *sql.DB {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("Skipping MySQL database test in short mode")
+	}
 
 	dsn := os.Getenv("CLEAT_TEST_MYSQL")
 	if dsn == "" {
