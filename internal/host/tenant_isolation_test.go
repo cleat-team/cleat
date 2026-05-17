@@ -570,3 +570,209 @@ func TestTenantIsolation_Promises(t *testing.T) {
 		})
 	}
 }
+
+// TestTenantIsolation_Reaper verifies that ReapStaleInstances on tenant A
+// does not reclaim tenant B's running workflows.
+func TestTenantIsolation_Reaper(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			if !backend.Enabled() {
+				t.Skipf("%s backend not enabled", backend.Name())
+			}
+
+			mtBackend, ok := backend.(MultiTenantStoreBackend)
+			if !ok {
+				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+			}
+
+			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			defer teardownA()
+			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			defer teardownB()
+
+			ctx := context.Background()
+
+			def := &WorkflowDef{
+				Name:       "test-reaper",
+				Version:    1,
+				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				ABIVersion: 1,
+				MinVersion: 1,
+			}
+			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store A: %v", err)
+			}
+			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store B: %v", err)
+			}
+
+			// Create a workflow in store A.
+			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-reaper", 1,
+				json.RawMessage(`{}`), "reaper-a-1", DefaultTenantUUID)
+			if err != nil {
+				t.Fatalf("StartNewRun on store A: %v", err)
+			}
+
+			// Create a workflow in store B.
+			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-reaper", 1,
+				json.RawMessage(`{}`), "reaper-b-1", DefaultTenantUUID)
+			if err != nil {
+				t.Fatalf("StartNewRun on store B: %v", err)
+			}
+
+			// Claim both — moves them to "running" with a fresh heartbeat.
+			claimedA, err := storeA.ClaimWorkflow(ctx, "test-worker")
+			if err != nil {
+				t.Fatalf("ClaimWorkflow on store A: %v", err)
+			}
+			if claimedA == nil {
+				t.Fatal("ClaimWorkflow on store A returned nil")
+			}
+			claimedB, err := storeB.ClaimWorkflow(ctx, "test-worker")
+			if err != nil {
+				t.Fatalf("ClaimWorkflow on store B: %v", err)
+			}
+			if claimedB == nil {
+				t.Fatal("ClaimWorkflow on store B returned nil")
+			}
+
+			// Let the heartbeat age slightly so even a 1ns timeout catches it.
+			time.Sleep(10 * time.Millisecond)
+
+			// Reap stale instances from store A.
+			reaped, err := storeA.ReapStaleInstances(ctx, 1*time.Nanosecond)
+			if err != nil {
+				t.Fatalf("ReapStaleInstances on store A: %v", err)
+			}
+			if reaped < 0 {
+				t.Errorf("ReapStaleInstances returned negative count: %d", reaped)
+			}
+
+			// Store B's workflow must still be running — reaping on store A
+			// must not cross tenant boundaries.
+			wfB, err := storeB.GetWorkflowByID(ctx, runIDB)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID on store B: %v", err)
+			}
+			if wfB == nil {
+				t.Fatal("store B workflow disappeared")
+			}
+			if wfB.Status != "running" {
+				t.Errorf("ISOLATION BREACH: tenant A's reaper reclaimed tenant B's workflow %s (status=%s)", runIDB, wfB.Status)
+			}
+
+			// Cleanup: complete both workflows.
+			storeA.CompleteWorkflow(ctx, runIDA, "test-worker", 0, `{"done":true}`, nil)
+			storeB.CompleteWorkflow(ctx, runIDB, "test-worker", 0, `{"done":true}`, nil)
+		})
+	}
+}
+
+// TestTenantIsolation_ConcurrencyKeys verifies that concurrency key operations
+// (acquire, reap) respect tenant boundaries.
+func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			if !backend.Enabled() {
+				t.Skipf("%s backend not enabled", backend.Name())
+			}
+
+			mtBackend, ok := backend.(MultiTenantStoreBackend)
+			if !ok {
+				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+			}
+
+			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			defer teardownA()
+			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			defer teardownB()
+
+			ctx := context.Background()
+
+			// --- Part 1: same key, different tenants, both should acquire ---
+
+			acquiredA, err := storeA.AcquireConcurrencyKey(ctx, "iso-key", "wf-a", 60*time.Second)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey on store A: %v", err)
+			}
+			if !acquiredA {
+				t.Fatal("expected store A to acquire iso-key")
+			}
+
+			// Same key, different tenant — should succeed because tenants are isolated.
+			acquiredB, err := storeB.AcquireConcurrencyKey(ctx, "iso-key", "wf-b", 60*time.Second)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey on store B: %v", err)
+			}
+			if !acquiredB {
+				t.Error("ISOLATION BREACH: store B cannot acquire iso-key — tenant A's key leaked across tenants")
+			}
+
+			// Within the same tenant, a second workflow should NOT acquire the same key.
+			acquiredA2, err := storeA.AcquireConcurrencyKey(ctx, "iso-key", "wf-a-2", 60*time.Second)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey (second) on store A: %v", err)
+			}
+			if acquiredA2 {
+				t.Error("same-tenant acquire of held key should have returned false")
+			}
+
+			// Clean up part 1.
+			if err := storeA.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+				t.Fatalf("ReleaseConcurrencyKey on store A: %v", err)
+			}
+			if err := storeB.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+				t.Fatalf("ReleaseConcurrencyKey on store B: %v", err)
+			}
+
+			// --- Part 2: ReapExpiredConcurrencyKeys respects tenant boundaries ---
+
+			// Store B acquires a key with a long TTL.
+			acquiredLong, err := storeB.AcquireConcurrencyKey(ctx, "reap-iso-key", "wf-b-long", 300*time.Second)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey (long TTL) on store B: %v", err)
+			}
+			if !acquiredLong {
+				t.Fatal("expected store B to acquire reap-iso-key with long TTL")
+			}
+
+			// Store A acquires the same key name with a 1ns TTL (effectively expired).
+			acquiredShort, err := storeA.AcquireConcurrencyKey(ctx, "reap-iso-key", "wf-a-short", 1*time.Nanosecond)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey (short TTL) on store A: %v", err)
+			}
+			if !acquiredShort {
+				t.Fatal("expected store A to acquire reap-iso-key with short TTL")
+			}
+
+			// Give the short TTL a moment to expire.
+			time.Sleep(10 * time.Millisecond)
+
+			// Reap expired keys on store A. This must not touch store B's key.
+			reaped, err := storeA.ReapExpiredConcurrencyKeys(ctx)
+			if err != nil {
+				t.Fatalf("ReapExpiredConcurrencyKeys on store A: %v", err)
+			}
+			if reaped < 0 {
+				t.Errorf("ReapExpiredConcurrencyKeys returned negative count: %d", reaped)
+			}
+
+			// Store B's long-lived key must still be held — a second workflow
+			// should fail to acquire it within tenant B.
+			stillHeld, err := storeB.AcquireConcurrencyKey(ctx, "reap-iso-key", "wf-b-2", 60*time.Second)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey on store B after reap: %v", err)
+			}
+			if stillHeld {
+				t.Errorf("ISOLATION BREACH: tenant A's ReapExpiredConcurrencyKeys removed tenant B's non-expired key")
+			}
+
+			// Cleanup part 2.
+			if err := storeB.ReleaseConcurrencyKey(ctx, "reap-iso-key"); err != nil {
+				t.Fatalf("ReleaseConcurrencyKey on store B: %v", err)
+			}
+		})
+	}
+}

@@ -108,6 +108,22 @@ func (b *MySQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	return store, teardown
 }
 
+func (b *MySQLBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowStore, func()) {
+	t.Helper()
+	if !b.Enabled() {
+		t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
+	}
+	db := testutil.MySQLTestDB(t)
+	testutil.SetupMySQLFullSchema(t, db)
+	store := NewMySQLStore(db)
+	store.tenantID = tenantID
+	teardown := func() {
+		testutil.CleanupMySQLTestData(t, db)
+		db.Close()
+	}
+	return store, teardown
+}
+
 // MSSQLBackend implements StoreBackend for SQL Server 2017+ / Azure SQL Database.
 type MSSQLBackend struct{}
 
@@ -127,6 +143,22 @@ func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 	store := NewMSSQLStore(db)
+	teardown := func() {
+		testutil.CleanupMSSQLTestData(t, db)
+		db.Close()
+	}
+	return store, teardown
+}
+
+func (b *MSSQLBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowStore, func()) {
+	t.Helper()
+	if !b.Enabled() {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
+	db := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLFullSchema(t, db)
+	store := NewMSSQLStore(db)
+	store.tenantID = tenantID
 	teardown := func() {
 		testutil.CleanupMSSQLTestData(t, db)
 		db.Close()
