@@ -25,6 +25,8 @@ type sessionRecord struct {
 	Started          string   `json:"started"`
 	Ended            string   `json:"ended"`
 	Status           string   `json:"status"`
+	CrashLog         string   `json:"crash_log,omitempty"`
+	DurationMs       int64    `json:"duration_ms,omitempty"`
 }
 
 // readSession reads and unmarshals session.json. Returns nil if file doesn't

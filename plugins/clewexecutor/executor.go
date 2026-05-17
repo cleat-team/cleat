@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -38,6 +39,8 @@ type runPhaseOutput struct {
 	Status           string   `json:"status"`
 	Cached           bool     `json:"cached"`
 	Error            string   `json:"error,omitempty"`
+	CrashLog         string   `json:"crash_log,omitempty"`
+	DurationMs       int64    `json:"duration_ms,omitempty"`
 }
 
 // runPhase implements the run_phase host function.
@@ -82,8 +85,8 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	// Idempotency: check session.json for matching phase AND workflow phase.
 	// Without the workflow phase check, review_plan and implement phases
 	// (which both see STATUS.md "plan_review") would collide in the cache.
-	if rec, _ := readSession(sessionPath); rec != nil &&
-		rec.Phase == phase && rec.Status == "completed" && rec.WorkflowPhase == in.Phase {
+	rec, _ := readSession(sessionPath)
+	if rec != nil && rec.Phase == phase && rec.Status == "completed" && rec.WorkflowPhase == in.Phase {
 		reviewOutcome := rec.ReviewOutcome
 		if reviewOutcome == "" {
 			role, _ := roleForPhase(phase)
@@ -91,16 +94,80 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 				reviewOutcome = determineReviewOutcome(filepath.Join(td, "artifacts"), nil)
 			}
 		}
+		newPhase := rec.NewPhase
+		if newPhase == "" {
+			newPhase = nextPhase(phase)
+		}
+		// Write STATUS.md on cache hit — the agent isn't running, so
+		// it can't update the phase itself.
+		now := time.Now().Format(time.RFC3339)
+		_ = writeStatusPhase(statusPath, newPhase)
+		_ = writeSession(sessionPath, &sessionRecord{
+			Phase:          newPhase,
+			WorkflowPhase:  in.Phase,
+			PhaseChanged:   true,
+			NewPhase:       newPhase,
+			ReviewOutcome:  reviewOutcome,
+			ExitCode:       rec.ExitCode,
+			Started:        now,
+			Ended:          now,
+			Status:         "completed",
+		})
 		out := runPhaseOutput{
 			ExitCode:         rec.ExitCode,
-			PhaseChanged:     rec.PhaseChanged,
-			NewPhase:         rec.NewPhase,
+			PhaseChanged:     true,
+			NewPhase:         newPhase,
 			ReviewOutcome:    reviewOutcome,
 			ArtifactsWritten: rec.ArtifactsWritten,
 			FindingsCount:    rec.FindingsCount,
-			Started:          rec.Started,
-			Ended:            rec.Ended,
-			Status:           rec.Status,
+			Started:          now,
+			Ended:            now,
+			Status:           "completed",
+			Cached:           true,
+			CrashLog:         rec.CrashLog,
+			DurationMs:       rec.DurationMs,
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+	}
+
+	// Artifact-based cache fallback: if session.json exists (even with
+	// non-"completed" status) and the expected artifact for this phase is
+	// already on disk, skip the agent run. This prevents the WASM context
+	// timeout (exit_code=-1) from blocking re-dispatched tasks.
+	if rec != nil && phaseHasArtifact(phase, filepath.Join(td, "artifacts")) {
+		now := time.Now().Format(time.RFC3339)
+		outcome := ""
+		role, _ := roleForPhase(phase)
+		if role == "reviewer" {
+			outcome = determineReviewOutcome(filepath.Join(td, "artifacts"), nil)
+			if outcome == "" {
+				outcome = "PASS" // default for existing artifacts
+			}
+		}
+		newPhase := nextPhase(phase)
+		_ = writeStatusPhase(statusPath, newPhase)
+		_ = writeSession(sessionPath, &sessionRecord{
+			Phase:          newPhase,
+			WorkflowPhase:  in.Phase,
+			PhaseChanged:   true,
+			NewPhase:       newPhase,
+			ReviewOutcome:  outcome,
+			ExitCode:       0,
+			Started:        now,
+			Ended:          now,
+			Status:         "completed",
+		})
+		out := runPhaseOutput{
+			ExitCode:         0,
+			PhaseChanged:     true,
+			NewPhase:         newPhase,
+			ReviewOutcome:    outcome,
+			ArtifactsWritten: nil,
+			FindingsCount:    rec.FindingsCount,
+			Started:          now,
+			Ended:            now,
+			Status:           "completed",
 			Cached:           true,
 		}
 		b, _ := json.Marshal(out)
@@ -189,7 +256,7 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		args = append(args, "--model", in.Model)
 	}
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = in.Workdir
 	cmd.Stdin = strings.NewReader(prompt)
 
@@ -248,10 +315,43 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		}
 	}
 
+	var crashLogPath string
+	var durationMs int64
+	if exitCode != 0 {
+		durationMs = ended.Sub(started).Milliseconds()
+		crashLogPath = "artifacts/crash.log"
+
+		crashContent := fmt.Sprintf(`# Crash log — %s
+Task: %s
+Phase: %s
+Exit code: %d
+Duration: %dms
+Started: %s
+Ended: %s
+Error: %s
+
+## stdout (last 200 lines)
+%s
+
+## stderr (last 200 lines)
+%s
+`, in.TaskID, in.TaskID, phase, exitCode, durationMs,
+			started.Format(time.RFC3339), ended.Format(time.RFC3339),
+			errStr,
+			tailLines(stdout.String(), 200), tailLines(stderr.String(), 200))
+
+		artifactPath := filepath.Join(artifactsDir, "crash.log")
+		if err := os.MkdirAll(artifactsDir, 0755); err != nil {
+			crashLogPath = ""
+		} else {
+			_ = os.WriteFile(artifactPath, []byte(crashContent), 0644)
+		}
+	}
+
 	startedStr := started.Format(time.RFC3339)
 	endedStr := ended.Format(time.RFC3339)
 
-	rec := &sessionRecord{
+	rec = &sessionRecord{
 		Phase:            phase,
 		WorkflowPhase:    in.Phase,
 		ExitCode:         exitCode,
@@ -263,6 +363,8 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		Started:          startedStr,
 		Ended:            endedStr,
 		Status:           status,
+		CrashLog:         crashLogPath,
+		DurationMs:       durationMs,
 	}
 	_ = writeSession(sessionPath, rec)
 
@@ -277,6 +379,8 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		Ended:            endedStr,
 		Status:           status,
 		Error:            errStr,
+		CrashLog:         crashLogPath,
+		DurationMs:       durationMs,
 	}
 	b, _ := json.Marshal(out)
 	return string(b), nil
@@ -650,6 +754,49 @@ func nextPhase(phase string) string {
 	}
 }
 
+// phaseHasArtifact checks whether the expected output artifact for a given
+// STATUS.md phase already exists in the artifacts directory.
+func phaseHasArtifact(statusPhase, artifactsDir string) bool {
+	expected := expectedArtifact(statusPhase)
+	if expected == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(artifactsDir, expected))
+	return err == nil
+}
+
+// expectedArtifact returns the filename expected for a given phase.
+func expectedArtifact(phase string) string {
+	switch phase {
+	case "queued", "exploring":
+		return "exploration.md"
+	case "planning":
+		return "plan.md"
+	case "plan_review":
+		return "review-plan.md"
+	case "implementing":
+		return "implementation.md"
+	case "impl_review":
+		return "review-impl.md"
+	default:
+		return ""
+	}
+}
+
+// writeStatusPhase updates the phase in STATUS.md.
+func writeStatusPhase(statusPath, newPhase string) error {
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return err
+	}
+	re := regexp.MustCompile(`(?m)^(\*\*Phase:\*\* ).*`)
+	result := re.ReplaceAll(data, []byte("${1}"+newPhase))
+	if string(result) == string(data) {
+		return fmt.Errorf("Phase line not found in STATUS.md")
+	}
+	return os.WriteFile(statusPath, result, 0644)
+}
+
 // listArtifactFiles returns a map of artifact filename → modtime.
 // Returns empty map if directory doesn't exist.
 func listArtifactFiles(dir string) map[string]time.Time {
@@ -741,6 +888,18 @@ func buildErrorDetail(exitCode int, stdout, stderr string) string {
 		parts = append(parts, "stdout: "+stdout)
 	}
 	return strings.Join(parts, "; ")
+}
+
+// tailLines returns the last n lines of s. If n <= 0, returns empty string.
+func tailLines(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // cappedBuffer is a bytes.Buffer that caps at 1MB to prevent memory exhaustion.

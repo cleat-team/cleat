@@ -1159,3 +1159,130 @@ func (m *mockFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFun
 	}{opts.Name, opts.Idempotent})
 	return nil
 }
+
+func TestCrashArtifactWrittenOnNonZeroExit(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "implementing")
+
+	artifactsDir := filepath.Join(root, "projects", "testproj", "test-task", "artifacts")
+	os.MkdirAll(artifactsDir, 0755)
+	mockScript := filepath.Join(root, "mock-fail.sh")
+	os.WriteFile(mockScript, []byte(`#!/bin/sh
+echo "this is stderr output" >&2
+echo "this is stdout output"
+exit 3
+`), 0755)
+	p.agentBin = mockScript
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if out.ExitCode != 3 {
+		t.Errorf("expected exit_code 3, got %d", out.ExitCode)
+	}
+	if out.Status != "failed" {
+		t.Errorf("expected status 'failed', got %q", out.Status)
+	}
+	if out.CrashLog != "artifacts/crash.log" {
+		t.Errorf("expected CrashLog 'artifacts/crash.log', got %q", out.CrashLog)
+	}
+	if out.DurationMs <= 0 {
+		t.Errorf("expected DurationMs > 0, got %d", out.DurationMs)
+	}
+
+	// Verify crash.log file exists and has content.
+	crashPath := filepath.Join(artifactsDir, "crash.log")
+	data, err := os.ReadFile(crashPath)
+	if err != nil {
+		t.Fatalf("crash.log not found at %s: %v", crashPath, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "Exit code: 3") {
+		t.Error("crash.log missing exit code")
+	}
+	if !strings.Contains(content, "this is stderr output") {
+		t.Error("crash.log missing stderr content")
+	}
+	if !strings.Contains(content, "this is stdout output") {
+		t.Error("crash.log missing stdout content")
+	}
+	if !strings.Contains(content, "Phase: implementing") {
+		t.Error("crash.log missing phase")
+	}
+	if !strings.Contains(content, "Duration:") {
+		t.Error("crash.log missing duration")
+	}
+
+	// Verify session.json has crash fields.
+	sessionPath := filepath.Join(root, "projects", "testproj", "test-task", "session.json")
+	sessData, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatalf("session.json not found: %v", err)
+	}
+	if !strings.Contains(string(sessData), `"crash_log"`) {
+		t.Error("session.json missing crash_log field")
+	}
+	if !strings.Contains(string(sessData), `"duration_ms"`) {
+		t.Error("session.json missing duration_ms field")
+	}
+}
+
+func TestNoCrashArtifactOnSuccess(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "implementing")
+	// agentBin = "true" (set by setupRunPhaseTest) exits 0
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+	outJSON, _ := p.runPhase(context.Background(), string(inputJSON))
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.CrashLog != "" {
+		t.Errorf("expected empty CrashLog on success, got %q", out.CrashLog)
+	}
+	if out.DurationMs != 0 {
+		t.Errorf("expected DurationMs 0 on success, got %d", out.DurationMs)
+	}
+
+	// Verify no crash.log was written.
+	artifactsDir := filepath.Join(root, "projects", "testproj", "test-task", "artifacts")
+	crashPath := filepath.Join(artifactsDir, "crash.log")
+	if _, err := os.Stat(crashPath); err == nil {
+		t.Error("crash.log should not exist on success")
+	}
+}
+
+func TestCrashArtifactWithEmptyOutput(t *testing.T) {
+	root, p := setupRunPhaseTest(t, "implementing")
+	p.agentBin = "false" // exits 1, no output
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+	}
+	inputJSON, _ := json.Marshal(in)
+	p.runPhase(context.Background(), string(inputJSON))
+
+	artifactsDir := filepath.Join(root, "projects", "testproj", "test-task", "artifacts")
+	data, _ := os.ReadFile(filepath.Join(artifactsDir, "crash.log"))
+	content := string(data)
+	if !strings.Contains(content, "Exit code: 1") {
+		t.Error("crash.log missing exit code for empty-output crash")
+	}
+}
