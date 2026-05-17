@@ -206,7 +206,8 @@ CREATE TABLE IF NOT EXISTS concurrency_keys (
     key_text TEXT NOT NULL,
     workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
     acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL,
+    tenant_id UUID
 );
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     key_hash    BYTEA NOT NULL PRIMARY KEY,

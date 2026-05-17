@@ -178,7 +178,8 @@ CREATE TABLE IF NOT EXISTS concurrency_keys (
     key_text           TEXT NOT NULL,
     workflow_id        VARCHAR(255) NOT NULL,
     acquired_at        TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-    expires_at         TIMESTAMP(6) NOT NULL
+    expires_at         TIMESTAMP(6) NOT NULL,
+    tenant_id          CHAR(36)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (

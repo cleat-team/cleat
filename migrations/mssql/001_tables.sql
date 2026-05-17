@@ -250,6 +250,7 @@ CREATE TABLE dbo.concurrency_keys (
     workflow_id     NVARCHAR(255)   NOT NULL,
     acquired_at     DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),
     expires_at      DATETIMEOFFSET  NOT NULL,
+    tenant_id       UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     CONSTRAINT pk_concurrency_keys PRIMARY KEY (key_hash),
     CONSTRAINT fk_concurrency_keys_workflow FOREIGN KEY (workflow_id)
         REFERENCES dbo.workflow_instances(id)
