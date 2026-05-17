@@ -1,0 +1,5 @@
+name: clew-task-lifecycle
+language: go
+entry_points:
+  - name: HandleIncident
+    function: HandleIncident

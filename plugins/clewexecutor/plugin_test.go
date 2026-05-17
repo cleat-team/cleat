@@ -517,6 +517,45 @@ func TestRunPhaseIdempotent(t *testing.T) {
 	if out2.Started != out1.Started {
 		t.Errorf("cached started mismatch: %q vs %q", out2.Started, out1.Started)
 	}
+
+	// Reviewer phase: verify ReviewOutcome is preserved in cache.
+	t.Run("reviewer", func(t *testing.T) {
+		root2, p2 := setupRunPhaseTest(t, "plan_review")
+		artifactsDir := filepath.Join(root2, "projects", "testproj", "test-task", "artifacts")
+		os.MkdirAll(artifactsDir, 0755)
+		os.WriteFile(filepath.Join(artifactsDir, "review-plan.md"), []byte("[OUTCOME:PASS]\n"), 0644)
+
+		in2 := runPhaseInput{
+			TaskID:      "test-task",
+			Project:     "testproj",
+			ProjectRoot: root2,
+			Workdir:     root2,
+		}
+		inputJSON2, _ := json.Marshal(in2)
+
+		outJSON1, err := p2.runPhase(context.Background(), string(inputJSON2))
+		if err != nil {
+			t.Fatalf("first runPhase() (reviewer) error: %v", err)
+		}
+		var r1 runPhaseOutput
+		json.Unmarshal([]byte(outJSON1), &r1)
+		if r1.ReviewOutcome != "PASS" {
+			t.Errorf("expected ReviewOutcome PASS on first call, got %q", r1.ReviewOutcome)
+		}
+
+		outJSON2, err := p2.runPhase(context.Background(), string(inputJSON2))
+		if err != nil {
+			t.Fatalf("second runPhase() (reviewer) error: %v", err)
+		}
+		var r2 runPhaseOutput
+		json.Unmarshal([]byte(outJSON2), &r2)
+		if !r2.Cached {
+			t.Error("expected Cached: true on second reviewer invocation")
+		}
+		if r2.ReviewOutcome != "PASS" {
+			t.Errorf("expected cached ReviewOutcome PASS, got %q", r2.ReviewOutcome)
+		}
+	})
 }
 
 func TestRunPhaseRoleOverride(t *testing.T) {
