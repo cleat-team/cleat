@@ -570,3 +570,292 @@ func TestTenantIsolation_Promises(t *testing.T) {
 		})
 	}
 }
+
+// TestTenantIsolation_Reaper verifies that ReapStaleInstances on tenant A
+// does not reclaim tenant B's running workflows.
+func TestTenantIsolation_Reaper(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			if !backend.Enabled() {
+				t.Skipf("%s backend not enabled", backend.Name())
+			}
+
+			mtBackend, ok := backend.(MultiTenantStoreBackend)
+			if !ok {
+				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+			}
+
+			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			defer teardownA()
+			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			defer teardownB()
+
+			ctx := context.Background()
+
+			def := &WorkflowDef{
+				Name:       "test-reaper",
+				Version:    1,
+				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				ABIVersion: 1,
+				MinVersion: 1,
+			}
+			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store A: %v", err)
+			}
+			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store B: %v", err)
+			}
+
+			// Create a workflow in store A.
+			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-reaper", 1,
+				json.RawMessage(`{}`), "reaper-a-1", DefaultTenantUUID)
+			if err != nil {
+				t.Fatalf("StartNewRun on store A: %v", err)
+			}
+
+			// Create a workflow in store B.
+			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-reaper", 1,
+				json.RawMessage(`{}`), "reaper-b-1", DefaultTenantUUID)
+			if err != nil {
+				t.Fatalf("StartNewRun on store B: %v", err)
+			}
+
+			// Claim both — moves them to "running" with a fresh heartbeat.
+			claimedA, err := storeA.ClaimWorkflow(ctx, "test-worker")
+			if err != nil {
+				t.Fatalf("ClaimWorkflow on store A: %v", err)
+			}
+			if claimedA == nil {
+				t.Fatal("ClaimWorkflow on store A returned nil")
+			}
+			if claimedA.Status != "running" {
+				t.Fatalf("ClaimWorkflow on store A returned status %q, want %q", claimedA.Status, "running")
+			}
+			claimedB, err := storeB.ClaimWorkflow(ctx, "test-worker")
+			if err != nil {
+				t.Fatalf("ClaimWorkflow on store B: %v", err)
+			}
+			if claimedB == nil {
+				t.Fatal("ClaimWorkflow on store B returned nil")
+			}
+			if claimedB.Status != "running" {
+				t.Fatalf("ClaimWorkflow on store B returned status %q, want %q", claimedB.Status, "running")
+			}
+
+			// Let the heartbeat age slightly so even a 1ns timeout catches it.
+			time.Sleep(10 * time.Millisecond)
+
+			// Reap stale instances from store A.
+			reaped, err := storeA.ReapStaleInstances(ctx, 1*time.Nanosecond)
+			if err != nil {
+				t.Fatalf("ReapStaleInstances on store A: %v", err)
+			}
+			if reaped < 1 {
+				t.Errorf("expected storeA to reap at least 1 stale instance, got %d", reaped)
+			}
+
+			// storeA's own workflow must have been reaped.
+			wfA, err := storeA.GetWorkflowByID(ctx, runIDA)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID on store A after reap: %v", err)
+			}
+			if wfA == nil {
+				t.Fatal("store A workflow disappeared")
+			}
+			if wfA.Status != "ready" {
+				t.Errorf("own-tenant reaper did not reclaim workflow %s (status=%s)", runIDA, wfA.Status)
+			}
+
+			// Store B's workflow must still be running — reaping on store A
+			// must not cross tenant boundaries.
+			wfB, err := storeB.GetWorkflowByID(ctx, runIDB)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID on store B: %v", err)
+			}
+			if wfB == nil {
+				t.Fatal("store B workflow disappeared")
+			}
+			if wfB.Status != "running" {
+				t.Errorf("ISOLATION BREACH: tenant A's reaper reclaimed tenant B's workflow %s (status=%s)", runIDB, wfB.Status)
+			}
+
+			// Verify storeB's own reaper also works (own-tenant reaping).
+			reapedB, err := storeB.ReapStaleInstances(ctx, 1*time.Nanosecond)
+			if err != nil {
+				t.Fatalf("ReapStaleInstances on store B: %v", err)
+			}
+			if reapedB < 1 {
+				t.Errorf("expected storeB to reap at least 1 stale instance, got %d", reapedB)
+			}
+			wfBAfter, err := storeB.GetWorkflowByID(ctx, runIDB)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID on store B after own reap: %v", err)
+			}
+			if wfBAfter.Status != "ready" {
+				t.Errorf("own-tenant reaper did not reclaim workflow %s (status=%s)", runIDB, wfBAfter.Status)
+			}
+
+			// Cleanup: claim and complete both workflows.
+			claimedA, _ = storeA.ClaimWorkflow(ctx, "test-worker")
+			if claimedA != nil {
+				storeA.CompleteWorkflow(ctx, runIDA, "test-worker", 0, `{"done":true}`, nil)
+			}
+			claimedB, _ = storeB.ClaimWorkflow(ctx, "test-worker")
+			if claimedB != nil {
+				storeB.CompleteWorkflow(ctx, runIDB, "test-worker", 0, `{"done":true}`, nil)
+			}
+		})
+	}
+}
+
+// TestTenantIsolation_ConcurrencyKeys verifies that concurrency key operations
+// (acquire, reap) respect tenant boundaries.
+func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			if !backend.Enabled() {
+				t.Skipf("%s backend not enabled", backend.Name())
+			}
+
+			mtBackend, ok := backend.(MultiTenantStoreBackend)
+			if !ok {
+				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+			}
+
+			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			defer teardownA()
+			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			defer teardownB()
+
+			ctx := context.Background()
+
+			// --- Part 1: Acquire/release cross-tenant isolation ---
+			// concurrency_keys has PRIMARY KEY (key_hash) alone, so two tenants
+			// cannot simultaneously hold the same key name. The test works within
+			// this constraint, verifying tenant-scoped release isolation and
+			// sequential reuse across tenants.
+
+			acquired, err := storeA.AcquireConcurrencyKey(ctx, "iso-key", "wf-a", 60*time.Second)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey on store A: %v", err)
+			}
+			if !acquired {
+				t.Fatal("expected store A to acquire iso-key")
+			}
+
+			// storeA can see its own key.
+			count, err := storeA.GetConcurrencyKeyCount(ctx, "wf-a")
+			if err != nil {
+				t.Fatalf("GetConcurrencyKeyCount on store A: %v", err)
+			}
+			if count < 1 {
+				t.Errorf("expected >= 1 concurrency keys for wf-a, got %d", count)
+			}
+
+			// Same-tenant conflict: second workflow in storeA cannot acquire.
+			acquired, err = storeA.AcquireConcurrencyKey(ctx, "iso-key", "wf-a-2", 60*time.Second)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey (second) on store A: %v", err)
+			}
+			if acquired {
+				t.Error("same-tenant acquire of held key should have returned false")
+			}
+
+			// storeB tries to release "iso-key" — tenant-scoped, should be a no-op
+			// because the row has tenant_id = tenant A.
+			if err := storeB.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+				t.Fatalf("ReleaseConcurrencyKey on store B: %v", err)
+			}
+
+			// storeA still holds the key — storeB's release was tenant-scoped.
+			count, err = storeA.GetConcurrencyKeyCount(ctx, "wf-a")
+			if err != nil {
+				t.Fatalf("GetConcurrencyKeyCount on store A after storeB release: %v", err)
+			}
+			if count < 1 {
+				t.Errorf("ISOLATION BREACH: storeB's ReleaseConcurrencyKey removed storeA's key (count=%d)", count)
+			}
+
+			// storeA releases its own key.
+			if err := storeA.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+				t.Fatalf("ReleaseConcurrencyKey on store A (own key): %v", err)
+			}
+
+			// storeA confirms key is gone.
+			count, err = storeA.GetConcurrencyKeyCount(ctx, "wf-a")
+			if err != nil {
+				t.Fatalf("GetConcurrencyKeyCount on store A after own release: %v", err)
+			}
+			if count != 0 {
+				t.Errorf("expected 0 keys after release, got %d", count)
+			}
+
+			// After storeA released, storeB can acquire the same key name.
+			acquired, err = storeB.AcquireConcurrencyKey(ctx, "iso-key", "wf-b", 60*time.Second)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey on storeB after release: %v", err)
+			}
+			if !acquired {
+				t.Error("storeB should acquire iso-key after storeA released it")
+			}
+
+			// Now storeA cannot acquire — key is held by storeB (PK conflict).
+			acquired, err = storeA.AcquireConcurrencyKey(ctx, "iso-key", "wf-a-3", 60*time.Second)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey on storeA after storeB holds: %v", err)
+			}
+			if acquired {
+				t.Error("storeA should not acquire iso-key while storeB holds it")
+			}
+
+			// Cleanup part 1.
+			if err := storeB.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+				t.Fatalf("ReleaseConcurrencyKey on store B cleanup: %v", err)
+			}
+
+			// --- Part 2: Reap isolation — each tenant only reaps its own expired keys ---
+
+			// storeA acquires "reap-key-a" with 1ns TTL (effectively expired).
+			acquired, err = storeA.AcquireConcurrencyKey(ctx, "reap-key-a", "wf-a", 1*time.Nanosecond)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey (reap-key-a) on store A: %v", err)
+			}
+			if !acquired {
+				t.Fatal("expected store A to acquire reap-key-a")
+			}
+
+			// storeB acquires "reap-key-b" with 1ns TTL (effectively expired).
+			acquired, err = storeB.AcquireConcurrencyKey(ctx, "reap-key-b", "wf-b", 1*time.Nanosecond)
+			if err != nil {
+				t.Fatalf("AcquireConcurrencyKey (reap-key-b) on store B: %v", err)
+			}
+			if !acquired {
+				t.Fatal("expected store B to acquire reap-key-b")
+			}
+
+			// Give the short TTLs a moment to expire.
+			time.Sleep(10 * time.Millisecond)
+
+			// Reap expired keys on store A. Must only reap "reap-key-a".
+			reapedA, err := storeA.ReapExpiredConcurrencyKeys(ctx)
+			if err != nil {
+				t.Fatalf("ReapExpiredConcurrencyKeys on store A: %v", err)
+			}
+			if reapedA != 1 {
+				t.Errorf("expected storeA to reap exactly 1 expired key, got %d", reapedA)
+			}
+
+			// Reap expired keys on store B. Must only reap "reap-key-b".
+			// If storeA already cross-tenant-reaped it, this would return 0.
+			reapedB, err := storeB.ReapExpiredConcurrencyKeys(ctx)
+			if err != nil {
+				t.Fatalf("ReapExpiredConcurrencyKeys on store B: %v", err)
+			}
+			if reapedB != 1 {
+				t.Errorf("ISOLATION BREACH: expected storeB to reap 1 expired key, got %d (storeA may have cross-tenant-reaped it)", reapedB)
+			}
+		})
+	}
+}
