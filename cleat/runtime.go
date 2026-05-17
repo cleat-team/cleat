@@ -947,6 +947,7 @@ type HostCallsOptions struct {
 	DurableCallJSONWithOptions func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 	DurableCallWithHeartbeat   func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
 	DurableSleep              func(ms int64)
+		DurableSleepMs            func(ms int64)
 	DurableAwaitSignals       func(signalNames []string, timeoutMs int64) (string, string, bool, error)
 	CreatePromise func(name string) (promiseID string, err error)
 	AwaitPromise  func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)

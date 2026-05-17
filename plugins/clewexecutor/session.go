@@ -102,6 +102,8 @@ func roleForPhase(phase string) (string, error) {
 		return "developer", nil
 	case "impl_review":
 		return "reviewer", nil
+	case "create_pr", "ci_fix", "merge":
+		return "developer", nil
 	case "done":
 		return "", fmt.Errorf("task is already done")
 	case "blocked", "failed":

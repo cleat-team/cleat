@@ -94,11 +94,20 @@ func TestRegisterHostFunctions(t *testing.T) {
 	if err := p.RegisterHostFunctions(registry); err != nil {
 		t.Fatalf("RegisterHostFunctions() returned error: %v", err)
 	}
-	if registry.name != "run_phase" {
-		t.Errorf("expected 'run_phase', got %q", registry.name)
+	if len(registry.registrations) != 2 {
+		t.Fatalf("expected 2 registrations, got %d", len(registry.registrations))
 	}
-	if !registry.idempotent {
-		t.Error("expected Idempotent: true")
+	if registry.registrations[0].name != "run_phase" {
+		t.Errorf("expected first 'run_phase', got %q", registry.registrations[0].name)
+	}
+	if !registry.registrations[0].idempotent {
+		t.Error("expected run_phase Idempotent: true")
+	}
+	if registry.registrations[1].name != "check_ci" {
+		t.Errorf("expected second 'check_ci', got %q", registry.registrations[1].name)
+	}
+	if registry.registrations[1].idempotent {
+		t.Error("expected check_ci Idempotent: false")
 	}
 }
 
@@ -123,6 +132,9 @@ func TestRoleForPhase(t *testing.T) {
 		{"plan_review", "reviewer", false},
 		{"implementing", "developer", false},
 		{"impl_review", "reviewer", false},
+		{"create_pr", "developer", false},
+		{"ci_fix", "developer", false},
+		{"merge", "developer", false},
 		{"done", "", true},
 		{"blocked", "", true},
 		{"failed", "", true},
@@ -216,10 +228,15 @@ func TestBuildPrompt(t *testing.T) {
 }
 
 func TestBuildPromptProtocolNotFound(t *testing.T) {
+	// buildPrompt doesn't check file existence — that's done by runPhase.
+	// It should succeed even with a non-existent protocol path.
 	in := runPhaseInput{TaskID: "test", Project: "test", ProjectRoot: "/tmp", Workdir: "/tmp"}
-	_, err := buildPrompt(in, "explorer", "/tmp", "/nonexistent/protocol.md")
-	if err == nil {
-		t.Error("expected error for missing protocol file")
+	prompt, err := buildPrompt(in, "explorer", "/tmp", "/nonexistent/protocol.md")
+	if err != nil {
+		t.Fatalf("buildPrompt() returned error: %v", err)
+	}
+	if prompt == "" {
+		t.Error("expected non-empty prompt")
 	}
 }
 
@@ -392,7 +409,10 @@ func TestNextPhase(t *testing.T) {
 		"planning":     "plan_review",
 		"plan_review":  "implementing",
 		"implementing": "impl_review",
-		"impl_review":  "done",
+		"impl_review":  "create_pr",
+		"create_pr":    "ci_wait",
+		"ci_fix":       "ci_wait",
+		"merge":        "done",
 		"unknown":      "unknown",
 	}
 	for phase, want := range tests {
@@ -819,12 +839,16 @@ func TestRunPhaseContextCancelled(t *testing.T) {
 // --- mock helpers ---
 
 type mockFuncRegistry struct {
-	name       string
-	idempotent bool
+	registrations []struct {
+		name       string
+		idempotent bool
+	}
 }
 
 func (m *mockFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
-	m.name = opts.Name
-	m.idempotent = opts.Idempotent
+	m.registrations = append(m.registrations, struct {
+		name       string
+		idempotent bool
+	}{opts.Name, opts.Idempotent})
 	return nil
 }

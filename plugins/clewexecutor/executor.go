@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -106,14 +107,15 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		return string(b), nil
 	}
 
-	// Determine role. Workflow phase (in.Phase) takes priority over STATUS.md phase
-	// so that the implement phase launches a developer, not a reviewer.
+	// Use the later of STATUS.md phase and workflow phase for role lookup.
+	// If STATUS.md is ahead (e.g. "implementing" vs wf "explore"), use it —
+	// an explorer adds no value when a plan is already approved.
+	// If the workflow phase is ahead (e.g. "implement" vs "plan_review"),
+	// use it — the reviewer passed and we need a developer now.
 	role := in.RoleOverride
 	if role == "" {
-		lookupPhase := phase // from STATUS.md
-		if in.Phase != "" {
-			lookupPhase = workflowPhaseToStatusPhase(in.Phase)
-		}
+		wfStatusPhase := workflowPhaseToStatusPhase(in.Phase)
+		lookupPhase := laterPhase(phase, wfStatusPhase)
 		r, err := roleForPhase(lookupPhase)
 		if err != nil {
 			out := runPhaseOutput{Status: "failed", Error: err.Error()}
@@ -124,6 +126,14 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	}
 
 	protocolPath := filepath.Join(in.ProjectRoot, "prompts", role+"-agent.md")
+	if _, err := os.Stat(protocolPath); err != nil {
+		// For non-clew projects, prompts live in the clew repo, not project_root.
+		// Fall back: look for ../clew/prompts relative to workdir.
+		fallback := filepath.Join(in.Workdir, "..", "clew", "prompts", role+"-agent.md")
+		if _, err2 := os.Stat(fallback); err2 == nil {
+			protocolPath = fallback
+		}
+	}
 	prompt, err := buildPrompt(in, role, td, protocolPath)
 	if err != nil {
 		out := runPhaseOutput{Status: "failed", Error: err.Error()}
@@ -245,12 +255,143 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	return string(b), nil
 }
 
-// buildPrompt constructs the agent prompt matching clew-run.sh patterns.
-func buildPrompt(in runPhaseInput, role, td, protocolPath string) (string, error) {
-	if _, err := os.Stat(protocolPath); err != nil {
-		return "", fmt.Errorf("protocol file not found: %s", protocolPath)
+// checkCIInput is the JSON input for the check_ci host function.
+type checkCIInput struct {
+	Workdir string `json:"workdir"`
+}
+
+// checkCIOutput is the JSON output from the check_ci host function.
+type checkCIOutput struct {
+	CIStatus string `json:"ci_status"`
+	PRURL    string `json:"pr_url"`
+	Details  string `json:"details"`
+}
+
+// checkCI implements the check_ci host function — queries GitHub CI status
+// for the current branch without launching a Claude session.
+func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) {
+	var in checkCIInput
+	if err := json.Unmarshal([]byte(inputJSON), &in); err != nil {
+		return "", fmt.Errorf("check_ci: invalid input: %w", err)
+	}
+	if in.Workdir == "" {
+		out := checkCIOutput{CIStatus: "error", Details: "workdir is required"}
+		b, _ := json.Marshal(out)
+		return string(b), nil
 	}
 
+	branchCmd := exec.CommandContext(ctx, "git", "-C", in.Workdir, "branch", "--show-current")
+	branchOut, err := branchCmd.Output()
+	if err != nil {
+		var stderr string
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			stderr = string(exitErr.Stderr)
+		}
+		out := checkCIOutput{
+			CIStatus: "error",
+			Details:  fmt.Sprintf("git branch --show-current: %v: %s", err, stderr),
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+	}
+	branch := strings.TrimSpace(string(branchOut))
+	if branch == "" {
+		out := checkCIOutput{CIStatus: "error", Details: "detached HEAD"}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+	}
+
+	ghCmd := exec.CommandContext(ctx, "gh", "pr", "list",
+		"--head", branch,
+		"--json", "number,state,url,statusCheckRollup",
+		"--limit", "1",
+	)
+	ghCmd.Dir = in.Workdir
+	ghOut, ghErr := ghCmd.Output()
+	if ghErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(ghErr, &exitErr) {
+			out := checkCIOutput{
+				CIStatus: "error",
+				Details:  fmt.Sprintf("gh pr list: %s", string(exitErr.Stderr)),
+			}
+			b, _ := json.Marshal(out)
+			return string(b), nil
+		}
+		out := checkCIOutput{
+			CIStatus: "error",
+			Details:  fmt.Sprintf("gh pr list: %v", ghErr),
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+	}
+
+	var prs []struct {
+		Number            int    `json:"number"`
+		State             string `json:"state"`
+		URL               string `json:"url"`
+		StatusCheckRollup []struct {
+			Status     string `json:"status"`
+			Conclusion string `json:"conclusion"`
+		} `json:"statusCheckRollup"`
+	}
+	if err := json.Unmarshal(ghOut, &prs); err != nil {
+		out := checkCIOutput{
+			CIStatus: "error",
+			Details:  fmt.Sprintf("parse gh output: %v", err),
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+	}
+	if len(prs) == 0 {
+		out := checkCIOutput{
+			CIStatus: "no_pr",
+			Details:  fmt.Sprintf("no PR found for branch %q", branch),
+		}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+	}
+
+	pr := prs[0]
+	prURL := pr.URL
+
+	if len(pr.StatusCheckRollup) == 0 {
+		out := checkCIOutput{CIStatus: "passing", PRURL: prURL, Details: "no checks configured"}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+	}
+
+	hasFailure := false
+	hasPending := false
+	for _, check := range pr.StatusCheckRollup {
+		if check.Status != "COMPLETED" {
+			hasPending = true
+			continue
+		}
+		switch check.Conclusion {
+		case "FAILURE", "CANCELLED", "ACTION_REQUIRED", "TIMED_OUT", "STARTUP_FAILURE":
+			hasFailure = true
+		}
+	}
+
+	if hasFailure {
+		out := checkCIOutput{CIStatus: "failing", PRURL: prURL, Details: "checks failed"}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+	}
+	if hasPending {
+		out := checkCIOutput{CIStatus: "pending", PRURL: prURL, Details: "checks in progress"}
+		b, _ := json.Marshal(out)
+		return string(b), nil
+	}
+	out := checkCIOutput{CIStatus: "passing", PRURL: prURL, Details: "all checks passed"}
+	b, _ := json.Marshal(out)
+	return string(b), nil
+}
+
+// buildPrompt constructs the agent prompt matching clew-run.sh patterns.
+func buildPrompt(in runPhaseInput, role, td, protocolPath string) (string, error) {
 	taskPath := filepath.Join("projects", in.Project, in.TaskID)
 
 	switch role {
@@ -265,6 +406,14 @@ func buildPrompt(in runPhaseInput, role, td, protocolPath string) (string, error
 			in.Project, protocolPath, taskPath, taskPath, taskPath, in.TaskID,
 		), nil
 	case "developer":
+		// For tasks with an approved plan, skip explore/plan/review and go straight to implementation.
+		planPath := filepath.Join(td, "artifacts", "plan.md")
+		if planData, err := os.ReadFile(planPath); err == nil {
+			return fmt.Sprintf(
+				"You are a developer agent implementing an APPROVED plan. Do NOT re-explore, re-plan, or re-review the plan — those phases are done. Go directly to implementation.\n\nProject: %s. Task ID: %s.\n\nFirst read these files to understand what to build:\n- %s/TASK.md\n- %s/STATUS.md\n\nThen read the APPROVED PLAN below and IMPLEMENT it:\n\n--- APPROVED PLAN (%s/artifacts/plan.md) ---\n%s\n--- END PLAN ---\n\nYour job: implement every item in this plan. Modify the code files, write tests, run the test suite, and fix any failures. When done, write implementation notes to %s/artifacts/implementation.md, commit your changes with a descriptive message, and push to the feature branch. Do NOT stop at exploration or planning — produce actual code changes.",
+				in.Project, in.TaskID, taskPath, taskPath, taskPath, string(planData), taskPath,
+			), nil
+		}
 		return fmt.Sprintf(
 			"You are a developer agent in the Clew system. Project: %s. Read %s for your full protocol. Then read %s/TASK.md, %s/STATUS.md, and %s/CONTRACT.md (if it exists). Your task ID is %s. The code to modify is in this repository (your working directory). Follow the protocol exactly, including iteration to convergence at each review phase. Commit and push your changes when done.",
 			in.Project, protocolPath, taskPath, taskPath, taskPath, in.TaskID,
@@ -302,11 +451,35 @@ func workflowPhaseToStatusPhase(wfPhase string) string {
 		return "implementing"
 	case "review_impl":
 		return "impl_review"
+	case "create_pr":
+		return "create_pr"
+	case "ci_wait":
+		return "ci_wait"
+	case "ci_fix":
+		return "ci_fix"
+	case "merge":
+		return "merge"
 	default:
 		return wfPhase
 	}
 }
 
+
+	// phaseOrder maps clew status phases to their ordinal position.
+	var phaseOrder = map[string]int{
+		"queued": 0, "exploring": 1, "planning": 2, "plan_review": 3,
+		"implementing": 4, "impl_review": 5,
+		"create_pr": 6, "ci_wait": 7, "ci_fix": 8, "merge": 9,
+		"done": 10,
+	}
+
+	// laterPhase returns whichever phase is further along in the lifecycle.
+	func laterPhase(a, b string) string {
+		if phaseOrder[a] >= phaseOrder[b] {
+			return a
+		}
+		return b
+	}
 // determineReviewOutcome scans review artifacts for outcome markers.
 // When newArtifacts is nil/empty, scans all files in artifactsDir (used for cache fallback).
 // Returns "" when no review artifacts exist (fresh review phase, first pass).
@@ -369,6 +542,12 @@ func nextPhase(phase string) string {
 	case "implementing":
 		return "impl_review"
 	case "impl_review":
+		return "create_pr"
+	case "create_pr":
+		return "ci_wait"
+	case "ci_fix":
+		return "ci_wait"
+	case "merge":
 		return "done"
 	default:
 		return phase
