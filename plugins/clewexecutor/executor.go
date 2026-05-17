@@ -507,20 +507,6 @@ func workflowPhaseToStatusPhase(wfPhase string) string {
 		}
 		return b
 	}
-// firstMeaningfulWord extracts the first non-whitespace token after prefix in s.
-func firstMeaningfulWord(s, prefix string) string {
-	idx := strings.Index(s, prefix)
-	if idx < 0 {
-		return ""
-	}
-	rest := strings.TrimSpace(s[idx+len(prefix):])
-	fields := strings.Fields(rest)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
-
 // matchReviewOutcome checks a single line for a review outcome marker.
 // Returns "PASS", "BLOCKER", "SHOULD_FIX", or "".
 func matchReviewOutcome(line string) string {
