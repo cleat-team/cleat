@@ -27,15 +27,6 @@ type sessionRecord struct {
 	Status           string   `json:"status"`
 }
 
-func contains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
 // readSession reads and unmarshals session.json. Returns nil if file doesn't
 // exist, is corrupt, or can't be parsed.
 func readSession(path string) (*sessionRecord, error) {

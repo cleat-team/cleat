@@ -115,6 +115,33 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	role := in.RoleOverride
 	if role == "" {
 		wfStatusPhase := workflowPhaseToStatusPhase(in.Phase)
+
+		// Convergence guard: when STATUS.md has advanced past a review
+		// phase (e.g. CTO/human manually advanced it), return PASS to
+		// prevent the workflow from entering a retry loop dispatching
+		// non-reviewer roles with empty ReviewOutcome.
+		if (in.Phase == "review_plan" || in.Phase == "review_impl") &&
+			phaseOrder[phase] > phaseOrder[wfStatusPhase] {
+			now := time.Now().Format(time.RFC3339)
+			rec := &sessionRecord{
+				Phase:         phase,
+				WorkflowPhase: in.Phase,
+				ReviewOutcome: "PASS",
+				Started:       now,
+				Ended:         now,
+				Status:        "completed",
+			}
+			_ = writeSession(sessionPath, rec)
+			out := runPhaseOutput{
+				ReviewOutcome: "PASS",
+				Started:       now,
+				Ended:         now,
+				Status:        "completed",
+			}
+			b, _ := json.Marshal(out)
+			return string(b), nil
+		}
+
 		lookupPhase := laterPhase(phase, wfStatusPhase)
 		r, err := roleForPhase(lookupPhase)
 		if err != nil {
@@ -480,6 +507,84 @@ func workflowPhaseToStatusPhase(wfPhase string) string {
 		}
 		return b
 	}
+// firstMeaningfulWord extracts the first non-whitespace token after prefix in s.
+func firstMeaningfulWord(s, prefix string) string {
+	idx := strings.Index(s, prefix)
+	if idx < 0 {
+		return ""
+	}
+	rest := strings.TrimSpace(s[idx+len(prefix):])
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+// matchReviewOutcome checks a single line for a review outcome marker.
+// Returns "PASS", "BLOCKER", "SHOULD_FIX", or "".
+func matchReviewOutcome(line string) string {
+	// 1. Bracketed [OUTCOME:XXX] — canonical format (case-sensitive, HasPrefix).
+	if strings.HasPrefix(line, "[OUTCOME:") {
+		switch {
+		case strings.HasPrefix(line, "[OUTCOME:PASS]"):
+			return "PASS"
+		case strings.HasPrefix(line, "[OUTCOME:APPROVED]"):
+			return "PASS"
+		case strings.HasPrefix(line, "[OUTCOME:BLOCKER]"):
+			return "BLOCKER"
+		case strings.HasPrefix(line, "[OUTCOME:SHOULD_FIX]"):
+			return "SHOULD_FIX"
+		}
+	}
+
+	// 2. **Verdict:...** — bold verdict line (case-insensitive word match).
+	// Handle both **Verdict:** WORD and **Verdict: WORD** formats.
+	if idx := strings.Index(line, "**Verdict:"); idx >= 0 {
+		rest := strings.TrimSpace(line[idx+len("**Verdict:"):])
+		rest = strings.TrimLeft(rest, "*")
+		rest = strings.TrimSpace(rest)
+		if end := strings.Index(rest, "**"); end >= 0 {
+			rest = strings.TrimSpace(rest[:end])
+		}
+		fields := strings.Fields(rest)
+		if len(fields) > 0 {
+			w := fields[0]
+			if strings.EqualFold(w, "PASS") || strings.EqualFold(w, "APPROVED") || strings.EqualFold(w, "PASSES") {
+				return "PASS"
+			}
+		}
+		return ""
+	}
+
+	// 3. Bare OUTCOME: XXX (no brackets, case-sensitive, HasPrefix).
+	if strings.HasPrefix(line, "OUTCOME: ") {
+		switch {
+		case strings.HasPrefix(line, "OUTCOME: PASS"):
+			return "PASS"
+		case strings.HasPrefix(line, "OUTCOME: APPROVED"):
+			return "PASS"
+		case strings.HasPrefix(line, "OUTCOME: BLOCKER"):
+			return "BLOCKER"
+		case strings.HasPrefix(line, "OUTCOME: SHOULD_FIX"):
+			return "SHOULD_FIX"
+		}
+	}
+
+	// 4. Legacy bare [BLOCKER] / [SHOULD_FIX] (Contains not HasPrefix — the
+	// caller skips table rows; matchReviewOutcome sees them as BLOCKER/SHOULD_FIX
+	// because [BLOCKER] appears anywhere on the line. Rule 1 catches
+	// [OUTCOME:BLOCKER] first so there's no double-detection).
+	if strings.Contains(line, "[BLOCKER]") {
+		return "BLOCKER"
+	}
+	if strings.Contains(line, "[SHOULD_FIX]") {
+		return "SHOULD_FIX"
+	}
+
+	return ""
+}
+
 // determineReviewOutcome scans review artifacts for outcome markers.
 // When newArtifacts is nil/empty, scans all files in artifactsDir (used for cache fallback).
 // Returns "" when no review artifacts exist (fresh review phase, first pass).
@@ -506,14 +611,19 @@ func determineReviewOutcome(artifactsDir string, newArtifacts []string) string {
 		if err != nil {
 			continue
 		}
-		if bytes.Contains(data, []byte("[OUTCOME:BLOCKER]")) || bytes.Contains(data, []byte("[BLOCKER]")) {
-			hasBlocker = true
-		}
-		if bytes.Contains(data, []byte("[OUTCOME:SHOULD_FIX]")) || bytes.Contains(data, []byte("[SHOULD_FIX]")) {
-			hasShouldFix = true
-		}
-		if bytes.Contains(data, []byte("[OUTCOME:PASS]")) {
-			return "PASS"
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "|") {
+				continue
+			}
+			switch matchReviewOutcome(line) {
+			case "PASS":
+				return "PASS"
+			case "BLOCKER":
+				hasBlocker = true
+			case "SHOULD_FIX":
+				hasShouldFix = true
+			}
 		}
 	}
 	if hasBlocker {
@@ -617,8 +727,16 @@ func countFindings(role, artifactsDir string) int {
 			if err != nil {
 				continue
 			}
-			count += bytes.Count(data, []byte("[BLOCKER]"))
-			count += bytes.Count(data, []byte("[SHOULD_FIX]"))
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "|") {
+					continue
+				}
+				outcome := matchReviewOutcome(line)
+				if outcome == "BLOCKER" || outcome == "SHOULD_FIX" {
+					count++
+				}
+			}
 		}
 		return count
 	default:

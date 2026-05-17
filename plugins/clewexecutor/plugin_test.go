@@ -382,6 +382,16 @@ func TestCountFindingsReviewer(t *testing.T) {
 	}
 }
 
+func TestCountFindingsReviewerSkipsTableRows(t *testing.T) {
+	tmp := t.TempDir()
+	os.WriteFile(filepath.Join(tmp, "review-plan.md"), []byte(
+		"[BLOCKER] real finding\n| [BLOCKER] | 0 | 0 |\n[SHOULD_FIX] minor\n| [SHOULD_FIX] | 1 | 1 |\n"), 0644)
+	count := countFindings("reviewer", tmp)
+	if count != 2 {
+		t.Errorf("expected 2 findings (table rows skipped), got %d", count)
+	}
+}
+
 func TestCountFindingsNoArtifact(t *testing.T) {
 	count := countFindings("explorer", "/nonexistent/dir")
 	if count != 0 {
@@ -833,6 +843,303 @@ func TestRunPhaseContextCancelled(t *testing.T) {
 		// On some systems, sleep might not be found or context canceled before exec.
 		// Just check that the error path works.
 		t.Logf("context cancel result: status=%s, error=%s, exit=%d", out.Status, out.Error, out.ExitCode)
+	}
+}
+
+func TestRunPhaseConvergenceGuardReviewPlan(t *testing.T) {
+	// STATUS.md at "implementing" (ahead of review_plan→plan_review).
+	// Workflow dispatches review_plan. Guard should return PASS without
+	// running an agent — no agent should be invoked.
+	root, p := setupRunPhaseTest(t, "implementing")
+	p.agentBin = "false" // exits 1; proves agent wasn't run
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+		Phase:       "review_plan",
+	}
+	inputJSON, _ := json.Marshal(in)
+
+	outJSON, err := p.runPhase(context.Background(), string(inputJSON))
+	if err != nil {
+		t.Fatalf("runPhase() returned error: %v", err)
+	}
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.ReviewOutcome != "PASS" {
+		t.Errorf("expected ReviewOutcome PASS, got %q", out.ReviewOutcome)
+	}
+	if out.Status != "completed" {
+		t.Errorf("expected status 'completed', got %q (error: %s)", out.Status, out.Error)
+	}
+	if out.ExitCode != 0 {
+		t.Errorf("expected exit_code 0, got %d", out.ExitCode)
+	}
+	if out.Cached {
+		t.Error("expected Cached false (synthetic PASS, not cache hit)")
+	}
+
+	// Second call should hit the session cache.
+	outJSON2, err := p.runPhase(context.Background(), string(inputJSON))
+	if err != nil {
+		t.Fatalf("second runPhase() error: %v", err)
+	}
+	var out2 runPhaseOutput
+	json.Unmarshal([]byte(outJSON2), &out2)
+	if !out2.Cached {
+		t.Error("expected Cached true on second invocation (session.json written by guard)")
+	}
+	if out2.ReviewOutcome != "PASS" {
+		t.Errorf("expected cached ReviewOutcome PASS, got %q", out2.ReviewOutcome)
+	}
+}
+
+func TestRunPhaseConvergenceGuardReviewImpl(t *testing.T) {
+	// STATUS.md at "done" (ahead of review_impl→impl_review).
+	root, p := setupRunPhaseTest(t, "done")
+	p.agentBin = "false"
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+		Phase:       "review_impl",
+	}
+	inputJSON, _ := json.Marshal(in)
+
+	outJSON, err := p.runPhase(context.Background(), string(inputJSON))
+	if err != nil {
+		t.Fatalf("runPhase() returned error: %v", err)
+	}
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	if out.ReviewOutcome != "PASS" {
+		t.Errorf("expected ReviewOutcome PASS, got %q", out.ReviewOutcome)
+	}
+	if out.Status != "completed" {
+		t.Errorf("expected status 'completed', got %q (error: %s)", out.Status, out.Error)
+	}
+}
+
+func TestRunPhaseConvergenceGuardNotTriggeredNormal(t *testing.T) {
+	// STATUS.md at "plan_review" (same as review_plan→plan_review).
+	// Guard should NOT trigger — normal review flow.
+	root, p := setupRunPhaseTest(t, "plan_review")
+	p.agentBin = "true"
+
+	artifactsDir := filepath.Join(root, "projects", "testproj", "test-task", "artifacts")
+	os.MkdirAll(artifactsDir, 0755)
+	os.WriteFile(filepath.Join(artifactsDir, "review-plan.md"),
+		[]byte("[OUTCOME:PASS]\n"), 0644)
+
+	in := runPhaseInput{
+		TaskID:      "test-task",
+		Project:     "testproj",
+		ProjectRoot: root,
+		Workdir:     root,
+		Phase:       "review_plan",
+	}
+	inputJSON, _ := json.Marshal(in)
+
+	outJSON, err := p.runPhase(context.Background(), string(inputJSON))
+	if err != nil {
+		t.Fatalf("runPhase() returned error: %v", err)
+	}
+
+	var out runPhaseOutput
+	json.Unmarshal([]byte(outJSON), &out)
+	// Should have run the agent normally — the agent exits 0.
+	if out.Status != "completed" {
+		t.Errorf("expected status 'completed', got %q (error: %s)", out.Status, out.Error)
+	}
+	// When STATUS.md == workflow phase, laterPhase returns same phase,
+	// role is reviewer, ReviewOutcome determined from artifacts.
+}
+
+func TestMatchReviewOutcome(t *testing.T) {
+	tests := []struct {
+		line string
+		want string
+	}{
+		// Bracketed [OUTCOME:XXX] — canonical format.
+		{`[OUTCOME:PASS]`, "PASS"},
+		{`[OUTCOME:APPROVED]`, "PASS"},
+		{`[OUTCOME:BLOCKER]`, "BLOCKER"},
+		{`[OUTCOME:SHOULD_FIX]`, "SHOULD_FIX"},
+
+		// **Verdict:** XXX — bold verdict line.
+		{`**Verdict:** PASS`, "PASS"},
+		{`**Verdict:** APPROVED`, "PASS"},
+		{`**Verdict:** PASSES`, "PASS"},
+		{`**Verdict:** pass`, "PASS"},
+		{`**Verdict:** approved`, "PASS"},
+		{"**Verdict:** ❌ Does not pass", ""},
+
+		// **Verdict: WORD** — word inside bold span.
+		{`**Verdict: APPROVED**`, "PASS"},
+		{`**Verdict: PASS**`, "PASS"},
+
+		// Bare OUTCOME: XXX (no brackets).
+		{`OUTCOME: PASS`, "PASS"},
+		{`OUTCOME: BLOCKER`, "BLOCKER"},
+		{`OUTCOME: SHOULD_FIX`, "SHOULD_FIX"},
+
+		// Legacy bare [BLOCKER] / [SHOULD_FIX].
+		{`[BLOCKER]`, "BLOCKER"},
+		{`[SHOULD_FIX]`, "SHOULD_FIX"},
+
+		// Non-matching lines.
+		{`Some random text`, ""},
+		{``, ""},
+
+		// Table row — matchReviewOutcome does NOT skip table rows.
+		{`| [BLOCKER] | 0 | 0 |`, "BLOCKER"},
+	}
+	for _, tc := range tests {
+		t.Run("", func(t *testing.T) {
+			got := matchReviewOutcome(tc.line)
+			if got != tc.want {
+				t.Errorf("matchReviewOutcome(%q) = %q, want %q", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDetermineReviewOutcome(t *testing.T) {
+	tests := []struct {
+		name     string
+		files    map[string]string // filename → content
+		want     string
+	}{
+		{
+			name: "canonical PASS",
+			files: map[string]string{
+				"review-plan.md": "[OUTCOME:PASS]\n",
+			},
+			want: "PASS",
+		},
+		{
+			name: "APPROVED equals PASS",
+			files: map[string]string{
+				"review-plan.md": "[OUTCOME:APPROVED]\n",
+			},
+			want: "PASS",
+		},
+		{
+			name: "bold verdict PASS",
+			files: map[string]string{
+				"review-plan.md": "**Verdict:** PASS\n",
+			},
+			want: "PASS",
+		},
+		{
+			name: "PASS with table row skipped",
+			files: map[string]string{
+				"review-plan.md": "[OUTCOME:PASS]\n| [BLOCKER] | 0 | 0 |\n",
+			},
+			want: "PASS",
+		},
+		{
+			name: "legacy bare BLOCKER",
+			files: map[string]string{
+				"review-plan.md": "[BLOCKER]\nsome issue\n",
+			},
+			want: "BLOCKER",
+		},
+		{
+			name: "legacy bare SHOULD_FIX",
+			files: map[string]string{
+				"review-plan.md": "[SHOULD_FIX]\nminor issue\n",
+			},
+			want: "SHOULD_FIX",
+		},
+		{
+			name: "BLOCKER beats SHOULD_FIX",
+			files: map[string]string{
+				"review-plan.md": "[BLOCKER]\n[SHOULD_FIX]\n",
+			},
+			want: "BLOCKER",
+		},
+		{
+			name:  "no review artifacts",
+			files: nil,
+			want:  "",
+		},
+		{
+			name: "generic fallback PASS",
+			files: map[string]string{
+				"review-plan.md": "Some text without markers\n",
+			},
+			want: "PASS",
+		},
+		{
+			name: "bare OUTCOME line",
+			files: map[string]string{
+				"review-plan.md": "OUTCOME: PASS\n",
+			},
+			want: "PASS",
+		},
+		{
+			name: "table row only skipped, generic PASS",
+			files: map[string]string{
+				"review-plan.md": "| [BLOCKER] | 0 | 0 |\n",
+			},
+			want: "PASS",
+		},
+		{
+			name: "explicit BLOCKER",
+			files: map[string]string{
+				"review-plan.md": "[OUTCOME:BLOCKER]\n",
+			},
+			want: "BLOCKER",
+		},
+		{
+			name: "explicit SHOULD_FIX",
+			files: map[string]string{
+				"review-plan.md": "[OUTCOME:SHOULD_FIX]\nminor issue\n",
+			},
+			want: "SHOULD_FIX",
+		},
+		{
+			name: "non-review files ignored",
+			files: map[string]string{
+				"other-file.txt": "[OUTCOME:PASS]\n",
+			},
+			want: "PASS",
+		},
+		{
+			name: "verdict wins over skipped table",
+			files: map[string]string{
+				"review-plan.md": "**Verdict:** APPROVED\n| [BLOCKER] | 1 | 0 |\n",
+			},
+			want: "PASS",
+		},
+		{
+			name: "verdict word inside bold span",
+			files: map[string]string{
+				"review-plan.md": "**Verdict: APPROVED**\n",
+			},
+			want: "PASS",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, content := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+			}
+			got := determineReviewOutcome(dir, nil)
+			if got != tc.want {
+				t.Errorf("determineReviewOutcome() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
