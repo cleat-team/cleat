@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,23 +16,33 @@ var cleatBinary string
 
 func TestMain(m *testing.M) {
 	// Build the cleat binary for use in subprocess tests.
-	tmpDir, err := os.MkdirTemp("", "cleat-vet-test-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create temp dir: %v\n", err)
-		os.Exit(1)
-	}
+	// Skip the build in short mode so pure unit tests (e.g. TestDetectVetLang)
+	// can still run; individual vet tests that need the binary have their
+	// own Short() gates.
+	flag.Parse()
+	var tmpDir string
+	if !testing.Short() {
+		var err error
+		tmpDir, err = os.MkdirTemp("", "cleat-vet-test-*")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to create temp dir: %v\n", err)
+			os.Exit(1)
+		}
 
-	binary := filepath.Join(tmpDir, "cleat")
-	build := exec.Command("go", "build", "-o", binary, ".")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to build cleat: %v\n%s", err, out)
-		os.Exit(1)
-	}
+		binary := filepath.Join(tmpDir, "cleat")
+		build := exec.Command("go", "build", "-o", binary, ".")
+		build.Dir = "."
+		if out, err := build.CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to build cleat: %v\n%s", err, out)
+			os.Exit(1)
+		}
 
-	cleatBinary = binary
+		cleatBinary = binary
+	}
 	exitCode := m.Run()
-	os.RemoveAll(tmpDir)
+	if tmpDir != "" {
+		os.RemoveAll(tmpDir)
+	}
 	os.Exit(exitCode)
 }
 
@@ -40,6 +51,11 @@ func TestMain(m *testing.M) {
 // is extracted from the combined output.
 func runVetCmd(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+
+	if testing.Short() {
+		t.Skip("Skipping vet test in short mode")
+	}
+
 	cmd := exec.Command(cleatBinary, args...)
 	out, err := cmd.CombinedOutput()
 	output := string(out)
@@ -357,6 +373,10 @@ func TestDetectVetLang(t *testing.T) {
 
 // TestVetExitCode verifies exit code is 1 when errors are found, 0 otherwise.
 func TestVetExitCode(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping vet test in short mode")
+	}
+
 	// Should exit 1 (errors found).
 	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "e001_goroutine")
 	cmd := exec.Command(cleatBinary, "vet", "--lang", "go", "--json", fixture)
