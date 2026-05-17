@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -612,7 +613,8 @@ func matchReviewOutcome(line string) string {
 	return ""
 }
 
-// determineReviewOutcome scans review artifacts for outcome markers.
+// determineReviewOutcome scans the latest review round artifact for outcome markers.
+// Only the most recent round counts — stale BLOCKERs from earlier rounds are ignored.
 // When newArtifacts is nil/empty, scans all files in artifactsDir (used for cache fallback).
 // Returns "" when no review artifacts exist (fresh review phase, first pass).
 func determineReviewOutcome(artifactsDir string, newArtifacts []string) string {
@@ -628,29 +630,83 @@ func determineReviewOutcome(artifactsDir string, newArtifacts []string) string {
 			}
 		}
 	}
-	hasBlocker := false
-	hasShouldFix := false
-	for _, name := range artifacts {
-		if !strings.HasPrefix(name, "review-") || !strings.HasSuffix(name, ".md") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(artifactsDir, name))
-		if err != nil {
-			continue
-		}
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "|") {
+
+	// Find the latest review round files by prefix + round number.
+	// Matches "review-plan-round3-claude.md" or "review-plan-round1.md".
+	// Returns all files for the highest round number.
+	findLatestRoundFiles := func(prefix string) []string {
+		var latestN int
+		var all []string
+		marker := prefix + "-round"
+		for _, name := range artifacts {
+			if !strings.HasPrefix(name, marker) || !strings.HasSuffix(name, ".md") {
 				continue
 			}
-			switch matchReviewOutcome(line) {
-			case "PASS":
-				return "PASS"
-			case "BLOCKER":
-				hasBlocker = true
-			case "SHOULD_FIX":
-				hasShouldFix = true
+			// Extract round number: "review-plan-round3-claude.md" -> "3-claude"
+			rest := strings.TrimSuffix(strings.TrimPrefix(name, marker), ".md")
+			if rest == "" {
+				continue
 			}
+			// rest could be "3" or "3-claude" — take the leading digits
+			numStr := rest
+			if dash := strings.Index(rest, "-"); dash >= 0 {
+				numStr = rest[:dash]
+			}
+			n, err := strconv.Atoi(numStr)
+			if err != nil {
+				continue
+			}
+			if n > latestN {
+				latestN = n
+				all = nil
+			}
+			if n == latestN {
+				all = append(all, name)
+			}
+		}
+		return all
+	}
+
+	hasBlocker := false
+	hasShouldFix := false
+	scannedAny := false
+
+	for _, prefix := range []string{"review-plan", "review-impl"} {
+		latestFiles := findLatestRoundFiles(prefix)
+		if len(latestFiles) == 0 {
+			// Fall back to legacy unversioned file name
+			legacy := prefix + ".md"
+			for _, name := range artifacts {
+				if name == legacy {
+					latestFiles = []string{legacy}
+					break
+				}
+			}
+		}
+		for _, latest := range latestFiles {
+			data, err := os.ReadFile(filepath.Join(artifactsDir, latest))
+			if err != nil {
+				continue
+			}
+			scannedAny = true
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "|") {
+					continue
+				}
+				switch matchReviewOutcome(line) {
+				case "PASS":
+					// PASS from one model is good but keep scanning other models for BLOCKERs
+				case "BLOCKER":
+					hasBlocker = true
+				case "SHOULD_FIX":
+					hasShouldFix = true
+				}
+			}
+		}
+		// After scanning all models in the latest round, check aggregated result
+		if scannedAny && !hasBlocker {
+			return "PASS"
 		}
 	}
 	if hasBlocker {
@@ -659,7 +715,7 @@ func determineReviewOutcome(artifactsDir string, newArtifacts []string) string {
 	if hasShouldFix {
 		return "SHOULD_FIX"
 	}
-	if len(artifacts) > 0 {
+	if scannedAny || len(artifacts) > 0 {
 		return "PASS"
 	}
 	return ""
