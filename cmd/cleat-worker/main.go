@@ -1173,6 +1173,11 @@ func (w *Worker) dispatchLoop() {
 			return
 		default:
 		}
+		// Re-check after the non-blocking select to narrow the
+		// TOCTOU window between the check and the DB claims below.
+		if w.ctx.Err() != nil {
+			return
+		}
 
 		w.healthTracker.recordRun("dispatch")
 
@@ -1294,8 +1299,12 @@ func (w *Worker) dispatchLoop() {
 		}
 
 		// Improvement 3: Found work — reset idle counter (coalesced polling).
-		// Don't sleep before the next poll; there may be more work ready.
+		// When the claim returned a full batch there is likely more work;
+		// add a brief pause to avoid a tight polling loop against the DB.
 		idleTicks = 0
+		if len(wfs) == batchSize {
+			time.Sleep(10 * time.Millisecond)
+		}
 		w.consecutiveDBErrors = 0 // reset circuit breaker on success
 
 		workflowsClaimed.Add(float64(len(wfs)))
@@ -2130,6 +2139,9 @@ func (w *Worker) waitForDB() {
 		case <-w.ctx.Done():
 			return
 		default:
+		}
+		if w.ctx.Err() != nil {
+			return
 		}
 
 		if _, err := w.store.ClaimWorkflow(w.ctx, ""); err == nil || !isConnectionError(err) {

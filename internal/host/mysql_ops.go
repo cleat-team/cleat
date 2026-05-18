@@ -1043,6 +1043,7 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 		if n == 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Also batch cleanup compaction states for those workflows.
@@ -1069,6 +1070,7 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 		if n == 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	return totalDeleted, nil
@@ -1131,6 +1133,7 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 		if n == 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	return totalDeleted, nil
 }

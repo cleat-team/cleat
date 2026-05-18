@@ -519,6 +519,7 @@ func (e *TestEnv) AdvanceTimeAndDrain(d time.Duration) {
 		if pending == 0 {
 			return
 		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

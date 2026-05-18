@@ -2895,12 +2895,13 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 			if backoffMs > maxIntervalMs {
 				backoffMs = maxIntervalMs
 			}
-			if backoffMs > 0 {
-				select {
-				case <-ctx.Done():
-					return packDurableCallResult(0, 0, 0)
-				case <-time.After(time.Duration(backoffMs) * time.Millisecond):
-				}
+			if backoffMs < 1 {
+				backoffMs = 1 // minimum backoff to prevent a tight retry loop
+			}
+			select {
+			case <-ctx.Done():
+				return packDurableCallResult(0, 0, 0)
+			case <-time.After(time.Duration(backoffMs) * time.Millisecond):
 			}
 		}
 	}
@@ -3726,12 +3727,16 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 	s.recordEvent(rec)
 
 	// Execute the fire-and-forget call through the caller.
+	// Wrap in a timeout context to bound goroutine lifetime in case
+	// the external Call blocks indefinitely.
 	if s.engine.caller != nil {
 		go func() {
 			if ctx.Err() != nil {
 				return
 			}
-			_, _ = s.engine.caller.Call(ctx, service, operation, requestJSON)
+			callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer cancel()
+			_, _ = s.engine.caller.Call(callCtx, service, operation, requestJSON)
 		}()
 	}
 	return 0
@@ -3756,13 +3761,17 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 	s.recordEvent(rec)
 
 	// Schedule the call. For now, run in a goroutine after the delay.
+	// Wrap the call in a timeout context to bound goroutine lifetime
+	// in case the external Call blocks indefinitely.
 	if s.engine.caller != nil {
 		go func() {
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(time.Duration(delayMs) * time.Millisecond):
-				_, _ = s.engine.caller.Call(ctx, service, operation, requestJSON)
+				callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+				defer cancel()
+				_, _ = s.engine.caller.Call(callCtx, service, operation, requestJSON)
 			}
 		}()
 	}

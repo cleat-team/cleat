@@ -324,6 +324,7 @@ func (e *execution) awaitCondition(predicate func() bool, pollInterval, timeout 
 		e.runner.mu.Lock()
 		e.runner.now = e.runner.now.Add(pollInterval)
 		e.runner.mu.Unlock()
+		time.Sleep(pollInterval)
 	}
 }
 	func (e *execution) sideEffect(computedResult string) (string, error) {

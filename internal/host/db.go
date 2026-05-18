@@ -1084,11 +1084,9 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 
 		offset := 0
 		for {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				errCh <- ctx.Err()
 				return
-			default:
 			}
 
 			rows, err := s.db.QueryContext(ctx, `
@@ -4071,6 +4069,7 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 		if n == 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Also batch cleanup compaction states for those workflows.
@@ -4094,6 +4093,7 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 		if n == 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	return totalDeleted, nil
@@ -4176,6 +4176,7 @@ func (s *PostgresStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderTh
 		if n == 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	return totalDeleted, nil
 }
