@@ -214,7 +214,7 @@ func TestBuildPrompt(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.role, func(t *testing.T) {
-			prompt, err := buildPrompt(in, tc.role, t.TempDir(), protocolPath)
+			prompt, err := buildPrompt(in, tc.role, t.TempDir(), protocolPath, "")
 			if err != nil {
 				t.Fatalf("buildPrompt() for %s returned error: %v", tc.role, err)
 			}
@@ -231,7 +231,7 @@ func TestBuildPromptProtocolNotFound(t *testing.T) {
 	// buildPrompt doesn't check file existence — that's done by runPhase.
 	// It should succeed even with a non-existent protocol path.
 	in := runPhaseInput{TaskID: "test", Project: "test", ProjectRoot: "/tmp", Workdir: "/tmp"}
-	prompt, err := buildPrompt(in, "explorer", "/tmp", "/nonexistent/protocol.md")
+	prompt, err := buildPrompt(in, "explorer", "/tmp", "/nonexistent/protocol.md", "")
 	if err != nil {
 		t.Fatalf("buildPrompt() returned error: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestBuildPromptProtocolNotFound(t *testing.T) {
 
 func TestBuildPromptUnknownRole(t *testing.T) {
 	in := runPhaseInput{TaskID: "test", Project: "test", ProjectRoot: "/tmp", Workdir: "/tmp"}
-	_, err := buildPrompt(in, "unknown", "/tmp", "/dev/null")
+	_, err := buildPrompt(in, "unknown", "/tmp", "/dev/null", "")
 	if err == nil {
 		t.Error("expected error for unknown role")
 	}
