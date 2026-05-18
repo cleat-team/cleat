@@ -187,8 +187,9 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"name", "string"},
 			{"inputJSON", "string"},
-			{"version", "int64"},
+			{"version", "int"},
 			{"parentClosePolicy", "string"},
+			{"priority", "int"},
 		},
 		ResultStmts: []string{
 			"runIDLen := uint32(uint64(result) >> 32)",

@@ -357,7 +357,7 @@ class TestChildWorkflows:
 
     def test_child_workflow_with_options(self, host: LocalHostCalls):
         """``child_workflow_with_options`` accepts and stores version info."""
-        opts = ChildWorkflowOptions(version=2)
+        opts = ChildWorkflowOptions(version=2, priority=5)
         run_id = host.child_workflow_with_options("wf", {}, opts)
         assert isinstance(run_id, str)
         result = host.await_child(run_id)

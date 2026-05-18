@@ -22,7 +22,7 @@ func TestDeliverSignal(t *testing.T) {
 
 			ctx := context.Background()
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "deliver-signal-test", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "deliver-signal-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -59,7 +59,7 @@ func TestPollAndClaimSignal(t *testing.T) {
 
 			ctx := context.Background()
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "poll-claim-signal-test", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "poll-claim-signal-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -106,7 +106,7 @@ func TestPollSignal_NotDelivered(t *testing.T) {
 
 			ctx := context.Background()
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "poll-notfound-test", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "poll-notfound-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -136,7 +136,7 @@ func TestPollSignal_NonDestructive(t *testing.T) {
 
 			ctx := context.Background()
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "poll-nondestructive-test", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "poll-nondestructive-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -190,7 +190,7 @@ func TestStartChildWorkflow(t *testing.T) {
 
 			ctx := context.Background()
 
-			parentID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"parent":true}`), "child-parent-test", DefaultTenantUUID)
+			parentID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"parent":true}`), "child-parent-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -198,7 +198,7 @@ func TestStartChildWorkflow(t *testing.T) {
 				t.Fatal("StartNewRun returned empty parentID")
 			}
 
-			childID, err := store.StartChildWorkflow(ctx, parentID, "test-workflow", `{"from":"parent"}`, 1, "abandon")
+			childID, err := store.StartChildWorkflow(ctx, parentID, "test-workflow", `{"from":"parent"}`, 1, "abandon", 0)
 			if err != nil {
 				t.Fatalf("StartChildWorkflow: %v", err)
 			}
@@ -234,7 +234,7 @@ func TestGetChildResult_Completed(t *testing.T) {
 
 			ctx := context.Background()
 
-			parentID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"parent":true}`), "child-result-parent-test", DefaultTenantUUID)
+			parentID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"parent":true}`), "child-result-parent-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -242,7 +242,7 @@ func TestGetChildResult_Completed(t *testing.T) {
 				t.Fatal("StartNewRun returned empty parentID")
 			}
 
-			childID, err := store.StartChildWorkflow(ctx, parentID, "test-workflow", `{"from":"parent"}`, 1, "abandon")
+			childID, err := store.StartChildWorkflow(ctx, parentID, "test-workflow", `{"from":"parent"}`, 1, "abandon", 0)
 			if err != nil {
 				t.Fatalf("StartChildWorkflow: %v", err)
 			}
@@ -290,7 +290,7 @@ func TestGetChildResult_NotCompleted(t *testing.T) {
 
 			ctx := context.Background()
 
-			parentID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"parent":true}`), "child-notcomplete-parent-test", DefaultTenantUUID)
+			parentID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"parent":true}`), "child-notcomplete-parent-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -298,7 +298,7 @@ func TestGetChildResult_NotCompleted(t *testing.T) {
 				t.Fatal("StartNewRun returned empty parentID")
 			}
 
-			childID, err := store.StartChildWorkflow(ctx, parentID, "test-workflow", `{"from":"parent"}`, 1, "abandon")
+			childID, err := store.StartChildWorkflow(ctx, parentID, "test-workflow", `{"from":"parent"}`, 1, "abandon", 0)
 			if err != nil {
 				t.Fatalf("StartChildWorkflow: %v", err)
 			}
@@ -333,7 +333,7 @@ func TestReapStaleInstances(t *testing.T) {
 
 			ctx := context.Background()
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "reap-test", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "reap-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -388,11 +388,11 @@ func TestListWorkflows_ByStatus(t *testing.T) {
 			ctx := context.Background()
 
 			// Create two ready workflows.
-			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"seq":1}`), "list-by-status-1", DefaultTenantUUID)
+			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"seq":1}`), "list-by-status-1", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun 1: %v", err)
 			}
-			_, _, err = store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"seq":2}`), "list-by-status-2", DefaultTenantUUID)
+			_, _, err = store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"seq":2}`), "list-by-status-2", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun 2: %v", err)
 			}
@@ -449,7 +449,7 @@ func TestListWorkflows_Pagination(t *testing.T) {
 			// Create 5 workflows with distinct idempotency keys.
 			for i := 1; i <= 5; i++ {
 				key := "paginate-key-" + itoa(i)
-				_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"n":"`+itoa(i)+`"}`), key, DefaultTenantUUID)
+				_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"n":"`+itoa(i)+`"}`), key, DefaultTenantUUID, 0)
 				if err != nil {
 					t.Fatalf("StartNewRun %d: %v", i, err)
 				}
@@ -524,7 +524,7 @@ func TestListWorkflows_Search(t *testing.T) {
 
 			ctx := context.Background()
 
-			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "list-search-test", DefaultTenantUUID)
+			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "list-search-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -553,12 +553,12 @@ func TestListWorkflows_InputContains(t *testing.T) {
 
 			// Create workflows with distinctive JSON input.
 			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1,
-				json.RawMessage(`{"needle":"find-me-12345"}`), "input-filter-1", DefaultTenantUUID)
+				json.RawMessage(`{"needle":"find-me-12345"}`), "input-filter-1", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun 1: %v", err)
 			}
 			_, _, err = store.StartNewRun(ctx, "", "test-workflow", 1,
-				json.RawMessage(`{"other":"value"}`), "input-filter-2", DefaultTenantUUID)
+				json.RawMessage(`{"other":"value"}`), "input-filter-2", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun 2: %v", err)
 			}
@@ -599,7 +599,7 @@ func TestGetWorkflowByID(t *testing.T) {
 
 			ctx := context.Background()
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"key":"val"}`), "get-by-id-test", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"key":"val"}`), "get-by-id-test", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}

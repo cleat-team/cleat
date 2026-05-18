@@ -73,7 +73,7 @@ func TestClaimWorkflows_Batch(t *testing.T) {
 			// Create 5 ready workflows with unique idempotency keys.
 			for i := 0; i < 5; i++ {
 				key := fmt.Sprintf("claim-batch-key-%d", i)
-				_, alreadyExisted, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), key, DefaultTenantUUID)
+				_, alreadyExisted, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), key, DefaultTenantUUID, 0)
 				if err != nil {
 					t.Fatalf("StartNewRun[%d]: %v", i, err)
 				}
@@ -119,7 +119,7 @@ func TestClaimStickyWorkflows(t *testing.T) {
 			setupTestData(t, store)
 
 			// Create a workflow and set its sticky worker.
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -169,7 +169,7 @@ func TestClaimSkipLocked(t *testing.T) {
 			// Create exactly 10 ready workflows.
 			allIDs := make(map[string]bool)
 			for i := 0; i < 10; i++ {
-				runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+				runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 				if err != nil {
 					t.Fatalf("StartNewRun[%d]: %v", i, err)
 				}
@@ -251,7 +251,7 @@ func TestExactlyOnceStart(t *testing.T) {
 			setupTestData(t, store)
 
 			// First call with idempotency key — should create a new run.
-			runID1, alreadyExisted, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "idem-1", DefaultTenantUUID)
+			runID1, alreadyExisted, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "idem-1", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun (first): %v", err)
 			}
@@ -260,7 +260,7 @@ func TestExactlyOnceStart(t *testing.T) {
 			}
 
 			// Second call with the same key — should return the same runID.
-			runID2, alreadyExisted, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "idem-1", DefaultTenantUUID)
+			runID2, alreadyExisted, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "idem-1", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun (second): %v", err)
 			}
@@ -293,7 +293,7 @@ func TestExactlyOnceStart_DifferentKeys(t *testing.T) {
 			ctx := context.Background()
 			setupTestData(t, store)
 
-			runID1, alreadyExisted1, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "idem-a", DefaultTenantUUID)
+			runID1, alreadyExisted1, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "idem-a", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun (idem-a): %v", err)
 			}
@@ -301,7 +301,7 @@ func TestExactlyOnceStart_DifferentKeys(t *testing.T) {
 				t.Fatal("alreadyExisted=true for idem-a, expected false")
 			}
 
-			runID2, alreadyExisted2, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "idem-b", DefaultTenantUUID)
+			runID2, alreadyExisted2, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "idem-b", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun (idem-b): %v", err)
 			}
@@ -330,7 +330,7 @@ func TestAppendEventHistory(t *testing.T) {
 			ctx := context.Background()
 			setupTestData(t, store)
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -380,7 +380,7 @@ func TestAppendEventHistoryBatch(t *testing.T) {
 			ctx := context.Background()
 			setupTestData(t, store)
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -428,7 +428,7 @@ func TestAppendEventHistory_Idempotent(t *testing.T) {
 			ctx := context.Background()
 			setupTestData(t, store)
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -471,7 +471,7 @@ func TestLoadEventHistoryPaginated(t *testing.T) {
 			ctx := context.Background()
 			setupTestData(t, store)
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -553,7 +553,7 @@ func TestBinaryDataRoundTrip(t *testing.T) {
 			ctx := context.Background()
 			setupTestData(t, store)
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -601,7 +601,7 @@ func TestCompleteWorkflow(t *testing.T) {
 			setupTestData(t, store)
 			truncateAll(t, store)
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -650,7 +650,7 @@ func TestFailWorkflow(t *testing.T) {
 			setupTestData(t, store)
 			truncateAll(t, store)
 
-			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -698,7 +698,7 @@ func TestReleaseWorkflow(t *testing.T) {
 			setupTestData(t, store)
 			truncateAll(t, store)
 
-			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -748,7 +748,7 @@ func TestContinueAsNew_Atomic(t *testing.T) {
 			setupTestData(t, store)
 			truncateAll(t, store)
 
-			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"v":1}`), "", DefaultTenantUUID)
+			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{"v":1}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -762,7 +762,7 @@ func TestContinueAsNew_Atomic(t *testing.T) {
 			}
 
 			newInput := json.RawMessage(`{"v":2}`)
-			newRunID, err := store.ContinueAsNew(ctx, wf.ID, "worker-1", wf.Generation, "test-workflow", 1, newInput, nil, `{"result":"ok"}`, nil)
+			newRunID, err := store.ContinueAsNew(ctx, wf.ID, "worker-1", wf.Generation, "test-workflow", 1, newInput, nil, `{"result":"ok"}`, nil, 0)
 			if err != nil {
 				t.Fatalf("ContinueAsNew: %v", err)
 			}
@@ -808,7 +808,7 @@ func TestFinalizeWorkflowSegment(t *testing.T) {
 			setupTestData(t, store)
 			truncateAll(t, store)
 
-			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -870,7 +870,7 @@ func TestHeartbeat(t *testing.T) {
 			setupTestData(t, store)
 			truncateAll(t, store)
 
-			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -917,7 +917,7 @@ func TestBatchHeartbeat(t *testing.T) {
 
 			// Create 2 workflows and claim them both with the same worker.
 			for i := 0; i < 2; i++ {
-				_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+				_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 				if err != nil {
 					t.Fatalf("StartNewRun[%d]: %v", i, err)
 				}
@@ -954,7 +954,7 @@ func TestMoveToDeadLetterQueue(t *testing.T) {
 			setupTestData(t, store)
 			truncateAll(t, store)
 
-			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -1005,7 +1005,7 @@ func TestRequestCancellation(t *testing.T) {
 			ctx := context.Background()
 			setupTestData(t, store)
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -1039,7 +1039,7 @@ func TestCheckCancellation_NotCancelled(t *testing.T) {
 			ctx := context.Background()
 			setupTestData(t, store)
 
-			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -1053,6 +1053,44 @@ func TestCheckCancellation_NotCancelled(t *testing.T) {
 			}
 			if reason != "" {
 				t.Errorf("expected empty reason, got %q", reason)
+			}
+		})
+	}
+}
+
+
+// =============================================================================
+// Group 6 — Priority
+// =============================================================================
+
+func TestStartNewRunWithPriority(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			t.Parallel()
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			ctx := context.Background()
+			setupTestData(t, store)
+			truncateAll(t, store)
+
+			runID, alreadyExisted, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 5)
+			if err != nil {
+				t.Fatalf("StartNewRun with priority=5: %v", err)
+			}
+			if alreadyExisted {
+				t.Fatal("alreadyExisted=true for new run")
+			}
+
+			wf, err := store.GetWorkflowByID(ctx, runID)
+			if err != nil {
+				t.Fatalf("GetWorkflowByID: %v", err)
+			}
+			if wf == nil {
+				t.Fatal("workflow not found after StartNewRun")
+			}
+			if wf.Priority != 5 {
+				t.Errorf("Priority = %d, want 5", wf.Priority)
 			}
 		})
 	}

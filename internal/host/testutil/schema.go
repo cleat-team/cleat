@@ -45,6 +45,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				compaction_state JSONB, compacted_at TIMESTAMPTZ, compaction_step INTEGER,
 				plugin_vers JSONB NOT NULL DEFAULT '{}',
 				event_count BIGINT NOT NULL DEFAULT 0,
+				priority INTEGER NOT NULL DEFAULT 0,
 				allowed_signals JSONB DEFAULT NULL,
 					generation BIGINT NOT NULL DEFAULT 0)`,
 			`CREATE TABLE IF NOT EXISTS event_history (
@@ -104,6 +105,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				compaction_state JSON, compacted_at TIMESTAMP(6), compaction_step INTEGER,
 				plugin_vers JSON NOT NULL DEFAULT ('{}'),
 				event_count BIGINT NOT NULL DEFAULT 0,
+				priority INTEGER NOT NULL DEFAULT 0,
 				allowed_signals JSON DEFAULT NULL,
 					generation BIGINT NOT NULL DEFAULT 0)`,
 			`CREATE TABLE IF NOT EXISTS event_history (
@@ -172,6 +174,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					compaction_state NVARCHAR(MAX), compacted_at DATETIMEOFFSET, compaction_step INTEGER,
 					plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
 					event_count BIGINT NOT NULL DEFAULT 0,
+					priority INTEGER NOT NULL DEFAULT 0,
 					allowed_signals NVARCHAR(MAX) NULL,
 					generation BIGINT NOT NULL DEFAULT 0)`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_history')
@@ -271,6 +274,9 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`CREATE INDEX IF NOT EXISTS idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running'`,
 			`CREATE INDEX IF NOT EXISTS idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`,
 			`CREATE INDEX IF NOT EXISTS idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`,
+			// priority-aware queue index (migration 004)
+			`DROP INDEX IF EXISTS idx_instances_tenant_queue_ready`,
+			`CREATE INDEX IF NOT EXISTS idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority ASC, next_wake_at) WHERE status = 'ready'`,
 			// concurrency_keys index
 			`CREATE INDEX IF NOT EXISTS idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,
 			// idempotency_keys index
@@ -354,6 +360,9 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at)`,
 			`CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at)`,
 			`CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id)`,
+			// priority-aware queue index (migration 004)
+			`DROP INDEX idx_instances_tenant_queue_ready ON workflow_instances`,
+			`CREATE INDEX idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority, next_wake_at)`,
 			// concurrency_keys index
 			`CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,
 			// idempotency_keys index
@@ -431,6 +440,10 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_sticky' AND object_id = OBJECT_ID('workflow_instances'))
 				CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`,
+			// priority-aware queue index (migration 004)
+			`DROP INDEX IF EXISTS idx_instances_tenant_queue_ready ON dbo.workflow_instances`,
+			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_tenant_queue_ready' AND object_id = OBJECT_ID('workflow_instances'))
+				CREATE INDEX idx_instances_tenant_queue_ready ON dbo.workflow_instances(tenant_id, task_queue, status, priority ASC, next_wake_at) WHERE status = 'ready'`,
 			// concurrency_keys index
 			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_concurrency_keys_workflow' AND object_id = OBJECT_ID('concurrency_keys'))
 				CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,

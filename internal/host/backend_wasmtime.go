@@ -763,12 +763,12 @@ func (b *wasmtimeBackend) registerCleatChildWorkflow(linker *wasmtime.Linker) er
 }
 
 // ---------------------------------------------------------------------------
-// cleat_child_workflow_with_options: (i32,i32 x3, i64, i32,i32, i32,i32) -> i64
+// cleat_child_workflow_with_options: (i32,i32 x3, i64, i64, i32,i32, i32,i32) -> i64
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime.Linker) error {
 	return linker.FuncWrap("env", "cleat_child_workflow_with_options", func(ctx context.Context, caller *wasmtime.Caller,
-		namePtr, nameLen, inputPtr, inputLen uint32, version int64,
+		namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
 		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) (uint64, error) {
 		h := handlerFromContext(ctx)
 		buf, _, err := callerMemBuf(caller)
@@ -788,17 +788,17 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 			return errBadParam, nil
 		}
 		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.ChildWorkflowWithOptions(callCtx, nil, wfName, wfInput, version, parentClosePolicy, runIDPtr, runIDMaxLen)), nil
+		return uint64(h.ChildWorkflowWithOptions(callCtx, nil, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen)), nil
 	})
 }
 
 // ---------------------------------------------------------------------------
-// cleat_child_workflow_in_schema: (i32,i32 x4, i64, i32,i32, i32,i32) -> i64
+// cleat_child_workflow_in_schema: (i32,i32 x4, i64, i64, i32,i32, i32,i32) -> i64
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Linker) error {
 	return linker.FuncWrap("env", "cleat_child_workflow_in_schema", func(ctx context.Context, caller *wasmtime.Caller,
-		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64,
+		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
 		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) (uint64, error) {
 		h := handlerFromContext(ctx)
 		buf, _, err := callerMemBuf(caller)
@@ -822,7 +822,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Li
 			return errBadParam, nil
 		}
 		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.ChildWorkflowInSchema(callCtx, nil, targetSchema, wfName, wfInput, version, parentClosePolicy, runIDPtr, runIDMaxLen)), nil
+		return uint64(h.ChildWorkflowInSchema(callCtx, nil, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen)), nil
 	})
 }
 

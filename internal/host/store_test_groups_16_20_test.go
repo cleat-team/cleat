@@ -25,7 +25,7 @@ func TestGetQueryState(t *testing.T) {
 
 			// Create a fresh workflow instance.
 			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1,
-				json.RawMessage(`{}`), "qstate-test-1", DefaultTenantUUID)
+				json.RawMessage(`{}`), "qstate-test-1", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -92,7 +92,7 @@ func TestUpdateStickyWorker(t *testing.T) {
 			ctx := context.Background()
 
 			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1,
-				json.RawMessage(`{}`), "sticky-upd-1", DefaultTenantUUID)
+				json.RawMessage(`{}`), "sticky-upd-1", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -117,7 +117,7 @@ func TestClearStickyWorker(t *testing.T) {
 			ctx := context.Background()
 
 			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1,
-				json.RawMessage(`{}`), "sticky-clr-1", DefaultTenantUUID)
+				json.RawMessage(`{}`), "sticky-clr-1", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}
@@ -342,7 +342,7 @@ func TestQueueDepth(t *testing.T) {
 			for i := 0; i < 3; i++ {
 				key := "qd-test-" + string(rune('0'+i))
 				_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1,
-					json.RawMessage(`{}`), key, DefaultTenantUUID)
+					json.RawMessage(`{}`), key, DefaultTenantUUID, 0)
 				if err != nil {
 					t.Fatalf("StartNewRun #%d: %v", i, err)
 				}
@@ -374,7 +374,7 @@ func TestDeleteExpiredEvents(t *testing.T) {
 			// Create a workflow and complete it so it becomes a terminal
 			// (expired) candidate.
 			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1,
-				json.RawMessage(`{}`), "expired-test-1", DefaultTenantUUID)
+				json.RawMessage(`{}`), "expired-test-1", DefaultTenantUUID, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun: %v", err)
 			}

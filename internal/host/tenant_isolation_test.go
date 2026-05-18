@@ -52,7 +52,7 @@ func TestTenantSelfAccess(t *testing.T) {
 		// Start a workflow as the default tenant (from Setup).
 		runID, _, err := store.StartNewRun(ctx, "", "test-isolation", 1,
 			json.RawMessage(`{"owner":"tenant-a"}`),
-			"idempotency-tenant-a-1", DefaultTenantUUID)
+			"idempotency-tenant-a-1", DefaultTenantUUID, 0)
 		if err != nil {
 			t.Fatalf("StartNewRun: %v", err)
 		}
@@ -139,7 +139,7 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-isolation", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"iso-test-a-1", tenantA)
+				"iso-test-a-1", tenantA, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -147,7 +147,7 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-isolation", 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
-				"iso-test-b-1", tenantB)
+				"iso-test-b-1", tenantB, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}
@@ -251,7 +251,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-signals", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"signal-test-a-1", tenantA)
+				"signal-test-a-1", tenantA, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -259,7 +259,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-signals", 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
-				"signal-test-b-1", tenantB)
+				"signal-test-b-1", tenantB, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}
@@ -436,7 +436,7 @@ func TestTenantIsolation_EventHistory(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-event-history-iso", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"event-history-test-a-1", tenantA)
+				"event-history-test-a-1", tenantA, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -521,7 +521,7 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-promises", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"promise-test-a-1", tenantA)
+				"promise-test-a-1", tenantA, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -529,7 +529,7 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-promises", 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
-				"promise-test-b-1", tenantB)
+				"promise-test-b-1", tenantB, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}
@@ -619,14 +619,14 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-reaper", 1,
-				json.RawMessage(`{}`), "reaper-a-1", tenantA)
+				json.RawMessage(`{}`), "reaper-a-1", tenantA, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
 
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-reaper", 1,
-				json.RawMessage(`{}`), "reaper-b-1", tenantB)
+				json.RawMessage(`{}`), "reaper-b-1", tenantB, 0)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}

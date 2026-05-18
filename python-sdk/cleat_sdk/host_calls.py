@@ -307,16 +307,19 @@ class ChildResult:
 
 @dataclass
 class ChildWorkflowOptions:
-    """Options for starting a child workflow with version control.
+    """Options for starting a child workflow with version and priority control.
 
     Parameters
     ----------
     version : int
         Explicit workflow definition version to use.
         0 = use default resolution (parent's version).
+    priority : int
+        Scheduling priority (0 = highest priority; lower number = picked first).
     """
 
     version: int = 0
+    priority: int = 0
 
 
 @dataclass
@@ -489,11 +492,18 @@ if not _USING_WASM:
 if not _USING_WASM:
 
     def _import_cleat_child_workflow_with_options(
-        name: str,
-        input: str,
+        name_ptr: int,
+        name_len: int,
+        input_ptr: int,
+        input_len: int,
         version: int,
-    ) -> str:
-        """Stub for WASM import `."""
+        priority: int,
+        policy_ptr: int,
+        policy_len: int,
+        run_id_ptr: int,
+        run_id_max_len: int,
+    ) -> int:
+        """Stub for WASM import ``(import "env" "cleat_child_workflow_with_options")``."""
         raise NotImplementedError(
             "cleat_child_workflow_with_options can only be called within a cleat WASM runtime."
         )
@@ -1972,10 +1982,10 @@ class HostCalls:
     def child_workflow_with_options(
         self, name: str, input: Any, options: ChildWorkflowOptions = ChildWorkflowOptions()
     ) -> str:
-        """Start a child workflow instance with version options.
+        """Start a child workflow instance with version and priority options.
 
         Like :meth:`child_workflow` but allows specifying the workflow
-        definition version explicitly.
+        definition version and scheduling priority explicitly.
 
         Parameters
         ----------
@@ -1984,7 +1994,7 @@ class HostCalls:
         input : Any
             Input for the child workflow.
         options : ChildWorkflowOptions
-            Version options for the child workflow (default: version=0).
+            Version and priority options for the child workflow.
 
         Returns
         -------
@@ -1997,6 +2007,9 @@ class HostCalls:
         input_offset = SCRATCH_BASE + name_len
         remaining = OUT_BUF_SIZE - name_len
         input_len = write_string(input_offset, input_str, remaining)
+        # Empty parent-close-policy (not yet exposed in the Python SDK)
+        policy_offset = input_offset + input_len
+        policy_len = write_string(policy_offset, "", remaining - input_len)
 
         result = _import_cleat_child_workflow_with_options(
             SCRATCH_BASE,
@@ -2004,6 +2017,9 @@ class HostCalls:
             input_offset,
             input_len,
             options.version,
+            options.priority,
+            policy_offset,
+            policy_len,
             OUTPUT_OFFSET,
             OUT_BUF_SIZE,
         )

@@ -35,7 +35,7 @@ mod native_stubs {
 }
 
 pub use cleat_macro::cleat_test;
-pub use host_calls::{FetchResult, HostCalls, RetryPolicy, SignalResult};
+pub use host_calls::{ChildWorkflowOptions, FetchResult, HostCalls, RetryPolicy, SignalResult};
 pub use saga::{Saga, SagaStep};
 pub use plugins::{
     AwaitEventResult, AwaitWebhookResult, BlobGetResult, BlobPutResult,

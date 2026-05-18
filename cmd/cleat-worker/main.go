@@ -488,7 +488,7 @@ func main() {
 			if len(versions) == 0 {
 				return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
 			}
-			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "", host.DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "", host.DefaultTenantUUID, 0)
 			return runID, err
 		},
 
@@ -1497,7 +1497,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	caller := &dbServiceCaller{store: w.store, workerID: w.id}
 	engineOpts := []host.EngineOption{
 		host.WithSignalStore(w.store.(host.SignalStore)),
-		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, childVersions: childVersions}),
+		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),
 		host.WithWorkflowID(wf.ID),
 		host.WithTraceID(traceID),
 		host.WithTenantID(wf.TenantID),
@@ -1645,7 +1645,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		// ContinueAsNew: atomically append events, create a new run, and
 		// complete the current one — all in a single database transaction.
 		log.Printf("[worker %s] %s: continue_as_new → starting new run", w.id, wf.ID)
-		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState)
+		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
 		if err != nil {
 			log.Printf("[worker %s] %s: continue_as_new failed: %v", w.id, wf.ID, err)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
@@ -1872,7 +1872,7 @@ func (w *Worker) scheduleLoop() {
 					continue
 				}
 
-				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "", host.DefaultTenantUUID)
+				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "", host.DefaultTenantUUID, 0)
 				if serr != nil {
 					log.Printf("[worker %s] Scheduler: failed to start %s for schedule %s: %v",
 						w.id, sch.DefName, sch.Name, serr)
@@ -2227,11 +2227,13 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 type dbWorkflowState struct {
 	version       int
 	minVersion    int
+	priority      int
 	childVersions map[string]int
 }
 
 func (s *dbWorkflowState) Version() int    { return s.version }
 func (s *dbWorkflowState) MinVersion() int { return s.minVersion }
+func (s *dbWorkflowState) Priority() int  { return s.priority }
 func (s *dbWorkflowState) ChildVersion(name string) (int, bool) {
 	if s.childVersions == nil {
 		return 0, false
@@ -3068,6 +3070,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		ConcurrencyKey string          `json:"concurrency_key"`
 		TenantID       string          `json:"tenant_id"`
 		Namespace      string          `json:"namespace"` // deprecated; use tenant_id
+		Priority       int             `json:"priority"`
 	}
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
@@ -3128,7 +3131,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	// Redact sensitive fields in the input before storing.
 	in = json.RawMessage(host.Redact(string(in)))
-	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey, tenantID)
+	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey, tenantID, input.Priority)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return

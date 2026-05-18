@@ -215,6 +215,8 @@ type WorkflowState interface {
 	// ChildVersion returns the pinned version for a child workflow name
 	// from compile-time WASM metadata. Returns (0, false) if no pin exists.
 	ChildVersion(name string) (int, bool)
+	// Priority returns the scheduling priority of this workflow instance.
+	Priority() int
 }
 
 // SuspendError signals that the workflow should be suspended.
@@ -275,7 +277,7 @@ type ChildWorkflowStore interface {
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
 	// defVersion is the explicit workflow definition version to use, or 0 to use
 	// default resolution (SELECT MAX(version)).
-	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
+	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
 
 	// StartChildWorkflowAtomic creates a child workflow and records the parent's
 	// child_workflow event in a single database transaction, guaranteeing
@@ -284,7 +286,7 @@ type ChildWorkflowStore interface {
 	// The caller should still append the event to the in-memory history for
 	// same-execution replay. The later event flush will skip it via
 	// ON CONFLICT (workflow_id, step) DO NOTHING.
-	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error)
+	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error)
 
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
 }
@@ -298,7 +300,7 @@ type CrossSchemaChildStore interface {
 
 	// StartChildWorkflowInSchema creates a child workflow in the given target schema.
 	// The schema must be part of the engine's configured peerSchemas.
-	StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
+	StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
 
 	// GetChildResultInSchema polls a child workflow in the given target schema.
 	GetChildResultInSchema(ctx context.Context, targetSchema, runID string) (resultJSON string, completed bool, err error)
@@ -564,7 +566,7 @@ type Engine struct {
 	// between the engine returning and the worker calling store.ContinueAsNew.
 	// When set, the engine handles ContinueAsNew inline and marks the
 	// SuspendResult as ContinueAsNewHandled.
-	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)
+	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 
 	// Encryption at rest for sensitive event payloads.
 	encryption               *PayloadEncryption
@@ -841,7 +843,7 @@ func WithDefaultWorkflowTimeout(d time.Duration) EngineOption {
 // transition atomically (events + new run + old run completion).
 // When set, the engine calls this from its suspend path, eliminating
 // the race between engine return and worker-side store.ContinueAsNew call.
-func WithContinueAsNewHandler(fn func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)) EngineOption {
+func WithContinueAsNewHandler(fn func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)) EngineOption {
 	return func(e *Engine) { e.continueAsNewHandler = fn }
 }
 
@@ -1075,7 +1077,11 @@ func (e *Engine) executeWithBackend(
 			// generation is 0 because the engine does not yet track generation
 			// for continue-as-new; this code path is dormant (handler is never
 			// wired in current deployments).
-			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, res.Result, session.queryState)
+			priority := 0
+			if e.state != nil {
+				priority = e.state.Priority()
+			}
+			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, res.Result, session.queryState, priority)
 			if cnErr != nil {
 				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
 			}
@@ -1201,7 +1207,11 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				// for continue-as-new; this code path is dormant (handler is never
 				// wired in current deployments).
 				newEvents := session.history[len(replayHistory):]
-				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState)
+				priority := 0
+				if e.state != nil {
+					priority = e.state.Priority()
+				}
+				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
 					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
 				}
@@ -1467,7 +1477,11 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 				// for continue-as-new; this code path is dormant (handler is never
 				// wired in current deployments).
 				newEvents := session.history
-				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState)
+				priority := 0
+				if e.state != nil {
+					priority = e.state.Priority()
+				}
+				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
 					return "", session.history, nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
 				}
@@ -2505,11 +2519,11 @@ func (s *execSession) ChildWorkflow(ctx context.Context, m api.Module, name, inp
 	if s.engine.state != nil {
 		parentVersion = s.engine.state.Version()
 	}
-	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, parentVersion, "", runIDPtr, runIDMaxLen)
+	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, parentVersion, 0, "", runIDPtr, runIDMaxLen)
 }
 
-func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
-	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), parentClosePolicy, runIDPtr, runIDMaxLen)
+func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
+	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), int(priority), parentClosePolicy, runIDPtr, runIDMaxLen)
 }
 
 // ChildWorkflowInSchema starts a child workflow in a target PostgreSQL schema.
@@ -2518,7 +2532,7 @@ func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module
 //
 // The target schema MUST be in the engine's configured peerSchemas (or be the
 // engine's own schema).  An empty targetSchema falls back to the local schema.
-func (s *execSession) ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
+func (s *execSession) ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
 	// Validate: target schema must be a peer or our own schema.
 	if targetSchema != "" && targetSchema != s.engine.schema {
 		allowed := false
@@ -2533,14 +2547,14 @@ func (s *execSession) ChildWorkflowInSchema(ctx context.Context, m api.Module, t
 		}
 	}
 
-	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), parentClosePolicy, runIDPtr, runIDMaxLen, targetSchema)
+	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), int(priority), parentClosePolicy, runIDPtr, runIDMaxLen, targetSchema)
 }
 
 // childWorkflowWithVersion is the shared implementation for creating child workflows.
 // If version <= 0, the parent's version is used as the default.
 // If targetSchema is non-empty, the child is created in that PostgreSQL schema
 // (cross-instance cooperation); otherwise the child is created locally.
-func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, parentClosePolicy string, runIDPtr, runIDMaxLen uint32, targetSchema ...string) int64 {
+func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, priority int, parentClosePolicy string, runIDPtr, runIDMaxLen uint32, targetSchema ...string) int64 {
 	ts := ""
 	if len(targetSchema) > 0 {
 		ts = targetSchema[0]
@@ -2626,9 +2640,9 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 				errWritten, _ := s.writeResult(ctx, m, runIDPtr, err.Error(), runIDMaxLen)
 				return int64(uint64(errWritten)<<32 | 4) // error code 4 = invalid
 			}
-			runID, err = css.StartChildWorkflowInSchema(ctx, ts, parentID, name, inputJSON, childVersion, parentClosePolicy)
+			runID, err = css.StartChildWorkflowInSchema(ctx, ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
 		} else {
-			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(ctx, "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec)
+			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(ctx, "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
 		}
 		if err != nil {
 			runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
@@ -3997,7 +4011,7 @@ func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, input
 
 	var runID string
 	if s.engine.childWfStore != nil {
-		rid, err := s.engine.childWfStore.StartChildWorkflow(ctx, s.workflowID, name, inputJSON, 0, "")
+		rid, err := s.engine.childWfStore.StartChildWorkflow(ctx, s.workflowID, name, inputJSON, 0, "", 0)
 		if err == nil {
 			runID = rid
 		}

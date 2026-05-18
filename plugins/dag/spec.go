@@ -14,9 +14,10 @@ type DAGSpec struct {
 
 // TaskSpec describes a single task in a DAG spec.
 type TaskSpec struct {
-	Name    string   `json:"name"`
-	Fn      string   `json:"fn"`
-	Parents []string `json:"parents,omitempty"`
+	Name     string   `json:"name"`
+	Fn       string   `json:"fn"`
+	Parents  []string `json:"parents,omitempty"`
+	Priority int      `json:"priority,omitempty"`
 }
 
 // TaskFunc is the signature for a DAG task function.
@@ -74,7 +75,7 @@ func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
 				fn = f
 			}
 		}
-		d.AddTask(ts.Name, ts.Parents, fn)
+		d.AddTask(ts.Name, ts.Parents, fn, ts.Priority)
 	}
 
 	return d, nil

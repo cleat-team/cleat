@@ -22,8 +22,15 @@ def durable_await_all_children(run_ids_json_ptr: int, run_ids_json_len: int, res
     Wait for multiple child workflows to complete (batch).
     """
     raise NotImplementedError
-def durable_child_workflow_with_options(name: str, input: str, version: int) -> str:
+def durable_child_workflow_with_options(
+    name_ptr: int, name_len: int,
+    input_ptr: int, input_len: int,
+    version: int,
+    priority: int,
+    parent_close_policy_ptr: int, parent_close_policy_len: int,
+    run_id_ptr: int, run_id_max_len: int,
+) -> int:
     """
-    Start a child workflow with explicit version options.
+    Start a child workflow with version, priority, and parent-close-policy options.
     """
     raise NotImplementedError

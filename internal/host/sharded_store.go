@@ -426,12 +426,12 @@ func (s *ShardedStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID
 
 // ContinueAsNew routes by current run ID so that both the new-run insert and
 // the old-run completion land on the same shard.
-func (s *ShardedStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
+func (s *ShardedStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
 	shard := s.getShard(currentRunID)
 	if shard == nil {
 		return "", fmt.Errorf("continue_as_new: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.ContinueAsNew(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, newEvents, result, queryState)
+	return shard.Store.ContinueAsNew(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, newEvents, result, queryState, priority)
 }
 
 // FinalizeWorkflowSegment routes by workflow ID.
@@ -483,7 +483,7 @@ func (s *ShardedStore) PollAndClaimSignal(ctx context.Context, workflowID, signa
 // shard determined by its own ID (not its definition name). This ensures all
 // subsequent operations (LoadEventHistory, child workflows, signals, etc.)
 // route to the same shard.
-func (s *ShardedStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error) {
+func (s *ShardedStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -494,24 +494,24 @@ func (s *ShardedStore) StartNewRun(ctx context.Context, runID, defName string, d
 	if shard == nil {
 		return "", false, fmt.Errorf("start_new_run: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.StartNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID)
+	return shard.Store.StartNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority)
 }
 
 // StartChildWorkflow places the child on the same shard as the parent.
 // defVersion is passed through to the underlying store for version resolution.
-func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
+func (s *ShardedStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
 	shard := s.getShard(parentID)
 	if shard == nil {
 		return "", fmt.Errorf("start_child_workflow: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy)
+	return shard.Store.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
 
 // StartChildWorkflowAtomic routes by the root ancestor UUID (stripping .c suffix)
 // so the child lands on the same shard as its family. Generates a shard-aligned
 // ".c{step}.{rand}" child ID if childID is empty. The random suffix guarantees
 // uniqueness across generations (a parent and its child can both be at step 5).
-func (s *ShardedStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (string, error) {
+func (s *ShardedStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
 	if childID == "" {
 		rootID := stripChildSuffix(parentID)
 		// 12 hex chars from the UUID (48 bits) guarantees uniqueness within
@@ -523,7 +523,7 @@ func (s *ShardedStore) StartChildWorkflowAtomic(ctx context.Context, childID, pa
 	if shard == nil {
 		return "", fmt.Errorf("start_child_workflow_atomic: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
 	}
-	return shard.Store.StartChildWorkflowAtomic(ctx, childID, parentID, defName, inputJSON, defVersion, parentClosePolicy, event)
+	return shard.Store.StartChildWorkflowAtomic(ctx, childID, parentID, defName, inputJSON, defVersion, parentClosePolicy, event, priority)
 }
 
 // GetChildResult routes by child run ID.
