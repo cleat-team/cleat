@@ -1450,6 +1450,10 @@ func TestRunBuild_PythonTarget_NoPyFile(t *testing.T) {
 // ============================================================================
 
 func TestRunBuild_PythonTarget_WasmRoundtrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping Python WASM roundtrip test in short mode")
+	}
+
 	if _, err := exec.LookPath("componentize-py"); err != nil {
 		t.Skip("componentize-py not installed; skipping Python WASM round-trip test")
 	}

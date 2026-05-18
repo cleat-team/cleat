@@ -46,6 +46,9 @@ func TestMSSQLStoreFactory(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
 		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
 	}
+	if testing.Short() {
+		t.Skip("Skipping MSSQL database test in short mode")
+	}
 
 	connStr := os.Getenv("CLEAT_TEST_MSSQL")
 

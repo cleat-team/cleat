@@ -111,9 +111,11 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
 			}
 
-			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+			storeA, teardownA := mtBackend.SetupForTenant(t, tenantA)
 			defer teardownA()
-			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			storeB, teardownB := mtBackend.SetupForTenant(t, tenantB)
 			defer teardownB()
 
 			ctx := context.Background()
@@ -137,7 +139,7 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-isolation", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"iso-test-a-1", DefaultTenantUUID)
+				"iso-test-a-1", tenantA)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -145,7 +147,7 @@ func TestTenantIsolationWithSeparateStores(t *testing.T) {
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-isolation", 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
-				"iso-test-b-1", DefaultTenantUUID)
+				"iso-test-b-1", tenantB)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}
@@ -222,9 +224,11 @@ func TestTenantIsolation_Signals(t *testing.T) {
 				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
 			}
 
-			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+			storeA, teardownA := mtBackend.SetupForTenant(t, tenantA)
 			defer teardownA()
-			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			storeB, teardownB := mtBackend.SetupForTenant(t, tenantB)
 			defer teardownB()
 
 			ctx := context.Background()
@@ -247,7 +251,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-signals", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"signal-test-a-1", DefaultTenantUUID)
+				"signal-test-a-1", tenantA)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -255,7 +259,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-signals", 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
-				"signal-test-b-1", DefaultTenantUUID)
+				"signal-test-b-1", tenantB)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}
@@ -405,9 +409,11 @@ func TestTenantIsolation_EventHistory(t *testing.T) {
 				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
 			}
 
-			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+			storeA, teardownA := mtBackend.SetupForTenant(t, tenantA)
 			defer teardownA()
-			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			storeB, teardownB := mtBackend.SetupForTenant(t, tenantB)
 			defer teardownB()
 
 			ctx := context.Background()
@@ -430,7 +436,7 @@ func TestTenantIsolation_EventHistory(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-event-history-iso", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"event-history-test-a-1", DefaultTenantUUID)
+				"event-history-test-a-1", tenantA)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -488,9 +494,11 @@ func TestTenantIsolation_Promises(t *testing.T) {
 				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
 			}
 
-			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+			storeA, teardownA := mtBackend.SetupForTenant(t, tenantA)
 			defer teardownA()
-			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			storeB, teardownB := mtBackend.SetupForTenant(t, tenantB)
 			defer teardownB()
 
 			ctx := context.Background()
@@ -513,7 +521,7 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-promises", 1,
 				json.RawMessage(`{"owner":"tenant-a"}`),
-				"promise-test-a-1", DefaultTenantUUID)
+				"promise-test-a-1", tenantA)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
@@ -521,7 +529,7 @@ func TestTenantIsolation_Promises(t *testing.T) {
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-promises", 1,
 				json.RawMessage(`{"owner":"tenant-b"}`),
-				"promise-test-b-1", DefaultTenantUUID)
+				"promise-test-b-1", tenantB)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}
@@ -586,9 +594,11 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
 			}
 
-			storeA, teardownA := mtBackend.SetupForTenant(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+			storeA, teardownA := mtBackend.SetupForTenant(t, tenantA)
 			defer teardownA()
-			storeB, teardownB := mtBackend.SetupForTenant(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+			storeB, teardownB := mtBackend.SetupForTenant(t, tenantB)
 			defer teardownB()
 
 			ctx := context.Background()
@@ -609,14 +619,14 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 
 			// Create a workflow in store A.
 			runIDA, _, err := storeA.StartNewRun(ctx, "", "test-reaper", 1,
-				json.RawMessage(`{}`), "reaper-a-1", DefaultTenantUUID)
+				json.RawMessage(`{}`), "reaper-a-1", tenantA)
 			if err != nil {
 				t.Fatalf("StartNewRun on store A: %v", err)
 			}
 
 			// Create a workflow in store B.
 			runIDB, _, err := storeB.StartNewRun(ctx, "", "test-reaper", 1,
-				json.RawMessage(`{}`), "reaper-b-1", DefaultTenantUUID)
+				json.RawMessage(`{}`), "reaper-b-1", tenantB)
 			if err != nil {
 				t.Fatalf("StartNewRun on store B: %v", err)
 			}

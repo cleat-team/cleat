@@ -162,6 +162,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
          CREATE TABLE workflow_promises (
              workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
              promise_id NVARCHAR(900) NOT NULL,
+             tenant_id NVARCHAR(255) NOT NULL,
              promise_name NVARCHAR(MAX) NOT NULL,
              status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
              result NVARCHAR(MAX),
@@ -277,6 +278,9 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 // Default: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
 func MSSQLTestDB(t *testing.T) *sql.DB {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("Skipping MSSQL database test in short mode")
+	}
 
 	connStr := os.Getenv("CLEAT_TEST_MSSQL")
 	if connStr == "" {

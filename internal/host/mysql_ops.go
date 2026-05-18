@@ -34,9 +34,9 @@ func compactJSONString(s string) string {
 // CreatePromise creates a new promise for a workflow.
 func (s *MySQLStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT IGNORE INTO workflow_promises (workflow_id, promise_id, promise_name, status)
-		VALUES (?, ?, ?, 'pending')
-	`, workflowID, promiseID, promiseName)
+		INSERT IGNORE INTO workflow_promises (workflow_id, promise_id, promise_name, tenant_id, status)
+		VALUES (?, ?, ?, ?, 'pending')
+	`, workflowID, promiseID, promiseName, s.tenantID)
 	return err
 }
 
@@ -46,8 +46,8 @@ func (s *MySQLStore) CreatePromise(ctx context.Context, workflowID, promiseName,
 func (s *MySQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = ?, result = ?, resolved_at = NOW(6)
-		WHERE workflow_id = ? AND promise_id = ?
-	`, "resolved", result, workflowID, promiseID)
+		WHERE workflow_id = ? AND promise_id = ? AND tenant_id = ?
+	`, "resolved", result, workflowID, promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -64,8 +64,8 @@ func (s *MySQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, 
 func (s *MySQLStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = ?, error_msg = ?, resolved_at = NOW(6)
-		WHERE workflow_id = ? AND promise_id = ?
-	`, "rejected", errMsg, workflowID, promiseID)
+		WHERE workflow_id = ? AND promise_id = ? AND tenant_id = ?
+	`, "rejected", errMsg, workflowID, promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -81,8 +81,8 @@ func (s *MySQLStore) GetPromise(ctx context.Context, workflowID, promiseID strin
 	var resultStr, errStr sql.NullString
 	err = s.db.QueryRowContext(ctx, `
 		SELECT status, CAST(result AS CHAR), error_msg FROM workflow_promises
-		WHERE workflow_id = ? AND promise_id = ?
-	`, workflowID, promiseID).Scan(&status, &resultStr, &errStr)
+		WHERE workflow_id = ? AND promise_id = ? AND tenant_id = ?
+	`, workflowID, promiseID, s.tenantID).Scan(&status, &resultStr, &errStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "pending", "", "", nil
 	}
@@ -100,9 +100,9 @@ func (s *MySQLStore) ListPromises(ctx context.Context, workflowID string) ([]Pro
 		       COALESCE(error_msg, ''),
 		       created_at, resolved_at
 		FROM workflow_promises
-		WHERE workflow_id = ?
+		WHERE workflow_id = ? AND tenant_id = ?
 		ORDER BY created_at
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return nil, err
 	}

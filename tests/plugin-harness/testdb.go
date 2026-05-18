@@ -27,6 +27,10 @@ import (
 func OpenTestDB(t *testing.T, dialect plugin.Dialect, connStr string) (*sql.DB, string) {
 	t.Helper()
 
+	if testing.Short() {
+		t.Skip("Skipping database test in short mode")
+	}
+
 	schemaName := uniqueSchemaName()
 
 	var driverName string
