@@ -6,7 +6,7 @@ import (
 	"github.com/cleat-team/cleat/internal/plugin"
 )
 
-// RegisterHostFunctions registers run_phase and check_ci host functions.
+// RegisterHostFunctions registers all clew-executor host functions.
 func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("clew-executor: nil function registry")
@@ -17,8 +17,26 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	}, p.runPhase); err != nil {
 		return err
 	}
-	return scope.Register(plugin.FuncOptions{
+	if err := scope.Register(plugin.FuncOptions{
 		Name:       "check_ci",
 		Idempotent: false,
-	}, p.checkCI)
+	}, p.checkCI); err != nil {
+		return err
+	}
+	if err := scope.Register(plugin.FuncOptions{
+		Name:       "validate_files",
+		Idempotent: true,
+	}, p.validateFiles); err != nil {
+		return err
+	}
+	if err := scope.Register(plugin.FuncOptions{
+		Name:       "read_file",
+		Idempotent: true,
+	}, p.readFile); err != nil {
+		return err
+	}
+	return scope.Register(plugin.FuncOptions{
+		Name:       "create_task",
+		Idempotent: true,
+	}, p.createTask)
 }
