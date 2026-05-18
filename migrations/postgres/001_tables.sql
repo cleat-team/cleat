@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS workflow_promises (
     workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
     promise_id TEXT NOT NULL,
     promise_name TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     result JSONB,
     error_msg TEXT,
@@ -220,6 +221,7 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 CREATE TABLE IF NOT EXISTS workflow_update_requests (
     workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
     update_name TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
     payload JSONB NOT NULL DEFAULT '{}',
     promise_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',

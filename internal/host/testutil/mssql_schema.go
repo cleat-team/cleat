@@ -164,6 +164,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
              workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
              promise_id NVARCHAR(900) NOT NULL,
              tenant_id NVARCHAR(255) NOT NULL,
+             priority INTEGER NOT NULL DEFAULT 0,
              promise_name NVARCHAR(MAX) NOT NULL,
              status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
              result NVARCHAR(MAX),
@@ -178,6 +179,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
          CREATE TABLE workflow_update_requests (
              workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
              update_name NVARCHAR(900) NOT NULL,
+             priority INTEGER NOT NULL DEFAULT 0,
              payload NVARCHAR(MAX) NOT NULL DEFAULT '{}',
              promise_id NVARCHAR(MAX),
              status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
