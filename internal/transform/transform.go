@@ -395,6 +395,16 @@ func updateCallSites(file *ast.File, info *types.Info, modifiedFuncs map[string]
 		if calleeFQName == "" || !modifiedFuncs[calleeFQName] {
 			return true
 		}
+		// Don't inject h for PluginCaller method calls -- they manage their own binding.
+		if info != nil {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if selInfo, ok := info.Selections[sel]; ok {
+					if analyzer.PluginCallerMethod(selInfo) {
+						return true // skip -- PluginCaller handles h internally
+					}
+				}
+			}
+		}
 		// Check if h is already the first argument.
 		if len(call.Args) > 0 {
 			if ident, ok := call.Args[0].(*ast.Ident); ok && ident.Name == "h" {

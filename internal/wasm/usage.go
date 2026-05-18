@@ -178,6 +178,11 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 			return true
 		}
 		if !analyzer.HostCallsMethod(sel) {
+			// Check for PluginCaller methods — map to plugin_call imports.
+			if analyzer.PluginCallerMethod(sel) {
+				info.Used["plugin_call"] = true
+				info.Used["plugin_call_streaming"] = true
+			}
 			return true
 		}
 		fieldName := selExpr.Sel.Name
