@@ -257,6 +257,9 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	var durationMs int64
 	if exitCode != 0 {
 		durationMs = ended.Sub(started).Milliseconds()
+		if durationMs < 1 {
+			durationMs = 1
+		}
 		crashLogPath = "artifacts/crash.log"
 
 		crashContent := fmt.Sprintf(`# Crash log — %s
@@ -745,10 +748,7 @@ func determineReviewOutcome(artifactsDir string, newArtifacts []string) string {
 				}
 			}
 		}
-		// After scanning all models in the latest round, check aggregated result
-		if scannedAny && !hasBlocker {
-			return "PASS"
-		}
+		// Continue scanning other prefixes; final decision after the loop.
 	}
 	if hasBlocker {
 		return "BLOCKER"
