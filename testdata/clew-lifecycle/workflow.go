@@ -168,17 +168,9 @@ func runStateMachine(h cleat.HostCalls, input TaskInput) TaskOutput {
 			continue
 		}
 
-		if result.ReviewOutcome == "BLOCKER" {
-			setQueryState(h, "phase", "failed")
-			return TaskOutput{
-				TaskID:           input.TaskID,
-				FinalPhase:       "failed",
-				PhasesCompleted:  completed,
-				TotalPluginCalls: callCount,
-			}
-		}
-
-		// SHOULD_FIX: loop back to the preceding work phase.
+		// BLOCKER or SHOULD_FIX: loop back to the preceding work phase.
+		// Both mean "author fixes and re-submits" per reviewer protocol.
+		// The distinction only matters for whether the review PASSES.
 		prevPhase := reviewToPrevPhase(phase)
 		loopPassed := false
 		for round := 1; round <= maxReviewRounds; round++ {
@@ -222,15 +214,7 @@ func runStateMachine(h cleat.HostCalls, input TaskInput) TaskOutput {
 				loopPassed = true
 				break
 			}
-			if result.ReviewOutcome == "BLOCKER" {
-				setQueryState(h, "phase", "failed")
-				return TaskOutput{
-					TaskID:           input.TaskID,
-					FinalPhase:       "failed",
-					PhasesCompleted:  completed,
-					TotalPluginCalls: callCount,
-				}
-			}
+			// BLOCKER or SHOULD_FIX: continue looping.
 		}
 
 		if !loopPassed {

@@ -210,6 +210,7 @@ CREATE TABLE dbo.workflow_promises (
     workflow_id     NVARCHAR(255)   NOT NULL,
     promise_id      NVARCHAR(64)    NOT NULL,
     promise_name    NVARCHAR(255)   NOT NULL,
+    tenant_id       NVARCHAR(255)   NOT NULL,
     status          NVARCHAR(50)    NOT NULL DEFAULT 'pending',
     result          NVARCHAR(MAX)   NULL,
     error_msg       NVARCHAR(MAX)   NULL,
