@@ -121,3 +121,63 @@ bypassing the Short()-gated `MSSQLTestDB()` helper that other MSSQL tests use.
 | `go vet ./internal/host/...` | PASS |
 | `go test -short -run TestMSSQLStoreFactory ./internal/host/` | SKIP (no env var) |
 | `CLEAT_TEST_MSSQL=... go test -short -v -run TestMSSQLStoreFactory ./internal/host/` | SKIP (short mode, env var set) |
+
+---
+
+## §§9-19 Re-audit (2026-05-18)
+
+### Summary
+
+No code changes needed. All 11 files identified in the exploration phase are
+**transitively protected** via gated package-level `testDB()` or `OpenTestDB()` helpers.
+In Go, all `_test.go` files in the same package share package-level functions —
+duplicating gates in each file would add redundancy without improving coverage.
+
+### How transitive protection works
+
+Each affected test package defines exactly one `testDB()` helper with a single
+`testing.Short()` gate. Every test function in that package calls the same gated
+helper, so the gate applies uniformly across all test files in the package.
+
+### Gated helpers
+
+| Package | Helper | Gate location |
+|---|---|---|
+| `tests/scale/` | `testDB()` | `throughput_test.go:20-22` |
+| `tests/upgrade/` | `testDB()` | `schema_migration_test.go:19-21` |
+| `tests/integrity/` | `testDB()` | `event_history_test.go:21-23` |
+| `tests/plugin-harness/` | `OpenTestDB()` | `testdb.go:30-32` |
+
+### Per-section disposition
+
+| Section | File | Disposition |
+|---------|------|-------------|
+| §9 | tests/scale/latency_test.go | Calls gated testDB() |
+| §10 | tests/scale/concurrent_workflows_test.go | Calls gated testDB() |
+| §11 | tests/upgrade/worker_rolling_test.go | Calls gated testDB() |
+| §12 | tests/upgrade/wasm_version_test.go | Calls gated testDB() |
+| §13 | tests/integrity/ambiguity_detection_test.go | DB section calls gated testDB(); WASM-only section has no DB dep |
+| §14 | tests/integrity/concurrent_test.go | Calls gated testDB() |
+| §15 | tests/integrity/compaction_test.go | Calls gated testDB() |
+| §16 | tests/integrity/replay_determinism_test.go | Calls gated testDB() |
+| §17 | tests/integrity/wal_corruption_test.go | Calls gated testDB() |
+| §18 | tests/plugin-harness/multi_db_plugin_test.go | Calls gated OpenTestDB() |
+| §19 | internal/host/python_wasm_e2e_test.go | Already disabled via t.Skip(); ABI boundary test is pure unit test |
+
+### Verification
+
+```bash
+$ go test -short -count=1 ./tests/scale/...           # ok  0.007s
+$ go test -short -count=1 ./tests/integrity/...        # ok  0.008s
+$ go test -short -count=1 ./tests/plugin-harness/...   # ok  0.011s
+$ go test -short -count=1 ./internal/host/...          # ok  0.085s
+```
+
+`tests/upgrade` has a pre-existing build error (StartNewRun signature mismatch in
+wasm_version_test.go) that is unrelated to the testing.Short() audit.
+
+### Files changed in this phase
+
+- `projects/cleat/cleat-220/CONTRACT.md` — Mark §§9-19 as resolved
+- `projects/cleat/cleat-220/STATUS.md` — Mark task complete
+- `projects/cleat/cleat-220/artifacts/implementation.md` — Append this section
