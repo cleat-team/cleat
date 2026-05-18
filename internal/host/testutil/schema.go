@@ -248,7 +248,8 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				tenant_id TEXT)`,
 			`CREATE TABLE IF NOT EXISTS workflow_promises (
 				workflow_id TEXT NOT NULL, promise_id TEXT NOT NULL,
-				promise_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+				promise_name TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0,
+				status TEXT NOT NULL DEFAULT 'pending',
 				result JSONB, error_msg TEXT,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT now(), resolved_at TIMESTAMPTZ,
 				PRIMARY KEY (workflow_id, promise_id))`,
@@ -261,6 +262,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				expires_at TIMESTAMPTZ NOT NULL) // TTL is application-configured (default 720h)`,
 			`CREATE TABLE IF NOT EXISTS workflow_update_requests (
 				workflow_id TEXT NOT NULL, update_name TEXT NOT NULL,
+				priority INTEGER NOT NULL DEFAULT 0,
 				payload JSONB NOT NULL DEFAULT '{}',
 				promise_id TEXT,
 				status TEXT NOT NULL DEFAULT 'pending',
@@ -332,7 +334,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				tenant_id VARCHAR(255))`,
 			`CREATE TABLE IF NOT EXISTS workflow_promises (
 				workflow_id VARCHAR(255) NOT NULL, promise_id VARCHAR(255) NOT NULL,
-				promise_name TEXT NOT NULL,
+				promise_name TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0,
 				status VARCHAR(255) NOT NULL DEFAULT 'pending',
 				result JSON, error_msg TEXT,
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
@@ -347,6 +349,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				expires_at TIMESTAMP(6) NOT NULL) /* TTL is application-configured (default 720h) */`,
 			`CREATE TABLE IF NOT EXISTS workflow_update_requests (
 				workflow_id VARCHAR(255) NOT NULL, update_name VARCHAR(255) NOT NULL,
+				priority INTEGER NOT NULL DEFAULT 0,
 				payload JSON NOT NULL DEFAULT ('{}'),
 				promise_id VARCHAR(255),
 				status VARCHAR(255) NOT NULL DEFAULT 'pending',
@@ -406,7 +409,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_promises')
 				CREATE TABLE workflow_promises (
 					workflow_id NVARCHAR(64) NOT NULL, promise_id NVARCHAR(64) NOT NULL,
-					promise_name NVARCHAR(MAX) NOT NULL,
+					promise_name NVARCHAR(MAX) NOT NULL, priority INTEGER NOT NULL DEFAULT 0,
 					status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
 					result NVARCHAR(MAX), error_msg NVARCHAR(MAX),
 					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
@@ -423,6 +426,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_update_requests')
 				CREATE TABLE workflow_update_requests (
 					workflow_id NVARCHAR(64) NOT NULL, update_name NVARCHAR(255) NOT NULL,
+					priority INTEGER NOT NULL DEFAULT 0,
 					payload NVARCHAR(MAX) NOT NULL DEFAULT ('{}'),
 					promise_id NVARCHAR(64),
 					status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',

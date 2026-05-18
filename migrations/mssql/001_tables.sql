@@ -211,6 +211,7 @@ CREATE TABLE dbo.workflow_promises (
     promise_id      NVARCHAR(64)    NOT NULL,
     promise_name    NVARCHAR(255)   NOT NULL,
     tenant_id       NVARCHAR(255)   NOT NULL,
+    priority        INTEGER         NOT NULL DEFAULT 0,
     status          NVARCHAR(50)    NOT NULL DEFAULT 'pending',
     result          NVARCHAR(MAX)   NULL,
     error_msg       NVARCHAR(MAX)   NULL,
@@ -279,6 +280,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.workf
 CREATE TABLE dbo.workflow_update_requests (
     workflow_id     NVARCHAR(255)   NOT NULL,
     update_name     NVARCHAR(255)   NOT NULL,
+    priority        INTEGER         NOT NULL DEFAULT 0,
     payload         NVARCHAR(MAX)   NOT NULL DEFAULT '{}',
     promise_id      NVARCHAR(MAX)   NULL,
     status          NVARCHAR(50)    NOT NULL DEFAULT 'pending',

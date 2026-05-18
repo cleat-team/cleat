@@ -153,6 +153,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			promise_id    VARCHAR(255) NOT NULL,
 			promise_name  VARCHAR(255) NOT NULL,
 			tenant_id     VARCHAR(255) NOT NULL,
+			priority      INTEGER NOT NULL DEFAULT 0,
 			status        VARCHAR(50) NOT NULL DEFAULT 'pending',
 			result        JSON,
 			error_msg     TEXT,
@@ -166,6 +167,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 		`CREATE TABLE IF NOT EXISTS workflow_update_requests (
 			workflow_id   VARCHAR(255) NOT NULL,
 			update_name   VARCHAR(255) NOT NULL,
+			priority      INTEGER NOT NULL DEFAULT 0,
 			payload       TEXT NOT NULL,
 			promise_id    VARCHAR(255),
 			status        VARCHAR(50) NOT NULL DEFAULT 'pending',
