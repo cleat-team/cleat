@@ -174,7 +174,7 @@ func TestInMemoryChildWorkflowStore_StartAndGetResult(t *testing.T) {
 	s := NewInMemoryChildWorkflowStore()
 	ctx := context.Background()
 
-	runID, err := s.StartChildWorkflow(ctx, "parent-1", "child-workflow", `{"input":"test"}`, 0, "")
+	runID, err := s.StartChildWorkflow(ctx, "parent-1", "child-workflow", `{"input":"test"}`, 0, "", 0)
 	if err != nil {
 		t.Fatalf("StartChildWorkflow: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestInMemoryChildWorkflowStore_PreconfiguredResult(t *testing.T) {
 	ctx := context.Background()
 
 	s.SetResult("child-workflow", `{"custom":"result"}`)
-	runID, err := s.StartChildWorkflow(ctx, "parent-1", "child-workflow", `{}`, 0, "")
+	runID, err := s.StartChildWorkflow(ctx, "parent-1", "child-workflow", `{}`, 0, "", 0)
 	if err != nil {
 		t.Fatalf("StartChildWorkflow: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestInMemoryChildWorkflowStore_Handler(t *testing.T) {
 		return `{"handler":"executed","input":` + inputJSON + `}`, nil
 	})
 
-	runID, err := s.StartChildWorkflow(ctx, "parent-1", "child-workflow", `{"x":1}`, 0, "")
+	runID, err := s.StartChildWorkflow(ctx, "parent-1", "child-workflow", `{"x":1}`, 0, "", 0)
 	if err != nil {
 		t.Fatalf("StartChildWorkflow: %v", err)
 	}

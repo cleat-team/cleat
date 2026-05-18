@@ -145,8 +145,8 @@ export declare function import_cleat_child_workflow(
 ): i64;
 
 /**
- * 11b. cleat_child_workflow_with_options: Start a child workflow with version options.
- * (import "env" "cleat_child_workflow_with_options") (param i32 i32 i32 i32 i32 i32 i32) (result i64)
+ * 11b. cleat_child_workflow_with_options: Start a child workflow with version and priority options.
+ * (import "env" "cleat_child_workflow_with_options") (param i32 i32 i32 i32 i64 i64 i32 i32 i32 i32) (result i64)
  */
 @external("env", "cleat_child_workflow_with_options")
 export declare function import_cleat_child_workflow_with_options(
@@ -154,7 +154,10 @@ export declare function import_cleat_child_workflow_with_options(
   nameLen: i32,
   inputPtr: i32,
   inputLen: i32,
-  version: i32,
+  version: i64,
+  priority: i64,
+  policyPtr: i32,
+  policyLen: i32,
   runIdPtr: i32,
   runIdMaxLen: i32,
 ): i64;
@@ -1384,14 +1387,33 @@ export class HostCalls {
   }
 
   /**
-   * Start a child workflow instance with an explicit version.
+   * Options for starting a child workflow.
+   */
+  export class ChildWorkflowOptions {
+    /**
+     * Explicit workflow definition version (0 = use parent's version).
+     */
+    version: i32 = 0;
+    /**
+     * 0 = highest priority; lower numbers are picked first.
+     */
+    priority: i32 = 0;
+
+    constructor(version: i32 = 0, priority: i32 = 0) {
+      this.version = version;
+      this.priority = priority;
+    }
+  }
+
+  /**
+   * Start a child workflow instance with explicit version and priority options.
    *
    * @param name      - Child workflow definition name.
    * @param inputJson - Input JSON for the child workflow.
-   * @param version   - Explicit workflow definition version (0 = use parent's version).
+   * @param options   - ChildWorkflowOptions (version, priority, etc.).
    * @returns A DurableResult containing the child run ID on success.
    */
-  childWorkflowWithOptions(name: string, inputJson: string, version: i32 = 0): DurableResult<string> {
+  childWorkflowWithOptions(name: string, inputJson: string, options: ChildWorkflowOptions = new ChildWorkflowOptions()): DurableResult<string> {
     let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
     let inputOffset: usize = SCRATCH_BASE + nameLen;
     let remaining: i32 = OUT_BUF_SIZE - nameLen;
@@ -1402,7 +1424,10 @@ export class HostCalls {
       nameLen,
       inputOffset as i32,
       inputLen,
-      version,
+      options.version as i64,
+      options.priority as i64,
+      0,
+      0,
       OUTPUT_OFFSET as i32,
       OUT_BUF_SIZE,
     );

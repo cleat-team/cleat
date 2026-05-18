@@ -176,8 +176,15 @@ interface durable-children {
         results-max-len: u32,
     ) -> u64;
 
-    /// Start a child workflow with explicit version options.
-    durable-child-workflow-with-options: func(name: string, input: string, version: s32) -> string;
+    /// Start a child workflow with version, priority, and parent-close-policy options.
+    durable-child-workflow-with-options: func(
+        name-ptr: u32, name-len: u32,
+        input-ptr: u32, input-len: u32,
+        version: u64,
+        priority: u64,
+        parent-close-policy-ptr: u32, parent-close-policy-len: u32,
+        run-id-ptr: u32, run-id-max-len: u32,
+    ) -> u64;
 }
 
 /// Durable promise create, await, resolve, and reject operations.

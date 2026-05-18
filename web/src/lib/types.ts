@@ -38,6 +38,7 @@ export interface DAGTask {
   name: string;
   fn?: string;
   parents: string[];
+  priority?: number;
 }
 
 export interface DAGSpec {

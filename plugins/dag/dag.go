@@ -25,9 +25,10 @@ import (
 
 // Task represents a single node in the DAG.
 type Task struct {
-	Name    string
-	Parents []string
-	Fn      func(ctx *TaskContext) (string, error)
+	Name     string
+	Parents  []string
+	Fn       func(ctx *TaskContext) (string, error)
+	Priority int
 }
 
 // TaskContext provides the task with HostCalls and access to parent outputs.
@@ -58,8 +59,13 @@ func NewDAG() *DAG {
 
 // AddTask adds a task to the DAG. parents lists the names of tasks that must
 // complete before this task starts. Root tasks have no parents.
-func (d *DAG) AddTask(name string, parents []string, fn func(ctx *TaskContext) (string, error)) *DAG {
-	d.tasks[name] = &Task{Name: name, Parents: parents, Fn: fn}
+// priority is an optional scheduling priority (0 = highest, lower values = higher priority).
+func (d *DAG) AddTask(name string, parents []string, fn func(ctx *TaskContext) (string, error), priority ...int) *DAG {
+	p := 0
+	if len(priority) > 0 {
+		p = priority[0]
+	}
+	d.tasks[name] = &Task{Name: name, Parents: parents, Fn: fn, Priority: p}
 	return d
 }
 
@@ -145,7 +151,8 @@ func (d *DAG) startLevelSequential(h cleat.HostCalls, input interface{}, level [
 			return nil, nil, err
 		}
 
-		runID, err := h.ChildWorkflow(task.Name, string(inputJSON))
+		opts := cleat.ChildWorkflowOptions{Priority: task.Priority}
+		runID, err := h.ChildWorkflowWithOptions(task.Name, string(inputJSON), opts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("dag: failed to start child workflow %s: %w", task.Name, err)
 		}
@@ -180,7 +187,7 @@ func (d *DAG) startLevelParallel(h cleat.HostCalls, input interface{}, level []*
 				return
 			}
 
-			runID, err := h.ChildWorkflow(t.Name, string(inputJSON))
+			runID, err := h.ChildWorkflowWithOptions(t.Name, string(inputJSON), cleat.ChildWorkflowOptions{Priority: t.Priority})
 			if err != nil {
 				ch <- levelItem{idx, "", t, fmt.Errorf("dag: failed to start child workflow %s: %w", t.Name, err)} // cleat:allow E002
 				return

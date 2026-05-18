@@ -254,7 +254,7 @@ func (s *InMemoryChildWorkflowStore) Invocations() []ChildWorkflowInvocation {
 	return result
 }
 
-func (s *InMemoryChildWorkflowStore) StartChildWorkflow(_ context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
+func (s *InMemoryChildWorkflowStore) StartChildWorkflow(_ context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -292,8 +292,8 @@ func (s *InMemoryChildWorkflowStore) StartChildWorkflow(_ context.Context, paren
 	return runID, nil
 }
 
-func (s *InMemoryChildWorkflowStore) StartChildWorkflowAtomic(_ context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event host.EventRecord) (string, error) {
-	return s.StartChildWorkflow(context.Background(), parentID, defName, inputJSON, defVersion, parentClosePolicy)
+func (s *InMemoryChildWorkflowStore) StartChildWorkflowAtomic(_ context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event host.EventRecord, priority int) (string, error) {
+	return s.StartChildWorkflow(context.Background(), parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
 
 func (s *InMemoryChildWorkflowStore) GetChildResult(_ context.Context, runID string) (string, bool, error) {
@@ -363,6 +363,7 @@ type TestWorkflowState struct {
 	MinVersionVal int
 	// ChildVersions maps child workflow name -> pinned version
 	ChildVersions map[string]int
+	PriorityVal   int
 }
 
 func NewTestWorkflowState() *TestWorkflowState {
@@ -375,6 +376,7 @@ func NewTestWorkflowState() *TestWorkflowState {
 
 func (s *TestWorkflowState) Version() int { return s.VersionVal }
 func (s *TestWorkflowState) MinVersion() int { return s.MinVersionVal }
+func (s *TestWorkflowState) Priority() int { return s.PriorityVal }
 func (s *TestWorkflowState) ChildVersion(name string) (int, bool) {
 	v, ok := s.ChildVersions[name]
 	return v, ok

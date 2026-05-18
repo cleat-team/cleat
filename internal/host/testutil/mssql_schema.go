@@ -62,6 +62,7 @@ func SetupMSSQLMinimalSchema(t *testing.T, db *sql.DB) {
              compaction_step INTEGER,
              plugin_vers NVARCHAR(MAX) NOT NULL DEFAULT '{}',
              tenant_id UNIQUEIDENTIFIER,
+             priority INTEGER NOT NULL DEFAULT 0,
              generation BIGINT NOT NULL DEFAULT 0,
              FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
          )`,

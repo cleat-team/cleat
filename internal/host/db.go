@@ -48,6 +48,7 @@ type WorkflowInstance struct {
 	TenantID   string          `json:"tenant_id,omitempty"`
 	CreatedAt  time.Time       `json:"created_at,omitempty"`
 	Generation int64           `json:"generation"`
+	Priority   int             `json:"priority"`
 	TraceID    string          `json:"trace_id,omitempty"`
 }
 
@@ -205,7 +206,7 @@ type WorkflowStore interface {
 	// ContinueAsNew atomically creates a new workflow run AND completes the
 	// current one in a single database transaction.  If the transaction fails
 	// neither operation takes effect.  Returns the new run ID on success.
-	ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (newRunID string, err error)
+	ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 
 	// FinalizeWorkflowSegment atomically appends new events and updates the
 	// workflow status in a single database transaction.  finalStatus is one of
@@ -238,16 +239,16 @@ type WorkflowStore interface {
 	// without creating a duplicate.
 	// tenantID must be a valid UUID; the all-zeros default is accepted
 	// for single-tenant installations without RLS.
-	StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error)
+	StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error)
 
 	// StartChildWorkflow creates a child workflow instance linked to a parent.
 	// defVersion is the explicit workflow definition version to use, or 0 to use
 	// default resolution (SELECT MAX(version)).
-	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (runID string, err error)
+	StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (runID string, err error)
 
 	// StartChildWorkflowAtomic creates a child workflow and records the parent's
 	// child_workflow event in a single transaction, guaranteeing exactly-once creation.
-	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (runID string, err error)
+	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error)
 
 	// GetChildResult checks whether a child workflow has completed and returns its result.
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
@@ -706,11 +707,11 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 			WHERE status = 'ready'
 			  AND next_wake_at <= now()
 			  AND task_queue = ANY($2)
-			ORDER BY CASE WHEN sticky_worker_id = $1 THEN 0 ELSE 1 END, created_at
+			ORDER BY CASE WHEN sticky_worker_id = $1 THEN 0 ELSE 1 END, priority ASC, created_at
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim workflows: %w", err)
@@ -726,7 +727,7 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		var assignedTo, errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -777,11 +778,11 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 			  AND next_wake_at <= now()
 			  AND sticky_worker_id = $1
 			  AND task_queue = ANY($2)
-			ORDER BY created_at
+			ORDER BY priority ASC, created_at
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
-		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(trace_id, '') AS trace_id
+		RETURNING id, def_name, def_version, status, input, assigned_to, next_wake_at, tenant_id, created_at, error_code, error_op, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id
 	`, workerID, pq.Array(s.taskQueues), limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: %w", err)
@@ -797,7 +798,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 		var assignedTo, errorCode, errorOp sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.TraceID); err != nil {
+			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 
@@ -1304,7 +1305,7 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 // completes the current run in a single database transaction.  If the
 // transaction fails, neither events, the new run, nor the completion takes
 // effect.  Returns the new run ID on success.
-func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string) (string, error) {
+func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
@@ -1320,12 +1321,12 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	// Use the store's tenant scope to preserve tenant isolation.
 	var newRunID string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
-			$4)
+			$4, $5)
 		RETURNING id
-	`, defName, defVersion, newInput, s.tenantID).Scan(&newRunID)
+		`, defName, defVersion, newInput, s.tenantID, priority).Scan(&newRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
@@ -2137,7 +2138,7 @@ func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, sign
 // If idempotencyKey is non-empty, provides exactly-once semantics: a subsequent
 // call with the same key returns the existing workflow ID without creating a
 // duplicate. Returns the workflow ID, whether it already existed, and any error.
-func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string) (string, bool, error) {
+func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
 	if runID == "" {
 		runID = uuid.New().String()
 	}
@@ -2197,11 +2198,11 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
 			VALUES ($1, $2, $3, 'ready', $4,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
-			$5)
-		`, runID, defName, defVersion, input, tenantID)
+			$5, $6)
+		`, runID, defName, defVersion, input, tenantID, priority)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -2217,11 +2218,11 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
 		VALUES ($1, $2, $3, 'ready', $4,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
-			$5)
-	`, runID, defName, defVersion, input, tenantID)
+			$5, $6)
+	`, runID, defName, defVersion, input, tenantID, priority)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -2232,7 +2233,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 // The child is created with its own independent workflow instance.
 // If defVersion > 0, that version is used explicitly; otherwise the latest
 // non-deprecated version is used (SELECT MAX(version)).
-func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
+func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: begin: %w", err)
@@ -2241,15 +2242,15 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 
 	var runID string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES (gen_random_uuid(), $1,
 		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated) END,
 		        'ready', $2, $3,
 		        COALESCE(NULLIF($5, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $3), 'default'),
-			$6)
+			$6, $7)
 		RETURNING id
-	`, defName, inputJSON, parentID, defVersion, parentClosePolicy, DefaultTenantUUID).Scan(&runID)
+	`, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID, priority).Scan(&runID)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
@@ -2258,7 +2259,7 @@ func (s *PostgresStore) StartChildWorkflow(ctx context.Context, parentID, defNam
 
 // StartChildWorkflowAtomic creates a child workflow and records the parent's
 // child_workflow event in a single transaction, guaranteeing exactly-once creation.
-func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord) (string, error) {
+func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
 	if childID == "" {
 		childID = uuid.New().String()
 	}
@@ -2275,14 +2276,14 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 
 	// 1. INSERT child workflow instance.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
 		VALUES ($1, $2,
 		        CASE WHEN $5 > 0 THEN $5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = $2 AND NOT deprecated) END,
 		        'ready', $3, $4,
 		        COALESCE(NULLIF($6, ''), 'ABANDON'),
 		        COALESCE((SELECT task_queue FROM workflow_instances WHERE id = $4), 'default'),
-			$7)
-	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy, DefaultTenantUUID)
+			$7, $8)
+	`, childID, defName, inputJSON, parentID, defVersion, parentClosePolicy, s.tenantID, priority)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
 	}
@@ -2360,18 +2361,18 @@ func (s *PostgresStore) GetChildCount(ctx context.Context, parentWorkflowID stri
 
 // StartChildWorkflowInSchema creates a child workflow in the given target schema.
 // Implements CrossSchemaChildStore for cross-instance workflow cooperation.
-func (s *PostgresStore) StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
+func (s *PostgresStore) StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
 	var runID string
 	q := fmt.Sprintf(`
-		INSERT INTO %s.workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue)
+		INSERT INTO %s.workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, priority)
 		VALUES (gen_random_uuid(), $1,
 		        CASE WHEN $4 > 0 THEN $4 ELSE (SELECT MAX(version) FROM %s.workflow_defs WHERE name = $1 AND NOT deprecated) END,
 		        'ready', $2, $3,
 		        COALESCE(NULLIF($5, ''), 'ABANDON'),
-		        COALESCE((SELECT task_queue FROM %s.workflow_instances WHERE id = $3), 'default'))
+		        COALESCE((SELECT task_queue FROM %s.workflow_instances WHERE id = $3), 'default'), $6)
 		RETURNING id
 	`, pq.QuoteIdentifier(targetSchema), pq.QuoteIdentifier(targetSchema), pq.QuoteIdentifier(targetSchema))
-	if err := s.db.QueryRowContext(ctx, q, defName, inputJSON, parentID, defVersion, parentClosePolicy).Scan(&runID); err != nil {
+	if err := s.db.QueryRowContext(ctx, q, defName, inputJSON, parentID, defVersion, parentClosePolicy, priority).Scan(&runID); err != nil {
 		return "", fmt.Errorf("start child workflow in schema %q: %w", targetSchema, err)
 	}
 	return runID, nil
@@ -2564,7 +2565,7 @@ func (s *PostgresStore) ListWorkflows(ctx context.Context, filter WorkflowFilter
 		var nextWakeAt, createdAt sql.NullTime
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.TraceID); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		if nextWakeAt.Valid {
@@ -2603,10 +2604,12 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
 		       assigned_to, heartbeat_at, next_wake_at, completed_at, result::text, error_msg, error_code, error_op,
+		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, '')
 		FROM workflow_instances WHERE id = $1
 	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
+		&wf.Generation, &wf.Priority,
 		&wf.TraceID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
@@ -2968,7 +2971,7 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 		SELECT promise_id, promise_name, status, COALESCE(result::text, ''), COALESCE(error_msg, ''), created_at, resolved_at
 		FROM workflow_promises
 		WHERE workflow_id = $1
-		ORDER BY created_at
+		ORDER BY priority ASC, created_at
 	`, workflowID)
 	if err != nil {
 		return nil, err
@@ -3183,7 +3186,7 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 		       COALESCE(result::text, ''), COALESCE(error_msg, ''), created_at
 		FROM workflow_update_requests
 		WHERE workflow_id = $1 AND status = 'pending'
-		ORDER BY created_at
+		ORDER BY priority ASC, created_at
 	`, workflowID)
 	if err != nil {
 		return nil, err

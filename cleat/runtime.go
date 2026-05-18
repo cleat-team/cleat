@@ -699,12 +699,16 @@ const (
 	ParentClosePolicyRequestCancel ParentClosePolicy = "REQUEST_CANCEL" // Cancellation is requested on children
 )
 
-// ChildWorkflowOptions carries version resolution and parent close policy
-// configuration for spawning a child workflow.
+// ChildWorkflowOptions carries version resolution, parent close policy, and
+// priority configuration for spawning a child workflow.
 //
 // Version resolution priority:
 //  1. Version > 0: use that explicit version
 //  2. Version <= 0 (default): child uses the same version as the parent workflow
+//
+// Priority (0 = highest, lower numbers are picked first):
+//  Children do NOT inherit the parent's priority. An explicit priority must
+//  be set via the Priority field.
 type ChildWorkflowOptions struct {
 	Version int // 0 = use default resolution (parent's version)
 
@@ -712,6 +716,11 @@ type ChildWorkflowOptions struct {
 	// the parent workflow completes or fails.
 	// Default: ParentClosePolicyAbandon (current behavior, children continue running).
 	ParentClosePolicy ParentClosePolicy
+
+	// Priority controls scheduling order. 0 = highest priority;
+	// lower numbers are scheduled first. Children do NOT inherit
+	// the parent's priority.
+	Priority int
 }
 
 // ---- Call options ----
@@ -803,7 +812,7 @@ type HostCallsImpl struct {
 	continueAsNew             func(newInputJSON string) error
 	continueAsNewWithVersion func(newInputJSON string, newVersion int64) error
 	childWorkflow             func(name, inputJSON string) (string, error)
-	childWorkflowWithOptions  func(name, inputJSON string, version int, parentClosePolicy string) (string, error)
+	childWorkflowWithOptions  func(name, inputJSON string, version int, parentClosePolicy string, priority int) (string, error)
 	awaitChild                func(runID string) (string, error)
 	awaitAllChildren           func(runIDs []string) ([]ChildResult, error)
 	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
@@ -963,7 +972,7 @@ type HostCallsOptions struct {
 	ContinueAsNew                func(newInputJSON string) error
 	ContinueAsNewWithVersion     func(newInputJSON string, newVersion int64) error
 	ChildWorkflow                func(name, inputJSON string) (string, error)
-	ChildWorkflowWithOptions    func(name, inputJSON string, version int, parentClosePolicy string) (string, error)
+	ChildWorkflowWithOptions    func(name, inputJSON string, version int, parentClosePolicy string, priority int) (string, error)
 	AwaitChild                   func(runID string) (string, error)
 	AwaitAllChildren              func(runIDs []string) ([]ChildResult, error)
 	DurableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
@@ -1674,7 +1683,7 @@ func (h *HostCallsImpl) ChildWorkflow(name, inputJSON string) (string, error) {
 
 func (h *HostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts ChildWorkflowOptions) (string, error) {
 	if h.childWorkflowWithOptions != nil {
-		return h.childWorkflowWithOptions(name, inputJSON, opts.Version, string(opts.ParentClosePolicy))
+		return h.childWorkflowWithOptions(name, inputJSON, opts.Version, string(opts.ParentClosePolicy), opts.Priority)
 	}
 	// Fall back to plain ChildWorkflow if options handler is not available.
 	// ParentClosePolicy defaults to Abandon in this case (current behavior).

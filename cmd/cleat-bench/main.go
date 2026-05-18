@@ -136,7 +136,7 @@ func runBenchmark(ctx context.Context, store host.WorkflowStore, defName string,
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", host.DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", host.DefaultTenantUUID, 0)
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return
@@ -201,7 +201,7 @@ func runReplayBenchmark(ctx context.Context, store host.WorkflowStore, defName s
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", host.DefaultTenantUUID)
+			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", host.DefaultTenantUUID, 0)
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return
@@ -303,6 +303,7 @@ type benchState struct {
 
 func (s *benchState) Version() int                  { return s.version }
 func (s *benchState) MinVersion() int               { return s.minVersion }
+func (s *benchState) Priority() int                     { return 0 }
 func (s *benchState) ChildVersion(name string) (int, bool) { return 0, false }
 
 func init() {

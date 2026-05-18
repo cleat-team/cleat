@@ -115,6 +115,7 @@ var importDefs = map[string]importDef{
 			{"name", kindInString},
 			{"inputJSON", kindInString},
 			{"version", kindInt64},
+			{"priority", kindInt64},
 			{"parentClosePolicy", kindInString},
 			{"runID", kindOutString},
 		},

@@ -123,7 +123,7 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	// --- Non-idempotent path ---
 	runID := uuid.New().String()
 	id, isDup, err := store.StartNewRun(context.Background(), runID,
-		"test-wf", 1, json.RawMessage(`{"key":"val"}`), "", nonDefaultTenant)
+		"test-wf", 1, json.RawMessage(`{"key":"val"}`), "", nonDefaultTenant, 0)
 	if err != nil {
 		t.Fatalf("StartNewRun (no idemkey): %v", err)
 	}
@@ -150,7 +150,7 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	// --- Idempotent-key path ---
 	idemRunID := uuid.New().String()
 	idemID, isDup, err := store.StartNewRun(context.Background(), idemRunID,
-		"test-wf", 1, json.RawMessage(`{"key":"val"}`), "idem-key-214", nonDefaultTenant)
+		"test-wf", 1, json.RawMessage(`{"key":"val"}`), "idem-key-214", nonDefaultTenant, 0)
 	if err != nil {
 		t.Fatalf("StartNewRun (idemkey): %v", err)
 	}
