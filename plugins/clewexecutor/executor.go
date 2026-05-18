@@ -166,7 +166,7 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 			protocolPath = fallback
 		}
 	}
-	prompt, err := buildPrompt(in, role, td, protocolPath)
+	prompt, err := buildPrompt(in, role, td, protocolPath, phase)
 	if err != nil {
 		out := runPhaseOutput{Status: "failed", Error: err.Error()}
 		b, _ := json.Marshal(out)
@@ -194,7 +194,7 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		args = append(args, "--model", in.Model)
 	}
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd := exec.CommandContext(context.Background(), bin, args...)
 	cmd.Dir = in.Workdir
 	cmd.Stdin = strings.NewReader(prompt)
 
@@ -460,7 +460,7 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 }
 
 // buildPrompt constructs the agent prompt matching clew-run.sh patterns.
-func buildPrompt(in runPhaseInput, role, td, protocolPath string) (string, error) {
+func buildPrompt(in runPhaseInput, role, td, protocolPath, currentPhase string) (string, error) {
 	taskPath := filepath.Join("projects", in.Project, in.TaskID)
 
 	switch role {
@@ -475,12 +475,53 @@ func buildPrompt(in runPhaseInput, role, td, protocolPath string) (string, error
 			in.Project, protocolPath, taskPath, taskPath, taskPath, in.TaskID,
 		), nil
 	case "developer":
-		// For tasks with an approved plan, skip explore/plan/review and go straight to implementation.
+		// Phase-aware: create_pr, ci_fix, and merge need different instructions
+		// than implementation. Implementation is already done by this point.
+		switch currentPhase {
+		case "create_pr":
+			return fmt.Sprintf(
+				"You are a developer agent in the Clew system. Project: %s. Task ID: %s.\n\nYour implementation is already done and pushed to the '%s' branch.\n\nRead %s for your full protocol, then jump to Phase 6 (CI verification). Your job:\n- Rebase onto latest develop\n- Open a draft PR with `gh pr create --base develop --head %s --draft`\n- Wait for CI checks, fix any failures, and mark the PR ready for review\n- Update STATUS.md and write the daily log\n\nDo NOT re-explore, re-plan, or re-implement — those phases are complete.",
+				in.Project, in.TaskID, in.TaskID, protocolPath, in.TaskID,
+			), nil
+		case "ci_fix":
+			return fmt.Sprintf(
+				"You are a developer agent in the Clew system. Project: %s. Task ID: %s.\n\nA PR exists for branch '%s' but CI is failing. Read %s for your full protocol, then follow Phase 6 (CI verification). Read the CI failure logs, fix the issues, commit and push. Repeat until all checks pass or you hit the retry limit.",
+				in.Project, in.TaskID, in.TaskID, protocolPath,
+			), nil
+		case "merge":
+			return fmt.Sprintf(
+				"You are a developer agent in the Clew system. Project: %s. Task ID: %s.\n\nCI is passing and the PR is approved. Read %s for your full protocol, then follow Phase 7 (Wrap). Mark the PR as ready for review, merge it, and update STATUS.md to done.",
+				in.Project, in.TaskID, protocolPath,
+			), nil
+		}
+
+		// Default developer path: implementing or exploring.
+		//
+		// Check whether this is a post-review re-entry. If the workflow
+		// looped back from a failed review, the developer MUST read the
+		// review findings before touching code.
+		reviewFile := latestReviewFile(td, currentPhase)
 		planPath := filepath.Join(td, "artifacts", "plan.md")
 		if planData, err := os.ReadFile(planPath); err == nil {
+			if reviewFile != "" {
+				reviewData, _ := os.ReadFile(filepath.Join(td, "artifacts", reviewFile))
+				return fmt.Sprintf(
+					"You are a developer agent FIXING REVIEW FINDINGS. A reviewer found issues with your work. Do NOT re-explore or re-plan — apply the fixes.\n\nProject: %s. Task ID: %s.\n\nIMPORTANT — Read these first:\n- %s/STATUS.md (check current phase and review status)\n- %s/artifacts/%s (reviewer findings you MUST address)\n\nThen read the approved plan and CONTRACT for context:\n- %s/artifacts/plan.md\n- %s/CONTRACT.md\n\n--- REVIEW FINDINGS (%s) ---\n%s\n--- END REVIEW FINDINGS ---\n\nYour job: fix every [BLOCKER] and [SHOULD_FIX] finding. After fixing, write a brief response to %s/artifacts/implementation.md summarizing what you changed. Then commit and push. Do NOT stop at reading — produce actual code changes.",
+					in.Project, in.TaskID, taskPath, taskPath, reviewFile, taskPath, taskPath,
+					reviewFile, string(reviewData), taskPath,
+				), nil
+			}
 			return fmt.Sprintf(
 				"You are a developer agent implementing an APPROVED plan. Do NOT re-explore, re-plan, or re-review the plan — those phases are done. Go directly to implementation.\n\nProject: %s. Task ID: %s.\n\nFirst read these files to understand what to build:\n- %s/TASK.md\n- %s/STATUS.md\n\nThen read the APPROVED PLAN below and IMPLEMENT it:\n\n--- APPROVED PLAN (%s/artifacts/plan.md) ---\n%s\n--- END PLAN ---\n\nYour job: implement every item in this plan. Modify the code files, write tests, run the test suite, and fix any failures. When done, write implementation notes to %s/artifacts/implementation.md, commit your changes with a descriptive message, and push to the feature branch. Do NOT stop at exploration or planning — produce actual code changes.",
 				in.Project, in.TaskID, taskPath, taskPath, taskPath, string(planData), taskPath,
+			), nil
+		}
+		if reviewFile != "" {
+			reviewData, _ := os.ReadFile(filepath.Join(td, "artifacts", reviewFile))
+			return fmt.Sprintf(
+				"You are a developer agent FIXING REVIEW FINDINGS. A reviewer found issues with your work.\n\nProject: %s. Task ID: %s.\n\nIMPORTANT — Read these first:\n- %s/STATUS.md\n- %s/artifacts/%s (reviewer findings you MUST address)\n\n--- REVIEW FINDINGS (%s) ---\n%s\n--- END REVIEW FINDINGS ---\n\nYour job: fix every [BLOCKER] and [SHOULD_FIX] finding. After fixing, write implementation notes to %s/artifacts/implementation.md, commit and push.",
+				in.Project, in.TaskID, taskPath, taskPath, reviewFile,
+				reviewFile, string(reviewData), taskPath,
 			), nil
 		}
 		return fmt.Sprintf(
@@ -745,6 +786,36 @@ func nextPhase(phase string) string {
 	default:
 		return phase
 	}
+}
+
+// latestReviewFile finds the highest-round review artifact for the given phase.
+// For "implementing" it looks for review-impl-round*.md.
+// For "planning" it looks for review-plan-round*.md.
+// Returns "" if no review files exist.
+func latestReviewFile(td, currentPhase string) string {
+	prefix := "review-impl-round"
+	if currentPhase == "planning" || currentPhase == "plan_review" {
+		prefix = "review-plan-round"
+	}
+	artifactsDir := filepath.Join(td, "artifacts")
+	entries, err := os.ReadDir(artifactsDir)
+	if err != nil {
+		return ""
+	}
+	bestRound := 0
+	bestName := ""
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		rest := e.Name()[len(prefix):]
+		var round int
+		if _, err := fmt.Sscanf(rest, "%d-", &round); err == nil && round > bestRound {
+			bestRound = round
+			bestName = e.Name()
+		}
+	}
+	return bestName
 }
 
 // listArtifactFiles returns a map of artifact filename → modtime.
