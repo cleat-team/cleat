@@ -2971,3 +2971,275 @@ func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID stri
 	}
 	return nil, nil
 }
+
+// ---- healthTracker unit tests ----
+
+func TestHealthTracker_RecordRunAndIsStale(t *testing.T) {
+	ht := newHealthTracker()
+	ht.registerLoop("testloop")
+	ht.setInterval("testloop", 10*time.Millisecond)
+
+	// Immediately after registration, not stale yet (maxAge hasn't elapsed).
+	if ht.isStale("testloop") {
+		t.Error("expected loop to not be stale immediately after registration")
+	}
+
+	// Wait for maxAge (3 * 10ms = 30ms).
+	time.Sleep(50 * time.Millisecond)
+	if !ht.isStale("testloop") {
+		t.Error("expected loop to be stale after maxAge elapsed without recordRun")
+	}
+
+	ht.recordRun("testloop")
+	if ht.isStale("testloop") {
+		t.Error("expected loop to not be stale after recordRun")
+	}
+
+	// Wait for maxAge again.
+	time.Sleep(50 * time.Millisecond)
+	if !ht.isStale("testloop") {
+		t.Error("expected loop to be stale after maxAge elapsed again")
+	}
+}
+
+func TestHealthTracker_IsStale_NeverRegistered(t *testing.T) {
+	ht := newHealthTracker()
+	if ht.isStale("nonexistent") {
+		t.Error("expected non-registered loop to not be stale")
+	}
+}
+
+func TestHealthTracker_RegisteredCount(t *testing.T) {
+	ht := newHealthTracker()
+	if ht.registeredCount() != 0 {
+		t.Error("expected 0 registered loops initially")
+	}
+	ht.registerLoop("a")
+	ht.registerLoop("b")
+	if ht.registeredCount() != 2 {
+		t.Errorf("expected 2, got %d", ht.registeredCount())
+	}
+}
+
+func TestHealthTracker_StaleLoops_IncludesNeverRun(t *testing.T) {
+	ht := newHealthTracker()
+	ht.registerLoop("never-run")
+	ht.setInterval("never-run", time.Millisecond)
+
+	// Wait for maxAge to elapse (3 * 1ms).
+	time.Sleep(10 * time.Millisecond)
+
+	stale := ht.staleLoops()
+	found := false
+	for _, s := range stale {
+		if s == "never-run" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected never-run loop to appear in staleLoops after maxAge elapsed")
+	}
+
+	ht.recordRun("never-run")
+	stale = ht.staleLoops()
+	for _, s := range stale {
+		if s == "never-run" {
+			t.Error("expected loop to drop out of staleLoops after recordRun")
+		}
+	}
+}
+
+func TestHealthTracker_StaleLoops_ExcludesRunning(t *testing.T) {
+	ht := newHealthTracker()
+	ht.registerLoop("running")
+	ht.setInterval("running", 10*time.Millisecond)
+	ht.recordRun("running")
+
+	stale := ht.staleLoops()
+	for _, s := range stale {
+		if s == "running" {
+			t.Error("expected running loop to not be in staleLoops")
+		}
+	}
+}
+
+func TestHealthTracker_StaleLoops_DefaultMaxAge(t *testing.T) {
+	// Loops without a set interval should use the 60s default maxAge.
+	ht := newHealthTracker()
+	ht.registerLoop("no-interval")
+	ht.recordRun("no-interval")
+
+	if ht.isStale("no-interval") {
+		t.Error("loop that just ran should not be stale, even without interval set")
+	}
+}
+
+// ---- launchLoop tests ----
+
+func TestLaunchLoop_ClosesDoneChannel(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.loopFuncs = make(map[string]func())
+	w.loopCtxMap = make(map[string]*loopContext)
+
+	ctx, cancel := context.WithCancel(w.ctx)
+	w.loopCtxMap["testloop"] = &loopContext{
+		ctx:    ctx,
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+	w.healthTracker.registerLoop("testloop")
+
+	exited := make(chan struct{})
+	w.loopFuncs["testloop"] = func() {
+		defer w.wg.Done()
+		<-exited
+	}
+	w.launchLoop("testloop", w.loopFuncs["testloop"])
+
+	close(exited)
+	w.wg.Wait()
+
+	lc := w.loopCtxMap["testloop"]
+	select {
+	case <-lc.done:
+	case <-time.After(time.Second):
+		t.Error("done channel was not closed within 1s of loop exit")
+	}
+}
+
+// ---- restartLoop tests ----
+
+func TestRestartLoop_RecoveredLoopNotKilled(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.loopFuncs = make(map[string]func())
+	w.loopCtxMap = make(map[string]*loopContext)
+
+	ctx, cancel := context.WithCancel(w.ctx)
+	done := make(chan struct{})
+	w.loopCtxMap["recovered"] = &loopContext{ctx: ctx, cancel: cancel, done: done}
+	w.healthTracker.registerLoop("recovered")
+	w.healthTracker.setInterval("recovered", 50*time.Millisecond)
+	w.healthTracker.recordRun("recovered")
+
+	loopStarted := make(chan struct{})
+	loopWasCancelled := false
+	w.loopFuncs["recovered"] = func() {
+		defer w.wg.Done()
+		close(loopStarted)
+		<-ctx.Done()
+		loopWasCancelled = true
+	}
+
+	w.launchLoop("recovered", w.loopFuncs["recovered"])
+	<-loopStarted
+
+	if w.healthTracker.isStale("recovered") {
+		t.Error("expected isStale to return false immediately after recordRun")
+	}
+
+	w.restartLoop("recovered")
+
+	if loopWasCancelled {
+		t.Error("loop was cancelled even though it was not stale")
+	}
+
+	cancel()
+	w.wg.Wait()
+}
+
+func TestRestartLoop_KillsStaleLoop(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.loopFuncs = make(map[string]func())
+	w.loopCtxMap = make(map[string]*loopContext)
+
+	ctx, cancel := context.WithCancel(w.ctx)
+	done := make(chan struct{})
+	w.loopCtxMap["stale-loop"] = &loopContext{ctx: ctx, cancel: cancel, done: done}
+	w.healthTracker.registerLoop("stale-loop")
+	w.healthTracker.setInterval("stale-loop", time.Millisecond)
+
+	// Use a sync.Once to avoid double-close when restartLoop creates a new goroutine
+	// that also calls this function.
+	var exitedOnce sync.Once
+	loopExited := make(chan struct{})
+	w.loopFuncs["stale-loop"] = func() {
+		defer w.wg.Done()
+		exitedOnce.Do(func() { close(loopExited) })
+		<-ctx.Done()
+	}
+
+	w.launchLoop("stale-loop", w.loopFuncs["stale-loop"])
+
+	time.Sleep(10 * time.Millisecond)
+
+	if !w.healthTracker.isStale("stale-loop") {
+		t.Fatal("expected loop to be stale")
+	}
+
+	w.restartLoop("stale-loop")
+
+	select {
+	case <-loopExited:
+	case <-time.After(time.Second):
+		t.Error("old goroutine did not exit within 1s of restartLoop")
+	}
+
+	if lc, ok := w.loopCtxMap["stale-loop"]; ok {
+		lc.cancel()
+	}
+	w.wg.Wait()
+}
+
+func TestRestartLoop_NoFunctionRegistered(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.loopFuncs = make(map[string]func())
+
+	// Should not panic.
+	w.restartLoop("nonexistent")
+}
+
+// ---- poison-pill tests ----
+
+func TestWatchdog_PoisonPillCondition(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.healthCheckInterval = 10 * time.Millisecond
+	w.loopFuncs = make(map[string]func())
+	w.loopCtxMap = make(map[string]*loopContext)
+
+	for _, name := range []string{"a", "b", "c", "d"} {
+		ctx, cancel := context.WithCancel(w.ctx)
+		w.loopCtxMap[name] = &loopContext{ctx: ctx, cancel: cancel, done: make(chan struct{})}
+		w.healthTracker.registerLoop(name)
+		w.healthTracker.setInterval(name, time.Millisecond)
+		w.loopFuncs[name] = func() {
+			defer w.wg.Done()
+			<-w.ctx.Done()
+		}
+		w.launchLoop(name, w.loopFuncs[name])
+	}
+
+	time.Sleep(20 * time.Millisecond)
+
+	stale := w.healthTracker.staleLoops()
+	if len(stale) < 4 {
+		t.Fatalf("expected 4 stale loops, got %d", len(stale))
+	}
+
+	w.healthTracker.registerLoop("watchdog")
+	w.healthTracker.setInterval("watchdog", w.healthCheckInterval)
+	w.healthTracker.recordRun("watchdog")
+
+	total := w.healthTracker.registeredCount()
+	if total < 3 || len(stale) < (total*4/5) {
+		t.Errorf("expected poison-pill condition met: %d stale / %d total", len(stale), total)
+	}
+
+	w.cancel()
+	w.wg.Wait()
+}
