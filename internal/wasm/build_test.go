@@ -174,8 +174,8 @@ func TestPrepareBuildDirHappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(mod), "go 1.26") {
-		t.Errorf("expected go 1.26 in go.mod, got: %s", string(mod))
+	if !strings.Contains(string(mod), "go 1.23") {
+		t.Errorf("expected go 1.23 in go.mod, got: %s", string(mod))
 	}
 	if !strings.Contains(string(mod), "github.com/test/module") {
 		t.Errorf("expected module path in go.mod, got: %s", string(mod))

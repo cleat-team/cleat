@@ -2,8 +2,7 @@
 // for the cleat workflow transformer.
 //
 // Supported wasm compilation targets:
-//   - "go" (default) — standard Go wasip1/wasm
-//   - "tinygo"       — TinyGo wasip1 (for smaller binary size)
+//   - "tinygo"       — TinyGo wasip1 (default for Go)
 //   - "rust"         — Rust via cargo + wasm32-wasip1
 //   - "java"         — Java via Gradle + TeaVM
 //   - "assemblyscript" — AssemblyScript via asc

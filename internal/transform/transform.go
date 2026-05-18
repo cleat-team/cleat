@@ -38,10 +38,9 @@ type Config struct {
 	CallGraph *callgraph.Graph
 	Closure   *closure.Result
 
-	// Target is the compilation target ("go" or "tinygo").
-	// When "tinygo", the direct-call transform is skipped because
-	// TinyGo's asyncify scheduler needs function pointer indirection
-	// for goroutine switching.
+	// Target is the compilation target ("tinygo" for Go code).
+	// The direct-call transform is skipped because TinyGo's asyncify
+	// scheduler needs function pointer indirection for goroutine switching.
 	Target string
 }
 

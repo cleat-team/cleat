@@ -25,10 +25,11 @@ import (
 
 // Task represents a single node in the DAG.
 type Task struct {
-	Name     string
-	Parents  []string
-	Fn       func(ctx *TaskContext) (string, error)
-	Priority int
+	Name         string
+	Parents      []string
+	Fn           func(ctx *TaskContext) (string, error)
+	Priority     int
+	WorkflowName string // the workflow name to call (from spec Fn); empty means use Name
 }
 
 // TaskContext provides the task with HostCalls and access to parent outputs.
@@ -152,7 +153,11 @@ func (d *DAG) startLevelSequential(h cleat.HostCalls, input interface{}, level [
 		}
 
 		opts := cleat.ChildWorkflowOptions{Priority: task.Priority}
-		runID, err := h.ChildWorkflowWithOptions(task.Name, string(inputJSON), opts)
+		wfName := task.WorkflowName
+		if wfName == "" {
+			wfName = task.Name
+		}
+		runID, err := h.ChildWorkflowWithOptions(wfName, string(inputJSON), opts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("dag: failed to start child workflow %s: %w", task.Name, err)
 		}
@@ -187,7 +192,11 @@ func (d *DAG) startLevelParallel(h cleat.HostCalls, input interface{}, level []*
 				return
 			}
 
-			runID, err := h.ChildWorkflowWithOptions(t.Name, string(inputJSON), cleat.ChildWorkflowOptions{Priority: t.Priority})
+			wfName := t.WorkflowName
+			if wfName == "" {
+				wfName = t.Name
+			}
+			runID, err := h.ChildWorkflowWithOptions(wfName, string(inputJSON), cleat.ChildWorkflowOptions{Priority: t.Priority})
 			if err != nil {
 				ch <- levelItem{idx, "", t, fmt.Errorf("dag: failed to start child workflow %s: %w", t.Name, err)} // cleat:allow E002
 				return

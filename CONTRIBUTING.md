@@ -58,7 +58,7 @@ To build and test cleat you will need:
 |------|---------|----------|-------|
 | **Go** | 1.26+ | Yes | See `go.mod` |
 | **PostgreSQL** | 14+ (16 recommended) | Yes | For worker daemon and workflow storage |
-| **TinyGo** | Latest | No | Smaller WASM binaries via `--target tinygo` |
+| **TinyGo** | Latest | Yes | Required for Go WASM compilation |
 | **Rust toolchain** | Stable | No | For `cleat-macro` / `cleat-sdk` crates and Rust workflows |
 | **Node.js** | 20+ | No | For Svelte web UI and AssemblyScript SDK |
 | **Java** | 17+ | No | For Java SDK |
@@ -228,11 +228,8 @@ Workflows are compiled to WebAssembly using the `cleat build` command.
 ### Go WASM
 
 ```bash
-# Default: compile with standard Go toolchain (wasip1/wasm target)
+# Compile with TinyGo (the default and only Go WASM target)
 cleat build -o ./out ./path/to/workflow/package
-
-# Smaller binaries with TinyGo
-cleat build --target tinygo -o ./out ./path/to/workflow/package
 ```
 
 The pipeline: analyzer.Load -> callgraph.Build -> closure.Compute -> transform ->

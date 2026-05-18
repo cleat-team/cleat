@@ -840,6 +840,25 @@ export class FetchResult {
  * Mirrors Rust SDK `crates/cleat-sdk/src/host_calls.rs` and
  * Go `durable.HostCalls` interface.
  */
+/**
+ * Options for starting a child workflow.
+ */
+export class ChildWorkflowOptions {
+  /**
+   * Explicit workflow definition version (0 = use parent's version).
+   */
+  version: i32 = 0;
+  /**
+   * 0 = highest priority; lower numbers are picked first.
+   */
+  priority: i32 = 0;
+
+  constructor(version: i32 = 0, priority: i32 = 0) {
+    this.version = version;
+    this.priority = priority;
+  }
+}
+
 export class HostCalls {
   /** Memory helper for string I/O in linear memory. */
   protected memory: Memory;
@@ -1384,25 +1403,6 @@ export class HostCalls {
 
     let runId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
     return new DurableResult<string>(runId, null);
-  }
-
-  /**
-   * Options for starting a child workflow.
-   */
-  export class ChildWorkflowOptions {
-    /**
-     * Explicit workflow definition version (0 = use parent's version).
-     */
-    version: i32 = 0;
-    /**
-     * 0 = highest priority; lower numbers are picked first.
-     */
-    priority: i32 = 0;
-
-    constructor(version: i32 = 0, priority: i32 = 0) {
-      this.version = version;
-      this.priority = priority;
-    }
   }
 
   /**

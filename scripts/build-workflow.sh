@@ -17,5 +17,5 @@ fi
 
 cd "$WF_DIR"
 echo "Building WASM workflow in $WF_DIR..."
-GOOS=wasip1 GOARCH=wasm go build -o "$OUTPUT" .
+tinygo build -target=wasip1 -o "$OUTPUT" .
 echo "Built $WF_DIR/$OUTPUT ($(du -h "$OUTPUT" | cut -f1))"

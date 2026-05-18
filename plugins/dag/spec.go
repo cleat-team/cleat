@@ -76,6 +76,9 @@ func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
 			}
 		}
 		d.AddTask(ts.Name, ts.Parents, fn, ts.Priority)
+		if ts.Fn != "" {
+			d.tasks[ts.Name].WorkflowName = ts.Fn
+		}
 	}
 
 	return d, nil

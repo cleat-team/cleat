@@ -2984,8 +2984,8 @@ func TestHealthTracker_RecordRunAndIsStale(t *testing.T) {
 		t.Error("expected loop to not be stale immediately after registration")
 	}
 
-	// Wait for maxAge (3 * 10ms = 30ms).
-	time.Sleep(50 * time.Millisecond)
+	// Wait for maxAge (6 * 10ms = 60ms).
+	time.Sleep(120 * time.Millisecond)
 	if !ht.isStale("testloop") {
 		t.Error("expected loop to be stale after maxAge elapsed without recordRun")
 	}
@@ -2996,7 +2996,7 @@ func TestHealthTracker_RecordRunAndIsStale(t *testing.T) {
 	}
 
 	// Wait for maxAge again.
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(120 * time.Millisecond)
 	if !ht.isStale("testloop") {
 		t.Error("expected loop to be stale after maxAge elapsed again")
 	}
