@@ -162,6 +162,7 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
          CREATE TABLE workflow_promises (
              workflow_id NVARCHAR(900) NOT NULL REFERENCES workflow_instances(id),
              promise_id NVARCHAR(900) NOT NULL,
+             tenant_id NVARCHAR(255) NOT NULL,
              promise_name NVARCHAR(MAX) NOT NULL,
              status NVARCHAR(MAX) NOT NULL DEFAULT 'pending',
              result NVARCHAR(MAX),

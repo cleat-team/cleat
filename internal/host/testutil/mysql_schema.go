@@ -151,6 +151,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			workflow_id   VARCHAR(255) NOT NULL,
 			promise_id    VARCHAR(255) NOT NULL,
 			promise_name  VARCHAR(255) NOT NULL,
+			tenant_id     VARCHAR(255) NOT NULL,
 			status        VARCHAR(50) NOT NULL DEFAULT 'pending',
 			result        JSON,
 			error_msg     TEXT,
