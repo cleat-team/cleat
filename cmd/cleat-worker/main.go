@@ -1057,6 +1057,22 @@ func (w *Worker) getLoopCtx(name string) context.Context {
 	return w.ctx
 }
 
+// launchLoop starts a background loop goroutine and ensures the per-loop
+// done channel is closed when the goroutine exits. This makes the initial
+// launch consistent with the restart path (restartLoop), eliminating the
+// 5-second timeout on the first watchdog restart.
+// The done channel is captured at call time so that if restartLoop swaps
+// the loopCtxMap entry before this goroutine exits, we still close the
+// correct (original) channel.
+func (w *Worker) launchLoop(name string, fn func()) {
+	w.wg.Add(1)
+	done := w.loopCtxMap[name].done
+	go func() {
+		defer close(done)
+		w.withPanicRecovery(name, fn)()
+	}()
+}
+
 func (w *Worker) Run() {
 	// Initialize the global time seed so the first workflow execution
 	// (before the dispatch loop updates it) sees a real wall clock.
@@ -1067,10 +1083,9 @@ func (w *Worker) Run() {
 	w.loopFuncs = make(map[string]func())
 	w.loopCtxMap = make(map[string]*loopContext)
 
-	// initLoopCtx creates a cancellable per-loop context derived from the
-	// worker context. The initial done channel is never closed (the initial
-	// goroutines are started inline, not via restartLoop); the 5s timeout in
-	// restartLoop guards the wait.
+	// initLoopCtx creates a cancellable per-loop context and registers the
+	// loop for watchdog monitoring. The done channel is closed by launchLoop
+	// when the goroutine exits.
 	initLoopCtx := func(name string) {
 		ctx, cancel := context.WithCancel(w.ctx)
 		w.loopCtxMap[name] = &loopContext{
@@ -1078,6 +1093,7 @@ func (w *Worker) Run() {
 			cancel: cancel,
 			done:   make(chan struct{}),
 		}
+		w.healthTracker.registerLoop(name)
 	}
 	initLoopCtx("heartbeat")
 	initLoopCtx("reaper")
@@ -1092,59 +1108,49 @@ func (w *Worker) Run() {
 
 	// Background heartbeat goroutine.
 	w.loopFuncs["heartbeat"] = w.heartbeatLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("heartbeat", w.heartbeatLoop)()
+	w.launchLoop("heartbeat", w.heartbeatLoop)
 
 	// Background zombie reaper goroutine.
 	w.loopFuncs["reaper"] = w.reaperLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("reaper", w.reaperLoop)()
+	w.launchLoop("reaper", w.reaperLoop)
 
 	// Background concurrency key reaper goroutine (Feature 5).
 	w.loopFuncs["concurrency_key_reaper"] = w.concurrencyKeyReaperLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("concurrency_key_reaper", w.concurrencyKeyReaperLoop)()
+	w.launchLoop("concurrency_key_reaper", w.concurrencyKeyReaperLoop)
 
 	// Dispatch loop.
 	w.loopFuncs["dispatch"] = w.dispatchLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("dispatch", w.dispatchLoop)()
+	w.launchLoop("dispatch", w.dispatchLoop)
 
 	// Cron schedule loop.
 	w.loopFuncs["schedule"] = w.scheduleLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("schedule", w.scheduleLoop)()
+	w.launchLoop("schedule", w.scheduleLoop)
 
 	// Compaction loop.
 	w.loopFuncs["compaction"] = w.compactionLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("compaction", w.compactionLoop)()
+	w.launchLoop("compaction", w.compactionLoop)
 
 	// Memory estimate reload loop.
 	w.loopFuncs["memory_reload"] = w.memoryReloadLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("memory_reload", w.memoryReloadLoop)()
+	w.launchLoop("memory_reload", w.memoryReloadLoop)
 
 	// Memory sample cleanup loop.
 	w.loopFuncs["memory_cleanup"] = func() { w.memoryCleanupLoop(w.memorySampleRetention) }
-	w.wg.Add(1)
-	go w.withPanicRecovery("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })()
+	w.launchLoop("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })
 
 	// Retention loop.
 	w.loopFuncs["retention"] = func() { w.retentionLoop(w.retentionDays) }
-	w.wg.Add(1)
-	go w.withPanicRecovery("retention", func() { w.retentionLoop(w.retentionDays) })()
+	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays) })
 
 	// Update dispatch loop (Feature 3: Update Handler).
 	w.loopFuncs["update_dispatch"] = func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) }
-	w.wg.Add(1)
-	go w.withPanicRecovery("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })()
+	w.launchLoop("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })
 
 	// Watchdog loop for background loop health monitoring.
 	if w.healthCheckInterval > 0 {
+		initLoopCtx("watchdog")
 		w.loopFuncs["watchdog"] = w.watchdogLoop
-		w.wg.Add(1)
-		go w.withPanicRecovery("watchdog", w.watchdogLoop)()
+		w.launchLoop("watchdog", w.watchdogLoop)
 	}
 
 	log.Printf("[worker %s] Running", w.id)
@@ -1172,6 +1178,11 @@ func (w *Worker) dispatchLoop() {
 		case <-w.getLoopCtx("dispatch").Done():
 			return
 		default:
+		}
+		// Re-check after the non-blocking select to narrow the
+		// TOCTOU window between the check and the DB claims below.
+		if w.ctx.Err() != nil {
+			return
 		}
 
 		w.healthTracker.recordRun("dispatch")
@@ -1294,8 +1305,12 @@ func (w *Worker) dispatchLoop() {
 		}
 
 		// Improvement 3: Found work — reset idle counter (coalesced polling).
-		// Don't sleep before the next poll; there may be more work ready.
+		// When the claim returned a full batch there is likely more work;
+		// add a brief pause to avoid a tight polling loop against the DB.
 		idleTicks = 0
+		if len(wfs) == batchSize {
+			time.Sleep(10 * time.Millisecond)
+		}
 		w.consecutiveDBErrors = 0 // reset circuit breaker on success
 
 		workflowsClaimed.Add(float64(len(wfs)))
@@ -2131,6 +2146,9 @@ func (w *Worker) waitForDB() {
 			return
 		default:
 		}
+		if w.ctx.Err() != nil {
+			return
+		}
 
 		if _, err := w.store.ClaimWorkflow(w.ctx, ""); err == nil || !isConnectionError(err) {
 			// DB is back (or claim returned no work, which means DB is reachable).
@@ -2450,19 +2468,21 @@ func isConnectionError(err error) bool {
 // healthTracker records the last run time and panic status of each background loop
 // for watchdog monitoring and auto-restart.
 type healthTracker struct {
-	mu        sync.Mutex
-	lastRun   map[string]time.Time     // loop_name -> last successful run time
-	panicked  map[string]bool          // loop_name -> has panicked
-	restarts  map[string]int           // loop_name -> restart count
-	intervals map[string]time.Duration // loop_name -> expected run interval
+	mu           sync.Mutex
+	lastRun      map[string]time.Time     // loop_name -> last successful run time
+	panicked     map[string]bool          // loop_name -> has panicked
+	restarts     map[string]int           // loop_name -> restart count
+	intervals    map[string]time.Duration // loop_name -> expected run interval
+	registeredAt map[string]time.Time     // loop_name -> when the loop was first registered
 }
 
 func newHealthTracker() healthTracker {
 	return healthTracker{
-		lastRun:   make(map[string]time.Time),
-		panicked:  make(map[string]bool),
-		restarts:  make(map[string]int),
-		intervals: make(map[string]time.Duration),
+		lastRun:      make(map[string]time.Time),
+		panicked:     make(map[string]bool),
+		restarts:     make(map[string]int),
+		intervals:    make(map[string]time.Duration),
+		registeredAt: make(map[string]time.Time),
 	}
 }
 
@@ -2490,6 +2510,44 @@ func (ht *healthTracker) setInterval(name string, interval time.Duration) {
 	ht.intervals[name] = interval
 }
 
+func (ht *healthTracker) registerLoop(name string) {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	ht.registeredAt[name] = time.Now()
+}
+
+// isStale re-checks a single loop atomically to prevent TOCTOU races where
+// a loop recovered between the snapshot in staleLoops() and restartLoop().
+func (ht *healthTracker) isStale(name string) bool {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	lastRun, ok := ht.lastRun[name]
+	if !ok {
+		regAt, regOk := ht.registeredAt[name]
+		if !regOk {
+			return false
+		}
+		maxAge := 60 * time.Second
+		if interval, iOk := ht.intervals[name]; iOk && interval > 0 {
+			maxAge = interval * 3
+		}
+		return time.Since(regAt) > maxAge
+	}
+	interval, iOk := ht.intervals[name]
+	maxAge := 60 * time.Second
+	if iOk && interval > 0 {
+		maxAge = interval * 3
+	}
+	return time.Since(lastRun) > maxAge
+}
+
+// registeredCount returns the total number of registered loops.
+func (ht *healthTracker) registeredCount() int {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	return len(ht.registeredAt)
+}
+
 // maxAge returns the maximum allowed time since the last run for a loop,
 // defined as 3x the expected interval, or 60s if no interval is set.
 func (ht *healthTracker) maxAge(name string) time.Duration {
@@ -2503,6 +2561,8 @@ func (ht *healthTracker) maxAge(name string) time.Duration {
 }
 
 // staleLoops returns names of loops that haven't run within their maxAge.
+// It also catches loops that were registered but never recorded a run
+// (stuck during startup).
 func (ht *healthTracker) staleLoops() []string {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
@@ -2515,6 +2575,20 @@ func (ht *healthTracker) staleLoops() []string {
 			maxAge = interval * 3
 		}
 		if now.Sub(lastRun) > maxAge {
+			stale = append(stale, name)
+		}
+	}
+	// Also check loops that were registered but never recorded a run.
+	for name, regAt := range ht.registeredAt {
+		if _, ok := ht.lastRun[name]; ok {
+			continue
+		}
+		interval, iOk := ht.intervals[name]
+		maxAge := 60 * time.Second
+		if iOk && interval > 0 {
+			maxAge = interval * 3
+		}
+		if now.Sub(regAt) > maxAge {
 			stale = append(stale, name)
 		}
 	}
@@ -2562,6 +2636,7 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 // stale and gets restarted.
 func (w *Worker) watchdogLoop() {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("watchdog", w.healthCheckInterval)
 	ticker := time.NewTicker(w.healthCheckInterval)
 	defer ticker.Stop()
 
@@ -2570,11 +2645,31 @@ func (w *Worker) watchdogLoop() {
 		case <-w.ctx.Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("watchdog")
+
 			stale := w.healthTracker.staleLoops()
+
+			// Poison-pill: if the vast majority of loops are stale at once,
+			// the worker is likely hung (GC storm, OS stall, etc.). Exit
+			// cleanly and let external infrastructure restart the process.
+			total := w.healthTracker.registeredCount()
+			if len(stale) > 0 && total >= 3 && len(stale) >= (total*4/5) {
+				log.Printf("[worker %s] CRITICAL: %d/%d loops stale — worker appears hung, exiting for external restart", w.id, len(stale), total)
+				w.cancel()
+				return
+			}
+
 			for _, name := range stale {
+				if name == "watchdog" {
+					// The watchdog cannot restart itself. A stale watchdog
+					// entry indicates healthTracker state corruption.
+					log.Printf("[worker %s] watchdog: watchdog self-reported as stale — skipping self-restart (likely tracker corruption)", w.id)
+					continue
+				}
 				log.Printf("[worker %s] watchdog: %s loop is stale, restarting", w.id, name)
 				w.restartLoop(name)
 			}
+
 			// Report health metrics.
 			lastRun, panicked, restarts := w.healthTracker.snapshot()
 			for name, t := range lastRun {
@@ -2596,12 +2691,19 @@ func (w *Worker) watchdogLoop() {
 // prevents goroutine leaks and double execution when the watchdog detects a
 // stale loop.
 func (w *Worker) restartLoop(name string) {
-	w.healthTracker.recordRestart(name)
 	fn, ok := w.loopFuncs[name]
 	if !ok {
 		log.Printf("[worker %s] watchdog: no restart function registered for %s", w.id, name)
 		return
 	}
+
+	// Re-check staleness atomically to avoid killing a loop that recovered
+	// between the staleLoops() snapshot and this call (TOCTOU fix).
+	if !w.healthTracker.isStale(name) {
+		log.Printf("[worker %s] watchdog: %s recovered before restart, skipping", w.id, name)
+		return
+	}
+	w.healthTracker.recordRestart(name)
 
 	// Cancel the old loop context (if one exists) and wait for the old goroutine
 	// to acknowledge cancellation via its done channel.

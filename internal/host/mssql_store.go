@@ -476,11 +476,9 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 
 		offset := 0
 		for {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				errCh <- ctx.Err()
 				return
-			default:
 			}
 
 			rows, err := s.db.QueryContext(ctx, `
@@ -2811,6 +2809,7 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 		if n == 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// Also batch cleanup compaction states.
@@ -2835,6 +2834,7 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 		if n == 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	return totalDeleted, nil
@@ -2911,6 +2911,7 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 		if n == 0 {
 			break
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	return totalDeleted, nil
 }

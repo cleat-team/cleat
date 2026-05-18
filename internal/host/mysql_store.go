@@ -1313,11 +1313,9 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 
 		offset := 0
 		for {
-			select {
-			case <-ctx.Done():
+			if ctx.Err() != nil {
 				errCh <- ctx.Err()
 				return
-			default:
 			}
 
 			rows, err := s.db.QueryContext(ctx, `
