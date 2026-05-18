@@ -25,10 +25,11 @@ import (
 
 // Task represents a single node in the DAG.
 type Task struct {
-	Name     string
-	Parents  []string
-	Fn       func(ctx *TaskContext) (string, error)
-	Priority int
+	Name         string
+	Parents      []string
+	Fn           func(ctx *TaskContext) (string, error)
+	Priority     int
+	WorkflowName string // the workflow name to call (from spec Fn); empty means use Name
 }
 
 // TaskContext provides the task with HostCalls and access to parent outputs.
@@ -83,6 +84,10 @@ func (d *DAG) Output(name string) (string, bool) {
 
 // Execute runs the DAG using the provided HostCalls and input.
 // It delegates to ExecuteWithOptions with default options.
+//
+// input can be:
+//   - map[string]json.RawMessage — per-task inputs keyed by task name
+//   - any other value — used as the input for all tasks
 func (d *DAG) Execute(h cleat.HostCalls, input interface{}) error {
 	return d.ExecuteWithOptions(h, input, ExecuteOptions{})
 }
@@ -96,6 +101,10 @@ func (d *DAG) Execute(h cleat.HostCalls, input interface{}) error {
 // are started concurrently, limited by the semaphore to at most MaxParallelism
 // concurrent calls. When MaxParallelism is 0, all ChildWorkflow calls are
 // made sequentially before AwaitAllChildren is called.
+//
+// input can be:
+//   - map[string]json.RawMessage — per-task inputs keyed by task name
+//   - any other value — used as the input for all tasks
 func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts ExecuteOptions) error {
 	if err := d.validate(); err != nil {
 		return err
@@ -108,8 +117,11 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts Exec
 
 	d.outputs = make(map[string]string)
 
+	// Normalize per-task inputs.
+	perTaskInputs, _ := input.(map[string]json.RawMessage)
+
 	for _, level := range levels {
-		runIDs, levelTasks, startErr := d.startLevel(h, input, level, opts)
+		runIDs, levelTasks, startErr := d.startLevel(h, input, perTaskInputs, level, opts)
 		if startErr != nil {
 			return startErr
 		}
@@ -133,26 +145,30 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts Exec
 }
 
 // startLevel dispatches to sequential or parallel level start based on opts.
-func (d *DAG) startLevel(h cleat.HostCalls, input interface{}, level []*Task, opts ExecuteOptions) ([]string, []*Task, error) {
+func (d *DAG) startLevel(h cleat.HostCalls, input interface{}, perTaskInputs map[string]json.RawMessage, level []*Task, opts ExecuteOptions) ([]string, []*Task, error) {
 	if opts.MaxParallelism > 0 {
-		return d.startLevelParallel(h, input, level, opts.MaxParallelism)
+		return d.startLevelParallel(h, input, perTaskInputs, level, opts.MaxParallelism)
 	}
-	return d.startLevelSequential(h, input, level)
+	return d.startLevelSequential(h, input, perTaskInputs, level)
 }
 
 // startLevelSequential starts all tasks in the level one at a time.
-func (d *DAG) startLevelSequential(h cleat.HostCalls, input interface{}, level []*Task) ([]string, []*Task, error) {
+func (d *DAG) startLevelSequential(h cleat.HostCalls, input interface{}, perTaskInputs map[string]json.RawMessage, level []*Task) ([]string, []*Task, error) {
 	var runIDs []string
 	var levelTasks []*Task
 
 	for _, task := range level {
-		inputJSON, err := d.buildTaskInput(task, input)
+		inputJSON, err := d.taskInput(task, input, perTaskInputs)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		opts := cleat.ChildWorkflowOptions{Priority: task.Priority}
-		runID, err := h.ChildWorkflowWithOptions(task.Name, string(inputJSON), opts)
+		wfName := task.WorkflowName
+		if wfName == "" {
+			wfName = task.Name
+		}
+		runID, err := h.ChildWorkflowWithOptions(wfName, string(inputJSON), opts)
 		if err != nil {
 			return nil, nil, fmt.Errorf("dag: failed to start child workflow %s: %w", task.Name, err)
 		}
@@ -165,7 +181,7 @@ func (d *DAG) startLevelSequential(h cleat.HostCalls, input interface{}, level [
 
 // startLevelParallel starts all tasks in the level concurrently, limiting
 // concurrency with a buffered-channel semaphore.
-func (d *DAG) startLevelParallel(h cleat.HostCalls, input interface{}, level []*Task, maxParallelism int) ([]string, []*Task, error) {
+func (d *DAG) startLevelParallel(h cleat.HostCalls, input interface{}, perTaskInputs map[string]json.RawMessage, level []*Task, maxParallelism int) ([]string, []*Task, error) {
 	sem := make(chan struct{}, maxParallelism)
 
 	type levelItem struct {
@@ -181,13 +197,17 @@ func (d *DAG) startLevelParallel(h cleat.HostCalls, input interface{}, level []*
 		go func(idx int, t *Task) { // cleat:allow E001 -- SDK plugin, not user workflow; goroutine lifecycle is fully managed
 			defer func() { <-sem }()
 
-			inputJSON, err := d.buildTaskInput(t, input)
+			inputJSON, err := d.taskInput(t, input, perTaskInputs)
 			if err != nil {
 				ch <- levelItem{idx, "", t, err} // cleat:allow E002
 				return
 			}
 
-			runID, err := h.ChildWorkflowWithOptions(t.Name, string(inputJSON), cleat.ChildWorkflowOptions{Priority: t.Priority})
+			wfName := t.WorkflowName
+			if wfName == "" {
+				wfName = t.Name
+			}
+			runID, err := h.ChildWorkflowWithOptions(wfName, string(inputJSON), cleat.ChildWorkflowOptions{Priority: t.Priority})
 			if err != nil {
 				ch <- levelItem{idx, "", t, fmt.Errorf("dag: failed to start child workflow %s: %w", t.Name, err)} // cleat:allow E002
 				return
@@ -220,14 +240,42 @@ func (d *DAG) startLevelParallel(h cleat.HostCalls, input interface{}, level []*
 	return runIDs, tasks, nil
 }
 
-// buildTaskInput constructs the JSON input for a child workflow task.
+// taskInput returns the JSON input for a task, using per-task inputs when
+// available. When task.WorkflowName is set, the input is passed through as
+// raw JSON without wrapping — the target workflow receives its native input
+// format. Otherwise the input is wrapped with task name, input, and parent
+// outputs via buildTaskInput.
+func (d *DAG) taskInput(task *Task, defaultInput interface{}, perTaskInputs map[string]json.RawMessage) ([]byte, error) {
+	if task.WorkflowName != "" {
+		// Pass raw input through — the target workflow expects its own format.
+		if raw, ok := perTaskInputs[task.Name]; ok {
+			return raw, nil
+		}
+		// No per-task input; marshal the default input directly.
+		if defaultInput != nil {
+			if raw, ok := defaultInput.(json.RawMessage); ok {
+				return raw, nil
+			}
+			return json.Marshal(defaultInput)
+		}
+		return []byte("{}"), nil
+	}
+	// No WorkflowName set — wrap in {task, input, parent_outputs}.
+	input := defaultInput
+	if raw, ok := perTaskInputs[task.Name]; ok {
+		input = raw
+	}
+	return d.buildTaskInput(task, input)
+}
+
+// buildTaskInput constructs the wrapped JSON input for a child workflow task.
 func (d *DAG) buildTaskInput(task *Task, input interface{}) ([]byte, error) {
-	taskInput := map[string]interface{}{
+	wrapped := map[string]interface{}{
 		"task":           task.Name,
 		"input":          input,
 		"parent_outputs": d.buildParentOutputs(task, d.outputs),
 	}
-	return json.Marshal(taskInput)
+	return json.Marshal(wrapped)
 }
 
 func (d *DAG) buildParentOutputs(task *Task, outputs map[string]string) map[string]string {

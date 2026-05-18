@@ -564,13 +564,13 @@ func (e *WasmTestEnv) Close() {
 }
 
 // BuildWasm compiles Go source files at the given package path to WASM
-// using `go build` with GOOS=wasip1 GOARCH=wasm. The path can be:
+// using TinyGo. The path can be:
 //   - An absolute directory path
 //   - A relative directory path (resolved from the repo root)
 //   - A package path like "./testdata/myworkflow"
 //
 // Returns the compiled WASM bytes. Tests using this helper should be gated
-// with testing.Short() since it requires the `go` binary and takes time.
+// with testing.Short() since it requires the `tinygo` binary and takes time.
 func (e *WasmTestEnv) BuildWasm(t *testing.T, pkgPath string) []byte {
 	t.Helper()
 
@@ -600,16 +600,12 @@ func (e *WasmTestEnv) BuildWasm(t *testing.T, pkgPath string) []byte {
 
 	outPath := filepath.Join(tmpDir, "output.wasm")
 
-	cmd := exec.Command("go", "build",
+	cmd := exec.Command("tinygo", "build",
+		"-target=wasip1",
 		"-o", outPath,
-		"-tags", "wasip1",
+		".",
 	)
 	cmd.Dir = absDir
-	cmd.Env = append(os.Environ(),
-		"GOOS=wasip1",
-		"GOARCH=wasm",
-		"CGO_ENABLED=0",
-	)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {

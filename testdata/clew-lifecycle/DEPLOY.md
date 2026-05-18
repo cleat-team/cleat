@@ -154,4 +154,4 @@ Each deploy requires a new version name. Re-deploying to an existing name fails 
 The worker loads all workflow WASM into memory at startup. New versions aren't picked up until restart. In-flight workflow instances are lost on restart.
 
 ### Gap F: No standalone cleat CLI
-There is no standalone `cleat` binary for build/deploy. The WASM is built with `GOOS=wasip1 GOARCH=wasm go build` from the cleat repo's Go toolchain. Deployment uses the `deploy-workflow` Go tool built from `cmd/deploy-workflow/`.
+There is no standalone `cleat` binary for build/deploy. The WASM is built with `tinygo build -target=wasip1` from the cleat repo's toolchain. Deployment uses the `deploy-workflow` Go tool built from `cmd/deploy-workflow/`.

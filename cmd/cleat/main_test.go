@@ -53,7 +53,7 @@ func TestIsErrorType(t *testing.T) {
 }
 
 func TestIsValidTarget(t *testing.T) {
-	valid := []string{"go", "tinygo", "rust", "java", "assemblyscript", "python"}
+	valid := []string{"tinygo", "rust", "java", "assemblyscript", "python"}
 	for _, v := range valid {
 		if !isValidTarget(v) {
 			t.Errorf("isValidTarget(%q) = false, want true", v)

@@ -78,7 +78,7 @@ func main() {
 	driver := flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
 	concurrency := flag.Int("concurrency", 10, "Max concurrent workflow executions")
 	heartbeatInterval := flag.Duration("heartbeat", 5*time.Second, "Heartbeat interval")
-	pollInterval := flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
+	pollInterval := flag.Duration("poll", 5*time.Second, "Poll interval when no work")
 	apiAddr := flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
 	taskQueuesStr := flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
 	compactionThreshold := flag.Int("compaction-threshold", host.DefaultCompactionThreshold, "Number of events before history compaction triggers")
@@ -2527,16 +2527,16 @@ func (ht *healthTracker) isStale(name string) bool {
 		if !regOk {
 			return false
 		}
-		maxAge := 60 * time.Second
+		maxAge := 120 * time.Second
 		if interval, iOk := ht.intervals[name]; iOk && interval > 0 {
-			maxAge = interval * 3
+			maxAge = interval * 6
 		}
 		return time.Since(regAt) > maxAge
 	}
 	interval, iOk := ht.intervals[name]
-	maxAge := 60 * time.Second
+	maxAge := 120 * time.Second
 	if iOk && interval > 0 {
-		maxAge = interval * 3
+		maxAge = interval * 6
 	}
 	return time.Since(lastRun) > maxAge
 }
@@ -2549,15 +2549,15 @@ func (ht *healthTracker) registeredCount() int {
 }
 
 // maxAge returns the maximum allowed time since the last run for a loop,
-// defined as 3x the expected interval, or 60s if no interval is set.
+// defined as 6x the expected interval, or 120s if no interval is set.
 func (ht *healthTracker) maxAge(name string) time.Duration {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
 	interval, ok := ht.intervals[name]
 	if ok && interval > 0 {
-		return interval * 3
+		return interval * 6
 	}
-	return 60 * time.Second
+	return 120 * time.Second
 }
 
 // staleLoops returns names of loops that haven't run within their maxAge.
@@ -2570,9 +2570,9 @@ func (ht *healthTracker) staleLoops() []string {
 	now := time.Now()
 	for name, lastRun := range ht.lastRun {
 		interval, ok := ht.intervals[name]
-		maxAge := 60 * time.Second
+		maxAge := 120 * time.Second
 		if ok && interval > 0 {
-			maxAge = interval * 3
+			maxAge = interval * 6
 		}
 		if now.Sub(lastRun) > maxAge {
 			stale = append(stale, name)
@@ -2584,9 +2584,9 @@ func (ht *healthTracker) staleLoops() []string {
 			continue
 		}
 		interval, iOk := ht.intervals[name]
-		maxAge := 60 * time.Second
+		maxAge := 120 * time.Second
 		if iOk && interval > 0 {
-			maxAge = interval * 3
+			maxAge = interval * 6
 		}
 		if now.Sub(regAt) > maxAge {
 			stale = append(stale, name)

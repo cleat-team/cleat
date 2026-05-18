@@ -94,20 +94,27 @@ func TestRegisterHostFunctions(t *testing.T) {
 	if err := p.RegisterHostFunctions(registry); err != nil {
 		t.Fatalf("RegisterHostFunctions() returned error: %v", err)
 	}
-	if len(registry.registrations) != 2 {
-		t.Fatalf("expected 2 registrations, got %d", len(registry.registrations))
+	if len(registry.registrations) != 5 {
+		t.Fatalf("expected 5 registrations, got %d", len(registry.registrations))
 	}
-	if registry.registrations[0].name != "run_phase" {
-		t.Errorf("expected first 'run_phase', got %q", registry.registrations[0].name)
+	// Order: run_phase, check_ci, validate_files, read_file, create_task
+	expect := []struct {
+		name       string
+		idempotent bool
+	}{
+		{"run_phase", true},
+		{"check_ci", false},
+		{"validate_files", true},
+		{"read_file", true},
+		{"create_task", true},
 	}
-	if !registry.registrations[0].idempotent {
-		t.Error("expected run_phase Idempotent: true")
-	}
-	if registry.registrations[1].name != "check_ci" {
-		t.Errorf("expected second 'check_ci', got %q", registry.registrations[1].name)
-	}
-	if registry.registrations[1].idempotent {
-		t.Error("expected check_ci Idempotent: false")
+	for i, e := range expect {
+		if registry.registrations[i].name != e.name {
+			t.Errorf("expected registrations[%d] name %q, got %q", i, e.name, registry.registrations[i].name)
+		}
+		if registry.registrations[i].idempotent != e.idempotent {
+			t.Errorf("expected registrations[%d] idempotent %v, got %v", i, e.idempotent, registry.registrations[i].idempotent)
+		}
 	}
 }
 
@@ -214,7 +221,7 @@ func TestBuildPrompt(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.role, func(t *testing.T) {
-			prompt, err := buildPrompt(in, tc.role, t.TempDir(), protocolPath)
+			prompt, err := buildPrompt(in, tc.role, t.TempDir(), protocolPath, "")
 			if err != nil {
 				t.Fatalf("buildPrompt() for %s returned error: %v", tc.role, err)
 			}
@@ -231,7 +238,7 @@ func TestBuildPromptProtocolNotFound(t *testing.T) {
 	// buildPrompt doesn't check file existence — that's done by runPhase.
 	// It should succeed even with a non-existent protocol path.
 	in := runPhaseInput{TaskID: "test", Project: "test", ProjectRoot: "/tmp", Workdir: "/tmp"}
-	prompt, err := buildPrompt(in, "explorer", "/tmp", "/nonexistent/protocol.md")
+	prompt, err := buildPrompt(in, "explorer", "/tmp", "/nonexistent/protocol.md", "")
 	if err != nil {
 		t.Fatalf("buildPrompt() returned error: %v", err)
 	}
@@ -242,7 +249,7 @@ func TestBuildPromptProtocolNotFound(t *testing.T) {
 
 func TestBuildPromptUnknownRole(t *testing.T) {
 	in := runPhaseInput{TaskID: "test", Project: "test", ProjectRoot: "/tmp", Workdir: "/tmp"}
-	_, err := buildPrompt(in, "unknown", "/tmp", "/dev/null")
+	_, err := buildPrompt(in, "unknown", "/tmp", "/dev/null", "")
 	if err == nil {
 		t.Error("expected error for unknown role")
 	}
