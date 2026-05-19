@@ -188,19 +188,40 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	artifactsDir := filepath.Join(td, "artifacts")
 	snapshot := listArtifactFiles(artifactsDir)
 
-	// Build CLI args.
+	// Build CLI args. Prompt via stdin. A watchdog goroutine kills claude
+	// after 2 minutes if it hasn't exited — the workflow reads results from
+	// disk (survey-output.json) so stdout isn't required.
 	args := []string{"--dangerously-skip-permissions"}
 	if in.Model != "" {
 		args = append(args, "--model", in.Model)
 	}
 
-	cmd := exec.CommandContext(context.Background(), bin, args...)
+	execCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(execCtx, bin, args...)
 	cmd.Dir = in.Workdir
 	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr cappedBuffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+
+	// Watchdog: kill claude after 2 minutes. The workflow reads survey
+	// results from disk files, not stdout, so we don't need claude to
+	// exit cleanly — we just need it to write files within 2 minutes.
+	watchdogDone := make(chan struct{})
+	defer close(watchdogDone)
+	go func() {
+		timer := time.NewTimer(2 * time.Minute)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+		case <-watchdogDone:
+		}
+	}()
 
 	started := time.Now()
 	runErr := cmd.Run()
