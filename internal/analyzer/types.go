@@ -119,6 +119,58 @@ func HostCallsMethod(sel *types.Selection) bool {
 	return IsHostCallsType(sel.Recv())
 }
 
+// PluginCallerMethod reports whether the given selection is a method call
+// on a type that implements the cleat.PluginCaller marker interface.
+func PluginCallerMethod(sel *types.Selection) bool {
+	if sel == nil {
+		return false
+	}
+	return ImplementsPluginCaller(sel.Recv())
+}
+
+// ImplementsPluginCaller reports whether the given type implements the
+// cleat.PluginCaller marker interface (has a cleatPlugin() method with
+// no parameters and no return values).
+func ImplementsPluginCaller(t types.Type) bool {
+	named := resolveNamedType(t)
+	if named == nil {
+		return false
+	}
+	// Check *T — the cleatPlugin method is defined with a pointer receiver.
+	ptr := types.NewPointer(named)
+	ms := types.NewMethodSet(ptr)
+	for i := 0; i < ms.Len(); i++ {
+		m := ms.At(i).Obj()
+		if m.Name() == "cleatPlugin" {
+			sig, ok := m.Type().(*types.Signature)
+			return ok && sig.Params().Len() == 0 && sig.Results().Len() == 0
+		}
+	}
+	// Also check value receiver methods (for completeness).
+	msVal := types.NewMethodSet(named)
+	for i := 0; i < msVal.Len(); i++ {
+		m := msVal.At(i).Obj()
+		if m.Name() == "cleatPlugin" {
+			sig, ok := m.Type().(*types.Signature)
+			return ok && sig.Params().Len() == 0 && sig.Results().Len() == 0
+		}
+	}
+	return false
+}
+
+// resolveNamedType unwraps pointer types and returns the underlying named type.
+func resolveNamedType(t types.Type) *types.Named {
+	if named, ok := t.(*types.Named); ok {
+		return named
+	}
+	if ptr, ok := t.(*types.Pointer); ok {
+		if named, ok := ptr.Elem().(*types.Named); ok {
+			return named
+		}
+	}
+	return nil
+}
+
 // FuncFQName returns the fully-qualified name of a *types.Func in the same
 // format used as keys in AnalysisResult.Funcs. For generic instantiations,
 // it uses Origin() to return the type-parameter form (e.g., "*Container[T].Process"

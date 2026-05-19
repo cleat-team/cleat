@@ -148,6 +148,10 @@ func hasHostCallsCall(fd *analyzer.FuncDecl) bool {
 	if fd.Ast.Body == nil || fd.Pkg.Info == nil {
 		return false
 	}
+	// PluginCaller methods are trusted boundaries — automatically durable leaves.
+	if fd.RecvType != nil && analyzer.ImplementsPluginCaller(fd.RecvType) {
+		return true
+	}
 	found := false
 	ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
 		if found {
@@ -165,7 +169,7 @@ func hasHostCallsCall(fd *analyzer.FuncDecl) bool {
 		if !ok {
 			return true
 		}
-		if analyzer.HostCallsMethod(sel) {
+		if analyzer.HostCallsMethod(sel) || analyzer.PluginCallerMethod(sel) {
 			found = true
 			return false
 		}
