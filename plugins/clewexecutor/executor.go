@@ -236,11 +236,6 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		}
 	}
 
-	status := "completed"
-	if exitCode != 0 {
-		status = "failed"
-	}
-
 	// Determine new phase by re-reading STATUS.md after the agent ran.
 	newPhase := phase
 	if np, err := extractPhase(statusPath); err == nil {
@@ -254,6 +249,14 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 
 	newSnapshot := listArtifactFiles(artifactsDir)
 	artifactsWritten := diffArtifacts(snapshot, newSnapshot)
+
+	// If the watchdog killed claude but artifacts were produced, treat
+	// as success. The watchdog is expected to kill claude after it finishes
+	// writing files — claude doesn't exit on its own in stdin mode.
+	status := "completed"
+	if exitCode != 0 && len(artifactsWritten) == 0 {
+		status = "failed"
+	}
 	findingsCount := countFindings(role, artifactsDir)
 
 	reviewOutcome := ""
