@@ -270,6 +270,14 @@ type Lifecycle interface {
 	// calling AwaitChild in a loop, all children are awaited concurrently.
 	AwaitAllChildren(runIDs []string) ([]ChildResult, error)
 
+	// AwaitAnyChild blocks until at least one child workflow from the set completes.
+	// Returns the runID, result, and any error. This is "wait for any child."
+	AwaitAnyChild(runIDs []string) (completedRunID string, result string, err error)
+
+	// PollChild checks a child's status without blocking.
+	// Returns status ("running", "completed", "failed"), result, and any error.
+	PollChild(runID string) (status string, result string, err error)
+
 	// ChildWorkflowTyped starts a child workflow with typed input.
 	// Marshals request to JSON internally. Use AwaitChildTyped to
 	// get the typed result.
@@ -815,6 +823,8 @@ type HostCallsImpl struct {
 	childWorkflowWithOptions  func(name, inputJSON string, version int, parentClosePolicy string, priority int) (string, error)
 	awaitChild                func(runID string) (string, error)
 	awaitAllChildren           func(runIDs []string) ([]ChildResult, error)
+	awaitAnyChild              func(runIDs []string) (completedRunID string, result string, err error)
+	pollChild                  func(runID string) (status string, result string, err error)
 	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
 	childWorkflowTyped        func(name string, request interface{}) (string, error)
 	awaitChildTyped           func(runID string, result interface{}) error
@@ -890,6 +900,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		childWorkflowWithOptions:  opts.ChildWorkflowWithOptions,
 		awaitChild:                opts.AwaitChild,
 		awaitAllChildren:           opts.AwaitAllChildren,
+		awaitAnyChild:              opts.AwaitAnyChild,
+		pollChild:                  opts.PollChild,
 		durableCallTypedWithHeartbeat: opts.DurableCallTypedWithHeartbeat,
 		childWorkflowTyped:        opts.ChildWorkflowTyped,
 		awaitChildTyped:           opts.AwaitChildTyped,
@@ -975,6 +987,8 @@ type HostCallsOptions struct {
 	ChildWorkflowWithOptions    func(name, inputJSON string, version int, parentClosePolicy string, priority int) (string, error)
 	AwaitChild                   func(runID string) (string, error)
 	AwaitAllChildren              func(runIDs []string) ([]ChildResult, error)
+	AwaitAnyChild                 func(runIDs []string) (completedRunID string, result string, err error)
+	PollChild                     func(runID string) (status string, result string, err error)
 	DurableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
 	DurableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
 	ChildWorkflowTyped           func(name string, request interface{}) (string, error)
@@ -1702,6 +1716,20 @@ func (h *HostCallsImpl) AwaitAllChildren(runIDs []string) ([]ChildResult, error)
 		return nil, errors.New("durable: AwaitAllChildren can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.awaitAllChildren(runIDs)
+}
+
+func (h *HostCallsImpl) AwaitAnyChild(runIDs []string) (string, string, error) {
+	if h.awaitAnyChild == nil {
+		return "", "", errors.New("durable: AwaitAnyChild can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	}
+	return h.awaitAnyChild(runIDs)
+}
+
+func (h *HostCallsImpl) PollChild(runID string) (string, string, error) {
+	if h.pollChild == nil {
+		return "", "", errors.New("durable: PollChild can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	}
+	return h.pollChild(runID)
 }
 
 func (h *HostCallsImpl) ChildWorkflowTyped(name string, request interface{}) (string, error) {

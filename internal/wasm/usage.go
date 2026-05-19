@@ -62,6 +62,8 @@ var hostFunctions = []HostFunction{
 	{"cleat_child_workflow", "ChildWorkflowTyped"},
 	{"cleat_await_child", "AwaitChild"},
 	{"cleat_await_all_children", "AwaitAllChildren"},
+	{"cleat_await_any_child", "AwaitAnyChild"},
+	{"cleat_poll_child", "PollChild"},
 	{"cleat_await_child", "AwaitChildTyped"},
 	{"cleat_call_retry", "DurableCallWithRetry"},
 	// Versioning
@@ -141,6 +143,9 @@ func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInf
 		collectHostCallsCalls(fd, info)
 	}
 
+	// Incorporate //cleat:require directives from source comments.
+	collectRequirements(result, info)
+
 	// Build the stable ordered list of used functions.
 	for _, hf := range hostFunctions {
 		if info.Used[hf.ImportName] {
@@ -149,6 +154,41 @@ func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInf
 	}
 
 	return info
+}
+
+// collectRequirements scans the target package's source files for
+// //cleat:require directives and adds the listed host functions to info.Used.
+//
+// Directive format:
+//
+//	//cleat:require ChildWorkflowWithOptions,AwaitAnyChild
+//
+// The directive names HostCallsOptions field names (not import names). They
+// are resolved to import names via the hostFunctions table.
+func collectRequirements(result *analyzer.AnalysisResult, info *UsageInfo) {
+	fieldToImport := make(map[string]string)
+	for _, hf := range hostFunctions {
+		fieldToImport[hf.FieldName] = hf.ImportName
+	}
+
+	for _, file := range result.TargetPkg.Files {
+		for _, cg := range file.Comments {
+			for _, c := range cg.List {
+				text := c.Text
+				const prefix = "//cleat:require "
+				if !strings.HasPrefix(text, prefix) {
+					continue
+				}
+				rest := text[len(prefix):]
+				for _, field := range strings.Split(rest, ",") {
+					field = strings.TrimSpace(field)
+					if importName, ok := fieldToImport[field]; ok {
+						info.Used[importName] = true
+					}
+				}
+			}
+		}
+	}
 }
 
 // collectHostCallsCalls walks a function body and records which HostCalls
