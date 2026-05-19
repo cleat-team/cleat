@@ -188,20 +188,19 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	artifactsDir := filepath.Join(td, "artifacts")
 	snapshot := listArtifactFiles(artifactsDir)
 
-	// Build CLI args. Interactive mode (no --print) — the prompt is sent
-	// via stdin with /quit appended so claude processes it and then exits.
-	// No artificial watchdog: complex tasks can run 45+ minutes.
-	args := []string{"--dangerously-skip-permissions"}
+	// Build CLI args. --print mode: reads prompt from stdin, prints response,
+	// and exits. No artificial watchdog — complex tasks can run 45+ minutes.
+	args := []string{"--dangerously-skip-permissions", "--print"}
 	if in.Model != "" {
 		args = append(args, "--model", in.Model)
 	}
 
-	// 60-minute safety timeout — claude should exit via /quit long before this.
+	// 60-minute safety timeout — claude should exit long before this.
 	execCtx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(execCtx, bin, args...)
 	cmd.Dir = in.Workdir
-	cmd.Stdin = strings.NewReader(prompt + "\n/quit\n")
+	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr cappedBuffer
 	cmd.Stdout = &stdout
