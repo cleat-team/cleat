@@ -2574,7 +2574,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	// Resolve version priority:
 	//   1. Explicit version from ChildWorkflowOptions (version > 0 from WASM ABI)
 	//   2. Pinned child version from WASM metadata (compile-time pin)
-	//   3. Parent's own version (current default)
+	//   3. DB resolves version <= 0 to MAX(version) via CASE in INSERT
 	// Cross-schema children skip pinned versions (target schema may differ).
 	childVersion := version
 	if childVersion <= 0 && ts == "" {
@@ -2582,11 +2582,6 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			if pinnedVersion, ok := s.engine.state.ChildVersion(name); ok && pinnedVersion > 0 {
 				childVersion = pinnedVersion
 			}
-		}
-	}
-	if childVersion <= 0 {
-		if s.engine.state != nil {
-			childVersion = s.engine.state.Version()
 		}
 	}
 
