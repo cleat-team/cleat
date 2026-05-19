@@ -221,7 +221,7 @@ var adapterDefs = map[string]adapterDef{
 	},
 	"AwaitAllChildren": {
 		FieldName:  "AwaitAllChildren",
-		ReturnType: "([]ChildResult, error)",
+		ReturnType: "([]cleat.ChildResult, error)",
 		Params: []adapterParam{
 			{"runIDs", "[]string"},
 		},
@@ -231,7 +231,7 @@ var adapterDefs = map[string]adapterDef{
 			"if errCode != 0 {",
 			`    return nil, fmt.Errorf("cleat_await_all_children: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
 			"}",
-			"var outcomes []ChildResult",
+			"var outcomes []cleat.ChildResult",
 			`if err := json.Unmarshal(resultsBuf[:resultLen], &outcomes); err != nil {`,
 			`    return nil, fmt.Errorf("cleat_await_all_children: bad result: %w", err)`,
 			"}",
@@ -807,6 +807,8 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 			closureParams = append(closureParams, p.Name+" []string")
 		case "int64":
 			closureParams = append(closureParams, p.Name+" int64")
+		case "int":
+			closureParams = append(closureParams, p.Name+" int")
 		case "time.Duration":
 			closureParams = append(closureParams, p.Name+" time.Duration")
 		case "func(string)":
@@ -829,6 +831,12 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 	// Allocate output buffers.
 	for _, name := range outBufNames(importName) {
 		fmt.Fprintf(buf, "\t\t\t%s := make([]byte, _cleatOutBufSize)\n", name)
+	}
+
+	// Build adapter param type lookup for import arg conversion.
+	adapterParamType := make(map[string]string)
+	for _, p := range adef.Params {
+		adapterParamType[p.Name] = p.Type
 	}
 
 	// Argument setup (stringPtr for input strings, json.Marshal for []string).
@@ -873,7 +881,11 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 		case kindOutString:
 			args = append(args, fmt.Sprintf("unsafe.Pointer(unsafe.SliceData(%sBuf)), uint32(len(%sBuf))", dp.Name, dp.Name))
 		case kindInt64:
-			args = append(args, dp.Name)
+			if adapterParamType[dp.Name] == "int" {
+				args = append(args, fmt.Sprintf("int64(%s)", dp.Name))
+			} else {
+				args = append(args, dp.Name)
+			}
 		}
 	}
 	buf.WriteString(strings.Join(args, ", "))
@@ -908,6 +920,8 @@ func generateHostFunc(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 			params = append(params, p.Name+" []string")
 		case "int64":
 			params = append(params, p.Name+" int64")
+		case "int":
+			params = append(params, p.Name+" int")
 		case "time.Duration":
 			params = append(params, p.Name+" time.Duration")
 		case "func(string)":
@@ -929,6 +943,12 @@ func generateHostFunc(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 	// Allocate output buffers.
 	for _, name := range outBufNames(importName) {
 		fmt.Fprintf(buf, "\t%s := make([]byte, _cleatOutBufSize)\n", name)
+	}
+
+	// Build adapter param type lookup for import arg conversion.
+	adapterParamType := make(map[string]string)
+	for _, p := range adef.Params {
+		adapterParamType[p.Name] = p.Type
 	}
 
 	// Argument setup.
@@ -973,7 +993,11 @@ func generateHostFunc(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 		case kindOutString:
 			args = append(args, fmt.Sprintf("unsafe.Pointer(unsafe.SliceData(%sBuf)), uint32(len(%sBuf))", dp.Name, dp.Name))
 		case kindInt64:
-			args = append(args, dp.Name)
+			if adapterParamType[dp.Name] == "int" {
+				args = append(args, fmt.Sprintf("int64(%s)", dp.Name))
+			} else {
+				args = append(args, dp.Name)
+			}
 		}
 	}
 	buf.WriteString(strings.Join(args, ", "))
@@ -1004,6 +1028,8 @@ func generateHostWrapperFunc(buf *bytes.Buffer, fieldName string, wdef hostWrapp
 			params = append(params, p.Name+" []string")
 		case "int64":
 			params = append(params, p.Name+" int64")
+		case "int":
+			params = append(params, p.Name+" int")
 		case "time.Duration":
 			params = append(params, p.Name+" time.Duration")
 		case "func(string)":
