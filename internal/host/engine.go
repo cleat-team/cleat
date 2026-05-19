@@ -2695,7 +2695,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 
 	// Fresh execution: check child result via store.
 	if s.engine.childWfStore != nil {
-		result, completed, err := s.engine.childWfStore.GetChildResult(ctx, runID)
+		result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
 		if completed && err == nil {
 			rec := EventRecord{
 				Step:      s.stepCount,
@@ -2749,7 +2749,7 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 
 	var pr pollResult
 	if s.engine.childWfStore != nil {
-		result, completed, err := s.engine.childWfStore.GetChildResult(ctx, runID)
+		result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
 		if err != nil {
 			pr = pollResult{Status: "failed", Error: err.Error()}
 		} else if completed {
@@ -2829,7 +2829,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 
 	if s.engine.childWfStore != nil {
 		for _, rid := range runIDs {
-			result, completed, err := s.engine.childWfStore.GetChildResult(ctx, rid)
+			result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
 			if err != nil || completed {
 				var out outcome
 				out.RunID = rid
@@ -2897,7 +2897,7 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 		go func(idx int, rid string) {
 			defer wg.Done()
 			if s.engine.childWfStore != nil {
-				result, completed, err := s.engine.childWfStore.GetChildResult(ctx, rid)
+				result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
 				if err != nil {
 					outcomes[idx] = childOutcome{RunID: rid, Error: err.Error()}
 				} else if completed {
