@@ -247,9 +247,13 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		parentClosePolicy, ok := readServiceName(mem, policyPtr, policyLen)
-		if !ok {
-			return errBadParam
+		parentClosePolicy := ""
+		if policyLen > 0 {
+			var ok bool
+			parentClosePolicy, ok = readServiceName(mem, policyPtr, policyLen)
+			if !ok {
+				return errBadParam
+			}
 		}
 		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_with_options")
@@ -272,9 +276,13 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 			if !ok {
 				return errBadParam
 			}
-			parentClosePolicy, ok := readServiceName(mem, policyPtr, policyLen)
-			if !ok {
-				return errBadParam
+			parentClosePolicy := ""
+			if policyLen > 0 {
+				var ok bool
+				parentClosePolicy, ok = readServiceName(mem, policyPtr, policyLen)
+				if !ok {
+					return errBadParam
+				}
 			}
 			return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
 		}).Export("cleat_child_workflow_in_schema")

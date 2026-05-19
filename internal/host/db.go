@@ -2272,6 +2272,16 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 		return "", fmt.Errorf("start child workflow atomic: set rls: %w", err)
 	}
 
+	// Debug: check what MAX(version) resolves to.
+	var resolvedVersion int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE((SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated), -1)`,
+		defName).Scan(&resolvedVersion); err != nil {
+		resolvedVersion = -2
+	}
+	log.Printf("[engine] StartChildWorkflowAtomic: defName=%q defVersion=%d resolvedVersion=%d tenantID=%s parentID=%s",
+		defName, defVersion, resolvedVersion, s.tenantID, parentID)
+
 	// 1. INSERT child workflow instance.
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)

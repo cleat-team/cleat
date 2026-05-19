@@ -254,7 +254,10 @@ var adapterDefs = map[string]adapterDef{
 			`if err := json.Unmarshal(resultBuf[:resultLen], &pr); err != nil {`,
 			`	return "", "", fmt.Errorf("cleat_poll_child: bad result: %w", err)`,
 			"}",
-			"return pr.Status, pr.Result, pr.Error, nil",
+			"if pr.Error != \"\" {",
+				"	return pr.Status, pr.Result, fmt.Errorf(\"%s\", pr.Error)",
+				"}",
+				"return pr.Status, pr.Result, nil",
 		},
 	},
 	"AwaitAnyChild": {
@@ -277,7 +280,10 @@ var adapterDefs = map[string]adapterDef{
 			`if err := json.Unmarshal(resultBuf[:resultLen], &out); err != nil {`,
 			`	return "", "", fmt.Errorf("cleat_await_any_child: bad result: %w", err)`,
 			"}",
-			"return out.RunID, out.Result, out.Error, nil",
+			"if out.Error != \"\" {",
+				"	return out.RunID, \"\", fmt.Errorf(\"%s\", out.Error)",
+				"}",
+				"return out.RunID, out.Result, nil",
 		},
 	},
 	"DurableCallWithRetry": {

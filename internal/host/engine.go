@@ -2600,7 +2600,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	if s.engine.childWfStore != nil {
 		// Check child workflow quota before creating the child.
 		if s.engine.maxQuotaChildren > 0 && s.engine.workflowStore != nil {
-			count, err := s.engine.workflowStore.GetChildCount(ctx, s.workflowID)
+			count, err := s.engine.workflowStore.GetChildCount(context.Background(), s.workflowID)
 			if err != nil {
 				errMsg := fmt.Sprintf("workflow %s: failed to check child quota: %v", s.workflowID, err)
 				log.Printf("[engine] %s", errMsg)
@@ -2638,9 +2638,9 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 				errWritten, _ := s.writeResult(ctx, m, runIDPtr, err.Error(), runIDMaxLen)
 				return int64(uint64(errWritten)<<32 | 4) // error code 4 = invalid
 			}
-			runID, err = css.StartChildWorkflowInSchema(ctx, ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
+			runID, err = css.StartChildWorkflowInSchema(context.Background(), ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
 		} else {
-			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(ctx, "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
+			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(context.Background(), "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
 		}
 		if err != nil {
 			errMsg := fmt.Sprintf("child workflow %q: start failed: %v", name, err)
