@@ -2027,6 +2027,7 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 
 func (w *Worker) updateDispatchLoop(ctx context.Context) {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("update_dispatch", 5*time.Second)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -2035,6 +2036,7 @@ func (w *Worker) updateDispatchLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("update_dispatch")
 			w.dispatchPendingUpdates()
 		}
 	}
