@@ -42,7 +42,7 @@ type sendWebhookOutput struct {
 // up and deliver. Returns the delivery ID.
 func (p *Plugin) sendWebhook(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("notifications: no tenant context")
 	}
 

@@ -6,8 +6,6 @@ import (
 	"database/sql/driver"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // fakeConnector provides a valid driver.Connector that returns an error
@@ -55,7 +53,7 @@ func TestTenantPoolsClose(t *testing.T) {
 func TestTenantPoolsCloseWithEntries(t *testing.T) {
 	tp := NewTenantPools(nil, "")
 	db := sql.OpenDB(&fakeConnector{})
-	tp.pools[uuid.New()] = db
+	tp.pools["550e8400-e29b-41d4-a716-446655440000"] = db
 	// Close with one pool entry exercises the loop body.
 	tp.Close()
 	// The pool should have been removed from the map.

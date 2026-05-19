@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
 
 	"github.com/cleat-team/cleat/internal/plugin"
@@ -84,7 +83,7 @@ type checkStatusOutput struct {
 // send sends a single transactional email via SendGrid.
 func (p *Plugin) send(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("email: no tenant context")
 	}
 
@@ -180,7 +179,7 @@ func (p *Plugin) send(ctx context.Context, inputJSON string) (string, error) {
 // sendTemplate sends an email using a pre-defined SendGrid template.
 func (p *Plugin) sendTemplate(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("email: no tenant context")
 	}
 
@@ -259,7 +258,7 @@ func (p *Plugin) sendTemplate(ctx context.Context, inputJSON string) (string, er
 // returns a best-effort "sent" status.
 func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("email: no tenant context")
 	}
 

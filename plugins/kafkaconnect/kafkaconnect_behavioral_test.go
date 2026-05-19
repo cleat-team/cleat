@@ -464,7 +464,7 @@ func authedRequest(method, target string, body io.Reader) *http.Request {
 // withCallContext returns a context with the test tenant's CallContext injected.
 func withCallContext(ctx context.Context) context.Context {
 	return plugin.WithCallContext(ctx, &plugin.CallContext{
-		TenantID: testTenantID,
+		TenantID: testTenantID.String(),
 	})
 }
 
@@ -1190,7 +1190,7 @@ func TestKafkaConsumeViaRestProxy(t *testing.T) {
 
 	c := configRow{
 		ID:            uuid.New(),
-		TenantID:      testTenantID,
+		TenantID: testTenantID,
 		Name:          "test-config",
 		Brokers:       "broker:9092",
 		Topic:         "test-topic",
@@ -1328,7 +1328,7 @@ func TestKafkaPublishRecord(t *testing.T) {
 
 		cfg := configRow{
 			ID:            uuid.New(),
-			TenantID:      testTenantID,
+			TenantID: testTenantID,
 			Name:          "test-publish",
 			Brokers:       "broker:9092",
 			Topic:         "test-topic",

@@ -81,7 +81,7 @@ type deleteOutput struct {
 // idempotent and safe to re-invoke during replay.
 func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("pgvector: no tenant context")
 	}
 
@@ -190,7 +190,7 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 // updated. Otherwise a new row is inserted.
 func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("pgvector: no tenant context")
 	}
 
@@ -287,7 +287,7 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 // This function is idempotent and safe to re-invoke during replay.
 func (p *Plugin) delete(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("pgvector: no tenant context")
 	}
 

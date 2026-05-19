@@ -84,7 +84,7 @@ const pdEventsAPIURL = "https://events.pagerduty.com/v2/enqueue"
 // API v2.
 func (p *Plugin) triggerIncident(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("pagerduty: no tenant context")
 	}
 
@@ -154,7 +154,7 @@ func (p *Plugin) triggerIncident(ctx context.Context, inputJSON string) (string,
 // PagerDuty Events API v2.
 func (p *Plugin) resolveIncident(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("pagerduty: no tenant context")
 	}
 

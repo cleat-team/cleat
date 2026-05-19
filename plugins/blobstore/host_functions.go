@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/internal/plugin"
 )
 
@@ -69,7 +68,7 @@ type blobGetOutput struct {
 // index entry.
 func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("blobstore: no tenant context")
 	}
 
@@ -164,7 +163,7 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 // along with metadata. Returns an error if the blob is not found or has expired.
 func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("blobstore: no tenant context")
 	}
 

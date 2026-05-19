@@ -1013,7 +1013,7 @@ func TestHostFunctionSendWebhook(t *testing.T) {
 	store.mu.Unlock()
 
 	cc := &plugin.CallContext{
-		TenantID:   testTenantID,
+		TenantID:   testTenantID.String(),
 		WorkflowID: "wf-test",
 		DB:         p.db.(*host.SQLDBAdapter).DB,
 	}
@@ -1059,7 +1059,7 @@ func TestHostFunctionInvalidWebhook(t *testing.T) {
 	p, _ := setupTestPlugin(t)
 
 	cc := &plugin.CallContext{
-		TenantID:   testTenantID,
+		TenantID:   testTenantID.String(),
 		WorkflowID: "wf-test",
 		DB:         p.db.(*host.SQLDBAdapter).DB,
 	}
@@ -1081,7 +1081,7 @@ func TestHostFunctionMissingWebhookID(t *testing.T) {
 	p, _ := setupTestPlugin(t)
 
 	cc := &plugin.CallContext{
-		TenantID:   testTenantID,
+		TenantID:   testTenantID.String(),
 		WorkflowID: "wf-test",
 		DB:         p.db.(*host.SQLDBAdapter).DB,
 	}
@@ -1099,7 +1099,7 @@ func TestHostFunctionMissingEventType(t *testing.T) {
 	p, _ := setupTestPlugin(t)
 
 	cc := &plugin.CallContext{
-		TenantID:   testTenantID,
+		TenantID:   testTenantID.String(),
 		WorkflowID: "wf-test",
 		DB:         p.db.(*host.SQLDBAdapter).DB,
 	}
@@ -1366,7 +1366,7 @@ func TestSendWebhookNoTenant(t *testing.T) {
 
 func TestSendWebhookInvalidJSON(t *testing.T) {
 	p := &Plugin{logger: slog.Default()}
-	cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-1"}
+	cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-1"}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 	_, err := p.sendWebhook(ctx, `not json`)
 	if err == nil {
@@ -1391,7 +1391,7 @@ func TestSendWebhookNilPayload(t *testing.T) {
 	})
 	store.mu.Unlock()
 
-	cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-test"}
+	cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-test"}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	input := fmt.Sprintf(`{"webhook_id":"%s","event_type":"test.event"}`, webhookID.String())

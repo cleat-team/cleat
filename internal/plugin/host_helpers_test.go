@@ -4,15 +4,15 @@ import (
 	"context"
 	"testing"
 
-	"github.com/google/uuid"
+	"github.com/cleat-team/cleat/internal/wasmrw"
 )
 
 // ---- Encode/Decode helpers ----
 
 func TestEncodeOK(t *testing.T) {
-	v := EncodeOK()
+	v := wasmrw.OK()
 	if v != 0 {
-		t.Errorf("EncodeOK() = %d, want 0", v)
+		t.Errorf("wasmrw.OK() = %d, want 0", v)
 	}
 }
 
@@ -27,22 +27,22 @@ func TestEncodeOKWithLen(t *testing.T) {
 		{4294967295, 4294967295 << 32}, // max uint32
 	}
 	for _, tc := range tests {
-		got := EncodeOKWithLen(tc.len)
+		got := wasmrw.OKWithLen(tc.len)
 		if got != tc.want {
-			t.Errorf("EncodeOKWithLen(%d) = %d, want %d", tc.len, got, tc.want)
+			t.Errorf("wasmrw.OKWithLen(%d) = %d, want %d", tc.len, got, tc.want)
 		}
 	}
 }
 
 func TestEncodeError(t *testing.T) {
-	v := EncodeError(nil)
+	v := wasmrw.Error(nil)
 	if v != 1 {
-		t.Errorf("EncodeError(nil) = %d, want 1 (errorCode=1)", v)
+		t.Errorf("wasmrw.Error(nil) = %d, want 1 (errorCode=1)", v)
 	}
 
-	v = EncodeError(assertAnError)
+	v = wasmrw.Error(assertAnError)
 	if v != 1 {
-		t.Errorf("EncodeError(err) = %d, want 1", v)
+		t.Errorf("wasmrw.Error(err) = %d, want 1", v)
 	}
 }
 
@@ -53,10 +53,10 @@ type errType struct{}
 func (e *errType) Error() string { return "something went wrong" }
 
 func TestEncodeSuspend(t *testing.T) {
-	v := EncodeSuspend()
+	v := wasmrw.Suspend()
 	expected := uint64(1) << 62
 	if v != expected {
-		t.Errorf("EncodeSuspend() = %d, want %d", v, expected)
+		t.Errorf("wasmrw.Suspend() = %d, want %d", v, expected)
 	}
 }
 
@@ -71,7 +71,7 @@ func TestWithCallContextAndCallContextFromContext(t *testing.T) {
 		t.Error("expected nil CallContext from background context")
 	}
 
-	tenantID := uuid.New()
+	tenantID := "550e8400-e29b-41d4-a716-446655440000"
 	expected := &CallContext{
 		TenantID:   tenantID,
 		WorkflowID: "wf-123",
@@ -100,8 +100,8 @@ func TestCallContextFromContextReturnsNilForWrongType(t *testing.T) {
 
 func TestWithCallContextMultipleTimes(t *testing.T) {
 	ctx := context.Background()
-	cc1 := &CallContext{TenantID: uuid.New(), WorkflowID: "wf-1"}
-	cc2 := &CallContext{TenantID: uuid.New(), WorkflowID: "wf-2"}
+	cc1 := &CallContext{TenantID: "550e8400-e29b-41d4-a716-446655440001", WorkflowID: "wf-1"}
+	cc2 := &CallContext{TenantID: "550e8400-e29b-41d4-a716-446655440002", WorkflowID: "wf-2"}
 
 	ctx = WithCallContext(ctx, cc1)
 	ctx = WithCallContext(ctx, cc2)

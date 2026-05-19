@@ -22,7 +22,7 @@ import (
 // Test helpers
 // ---------------------------------------------------------------------------
 
-var testTenantID = uuid.MustParse("00000000-0000-0000-0000-000000000001")
+var testTenantID = uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
 
 // testTransport is an http.RoundTripper that rewrites ALL requests to point
 // to the given baseURL, preserving the path, query, method, headers, and body.

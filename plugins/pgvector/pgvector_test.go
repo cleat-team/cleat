@@ -385,7 +385,7 @@ func tenantID() uuid.UUID {
 
 func tenantCtx() context.Context {
 	return plugin.WithCallContext(context.Background(), &plugin.CallContext{
-		TenantID:   tenantID(),
+		TenantID:   tenantID().String(),
 		WorkflowID: "test-workflow",
 	})
 }

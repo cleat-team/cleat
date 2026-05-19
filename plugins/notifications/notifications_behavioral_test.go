@@ -720,7 +720,7 @@ func TestSendWebhook_NoTenantContext(t *testing.T) {
 
 func TestSendWebhook_InvalidJSON(t *testing.T) {
 	p := &Plugin{}
-	cc := &plugin.CallContext{TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001")}
+	cc := &plugin.CallContext{TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001").String()}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 	_, err := p.sendWebhook(ctx, `not json`)
 	if err == nil {
@@ -1328,7 +1328,7 @@ func TestSendWebhook_NilPayloadDefaults(t *testing.T) {
 	})
 	store.mu.Unlock()
 
-	cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-nil-payload"}
+	cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-nil-payload"}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	input := fmt.Sprintf(`{"webhook_id":"%s","event_type":"test.event"}`, webhookID.String())
@@ -1511,7 +1511,7 @@ func TestSendWebhook_DBVerifyError(t *testing.T) {
 			logger: discardLogger(),
 		}
 
-		cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-verify-err"}
+		cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-verify-err"}
 		ctx := plugin.WithCallContext(context.Background(), cc)
 
 		_, err := p.sendWebhook(ctx, `{"webhook_id":"`+uuid.New().String()+`","event_type":"test"}`)
@@ -1554,7 +1554,7 @@ func TestSendWebhook_DBInsertError(t *testing.T) {
 		})
 		store.mu.Unlock()
 
-		cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-insert-err"}
+		cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-insert-err"}
 		ctx := plugin.WithCallContext(context.Background(), cc)
 
 		// Set up a new erroring DB for the insert.

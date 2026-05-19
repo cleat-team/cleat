@@ -1877,10 +1877,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			callCtx := ctx
 			cc := &plugin.CallContext{}
 			if s.tenantID != "" {
-				tid, err := uuid.Parse(s.tenantID)
-				if err == nil {
-					cc.TenantID = tid
-				}
+				cc.TenantID = s.tenantID
 			}
 			if s.workflowID != "" {
 				cc.WorkflowID = s.workflowID
@@ -1991,10 +1988,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	callCtx := ctx
 	cc := &plugin.CallContext{}
 	if s.tenantID != "" {
-		tid, err := uuid.Parse(s.tenantID)
-		if err == nil {
-			cc.TenantID = tid
-		}
+		cc.TenantID = s.tenantID
 	}
 	if s.workflowID != "" {
 		cc.WorkflowID = s.workflowID

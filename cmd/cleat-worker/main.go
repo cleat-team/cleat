@@ -1558,18 +1558,15 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 	// Use tenant-scoped database connection for plugin host functions.
 	if w.tenantPools != nil && wf.TenantID != "" {
-		tenantID, err := uuid.Parse(wf.TenantID)
-		if err == nil {
-			tenantDB, err := w.tenantPools.For(w.ctx, tenantID)
-			if err != nil {
-				log.Printf("[worker %s] %s: cannot get tenant pool for %s: %v", w.id, wf.ID, wf.TenantID, err)
-				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), host.ErrUnknown.String(), "", nil)
-				return
-			}
-			engineOpts = append(engineOpts, host.WithDB(tenantDB))
+		tenantDB, err := w.tenantPools.For(w.ctx, wf.TenantID)
+		if err != nil {
+			log.Printf("[worker %s] %s: cannot get tenant pool for %s: %v", w.id, wf.ID, wf.TenantID, err)
+			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), host.ErrUnknown.String(), "", nil)
+			return
 		}
+		engineOpts = append(engineOpts, host.WithDB(tenantDB))
 	}
 	if compactionState != nil {
 		engineOpts = append(engineOpts, host.WithCompactionState(compactionState))
