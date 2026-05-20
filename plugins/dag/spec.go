@@ -31,7 +31,7 @@ func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
 	}
 	j := strings.TrimSpace(string(raw))
 	if len(j) == 0 || j[0] != '{' {
-		return nil, fmt.Errorf("dag: decode spec: invalid JSON")
+		return nil, fmt.Errorf("dag: decode spec: invalid JSON (v2)")
 	}
 	// Quick validation: check balanced top-level braces.
 	if findClosing(j, '{', '}') < 0 {
@@ -126,11 +126,23 @@ func parseTaskSpecs(j string) []TaskSpec {
 	return specs
 }
 
-// extractJSONString extracts a quoted string value from a JSON object field.
+// ExtractJSONString extracts a quoted string value from a JSON object field.
+// Unescapes \" and \\ escape sequences in the string.
 func ExtractJSONString(j, key string) string {
 	val := extractJSONValue(j, key)
 	if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
-		return val[1 : len(val)-1]
+		s := val[1 : len(val)-1]
+		// Unescape \" and \\.
+		var buf []byte
+		for i := 0; i < len(s); i++ {
+			if s[i] == '\\' && i+1 < len(s) {
+				i++
+				buf = append(buf, s[i])
+				continue
+			}
+			buf = append(buf, s[i])
+		}
+		return string(buf)
 	}
 	return val
 }
@@ -176,11 +188,17 @@ func extractJSONValue(j, key string) string {
 
 	switch rest[0] {
 	case '"':
-		end := indexOfStr(rest[1:], `"`)
-		if end < 0 {
-			return ""
+		// Find the closing quote, skipping \" escape sequences.
+		for i := 1; i < len(rest); i++ {
+			if rest[i] == '\\' && i+1 < len(rest) {
+				i++ // skip escaped character
+				continue
+			}
+			if rest[i] == '"' {
+				return rest[:i+1]
+			}
 		}
-		return rest[:end+2]
+		return ""
 	case '[':
 		close := findClosing(rest, '[', ']')
 		if close < 0 {
