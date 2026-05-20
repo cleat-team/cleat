@@ -268,7 +268,7 @@ func findClosing(s string, open, close byte) int {
 
 // splitJSONObjects splits a JSON array body like {...},{...} into individual object strings.
 func splitJSONObjects(s string) []string {
-	var result []string
+	result := make([]string, 0, 8)
 	i := 0
 	for i < len(s) {
 		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' || s[i] == ',') {
@@ -297,7 +297,7 @@ func splitJSONStringArray(s string) []string {
 	if len(s) >= 2 && s[0] == '[' && s[len(s)-1] == ']' {
 		s = s[1 : len(s)-1]
 	}
-	var result []string
+	result := make([]string, 0, 8)
 	parts := strings.Split(s, ",")
 	for _, p := range parts {
 		p = strings.TrimSpace(p)

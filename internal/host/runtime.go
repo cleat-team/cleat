@@ -239,6 +239,10 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 		// if _start panicked the module may have been torn down, so verify
 		// memory is still accessible.
 		if mem := mod.Memory(); mem != nil && mem.Size() > 0 {
+			// Give Go WASM runtime extra time to initialize the function
+			// table after _start launches. Prevents call_indirect traps
+			// in child workflows where timing is tighter.
+			time.Sleep(50 * time.Millisecond)
 			return nil
 		}
 		delay *= 2
