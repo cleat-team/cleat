@@ -92,7 +92,7 @@ func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
 // parseDAGSpec parses a JSON DAG spec string into a DAGSpec.
 func parseDAGSpec(j string) DAGSpec {
 	return DAGSpec{
-		Name:  extractJSONString(j, "name"),
+		Name:  ExtractJSONString(j, "name"),
 		Tasks: parseTaskSpecs(j),
 	}
 }
@@ -117,17 +117,17 @@ func parseTaskSpecs(j string) []TaskSpec {
 			parents = splitJSONStringArray(parentsRaw)
 		}
 		specs = append(specs, TaskSpec{
-			Name:     extractJSONString(obj, "name"),
-			Fn:       extractJSONString(obj, "fn"),
+			Name:     ExtractJSONString(obj, "name"),
+			Fn:       ExtractJSONString(obj, "fn"),
 			Parents:  parents,
-			Priority: extractJSONInt(obj, "priority"),
+			Priority: ExtractJSONInt(obj, "priority"),
 		})
 	}
 	return specs
 }
 
 // extractJSONString extracts a quoted string value from a JSON object field.
-func extractJSONString(j, key string) string {
+func ExtractJSONString(j, key string) string {
 	val := extractJSONValue(j, key)
 	if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
 		return val[1 : len(val)-1]
@@ -145,7 +145,7 @@ func extractJSONArray(j, key string) string {
 }
 
 // extractJSONInt extracts an integer value from a JSON object field.
-func extractJSONInt(j, key string) int {
+func ExtractJSONInt(j, key string) int {
 	val := extractJSONValue(j, key)
 	if val == "" {
 		return 0
