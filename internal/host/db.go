@@ -1450,6 +1450,8 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		s.ClearStickyWorker(context.Background(), runID)
 		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
+		// Wake the parent workflow immediately so it can pick up the child's result.
+		s.wakeParent(context.Background(), runID)
 	}
 
 	return nil
@@ -1982,6 +1984,19 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
 	`, parentWorkflowID)
+}
+
+// wakeParent sets the parent workflow's next_wake_at to now so it immediately
+// detects child completion. Runs as a best-effort post-commit operation.
+func (s *PostgresStore) wakeParent(ctx context.Context, childID string) {
+	s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET next_wake_at = now()
+		WHERE id = (
+			SELECT parent_workflow_id FROM workflow_instances WHERE id = $1
+		)
+		AND status = 'ready'
+	`, childID)
 }
 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
