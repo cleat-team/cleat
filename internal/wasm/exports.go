@@ -18,27 +18,88 @@ func GenerateExports(pkgName string, result *analyzer.AnalysisResult) []byte {
 	fmt.Fprintf(&buf, "package %s\n\n", pkgName)
 
 	buf.WriteString("import (\n")
-	buf.WriteString("\t\"encoding/json\"\n")
 	buf.WriteString("\t\"fmt\"\n")
+	buf.WriteString("\t\"strings\"\n")
 	buf.WriteString("\t\"unsafe\"\n")
 	buf.WriteString("\n")
 	buf.WriteString("\t\"github.com/cleat-team/cleat/cleat\"\n")
 	buf.WriteString(")\n\n")
 
-	buf.WriteString(`// writeJSONOut marshals v to JSON and copies it into the output buffer.
-func writeJSONOut(outPtr unsafe.Pointer, maxLen uint32, v interface{}) int64 {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return writeErrorOut(outPtr, maxLen, err)
+	// Helper: extract a quoted JSON string value for a given key.
+	buf.WriteString(`func extractJSONString(raw, key string) string {
+	search := "\"" + key + "\":"
+	idx := strings.Index(raw, search)
+	if idx < 0 {
+		return ""
 	}
-	outLen := uint32(len(data))
+	rest := raw[idx+len(search):]
+	rest = strings.TrimLeft(rest, " \t\n\r")
+	if len(rest) == 0 || rest[0] != '"' {
+		return ""
+	}
+	var buf []byte
+	for i := 1; i < len(rest); i++ {
+		c := rest[i]
+		if c == '\\' && i+1 < len(rest) {
+			i++
+			buf = append(buf, rest[i])
+			continue
+		}
+		if c == '"' {
+			return string(buf)
+		}
+		buf = append(buf, c)
+	}
+	return ""
+}
+
+`)
+
+	// Helper: extract an integer value for a given key.
+	buf.WriteString(`func extractJSONInt(raw, key string) int {
+	search := "\"" + key + "\":"
+	idx := strings.Index(raw, search)
+	if idx < 0 {
+		return 0
+	}
+	rest := raw[idx+len(search):]
+	rest = strings.TrimLeft(rest, " \t\n\r")
+	n := 0
+	for _, c := range rest {
+		if c >= '0' && c <= '9' {
+			n = n*10 + int(c-'0')
+		} else {
+			break
+		}
+	}
+	return n
+}
+
+`)
+
+	// writeJSONOut wraps a string as a JSON string value and copies it to the
+	// output buffer. The input is the raw string content; it gets wrapped in
+	// quotes with internal " and \ characters escaped.
+	buf.WriteString(`func writeJSONOut(outPtr unsafe.Pointer, maxLen uint32, v interface{}) int64 {
+	s := v.(string)
+	var buf []byte
+	buf = append(buf, '"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '"' || c == '\\' {
+			buf = append(buf, '\\')
+		}
+		buf = append(buf, c)
+	}
+	buf = append(buf, '"')
+	outLen := uint32(len(buf))
 	if outLen > maxLen {
 		return writeErrorOut(outPtr, maxLen,
 			fmt.Errorf("response size %d exceeds buffer capacity %d", outLen, maxLen))
 	}
 	if outLen > 0 {
 		dst := unsafe.Slice((*byte)(outPtr), int(outLen))
-		copy(dst, data)
+		copy(dst, buf)
 	}
 	return int64(outLen) << 32 // errCode = 0
 }
@@ -60,6 +121,22 @@ func writeErrorOut(outPtr unsafe.Pointer, maxLen uint32, err error) int64 {
 // writeSuspendOut returns a sentinel indicating the workflow suspended.
 func writeSuspendOut() int64 {
 	return 1 << 62
+}
+
+// encodeJSONString encodes a Go string as a JSON string (wraps in quotes,
+// escapes " and \).
+func encodeJSONString(s string) string {
+	var buf []byte
+	buf = append(buf, '"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '"' || c == '\\' {
+			buf = append(buf, '\\')
+		}
+		buf = append(buf, c)
+	}
+	buf = append(buf, '"')
+	return string(buf)
 }
 
 `)
@@ -122,17 +199,17 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 
 	if len(fields) > 0 {
 		buf.WriteString("\targsJSON := readString(argsPtr, argsLen)\n")
-		buf.WriteString("\tvar args struct {\n")
 		for _, f := range fields {
-			fmt.Fprintf(buf, "\t\t%s %s `json:\"%s\"`\n", f.GoName, f.GoType, f.JSONTag)
+			switch f.GoType {
+			case "string":
+				fmt.Fprintf(buf, "\t%s := extractJSONString(argsJSON, %q)\n", f.GoName, f.JSONTag)
+			case "int", "int64", "int32":
+				fmt.Fprintf(buf, "\t%s := extractJSONInt(argsJSON, %q)\n", f.GoName, f.JSONTag)
+			default:
+				// Fallback: treat as string (covers inputJSON and similar).
+				fmt.Fprintf(buf, "\t%s := extractJSONString(argsJSON, %q)\n", f.GoName, f.JSONTag)
+			}
 		}
-		buf.WriteString("\t}\n")
-		buf.WriteString("\tif err := json.Unmarshal([]byte(argsJSON), &args); err != nil {\n")
-		buf.WriteString("\t\terrJSON, _ := json.Marshal(err.Error())\n")
-		buf.WriteString("\t\terrPtr, errLen := stringPtr(string(errJSON))\n")
-		buf.WriteString("\t\tcleatCompleteImport(1, errPtr, errLen)\n")
-		buf.WriteString("\t\treturn writeErrorOut(outPtr, maxOutLen, err)\n")
-		buf.WriteString("\t}\n")
 	} else {
 		buf.WriteString("\t_ = argsPtr\n")
 		buf.WriteString("\t_ = argsLen\n")
@@ -157,11 +234,11 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 	buf.WriteString("\t\t\t}\n")
 	buf.WriteString("\t\t}()\n\n")
 
-	// Build call arguments.
+	// Build call arguments: start with "h" (HostCalls), then each field.
 	var callArgs []string
 	callArgs = append(callArgs, "h")
 	for _, f := range fields {
-		callArgs = append(callArgs, "args."+f.GoName)
+		callArgs = append(callArgs, f.GoName)
 	}
 
 	if hasResultValue && hasErrorReturn {
@@ -170,12 +247,13 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 		buf.WriteString("\t\t\t__susResultErr = __e\n")
 		buf.WriteString("\t\t\treturn\n")
 		buf.WriteString("\t\t}\n")
-		buf.WriteString("\t\t__susResultJSON, __susResultErr = json.Marshal(__r)\n")
+		// Result is already a JSON string from the workflow function.
+		buf.WriteString("\t\t__susResultJSON = []byte(__r)\n")
 	} else if hasErrorReturn {
 		fmt.Fprintf(buf, "\t\t__susResultErr = %s(%s)\n", fd.Name, strings.Join(callArgs, ", "))
 	} else if hasResultValue {
 		fmt.Fprintf(buf, "\t\t__r := %s(%s)\n", fd.Name, strings.Join(callArgs, ", "))
-		buf.WriteString("\t\t__susResultJSON, __susResultErr = json.Marshal(__r)\n")
+		buf.WriteString("\t\t__susResultJSON = []byte(__r)\n")
 	} else {
 		fmt.Fprintf(buf, "\t\t%s(%s)\n", fd.Name, strings.Join(callArgs, ", "))
 	}
@@ -186,15 +264,15 @@ func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifi
 	buf.WriteString("\t\treturn writeSuspendOut()\n")
 	buf.WriteString("\t}\n")
 	buf.WriteString("\tif __susResultErr != nil {\n")
-		buf.WriteString("\t\terrJSON, _ := json.Marshal(__susResultErr.Error())\n")
-		buf.WriteString("\t\terrPtr, errLen := stringPtr(string(errJSON))\n")
-		buf.WriteString("\t\tcleatCompleteImport(1, errPtr, errLen)\n")
+	buf.WriteString("\t\terrStr := encodeJSONString(__susResultErr.Error())\n")
+	buf.WriteString("\t\terrPtr, errLen := stringPtr(errStr)\n")
+	buf.WriteString("\t\tcleatCompleteImport(1, errPtr, errLen)\n")
 	buf.WriteString("\t\treturn writeErrorOut(outPtr, maxOutLen, __susResultErr)\n")
 	buf.WriteString("\t}\n")
-	buf.WriteString("\tresultJSON, _ := json.Marshal(string(__susResultJSON))\n")
-	buf.WriteString("\tresultPtr, resultLen := stringPtr(string(resultJSON))\n")
+	buf.WriteString("\tresultStr := string(__susResultJSON)\n")
+	buf.WriteString("\tresultPtr, resultLen := stringPtr(resultStr)\n")
 	buf.WriteString("\tcleatCompleteImport(0, resultPtr, resultLen)\n")
-	buf.WriteString("\treturn writeJSONOut(outPtr, maxOutLen, json.RawMessage(__susResultJSON))\n")
+	buf.WriteString("\treturn writeJSONOut(outPtr, maxOutLen, resultStr)\n")
 
 	buf.WriteString("}\n\n")
 }
