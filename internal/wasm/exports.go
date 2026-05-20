@@ -42,7 +42,22 @@ func GenerateExports(pkgName string, result *analyzer.AnalysisResult) []byte {
 		c := rest[i]
 		if c == '\\' && i+1 < len(rest) {
 			i++
-			buf = append(buf, rest[i])
+			switch rest[i] {
+			case 'n':
+				buf = append(buf, '\n')
+			case 't':
+				buf = append(buf, '\t')
+			case 'r':
+				buf = append(buf, '\r')
+			case '"':
+				buf = append(buf, '"')
+			case '\\':
+				buf = append(buf, '\\')
+			case '/':
+				buf = append(buf, '/')
+			default:
+				buf = append(buf, rest[i])
+			}
 			continue
 		}
 		if c == '"' {

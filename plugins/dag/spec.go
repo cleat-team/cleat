@@ -137,7 +137,22 @@ func ExtractJSONString(j, key string) string {
 		for i := 0; i < len(s); i++ {
 			if s[i] == '\\' && i+1 < len(s) {
 				i++
-				buf = append(buf, s[i])
+				switch s[i] {
+				case 'n':
+					buf = append(buf, '\n')
+				case 't':
+					buf = append(buf, '\t')
+				case 'r':
+					buf = append(buf, '\r')
+				case '"':
+					buf = append(buf, '"')
+				case '\\':
+					buf = append(buf, '\\')
+				case '/':
+					buf = append(buf, '/')
+				default:
+					buf = append(buf, s[i])
+				}
 				continue
 			}
 			buf = append(buf, s[i])
