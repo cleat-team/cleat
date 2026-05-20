@@ -203,12 +203,27 @@ func extractJSONValue(j, key string) string {
 }
 
 // findClosing finds the matching closing bracket for the opening bracket at position 0.
+// Skips characters inside JSON strings to avoid false matches on braces in string values.
 func findClosing(s string, open, close byte) int {
 	depth := 0
+	inString := false
 	for i := 0; i < len(s); i++ {
-		if s[i] == open {
+		c := s[i]
+		if inString {
+			if c == '\\' {
+				i++ // skip escaped character
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			continue
+		}
+		if c == open {
 			depth++
-		} else if s[i] == close {
+		} else if c == close {
 			depth--
 			if depth == 0 {
 				return i
