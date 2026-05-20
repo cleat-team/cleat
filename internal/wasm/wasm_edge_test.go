@@ -995,19 +995,22 @@ func TestGenerateHostAdapterWithHeartbeat(t *testing.T) {
 }
 
 func TestGenerateHostAdapterWithAwaitAllChildren(t *testing.T) {
-	// AwaitAllChildren has []string param.
+	// AwaitAllChildren has []string param — now uses manual JSON helpers.
 	usage := &UsageInfo{
 		Used:  map[string]bool{"cleat_await_all_children": true},
 		Funcs: []HostFunction{{ImportName: "cleat_await_all_children", FieldName: "AwaitAllChildren"}},
 	}
 	code := string(GenerateHostAdapter("mypkg", usage, "go"))
+	// Should NOT import encoding/json.
+	if strings.Contains(code, `"encoding/json"`) {
+		t.Error("generated code should not import encoding/json")
+	}
 	for _, c := range []string{
-		`"encoding/json"`,
-		"runIDs []string",
-		"json.Marshal(runIDs)",
+		"buildJSONStringArray",
+		"parseChildResultArray",
 	} {
 		if !strings.Contains(code, c) {
-			t.Errorf("expected []string pattern: %s", c)
+			t.Errorf("expected manual JSON helper: %s", c)
 		}
 	}
 	syntaxCheck(t, "GenerateHostAdapter(awaitall)", code)
@@ -1089,7 +1092,7 @@ func TestGenerateHostAdapterWithMultiple(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// needsFmt / needsJSON — remaining branch coverage
+// needsFmt / needsManualJSON — remaining branch coverage
 // ---------------------------------------------------------------------------
 
 func TestNeedsFmtEdgeCases(t *testing.T) {
@@ -1127,37 +1130,37 @@ func TestNeedsFmtEdgeCases(t *testing.T) {
 	})
 }
 
-func TestNeedsJSONEdgeCases(t *testing.T) {
-	t.Run("await signals needs json", func(t *testing.T) {
+func TestNeedsManualJSONEdgeCases(t *testing.T) {
+	t.Run("await signals needs manual json", func(t *testing.T) {
 		usage := &UsageInfo{
 			Funcs: []HostFunction{
 				{ImportName: "cleat_await_signals", FieldName: "DurableAwaitSignals"},
 			},
 		}
-		if !needsJSON(usage) {
-			t.Error("DurableAwaitSignals should need json ([]string params)")
+		if !needsManualJSON(usage) {
+			t.Error("DurableAwaitSignals should need manual JSON ([]string params)")
 		}
 	})
 
-	t.Run("log does not need json", func(t *testing.T) {
+	t.Run("log does not need manual json", func(t *testing.T) {
 		usage := &UsageInfo{
 			Funcs: []HostFunction{
 				{ImportName: "cleat_log", FieldName: "DurableLog"},
 			},
 		}
-		if needsJSON(usage) {
-			t.Error("DurableLog should not need json")
+		if needsManualJSON(usage) {
+			t.Error("DurableLog should not need manual JSON")
 		}
 	})
 
-	t.Run("await child does not need json", func(t *testing.T) {
+	t.Run("await child does not need manual json", func(t *testing.T) {
 		usage := &UsageInfo{
 			Funcs: []HostFunction{
 				{ImportName: "cleat_await_child", FieldName: "AwaitChild"},
 			},
 		}
-		if needsJSON(usage) {
-			t.Error("AwaitChild result stmts don't reference json.Unmarshal/json.Marshal")
+		if needsManualJSON(usage) {
+			t.Error("AwaitChild result stmts don't reference manual JSON helpers")
 		}
 	})
 }
