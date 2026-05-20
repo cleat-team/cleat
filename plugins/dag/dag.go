@@ -16,7 +16,6 @@ package dag
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -24,6 +23,10 @@ import (
 	"github.com/cleat-team/cleat/cleat"
 	"github.com/cleat-team/cleat/internal/plugin"
 )
+
+// RawMessage is a raw JSON-encoded value, replacing RawMessage
+// to avoid importing encoding/json in TinyGo WASM builds.
+type RawMessage []byte
 
 // Task represents a single node in the DAG.
 type Task struct {
@@ -87,7 +90,7 @@ func (d *DAG) Output(name string) (string, bool) {
 // It delegates to ExecuteWithOptions with default options.
 //
 // input can be:
-//   - map[string]json.RawMessage — per-task inputs keyed by task name
+//   - map[string]RawMessage — per-task inputs keyed by task name
 //   - any other value — used as the input for all tasks
 func (d *DAG) Execute(h cleat.HostCalls, input interface{}) error {
 	return d.ExecuteWithOptions(h, input, ExecuteOptions{})
@@ -108,7 +111,7 @@ func (d *DAG) Execute(h cleat.HostCalls, input interface{}) error {
 // When 0 (default), all ready tasks are started at once.
 //
 // input can be:
-//   - map[string]json.RawMessage — per-task inputs keyed by task name
+//   - map[string]RawMessage — per-task inputs keyed by task name
 //   - any other value — used as the input for all tasks
 func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts ExecuteOptions) error {
 	if err := d.validate(); err != nil {
@@ -148,7 +151,7 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts Exec
 	}
 
 	running := make(map[string]*Task) // runID -> task
-	perTaskInputs, _ := input.(map[string]json.RawMessage)
+	perTaskInputs, _ := input.(map[string]RawMessage)
 
 	for len(ready) > 0 || len(running) > 0 {
 		// Start as many ready tasks as the parallelism limit allows.
@@ -200,7 +203,7 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts Exec
 }
 
 // startChild creates a single child workflow for the given task.
-func (d *DAG) startChild(h cleat.HostCalls, task *Task, defaultInput interface{}, perTaskInputs map[string]json.RawMessage) (string, error) {
+func (d *DAG) startChild(h cleat.HostCalls, task *Task, defaultInput interface{}, perTaskInputs map[string]RawMessage) (string, error) {
 	inputJSON, err := d.taskInput(task, defaultInput, perTaskInputs)
 	if err != nil {
 		return "", err
@@ -247,7 +250,7 @@ func insertSortedByPriority(tasks []*Task, task *Task) []*Task {
 // raw JSON without wrapping — the target workflow receives its native input
 // format. Otherwise the input is wrapped with task name, input, and parent
 // outputs via buildTaskInput.
-func (d *DAG) taskInput(task *Task, defaultInput interface{}, perTaskInputs map[string]json.RawMessage) ([]byte, error) {
+func (d *DAG) taskInput(task *Task, defaultInput interface{}, perTaskInputs map[string]RawMessage) ([]byte, error) {
 	if task.WorkflowName != "" {
 		// Pass raw input through — the target workflow expects its own format.
 		if raw, ok := perTaskInputs[task.Name]; ok {
@@ -255,10 +258,10 @@ func (d *DAG) taskInput(task *Task, defaultInput interface{}, perTaskInputs map[
 		}
 		// No per-task input; marshal the default input directly.
 		if defaultInput != nil {
-			if raw, ok := defaultInput.(json.RawMessage); ok {
+			if raw, ok := defaultInput.(RawMessage); ok {
 				return raw, nil
 			}
-			return json.Marshal(defaultInput)
+			return marshalToJSON(defaultInput), nil
 		}
 		return []byte("{}"), nil
 	}
@@ -277,7 +280,7 @@ func (d *DAG) buildTaskInput(task *Task, input interface{}) ([]byte, error) {
 		"input":          input,
 		"parent_outputs": d.buildParentOutputs(task, d.outputs),
 	}
-	return json.Marshal(wrapped)
+	return marshalToJSON(wrapped), nil
 }
 
 func (d *DAG) buildParentOutputs(task *Task, outputs map[string]string) map[string]string {
@@ -290,6 +293,82 @@ func (d *DAG) buildParentOutputs(task *Task, outputs map[string]string) map[stri
 	return result
 }
 
+// marshalToJSON encodes common types to JSON without encoding/json.
+func marshalToJSON(v interface{}) []byte {
+	switch val := v.(type) {
+	case RawMessage:
+		return val
+	case string:
+		return []byte(`"` + val + `"`)
+	case map[string]string:
+		return buildStringMapJSON(val)
+	case map[string]interface{}:
+		return buildInterfaceMapJSON(val)
+	default:
+		return []byte("{}")
+	}
+}
+
+func buildStringMapJSON(m map[string]string) []byte {
+	if len(m) == 0 {
+		return []byte("{}")
+	}
+	var b []byte
+	b = append(b, '{')
+	first := true
+	for k, v := range m {
+		if !first {
+			b = append(b, ',')
+		}
+		first = false
+		b = append(b, '"')
+		b = append(b, k...)
+		b = append(b, '"', ':')
+		if v == "" {
+			b = append(b, '"', '"')
+		} else {
+			b = append(b, '"')
+			b = append(b, v...)
+			b = append(b, '"')
+		}
+	}
+	b = append(b, '}')
+	return b
+}
+
+func buildInterfaceMapJSON(m map[string]interface{}) []byte {
+	if len(m) == 0 {
+		return []byte("{}")
+	}
+	var b []byte
+	b = append(b, '{')
+	first := true
+	for k, v := range m {
+		if !first {
+			b = append(b, ',')
+		}
+		first = false
+		b = append(b, '"')
+		b = append(b, k...)
+		b = append(b, '"', ':')
+		switch val := v.(type) {
+		case string:
+			b = append(b, '"')
+			b = append(b, val...)
+			b = append(b, '"')
+		case RawMessage:
+			b = append(b, val...)
+		case map[string]string:
+			b = append(b, buildStringMapJSON(val)...)
+		default:
+			b = append(b, '"', '"')
+		}
+	}
+	b = append(b, '}')
+	return b
+}
+
+// validate checks that all parent references exist and there are no cycles.
 // validate checks that all parent references exist and there are no cycles.
 func (d *DAG) validate() error {
 	for name, task := range d.tasks {
