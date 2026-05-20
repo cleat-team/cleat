@@ -782,7 +782,7 @@ func TestSendMessage(t *testing.T) {
 	inputJSON, _ := json.Marshal(input)
 
 	// Call sendMessage with a context containing tenant context.
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	output, err := p.sendMessage(ctx, string(inputJSON))
@@ -1227,7 +1227,7 @@ func TestSN_SendMessage_InvalidJSON(t *testing.T) {
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	_, err := p.sendMessage(ctx, `not json`)
 	if err == nil || !strings.Contains(err.Error(), "invalid input") {
 		t.Fatalf("expected invalid input error, got: %v", err)
@@ -1245,7 +1245,7 @@ func TestSN_SendMessage_MissingConfigID(t *testing.T) {
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	_, err := p.sendMessage(ctx, `{"text":"hello"}`)
 	if err == nil || !strings.Contains(err.Error(), "config_id is required") {
 		t.Fatalf("expected config_id required error, got: %v", err)
@@ -1263,7 +1263,7 @@ func TestSN_SendMessage_MissingText(t *testing.T) {
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	_, err := p.sendMessage(ctx, `{"config_id":"00000000-0000-0000-0000-000000000001","text":""}`)
 	if err == nil || !strings.Contains(err.Error(), "text is required") {
 		t.Fatalf("expected text required error, got: %v", err)
@@ -1281,7 +1281,7 @@ func TestSN_SendMessage_ConfigNotFound(t *testing.T) {
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	// No config seeded -> config not found.
 	_, err := p.sendMessage(ctx, `{"config_id":"00000000-0000-0000-0000-000000000001","text":"hello"}`)
 	if err == nil || !strings.Contains(err.Error(), "config not found") {
@@ -1318,7 +1318,7 @@ func TestSN_SendMessage_WebhookError(t *testing.T) {
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	_, err := p.sendMessage(ctx, `{"config_id":"`+cfgID.String()+`","text":"hello"}`)
 	if err == nil || !strings.Contains(err.Error(), "webhook returned") {
 		t.Fatalf("expected webhook error, got: %v", err)
@@ -1354,7 +1354,7 @@ func TestSN_SendMessage_NonJSONResponse(t *testing.T) {
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	out, err := p.sendMessage(ctx, `{"config_id":"`+cfgID.String()+`","text":"hello"}`)
 	if err != nil {
 		t.Fatalf("sendMessage: %v", err)

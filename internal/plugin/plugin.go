@@ -29,9 +29,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"net/http"
-
-	"github.com/google/uuid"
 )
 
 // PluginInfo describes a plugin for discovery and documentation.
@@ -86,10 +83,10 @@ type Plugin interface {
 // Environment provides plugins with access to cleat infrastructure.
 type Environment struct {
 	DB       PluginDB
-	Mux      *http.ServeMux
+	Mux      ServeMux // *http.ServeMux on host, interface{} on TinyGo
 	Config   []byte
 	Logger   *slog.Logger
-	TenantID uuid.UUID
+	TenantID string
 	Done     <-chan struct{}
 	Dialect  Dialect
 
@@ -155,18 +152,6 @@ type Migration struct {
 	UpMySQL   string // optional — MySQL DDL. Empty means PG-only for this version.
 	UpMSSQL   string // optional — MSSQL DDL. Empty means PG-only for this version.
 	Down      string // optional — SQL to roll back
-}
-
-// HasRoutes: plugin exposes HTTP endpoints.
-type HasRoutes interface {
-	Plugin
-	RegisterRoutes(mux *http.ServeMux) error
-}
-
-// HasMiddleware: plugin wraps the HTTP handler chain.
-type HasMiddleware interface {
-	Plugin
-	Middleware(next http.Handler) http.Handler
 }
 
 // HasCommands: plugin adds CLI subcommands.

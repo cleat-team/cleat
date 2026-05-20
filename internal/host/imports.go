@@ -37,6 +37,8 @@ type HostHandler interface {
 	ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64
 	AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
 	AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64
+	PollChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
+	AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64
 	DurableCallWithRetry(ctx context.Context, m api.Module, service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string, responsePtr, responseMaxLen uint32) int64
 	DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64
 	Version(ctx context.Context) int64
@@ -245,9 +247,13 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		if !ok {
 			return errBadParam
 		}
-		parentClosePolicy, ok := readServiceName(mem, policyPtr, policyLen)
-		if !ok {
-			return errBadParam
+		parentClosePolicy := ""
+		if policyLen > 0 {
+			var ok bool
+			parentClosePolicy, ok = readServiceName(mem, policyPtr, policyLen)
+			if !ok {
+				return errBadParam
+			}
 		}
 		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_with_options")
@@ -270,9 +276,13 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 			if !ok {
 				return errBadParam
 			}
-			parentClosePolicy, ok := readServiceName(mem, policyPtr, policyLen)
-			if !ok {
-				return errBadParam
+			parentClosePolicy := ""
+			if policyLen > 0 {
+				var ok bool
+				parentClosePolicy, ok = readServiceName(mem, policyPtr, policyLen)
+				if !ok {
+					return errBadParam
+				}
 			}
 			return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
 		}).Export("cleat_child_workflow_in_schema")
@@ -379,6 +389,29 @@ func registerHostFunctions(builder wazero.HostModuleBuilder) {
 		}
 		return uint64(h.AwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen))
 	}).Export("cleat_await_all_children")
+
+	// cleat_poll_child: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		runIDPtr, runIDLen, resultPtr, resultMaxLen uint32) uint64 {
+		mem := m.Memory()
+		runID, ok := readServiceName(mem, runIDPtr, runIDLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(handlerFromContext(ctx).PollChild(ctx, m, runID, resultPtr, resultMaxLen))
+	}).Export("cleat_poll_child")
+
+	// cleat_await_any_child: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		idsPtr, idsLen, resultPtr, resultMaxLen uint32) uint64 {
+		h := handlerFromContext(ctx)
+		mem := m.Memory()
+		runIDsJSON, ok := readWasmStringValidated(mem, idsPtr, idsLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(h.AwaitAnyChild(ctx, m, runIDsJSON, resultPtr, resultMaxLen))
+	}).Export("cleat_await_any_child")
 
 	// plugin_call_streaming: (ptr,len x5) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

@@ -48,7 +48,7 @@ type awaitWebhookOutput struct {
 // engine will retry according to its retry policy.
 func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("webhook-ingest: no tenant context")
 	}
 

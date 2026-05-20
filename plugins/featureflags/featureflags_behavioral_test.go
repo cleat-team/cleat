@@ -396,7 +396,7 @@ func TestFF_EvaluateFlag_MissingTenant(t *testing.T) {
 func TestFF_EvaluateFlag_InvalidJSON(t *testing.T) {
 	p, _, _ := newFFPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001").String(),
 	})
 	_, err := p.evaluateFlag(ctx, `not json`)
 	if err == nil || !strings.Contains(err.Error(), "invalid input") {
@@ -407,7 +407,7 @@ func TestFF_EvaluateFlag_InvalidJSON(t *testing.T) {
 func TestFF_EvaluateFlag_MissingKey(t *testing.T) {
 	p, _, _ := newFFPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001").String(),
 	})
 	_, err := p.evaluateFlag(ctx, `{"key":""}`)
 	if err == nil || !strings.Contains(err.Error(), "key is required") {
@@ -874,7 +874,7 @@ func TestFF_Init_InvalidConfig(t *testing.T) {
 func TestFF_EvaluateFlag_DBLookup_NotFound(t *testing.T) {
 	p, _, _ := newFFPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001").String(),
 	})
 	_, err := p.evaluateFlag(ctx, `{"key":"missing_flag"}`)
 	if err == nil || !strings.Contains(err.Error(), "flag not found") {
@@ -892,7 +892,7 @@ func TestFF_EvaluateFlag_DBLookup_Disabled(t *testing.T) {
 	}
 	fdb.mu.Unlock()
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: tid})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{	TenantID: tid.String()})
 	out, err := p.evaluateFlag(ctx, `{"key":"disabled_flag"}`)
 	if err != nil {
 		t.Fatalf("evaluateFlag: %v", err)
@@ -914,7 +914,7 @@ func TestFF_EvaluateFlag_DBLookup_Enabled(t *testing.T) {
 	}
 	fdb.mu.Unlock()
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: tid})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{	TenantID: tid.String()})
 	out, err := p.evaluateFlag(ctx, `{"key":"enabled_flag","context":{"user_id":"user1"}}`)
 	if err != nil {
 		t.Fatalf("evaluateFlag: %v", err)

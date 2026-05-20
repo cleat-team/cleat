@@ -8,8 +8,6 @@ import (
 	"log"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // TenantPools manages per-tenant database connection pools.
@@ -20,7 +18,7 @@ type TenantPools struct {
 	OwnerDB *sql.DB
 
 	mu       sync.Mutex
-	pools    map[uuid.UUID]*sql.DB
+	pools    map[string]*sql.DB
 	connStr  string // base connection string (without user/password — we add per-tenant)
 }
 
@@ -31,18 +29,18 @@ type TenantPools struct {
 func NewTenantPools(ownerDB *sql.DB, baseDSN string) *TenantPools {
 	return &TenantPools{
 		OwnerDB: ownerDB,
-		pools:   make(map[uuid.UUID]*sql.DB),
+		pools:   make(map[string]*sql.DB),
 		connStr: baseDSN,
 	}
 }
 
 // For returns a tenant-scoped *sql.DB. Pools are created lazily and cached.
 // Caller does NOT close the returned DB — TenantPools manages the lifecycle.
-func (tp *TenantPools) For(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error) {
+func (tp *TenantPools) For(ctx context.Context, tenantID string) (*sql.DB, error) {
 	// In single-tenant mode, all workflows run under the default tenant
 	// (zero UUID) and share the owner connection pool. No per-tenant
 	// roles exist on managed PostgreSQL services.
-	if tenantID == uuid.Nil {
+	if tenantID == "" {
 		return tp.OwnerDB, nil
 	}
 

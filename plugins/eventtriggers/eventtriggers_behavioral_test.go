@@ -260,7 +260,7 @@ func TestAwaitEvent_InputValidation(t *testing.T) {
 	t.Run("invalid JSON", func(t *testing.T) {
 		p := &Plugin{}
 		ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-			TenantID: uuid.New(),
+			TenantID: uuid.New().String(),
 		})
 		_, err := p.awaitEvent(ctx, "{not valid json}")
 		if err == nil {
@@ -274,7 +274,7 @@ func TestAwaitEvent_InputValidation(t *testing.T) {
 	t.Run("missing event_type", func(t *testing.T) {
 		p := &Plugin{}
 		ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-			TenantID: uuid.New(),
+			TenantID: uuid.New().String(),
 		})
 		_, err := p.awaitEvent(ctx, `{"timeout_ms":5000}`)
 		if err == nil {
@@ -3388,7 +3388,7 @@ func TestRegisterAndUnregisterAwaiter(t *testing.T) {
 	}
 
 	// Register.
-	p.registerAwaiter(context.Background(), etTestTenantID, "wf-123", "order.created")
+	p.registerAwaiter(context.Background(), etTestTenantID.String(), "wf-123", "order.created")
 
 	store.mu.RLock()
 	n := len(store.awaiters)
@@ -3433,7 +3433,7 @@ func TestAwaitEventFindsAndConsumesEvent(t *testing.T) {
 	}
 
 	// Set up call context so awaitEvent can identify the tenant.
-	cc := &plugin.CallContext{TenantID: etTestTenantID, WorkflowID: "wf-consumer"}
+	cc := &plugin.CallContext{TenantID: etTestTenantID.String(), WorkflowID: "wf-consumer"}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	// Call awaitEvent with matching event type.
@@ -3481,7 +3481,7 @@ func TestAwaitEventNoEvent(t *testing.T) {
 	}
 
 	// Set up call context so awaitEvent can identify the tenant.
-	cc := &plugin.CallContext{TenantID: etTestTenantID}
+	cc := &plugin.CallContext{TenantID: etTestTenantID.String()}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	// When no event, awaitEvent should return Found=false.
@@ -3511,7 +3511,7 @@ func TestAwaitEventWithAwaiterRegistration(t *testing.T) {
 
 	// Create context with workflow ID so registerAwaiter is called.
 	cc := &plugin.CallContext{
-		TenantID:   etTestTenantID,
+		TenantID:   etTestTenantID.String(),
 		WorkflowID: "wf-await-test",
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)

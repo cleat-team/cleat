@@ -1385,7 +1385,7 @@ func TestAwaitWebhookHostFunction(t *testing.T) {
 	}
 
 	// Call awaitWebhook with context containing tenant info.
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	input, _ := json.Marshal(map[string]interface{}{
@@ -1433,7 +1433,7 @@ func TestAwaitWebhookNoEvents(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	input, _ := json.Marshal(map[string]interface{}{
@@ -2580,7 +2580,7 @@ func TestWH_AwaitWebhook_InvalidSourceID(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	// Call with invalid source_id.
@@ -2610,7 +2610,7 @@ func TestWH_AwaitWebhook_InvalidJSON(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	// Call with invalid JSON input.
@@ -2909,7 +2909,7 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	input, _ := json.Marshal(map[string]interface{}{
@@ -2956,7 +2956,7 @@ func TestWH_AwaitWebhook_ExecError(t *testing.T) {
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	input, _ := json.Marshal(map[string]interface{}{

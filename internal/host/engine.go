@@ -61,6 +61,8 @@ const (
 	EventTypeDurableSend           EventType = "durable_send"
 	EventTypeDurableScheduleInvoke EventType = "durable_schedule_invoke"
 	EventTypeFetch                 EventType = "fetch"
+	EventTypePollChild             EventType = "poll_child"
+	EventTypeAwaitAnyChild         EventType = "await_any_child"
 )
 
 // EventRecord is a single event in a workflow's execution history.
@@ -1189,6 +1191,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 			if se == nil {
 				se = &SuspendError{Reason: "workflow suspended"}
 			}
+			if se.Until.IsZero() {
+				se.Until = time.Now().Add(30 * time.Second)
+			}
+			if se.Until.IsZero() {
+				se.Until = time.Now().Add(30 * time.Second)
+			}
 
 			// If ContinueAsNew was triggered and the engine has a handler,
 			// call it now to atomically persist the transition inline.
@@ -1877,10 +1885,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			callCtx := ctx
 			cc := &plugin.CallContext{}
 			if s.tenantID != "" {
-				tid, err := uuid.Parse(s.tenantID)
-				if err == nil {
-					cc.TenantID = tid
-				}
+				cc.TenantID = s.tenantID
 			}
 			if s.workflowID != "" {
 				cc.WorkflowID = s.workflowID
@@ -1991,10 +1996,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	callCtx := ctx
 	cc := &plugin.CallContext{}
 	if s.tenantID != "" {
-		tid, err := uuid.Parse(s.tenantID)
-		if err == nil {
-			cc.TenantID = tid
-		}
+		cc.TenantID = s.tenantID
 	}
 	if s.workflowID != "" {
 		cc.WorkflowID = s.workflowID
@@ -2543,7 +2545,9 @@ func (s *execSession) ChildWorkflowInSchema(ctx context.Context, m api.Module, t
 			}
 		}
 		if !allowed {
-			return packDurableCallResult(0, 0, 0)
+			errMsg := fmt.Sprintf("child workflow %q: target schema %q is not an allowed peer", name, targetSchema)
+			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+			return int64(uint64(errWritten)<<32 | 4) // errCode 4 = invalid
 		}
 	}
 
@@ -2576,7 +2580,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	// Resolve version priority:
 	//   1. Explicit version from ChildWorkflowOptions (version > 0 from WASM ABI)
 	//   2. Pinned child version from WASM metadata (compile-time pin)
-	//   3. Parent's own version (current default)
+	//   3. DB resolves version <= 0 to MAX(version) via CASE in INSERT
 	// Cross-schema children skip pinned versions (target schema may differ).
 	childVersion := version
 	if childVersion <= 0 && ts == "" {
@@ -2584,11 +2588,6 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			if pinnedVersion, ok := s.engine.state.ChildVersion(name); ok && pinnedVersion > 0 {
 				childVersion = pinnedVersion
 			}
-		}
-	}
-	if childVersion <= 0 {
-		if s.engine.state != nil {
-			childVersion = s.engine.state.Version()
 		}
 	}
 
@@ -2602,7 +2601,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	if s.engine.childWfStore != nil {
 		// Check child workflow quota before creating the child.
 		if s.engine.maxQuotaChildren > 0 && s.engine.workflowStore != nil {
-			count, err := s.engine.workflowStore.GetChildCount(ctx, s.workflowID)
+			count, err := s.engine.workflowStore.GetChildCount(context.Background(), s.workflowID)
 			if err != nil {
 				errMsg := fmt.Sprintf("workflow %s: failed to check child quota: %v", s.workflowID, err)
 				log.Printf("[engine] %s", errMsg)
@@ -2640,21 +2639,23 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 				errWritten, _ := s.writeResult(ctx, m, runIDPtr, err.Error(), runIDMaxLen)
 				return int64(uint64(errWritten)<<32 | 4) // error code 4 = invalid
 			}
-			runID, err = css.StartChildWorkflowInSchema(ctx, ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
+			runID, err = css.StartChildWorkflowInSchema(context.Background(), ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
 		} else {
-			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(ctx, "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
+			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(context.Background(), "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
 		}
 		if err != nil {
-			runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
-		} else {
-			// Append event to in-memory history for same-execution replay.
-			// The store already wrote it to event_history atomically;
-			// the later flush will skip it via ON CONFLICT DO NOTHING.
-			rec.RunID = runID
-			s.history = append(s.history, rec)
-			s.nowMs = rec.TimestampMs
-			s.stepCount++
+			errMsg := fmt.Sprintf("child workflow %q: start failed: %v", name, err)
+			log.Printf("[engine] %s", errMsg)
+			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+			return int64(uint64(errWritten)<<32 | 3) // errCode 3 = not_found
 		}
+		// Append event to in-memory history for same-execution replay.
+		// The store already wrote it to event_history atomically;
+		// the later flush will skip it via ON CONFLICT DO NOTHING.
+		rec.RunID = runID
+		s.history = append(s.history, rec)
+		s.nowMs = rec.TimestampMs
+		s.stepCount++
 	} else {
 		runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
 		rec := EventRecord{
@@ -2700,7 +2701,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 
 	// Fresh execution: check child result via store.
 	if s.engine.childWfStore != nil {
-		result, completed, err := s.engine.childWfStore.GetChildResult(ctx, runID)
+		result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
 		if completed && err == nil {
 			rec := EventRecord{
 				Step:      s.stepCount,
@@ -2742,6 +2743,136 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 	return packAwaitChildResultSuspend()
 }
 
+func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
+	// Non-blocking check of a child's status. Never suspends.
+	// Returns: {"status":"running|completed|failed", "result":"...", "error":"..."}
+
+	type pollResult struct {
+		Status string `json:"status"`
+		Result string `json:"result,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}
+
+	var pr pollResult
+	if s.engine.childWfStore != nil {
+		result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
+		if err != nil {
+			pr = pollResult{Status: "failed", Error: err.Error()}
+		} else if completed {
+			if result != "" {
+				pr = pollResult{Status: "completed", Result: result}
+			} else {
+				pr = pollResult{Status: "failed", Error: "child workflow failed (empty result)"}
+			}
+		} else {
+			pr = pollResult{Status: "running"}
+		}
+	} else {
+		pr = pollResult{Status: "failed", Error: "no child workflow store"}
+	}
+
+	out, _ := json.Marshal(pr)
+	written, _ := s.writeResult(ctx, m, resultPtr, string(out), resultMaxLen)
+	return int64(uint64(written)<<32 | 0)
+}
+
+func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeAwaitAnyChild {
+				s.stepCount++
+				if rec.Response != "" {
+					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
+					return int64(uint64(written)<<32 | 0)
+				}
+				// Empty response: this was a suspend (no child was done yet).
+				// Peek at the next event — if it is also an AwaitAnyChild with
+				// a non-empty response, that is the re-execution result. Consume
+				// both events and return the cached result. This avoids a
+				// non-deterministic fall-through to fresh where multiple children
+				// might show as completed on replay.
+				if s.stepCount < len(s.history) {
+					nextRec := s.history[s.stepCount]
+					if nextRec.EventType == EventTypeAwaitAnyChild && nextRec.Response != "" {
+						s.stepCount++
+						written, _ := s.writeResult(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
+						return int64(uint64(written)<<32 | 0)
+					}
+				}
+				// No cached re-execution result — fall through to fresh.
+				s.exitReplay()
+			} else {
+				// Event type mismatch — replay divergence.
+				replayFailuresTotal.Inc()
+				errMsg := fmt.Sprintf("replay divergence at step %d: expected await_any_child, got %s", rec.Step, rec.EventType)
+				written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
+				return int64(uint64(written)<<32 | 1)
+			}
+		} else {
+			s.exitReplay()
+		}
+	}
+
+	// Fresh execution: poll children in deterministic order and return the
+	// first completed one. Sorted order guarantees that replay after a suspend
+	// produces the same result as the original execution when multiple children
+	// happen to be complete.
+	var runIDs []string
+	if err := json.Unmarshal([]byte(runIDsJSON), &runIDs); err != nil {
+		written, _ := s.writeResult(ctx, m, resultPtr, fmt.Sprintf(`{"error":"invalid runIDs: %v"}`, err), resultMaxLen)
+		return int64(uint64(written)<<32 | 1)
+	}
+
+	// Sort for deterministic polling order.
+	sort.Strings(runIDs)
+
+	type outcome struct {
+		RunID  string `json:"run_id"`
+		Result string `json:"result,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}
+
+	if s.engine.childWfStore != nil {
+		for _, rid := range runIDs {
+			result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
+			if err != nil || completed {
+				var out outcome
+				out.RunID = rid
+				if err != nil {
+					out.Error = err.Error()
+				} else {
+					out.Result = result
+				}
+				outJSON, _ := json.Marshal(out)
+				rec := EventRecord{
+					Step:      s.stepCount,
+					EventType: EventTypeAwaitAnyChild,
+					Request:   runIDsJSON,
+					Response:  string(outJSON),
+				}
+				s.recordEvent(rec)
+				written, _ := s.writeResult(ctx, m, resultPtr, string(outJSON), resultMaxLen)
+				return int64(uint64(written)<<32 | 0)
+			}
+		}
+	}
+
+	// No child completed — suspend.
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeAwaitAnyChild,
+		Request:   runIDsJSON,
+	}
+	s.recordEvent(rec)
+
+	s.suspendErr = &SuspendError{
+		Reason: fmt.Sprintf("await_any_child(%s)", runIDsJSON),
+	}
+
+	return packAwaitChildResultSuspend()
+}
+
 func (s *execSession) AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
 	if s.isReplay {
 		return s.replayAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
@@ -2772,7 +2903,7 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 		go func(idx int, rid string) {
 			defer wg.Done()
 			if s.engine.childWfStore != nil {
-				result, completed, err := s.engine.childWfStore.GetChildResult(ctx, rid)
+				result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
 				if err != nil {
 					outcomes[idx] = childOutcome{RunID: rid, Error: err.Error()}
 				} else if completed {

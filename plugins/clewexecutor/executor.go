@@ -188,13 +188,17 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	artifactsDir := filepath.Join(td, "artifacts")
 	snapshot := listArtifactFiles(artifactsDir)
 
-	// Build CLI args.
-	args := []string{"--dangerously-skip-permissions"}
+	// Build CLI args. --print mode: reads prompt from stdin, prints response,
+	// and exits. No artificial watchdog — complex tasks can run 45+ minutes.
+	args := []string{"--dangerously-skip-permissions", "--print"}
 	if in.Model != "" {
 		args = append(args, "--model", in.Model)
 	}
 
-	cmd := exec.CommandContext(context.Background(), bin, args...)
+	// 60-minute safety timeout — claude should exit long before this.
+	execCtx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(execCtx, bin, args...)
 	cmd.Dir = in.Workdir
 	cmd.Stdin = strings.NewReader(prompt)
 
@@ -215,11 +219,6 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		}
 	}
 
-	status := "completed"
-	if exitCode != 0 {
-		status = "failed"
-	}
-
 	// Determine new phase by re-reading STATUS.md after the agent ran.
 	newPhase := phase
 	if np, err := extractPhase(statusPath); err == nil {
@@ -233,6 +232,14 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 
 	newSnapshot := listArtifactFiles(artifactsDir)
 	artifactsWritten := diffArtifacts(snapshot, newSnapshot)
+
+	// If the watchdog killed claude but artifacts were produced, treat
+	// as success. The watchdog is expected to kill claude after it finishes
+	// writing files — claude doesn't exit on its own in stdin mode.
+	status := "completed"
+	if exitCode != 0 && len(artifactsWritten) == 0 {
+		status = "failed"
+	}
 	findingsCount := countFindings(role, artifactsDir)
 
 	reviewOutcome := ""

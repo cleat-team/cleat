@@ -144,8 +144,22 @@ var importDefs = map[string]importDef{
 	"cleat_await_all_children": {
 		ImportName: "cleat_await_all_children",
 		Params: []paramSpec{
-			{"runIDsJSON", kindInString},
+			{"runIDs", kindInString},
 			{"results", kindOutString},
+		},
+	},
+	"cleat_poll_child": {
+		ImportName: "cleat_poll_child",
+		Params: []paramSpec{
+			{"runID", kindInString},
+			{"result", kindOutString},
+		},
+	},
+	"cleat_await_any_child": {
+		ImportName: "cleat_await_any_child",
+		Params: []paramSpec{
+			{"runIDs", kindInString},
+			{"result", kindOutString},
 		},
 	},
 	"cleat_call_heartbeat": {

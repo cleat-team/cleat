@@ -159,7 +159,7 @@ func setupCustomPlugin(t *testing.T, cfg Config) *Plugin {
 
 func streamTenantCtx() context.Context {
 	return plugin.WithCallContext(context.Background(), &plugin.CallContext{
-		TenantID:   uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		TenantID:   uuid.MustParse("00000000-0000-0000-0000-000000000001").String(),
 		WorkflowID: "test-workflow",
 	})
 }

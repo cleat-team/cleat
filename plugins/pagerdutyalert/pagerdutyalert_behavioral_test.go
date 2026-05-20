@@ -454,7 +454,7 @@ func authedRequest(method, target string, body io.Reader) *http.Request {
 
 func withCallContext(ctx context.Context) context.Context {
 	return plugin.WithCallContext(ctx, &plugin.CallContext{
-		TenantID: testTenantID,
+		TenantID: testTenantID.String(),
 	})
 }
 

@@ -44,7 +44,7 @@ type evaluateFlagOutput struct {
 // the result. This function is idempotent and safe to re-invoke during replay.
 func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("feature-flags: no tenant context")
 	}
 

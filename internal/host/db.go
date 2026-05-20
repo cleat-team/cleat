@@ -1450,6 +1450,8 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		s.ClearStickyWorker(context.Background(), runID)
 		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
+		// Wake the parent workflow immediately so it can pick up the child's result.
+		s.wakeParent(context.Background(), runID)
 	}
 
 	return nil
@@ -1984,6 +1986,19 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 	`, parentWorkflowID)
 }
 
+// wakeParent sets the parent workflow's next_wake_at to now so it immediately
+// detects child completion. Runs as a best-effort post-commit operation.
+func (s *PostgresStore) wakeParent(ctx context.Context, childID string) {
+	s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET next_wake_at = now()
+		WHERE id = (
+			SELECT parent_workflow_id FROM workflow_instances WHERE id = $1
+		)
+		AND status = 'ready'
+	`, childID)
+}
+
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
 func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
@@ -2271,6 +2286,16 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 	if err := s.setRLSOnTx(tx); err != nil {
 		return "", fmt.Errorf("start child workflow atomic: set rls: %w", err)
 	}
+
+	// Debug: check what MAX(version) resolves to.
+	var resolvedVersion int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COALESCE((SELECT MAX(version) FROM workflow_defs WHERE name = $1 AND NOT deprecated), -1)`,
+		defName).Scan(&resolvedVersion); err != nil {
+		resolvedVersion = -2
+	}
+	log.Printf("[engine] StartChildWorkflowAtomic: defName=%q defVersion=%d resolvedVersion=%d tenantID=%s parentID=%s",
+		defName, defVersion, resolvedVersion, s.tenantID, parentID)
 
 	// 1. INSERT child workflow instance.
 	_, err = tx.ExecContext(ctx, `

@@ -334,7 +334,7 @@ func TestCapitalize(t *testing.T) {
 	}
 }
 
-// ---- needsFmt/needsJSON/needsUnsafe ----
+// ---- needsFmt/needsManualJSON/needsUnsafe ----
 
 func TestNeedsFmt(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_call": true},
@@ -349,16 +349,24 @@ func TestNeedsFmt(t *testing.T) {
 	}
 }
 
-func TestNeedsJSON(t *testing.T) {
+func TestNeedsManualJSON(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_await_signals": true},
 		Funcs: []HostFunction{{ImportName: "cleat_await_signals", FieldName: "DurableAwaitSignals"}}}
-	if !needsJSON(usage) {
+	if !needsManualJSON(usage) {
 		t.Error("cleat_await_signals uses []string params")
 	}
 	usage2 := &UsageInfo{Used: map[string]bool{"cleat_call": true},
 		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
-	if needsJSON(usage2) {
-		t.Error("cleat_call should not need json")
+	if needsManualJSON(usage2) {
+		t.Error("cleat_call should not need manual JSON")
+	}
+}
+
+func TestNeedsManualJSONAwaitAnyChild(t *testing.T) {
+	usage := &UsageInfo{Used: map[string]bool{"cleat_await_any_child": true},
+		Funcs: []HostFunction{{ImportName: "cleat_await_any_child", FieldName: "AwaitAnyChild"}}}
+	if !needsManualJSON(usage) {
+		t.Error("AwaitAnyChild uses parseSimpleResult and []string")
 	}
 }
 
@@ -372,14 +380,6 @@ func TestNeedsUnsafe(t *testing.T) {
 		Funcs: []HostFunction{{ImportName: "cleat_log", FieldName: "DurableLog"}}}
 	if needsUnsafe(usage2) {
 		t.Error("cleat_log should not need unsafe")
-	}
-}
-
-func TestNeedsJSONWithPluginCallStreaming(t *testing.T) {
-	usage := &UsageInfo{Used: map[string]bool{"cleat_plugin_call_streaming": true},
-		Funcs: []HostFunction{{ImportName: "cleat_plugin_call_streaming", FieldName: "PluginCallStreaming"}}}
-	if !needsJSON(usage) {
-		t.Error("PluginCallStreaming result stmts contain json.Unmarshal")
 	}
 }
 
@@ -680,7 +680,7 @@ func TestSimpleResultPacking(t *testing.T) {
 	}
 }
 
-// ---- needsTime / needsUnsafe / needsJSON / outBufNames edge cases ----
+// ---- needsTime / needsUnsafe / needsManualJSON / outBufNames edge cases ----
 
 func TestNeedsTimeTrue(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_call_heartbeat": true},
@@ -707,11 +707,11 @@ func TestNeedsFmtFalse(t *testing.T) {
 	}
 }
 
-func TestNeedsJSONFalse(t *testing.T) {
+func TestNeedsManualJSONFalse(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_call": true},
 		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
-	if needsJSON(usage) {
-		t.Error("cleat_call should not need json")
+	if needsManualJSON(usage) {
+		t.Error("cleat_call should not need manual JSON")
 	}
 }
 
@@ -764,10 +764,10 @@ func TestNeedsUnsafeWithUnmappedField(t *testing.T) {
 	}
 }
 
-func TestNeedsJSONWithUnmappedField(t *testing.T) {
+func TestNeedsManualJSONWithUnmappedField(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_unknown": true},
 		Funcs: []HostFunction{{ImportName: "cleat_unknown", FieldName: "NonExistentField"}}}
-	if needsJSON(usage) {
+	if needsManualJSON(usage) {
 		t.Error("expected false for unmapped field")
 	}
 }

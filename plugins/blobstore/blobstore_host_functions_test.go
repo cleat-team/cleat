@@ -46,7 +46,7 @@ func setupHostFuncTest(t *testing.T) (*Plugin, *fakeDBStore, *fakeClock) {
 // hostFuncContext wraps a context with a plugin.CallContext for testing host functions.
 func hostFuncContext(ctx context.Context, tenantID uuid.UUID, workflowID string) context.Context {
 	return plugin.WithCallContext(ctx, &plugin.CallContext{
-		TenantID:   tenantID,
+		TenantID:   tenantID.String(),
 		WorkflowID: workflowID,
 	})
 }

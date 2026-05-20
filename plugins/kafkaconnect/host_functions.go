@@ -59,7 +59,7 @@ type kafkaRestProxyRecord struct {
 // or logs the message if no REST proxy is configured.
 func (p *Plugin) produce(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("kafka-connect: no tenant context")
 	}
 
