@@ -1422,7 +1422,15 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	log.Printf("[worker %s] %s: loaded %d history events", w.id, wf.ID, len(history))
 
 	// ---- Determine entry point ----
-	entryPoint := determineEntryPoint(wf.Input)
+	entryPoint := determineEntryPoint(wf.Input, wasmBytes)
+	if entryPoint == "" {
+		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation,
+			"cannot determine entry point: no __entry_point in input and no handle_* export in WASM binary",
+			host.ErrPermanent.String(), "", nil)
+		return
+	}
 
 	// ---- Load compaction state if present ----
 	var compactionState *host.CompactionState
@@ -2311,16 +2319,72 @@ func pluginNames(m map[string]string) string {
 	return strings.Join(names, ", ")
 }
 
-// The default entry point is "handle_incident". This can be overridden by
-// including an "__entry_point" field in the input.
-func determineEntryPoint(input json.RawMessage) string {
+// determineEntryPoint extracts the entry point name from workflow input.
+// If the input has an "__entry_point" field, that value is used.
+// Otherwise it falls back to the first "handle_*" export in the WASM binary.
+// If no exports match, it returns an empty string and the caller should fail.
+func determineEntryPoint(input json.RawMessage, wasmBytes []byte) string {
 	var meta struct {
 		EntryPoint string `json:"__entry_point"`
 	}
 	if err := json.Unmarshal(input, &meta); err == nil && meta.EntryPoint != "" {
 		return meta.EntryPoint
 	}
-	return "handle_incident"
+	return firstHandleExport(wasmBytes)
+}
+
+// firstHandleExport scans a WASM binary's export section for the first
+// exported function whose name starts with "handle_".
+func firstHandleExport(wasmBytes []byte) string {
+	if len(wasmBytes) < 8 {
+		return ""
+	}
+	pos := 8 // skip magic + version
+	sectionEnd := 0
+	for pos < len(wasmBytes) {
+		sectionID := wasmBytes[pos]
+		pos++
+		sectionLen, n := decodeULEB128(wasmBytes, pos)
+		pos = n
+		sectionEnd = pos + int(sectionLen)
+		if sectionID == 7 { // export section
+			count, n := decodeULEB128(wasmBytes, pos)
+			pos = n
+			for i := uint32(0); i < count; i++ {
+				nameLen, n := decodeULEB128(wasmBytes, pos)
+				pos = n
+				name := string(wasmBytes[pos : pos+int(nameLen)])
+				pos += int(nameLen)
+				kind := wasmBytes[pos]
+				pos++                                // kind (0=func)
+				_, n = decodeULEB128(wasmBytes, pos) // index
+				pos = n
+				if kind == 0 && strings.HasPrefix(name, "handle_") {
+					return name
+				}
+			}
+			return ""
+		}
+		pos = sectionEnd
+	}
+	return ""
+}
+
+// decodeULEB128 reads an unsigned LEB128 value from buf at offset pos.
+// Returns the value and the new offset.
+func decodeULEB128(buf []byte, pos int) (uint32, int) {
+	var result uint32
+	var shift uint
+	for {
+		b := buf[pos]
+		pos++
+		result |= uint32(b&0x7F) << shift
+		if b&0x80 == 0 {
+			break
+		}
+		shift += 7
+	}
+	return result, pos
 }
 
 // runDefers executes registered defer callbacks in LIFO (reverse) order.

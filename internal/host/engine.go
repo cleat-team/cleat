@@ -1191,6 +1191,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 			if se == nil {
 				se = &SuspendError{Reason: "workflow suspended"}
 			}
+			if se.Until.IsZero() {
+				se.Until = time.Now().Add(30 * time.Second)
+			}
+			if se.Until.IsZero() {
+				se.Until = time.Now().Add(30 * time.Second)
+			}
 
 			// If ContinueAsNew was triggered and the engine has a handler,
 			// call it now to atomically persist the transition inline.
