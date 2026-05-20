@@ -31,7 +31,7 @@ func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
 	}
 	j := strings.TrimSpace(string(raw))
 	if len(j) == 0 || j[0] != '{' {
-		return nil, fmt.Errorf("dag: decode spec: invalid JSON")
+		return nil, fmt.Errorf("dag: decode spec: invalid JSON (v2)")
 	}
 	// Quick validation: check balanced top-level braces.
 	if findClosing(j, '{', '}') < 0 {
@@ -92,7 +92,7 @@ func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
 // parseDAGSpec parses a JSON DAG spec string into a DAGSpec.
 func parseDAGSpec(j string) DAGSpec {
 	return DAGSpec{
-		Name:  extractJSONString(j, "name"),
+		Name:  ExtractJSONString(j, "name"),
 		Tasks: parseTaskSpecs(j),
 	}
 }
@@ -117,20 +117,32 @@ func parseTaskSpecs(j string) []TaskSpec {
 			parents = splitJSONStringArray(parentsRaw)
 		}
 		specs = append(specs, TaskSpec{
-			Name:     extractJSONString(obj, "name"),
-			Fn:       extractJSONString(obj, "fn"),
+			Name:     ExtractJSONString(obj, "name"),
+			Fn:       ExtractJSONString(obj, "fn"),
 			Parents:  parents,
-			Priority: extractJSONInt(obj, "priority"),
+			Priority: ExtractJSONInt(obj, "priority"),
 		})
 	}
 	return specs
 }
 
-// extractJSONString extracts a quoted string value from a JSON object field.
-func extractJSONString(j, key string) string {
+// ExtractJSONString extracts a quoted string value from a JSON object field.
+// Unescapes \" and \\ escape sequences in the string.
+func ExtractJSONString(j, key string) string {
 	val := extractJSONValue(j, key)
 	if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
-		return val[1 : len(val)-1]
+		s := val[1 : len(val)-1]
+		// Unescape \" and \\.
+		var buf []byte
+		for i := 0; i < len(s); i++ {
+			if s[i] == '\\' && i+1 < len(s) {
+				i++
+				buf = append(buf, s[i])
+				continue
+			}
+			buf = append(buf, s[i])
+		}
+		return string(buf)
 	}
 	return val
 }
@@ -145,7 +157,7 @@ func extractJSONArray(j, key string) string {
 }
 
 // extractJSONInt extracts an integer value from a JSON object field.
-func extractJSONInt(j, key string) int {
+func ExtractJSONInt(j, key string) int {
 	val := extractJSONValue(j, key)
 	if val == "" {
 		return 0
@@ -176,11 +188,17 @@ func extractJSONValue(j, key string) string {
 
 	switch rest[0] {
 	case '"':
-		end := indexOfStr(rest[1:], `"`)
-		if end < 0 {
-			return ""
+		// Find the closing quote, skipping \" escape sequences.
+		for i := 1; i < len(rest); i++ {
+			if rest[i] == '\\' && i+1 < len(rest) {
+				i++ // skip escaped character
+				continue
+			}
+			if rest[i] == '"' {
+				return rest[:i+1]
+			}
 		}
-		return rest[:end+2]
+		return ""
 	case '[':
 		close := findClosing(rest, '[', ']')
 		if close < 0 {
@@ -203,12 +221,27 @@ func extractJSONValue(j, key string) string {
 }
 
 // findClosing finds the matching closing bracket for the opening bracket at position 0.
+// Skips characters inside JSON strings to avoid false matches on braces in string values.
 func findClosing(s string, open, close byte) int {
 	depth := 0
+	inString := false
 	for i := 0; i < len(s); i++ {
-		if s[i] == open {
+		c := s[i]
+		if inString {
+			if c == '\\' {
+				i++ // skip escaped character
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			continue
+		}
+		if c == open {
 			depth++
-		} else if s[i] == close {
+		} else if c == close {
 			depth--
 			if depth == 0 {
 				return i

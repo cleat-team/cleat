@@ -890,18 +890,17 @@ func parseChildResultArray(json string) []cleat.ChildResult {
 	// Find each object between { and }
 	i := 0
 	for i < len(json) {
-		open := indexOf(json[i:], "{")
+		open := strings.Index(json[i:], "{")
 		if open < 0 {
 			break
 		}
-		close := indexOf(json[i+open:], "}")
+		close := strings.Index(json[i+open:], "}")
 		if close < 0 {
 			break
 		}
 		obj := json[i+open : i+open+close+1]
 		results = append(results, cleat.ChildResult{
 			RunID:  extractJSONString(obj, "run_id"),
-			Status: extractJSONString(obj, "status"),
 			Result: extractJSONString(obj, "result"),
 			Error:  extractJSONString(obj, "error"),
 		})
@@ -910,30 +909,6 @@ func parseChildResultArray(json string) []cleat.ChildResult {
 	return results
 }
 
-// extractJSONString extracts the string value of a field from a simple JSON object.
-// json: {"key":"value",...} — no nesting, no escapes beyond basic format.
-func extractJSONString(json string, key string) string {
-	search := "\x22" + key + "\x22:\x22"
-	start := indexOf(json, search)
-	if start < 0 {
-		return ""
-	}
-	valStart := start + len(search)
-	end := indexOf(json[valStart:], "\x22")
-	if end < 0 {
-		return ""
-	}
-	return json[valStart : valStart+end]
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
-}
 `)
 }
 
