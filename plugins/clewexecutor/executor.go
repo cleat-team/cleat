@@ -579,6 +579,10 @@ func workflowPhaseToStatusPhase(wfPhase string) string {
 		return "ci_fix"
 	case "merge":
 		return "merge"
+	case "survey", "surveying":
+		return "surveying"
+	case "brief", "briefing":
+		return "briefing"
 	default:
 		return wfPhase
 	}
@@ -590,7 +594,7 @@ func workflowPhaseToStatusPhase(wfPhase string) string {
 		"queued": 0, "exploring": 1, "planning": 2, "plan_review": 3,
 		"implementing": 4, "impl_review": 5,
 		"create_pr": 6, "ci_wait": 7, "ci_fix": 8, "merge": 9,
-		"done": 10,
+		"surveying": 11, "briefing": 12, "done": 10,
 	}
 
 	// laterPhase returns whichever phase is further along in the lifecycle.
