@@ -360,6 +360,9 @@ func TestCascadeDelete(t *testing.T) {
 				}
 			}
 
+			// Clean up test FK constraints so other tests don't see them.
+			removeCascadeFKs(t, db, d.dialect)
+
 			// Clean up workflow_defs.
 			db.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
 
@@ -452,6 +455,7 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 		exec(`ALTER TABLE dbo.workflow_update_requests ADD CONSTRAINT fk_update_requests_workflow FOREIGN KEY (workflow_id) REFERENCES dbo.workflow_instances(id) ON DELETE CASCADE`)
 	}
 }
+
 
 // insertWorkflowInstance inserts a single workflow_instances row for cascade testing.
 func insertWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID string) {
@@ -573,5 +577,51 @@ func insertChildRows(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID st
 		if err != nil {
 			t.Fatalf("insert workflow_update_requests (mssql): %v", err)
 		}
+	}
+}
+
+// removeCascadeFKs drops the test-specific CASCADE FK constraints so they
+// don't interfere with other tests sharing the same database.
+func removeCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
+	t.Helper()
+
+	exec := func(sql string) {
+		t.Helper()
+		if _, err := db.Exec(sql); err != nil {
+			t.Logf("remove CASCADE FK (non-fatal): %v\nSQL: %s", err, sql)
+		}
+	}
+
+	switch dialect {
+	case testutil.DialectPostgres:
+		exec(`ALTER TABLE event_history DROP CONSTRAINT IF EXISTS fk_test_cascade_eh`)
+		exec(`ALTER TABLE workflow_signals DROP CONSTRAINT IF EXISTS fk_test_cascade_ws`)
+		exec(`ALTER TABLE workflow_promises DROP CONSTRAINT IF EXISTS fk_test_cascade_wp`)
+		exec(`ALTER TABLE concurrency_keys DROP CONSTRAINT IF EXISTS fk_test_cascade_ck`)
+		exec(`ALTER TABLE workflow_update_requests DROP CONSTRAINT IF EXISTS fk_test_cascade_wu`)
+	case testutil.DialectMySQL:
+		for _, tbl := range []string{"event_history", "workflow_signals", "workflow_promises", "workflow_update_requests", "concurrency_keys"} {
+			cnameQuery := "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = '" + tbl + "' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances'"
+			rows, err := db.Query(cnameQuery)
+			if err != nil {
+				t.Logf("remove MySQL CASCADE FK for %s (non-fatal): %v", tbl, err)
+				continue
+			}
+			var cname string
+			for rows.Next() {
+				if err := rows.Scan(&cname); err != nil {
+					t.Logf("remove MySQL CASCADE FK for %s (non-fatal): %v", tbl, err)
+					break
+				}
+				exec("ALTER TABLE " + tbl + " DROP FOREIGN KEY " + cname)
+			}
+			rows.Close()
+		}
+	case testutil.DialectMSSQL:
+		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_event_history_workflow') ALTER TABLE event_history DROP CONSTRAINT fk_event_history_workflow`)
+		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_signals_workflow') ALTER TABLE workflow_signals DROP CONSTRAINT fk_signals_workflow`)
+		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_promises_workflow') ALTER TABLE workflow_promises DROP CONSTRAINT fk_promises_workflow`)
+		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_concurrency_keys_workflow') ALTER TABLE concurrency_keys DROP CONSTRAINT fk_concurrency_keys_workflow`)
+		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_update_requests_workflow') ALTER TABLE workflow_update_requests DROP CONSTRAINT fk_update_requests_workflow`)
 	}
 }
