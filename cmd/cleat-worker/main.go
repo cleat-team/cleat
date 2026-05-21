@@ -741,6 +741,9 @@ func main() {
 		mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
 		mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
 
+		// Version management endpoints.
+		host.RegisterVersionHandler(mux, store)
+
 		// Plugin discovery endpoint.
 		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -2116,8 +2119,18 @@ func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 
 	// Check in-memory cache first.
 	if cached, ok := w.wasmCache.get(key); ok {
-		wasmCacheHits.Inc()
-		return cached, nil
+		dbLen, err := w.store.GetWASMLength(w.ctx, defName, defVersion)
+		if err == nil {
+			if dbLen == int64(len(cached)) {
+				wasmCacheHits.Inc()
+				return cached, nil
+			}
+			log.Printf("[worker %s] WASM cache stale for %s, reloading", w.id, key)
+		} else {
+			wasmCacheHits.Inc()
+			return cached, nil
+		}
+		w.wasmCache.remove(key)
 	}
 
 	// Check disk cache before going to the database.
@@ -3849,7 +3862,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Invalidate WASM cache
-	s.worker.wasmCache.remove(def.Name)
+	s.worker.wasmCache.remove(fmt.Sprintf("%s:%d", def.Name, def.Version))
 
 	s.writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"name":        def.Name,

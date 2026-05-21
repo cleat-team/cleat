@@ -300,6 +300,22 @@ func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion 
 	return nil, lastErr
 }
 
+// GetWASMLength returns the byte length of the stored WASM binary.
+func (s *ShardedStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
+	var lastErr error
+	s.mu.RLock()
+	shards := s.shards
+	s.mu.RUnlock()
+	for _, shard := range shards {
+		length, err := shard.Store.GetWASMLength(ctx, defName, defVersion)
+		if err == nil {
+			return length, nil
+		}
+		lastErr = err
+	}
+	return 0, lastErr
+}
+
 // ListVersions tries each shard (definitions are replicated across shards).
 func (s *ShardedStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	// Merge version lists from all shards (deduped).

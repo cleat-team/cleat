@@ -572,6 +572,13 @@ func (s *MySQLStore) LoadWASM(ctx context.Context, defName string, defVersion in
 	return wasmBytes, nil
 }
 
+// GetWASMLength returns the byte length of the stored WASM binary.
+func (s *MySQLStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
+	var length int64
+	err := s.db.QueryRowContext(ctx, `SELECT LENGTH(wasm_bytes) FROM workflow_defs WHERE name = ? AND version = ?`, defName, defVersion).Scan(&length)
+	return length, err
+}
+
 // ListVersions returns all deployed versions of a workflow.
 func (s *MySQLStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	rows, err := s.db.QueryContext(ctx, `

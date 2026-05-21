@@ -111,6 +111,7 @@ func roleForPhase(phase string) (string, error) {
 }
 
 // taskDir returns the task directory path.
+// Mirrors the logic in protocol/paths.go — keep both in sync.
 func taskDir(projectRoot, project, taskID string) string {
 	if project == "clew" {
 		return filepath.Join(projectRoot, "task_state", taskID)
