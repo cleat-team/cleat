@@ -1389,6 +1389,9 @@ func (s *stubWorkflowStore) AppendEventHistoryBatch(ctx context.Context, workflo
 func (s *stubWorkflowStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	return nil, nil
 }
+func (s *stubWorkflowStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
+	return 0, nil
+}
 func (s *stubWorkflowStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
 	return nil, nil
 }
@@ -2456,6 +2459,7 @@ func (m *mockCollectMetricsStore) AppendEventHistory(ctx context.Context, workfl
 func (m *mockCollectMetricsStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error { return nil }
 func (m *mockCollectMetricsStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockCollectMetricsStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
+func (m *mockCollectMetricsStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) { return 0, nil }
 func (m *mockCollectMetricsStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
 func (m *mockCollectMetricsStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
 func (m *mockCollectMetricsStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
@@ -2521,6 +2525,7 @@ func (m *mockCheckStaleStore) AppendEventHistory(ctx context.Context, workflowID
 func (m *mockCheckStaleStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error { return nil }
 func (m *mockCheckStaleStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockCheckStaleStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
+func (m *mockCheckStaleStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) { return 0, nil }
 func (m *mockCheckStaleStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
 func (m *mockCheckStaleStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
 func (m *mockCheckStaleStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
@@ -2586,6 +2591,7 @@ func (m *mockGCStore) AppendEventHistory(ctx context.Context, workflowID string,
 func (m *mockGCStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error { return nil }
 func (m *mockGCStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockGCStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
+func (m *mockGCStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) { return 0, nil }
 func (m *mockGCStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
 func (m *mockGCStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
 func (m *mockGCStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
@@ -2651,6 +2657,7 @@ func (m *mockPurgeStore) AppendEventHistory(ctx context.Context, workflowID stri
 func (m *mockPurgeStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error { return nil }
 func (m *mockPurgeStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
 func (m *mockPurgeStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
+func (m *mockPurgeStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) { return 0, nil }
 func (m *mockPurgeStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
 func (m *mockPurgeStore) Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error) { return false, nil }
 func (m *mockPurgeStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }

@@ -2515,13 +2515,7 @@ func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module
 }
 
 func (s *execSession) ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
-	// Use parent's version as default. ResolveChildVersion with opts.Version <= 0
-	// will fall through to the parent's version rule.
-	parentVersion := 1
-	if s.engine.state != nil {
-		parentVersion = s.engine.state.Version()
-	}
-	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, parentVersion, 0, "", runIDPtr, runIDMaxLen)
+	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, 0, 0, "", runIDPtr, runIDMaxLen)
 }
 
 func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
@@ -2691,7 +2685,8 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 					return packAwaitChildResult(uint32(written), 0)
 				}
 				// No cached result yet — fall through to fresh to re-check.
-				s.stepCount++
+				// Don't advance stepCount; the fresh execution will record
+				// the result at this same step, overwriting the empty event.
 				s.exitReplay()
 			}
 		} else {
@@ -4581,12 +4576,12 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				defer_description, defer_id, child_name, child_input, run_id, new_input,
 				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				promise_name, promise_id, promise_result, promise_error, payload,
-				checksum, created_at)
+				checksum, created_at, tenant_id)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
 				$9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
 				$20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
-				$30, NOW())
-			ON CONFLICT (workflow_id, step) DO NOTHING
+				$30, NOW(), $31)
+			ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
 		`, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
@@ -4596,7 +4591,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
 			payloadArg,
-			checksum)
+			checksum, e.tenantID)
 		if err != nil {
 			tx.Rollback()
 			lastErr = fmt.Errorf("flush event: exec: %w", err)

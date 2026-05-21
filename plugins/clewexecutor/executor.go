@@ -160,10 +160,19 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	protocolPath := filepath.Join(in.ProjectRoot, "prompts", role+"-agent.md")
 	if _, err := os.Stat(protocolPath); err != nil {
 		// For non-clew projects, prompts live in the clew repo, not project_root.
+		// Check CLEW_REPO_ROOT env var first.
+		if crr := os.Getenv("CLEW_REPO_ROOT"); crr != "" {
+			crrPath := filepath.Join(crr, "prompts", role+"-agent.md")
+			if _, err2 := os.Stat(crrPath); err2 == nil {
+				protocolPath = crrPath
+			}
+		}
 		// Fall back: look for ../clew/prompts relative to workdir.
-		fallback := filepath.Join(in.Workdir, "..", "clew", "prompts", role+"-agent.md")
-		if _, err2 := os.Stat(fallback); err2 == nil {
-			protocolPath = fallback
+		if protocolPath == filepath.Join(in.ProjectRoot, "prompts", role+"-agent.md") {
+			fallback := filepath.Join(in.Workdir, "..", "clew", "prompts", role+"-agent.md")
+			if _, err2 := os.Stat(fallback); err2 == nil {
+				protocolPath = fallback
+			}
 		}
 	}
 	prompt, err := buildPrompt(in, role, td, protocolPath, phase)
@@ -471,7 +480,7 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 
 // buildPrompt constructs the agent prompt matching clew-run.sh patterns.
 func buildPrompt(in runPhaseInput, role, td, protocolPath, currentPhase string) (string, error) {
-	taskPath := filepath.Join("projects", in.Project, in.TaskID)
+	taskPath := td // absolute task directory from taskDir()
 
 	switch role {
 	case "explorer":

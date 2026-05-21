@@ -166,6 +166,9 @@ type WorkflowStore interface {
 	// LoadWASM returns the compiled WASM bytes for a workflow definition.
 	LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error)
 
+	// GetWASMLength returns the byte length of the stored WASM binary.
+	GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error)
+
 	// ListVersions returns all deployed versions of a workflow.
 	ListVersions(ctx context.Context, defName string) ([]int, error)
 
@@ -1255,9 +1258,9 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 			defer_description, defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error, payload,
-			created_at, checksum)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
-		ON CONFLICT (workflow_id, step) DO NOTHING
+			created_at, checksum, tenant_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
+		ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
 	`)
 	if err != nil {
 		return fmt.Errorf("append events in tx: prepare: %w", err)
@@ -1283,7 +1286,7 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
 			payloadArg,
 			time.UnixMilli(rec.TimestampMs),
-			checksum)
+			checksum, s.tenantID)
 		if err != nil {
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
@@ -1481,6 +1484,13 @@ func (s *PostgresStore) LoadWASM(ctx context.Context, defName string, defVersion
 		return nil, fmt.Errorf("load wasm: %w", err)
 	}
 	return wasmBytes, tx.Commit()
+}
+
+// GetWASMLength returns the byte length of the stored WASM binary.
+func (s *PostgresStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
+	var length int64
+	err := s.db.QueryRowContext(ctx, `SELECT length(wasm_bytes) FROM workflow_defs WHERE name = $1 AND version = $2`, defName, defVersion).Scan(&length)
+	return length, err
 }
 
 // TraceWorkflow sets the W3C trace_id on a workflow instance.

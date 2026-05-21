@@ -367,6 +367,7 @@ func (m *mockCompactStore) ClaimStickyWorkflows(ctx context.Context, workerID st
 func (m *mockCompactStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error { return nil }
 func (m *mockCompactStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error { return nil }
 func (m *mockCompactStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
+func (m *mockCompactStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) { return 0, nil }
 func (m *mockCompactStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
 func (m *mockCompactStore) Heartbeat(ctx context.Context, workflowID, workerID string, _ int64) (bool, error) { return false, nil }
 func (m *mockCompactStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
