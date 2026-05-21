@@ -259,7 +259,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				result JSONB,
 				error_msg TEXT,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-				expires_at TIMESTAMPTZ NOT NULL) // TTL is application-configured (default 720h)`,
+				expires_at TIMESTAMPTZ NOT NULL)`,
 			`CREATE TABLE IF NOT EXISTS workflow_update_requests (
 				workflow_id TEXT NOT NULL, update_name TEXT NOT NULL,
 				priority INTEGER NOT NULL DEFAULT 0,
