@@ -149,6 +149,76 @@ Before applying a migration, the worker or migration tool runs sanity checks:
 If a migration fails, the worker logs the error and exits. Fix the migration
 and restart.
 
+### Migration 007: Foreign Key CASCADE
+
+Migration 007 adds `ON DELETE CASCADE` to all foreign keys referencing
+`workflow_instances(id)`. This affects five child tables: `event_history`,
+`workflow_signals`, `workflow_promises`, `concurrency_keys`, and
+`workflow_update_requests`.
+
+**What changes**: Each FK is dropped and re-added with `ON DELETE CASCADE`.
+In MySQL, `concurrency_keys` also receives its FK constraint for the first
+time (it was missing in the original schema).
+
+**Why**: Without CASCADE, deleting a workflow instance required manually
+deleting child rows first. The `DeleteDeadLetteredWorkflows` reaper did this,
+but other code paths that deleted workflow instances could leave orphaned
+rows in child tables.
+
+**Lock risk — HIGH**: Each `ALTER TABLE ... DROP CONSTRAINT ... ADD CONSTRAINT`
+takes an `ACCESS EXCLUSIVE` lock (Postgres) or equivalent on the child table.
+On large `event_history` tables (millions of rows), this blocks all writes for
+the duration of the constraint validation scan.
+
+**Mitigation**:
+- The Postgres migration itself uses `SET LOCAL lock_timeout = '30s'` within the
+  DO block, which overrides any session-level `lock_timeout` you may have set.
+  If you want a shorter timeout for the migration, you must edit the migration
+  SQL (the `SET LOCAL` inside the DO block takes precedence).
+- Set `lock_timeout` before running for the migration runner's other statements:
+  `SET lock_timeout = '5s';` (Postgres) or `SET SESSION lock_wait_timeout = 5;`
+  (MySQL)
+- Run during a maintenance window or off-peak hours
+- For Postgres, the entire DO block runs in a single transaction; no intermediate
+  states are visible to other sessions
+- For MySQL, ALTER TABLE implicitly commits, creating a brief no-FK window between
+  DROP and re-ADD on each table. Run during a quiet period
+- Pre-validate by checking for orphaned rows:
+  ```sql
+  SELECT COUNT(*) FROM event_history eh
+  LEFT JOIN workflow_instances wi ON eh.workflow_id = wi.id
+  WHERE wi.id IS NULL;
+  ```
+  This should return 0 on a healthy installation.
+- Estimated time: proportional to the largest child table. On a table with 10M
+  rows, expect 30-120 seconds per ALTER.
+
+**MySQL orphan check for concurrency_keys**: Before the migration, verify there
+are no orphaned `concurrency_keys` rows:
+```sql
+SELECT COUNT(*) FROM concurrency_keys ck
+LEFT JOIN workflow_instances wi ON ck.workflow_id = wi.id
+WHERE wi.id IS NULL;
+```
+If this returns > 0, clean up orphaned rows first:
+```sql
+DELETE ck FROM concurrency_keys ck
+LEFT JOIN workflow_instances wi ON ck.workflow_id = wi.id
+WHERE wi.id IS NULL;
+```
+
+**Re-running the migration**: The migration runner prevents re-execution via
+`schema_migrations` tracking. If manually re-applied: the Postgres DO block is
+idempotent (DROP + re-ADD arrives at the same state); MSSQL `IF EXISTS` guards
+make it idempotent; MySQL re-application would fail on the `ADD FOREIGN KEY`
+step for concurrency_keys (FK already exists). Do not re-apply migration 007
+manually.
+
+**Rollback**: Migration 007 has no automatic rollback. Once CASCADE is applied,
+deletes are silently destructive. To undo, re-apply the constraints without
+`ON DELETE CASCADE` (reverse of the migration DDL). Contact support for a
+rollback script if needed.
+
 ## Running old and new workers side by side
 
 Because workers are stateless and read workflow definitions from the database,

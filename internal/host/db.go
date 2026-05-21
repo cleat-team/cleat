@@ -429,8 +429,9 @@ type WorkflowStore interface {
 
 	// DeleteDeadLetteredWorkflows permanently deletes workflow instances that are
 	// in the dead_lettered state and whose completed_at is older than the cutoff.
-	// Event history rows are deleted first (to satisfy FK constraints), then the
-	// workflow_instances rows are deleted. Returns the number of instances deleted.
+	// Child rows (event_history, signals, promises, concurrency_keys, update_requests)
+	// are deleted automatically via ON DELETE CASCADE. Returns the number of
+	// workflow instances deleted.
 	DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
 
 	// StreamEventHistory loads event history for a workflow in pages, returning
@@ -4166,32 +4167,13 @@ func (s *PostgresStore) TerminateWorkflow(ctx context.Context, workflowID, reaso
 }
 
 // DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
-// whose completed_at is older than the cutoff. Event history rows are deleted
-// first (to satisfy FK constraints), then the workflow_instances rows are deleted.
+// whose completed_at is older than the cutoff. Child rows (event_history, signals,
+// promises, concurrency_keys, update_requests) are automatically deleted via
+// ON DELETE CASCADE.
 func (s *PostgresStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		// Delete event history first (FK constraint).
 		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM event_history
-			WHERE workflow_id IN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < $1
-				  AND tenant_id = $2
-				ORDER BY id
-				LIMIT 10000
-			)
-		`, olderThan, s.tenantID)
-		if err != nil {
-			return totalDeleted, fmt.Errorf("delete dead-lettered event history: %w", err)
-		}
-		n, _ := result.RowsAffected()
-		totalDeleted += n
-
-		// Then delete the workflow instances.
-		result, err = s.db.ExecContext(ctx, `
 			DELETE FROM workflow_instances
 			WHERE id IN (
 				SELECT id FROM workflow_instances
@@ -4206,7 +4188,7 @@ func (s *PostgresStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderTh
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
 		}
-		n, _ = result.RowsAffected()
+		n, _ := result.RowsAffected()
 		totalDeleted += n
 		if n == 0 {
 			break

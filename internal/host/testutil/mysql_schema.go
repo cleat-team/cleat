@@ -135,9 +135,9 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
 		// concurrency_keys
-		// Note: no FOREIGN KEY on workflow_id — concurrency keys are ephemeral
-		// and workflow instances may be cleaned up before their keys are released.
-		// This matches the Postgres and MSSQL test schemas.
+		// Note: no FOREIGN KEY on workflow_id in test schema (intentionally omitted
+		// for test isolation). Production now has CASCADE FK via migration 007.
+		// The Postgres and MSSQL test schemas also omit FKs for test isolation.
 		`CREATE TABLE IF NOT EXISTS concurrency_keys (
 			key_hash     VARBINARY(32) PRIMARY KEY,
 			key_text     TEXT NOT NULL,

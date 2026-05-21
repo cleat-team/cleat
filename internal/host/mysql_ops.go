@@ -1100,28 +1100,13 @@ func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason s
 }
 
 // DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
-// whose completed_at is older than the cutoff.
+// whose completed_at is older than the cutoff. Child rows (event_history, signals,
+// promises, concurrency_keys, update_requests) are automatically deleted via
+// ON DELETE CASCADE.
 func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
 		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM event_history
-			WHERE workflow_id IN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
-				ORDER BY id
-				LIMIT 10000
-			)
-		`, olderThan)
-		if err != nil {
-			return totalDeleted, fmt.Errorf("delete dead-lettered event history: %w", err)
-		}
-		n, _ := result.RowsAffected()
-		totalDeleted += n
-
-		result, err = s.db.ExecContext(ctx, `
 			DELETE FROM workflow_instances
 			WHERE id IN (
 				SELECT id FROM workflow_instances
@@ -1135,7 +1120,7 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
 		}
-		n, _ = result.RowsAffected()
+		n, _ := result.RowsAffected()
 		totalDeleted += n
 		if n == 0 {
 			break
