@@ -144,124 +144,84 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
-	if cfg.Target == GoTarget {
-		// Standard Go wasip1: main() calls cleat_poll_work (a host import)
-		// to get the entry point name and input JSON from the host, then
-		// dispatches to the entry point. The host calls _start synchronously;
-		// main() processes one unit of work and returns.
-		// cleatPollWorkImport is declared in gen_wasm_imports.go.
-		mainStub := "package main\n\n" +
-			"import \"unsafe\"\n\n" +
-			"func cleatPollWork() (string, []byte) {\n" +
-			"\tvar entryBuf [256]byte\n" +
-			"\tvar argsBuf [65536]byte\n" +
-			"\tresult := cleatPollWorkImport(unsafe.Pointer(&entryBuf[0]), 256, unsafe.Pointer(&argsBuf[0]), 65536)\n" +
-			"\tentryLen := uint32(uint64(result) >> 32)\n" +
-			"\targsLen := uint32(uint64(result) & 0xFFFFFFFF)\n" +
-			"\tif entryLen > 256 { entryLen = 256 }\n" +
-			"\tif argsLen > 65536 { argsLen = 65536 }\n" +
-			"\treturn string(entryBuf[:entryLen]), argsBuf[:argsLen]\n" +
-			"}\n\n" +
-			"func main() {\n" +
-			"\tentryName, argsJSON := cleatPollWork()\n" +
-			"\tresultJSON := cleatDispatch(entryName, argsJSON)\n" +
-			"\tresultStr := string(resultJSON)\n" +
-			"\tresultPtr, resultLen := stringPtr(resultStr)\n" +
-			"\tcleatCompleteImport(0, resultPtr, resultLen)\n" +
-			"}\n"
-		if err := writeFile("gen_main_stub.go", mainStub); err != nil {
-			return err
+	mainStub := "package main\n\nfunc main() {\n\t<-make(chan struct{})\n}\n"
+	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
+		return err
+	}
+
+	// Create go.mod with replace directive pointing to the project root.
+	// TinyGo caps the go version to its supported maximum.
+	goVersion := "1.23"
+	replaceRoot := cfg.ProjectRoot
+	// Create a minimal dependency tree with go 1.23 so TinyGo doesn't
+	// reject the project root's go 1.26 requirement.
+	depsDir := filepath.Join(cfg.OutDir, ".deps")
+	if err := os.MkdirAll(filepath.Join(depsDir, "cleat"), 0755); err != nil {
+		return fmt.Errorf("creating .deps/cleat: %w", err)
+	}
+	// Copy cleat SDK into .deps/
+	srcCleat := filepath.Join(cfg.ProjectRoot, "cleat")
+	goFiles, err := filepath.Glob(filepath.Join(srcCleat, "*.go"))
+	if err != nil {
+		return fmt.Errorf("globbing cleat source: %w", err)
+	}
+	for _, gf := range goFiles {
+		base := filepath.Base(gf)
+		if strings.HasPrefix(base, "gen_") {
+			continue
 		}
-	} else {
-		// TinyGo: main() blocks on a channel receive so the asyncify
-		// scheduler can run exports while main is blocked.
-		mainStub := "package main\n\nfunc main() {\n\t<-make(chan struct{})\n}\n"
-		if err := writeFile("gen_main_stub.go", mainStub); err != nil {
-			return err
+		content, err := os.ReadFile(gf)
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", base, err)
+		}
+		if err := os.WriteFile(filepath.Join(depsDir, "cleat", base), content, 0644); err != nil {
+			return fmt.Errorf("writing %s: %w", base, err)
 		}
 	}
 
-	if cfg.Target == GoTarget {
-		// Standard Go: use the project's real go.mod version. The replace
-		// directive points directly to the project root — no .deps/
-		// workaround needed.
-		goVersion := cfg.GoVersion
-		if goVersion == "" {
-			goVersion = "1.25"
+	// Copy cleat/go.mod and go.sum into .deps/cleat/ so that
+	// github.com/cleat-team/cleat/cleat is a proper submodule
+	// resolvable via the replace directive.
+	for _, modFile := range []string{"go.mod", "go.sum"} {
+		srcMod := filepath.Join(srcCleat, modFile)
+		if data, err := os.ReadFile(srcMod); err == nil {
+			os.WriteFile(filepath.Join(depsDir, "cleat", modFile), data, 0644)
 		}
-		modContent := fmt.Sprintf(`module cleat-build
-
-go %s
-
-require %s v0.0.0
-
-replace %s => %s
-`, goVersion, cfg.ModulePath+"/cleat", cfg.ModulePath+"/cleat", filepath.Join(cfg.ProjectRoot, "cleat"))
-
-		modPath := filepath.Join(cfg.OutDir, "go.mod")
-		if err := os.WriteFile(modPath, []byte(modContent), 0644); err != nil {
-			return fmt.Errorf("writing go.mod: %w", err)
+	}
+	// Also copy cleattest if present.
+	srcCleattest := filepath.Join(srcCleat, "cleattest")
+	if st, err := os.Stat(srcCleattest); err == nil && st.IsDir() {
+		if err := os.MkdirAll(filepath.Join(depsDir, "cleattest"), 0755); err != nil {
+			return fmt.Errorf("creating .deps/cleattest: %w", err)
 		}
-	} else {
-		// TinyGo: cap the go version to TinyGo's supported maximum and
-		// create a .deps/ shim to avoid the project root's newer go.mod.
-		goVersion := "1.23"
-		replaceRoot := cfg.ProjectRoot
-
-		depsDir := filepath.Join(cfg.OutDir, ".deps")
-		if err := os.MkdirAll(filepath.Join(depsDir, "cleat"), 0755); err != nil {
-			return fmt.Errorf("creating .deps/cleat: %w", err)
-		}
-		srcCleat := filepath.Join(cfg.ProjectRoot, "cleat")
-		goFiles, err := filepath.Glob(filepath.Join(srcCleat, "*.go"))
-		if err != nil {
-			return fmt.Errorf("globbing cleat source: %w", err)
-		}
-		for _, gf := range goFiles {
+		testGoFiles, _ := filepath.Glob(filepath.Join(srcCleattest, "*.go"))
+		for _, gf := range testGoFiles {
 			base := filepath.Base(gf)
-			if strings.HasPrefix(base, "gen_") {
-				continue
-			}
 			content, err := os.ReadFile(gf)
 			if err != nil {
-				return fmt.Errorf("reading %s: %w", base, err)
+				continue
 			}
-			if err := os.WriteFile(filepath.Join(depsDir, "cleat", base), content, 0644); err != nil {
-				return fmt.Errorf("writing %s: %w", base, err)
-			}
+			os.WriteFile(filepath.Join(depsDir, "cleattest", base), content, 0644)
 		}
-
-		for _, modFile := range []string{"go.mod", "go.sum"} {
-			srcMod := filepath.Join(srcCleat, modFile)
-			if data, err := os.ReadFile(srcMod); err == nil {
-				os.WriteFile(filepath.Join(depsDir, "cleat", modFile), data, 0644)
-			}
-		}
-		srcCleattest := filepath.Join(srcCleat, "cleattest")
-		if st, err := os.Stat(srcCleattest); err == nil && st.IsDir() {
-			if err := os.MkdirAll(filepath.Join(depsDir, "cleattest"), 0755); err != nil {
-				return fmt.Errorf("creating .deps/cleattest: %w", err)
-			}
-			testGoFiles, _ := filepath.Glob(filepath.Join(srcCleattest, "*.go"))
-			for _, gf := range testGoFiles {
-				base := filepath.Base(gf)
-				content, err := os.ReadFile(gf)
-				if err != nil {
-					continue
-				}
-				os.WriteFile(filepath.Join(depsDir, "cleattest", base), content, 0644)
-			}
-		}
-		depsMod := fmt.Sprintf(`module %s
+	}
+	// Write .deps/go.mod with a compatible version.
+	depsMod := fmt.Sprintf(`module %s
 
 go 1.23
 `, cfg.ModulePath)
-		if err := os.WriteFile(filepath.Join(depsDir, "go.mod"), []byte(depsMod), 0644); err != nil {
-			return fmt.Errorf("writing .deps/go.mod: %w", err)
-		}
-		replaceRoot = depsDir
+	if err := os.WriteFile(filepath.Join(depsDir, "go.mod"), []byte(depsMod), 0644); err != nil {
+		return fmt.Errorf("writing .deps/go.mod: %w", err)
+	}
+	absDeps, err := filepath.Abs(depsDir)
+	if err != nil {
+		return fmt.Errorf("resolving .deps path: %w", err)
+	}
+	replaceRoot = absDeps
 
-		modContent := fmt.Sprintf(`module cleat-build
+	// Use a minimal go.mod for TinyGo. The cleat/cleat submodule is
+	// replaced directly (not via the root module), and go mod tidy is
+	// run by the caller to generate the go.sum.
+	modContent := fmt.Sprintf(`module cleat-build
 
 go %s
 
@@ -270,10 +230,9 @@ require %s v0.0.0
 replace %s => %s/cleat
 `, goVersion, cfg.ModulePath+"/cleat", cfg.ModulePath+"/cleat", replaceRoot)
 
-		modPath := filepath.Join(cfg.OutDir, "go.mod")
-		if err := os.WriteFile(modPath, []byte(modContent), 0644); err != nil {
-			return fmt.Errorf("writing go.mod: %w", err)
-		}
+	modPath := filepath.Join(cfg.OutDir, "go.mod")
+	if err := os.WriteFile(modPath, []byte(modContent), 0644); err != nil {
+		return fmt.Errorf("writing go.mod: %w", err)
 	}
 
 	return nil

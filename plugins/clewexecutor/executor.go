@@ -208,10 +208,10 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	}
 
 	// Resolve agent binary.
-	bin := p.agentBin
-	if in.Tool == "aider" {
-		bin = "aider"
-	}
+		bin := p.agentBin
+		if in.Tool == "aider" {
+			bin = "aider"
+		}
 	if _, err := exec.LookPath(bin); err != nil {
 		out := runPhaseOutput{Status: "failed", Error: fmt.Sprintf("agent not found: %s (resolve from $PATH)", bin)}
 		b, _ := json.Marshal(out)
@@ -559,8 +559,8 @@ func buildPrompt(in runPhaseInput, role, td, protocolPath, currentPhase string) 
 		switch currentPhase {
 		case "create_pr":
 			return fmt.Sprintf(
-				"You are a developer agent in the Clew system. Project: %s. Task ID: %s.\n\nYour implementation is already done and pushed to the '%s' branch.\n\nRead %s for your full protocol, then jump to Phase 6 (CI verification). Your job:\n- Rebase onto latest develop\n- Open a draft PR with `gh pr create --base develop --head %s --draft`\n- Wait for CI checks, fix any failures, and mark the PR ready for review\n- Update STATUS.md and write the daily log\n\nDo NOT re-explore, re-plan, or re-implement — those phases are complete.",
-				in.Project, in.TaskID, in.TaskID, protocolPath, in.TaskID,
+				"You are a developer agent in the Clew system with ONE job: create a pull request.\n\nProject: %s. Task ID: %s.\n\nYour code is on the '%s' branch and already pushed.\n\nDO THESE EXACT STEPS AND NOTHING ELSE:\n1. Read %s/TASK.md to get the task description.\n2. Run: git fetch origin develop && git checkout %s && git rebase origin/develop\n3. Run: gh pr create --base develop --head %s --title \"<descriptive title from TASK.md>\" --body \"<summary from artifacts/implementation.md>\"\n4. Report the PR URL. Stop.\n\nDO NOT read the full developer protocol. DO NOT implement anything. DO NOT review anything. DO NOT wait for CI. DO NOT write artifacts. CREATE THE PR AND STOP.",
+				in.Project, in.TaskID, in.TaskID, taskPath, in.TaskID, in.TaskID,
 			), nil
 		case "ci_fix", "rebase_fix":
 			return fmt.Sprintf(
@@ -872,6 +872,11 @@ func nextPhase(phase string) string {
 // For "implementing" it looks for review-impl-round*.md.
 // For "planning" it looks for review-plan-round*.md.
 // Returns "" if no review files exist.
+
+// createPRDirect executes gh pr create directly without running an agent.
+// Agents frequently get sidetracked by protocol files or run out of WASM
+// time when asked to create PRs. A direct shell command is reliable.
+
 func latestReviewFile(td, currentPhase string) string {
 	prefix := "review-impl-round"
 	if currentPhase == "planning" || currentPhase == "plan_review" {
