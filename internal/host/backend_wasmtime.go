@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/bytecodealliance/wasmtime-go/v44"
+
+	"github.com/cleat-team/cleat/internal/wasm"
 )
 
 // Compile-time check: wasmtimeBackend implements WasmBackend.
@@ -72,6 +74,20 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Wrap context so host functions can find the session.
 	ctx = withHandler(ctx, session)
 	b.handler = session
+
+	// Detect Component Model binaries and extract the first core module.
+	// Component Model binaries (.wasm from componentize-py) contain nested
+	// core WASM modules. We extract the first one and execute it directly.
+	if isComponentWasm(wasmBytes) {
+		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
+		if bundleErr != nil {
+			return nil, fmt.Errorf("host: parse component bundle: %w", bundleErr)
+		}
+		if len(bundle.Modules) == 0 {
+			return nil, fmt.Errorf("host: component bundle has no core modules")
+		}
+		wasmBytes = wasm.PatchEmptyImportModuleName(bundle.Modules[0], "__component_adapter__")
+	}
 
 	// Compile the WASM module.
 	module, err := wasmtime.NewModule(b.engine, wasmBytes)
@@ -1925,3 +1941,4 @@ func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
 		return (int64(entryLen) << 32) | int64(argsLen)
 	})
 }
+
