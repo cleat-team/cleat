@@ -1841,6 +1841,30 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 
 		// Fill unresolved WASI 0.2.0 imports with traps.
 		_ = linker.DefineUnknownImportsAsTraps(cm)
+		// Define placeholder imports for modules that need them:
+		// - __indirect_function_table: WASM table for indirect calls
+		// - __stack_pointer: WASM mutable i32 global for stack management
+		tblType := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), 1, false, 0)
+		if tbl, err := wasmtime.NewTable(store, tblType, wasmtime.ValFuncref(nil)); err == nil {
+			_ = linker.Define(store, "env", "__indirect_function_table", tbl)
+		}
+		i32Mut := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
+		i32Imm := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
+		if sp, err := wasmtime.NewGlobal(store, i32Mut, wasmtime.ValI32(0)); err == nil {
+			_ = linker.Define(store, "env", "__stack_pointer", sp)
+		}
+		if mb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
+			_ = linker.Define(store, "env", "__memory_base", mb)
+		}
+		if tb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
+			_ = linker.Define(store, "env", "__table_base", tb)
+		}
+		if gmb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(0)); err == nil {
+			_ = linker.Define(store, "GOT.mem", "__memory_base", gmb)
+		}
+		if gtb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1)); err == nil {
+			_ = linker.Define(store, "GOT.func", "__table_base", gtb)
+		}
 
 		modInst, err := linker.Instantiate(store, cm)
 		if err != nil {
