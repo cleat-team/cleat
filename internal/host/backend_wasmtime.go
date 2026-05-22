@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go"
+	"github.com/bytecodealliance/wasmtime-go/v44"
 
 	"github.com/cleat-team/cleat/internal/wasm"
 )
@@ -45,8 +45,8 @@ func NewWasmtimeBackend(ctx context.Context) (*wasmtimeBackend, error) {
 func (b *wasmtimeBackend) Name() string { return "wasmtime" }
 
 // Close releases the wasmtime engine resources.
-// Engine is GC'd by the Go runtime (wasmtime-go v1.0.0 removed explicit Close).
 func (b *wasmtimeBackend) Close(ctx context.Context) error {
+	b.engine.Close()
 	return nil
 }
 
@@ -62,6 +62,7 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
 	// Create per-execution store with WASI configuration.
 	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
 
 	// Configure WASI for Go wasip1 module support.
 	// The module may need WASI for stack/goroutine management even though we
@@ -93,6 +94,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if err != nil {
 		return nil, fmt.Errorf("host: compile: %w", err)
 	}
+	defer module.Close()
 
 	// Create linker and register host functions.
 	linker := wasmtime.NewLinker(b.engine)
