@@ -14,10 +14,12 @@ type DAGSpec struct {
 
 // TaskSpec describes a single task in a DAG spec.
 type TaskSpec struct {
-	Name     string   `json:"name"`
-	Fn       string   `json:"fn"`
-	Parents  []string `json:"parents,omitempty"`
-	Priority int      `json:"priority,omitempty"`
+	Name        string   `json:"name"`
+	Fn          string   `json:"fn"`
+	Parents     []string `json:"parents,omitempty"`
+	Priority    int      `json:"priority,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Contract    string   `json:"contract,omitempty"`
 }
 
 // TaskFunc is the signature for a DAG task function.
@@ -81,9 +83,9 @@ func LoadFromJSON(r io.Reader, registry map[string]TaskFunc) (*DAG, error) {
 			}
 		}
 		d.AddTask(ts.Name, ts.Parents, fn, ts.Priority)
-		if ts.Fn != "" {
-			d.tasks[ts.Name].WorkflowName = ts.Fn
-		}
+		d.tasks[ts.Name].WorkflowName = ts.Fn
+		d.tasks[ts.Name].Description = ts.Description
+		d.tasks[ts.Name].Contract = ts.Contract
 	}
 
 	return d, nil
@@ -117,10 +119,12 @@ func parseTaskSpecs(j string) []TaskSpec {
 			parents = splitJSONStringArray(parentsRaw)
 		}
 		specs = append(specs, TaskSpec{
-			Name:     ExtractJSONString(obj, "name"),
-			Fn:       ExtractJSONString(obj, "fn"),
-			Parents:  parents,
-			Priority: ExtractJSONInt(obj, "priority"),
+			Name:        ExtractJSONString(obj, "name"),
+			Fn:          ExtractJSONString(obj, "fn"),
+			Parents:     parents,
+			Priority:    ExtractJSONInt(obj, "priority"),
+			Description: ExtractJSONString(obj, "description"),
+			Contract:    ExtractJSONString(obj, "contract"),
 		})
 	}
 	return specs
