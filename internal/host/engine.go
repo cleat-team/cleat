@@ -2390,43 +2390,10 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 }
 
 func (s *execSession) DurableLog(ctx context.Context, m api.Module, message string) int64 {
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeDurableLog,
-		Message:   message,
-	}
-
-	// Parse structured log fields from JSON if present.
-	if len(message) > 0 && message[0] == '{' {
-		var logEntry struct {
-			Level   string            `json:"level"`
-			Message string            `json:"message"`
-			KV      map[string]string `json:"kv"`
-		}
-		if err := json.Unmarshal([]byte(message), &logEntry); err == nil {
-			rec.LogLevel = logEntry.Level
-			rec.Message = logEntry.Message
-			if kvJSON, err := json.Marshal(logEntry.KV); err == nil {
-				rec.LogKV = string(kvJSON)
-			}
-		}
-	}
-
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			next := s.history[s.stepCount]
-			if next.EventType == EventTypeDurableLog {
-				s.stepCount++
-				return 0
-			}
-		}
-		return 0
-	}
-
-	s.recordEvent(rec)
+	// Non-durable: no event recorded, no replay matching.
+	// Log output goes via the worker's stdout/stderr capture.
 	return 0
 }
-
 func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reasonPtr, reasonMaxLen uint32) int64 {
 	if s.isReplay {
 		return 0 // never cancelled during replay

@@ -9,6 +9,18 @@ import (
 	"regexp"
 )
 
+// tokenUsage mirrors protocol.TokenUsage. Duplicated to avoid importing the
+// clew protocol package into the plugin (existing pattern: runPhaseOutput
+// mirrors PluginCallOutput).
+type tokenUsage struct {
+	InputTokens          int     `json:"input_tokens"`
+	OutputTokens         int     `json:"output_tokens"`
+	CacheReadInputTokens int     `json:"cache_read_input_tokens"`
+	CacheCreationTokens  int     `json:"cache_creation_input_tokens"`
+	CostUSD              float64 `json:"cost_usd"`
+	Model                string  `json:"model"`
+}
+
 // sessionRecord stores the full output plus phase for idempotent caching.
 // When a cache hit occurs, these fields are returned directly as runPhaseOutput.
 // WorkflowPhase distinguishes runs of different workflow phases that share the
@@ -25,8 +37,13 @@ type sessionRecord struct {
 	Started          string   `json:"started"`
 	Ended            string   `json:"ended"`
 	Status           string   `json:"status"`
-	CrashLog         string   `json:"crash_log,omitempty"`
-	DurationMs       int64    `json:"duration_ms,omitempty"`
+	CrashLog         string      `json:"crash_log,omitempty"`
+	DurationMs       int64       `json:"duration_ms,omitempty"`
+	TaskID           string      `json:"task_id,omitempty"`
+	Role             string      `json:"role,omitempty"`
+	Tool             string      `json:"tool,omitempty"`
+	Model            string      `json:"model,omitempty"`
+	TokenUsage       *tokenUsage `json:"token_usage,omitempty"`
 }
 
 // readSession reads and unmarshals session.json. Returns nil if file doesn't

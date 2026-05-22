@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
 
 	"github.com/cleat-team/cleat/cleat"
 	"github.com/cleat-team/cleat/internal/plugin"
@@ -35,6 +34,8 @@ type Task struct {
 	Fn           func(ctx *TaskContext) (string, error)
 	Priority     int
 	WorkflowName string // the workflow name to call (from spec Fn); empty means use Name
+	Description  string // from DAG spec, for task creation
+	Contract     string // from DAG spec, for task creation
 }
 
 // TaskContext provides the task with HostCalls and access to parent outputs.
@@ -72,6 +73,20 @@ func (d *DAG) AddTask(name string, parents []string, fn func(ctx *TaskContext) (
 	}
 	d.tasks[name] = &Task{Name: name, Parents: parents, Fn: fn, Priority: p}
 	return d
+}
+
+// Tasks returns a copy of all tasks in the DAG.
+func (d *DAG) Tasks() map[string]*Task {
+	out := make(map[string]*Task, len(d.tasks))
+	for k, v := range d.tasks {
+		out[k] = v
+	}
+	return out
+}
+
+// Task returns the named task, or nil if not found.
+func (d *DAG) Task(name string) *Task {
+	return d.tasks[name]
 }
 
 // Output returns the output of the named task after Execute completes.
@@ -152,6 +167,16 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts Exec
 
 	running := make(map[string]*Task) // runID -> task
 	perTaskInputs, _ := input.(map[string]RawMessage)
+	if perTaskInputs == nil {
+		// Try map[string]string — callers outside the dag package can't
+		// construct map[string]RawMessage directly (TinyGo type identity).
+		if strMap, ok := input.(map[string]string); ok {
+			perTaskInputs = make(map[string]RawMessage, len(strMap))
+			for k, v := range strMap {
+				perTaskInputs[k] = RawMessage(v)
+			}
+		}
+	}
 
 	for len(ready) > 0 || len(running) > 0 {
 		// Start as many ready tasks as the parallelism limit allows.
@@ -179,14 +204,15 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts Exec
 		// Wait for at least one child to complete.
 		completedRunID, result, awaitErr := h.AwaitAnyChild(runIDs)
 		if awaitErr != nil {
-			return fmt.Errorf("dag: await any child failed: %w", awaitErr)
+			return fmt.Errorf("dag: await any child failed: %v", awaitErr)
 		}
 
 		task := running[completedRunID]
 		delete(running, completedRunID)
+		if task == nil {
+			return fmt.Errorf("dag: internal error: completed child %q not found in running set", completedRunID)
+		}
 
-		// TODO: distinguish child failures (result=="", err!="") from successes.
-		// For now, store the raw result and let the DAG client check.
 		d.outputs[task.Name] = result
 
 		// Enqueue newly-unblocked dependents.
@@ -194,6 +220,9 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts Exec
 			unsatisfied[depName]--
 			if unsatisfied[depName] == 0 {
 				depTask := d.tasks[depName]
+				if depTask == nil {
+					return fmt.Errorf("dag: internal error: dependent %q not found in tasks", depName)
+				}
 				ready = insertSortedByPriority(ready, depTask)
 			}
 		}
@@ -213,36 +242,62 @@ func (d *DAG) startChild(h cleat.HostCalls, task *Task, defaultInput interface{}
 	if wfName == "" {
 		wfName = task.Name
 	}
-	runID, err := h.ChildWorkflowWithOptions(wfName, string(inputJSON), cleat.ChildWorkflowOptions{Priority: task.Priority})
+	inputStr := "{}"
+	if len(inputJSON) > 0 {
+		inputStr = string(inputJSON)
+	}
+	runID, err := h.ChildWorkflowWithOptions(wfName, inputStr, cleat.ChildWorkflowOptions{Priority: task.Priority})
 	if err != nil {
-		return "", fmt.Errorf("dag: failed to start child workflow %s: %w", task.Name, err)
+		return "", fmt.Errorf("dag: failed to start child workflow %s: %v", task.Name, err)
 	}
 	return runID, nil
 }
 
 // sortTasksByPriority sorts tasks by priority (lower = higher priority),
 // with name as tiebreaker for determinism.
+// Uses insertion sort to avoid sort.Slice which is not TinyGo-WASM-safe.
+// Safe to call with nil or empty slice.
 func sortTasksByPriority(tasks []*Task) {
-	sort.Slice(tasks, func(i, j int) bool {
-		if tasks[i].Priority != tasks[j].Priority {
-			return tasks[i].Priority < tasks[j].Priority
+	if len(tasks) < 2 {
+		return
+	}
+	for i := 1; i < len(tasks); i++ {
+		key := tasks[i]
+		if key == nil {
+			continue
 		}
-		return tasks[i].Name < tasks[j].Name
-	})
+		j := i - 1
+		for j >= 0 && taskLess(key, tasks[j]) {
+			tasks[j+1] = tasks[j]
+			j--
+		}
+		tasks[j+1] = key
+	}
 }
 
 // insertSortedByPriority inserts a task into a priority-sorted slice.
+// Uses linear scan to avoid sort.Search which is not TinyGo-WASM-safe.
+// Safe to call with nil or empty tasks slice.
 func insertSortedByPriority(tasks []*Task, task *Task) []*Task {
-	i := sort.Search(len(tasks), func(i int) bool {
-		if tasks[i].Priority != task.Priority {
-			return tasks[i].Priority > task.Priority
-		}
-		return tasks[i].Name > task.Name
-	})
+	if task == nil {
+		return tasks
+	}
+	i := 0
+	for i < len(tasks) && tasks[i] != nil && !taskLess(task, tasks[i]) {
+		i++
+	}
 	tasks = append(tasks, nil)
 	copy(tasks[i+1:], tasks[i:])
 	tasks[i] = task
 	return tasks
+}
+
+// taskLess returns true if a should come before b (lower priority = higher precedence).
+func taskLess(a, b *Task) bool {
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	return a.Name < b.Name
 }
 
 // taskInput returns the JSON input for a task, using per-task inputs when
@@ -297,6 +352,9 @@ func (d *DAG) buildParentOutputs(task *Task, outputs map[string]string) map[stri
 func marshalToJSON(v interface{}) []byte {
 	switch val := v.(type) {
 	case RawMessage:
+		if len(val) == 0 {
+			return []byte("{}")
+		}
 		return val
 	case string:
 		return []byte(`"` + val + `"`)

@@ -1103,7 +1103,6 @@ func (w *Worker) Run() {
 	initLoopCtx("concurrency_key_reaper")
 	initLoopCtx("dispatch")
 	initLoopCtx("schedule")
-	initLoopCtx("compaction")
 	initLoopCtx("memory_reload")
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
@@ -1128,10 +1127,6 @@ func (w *Worker) Run() {
 	// Cron schedule loop.
 	w.loopFuncs["schedule"] = w.scheduleLoop
 	w.launchLoop("schedule", w.scheduleLoop)
-
-	// Compaction loop.
-	w.loopFuncs["compaction"] = w.compactionLoop
-	w.launchLoop("compaction", w.compactionLoop)
 
 	// Memory estimate reload loop.
 	w.loopFuncs["memory_reload"] = w.memoryReloadLoop
