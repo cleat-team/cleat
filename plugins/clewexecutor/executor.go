@@ -39,8 +39,9 @@ type runPhaseOutput struct {
 	Status           string   `json:"status"`
 	Cached           bool     `json:"cached"`
 	Error            string   `json:"error,omitempty"`
-	CrashLog         string   `json:"crash_log,omitempty"`
-	DurationMs       int64    `json:"duration_ms,omitempty"`
+	CrashLog         string      `json:"crash_log,omitempty"`
+	DurationMs       int64       `json:"duration_ms,omitempty"`
+	TokenUsage       *tokenUsage `json:"token_usage,omitempty"`
 }
 
 // runPhase implements the run_phase host function.
@@ -107,6 +108,7 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 			Cached:           true,
 			CrashLog:         rec.CrashLog,
 			DurationMs:       rec.DurationMs,
+			TokenUsage:       rec.TokenUsage,
 		}
 		b, _ := json.Marshal(out)
 		return string(b), nil
@@ -222,7 +224,7 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 
 	// Build CLI args. --print mode: reads prompt from stdin, prints response,
 	// and exits. No artificial watchdog — complex tasks can run 45+ minutes.
-	args := []string{"--dangerously-skip-permissions", "--print"}
+	args := []string{"--dangerously-skip-permissions", "--print", "--output-format", "json"}
 	if in.Model != "" {
 		args = append(args, "--model", in.Model)
 	}
@@ -241,6 +243,8 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	started := time.Now()
 	runErr := cmd.Run()
 	ended := time.Now()
+
+	tu := extractTokenUsage(stdout.String())
 
 	exitCode := 0
 	if runErr != nil {
@@ -331,6 +335,17 @@ Error: exit code %d
 	startedStr := started.Format(time.RFC3339)
 	endedStr := ended.Format(time.RFC3339)
 
+	var existingTaskID, existingRole, existingTool, existingModel string
+	if existing, _ := readSession(sessionPath); existing != nil {
+		existingTaskID = existing.TaskID
+		existingRole = existing.Role
+		existingTool = existing.Tool
+		existingModel = existing.Model
+	}
+	if existingTaskID == "" {
+		existingTaskID = in.TaskID
+	}
+
 	rec := &sessionRecord{
 		Phase:            phase,
 		WorkflowPhase:    in.Phase,
@@ -345,6 +360,11 @@ Error: exit code %d
 		Status:           status,
 		CrashLog:         crashLogPath,
 		DurationMs:       durationMs,
+		TaskID:           existingTaskID,
+		Role:             existingRole,
+		Tool:             existingTool,
+		Model:            existingModel,
+		TokenUsage:       tu,
 	}
 	_ = writeSession(sessionPath, rec)
 
@@ -361,6 +381,7 @@ Error: exit code %d
 		Error:            errStr,
 		CrashLog:         crashLogPath,
 		DurationMs:       durationMs,
+		TokenUsage:       tu,
 	}
 	b, _ := json.Marshal(out)
 	return string(b), nil
@@ -991,6 +1012,41 @@ func countFindings(role, artifactsDir string) int {
 		return count
 	default:
 		return 0
+	}
+}
+
+// extractTokenUsage parses claude --output-format json stdout for token
+// data. Returns nil if parsing fails (defensive: no token_usage written
+// but also no crash). modelUsage is a single-entry map for a single claude
+// invocation — the for-range picks the sole key.
+func extractTokenUsage(stdout string) *tokenUsage {
+	var result struct {
+		ModelUsage   map[string]struct {
+			InputTokens int `json:"inputTokens"`
+		} `json:"modelUsage"`
+		TotalCostUSD float64 `json:"total_cost_usd"`
+		Usage        struct {
+			InputTokens          int `json:"input_tokens"`
+			OutputTokens         int `json:"output_tokens"`
+			CacheReadInputTokens int `json:"cache_read_input_tokens"`
+			CacheCreationTokens  int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		return nil
+	}
+	model := ""
+	for k := range result.ModelUsage {
+		model = k
+		break
+	}
+	return &tokenUsage{
+		InputTokens:          result.Usage.InputTokens,
+		OutputTokens:         result.Usage.OutputTokens,
+		CacheReadInputTokens: result.Usage.CacheReadInputTokens,
+		CacheCreationTokens:  result.Usage.CacheCreationTokens,
+		CostUSD:              result.TotalCostUSD,
+		Model:                model,
 	}
 }
 
