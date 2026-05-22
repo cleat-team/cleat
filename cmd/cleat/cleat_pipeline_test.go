@@ -605,6 +605,85 @@ func TestRunBuild_GoTarget(t *testing.T) {
 	}
 }
 
+func TestRunBuild_GoTargetBuildDir(t *testing.T) {
+	// Similar to TestRunBuild_TinyGoTarget: verify the build directory setup
+	// for the "go" target without requiring actual go build to compile.
+	pattern := filepath.Join(testdataDir(t), "basic")
+	result, _, _, _, usage, tr := analyze(pattern, "")
+
+	if result == nil {
+		t.Fatal("analyze returned nil for basic package")
+	}
+
+	outDir := t.TempDir()
+	outputs := wasm.BuildOutputs("main", usage, result, "")
+	wasmFile := wasmOutputName(result)
+	goVersion := result.GoVersion
+	if goVersion == "" {
+		goVersion = "1.26"
+	}
+	buildCfg := &wasm.BuildConfig{
+		SrcDir:      result.TargetPkg.Dir,
+		OutDir:      outDir,
+		PkgName:     "main",
+		ModulePath:  result.ModulePath,
+		ProjectRoot: result.ModuleDir,
+		GoVersion:   goVersion,
+		Outputs:     outputs,
+		WASMOutput:  wasmFile,
+		Target:      "go",
+		XfrmSource:  tr.Files,
+	}
+
+	if err := wasm.PrepareBuildDir(buildCfg); err != nil {
+		t.Fatalf("PrepareBuildDir (go) failed: %v", err)
+	}
+
+	// The build directory should have go.mod with the real Go version.
+	modPath := filepath.Join(outDir, "go.mod")
+	modData, err := os.ReadFile(modPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modStr := string(modData)
+	if strings.Contains(modStr, "go 1.23") {
+		t.Errorf("expected real Go version in go.mod for go target, got 'go 1.23': %s", modStr)
+	}
+
+	// No .deps/ directory for the "go" target.
+	if _, err := os.Stat(filepath.Join(outDir, ".deps")); !os.IsNotExist(err) {
+		t.Error("expected no .deps/ directory for go target")
+	}
+
+	// Generated files should exist.
+	genFiles := []string{
+		"gen_wasm_imports.go",
+		"gen_wasm_memory.go",
+		"gen_host_adapter.go",
+		"gen_wasm_exports.go",
+		"gen_main_stub.go",
+	}
+	for _, gf := range genFiles {
+		if _, err := os.Stat(filepath.Join(outDir, gf)); os.IsNotExist(err) {
+			t.Errorf("expected generated file %s not found in go build", gf)
+		}
+	}
+
+	// The main stub for the "go" target uses cleat_poll_work to pull
+	// work from the host, dispatching via cleatDispatch().
+	mainStubPath := filepath.Join(outDir, "gen_main_stub.go")
+	stubData, err := os.ReadFile(mainStubPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stubData), "<-make(chan struct{})") {
+		t.Errorf("go target main stub should not use channel block, got: %s", string(stubData))
+	}
+	if !strings.Contains(string(stubData), "cleatPollWork") {
+		t.Errorf("go target main stub should contain cleatPollWork, got: %s", string(stubData))
+	}
+}
+
 func entryNames(entries []os.DirEntry) []string {
 	names := make([]string, len(entries))
 	for i, e := range entries {

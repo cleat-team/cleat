@@ -141,7 +141,8 @@ Assembles the build directory and compiles:
    | `gen_host_adapter.go` | Adapter code that bridges Go types to WASM i64 values |
    | `gen_wasm_exports.go` | Named WASM exports for each entry point |
    | `gen_main_stub.go` | `main()` that blocks forever (`select{}` for Go,
-   `<-make(chan struct{})` for TinyGo) |
+   `<-make(chan struct{})` for TinyGo). The `--target go` stub does not
+   require a `.deps/` shim. |
 
 3. **Compilation**:
 
@@ -334,16 +335,21 @@ interface to scalar types only (i32, i64).
 
 ### Standard Go (`--target go`)
 
-- Uses `GOOS=wasip1 GOARCH=wasm` (bundled with Go 1.22+).
+- Uses `GOOS=wasip1 GOARCH=wasm` (bundled with Go 1.22+) — fully implemented.
 - Produces larger binaries (~2-5 MB for typical workflows) but full Go runtime
-  support.
+  and standard library support.
+- No TinyGo required; uses the standard `go build` toolchain.
 - `main()` blocks with `select{}` to keep the WASM instance alive.
 
 ### TinyGo (`--target tinygo`)
 
 - Uses `tinygo build -target=wasi`.
-- Produces smaller binaries (~60% size reduction).
+- The default target is `go` (standard Go); use `--target tinygo` explicitly for
+  smaller binaries.
+- Produces smaller binaries (~60% size reduction over standard Go).
 - Limited to Go 1.24 compatibility (TinyGo 0.36-0.37 constraint).
+- Use `--target go` for full standard library support when binary size is not a
+  concern.
 - `main()` blocks on `<-make(chan struct{})` (TinyGo's asyncify scheduler
   handles exports while main is blocked).
 - Requires a dependency shim in `.deps/` with an older `go.mod` for
