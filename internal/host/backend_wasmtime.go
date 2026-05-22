@@ -1793,9 +1793,26 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 			}
 		}
 
+		// Some modules import "memory" from "env" (not as a host function).
+		// Route it from any already-instantiated instance that exports memory.
+		for _, prevInst := range instances {
+			if prevInst == nil {
+				continue
+			}
+			if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
+				_ = linker.Define(store, "env", "memory", memExp)
+				break
+			}
+		}
+
 		modInst, err := linker.Instantiate(store, cm)
 		if err != nil {
-			return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args): %w", i, inst.ModuleIndex, len(inst.Args), err)
+			// Build a list of expected import module names for diagnostics.
+			var importMods []string
+			for importName := range importNameToInstance {
+				importMods = append(importMods, importName)
+			}
+			return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args, imports: %v): %w", i, inst.ModuleIndex, len(inst.Args), importMods, err)
 		}
 		instances[i] = modInst
 	}

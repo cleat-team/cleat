@@ -312,25 +312,6 @@ func parseFromExports(payload []byte, pos int) (parseResult, error) {
 		}
 		r.endPos += n2
 
-			// After idx there is a from-info discriminator byte:
-			//   0x00 = declaration (no further data)
-			//   0x01 = alias (followed by a LEB128 alias index)
-			// We MUST consume these bytes to keep the parser position
-			// correct for subsequent entries.
-			if r.endPos >= len(payload) {
-				return r, fmt.Errorf("truncated export %d (from-info missing)", i)
-			}
-			fromInfo := payload[r.endPos]
-				r.endPos++
-			if fromInfo == 0x01 {
-				// Alias: skip the alias index LEB128
-				_, n3 := decodeULEB128(payload[r.endPos:])
-				if n3 <= 0 {
-					return r, fmt.Errorf("corrupt export %d alias index", i)
-				}
-				r.endPos += n3
-			}
-
 		r.FromExports = append(r.FromExports, ExportSpec{
 			Name:  name,
 			Kind:  sortByte,

@@ -20,8 +20,8 @@ func wasmtimeBackendOptions() []host.EngineOption {
 		host.WithBackend("go", wt),
 		host.WithBackend("rust", wt),
 		host.WithBackend("assemblyscript", wt),
-		// Python uses the engine's executeComponent path (wazero) which
-		// handles Component Model binaries natively.
+		// Python Component Model binaries go through the engine's wazero
+		// executeComponent path which handles WASI 0.2.0 resource types.
 		// Java uses the legacy wazero path due to wasmtime-go crash.
 		host.WithBackend("java", wt),
 	}
