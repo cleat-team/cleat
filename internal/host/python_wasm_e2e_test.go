@@ -49,23 +49,22 @@ ctx := context.Background()
 	}
 
 	// ---- Step 2: Decompose the component model binary to a core module ----
-	coreWasmPath := pythonWasm.decomposeComponent(t, wasmPath)
-	if coreWasmPath != wasmPath {
-		// If decomposition produced a different file, use it instead.
-		coreBytes, err := os.ReadFile(coreWasmPath)
-		if err != nil {
-			t.Fatalf("read decomposed WASM: %v", err)
+	// wasm-tools >= 1.230 removed "component decompose". The wasmtime
+	// backend's ExecuteComponent handles component binaries natively, so
+	// we only decompose if the tool is available (for wazero fallback).
+	if pythonWasm.canDecompose() {
+		coreWasmPath := pythonWasm.decomposeComponent(t, wasmPath)
+		if coreWasmPath != wasmPath {
+			coreBytes, err := os.ReadFile(coreWasmPath)
+			if err != nil {
+				t.Fatalf("read decomposed WASM: %v", err)
+			}
+			wasmBytes = coreBytes
+			t.Logf("Using decomposed core module: %s (%d bytes)", coreWasmPath, len(coreBytes))
 		}
-		wasmBytes = coreBytes
-		t.Logf("Using decomposed core module: %s (%d bytes)", coreWasmPath, len(coreBytes))
-	}
-	if coreWasmPath == wasmPath {
-		// Decomposition not available (wasm-tools >= ~1.230 removed the
-		// "component decompose" subcommand). The engine needs core WASM.
-		pythonWasm.skipIfNoDecompose(t)
 	}
 
-	// ---- Step 3: Create runtime and engine ----
+	// ---- Step 3: Create runtime and engine with wasmtime backend ----
 	rt, err := NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
@@ -73,7 +72,16 @@ ctx := context.Background()
 	defer rt.Close(ctx)
 
 	caller := &mockCaller{}
-	engine := NewEngine(rt, caller)
+	var engineOpts []EngineOption
+	if true {
+		if wt, wtErr := NewWasmtimeBackend(ctx); wtErr == nil {
+			engineOpts = append(engineOpts, WithBackend("python", wt))
+			t.Log("wasmtime backend registered for python")
+		} else {
+			t.Logf("wasmtime backend not available: %v (falling back to wazero)", wtErr)
+		}
+	}
+	engine := NewEngine(rt, caller, engineOpts...)
 
 	// ---- Step 4: Execute the workflow ----
 	input := `{"request":{"user_id":"u-test-42","message":"Hello from Python WASM","channel":"email"}}`
@@ -425,6 +433,20 @@ func (h *pythonWasmTestHelper) compileWorkflow(t *testing.T, pyFile, funcName st
 		t.Fatalf("WASM output not found at %s", output)
 	}
 	return output
+}
+
+// canDecompose returns true if wasm-tools component decompose is available.
+func (h *pythonWasmTestHelper) canDecompose() bool {
+	wt, err := exec.LookPath("wasm-tools")
+	if err != nil {
+		return false
+	}
+	// Check that "wasm-tools component decompose" is a recognized subcommand.
+	cmd := exec.Command(wt, "component", "decompose", "--help")
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	return true
 }
 
 // decomposeComponent converts a Component Model binary to a core WASM module.

@@ -1786,12 +1786,28 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 		}
 	}
 
+	// Multi-pass instantiation: instances are processed in passes.
+	// Each pass tries to instantiate any still-pending instance that has
+	// a module. If instantiation fails because a dependency isn't ready,
+	// it is retried in a later pass. This handles complex FromExports
+	// chains and avoids the need for an explicit topological sort.
+	pending := make([]bool, len(bundle.Instances))
+	pendingCount := 0
 	for i, inst := range bundle.Instances {
-		if inst.ModuleIndex < 0 {
-			// FromExports-only alias — no module of its own.
-			continue
+		if inst.ModuleIndex >= 0 {
+			pending[i] = true
+			pendingCount++
 		}
-		cm := compiled[inst.ModuleIndex]
+	}
+
+	maxPasses := len(bundle.Instances) + 5
+	for pass := 0; pass < maxPasses && pendingCount > 0; pass++ {
+		progress := false
+		for i, inst := range bundle.Instances {
+			if !pending[i] || inst.ModuleIndex < 0 {
+				continue
+			}
+			cm := compiled[inst.ModuleIndex]
 
 		// Build a map from import module name to source instance index,
 		// resolving through FromExports chains to the actual instantiated instance.
@@ -1823,7 +1839,11 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				continue
 			}
 			if err := linker.DefineInstance(store, importName, instances[srcIdx]); err != nil {
-				return nil, fmt.Errorf("host: define instance %d as %q for instance %d: %w", srcIdx, importName, i, err)
+				// "defined twice" is OK — some exports (e.g. abort) are
+				// defined by both registerEnvStubs and the source instance.
+				if !strings.Contains(err.Error(), "defined twice") {
+					return nil, fmt.Errorf("host: define instance %d as %q for instance %d: %w", srcIdx, importName, i, err)
+				}
 			}
 		}
 
@@ -1841,10 +1861,24 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 
 		// Fill unresolved WASI 0.2.0 imports with traps.
 		_ = linker.DefineUnknownImportsAsTraps(cm)
-		// Define placeholder imports for modules that need them:
-		// - __indirect_function_table: WASM table for indirect calls
-		// - __stack_pointer: WASM mutable i32 global for stack management
-		tblType := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), 1, false, 0)
+		// Define placeholder imports for modules that need them.
+		// __indirect_function_table: size from the module's table import
+		// (or a generous default if import info is unavailable).
+		tblMinSize := uint32(1048576)
+		tblHasMax := false
+		tblMaxSize := uint32(0)
+		for _, impTy := range cm.Imports() {
+			if impTy.Module() == "env" && impTy.Name() != nil && *impTy.Name() == "__indirect_function_table" {
+				if extType := impTy.Type(); extType != nil {
+					if tt := extType.TableType(); tt != nil {
+						tblMinSize = tt.Minimum()
+						tblHasMax, tblMaxSize = tt.Maximum()
+					}
+				}
+				break
+			}
+		}
+		tblType := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMinSize, tblHasMax, tblMaxSize)
 		if tbl, err := wasmtime.NewTable(store, tblType, wasmtime.ValFuncref(nil)); err == nil {
 			_ = linker.Define(store, "env", "__indirect_function_table", tbl)
 		}
@@ -1866,17 +1900,104 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 			_ = linker.Define(store, "GOT.func", "__table_base", gtb)
 		}
 
-		modInst, err := linker.Instantiate(store, cm)
-		if err != nil {
+		// Per-export fallback: for imports not already resolved by
+		// DefineInstance or the placeholder globals above, search
+		// already-instantiated instances for matching exports and
+		// route them under the import's module name.
+		// This handles GOT.mem::PyExc_SystemError etc. where the
+		// CPython runtime exports individual symbols that other
+		// modules import through GOT module names.
+		for _, impTy := range cm.Imports() {
+			modName := impTy.Module()
+			namePtr := impTy.Name()
+			if namePtr == nil {
+				continue
+			}
+			fieldName := *namePtr
+
+			// Skip host module names (handled by registerAllImports + traps).
+			if modName == "env" || modName == "wasi_snapshot_preview1" || modName == "teavm" {
+				continue
+			}
+
+			// Skip if source instance was already instantiated
+			// (DefineInstance already routed all its exports).
+			if srcIdx, ok := importNameToInstance[modName]; ok {
+				if srcIdx >= 0 && srcIdx < len(instances) && instances[srcIdx] != nil {
+					continue
+				}
+				// Source not yet instantiated — fall through to per-export search.
+			}
+
+			// Search already-instantiated instances for this export name.
+			for _, prevInst := range instances {
+				if prevInst == nil {
+					continue
+				}
+				exp := prevInst.GetExport(store, fieldName)
+				if exp == nil {
+					continue
+				}
+				extType := impTy.Type()
+				if extType == nil {
+					continue
+				}
+				// Route the export under the import's module name.
+				if extType.FuncType() != nil && exp.Func() != nil {
+					_ = linker.Define(store, modName, fieldName, exp)
+				} else if extType.GlobalType() != nil && exp.Global() != nil {
+					_ = linker.Define(store, modName, fieldName, exp)
+				} else if extType.MemoryType() != nil && exp.Memory() != nil {
+					_ = linker.Define(store, modName, fieldName, exp)
+				} else if extType.TableType() != nil && exp.Table() != nil {
+					_ = linker.Define(store, modName, fieldName, exp)
+				}
+				break
+			}
+		}
+
+		modInst, instErr := linker.Instantiate(store, cm)
+		if instErr != nil {
+			// If the error is a missing import, retry in a later pass
+			// (the dependency may not be instantiated yet).
+			if strings.Contains(instErr.Error(), "unknown import") ||
+				strings.Contains(instErr.Error(), "has not been defined") {
+				continue // retry in next pass
+			}
 			// Build a list of expected import module names for diagnostics.
 			var importMods []string
 			for importName := range importNameToInstance {
 				importMods = append(importMods, importName)
 			}
-			return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args, imports: %v): %w", i, inst.ModuleIndex, len(inst.Args), importMods, err)
+			return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args, imports: %v): %w", i, inst.ModuleIndex, len(inst.Args), importMods, instErr)
 		}
 		instances[i] = modInst
+		pending[i] = false
+		pendingCount--
+		progress = true
 	}
+	if !progress {
+		// No instances could be instantiated in this pass.
+		// Build a diagnostic list of whats still pending.
+		var pendingList []int
+		for idx, p := range pending {
+			if p {
+				pendingList = append(pendingList, idx)
+			}
+		}
+		return nil, fmt.Errorf("host: could not instantiate %d instances (stuck at pass %d): pending=%v", pendingCount, pass, pendingList)
+	}
+}
+
+if pendingCount > 0 {
+	var pendingList []int
+	for idx, p := range pending {
+		if p {
+			pendingList = append(pendingList, idx)
+		}
+	}
+	return nil, fmt.Errorf("host: %d instances still pending after %d passes: %v", pendingCount, maxPasses, pendingList)
+}
 
 	// ---- Step 4: Build resolved exports map per instance ----
 	type resolvedExp struct {
