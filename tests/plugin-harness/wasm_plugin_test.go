@@ -402,7 +402,7 @@ func TestPluginCalls_Wasm_Rust(t *testing.T) {
 	result, history, err := wenv.Execute(t, wasmBytes, "call_all_plugins", `{}`)
 	if err != nil {
 		if strings.Contains(err.Error(), "wasmtime panic") {
-			t.Skipf("wasmtime-go v44 compatibility issue with this WASM module: %v", err)
+			t.Skipf("wasmtime-go compatibility issue with this WASM module: %v", err)
 		}
 		t.Fatalf("workflow execution failed: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestPluginCalls_Wasm_Python(t *testing.T) {
 			t.Skipf("Component Model binary has multi-module DAG — needs full executeComponent port: %v", err)
 		}
 		if strings.Contains(err.Error(), "wasmtime panic") {
-			t.Skipf("wasmtime-go v44 compat issue: %v", err)
+			t.Skipf("wasmtime-go compat issue: %v", err)
 		}
 		t.Fatalf("workflow execution failed: %v", err)
 	}
@@ -633,7 +633,7 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 	result, history, err := wenv.Execute(t, wasmBytes, "CallAllPlugins", `{}`)
 	if err != nil {
 		if strings.Contains(err.Error(), "wasmtime panic") || strings.Contains(err.Error(), "wasm trap") {
-			t.Skipf("wasmtime-go v44 compatibility issue with Java/TeaVM modules: %v", err)
+			t.Skipf("wasmtime-go compatibility issue with Java/TeaVM modules: %v", err)
 		}
 		t.Fatalf("workflow execution failed: %v", err)
 	}
@@ -641,7 +641,7 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 	result = strings.TrimRight(result, "\x00")
 	result = strings.TrimSpace(result)
 	if result == "ok" || result == `"ok"` || strings.Contains(result, "wasmtime panic") {
-		t.Skipf("Java module crashed (wasmtime-go v44 compat): raw: %.200s", result)
+		t.Skipf("Java module crashed (wasmtime-go compat): raw: %.200s", result)
 	}
 	var results map[string]interface{}
 	dec := json.NewDecoder(strings.NewReader(result))
