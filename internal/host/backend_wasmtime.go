@@ -1964,6 +1964,52 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				strings.Contains(instErr.Error(), "has not been defined") {
 				continue // retry in next pass
 			}
+			// Element segment / table errors can result from
+			// adapter-provided tables conflicting with our
+			// placeholders. Retry without cross-module routing.
+			if strings.Contains(instErr.Error(), "undefined element") ||
+				strings.Contains(instErr.Error(), "out of bounds") {
+				linker2 := wasmtime.NewLinker(b.engine)
+				var cr2, ce2 string
+				b.registerAllImports(linker2, &cr2, &ce2)
+				_ = linker2.DefineUnknownImportsAsTraps(cm)
+				for _, prevInst := range instances {
+					if prevInst == nil { continue }
+					if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
+						_ = linker2.Define(store, "env", "memory", memExp)
+						break
+					}
+				}
+				tblMin2 := uint32(1048576)
+				tblType2 := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMin2, false, 0)
+				if tbl2, _ := wasmtime.NewTable(store, tblType2, wasmtime.ValFuncref(nil)); tbl2 != nil {
+					_ = linker2.Define(store, "env", "__indirect_function_table", tbl2)
+				}
+				i32Imm2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
+				i32Mut2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
+				if sp2, _ := wasmtime.NewGlobal(store, i32Mut2, wasmtime.ValI32(0)); sp2 != nil {
+					_ = linker2.Define(store, "env", "__stack_pointer", sp2)
+				}
+				if mb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); mb2 != nil {
+					_ = linker2.Define(store, "env", "__memory_base", mb2)
+				}
+				if tb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); tb2 != nil {
+					_ = linker2.Define(store, "env", "__table_base", tb2)
+				}
+				if gmb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(0)); gmb2 != nil {
+					_ = linker2.Define(store, "GOT.mem", "__memory_base", gmb2)
+				}
+				if gtb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1)); gtb2 != nil {
+					_ = linker2.Define(store, "GOT.func", "__table_base", gtb2)
+				}
+				if modInst2, err2 := linker2.Instantiate(store, cm); err2 == nil {
+					instances[i] = modInst2
+					pending[i] = false
+					pendingCount--
+					progress = true
+					continue
+				}
+			}
 			// Build a list of expected import module names for diagnostics.
 			var importMods []string
 			for importName := range importNameToInstance {
