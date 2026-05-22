@@ -210,7 +210,8 @@ AI-ready Python SDK with LangChain integration. The Go-native AI plugins
 ### Go — Already Done
 
 Full automated transformer pipeline: analyzer → callgraph → closure → transform →
-WASM compile via TinyGo. ~3,000 lines of transformer code across 5 packages.
+WASM compile via standard Go (`--target go`, default) or TinyGo (`--target tinygo`).
+~3,000 lines of transformer code across 5 packages.
 
 ### Rust — Already Done
 
@@ -230,7 +231,7 @@ WASM compile via TinyGo. ~3,000 lines of transformer code across 5 packages.
 | **TypeScript** | Javy/QuickJS (mature) | ~2-3 weeks | ~3-6 weeks | 1-5 MB | Binary size, debugging | 4th |
 | **Python** | componentize-py | ✅ Done (4.5K lines, 80 tests) | ✅ Done (@cleat_entry) | 5-20 MB | WASM FFI wiring (2-3 wks) | 5th |
 | **C#/.NET** | NativeAOT-LLVM (exp.) | ~3-5 weeks | ~4-8 weeks | 1-5 MB | Immature toolchain | 6th |
-| **Go** | tinygo | ✅ Done | ✅ Done | ~100-500 KB | None | Done |
+| **Go** | go / tinygo | ✅ Done | ✅ Done | ~4-10 MB (go), ~50-200 KB (tinygo) | None | Done |
 | **Rust** | cargo build (built-in) | ✅ Done | ✅ Done | ~50-200 KB | None | Done |
 
 ---

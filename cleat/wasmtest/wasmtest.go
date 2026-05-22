@@ -600,12 +600,14 @@ func (e *WasmTestEnv) BuildWasm(t *testing.T, pkgPath string) []byte {
 
 	outPath := filepath.Join(tmpDir, "output.wasm")
 
-	cmd := exec.Command("tinygo", "build",
-		"-target=wasip1",
+	// Use standard Go wasip1 compilation (cleat build --target go pipeline).
+	// The source must already be transformed and have generated stubs.
+	cmd := exec.Command("go", "build",
 		"-o", outPath,
 		".",
 	)
 	cmd.Dir = absDir
+	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {

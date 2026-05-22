@@ -114,15 +114,21 @@ Recommendations:
 
 ## Best Practices for Minimizing Binary Size
 
-### 1. TinyGo Compilation
+### 1. Compilation Target
+
+The default target is `--target go` (standard Go toolchain). For smaller
+binaries, use `--target tinygo`:
 
 ```bash
+# Standard Go (full stdlib, larger binary)
 cleat build ./workflow/
+
+# TinyGo (smaller binary, limited stdlib)
+cleat build --target tinygo ./workflow/
 ```
 
-TinyGo is the default and only compiler for Go WASM workflows. See
-[Workflow Go Constraints](./workflow-go-constraints.md) for library
-compatibility details.
+See [Workflow Go Constraints](./workflow-go-constraints.md) for library
+compatibility details for each target.
 
 ### 2. Audit Your Imports
 

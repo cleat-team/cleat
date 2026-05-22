@@ -31,6 +31,13 @@ type paramSpec struct {
 
 // importDefs maps each host function to its low-level WASM import signature.
 var importDefs = map[string]importDef{
+	"cleat_poll_work": {
+		ImportName: "cleat_poll_work",
+		Params: []paramSpec{
+			{"entryName", kindOutString},
+			{"argsJSON", kindOutString},
+		},
+	},
 	"cleat_complete": {
 		ImportName: "cleat_complete",
 		Params: []paramSpec{
@@ -324,6 +331,9 @@ func GenerateImports(pkgName string, usage *UsageInfo) []byte {
 	buf.WriteString(`//go:wasmimport env cleat_complete
 func cleatCompleteImport(status uint32, resultPtr unsafe.Pointer, resultLen uint32) int64
 
+//go:wasmimport env cleat_poll_work
+func cleatPollWorkImport(entryNamePtr unsafe.Pointer, entryNameMaxLen uint32, argsPtr unsafe.Pointer, argsMaxLen uint32) int64
+
 `)
 
 	return buf.Bytes()
@@ -385,6 +395,6 @@ func BuildOutputs(pkgName string, usage *UsageInfo, result *analyzer.AnalysisRes
 		Imports: string(GenerateImports(pkgName, usage)),
 		Memory:  string(GenerateMemory(pkgName)),
 		Adapter: string(GenerateHostAdapter(pkgName, usage, target)),
-		Exports: string(GenerateExports(pkgName, result)),
+		Exports: string(GenerateExports(pkgName, result, target)),
 	}
 }

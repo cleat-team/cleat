@@ -31,5 +31,5 @@ Key conventions:
 ## Build
 
 - Go 1.25+, module `github.com/cleat-team/cleat`
-- WASM workflows are compiled with TinyGo (`tinygo build -target=wasip1`)
+- WASM workflows are compiled with the standard Go toolchain (`--target go`, default) or TinyGo (`--target tinygo`)
 - Tests use `go test`, fuzz tests, and behavioral test suites

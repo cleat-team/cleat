@@ -327,7 +327,12 @@ for _, k := range keys {
 ## 5. TinyGo Limitations
 
 When using `cleat build --target tinygo`, additional constraints apply because
-TinyGo does not fully implement the Go standard library.
+TinyGo does not fully implement the Go standard library. Using
+`cleat build --target go` (the default) lifts all TinyGo-specific limitations:
+the full Go standard library is available, there are no JSON bugs, no Go version
+constraints beyond the project's `go.mod`, and no `.deps/` shim is required.
+See [When to Use Standard Go vs TinyGo](#when-to-use-standard-go-vs-tinygo)
+for guidance on choosing between the two targets.
 
 ### Missing Standard Library Packages
 

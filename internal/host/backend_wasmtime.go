@@ -15,13 +15,22 @@ import (
 // Compile-time check: wasmtimeBackend implements WasmBackend.
 var _ WasmBackend = (*wasmtimeBackend)(nil)
 
+// errBadParamInt64 is the int64 equivalent of errBadParam for return values
+// from FuncWrap closures (which must return int64, not uint64).
+const errBadParamInt64 int64 = -4294967295
+
 // wasmtimeBackend implements WasmBackend using the wasmtime WASM runtime.
 // It loads core WASM modules (post-decompose Component Model binaries).
 //
 // Build constraint: this file requires CGO because wasmtime-go wraps the
 // wasmtime Rust runtime via CGo.
 type wasmtimeBackend struct {
-	engine *wasmtime.Engine
+	engine  *wasmtime.Engine
+	handler HostHandler // current execution session
+
+	// Work data for the Go dispatcher (cleat_poll_work).
+	workEntryPoint string
+	workInput      []byte
 }
 
 // NewWasmtimeBackend creates a new wasmtimeBackend with a fresh engine.
@@ -62,6 +71,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Wrap context so host functions can find the session.
 	ctx = withHandler(ctx, session)
+	b.handler = session
 
 	// Compile the WASM module.
 	module, err := wasmtime.NewModule(b.engine, wasmBytes)
@@ -241,6 +251,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if err := b.registerCleatComplete(linker, &completeResult, &completeErr); err != nil {
 		return nil, fmt.Errorf("host: register cleat_complete: %w", err)
 	}
+	if err := b.registerCleatPollWork(linker); err != nil {
+		return nil, fmt.Errorf("host: register cleat_poll_work: %w", err)
+	}
 
 	// Instantiate the module.
 	instance, err := linker.Instantiate(store, module)
@@ -292,37 +305,33 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		copy(data[inputOffset:], inputBytes)
 	}
 
-	// If the module exports _start (Go wasip1), call it in the background
-	// to initialize the Go runtime.
+	// If the module exports _start (Go wasip1), use the cleat_poll_work
+	// dispatcher protocol. We store the entry point + input on the backend,
+	// then call _start synchronously. main() calls cleat_poll_work (which
+	// returns the work), dispatches to the entry point, and calls
+	// cleat_complete with the result. All WASM execution stays on one
+	// goroutine, avoiding the Go wasip1 reentrancy issue.
 	if startFn := instance.GetFunc(store, "_start"); startFn != nil {
-		started := make(chan struct{})
-		go func() {
-			close(started)
-			startFn.Call(store)
-		}()
-		// Wait for the goroutine to begin executing.
-		<-started
+		b.workEntryPoint = entryPoint
+		b.workInput = []byte(input)
 
-		// Wait for memory to become accessible (signals runtime init complete).
-		delay := 100 * time.Microsecond
-		const maxDelay = 10 * time.Millisecond
-		for {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(delay):
-			}
-			if mem.DataSize(store) > 0 {
-				break
-			}
-			delay *= 2
-			if delay > maxDelay {
-				delay = maxDelay
-			}
+		// Call _start synchronously. main() processes the work and returns.
+		func() {
+				defer func() { recover() }()
+				startFn.Call(store)
+			}()
+
+		// Result is delivered via cleat_complete hook.
+		if completeErr != "" {
+			return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr)
 		}
+		if completeResult != "" {
+			return &ExecResult{Result: completeResult, Suspended: false}, nil
+		}
+		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 	}
 
-	// Get the entry point export.
+	// Non-Go module: call the export directly.
 	fn := instance.GetFunc(store, entryPoint)
 	if fn == nil {
 		return nil, fmt.Errorf("host: export %q not found", entryPoint)
@@ -377,34 +386,158 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 }
 
 // ---------------------------------------------------------------------------
+// Shared-memory dispatcher protocol for Go WASM modules
+// ---------------------------------------------------------------------------
+
+// dispatcher memory layout (matches gen_main_stub.go for --target go):
+//
+//	Offset  Size   Field
+//	0       1      command byte (0=idle, 1=execute, 2=done, 3=error)
+//	1       4      entry point name length (uint32 LE)
+//	5       4      input JSON length (uint32 LE)
+//	9       4      output JSON length (uint32 LE)
+//	13      256    entry point name buffer
+//	269     65536  input JSON buffer
+//	65837   65536  output JSON buffer
+const (
+	_dispatcherBase       = 10 * 1024 * 1024 // 10 MiB
+	_dispatcherCmd        = _dispatcherBase + 0
+	_dispatcherNameLen    = _dispatcherBase + 1
+	_dispatcherInputLen   = _dispatcherBase + 5
+	_dispatcherOutputLen  = _dispatcherBase + 9
+	_dispatcherNameBuf    = _dispatcherBase + 13
+	_dispatcherInputBuf   = _dispatcherBase + 269
+	_dispatcherOutputBuf  = _dispatcherBase + 65837
+	_dispatcherNameMax    = 256
+	_dispatcherInputMax   = 65536
+	_dispatcherOutputMax  = 65536
+	_dispatcherInterval   = 10 * time.Millisecond
+	_dispatcherTimeout    = 30 * time.Second
+)
+
+// executeViaDispatcher communicates with main()'s dispatch loop via shared
+// memory. The _start function is already running in a background goroutine
+// and main() is polling the command byte. We write work, wait for the
+// result, and return.
+func (b *wasmtimeBackend) executeViaDispatcher(
+	store wasmtime.Storelike,
+	mem *wasmtime.Memory,
+	entryPoint string,
+	input json.RawMessage,
+	completeResult, completeErr string,
+) (*ExecResult, error) {
+	data := mem.UnsafeData(store)
+
+	// Grow memory to cover the dispatcher region if needed.
+	needed := _dispatcherOutputBuf + _dispatcherOutputMax
+	if uint64(len(data)) < uint64(needed) {
+		pagesNeeded := (needed - len(data) + wasmPageSize - 1) / wasmPageSize
+		if _, err := mem.Grow(store, uint64(pagesNeeded)); err != nil {
+			return nil, fmt.Errorf("host: grow memory for dispatcher: %w", err)
+		}
+		data = mem.UnsafeData(store)
+	}
+
+	// Zero the command byte.
+	data[_dispatcherCmd] = 0
+
+	// Write entry point name (without NUL terminator, main reads length).
+	entryBytes := []byte(entryPoint)
+	if len(entryBytes) > _dispatcherNameMax {
+		entryBytes = entryBytes[:_dispatcherNameMax]
+	}
+	putUint32LE(data[_dispatcherNameLen:], uint32(len(entryBytes)))
+	copy(data[_dispatcherNameBuf:], entryBytes)
+
+	// Write input JSON.
+	inputBytes := []byte(input)
+	if len(inputBytes) > _dispatcherInputMax {
+		inputBytes = inputBytes[:_dispatcherInputMax]
+	}
+	putUint32LE(data[_dispatcherInputLen:], uint32(len(inputBytes)))
+	copy(data[_dispatcherInputBuf:], inputBytes)
+
+	// Signal work: set command byte to 1 (execute).
+	data[_dispatcherCmd] = 1
+
+	// Poll for completion.
+	deadline := time.Now().Add(_dispatcherTimeout)
+	for {
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("host: dispatcher timeout waiting for %q", entryPoint)
+		}
+		cmd := data[_dispatcherCmd]
+		if cmd == 2 {
+			// Done: read the result.
+			outLen := getUint32LE(data[_dispatcherOutputLen:])
+			if outLen > _dispatcherOutputMax {
+				outLen = _dispatcherOutputMax
+			}
+			result := string(data[_dispatcherOutputBuf : _dispatcherOutputBuf+outLen])
+			return &ExecResult{Result: result, Suspended: false}, nil
+		}
+		if cmd == 3 {
+			// Error: read the error message from output buffer.
+			outLen := getUint32LE(data[_dispatcherOutputLen:])
+			if outLen > _dispatcherOutputMax {
+				outLen = _dispatcherOutputMax
+			}
+			errMsg := string(data[_dispatcherOutputBuf : _dispatcherOutputBuf+outLen])
+			return nil, fmt.Errorf("host: %q: %s", entryPoint, errMsg)
+		}
+		// Also check cleat_complete for suspend/results.
+		if completeErr != "" {
+			return nil, fmt.Errorf("host: %q failed: %s", entryPoint, completeErr)
+		}
+		if completeResult != "" {
+			return &ExecResult{Result: completeResult, Suspended: false}, nil
+		}
+		time.Sleep(_dispatcherInterval)
+	}
+}
+
+func putUint32LE(b []byte, v uint32) {
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+}
+
+func getUint32LE(b []byte) uint32 {
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+
+// ---------------------------------------------------------------------------
 // Helper: raw memory read/write on a []byte slice
 // ---------------------------------------------------------------------------
 
 // wasmtimeReadString reads a string from a raw WASM linear memory buffer.
-func wasmtimeReadString(buf []byte, ptr, length uint32) string {
-	if length == 0 {
+func wasmtimeReadString(buf []byte, ptr, length int32) string {
+	if length <= 0 {
 		return ""
 	}
-	if uint64(ptr)+uint64(length) > uint64(len(buf)) {
+	pu, lu := uint32(ptr), uint32(length)
+	if uint64(pu)+uint64(lu) > uint64(len(buf)) {
 		return ""
 	}
-	return string(buf[ptr : ptr+length])
+	return string(buf[pu : pu+lu])
 }
 
 // wasmtimeReadStringValidated reads and validates a string from a raw buffer.
-func wasmtimeReadStringValidated(buf []byte, ptr, length, maxLen uint32) (string, bool) {
-	if length == 0 || length > maxLen {
+func wasmtimeReadStringValidated(buf []byte, ptr, length, maxLen int32) (string, bool) {
+	if length <= 0 || length > maxLen {
 		return "", false
 	}
-	if uint64(ptr)+uint64(length) > uint64(len(buf)) {
+	pu, lu := uint32(ptr), uint32(length)
+	if uint64(pu)+uint64(lu) > uint64(len(buf)) {
 		return "", false
 	}
-	return string(buf[ptr : ptr+length]), true
+	return string(buf[pu : pu+lu]), true
 }
 
 // wasmtimeReadServiceName reads and validates a service/operation name.
-func wasmtimeReadServiceName(buf []byte, ptr, length uint32) (string, bool) {
-	s, ok := wasmtimeReadStringValidated(buf, ptr, length, MaxWasmStringLen)
+func wasmtimeReadServiceName(buf []byte, ptr, length int32) (string, bool) {
+	s, ok := wasmtimeReadStringValidated(buf, ptr, length, int32(MaxWasmStringLen))
 	if !ok {
 		return "", false
 	}
@@ -435,13 +568,21 @@ func wasmtimeWriteString(buf []byte, ptr uint32, s string, maxLen uint32) (uint3
 
 // registerWasiStubs registers WASI preview1 stubs needed by core modules.
 func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
+	// DefineWasi provides the full WASI preview1 implementation (fd_write,
+	// random_get, clock_time_get, environ_get, proc_exit, sched_yield, etc.).
+	// Required by Go wasip1, Rust wasm32-wasip1, and other WASI-compiled modules.
+	if err := linker.DefineWasi(); err != nil {
+		return err
+	}
+
 	// reset_adapter_state is required by core modules extracted from Component
 	// Model binaries produced by componentize-py. It is a no-op.
 	if err := linker.FuncWrap("wasi_snapshot_preview1", "reset_adapter_state",
-		func(ctx context.Context) {},
+		func() {},
 	); err != nil {
 		return err
 	}
+
 	return nil
 }
 
@@ -449,7 +590,7 @@ func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
 func (b *wasmtimeBackend) registerEnvStubs(linker *wasmtime.Linker) error {
 	// abort is required by AssemblyScript-compiled WASM modules.
 	if err := linker.FuncWrap("env", "abort",
-		func(ctx context.Context, msg, file, line, col uint32) {},
+		func(msg, file, line, col int32) {},
 	); err != nil {
 		// Some modules may not import abort; this is not fatal.
 		if isWasmtimeLinkerError(err) {
@@ -463,7 +604,7 @@ func (b *wasmtimeBackend) registerEnvStubs(linker *wasmtime.Linker) error {
 func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 	// putwcharsOut
 	if err := linker.FuncWrap("teavm", "putwcharsOut",
-		func(ctx context.Context, chars, count uint32) {},
+		func(chars, count int32) {},
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
 			return err
@@ -471,7 +612,7 @@ func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 	}
 	// currentTimeMillis
 	if err := linker.FuncWrap("teavm", "currentTimeMillis",
-		func(ctx context.Context) float64 { return 0 },
+		func() float64 { return 0 },
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
 			return err
@@ -479,7 +620,7 @@ func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 	}
 	// logString
 	if err := linker.FuncWrap("teavm", "logString",
-		func(ctx context.Context, ptr uint32) {},
+		func(ptr int32) {},
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
 			return err
@@ -487,7 +628,7 @@ func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 	}
 	// logInt
 	if err := linker.FuncWrap("teavm", "logInt",
-		func(ctx context.Context, ptr uint32) {},
+		func(ptr int32) {},
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
 			return err
@@ -495,7 +636,7 @@ func (b *wasmtimeBackend) registerTeavmStubs(linker *wasmtime.Linker) error {
 	}
 	// logOutOfMemory
 	if err := linker.FuncWrap("teavm", "logOutOfMemory",
-		func(ctx context.Context) {},
+		func() {},
 	); err != nil {
 		if isWasmtimeLinkerError(err) {
 			return err
@@ -546,27 +687,27 @@ func ctxWithMem(ctx context.Context, buf []byte) context.Context {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatCall(linker *wasmtime.Linker, completeResult, completeErr *string) error {
-	return linker.FuncWrap("env", "cleat_call", func(ctx context.Context, caller *wasmtime.Caller,
-		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_call", func(caller *wasmtime.Caller,
+		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		service, ok := wasmtimeReadServiceName(buf, svcPtr, svcLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		op, ok := wasmtimeReadServiceName(buf, opPtr, opLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.DurableCall(callCtx, nil, service, op, req, respPtr, respMaxLen)), nil
+		callCtx := ctxWithMem(context.Background(), buf)
+	return h.DurableCall(callCtx, nil, service, op, req, uint32(respPtr), uint32(respMaxLen))
 	})
 }
 
@@ -575,8 +716,8 @@ func (b *wasmtimeBackend) registerCleatCall(linker *wasmtime.Linker, completeRes
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatSleep(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_sleep", func(ctx context.Context, durationMs int64) (uint64, error) {
-		return uint64(handlerFromContext(ctx).DurableSleep(ctx, nil, durationMs)), nil
+	return linker.FuncWrap("env", "cleat_sleep", func(durationMs int64) int64 {
+		return b.handler.DurableSleep(context.Background(), nil, durationMs)
 	})
 }
 
@@ -585,8 +726,8 @@ func (b *wasmtimeBackend) registerCleatSleep(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatNow(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_now", func(ctx context.Context) (uint64, error) {
-		return uint64(handlerFromContext(ctx).Now(ctx)), nil
+	return linker.FuncWrap("env", "cleat_now", func() int64 {
+		return b.handler.Now(context.Background())
 	})
 }
 
@@ -595,8 +736,8 @@ func (b *wasmtimeBackend) registerCleatNow(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatRandom(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_random", func(ctx context.Context) (uint64, error) {
-		return uint64(handlerFromContext(ctx).Random(ctx)), nil
+	return linker.FuncWrap("env", "cleat_random", func() int64 {
+		return b.handler.Random(context.Background())
 	})
 }
 
@@ -605,18 +746,18 @@ func (b *wasmtimeBackend) registerCleatRandom(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatLog(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_log", func(ctx context.Context, caller *wasmtime.Caller,
-		msgPtr, msgLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_log", func(caller *wasmtime.Caller,
+		msgPtr, msgLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		msg, ok := wasmtimeReadStringValidated(buf, msgPtr, msgLen, MaxWasmStringLen)
+		msg, ok := wasmtimeReadStringValidated(buf, msgPtr, msgLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.DurableLog(ctx, nil, msg)), nil
+		return h.DurableLog(context.Background(), nil, msg)
 	})
 }
 
@@ -626,14 +767,14 @@ func (b *wasmtimeBackend) registerCleatLog(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatVersion(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_version", func(ctx context.Context) (uint64, error) {
-		return uint64(handlerFromContext(ctx).Version(ctx)), nil
+	return linker.FuncWrap("env", "cleat_version", func() int64 {
+		return b.handler.Version(context.Background())
 	})
 }
 
 func (b *wasmtimeBackend) registerCleatMinVersion(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_min_version", func(ctx context.Context) (uint64, error) {
-		return uint64(handlerFromContext(ctx).MinVersion(ctx)), nil
+	return linker.FuncWrap("env", "cleat_min_version", func() int64 {
+		return b.handler.MinVersion(context.Background())
 	})
 }
 
@@ -643,19 +784,18 @@ func (b *wasmtimeBackend) registerCleatMinVersion(linker *wasmtime.Linker) error
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_defer", func(ctx context.Context, caller *wasmtime.Caller,
-		descPtr, descLen, deferIDPtr, deferIDMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_defer", func(caller *wasmtime.Caller,
+		descPtr, descLen, deferIDPtr, deferIDMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		desc, ok := wasmtimeReadStringValidated(buf, descPtr, descLen, MaxWasmStringLen)
+		desc, ok := wasmtimeReadStringValidated(buf, descPtr, descLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.DurableDefer(callCtx, nil, desc, deferIDPtr, deferIDMaxLen)), nil
+		return h.DurableDefer(context.Background(), nil, desc, uint32(deferIDPtr), uint32(deferIDMaxLen))
 	})
 }
 
@@ -664,15 +804,14 @@ func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatPollCancellation(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_poll_cancellation", func(ctx context.Context, caller *wasmtime.Caller,
-		reasonPtr, reasonMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
-		buf, _, err := callerMemBuf(caller)
+	return linker.FuncWrap("env", "cleat_poll_cancellation", func(caller *wasmtime.Caller,
+		reasonPtr, reasonMaxLen int32) int64 {
+		h := b.handler
+		_, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.PollCancellation(callCtx, nil, reasonPtr, reasonMaxLen)), nil
+		return h.PollCancellation(context.Background(), nil, uint32(reasonPtr), uint32(reasonMaxLen))
 	})
 }
 
@@ -681,19 +820,18 @@ func (b *wasmtimeBackend) registerCleatPollCancellation(linker *wasmtime.Linker)
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatPollSignal(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_poll_signal", func(ctx context.Context, caller *wasmtime.Caller,
-		namePtr, nameLen, payloadPtr, payloadMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_poll_signal", func(caller *wasmtime.Caller,
+		namePtr, nameLen, payloadPtr, payloadMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		name, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.PollSignal(callCtx, nil, name, payloadPtr, payloadMaxLen)), nil
+		return h.PollSignal(context.Background(), nil, name, uint32(payloadPtr), uint32(payloadMaxLen))
 	})
 }
 
@@ -702,18 +840,18 @@ func (b *wasmtimeBackend) registerCleatPollSignal(linker *wasmtime.Linker) error
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatContinueAsNew(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_continue_as_new", func(ctx context.Context, caller *wasmtime.Caller,
-		inputPtr, inputLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_continue_as_new", func(caller *wasmtime.Caller,
+		inputPtr, inputLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		newInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
+		newInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.ContinueAsNew(ctx, nil, newInput)), nil
+		return h.ContinueAsNew(context.Background(), nil, newInput)
 	})
 }
 
@@ -722,18 +860,18 @@ func (b *wasmtimeBackend) registerCleatContinueAsNew(linker *wasmtime.Linker) er
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatContinueAsNewVersioned(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_continue_as_new_versioned", func(ctx context.Context, caller *wasmtime.Caller,
-		inputPtr, inputLen uint32, newVersion int32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_continue_as_new_versioned", func(caller *wasmtime.Caller,
+		inputPtr, inputLen int32, newVersion int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		newInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
+		newInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.ContinueAsNewWithVersion(ctx, nil, newInput, int(newVersion))), nil
+		return h.ContinueAsNewWithVersion(context.Background(), nil, newInput, int(newVersion))
 	})
 }
 
@@ -742,23 +880,22 @@ func (b *wasmtimeBackend) registerCleatContinueAsNewVersioned(linker *wasmtime.L
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatChildWorkflow(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_child_workflow", func(ctx context.Context, caller *wasmtime.Caller,
-		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_child_workflow", func(caller *wasmtime.Caller,
+		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		wfName, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
+		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.ChildWorkflow(callCtx, nil, wfName, wfInput, runIDPtr, runIDMaxLen)), nil
+		return h.ChildWorkflow(context.Background(), nil, wfName, wfInput, uint32(runIDPtr), uint32(runIDMaxLen))
 	})
 }
 
@@ -767,28 +904,27 @@ func (b *wasmtimeBackend) registerCleatChildWorkflow(linker *wasmtime.Linker) er
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_child_workflow_with_options", func(ctx context.Context, caller *wasmtime.Caller,
-		namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
-		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_child_workflow_with_options", func(caller *wasmtime.Caller,
+		namePtr, nameLen, inputPtr, inputLen int32, version int64, priority int64,
+		policyPtr, policyLen, runIDPtr, runIDMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		wfName, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
+		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		parentClosePolicy, ok := wasmtimeReadServiceName(buf, policyPtr, policyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.ChildWorkflowWithOptions(callCtx, nil, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen)), nil
+		return h.ChildWorkflowWithOptions(context.Background(), nil, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
 	})
 }
 
@@ -797,32 +933,31 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_child_workflow_in_schema", func(ctx context.Context, caller *wasmtime.Caller,
-		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
-		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_child_workflow_in_schema", func(caller *wasmtime.Caller,
+		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen int32, version int64, priority int64,
+		policyPtr, policyLen, runIDPtr, runIDMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		targetSchema, ok := wasmtimeReadServiceName(buf, schemaPtr, schemaLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		wfName, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
+		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		parentClosePolicy, ok := wasmtimeReadServiceName(buf, policyPtr, policyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.ChildWorkflowInSchema(callCtx, nil, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen)), nil
+		return h.ChildWorkflowInSchema(context.Background(), nil, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
 	})
 }
 
@@ -831,19 +966,18 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Li
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatAwaitChild(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_await_child", func(ctx context.Context, caller *wasmtime.Caller,
-		runIDPtr, runIDLen, resultPtr, resultMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_await_child", func(caller *wasmtime.Caller,
+		runIDPtr, runIDLen, resultPtr, resultMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		runID, ok := wasmtimeReadServiceName(buf, runIDPtr, runIDLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.AwaitChild(callCtx, nil, runID, resultPtr, resultMaxLen)), nil
+		return h.AwaitChild(context.Background(), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
 	})
 }
 
@@ -852,19 +986,18 @@ func (b *wasmtimeBackend) registerCleatAwaitChild(linker *wasmtime.Linker) error
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatAwaitAllChildren(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_await_all_children", func(ctx context.Context, caller *wasmtime.Caller,
-		idsPtr, idsLen, resultsPtr, resultsMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_await_all_children", func(caller *wasmtime.Caller,
+		idsPtr, idsLen, resultsPtr, resultsMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		runIDsJSON, ok := wasmtimeReadStringValidated(buf, idsPtr, idsLen, MaxWasmStringLen)
+		runIDsJSON, ok := wasmtimeReadStringValidated(buf, idsPtr, idsLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.AwaitAllChildren(callCtx, nil, runIDsJSON, resultsPtr, resultsMaxLen)), nil
+		return h.AwaitAllChildren(context.Background(), nil, runIDsJSON, uint32(resultsPtr), uint32(resultsMaxLen))
 	})
 }
 
@@ -873,36 +1006,35 @@ func (b *wasmtimeBackend) registerCleatAwaitAllChildren(linker *wasmtime.Linker)
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatCallRetry(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_call_retry", func(ctx context.Context, caller *wasmtime.Caller,
-		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32,
+	return linker.FuncWrap("env", "cleat_call_retry", func(caller *wasmtime.Caller,
+		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
-		nonRetryPtr, nonRetryLen uint32,
-		respPtr, respMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+		nonRetryPtr, nonRetryLen int32,
+		respPtr, respMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		service, ok := wasmtimeReadServiceName(buf, svcPtr, svcLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		op, ok := wasmtimeReadServiceName(buf, opPtr, opLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		nonRetryableErrorsJSON, ok := wasmtimeReadStringValidated(buf, nonRetryPtr, nonRetryLen, MaxWasmStringLen)
+		nonRetryableErrorsJSON, ok := wasmtimeReadStringValidated(buf, nonRetryPtr, nonRetryLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.DurableCallWithRetry(callCtx, nil, service, op, req,
+		return h.DurableCallWithRetry(context.Background(), nil, service, op, req,
 			maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
-			nonRetryableErrorsJSON, respPtr, respMaxLen)), nil
+			nonRetryableErrorsJSON, uint32(respPtr), uint32(respMaxLen))
 	})
 }
 
@@ -911,21 +1043,20 @@ func (b *wasmtimeBackend) registerCleatCallRetry(linker *wasmtime.Linker) error 
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatAwaitSignals(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_await_signals", func(ctx context.Context, caller *wasmtime.Caller,
-		namesPtr, namesLen uint32, timeoutMs int64,
-		sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_await_signals", func(caller *wasmtime.Caller,
+		namesPtr, namesLen int32, timeoutMs int64,
+		sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		names, ok := wasmtimeReadStringValidated(buf, namesPtr, namesLen, MaxWasmStringLen)
+		names, ok := wasmtimeReadStringValidated(buf, namesPtr, namesLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.DurableAwaitSignals(callCtx, nil, names, timeoutMs,
-			sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen)), nil
+		return h.DurableAwaitSignals(context.Background(), nil, names, timeoutMs,
+			uint32(sigNamePtr), uint32(sigNameMaxLen), uint32(payloadPtr), uint32(payloadMaxLen))
 	})
 }
 
@@ -934,22 +1065,22 @@ func (b *wasmtimeBackend) registerCleatAwaitSignals(linker *wasmtime.Linker) err
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatSetQueryState(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "set_query_state", func(ctx context.Context, caller *wasmtime.Caller,
-		keyPtr, keyLen, valPtr, valLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "set_query_state", func(caller *wasmtime.Caller,
+		keyPtr, keyLen, valPtr, valLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		key, ok := wasmtimeReadServiceName(buf, keyPtr, keyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		val, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, MaxWasmStringLen)
+		val, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.SetQueryState(ctx, nil, key, val)), nil
+		return h.SetQueryState(context.Background(), nil, key, val)
 	})
 }
 
@@ -958,29 +1089,28 @@ func (b *wasmtimeBackend) registerCleatSetQueryState(linker *wasmtime.Linker) er
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatCallHeartbeat(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_call_heartbeat", func(ctx context.Context, caller *wasmtime.Caller,
-		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32,
+	return linker.FuncWrap("env", "cleat_call_heartbeat", func(caller *wasmtime.Caller,
+		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		heartbeatIntervalMs int64,
-		respPtr, respMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+		respPtr, respMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		service, ok := wasmtimeReadServiceName(buf, svcPtr, svcLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		op, ok := wasmtimeReadServiceName(buf, opPtr, opLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.DurableCallWithHeartbeat(callCtx, nil, service, op, req, heartbeatIntervalMs, respPtr, respMaxLen)), nil
+		return h.DurableCallWithHeartbeat(context.Background(), nil, service, op, req, heartbeatIntervalMs, uint32(respPtr), uint32(respMaxLen))
 	})
 }
 
@@ -989,30 +1119,29 @@ func (b *wasmtimeBackend) registerCleatCallHeartbeat(linker *wasmtime.Linker) er
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatPluginCall(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "plugin_call", func(ctx context.Context, caller *wasmtime.Caller,
+	return linker.FuncWrap("env", "plugin_call", func(caller *wasmtime.Caller,
 		pluginNamePtr, pluginNameLen,
 		funcNamePtr, funcNameLen,
 		inputPtr, inputLen,
-		responsePtr, responseMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+		responsePtr, responseMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		pluginName, ok := wasmtimeReadServiceName(buf, pluginNamePtr, pluginNameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		funcName, ok := wasmtimeReadServiceName(buf, funcNamePtr, funcNameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
+		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.PluginCall(callCtx, nil, pluginName, funcName, inputJSON, responsePtr, responseMaxLen)), nil
+		return h.PluginCall(context.Background(), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
 	})
 }
 
@@ -1021,30 +1150,29 @@ func (b *wasmtimeBackend) registerCleatPluginCall(linker *wasmtime.Linker) error
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatPluginCallStreaming(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "plugin_call_streaming", func(ctx context.Context, caller *wasmtime.Caller,
+	return linker.FuncWrap("env", "plugin_call_streaming", func(caller *wasmtime.Caller,
 		pluginNamePtr, pluginNameLen,
 		funcNamePtr, funcNameLen,
 		inputPtr, inputLen,
-		responsePtr, responseMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+		responsePtr, responseMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		pluginName, ok := wasmtimeReadServiceName(buf, pluginNamePtr, pluginNameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		funcName, ok := wasmtimeReadServiceName(buf, funcNamePtr, funcNameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
+		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.PluginCallStreaming(callCtx, nil, pluginName, funcName, inputJSON, responsePtr, responseMaxLen)), nil
+		return h.PluginCallStreaming(context.Background(), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
 	})
 }
 
@@ -1053,18 +1181,18 @@ func (b *wasmtimeBackend) registerCleatPluginCallStreaming(linker *wasmtime.Link
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatRegisterUpdateHandler(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_register_update_handler", func(ctx context.Context, caller *wasmtime.Caller,
-		namePtr, nameLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_register_update_handler", func(caller *wasmtime.Caller,
+		namePtr, nameLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		name, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.RegisterUpdateHandler(ctx, nil, name)), nil
+		return h.RegisterUpdateHandler(context.Background(), nil, name)
 	})
 }
 
@@ -1073,19 +1201,18 @@ func (b *wasmtimeBackend) registerCleatRegisterUpdateHandler(linker *wasmtime.Li
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatCreatePromise(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_create_promise", func(ctx context.Context, caller *wasmtime.Caller,
-		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_create_promise", func(caller *wasmtime.Caller,
+		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		name, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.CreatePromise(callCtx, nil, name, promiseIDPtr, promiseIDMaxLen)), nil
+		return h.CreatePromise(context.Background(), nil, name, uint32(promiseIDPtr), uint32(promiseIDMaxLen))
 	})
 }
 
@@ -1094,20 +1221,19 @@ func (b *wasmtimeBackend) registerCleatCreatePromise(linker *wasmtime.Linker) er
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatAwaitPromise(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_await_promise", func(ctx context.Context, caller *wasmtime.Caller,
-		promiseIDPtr, promiseIDLen uint32, timeoutMs int64,
-		resultPtr, resultMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_await_promise", func(caller *wasmtime.Caller,
+		promiseIDPtr, promiseIDLen int32, timeoutMs int64,
+		resultPtr, resultMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		promiseID, ok := wasmtimeReadServiceName(buf, promiseIDPtr, promiseIDLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.AwaitPromise(callCtx, nil, promiseID, timeoutMs, resultPtr, resultMaxLen)), nil
+		return h.AwaitPromise(context.Background(), nil, promiseID, timeoutMs, uint32(resultPtr), uint32(resultMaxLen))
 	})
 }
 
@@ -1116,29 +1242,28 @@ func (b *wasmtimeBackend) registerCleatAwaitPromise(linker *wasmtime.Linker) err
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatSendSignalAndWait(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_send_signal_and_wait", func(ctx context.Context, caller *wasmtime.Caller,
-		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen uint32,
+	return linker.FuncWrap("env", "cleat_send_signal_and_wait", func(caller *wasmtime.Caller,
+		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen int32,
 		timeoutMs int64,
-		respPtr, respMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+		respPtr, respMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		targetRunID, ok := wasmtimeReadServiceName(buf, targetPtr, targetLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		signalName, ok := wasmtimeReadServiceName(buf, sigPtr, sigLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, MaxWasmStringLen)
+		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.SendSignalAndWait(callCtx, nil, targetRunID, signalName, payload, timeoutMs, respPtr, respMaxLen)), nil
+		return h.SendSignalAndWait(context.Background(), nil, targetRunID, signalName, payload, timeoutMs, uint32(respPtr), uint32(respMaxLen))
 	})
 }
 
@@ -1147,22 +1272,22 @@ func (b *wasmtimeBackend) registerCleatSendSignalAndWait(linker *wasmtime.Linker
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatReplyToSignal(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_reply_to_signal", func(ctx context.Context, caller *wasmtime.Caller,
-		correlationPtr, correlationLen, respPtr, respLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_reply_to_signal", func(caller *wasmtime.Caller,
+		correlationPtr, correlationLen, respPtr, respLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		correlationID, ok := wasmtimeReadServiceName(buf, correlationPtr, correlationLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		response, ok := wasmtimeReadStringValidated(buf, respPtr, respLen, MaxWasmStringLen)
+		response, ok := wasmtimeReadStringValidated(buf, respPtr, respLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.ReplyToSignal(ctx, nil, correlationID, response)), nil
+		return h.ReplyToSignal(context.Background(), nil, correlationID, response)
 	})
 }
 
@@ -1171,26 +1296,26 @@ func (b *wasmtimeBackend) registerCleatReplyToSignal(linker *wasmtime.Linker) er
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatSignalWorkflow(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_signal_workflow", func(ctx context.Context, caller *wasmtime.Caller,
-		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_signal_workflow", func(caller *wasmtime.Caller,
+		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		targetRunID, ok := wasmtimeReadServiceName(buf, targetPtr, targetLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		signalName, ok := wasmtimeReadServiceName(buf, sigPtr, sigLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, MaxWasmStringLen)
+		payload, ok := wasmtimeReadStringValidated(buf, payloadPtr, payloadLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.SignalWorkflow(ctx, nil, targetRunID, signalName, payload)), nil
+		return h.SignalWorkflow(context.Background(), nil, targetRunID, signalName, payload)
 	})
 }
 
@@ -1199,24 +1324,23 @@ func (b *wasmtimeBackend) registerCleatSignalWorkflow(linker *wasmtime.Linker) e
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatSetScope(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_set_scope", func(ctx context.Context, caller *wasmtime.Caller,
-		objTypePtr, objTypeLen, instKeyPtr, instKeyLen uint32,
-		prevScopePtr, prevScopeMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_set_scope", func(caller *wasmtime.Caller,
+		objTypePtr, objTypeLen, instKeyPtr, instKeyLen int32,
+		prevScopePtr, prevScopeMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		objType, ok := wasmtimeReadServiceName(buf, objTypePtr, objTypeLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		instKey, ok := wasmtimeReadServiceName(buf, instKeyPtr, instKeyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.SetScope(callCtx, nil, objType, instKey, prevScopePtr, prevScopeMaxLen)), nil
+		return h.SetScope(context.Background(), nil, objType, instKey, uint32(prevScopePtr), uint32(prevScopeMaxLen))
 	})
 }
 
@@ -1225,15 +1349,14 @@ func (b *wasmtimeBackend) registerCleatSetScope(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatGetScope(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_get_scope", func(ctx context.Context, caller *wasmtime.Caller,
-		objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
-		buf, _, err := callerMemBuf(caller)
+	return linker.FuncWrap("env", "cleat_get_scope", func(caller *wasmtime.Caller,
+		objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen int32) int64 {
+		h := b.handler
+		_, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.GetScope(callCtx, nil, objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen)), nil
+		return h.GetScope(context.Background(), nil, uint32(objTypePtr), uint32(objTypeMaxLen), uint32(instKeyPtr), uint32(instKeyMaxLen))
 	})
 }
 
@@ -1242,19 +1365,18 @@ func (b *wasmtimeBackend) registerCleatGetScope(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatUUID(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_uuid", func(ctx context.Context, caller *wasmtime.Caller,
-		seedPtr, seedLen, uuidPtr, uuidMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_uuid", func(caller *wasmtime.Caller,
+		seedPtr, seedLen, uuidPtr, uuidMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		seed, ok := wasmtimeReadStringValidated(buf, seedPtr, seedLen, MaxWasmStringLen)
+		seed, ok := wasmtimeReadStringValidated(buf, seedPtr, seedLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.UUID(callCtx, nil, seed, uuidPtr, uuidMaxLen)), nil
+		return h.UUID(context.Background(), nil, seed, uint32(uuidPtr), uint32(uuidMaxLen))
 	})
 }
 
@@ -1263,18 +1385,18 @@ func (b *wasmtimeBackend) registerCleatUUID(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatAcquireLock(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_acquire_lock", func(ctx context.Context, caller *wasmtime.Caller,
-		keyPtr, keyLen uint32, ttlMs int64) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_acquire_lock", func(caller *wasmtime.Caller,
+		keyPtr, keyLen int32, ttlMs int64) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		key, ok := wasmtimeReadServiceName(buf, keyPtr, keyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.AcquireLock(ctx, nil, key, ttlMs)), nil
+		return h.AcquireLock(context.Background(), nil, key, ttlMs)
 	})
 }
 
@@ -1283,18 +1405,18 @@ func (b *wasmtimeBackend) registerCleatAcquireLock(linker *wasmtime.Linker) erro
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatReleaseLock(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_release_lock", func(ctx context.Context, caller *wasmtime.Caller,
-		keyPtr, keyLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_release_lock", func(caller *wasmtime.Caller,
+		keyPtr, keyLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		key, ok := wasmtimeReadServiceName(buf, keyPtr, keyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.ReleaseLock(ctx, nil, key)), nil
+		return h.ReleaseLock(context.Background(), nil, key)
 	})
 }
 
@@ -1303,19 +1425,18 @@ func (b *wasmtimeBackend) registerCleatReleaseLock(linker *wasmtime.Linker) erro
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatSideEffect(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_side_effect", func(ctx context.Context, caller *wasmtime.Caller,
-		resultPtr, resultLen, outPtr, outMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_side_effect", func(caller *wasmtime.Caller,
+		resultPtr, resultLen, outPtr, outMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		result, ok := wasmtimeReadStringValidated(buf, resultPtr, resultLen, MaxWasmStringLen)
+		result, ok := wasmtimeReadStringValidated(buf, resultPtr, resultLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.SideEffect(callCtx, nil, result, outPtr, outMaxLen)), nil
+		return h.SideEffect(context.Background(), nil, result, uint32(outPtr), uint32(outMaxLen))
 	})
 }
 
@@ -1324,15 +1445,14 @@ func (b *wasmtimeBackend) registerCleatSideEffect(linker *wasmtime.Linker) error
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatWorkflowID(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_workflow_id", func(ctx context.Context, caller *wasmtime.Caller,
-		idPtr, idMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
-		buf, _, err := callerMemBuf(caller)
+	return linker.FuncWrap("env", "cleat_workflow_id", func(caller *wasmtime.Caller,
+		idPtr, idMaxLen int32) int64 {
+		h := b.handler
+		_, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.WorkflowID(callCtx, nil, idPtr, idMaxLen)), nil
+		return h.WorkflowID(context.Background(), nil, uint32(idPtr), uint32(idMaxLen))
 	})
 }
 
@@ -1341,15 +1461,14 @@ func (b *wasmtimeBackend) registerCleatWorkflowID(linker *wasmtime.Linker) error
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatRunID(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_run_id", func(ctx context.Context, caller *wasmtime.Caller,
-		idPtr, idMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
-		buf, _, err := callerMemBuf(caller)
+	return linker.FuncWrap("env", "cleat_run_id", func(caller *wasmtime.Caller,
+		idPtr, idMaxLen int32) int64 {
+		h := b.handler
+		_, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.RunID(callCtx, nil, idPtr, idMaxLen)), nil
+		return h.RunID(context.Background(), nil, uint32(idPtr), uint32(idMaxLen))
 	})
 }
 
@@ -1359,42 +1478,42 @@ func (b *wasmtimeBackend) registerCleatRunID(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatResolvePromise(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_resolve_promise", func(ctx context.Context, caller *wasmtime.Caller,
-		idPtr, idLen, valPtr, valLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_resolve_promise", func(caller *wasmtime.Caller,
+		idPtr, idLen, valPtr, valLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		promiseID, ok := wasmtimeReadServiceName(buf, idPtr, idLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, MaxWasmStringLen)
+		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.ResolvePromise(ctx, nil, promiseID, value)), nil
+		return h.ResolvePromise(context.Background(), nil, promiseID, value)
 	})
 }
 
 func (b *wasmtimeBackend) registerCleatRejectPromise(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_reject_promise", func(ctx context.Context, caller *wasmtime.Caller,
-		idPtr, idLen, errPtr, errLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_reject_promise", func(caller *wasmtime.Caller,
+		idPtr, idLen, errPtr, errLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		promiseID, ok := wasmtimeReadServiceName(buf, idPtr, idLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		errMsg, ok := wasmtimeReadStringValidated(buf, errPtr, errLen, MaxWasmStringLen)
+		errMsg, ok := wasmtimeReadStringValidated(buf, errPtr, errLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.RejectPromise(ctx, nil, promiseID, errMsg)), nil
+		return h.RejectPromise(context.Background(), nil, promiseID, errMsg)
 	})
 }
 
@@ -1403,26 +1522,26 @@ func (b *wasmtimeBackend) registerCleatRejectPromise(linker *wasmtime.Linker) er
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatSend(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_send", func(ctx context.Context, caller *wasmtime.Caller,
-		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_send", func(caller *wasmtime.Caller,
+		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		service, ok := wasmtimeReadServiceName(buf, svcPtr, svcLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		op, ok := wasmtimeReadServiceName(buf, opPtr, opLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.DurableSend(ctx, nil, service, op, req)), nil
+		return h.DurableSend(context.Background(), nil, service, op, req)
 	})
 }
 
@@ -1431,26 +1550,26 @@ func (b *wasmtimeBackend) registerCleatSend(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatScheduleInvoke(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_schedule_invoke", func(ctx context.Context, caller *wasmtime.Caller,
-		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen uint32, delayMs int64) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_schedule_invoke", func(caller *wasmtime.Caller,
+		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32, delayMs int64) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		service, ok := wasmtimeReadServiceName(buf, svcPtr, svcLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
 		op, ok := wasmtimeReadServiceName(buf, opPtr, opLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, MaxWasmStringLen)
+		req, ok := wasmtimeReadStringValidated(buf, reqPtr, reqLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.DurableScheduleInvoke(ctx, nil, service, op, req, delayMs)), nil
+		return h.DurableScheduleInvoke(context.Background(), nil, service, op, req, delayMs)
 	})
 }
 
@@ -1459,18 +1578,18 @@ func (b *wasmtimeBackend) registerCleatScheduleInvoke(linker *wasmtime.Linker) e
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatRegisterQueryHandler(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_register_query_handler", func(ctx context.Context, caller *wasmtime.Caller,
-		namePtr, nameLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_register_query_handler", func(caller *wasmtime.Caller,
+		namePtr, nameLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		name, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.RegisterQueryHandler(ctx, nil, name)), nil
+		return h.RegisterQueryHandler(context.Background(), nil, name)
 	})
 }
 
@@ -1479,22 +1598,22 @@ func (b *wasmtimeBackend) registerCleatRegisterQueryHandler(linker *wasmtime.Lin
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatRunDetached(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_run_detached", func(ctx context.Context, caller *wasmtime.Caller,
-		namePtr, nameLen, inputPtr, inputLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_run_detached", func(caller *wasmtime.Caller,
+		namePtr, nameLen, inputPtr, inputLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		name, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, MaxWasmStringLen)
+		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.RunDetached(ctx, nil, name, inputJSON)), nil
+		return h.RunDetached(context.Background(), nil, name, inputJSON)
 	})
 }
 
@@ -1506,87 +1625,86 @@ func (b *wasmtimeBackend) registerCleatRunDetached(linker *wasmtime.Linker) erro
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatSetState(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_set_state", func(ctx context.Context, caller *wasmtime.Caller,
-		keyPtr, keyLen, valPtr, valLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_set_state", func(caller *wasmtime.Caller,
+		keyPtr, keyLen, valPtr, valLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		key, ok := wasmtimeReadServiceName(buf, keyPtr, keyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, MaxWasmStringLen)
+		value, ok := wasmtimeReadStringValidated(buf, valPtr, valLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.SetState(ctx, nil, key, value)), nil
+		return h.SetState(context.Background(), nil, key, value)
 	})
 }
 
 func (b *wasmtimeBackend) registerCleatGetState(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_get_state", func(ctx context.Context, caller *wasmtime.Caller,
-		keyPtr, keyLen, valuePtr, valueMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_get_state", func(caller *wasmtime.Caller,
+		keyPtr, keyLen, valuePtr, valueMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		key, ok := wasmtimeReadServiceName(buf, keyPtr, keyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.GetState(callCtx, nil, key, valuePtr, valueMaxLen)), nil
+		return h.GetState(context.Background(), nil, key, uint32(valuePtr), uint32(valueMaxLen))
 	})
 }
 
 func (b *wasmtimeBackend) registerCleatDeleteState(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_delete_state", func(ctx context.Context, caller *wasmtime.Caller,
-		keyPtr, keyLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_delete_state", func(caller *wasmtime.Caller,
+		keyPtr, keyLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		key, ok := wasmtimeReadServiceName(buf, keyPtr, keyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.DeleteState(ctx, nil, key)), nil
+		return h.DeleteState(context.Background(), nil, key)
 	})
 }
 
 func (b *wasmtimeBackend) registerCleatIncrState(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_incr_state", func(ctx context.Context, caller *wasmtime.Caller,
-		keyPtr, keyLen uint32, delta int64) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_incr_state", func(caller *wasmtime.Caller,
+		keyPtr, keyLen int32, delta int64) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		key, ok := wasmtimeReadServiceName(buf, keyPtr, keyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.IncrState(ctx, nil, key, delta)), nil
+		return h.IncrState(context.Background(), nil, key, delta)
 	})
 }
 
 func (b *wasmtimeBackend) registerCleatHasState(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_has_state", func(ctx context.Context, caller *wasmtime.Caller,
-		keyPtr, keyLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_has_state", func(caller *wasmtime.Caller,
+		keyPtr, keyLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		key, ok := wasmtimeReadServiceName(buf, keyPtr, keyLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		return uint64(h.HasState(ctx, nil, key)), nil
+		return h.HasState(context.Background(), nil, key)
 	})
 }
 
@@ -1595,19 +1713,18 @@ func (b *wasmtimeBackend) registerCleatHasState(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatListState(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_list_state", func(ctx context.Context, caller *wasmtime.Caller,
-		prefixPtr, prefixLen, keysPtr, keysMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_list_state", func(caller *wasmtime.Caller,
+		prefixPtr, prefixLen, keysPtr, keysMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
-		prefix, ok := wasmtimeReadStringValidated(buf, prefixPtr, prefixLen, MaxWasmStringLen)
+		prefix, ok := wasmtimeReadStringValidated(buf, prefixPtr, prefixLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.ListState(callCtx, nil, prefix, keysPtr, keysMaxLen)), nil
+		return h.ListState(context.Background(), nil, prefix, uint32(keysPtr), uint32(keysMaxLen))
 	})
 }
 
@@ -1616,32 +1733,31 @@ func (b *wasmtimeBackend) registerCleatListState(linker *wasmtime.Linker) error 
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatFetch(linker *wasmtime.Linker) error {
-	return linker.FuncWrap("env", "cleat_fetch", func(ctx context.Context, caller *wasmtime.Caller,
-		methodPtr, methodLen, urlPtr, urlLen, headersPtr, headersLen, bodyPtr, bodyLen uint32,
-		responsePtr, responseMaxLen uint32) (uint64, error) {
-		h := handlerFromContext(ctx)
+	return linker.FuncWrap("env", "cleat_fetch", func(caller *wasmtime.Caller,
+		methodPtr, methodLen, urlPtr, urlLen, headersPtr, headersLen, bodyPtr, bodyLen int32,
+		responsePtr, responseMaxLen int32) int64 {
+		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		method, ok := wasmtimeReadServiceName(buf, methodPtr, methodLen)
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		url, ok := wasmtimeReadStringValidated(buf, urlPtr, urlLen, MaxWasmStringLen)
+		url, ok := wasmtimeReadStringValidated(buf, urlPtr, urlLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		headersJSON, ok := wasmtimeReadStringValidated(buf, headersPtr, headersLen, MaxWasmStringLen)
+		headersJSON, ok := wasmtimeReadStringValidated(buf, headersPtr, headersLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		body, ok := wasmtimeReadStringValidated(buf, bodyPtr, bodyLen, MaxWasmStringLen)
+		body, ok := wasmtimeReadStringValidated(buf, bodyPtr, bodyLen, int32(MaxWasmStringLen))
 		if !ok {
-			return errBadParam, nil
+			return errBadParamInt64
 		}
-		callCtx := ctxWithMem(ctx, buf)
-		return uint64(h.Fetch(callCtx, nil, method, url, headersJSON, body, responsePtr, responseMaxLen)), nil
+		return h.Fetch(context.Background(), nil, method, url, headersJSON, body, uint32(responsePtr), uint32(responseMaxLen))
 	})
 }
 
@@ -1653,11 +1769,11 @@ func (b *wasmtimeBackend) registerCleatFetch(linker *wasmtime.Linker) error {
 // ---------------------------------------------------------------------------
 
 func (b *wasmtimeBackend) registerCleatComplete(linker *wasmtime.Linker, completeResult, completeErr *string) error {
-	return linker.FuncWrap("env", "cleat_complete", func(ctx context.Context, caller *wasmtime.Caller,
-		status uint32, resultPtr uint32, resultLen uint32) (uint64, error) {
+	return linker.FuncWrap("env", "cleat_complete", func(caller *wasmtime.Caller,
+		status int32, resultPtr int32, resultLen int32) int64 {
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
-			return 0, err
+			return errBadParamInt64
 		}
 		if resultLen > 0 && uint64(resultPtr)+uint64(resultLen) <= uint64(len(buf)) {
 			result := string(buf[resultPtr : resultPtr+resultLen])
@@ -1667,6 +1783,44 @@ func (b *wasmtimeBackend) registerCleatComplete(linker *wasmtime.Linker, complet
 				*completeErr = result
 			}
 		}
-		return 0, nil
+		return 0
+	})
+}
+
+// ---------------------------------------------------------------------------
+// cleat_poll_work: (i32,i32, i32,i32) -> i64
+// entryName(ptr,maxLen), argsJSON(ptr,maxLen)
+// Returns the work data set by Execute() before calling _start.
+// ---------------------------------------------------------------------------
+
+func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
+	return linker.FuncWrap("env", "cleat_poll_work", func(caller *wasmtime.Caller,
+		entryNamePtr int32, entryNameMaxLen int32,
+		argsPtr int32, argsMaxLen int32) int64 {
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+
+		// Write entry point name.
+		entryBytes := []byte(b.workEntryPoint)
+		entryLen := len(entryBytes)
+		if entryLen > int(entryNameMaxLen) {
+			entryLen = int(entryNameMaxLen)
+		}
+		if entryLen > 0 {
+			copy(buf[entryNamePtr:entryNamePtr+int32(entryLen)], entryBytes[:entryLen])
+		}
+
+		// Write input JSON.
+		argsLen := len(b.workInput)
+		if argsLen > int(argsMaxLen) {
+			argsLen = int(argsMaxLen)
+		}
+		if argsLen > 0 {
+			copy(buf[argsPtr:argsPtr+int32(argsLen)], b.workInput[:argsLen])
+		}
+
+		return (int64(entryLen) << 32) | int64(argsLen)
 	})
 }

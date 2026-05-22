@@ -58,7 +58,7 @@ To build and test cleat you will need:
 |------|---------|----------|-------|
 | **Go** | 1.26+ | Yes | See `go.mod` |
 | **PostgreSQL** | 14+ (16 recommended) | Yes | For worker daemon and workflow storage |
-| **TinyGo** | Latest | Yes | Required for Go WASM compilation |
+| **TinyGo** | Latest | No | Required only for `--target tinygo`. The default `--target go` uses the standard Go toolchain (`GOOS=wasip1 GOARCH=wasm`). |
 | **Rust toolchain** | Stable | No | For `cleat-macro` / `cleat-sdk` crates and Rust workflows |
 | **Node.js** | 20+ | No | For Svelte web UI and AssemblyScript SDK |
 | **Java** | 17+ | No | For Java SDK |

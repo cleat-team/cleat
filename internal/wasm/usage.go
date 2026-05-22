@@ -2,7 +2,8 @@
 // for the cleat workflow transformer.
 //
 // Supported wasm compilation targets:
-//   - "tinygo"       — TinyGo wasip1 (default for Go)
+//   - "tinygo"       — TinyGo wasip1 (deprecated, use "go" instead)
+//   - "go"           — Standard Go wasip1 (go build with GOOS=wasip1 GOARCH=wasm)
 //   - "rust"         — Rust via cargo + wasm32-wasip1
 //   - "java"         — Java via Gradle + TeaVM
 //   - "assemblyscript" — AssemblyScript via asc
@@ -17,6 +18,10 @@ import (
 	"github.com/cleat-team/cleat/internal/analyzer"
 	"github.com/cleat-team/cleat/internal/closure"
 )
+
+// GoTarget identifies the standard Go WASM compilation target.
+// Uses GOOS=wasip1 GOARCH=wasm go build instead of TinyGo.
+const GoTarget = "go"
 
 // PythonTarget identifies the Python WASM compilation target.
 // Used by the Go build system to dispatch to the componentize-py pipeline.

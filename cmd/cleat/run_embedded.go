@@ -22,7 +22,7 @@ func runEmbedded(args []string) {
 	entryPoint := fs.String("entry-point", "place_order", "Entry point function name")
 	inputJSON := fs.String("input", "{}", "Workflow input as JSON")
 	apiAddr := fs.String("api-addr", ":8080", "HTTP API + web UI listen address (empty to disable)")
-	target := fs.String("target", "tinygo", "Build target: tinygo or rust")
+	target := fs.String("target", "go", "Build target: go (default), tinygo (deprecated), rust")
 	fs.Parse(args)
 
 	remainder := fs.Args()

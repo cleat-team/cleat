@@ -701,7 +701,7 @@ func needsFmt(usage *UsageInfo) bool {
 // needsManualJSON returns true if any of the used adapter defs need the
 // hand-written JSON helpers (buildJSONStringArray, parseSimpleResult,
 // parseChildResultArray). These replace encoding/json to avoid TinyGo
-// reflection bugs (invalid table access, unreachable panics).
+// reflection bugs and keep WASM binary size small for both targets.
 func needsManualJSON(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
 		adef, ok := adapterDefs[hf.FieldName]
@@ -840,6 +840,12 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo, target string) []byte
 // access" or "unreachable" panics. These helpers handle the specific types
 // used by the generated adapter (string arrays, simple result objects,
 // arrays of ChildResult).
+//
+// These helpers are used for both --target tinygo and --target go to keep
+// generated code consistent and avoid the 1-2 MB binary size increase from
+// importing encoding/json in WASM builds. Standard Go's encoding/json would
+// work correctly here but is not needed for the limited patterns the adapter
+// generates.
 func writeManualJSONHelpers(buf *bytes.Buffer) {
 	buf.WriteString(`
 // buildJSONStringArray builds a JSON array of strings without reflection.
