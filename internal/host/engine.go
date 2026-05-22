@@ -1715,7 +1715,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// and return the cached response.  (Use DurableCallIdempotent for
 	// exactly-once with write-ahead logging and ambiguity detection.)
 	if s.engine.db != nil {
-		if flushErr := s.engine.flushEvent(ctx, s.workflowID, rec); flushErr != nil {
+		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
 			log.Printf("[engine] freshCall: flushEvent failed for workflow=%s step=%d: %v", s.workflowID, rec.Step, flushErr)
 		}
 	}
@@ -1925,6 +1925,13 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			Idempotent:   idempotent,
 		}
 		s.recordEvent(rec)
+
+		// Flush immediately so plugin results survive worker crashes.
+		if s.engine.db != nil {
+			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
+				log.Printf("[engine] PluginCall: flushEvent failed for workflow=%s step=%d: %v", s.workflowID, rec.Step, flushErr)
+			}
+		}
 	}
 
 	if fnErr != nil {
@@ -3113,6 +3120,13 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	s.nowMs = rec.TimestampMs
 	s.history = append(s.history, rec)
 	s.stepCount++
+
+	// Persist immediately so events survive worker crashes.
+	if s.engine.db != nil && !s.isReplay {
+		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
+			log.Printf("[engine] recordEvent: flushEvent failed for workflow=%s step=%d type=%s: %v", s.workflowID, rec.Step, rec.EventType, flushErr)
+		}
+	}
 }
 
 func (s *execSession) Now(ctx context.Context) int64 {

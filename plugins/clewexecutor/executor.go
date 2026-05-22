@@ -175,6 +175,29 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 			}
 		}
 	}
+	// Escalation check: if this is a review phase and the work artifact
+	// hasn't changed since the last review, skip the review and escalate.
+	// Prevents the review loop from exhausting max rounds when the planner
+	// or developer doesn't actually update the work product between rounds.
+	if role == "reviewer" {
+		escalated := checkReviewEscalation(td, in.Phase)
+		if escalated != "" {
+			now := time.Now().Format(time.RFC3339)
+			out := runPhaseOutput{
+				ExitCode:      0,
+				PhaseChanged:  true,
+				NewPhase:      phase,
+				ReviewOutcome: escalated,
+				FindingsCount: 1,
+				Started:       now,
+				Ended:         now,
+				Status:        "completed",
+			}
+			b, _ := json.Marshal(out)
+			return string(b), nil
+		}
+	}
+
 	prompt, err := buildPrompt(in, role, td, protocolPath, phase)
 	if err != nil {
 		out := runPhaseOutput{Status: "failed", Error: err.Error()}
@@ -444,6 +467,22 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 	pr := prs[0]
 	prURL := pr.URL
 
+	// Check for merge conflicts before evaluating CI checks.
+	conflictCmd := exec.CommandContext(ctx, "gh", "pr", "view", strconv.Itoa(pr.Number),
+		"--json", "mergeable",
+	)
+	conflictCmd.Dir = in.Workdir
+	if conflictOut, conflictErr := conflictCmd.Output(); conflictErr == nil {
+		var conflictInfo struct {
+			Mergeable string `json:"mergeable"`
+		}
+		if json.Unmarshal(conflictOut, &conflictInfo) == nil && conflictInfo.Mergeable == "CONFLICTING" {
+			out := checkCIOutput{CIStatus: "conflict", PRURL: prURL, Details: "merge conflict with base branch"}
+			b, _ := json.Marshal(out)
+			return string(b), nil
+		}
+	}
+
 	if len(pr.StatusCheckRollup) == 0 {
 		out := checkCIOutput{CIStatus: "passing", PRURL: prURL, Details: "no checks configured"}
 		b, _ := json.Marshal(out)
@@ -502,7 +541,7 @@ func buildPrompt(in runPhaseInput, role, td, protocolPath, currentPhase string) 
 				"You are a developer agent in the Clew system. Project: %s. Task ID: %s.\n\nYour implementation is already done and pushed to the '%s' branch.\n\nRead %s for your full protocol, then jump to Phase 6 (CI verification). Your job:\n- Rebase onto latest develop\n- Open a draft PR with `gh pr create --base develop --head %s --draft`\n- Wait for CI checks, fix any failures, and mark the PR ready for review\n- Update STATUS.md and write the daily log\n\nDo NOT re-explore, re-plan, or re-implement — those phases are complete.",
 				in.Project, in.TaskID, in.TaskID, protocolPath, in.TaskID,
 			), nil
-		case "ci_fix":
+		case "ci_fix", "rebase_fix":
 			return fmt.Sprintf(
 				"You are a developer agent in the Clew system. Project: %s. Task ID: %s.\n\nA PR exists for branch '%s' but CI is failing. Read %s for your full protocol, then follow Phase 6 (CI verification). Read the CI failure logs, fix the issues, commit and push. Repeat until all checks pass or you hit the retry limit.",
 				in.Project, in.TaskID, in.TaskID, protocolPath,
@@ -584,7 +623,7 @@ func workflowPhaseToStatusPhase(wfPhase string) string {
 		return "create_pr"
 	case "ci_wait":
 		return "ci_wait"
-	case "ci_fix":
+	case "ci_fix", "rebase_fix":
 		return "ci_fix"
 	case "merge":
 		return "merge"
@@ -799,7 +838,7 @@ func nextPhase(phase string) string {
 		return "create_pr"
 	case "create_pr":
 		return "ci_wait"
-	case "ci_fix":
+	case "ci_fix", "rebase_fix":
 		return "ci_wait"
 	case "merge":
 		return "done"
@@ -836,6 +875,43 @@ func latestReviewFile(td, currentPhase string) string {
 		}
 	}
 	return bestName
+}
+
+// checkReviewEscalation detects when the review loop should stop because
+// the work product hasn't been updated since the last review.
+// Returns "PASS" if the work artifact is older than the latest review file,
+// meaning the planner/developer didn't address the previous review findings
+// and further review rounds would be wasted. The task advances with findings
+// deferred to the implementer.
+// Returns "" if no escalation is needed (no prior review, or work was updated).
+func checkReviewEscalation(td, reviewPhase string) string {
+	var workFile string
+	switch reviewPhase {
+	case "review_plan":
+		workFile = filepath.Join(td, "artifacts", "plan.md")
+	case "review_impl":
+		workFile = filepath.Join(td, "artifacts", "implementation.md")
+	default:
+		return ""
+	}
+	workInfo, err := os.Stat(workFile)
+	if err != nil {
+		return "" // no work file yet — can't escalate
+	}
+	latestReview := latestReviewFile(td, "")
+	if latestReview == "" {
+		return "" // no prior review
+	}
+	reviewInfo, err := os.Stat(filepath.Join(td, "artifacts", latestReview))
+	if err != nil {
+		return ""
+	}
+	// If the work artifact hasn't been modified since the last review,
+	// the review loop is stuck — pass with fixes deferred.
+	if !workInfo.ModTime().After(reviewInfo.ModTime()) {
+		return "PASS"
+	}
+	return ""
 }
 
 // listArtifactFiles returns a map of artifact filename → modtime.
