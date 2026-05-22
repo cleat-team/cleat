@@ -75,18 +75,13 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	ctx = withHandler(ctx, session)
 	b.handler = session
 
-	// Detect Component Model binaries and extract the first core module.
-	// Component Model binaries (.wasm from componentize-py) contain nested
-	// core WASM modules. We extract the first one and execute it directly.
+	// Detect Component Model binaries and dispatch to the component execution path.
 	if isComponentWasm(wasmBytes) {
 		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
 		if bundleErr != nil {
 			return nil, fmt.Errorf("host: parse component bundle: %w", bundleErr)
 		}
-		if len(bundle.Modules) == 0 {
-			return nil, fmt.Errorf("host: component bundle has no core modules")
-		}
-		wasmBytes = wasm.PatchEmptyImportModuleName(bundle.Modules[0], "__component_adapter__")
+		return b.ExecuteComponent(ctx, wasmBytes, bundle, entryPoint, input, session)
 	}
 
 	// Compile the WASM module.
@@ -98,189 +93,14 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Create linker and register host functions.
 	linker := wasmtime.NewLinker(b.engine)
-	if err := b.registerWasiStubs(linker); err != nil {
-		return nil, fmt.Errorf("host: register WASI stubs: %w", err)
-	}
-	if err := b.registerEnvStubs(linker); err != nil {
-		return nil, fmt.Errorf("host: register env stubs: %w", err)
-	}
-	if err := b.registerTeavmStubs(linker); err != nil {
-		return nil, fmt.Errorf("host: register teavm stubs: %w", err)
-	}
 
 	// Register cleat_* host functions. We use a closure-based approach:
 	// each function captures a result/error holder so that cleat_complete
 	// can store the workflow result and the Execute method can retrieve
 	// it even when the module subsequently traps (e.g. via proc_exit).
 	var completeResult, completeErr string
-
-	if err := b.registerCleatCall(linker, &completeResult, &completeErr); err != nil {
-		return nil, fmt.Errorf("host: register cleat_call: %w", err)
-	}
-	if err := b.registerCleatSleep(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_sleep: %w", err)
-	}
-	if err := b.registerCleatNow(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_now: %w", err)
-	}
-	if err := b.registerCleatRandom(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_random: %w", err)
-	}
-	if err := b.registerCleatLog(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_log: %w", err)
-	}
-	if err := b.registerCleatVersion(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_version: %w", err)
-	}
-	if err := b.registerCleatMinVersion(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_min_version: %w", err)
-	}
-	if err := b.registerCleatDefer(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_defer: %w", err)
-	}
-	if err := b.registerCleatPollCancellation(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_poll_cancellation: %w", err)
-	}
-	if err := b.registerCleatPollSignal(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_poll_signal: %w", err)
-	}
-	if err := b.registerCleatContinueAsNew(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_continue_as_new: %w", err)
-	}
-	if err := b.registerCleatContinueAsNewVersioned(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_continue_as_new_versioned: %w", err)
-	}
-	if err := b.registerCleatChildWorkflow(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_child_workflow: %w", err)
-	}
-	if err := b.registerCleatChildWorkflowWithOptions(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_child_workflow_with_options: %w", err)
-	}
-	if err := b.registerCleatChildWorkflowInSchema(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_child_workflow_in_schema: %w", err)
-	}
-	if err := b.registerCleatAwaitChild(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_await_child: %w", err)
-	}
-	if err := b.registerCleatAwaitAllChildren(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_await_all_children: %w", err)
-	}
-	if err := b.registerCleatCallRetry(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_call_retry: %w", err)
-	}
-	if err := b.registerCleatAwaitSignals(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_await_signals: %w", err)
-	}
-	if err := b.registerCleatSetQueryState(linker); err != nil {
-		return nil, fmt.Errorf("host: register set_query_state: %w", err)
-	}
-	if err := b.registerCleatCallHeartbeat(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_call_heartbeat: %w", err)
-	}
-	if err := b.registerCleatPluginCall(linker); err != nil {
-		return nil, fmt.Errorf("host: register plugin_call: %w", err)
-	}
-	if err := b.registerCleatPluginCallStreaming(linker); err != nil {
-		return nil, fmt.Errorf("host: register plugin_call_streaming: %w", err)
-	}
-	if err := b.registerCleatRegisterUpdateHandler(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_register_update_handler: %w", err)
-	}
-	if err := b.registerCleatCreatePromise(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_create_promise: %w", err)
-	}
-	if err := b.registerCleatAwaitPromise(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_await_promise: %w", err)
-	}
-	if err := b.registerCleatSendSignalAndWait(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_send_signal_and_wait: %w", err)
-	}
-	if err := b.registerCleatReplyToSignal(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_reply_to_signal: %w", err)
-	}
-	if err := b.registerCleatSignalWorkflow(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_signal_workflow: %w", err)
-	}
-	if err := b.registerCleatSetScope(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_set_scope: %w", err)
-	}
-	if err := b.registerCleatGetScope(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_get_scope: %w", err)
-	}
-	if err := b.registerCleatUUID(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_uuid: %w", err)
-	}
-	if err := b.registerCleatAcquireLock(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_acquire_lock: %w", err)
-	}
-	if err := b.registerCleatReleaseLock(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_release_lock: %w", err)
-	}
-	if err := b.registerCleatSideEffect(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_side_effect: %w", err)
-	}
-	if err := b.registerCleatWorkflowID(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_workflow_id: %w", err)
-	}
-	if err := b.registerCleatRunID(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_run_id: %w", err)
-	}
-	if err := b.registerCleatResolvePromise(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_resolve_promise: %w", err)
-	}
-	if err := b.registerCleatRejectPromise(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_reject_promise: %w", err)
-	}
-	if err := b.registerCleatSend(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_send: %w", err)
-	}
-	if err := b.registerCleatScheduleInvoke(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_schedule_invoke: %w", err)
-	}
-	if err := b.registerCleatRegisterQueryHandler(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_register_query_handler: %w", err)
-	}
-	if err := b.registerCleatRunDetached(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_run_detached: %w", err)
-	}
-	if err := b.registerCleatSetState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_set_state: %w", err)
-	}
-	if err := b.registerCleatGetState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_get_state: %w", err)
-	}
-	if err := b.registerCleatDeleteState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_delete_state: %w", err)
-	}
-	if err := b.registerCleatIncrState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_incr_state: %w", err)
-	}
-	if err := b.registerCleatHasState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_has_state: %w", err)
-	}
-	if err := b.registerCleatListState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_list_state: %w", err)
-	}
-	if err := b.registerCleatFetch(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_fetch: %w", err)
-	}
-	if err := b.registerCleatPollChild(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_poll_child: %w", err)
-	}
-	if err := b.registerCleatAwaitAnyChild(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_await_any_child: %w", err)
-	}
-	if err := b.registerCleatJsonParse(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_json_parse: %w", err)
-	}
-	if err := b.registerCleatJsonStringify(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_json_stringify: %w", err)
-	}
-	if err := b.registerCleatComplete(linker, &completeResult, &completeErr); err != nil {
-		return nil, fmt.Errorf("host: register cleat_complete: %w", err)
-	}
-	if err := b.registerCleatPollWork(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_poll_work: %w", err)
+	if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+		return nil, fmt.Errorf("host: register imports: %w", err)
 	}
 
 	// Instantiate the module.
@@ -1909,6 +1729,411 @@ func (b *wasmtimeBackend) registerCleatComplete(linker *wasmtime.Linker, complet
 // entryName(ptr,maxLen), argsJSON(ptr,maxLen)
 // Returns the work data set by Execute() before calling _start.
 // ---------------------------------------------------------------------------
+
+// ExecuteComponent executes a WASM Component Model binary by decomposing it
+// into core modules, walking the instance DAG, and routing cross-module imports.
+func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte, bundle *wasm.ComponentBundle, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
+	const componentAdapterModule = "__component_adapter__"
+
+	// ---- Step 1: Compile all core modules ----
+	compiled := make([]*wasmtime.Module, len(bundle.Modules))
+	for i, modBytes := range bundle.Modules {
+		patched := wasm.PatchEmptyImportModuleName(modBytes, componentAdapterModule)
+		m, err := wasmtime.NewModule(b.engine, patched)
+		if err != nil {
+			return nil, fmt.Errorf("host: compile core module %d: %w", i, err)
+		}
+		compiled[i] = m
+		defer m.Close()
+	}
+
+	// ---- Step 2: Create store with WASI ----
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+	wasiConfig := wasmtime.NewWasiConfig()
+	wasiConfig.InheritStderr()
+	store.SetWasi(wasiConfig)
+
+	// ---- Step 3: Walk instance DAG ----
+	instances := make([]*wasmtime.Instance, len(bundle.Instances))
+
+	for i, inst := range bundle.Instances {
+		if inst.ModuleIndex < 0 {
+			// FromExports-only alias — no module of its own.
+			continue
+		}
+		cm := compiled[inst.ModuleIndex]
+
+		// Build a map from import module name to source instance index.
+		importNameToInstance := make(map[string]int, len(inst.Args))
+		for _, arg := range inst.Args {
+			importNameToInstance[arg.Name] = arg.InstanceIndex
+			if arg.Name == "" {
+				importNameToInstance[componentAdapterModule] = arg.InstanceIndex
+			}
+		}
+
+		linker := wasmtime.NewLinker(b.engine)
+		// Register host functions (WASI, env stubs, teavm stubs, all cleat_*).
+		// Use dummy completeResult/completeErr since component modules don't
+		// use the Go dispatcher cleat_complete protocol.
+		var completeResult, completeErr string
+		if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+			return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
+		}
+
+		// Wire cross-module imports: for each import the module declares,
+		// map it to the already-instantiated source instance.
+		for importName, srcIdx := range importNameToInstance {
+			if srcIdx < 0 || srcIdx >= len(instances) || instances[srcIdx] == nil {
+				continue
+			}
+			if err := linker.DefineInstance(store, importName, instances[srcIdx]); err != nil {
+				return nil, fmt.Errorf("host: define instance %d as %q for instance %d: %w", srcIdx, importName, i, err)
+			}
+		}
+
+		modInst, err := linker.Instantiate(store, cm)
+		if err != nil {
+			return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args): %w", i, inst.ModuleIndex, len(inst.Args), err)
+		}
+		instances[i] = modInst
+	}
+
+	// ---- Step 4: Build resolved exports map per instance ----
+	type resolvedExp struct {
+		exportName string
+		inst       *wasmtime.Instance
+	}
+	resolvedExports := make([]map[string]resolvedExp, len(bundle.Instances))
+
+	for i, inst := range bundle.Instances {
+		resolvedExports[i] = make(map[string]resolvedExp)
+		if inst.ModuleIndex >= 0 {
+			modInst := instances[i]
+			if modInst == nil {
+				continue
+			}
+			// Collect function exports by iterating the module's export types.
+			cm := compiled[inst.ModuleIndex]
+			exports := cm.Exports()
+			for _, exp := range exports {
+				if exp.Type().FuncType() != nil {
+					resolvedExports[i][exp.Name()] = resolvedExp{exportName: exp.Name(), inst: modInst}
+				}
+			}
+		}
+		// Apply FromExports aliases.
+		for _, fe := range inst.FromExports {
+			if fe.SourceInstance >= 0 && fe.SourceInstance < len(resolvedExports) {
+				if exp, ok := resolvedExports[fe.SourceInstance][fe.SourceName]; ok {
+					resolvedExports[i][fe.Name] = exp
+				}
+			}
+		}
+	}
+
+	// ---- Step 5: Resolve entry point ----
+	exp, ok := bundle.Exports[entryPoint]
+	if !ok {
+		return nil, fmt.Errorf("host: component export %q not found", entryPoint)
+	}
+
+	if exp.InstanceIndex < 0 || exp.InstanceIndex >= len(instances) {
+		return nil, fmt.Errorf("host: component export %q instance index %d out of range", entryPoint, exp.InstanceIndex)
+	}
+
+	var entryInst *wasmtime.Instance
+	var entryExportName string
+
+	if re, ok2 := resolvedExports[exp.InstanceIndex][exp.Name]; ok2 && re.inst != nil {
+		entryInst = re.inst
+		entryExportName = re.exportName
+	} else if instances[exp.InstanceIndex] != nil {
+		entryInst = instances[exp.InstanceIndex]
+		entryExportName = exp.Name
+	} else {
+		return nil, fmt.Errorf("host: cannot resolve component export %q (instance %d)", entryPoint, exp.InstanceIndex)
+	}
+
+	fn := entryInst.GetFunc(store, entryExportName)
+	if fn == nil {
+		return nil, fmt.Errorf("host: component export %q func %q not found", entryPoint, entryExportName)
+	}
+
+	// ---- Step 6: Find memory and set up scratch buffers ----
+	memory := entryInst.GetExport(store, "memory")
+	if memory == nil {
+		// Try other instances for memory.
+		for _, inst := range instances {
+			if inst == nil {
+				continue
+			}
+			if m := inst.GetExport(store, "memory"); m != nil {
+				memory = m
+				break
+			}
+		}
+	}
+	if memory == nil {
+		return nil, fmt.Errorf("host: no exported memory found in component instances")
+	}
+	mem := memory.Memory()
+	if mem == nil {
+		return nil, fmt.Errorf("host: memory export is not a memory")
+	}
+
+	outBufSz := OutBufSize
+	const legacyOffset = uint32(10 * 1024 * 1024)
+	currentSize := uint64(mem.DataSize(store))
+	scratchBase := uint32(currentSize + wasmPageSize)
+	if scratchBase < legacyOffset {
+		scratchBase = legacyOffset
+	}
+	inputOffset := scratchBase
+	outputOffset := scratchBase + outBufSz
+	needed := uint64(outputOffset + outBufSz)
+	if currentSize < needed {
+		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
+		if _, err := mem.Grow(store, pagesNeeded); err != nil {
+			return nil, fmt.Errorf("host: grow memory: %w", err)
+		}
+	}
+
+	// Write input JSON.
+	inputBytes := []byte(input)
+	if len(inputBytes) > 0 {
+		data := mem.UnsafeData(store)
+		if uint64(inputOffset)+uint64(len(inputBytes)) > uint64(len(data)) {
+			return nil, fmt.Errorf("host: input exceeds memory bounds")
+		}
+		copy(data[inputOffset:], inputBytes)
+	}
+
+	// ---- Step 7: Call the entry point ----
+	var results interface{}
+	var callErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callErr = fmt.Errorf("host: wasmtime panic in %q: %v", entryPoint, r)
+			}
+		}()
+		results, callErr = fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
+	}()
+
+	if callErr != nil {
+		return nil, callErr
+	}
+	if results == nil {
+		return nil, fmt.Errorf("host: export %q returned no results", entryPoint)
+	}
+
+	raw, ok := results.(int64)
+	if !ok {
+		return nil, fmt.Errorf("host: export %q returned non-int64 result", entryPoint)
+	}
+
+	if raw == (1 << 62) {
+		return &ExecResult{Suspended: true}, nil
+	}
+
+	errCode, actualLen := decodeExportResult(uint64(raw))
+	if actualLen > outBufSz {
+		return nil, fmt.Errorf("host: export %q: output overflow: wrote %d bytes, buffer is %d bytes", entryPoint, actualLen, outBufSz)
+	}
+
+	data := mem.UnsafeData(store)
+	outputStr := string(data[outputOffset : outputOffset+actualLen])
+	if errCode != 0 {
+		return nil, fmt.Errorf("host: export %q: %s", entryPoint, outputStr)
+	}
+
+	return &ExecResult{Result: outputStr, Suspended: false}, nil
+}
+
+// registerAllImports registers all host function imports on the given linker.
+// Extracted so both Execute and ExecuteComponent can share the same setup.
+func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string) error {
+	if err := b.registerWasiStubs(linker); err != nil {
+		return err
+	}
+	if err := b.registerEnvStubs(linker); err != nil {
+		return err
+	}
+	if err := b.registerTeavmStubs(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCall(linker, completeResult, completeErr); err != nil {
+		return err
+	}
+	if err := b.registerCleatSleep(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatNow(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRandom(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatLog(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatVersion(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatMinVersion(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatDefer(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPollCancellation(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPollSignal(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatContinueAsNew(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatContinueAsNewVersioned(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatChildWorkflow(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatChildWorkflowWithOptions(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatChildWorkflowInSchema(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitChild(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitAllChildren(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPollChild(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitAnyChild(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCallRetry(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitSignals(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSetQueryState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCallHeartbeat(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPluginCall(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPluginCallStreaming(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRegisterUpdateHandler(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCreatePromise(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitPromise(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSendSignalAndWait(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatReplyToSignal(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSignalWorkflow(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSetScope(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatGetScope(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatUUID(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAcquireLock(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatReleaseLock(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSideEffect(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatWorkflowID(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRunID(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatResolvePromise(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRejectPromise(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSend(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatScheduleInvoke(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRegisterQueryHandler(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRunDetached(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSetState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatGetState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatDeleteState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatIncrState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatHasState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatListState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatFetch(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatJsonParse(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatJsonStringify(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatComplete(linker, completeResult, completeErr); err != nil {
+		return err
+	}
+	if err := b.registerCleatPollWork(linker); err != nil {
+		return err
+	}
+	return nil
+}
 
 func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
 	return linker.FuncWrap("env", "cleat_poll_work", func(caller *wasmtime.Caller,
