@@ -7,7 +7,7 @@ import java.util.Map;
 import org.teavm.interop.Import;
 
 /**
- * High-level wrapper around all 18 cleat WASM host function imports.
+ * High-level wrapper around all cleat WASM host function imports.
  * <p>
  * Each WASM host function is imported from the {@code "env"} module via
  * {@link Import @Import}.  The raw native methods return packed {@code long}
@@ -141,8 +141,6 @@ public class HostCalls {
     private static native long setQueryStateRaw(
         int keyPtr, int keyLen, int valPtr, int valLen);
 
-    @Import(module = "env", name = "get_query_state")
-    private static native long getQueryStateRaw(int keyPtr, int keyLen, int outPtr, int outMaxLen);
 
     @Import(module = "env", name = "plugin_call")
     private static native long importPluginCall(
@@ -185,19 +183,6 @@ public class HostCalls {
     @Import(module = "env", name = "cleat_send")
     private static native long cleatSendRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen);
 
-    @Import(module = "env", name = "schedule_cron")
-    private static native long scheduleCronRaw(
-        int wfNamePtr, int wfNameLen,
-        int cronExprPtr, int cronExprLen,
-        int tzPtr, int tzLen,
-        int inputPtr, int inputLen,
-        int scheduleIdOutPtr, int scheduleIdOutMax);
-
-    @Import(module = "env", name = "delete_cron")
-    private static native long deleteCronRaw(int scheduleIdPtr, int scheduleIdLen);
-
-    @Import(module = "env", name = "list_crons")
-    private static native long listCronsRaw(int outPtr, int outMaxLen);
 
     @Import(module = "env", name = "schedule_invoke")
     private static native long scheduleInvokeRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen, long delayMs);
@@ -259,6 +244,58 @@ public class HostCalls {
 
     @Import(module = "env", name = "cleat_release_lock")
     private static native long cleatReleaseLockRaw(int keyPtr, int keyLen);
+
+    @Import(module = "env", name = "cleat_poll_child")
+    private static native long cleatPollChildRaw(
+        int runIdPtr, int runIdLen,
+        int resultPtr, int resultMaxLen);
+
+    @Import(module = "env", name = "cleat_await_any_child")
+    private static native long cleatAwaitAnyChildRaw(
+        int runIdsPtr, int runIdsLen,
+        int resultPtr, int resultMaxLen);
+
+    @Import(module = "env", name = "cleat_continue_as_new_versioned")
+    private static native long cleatContinueAsNewVersionedRaw(
+        int inputPtr, int inputLen, int newVersion);
+
+    @Import(module = "env", name = "cleat_side_effect")
+    private static native long cleatSideEffectRaw(
+        int resultPtr, int resultLen,
+        int outPtr, int outMaxLen);
+
+    @Import(module = "env", name = "cleat_set_scope")
+    private static native long cleatSetScopeRaw(
+        int objTypePtr, int objTypeLen,
+        int instKeyPtr, int instKeyLen,
+        int prevScopePtr, int prevScopeMaxLen);
+
+    @Import(module = "env", name = "cleat_get_scope")
+    private static native long cleatGetScopeRaw(
+        int objTypePtr, int objTypeMaxLen,
+        int instKeyPtr, int instKeyMaxLen);
+
+    @Import(module = "env", name = "cleat_uuid")
+    private static native long cleatUuidRaw(
+        int seedPtr, int seedLen,
+        int uuidPtr, int uuidMaxLen);
+
+    @Import(module = "env", name = "plugin_call_streaming")
+    private static native long importPluginCallStreaming(
+        int pluginNamePtr, int pluginNameLen,
+        int functionNamePtr, int functionNameLen,
+        int inputPtr, int inputLen,
+        int responsePtr, int responseMaxLen);
+
+    @Import(module = "env", name = "cleat_json_parse")
+    private static native long cleatJsonParseRaw(
+        int jsonPtr, int jsonLen,
+        int outPtr, int outMaxLen);
+
+    @Import(module = "env", name = "cleat_json_stringify")
+    private static native long cleatJsonStringifyRaw(
+        int ptr, int len,
+        int outPtr, int outMaxLen);
 
     // ========================================================================
     // Internal helpers: pack strings in scratch region, read output buffer
@@ -613,6 +650,29 @@ public class HostCalls {
     }
 
     /**
+     * Replace the current workflow's input and restart execution from the
+     * beginning with an explicit version ("continue-as-new-versioned").
+     * <p>
+     * Like {@link #continueAsNew(String)} but allows specifying the workflow
+     * definition version explicitly for the restarted execution.
+     *
+     * @param newInputJSON the new input JSON for the restarted workflow
+     * @param newVersion   the explicit workflow definition version to use
+     * @return a result indicating success, or an error description
+     */
+    public CleatResult<Void> continueAsNewVersioned(String newInputJSON, int newVersion) {
+        int[] p = packStrings(newInputJSON);
+
+        long result = cleatContinueAsNewVersionedRaw(p[0], p[1], newVersion);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("continueAsNewVersioned(...) failed: host returned error code " + errCode + ". Check that the input JSON is valid and version is valid.");
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
      * Create a promise with the given name.
      * <p>
      * Promises are durable, first-class entities in cleat. They can be
@@ -775,6 +835,35 @@ public class HostCalls {
 
         if (errCode != 0) {
             return CleatResult.err("awaitChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid.");
+        }
+
+        String childResult = readOutput(resultLen);
+        return CleatResult.ok(childResult);
+    }
+
+    /**
+     * Poll for a child workflow result without blocking.
+     * <p>
+     * Unlike {@link #awaitChild(String)}, this call is non-blocking and
+     * checks once.  If the child has not yet completed, the result carries
+     * an error.  Does not check for SUSPEND_SENTINEL.
+     *
+     * @param runID the child workflow run ID
+     * @return a result containing the child's output JSON on success, or an
+     *         error description on failure (including if not yet complete)
+     */
+    public CleatResult<String> pollChild(String runID) {
+        int[] p = packStrings(runID);
+
+        long result = cleatPollChildRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("pollChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid or the child has completed.");
         }
 
         String childResult = readOutput(resultLen);
@@ -946,35 +1035,6 @@ public class HostCalls {
         setQueryStateRaw(keyOff, keyLen, valOff, valLen);
     }
 
-    /**
-     * Get a key-value pair from the workflow's queryable state.
-     * <p>
-     * Retrieves the state value previously set via
-     * {@link #setQueryState(String, String)}.
-     *
-     * @param key the state key
-     * @return a result containing the state value on success, or an error
-     *         description on failure
-     */
-    public CleatResult<String> getQueryState(String key) {
-        int[] p = packStrings(key);
-        int keyOff = p[0], keyLen = p[1];
-
-        long result = getQueryStateRaw(
-            keyOff, keyLen,
-            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
-
-        int errCode = Memory.decodeCallErrCode(result);
-        int responseLen = Memory.decodeCallResponseLen(result);
-
-        if (errCode != 0) {
-            String errMsg = readOutput(responseLen);
-            return CleatResult.err(errMsg);
-        }
-
-        String response = readOutput(responseLen);
-        return CleatResult.ok(response);
-    }
 
     // ========================================================================
     // plugin_call — call a plugin host function (ABI 2.19)
@@ -1016,6 +1076,41 @@ public class HostCalls {
         int pnLen = p[3], fnLen = p[4], inLen = p[5];
 
         long result = importPluginCall(
+            pnOff, pnLen,
+            fnOff, fnLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int responseLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(responseLen);
+            return CleatResult.err(errMsg);
+        }
+
+        return CleatResult.ok(readOutput(responseLen));
+    }
+
+    /**
+     * Call a plugin host function with streaming support.
+     * <p>
+     * Like {@link #pluginCall(String, String, String)} but uses the
+     * streaming host function variant which supports incremental response
+     * delivery.  The API is identical to the caller.
+     *
+     * @param pluginName   name of the plugin (e.g. {@code "blobstore"})
+     * @param functionName name of the function within the plugin
+     * @param inputJson    input JSON for the plugin function
+     * @return a result containing the plugin function's response JSON on
+     *         success, or an error description on failure
+     */
+    public CleatResult<String> pluginCallStreaming(String pluginName, String functionName, String inputJson) {
+        int[] p = packStrings(pluginName, functionName, inputJson);
+        int pnOff = p[0], fnOff = p[1], inOff = p[2];
+        int pnLen = p[3], fnLen = p[4], inLen = p[5];
+
+        long result = importPluginCallStreaming(
             pnOff, pnLen,
             fnOff, fnLen,
             inOff, inLen,
@@ -1129,11 +1224,24 @@ public class HostCalls {
      * @return the previous scope prefix (empty string if none was set)
      */
     public String setScope(String objectType, String instanceKey) {
+        // Record the previous scope for return.
         String prev = this._scopePrefix;
+
+        int[] p = packStrings(objectType, instanceKey);
+        int objTypeOff = p[0], instKeyOff = p[1];
+        int objTypeLen = p[2], instKeyLen = p[3];
+
+        long result = cleatSetScopeRaw(
+            objTypeOff, objTypeLen,
+            instKeyOff, instKeyLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Still update _scopePrefix for backward compat with state operations.
         this._scopePrefix = (objectType != null && !objectType.isEmpty()
             && instanceKey != null && !instanceKey.isEmpty())
             ? "vo:" + objectType + ":" + instanceKey + ":"
             : "";
+
         return prev;
     }
 
@@ -1144,16 +1252,23 @@ public class HostCalls {
      *         {@code ["", ""]} if no scope is set
      */
     public String[] getScope() {
-        if (this._scopePrefix.isEmpty()) {
-            return new String[]{"", ""};
-        }
-        // Parse "vo:<type>:<key>:" format
-        String trimmed = this._scopePrefix.substring(0, this._scopePrefix.length() - 1);
-        String[] parts = trimmed.split(":", 3);
-        if (parts.length == 3 && "vo".equals(parts[0])) {
-            return new String[]{parts[1], parts[2]};
-        }
-        return new String[]{"", ""};
+        // Split the output buffer: first half for objectType, second for instanceKey.
+        final int halfBufSize = Memory.OUT_BUF_SIZE / 2;
+
+        long result = cleatGetScopeRaw(
+            Memory.OUTPUT_OFFSET, halfBufSize,
+            Memory.OUTPUT_OFFSET + halfBufSize, halfBufSize);
+
+        int[] lengths = Memory.decodeGetScopeResult(result);
+        int objTypeLen = lengths[0];
+        int instKeyLen = lengths[1];
+
+        String objType = Memory.readString(Memory.OUTPUT_OFFSET,
+            Math.min(objTypeLen, halfBufSize));
+        String instKey = Memory.readString(Memory.OUTPUT_OFFSET + halfBufSize,
+            Math.min(instKeyLen, halfBufSize));
+
+        return new String[]{objType, instKey};
     }
 
     /**
@@ -1180,29 +1295,20 @@ public class HostCalls {
      * @return a UUID-formatted string
      */
     public String uuid(String seed) {
-        String wfId = this.currentWorkflowId();
-        String data = wfId + ":" + seed;
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest(data.getBytes(StandardCharsets.UTF_8));
+        int[] p = packStrings(seed);
 
-            // Take first 16 bytes and set version/variant bits
-            hash[6] = (byte) ((hash[6] & 0x0f) | 0x50); // Version 5
-            hash[8] = (byte) ((hash[8] & 0x3f) | 0x80); // Variant 1
+        long result = cleatUuidRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
-            // Format as UUID: 8-4-4-4-12
-            StringBuilder sb = new StringBuilder(36);
-            for (int i = 0; i < 16; i++) {
-                if (i == 4 || i == 6 || i == 8 || i == 10) {
-                    sb.append('-');
-                }
-                sb.append(String.format("%02x", hash[i] & 0xff));
-            }
-            return sb.toString();
-        } catch (NoSuchAlgorithmException e) {
-            // Fallback: improbable - SHA-256 is always available
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int uuidLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0 || uuidLen == 0) {
             return "00000000-0000-0000-0000-000000000000";
         }
+
+        return readOutput(uuidLen);
     }
 
     // ========================================================================
@@ -1537,87 +1643,6 @@ public class HostCalls {
         return scheduleInvokeMs(service, operation, requestJSON, delaySeconds * 1000);
     }
 
-    // ========================================================================
-    // Cron-triggered workflow schedules
-    // ========================================================================
-
-    /**
-     * Create a recurring workflow trigger from a cron expression.
-     * <p>
-     * The host creates a recurring schedule that invokes the named workflow
-     * on the cron schedule.  Returns a schedule ID that can be used with
-     * {@link #deleteCron(String)} to remove the schedule.
-     *
-     * @param workflowName the workflow definition name to trigger
-     * @param cronExpr     standard 5-field cron expression (e.g. {@code "0 0 * * *"}
-     *                     for daily at midnight)
-     * @param timezone     IANA timezone name (e.g. {@code "America/New_York"},
-     *                     {@code "UTC"})
-     * @param inputJSON    JSON input string for each workflow invocation
-     * @return a result containing the schedule ID on success, or an error
-     *         description on failure
-     */
-    public CleatResult<String> scheduleCron(
-        String workflowName, String cronExpr, String timezone, String inputJSON) {
-        int[] p = packStrings(workflowName, cronExpr, timezone, inputJSON);
-        int wfOff = p[0], crOff = p[1], tzOff = p[2], inOff = p[3];
-        int wfLen = p[4], crLen = p[5], tzLen = p[6], inLen = p[7];
-
-        long result = scheduleCronRaw(
-            wfOff, wfLen,
-            crOff, crLen,
-            tzOff, tzLen,
-            inOff, inLen,
-            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int scheduleIdLen = Memory.decodeSimpleExtra(result);
-
-        if (errCode != 0) {
-            return CleatResult.err("scheduleCron(workflowName=\"" + workflowName + "\", cronExpr=\"" + cronExpr + "\") failed: host returned error code " + errCode + ". Check that the cron expression is valid.");
-        }
-
-        String scheduleId = readOutput(scheduleIdLen);
-        return CleatResult.ok(scheduleId);
-    }
-
-    /**
-     * Remove a recurring cron-triggered workflow schedule.
-     *
-     * @param scheduleId the schedule ID returned by
-     *                   {@link #scheduleCron(String, String, String, String)}
-     * @return a result indicating success, or an error description on failure
-     */
-    public CleatResult<Void> deleteCron(String scheduleId) {
-        int[] p = packStrings(scheduleId);
-        long result = deleteCronRaw(p[0], p[1]);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        if (errCode != 0) {
-            return CleatResult.err("deleteCron(scheduleId=\"" + scheduleId + "\") failed: host returned error code " + errCode + ". Check that the schedule ID is valid.");
-        }
-        return CleatResult.ok(null);
-    }
-
-    /**
-     * List all registered cron-triggered workflow schedules.
-     *
-     * @return a result containing a JSON array of schedule objects on success,
-     *         or an error description on failure
-     */
-    public CleatResult<String> listCrons() {
-        long result = listCronsRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int scheduleListLen = Memory.decodeSimpleExtra(result);
-
-        if (errCode != 0) {
-            return CleatResult.err("listCrons() failed: host returned error code " + errCode + ". Check that cron operations are available.");
-        }
-
-        String scheduleList = readOutput(scheduleListLen);
-        return CleatResult.ok(scheduleList);
-    }
 
     // ========================================================================
     // Query handlers
@@ -1714,6 +1739,35 @@ public class HostCalls {
             return CleatResult.err("setState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key is valid and state operations are available.");
         }
         return CleatResult.ok(null);
+    }
+
+    /**
+     * Record a side-effect result for deterministic replay.
+     * <p>
+     * Side effects are non-deterministic operations whose results are recorded
+     * in the workflow event history.  On replay, the recorded result is
+     * returned instead of re-executing the side effect.
+     *
+     * @param computedResult the result of the side effect computation
+     * @return a result containing the side effect output on success, or an
+     *         error description on failure
+     */
+    public CleatResult<String> sideEffect(String computedResult) {
+        int[] p = packStrings(computedResult);
+
+        long result = cleatSideEffectRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int outLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("sideEffect(...) failed: host returned error code " + errCode + ". Check that the input is valid.");
+        }
+
+        String output = readOutput(outLen);
+        return CleatResult.ok(output);
     }
 
     /**
@@ -1879,6 +1933,55 @@ public class HostCalls {
 
         String response = readOutput(resultLen);
         return CleatResult.ok(response);
+    }
+
+    // ========================================================================
+    // awaitAnyChild
+    // ========================================================================
+
+    /**
+     * Wait for any of the specified child workflows to complete.
+     * <p>
+     * The run IDs are passed as a JSON array string (e.g.
+     * {@code ["run-1","run-2"]}).  The method suspends until at least one
+     * child has completed, then returns its result.
+     *
+     * @param runIDs the child workflow run IDs to wait for
+     * @return a result containing the completed child's output JSON on success,
+     *         or an error description on failure
+     */
+    public CleatResult<String> awaitAnyChild(String[] runIDs) {
+        // Serialize run IDs as a JSON string array.
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < runIDs.length; i++) {
+            if (i > 0) {
+                sb.append(",");
+            }
+            sb.append("\"").append(JsonHelper.escapeJson(runIDs[i])).append("\"");
+        }
+        sb.append("]");
+        String idsJson = sb.toString();
+
+        int[] p = packStrings(idsJson);
+
+        long result = cleatAwaitAnyChildRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Check for suspension sentinel before decoding the result.
+        if (result == Memory.SUSPEND_SENTINEL) {
+            return CleatResult.err("no child workflow yet complete; workflow must suspend");
+        }
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+
+        if (errCode != 0) {
+            return CleatResult.err("awaitAnyChild(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid.");
+        }
+
+        String childResult = readOutput(resultLen);
+        return CleatResult.ok(childResult);
     }
 
     // ========================================================================
@@ -2268,6 +2371,70 @@ public class HostCalls {
             return CleatResult.err("releaseLock(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the lock key is valid and the lock is held.");
         }
         return CleatResult.ok(null);
+    }
+
+    // ========================================================================
+    // JSON utility operations
+    // ========================================================================
+
+    /**
+     * Parse and normalize a JSON string, returning a normalized (canonical)
+     * form.
+     * <p>
+     * This is a deterministic host-call that ensures consistent JSON format
+     * across workflow replays.
+     *
+     * @param json the JSON string to parse
+     * @return a result containing the normalized JSON string on success, or
+     *         an error description on failure
+     */
+    public CleatResult<String> jsonParse(String json) {
+        int[] p = packStrings(json);
+
+        long result = cleatJsonParseRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int outLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(outLen);
+            return CleatResult.err(errMsg);
+        }
+
+        String normalized = readOutput(outLen);
+        return CleatResult.ok(normalized);
+    }
+
+    /**
+     * Convert a JSON-compatible value to its canonical JSON string
+     * representation via the host runtime.
+     * <p>
+     * This is a deterministic host-call that ensures consistent JSON output
+     * across workflow replays.
+     *
+     * @param json the JSON-compatible string to stringify
+     * @return a result containing the canonical JSON string on success, or
+     *         an error description on failure
+     */
+    public CleatResult<String> jsonStringify(String json) {
+        int[] p = packStrings(json);
+
+        long result = cleatJsonStringifyRaw(
+            p[0], p[1],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeCallErrCode(result);
+        int outLen = Memory.decodeCallResponseLen(result);
+
+        if (errCode != 0) {
+            String errMsg = readOutput(outLen);
+            return CleatResult.err(errMsg);
+        }
+
+        String canonical = readOutput(outLen);
+        return CleatResult.ok(canonical);
     }
 
     // ========================================================================

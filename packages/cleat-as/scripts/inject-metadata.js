@@ -274,6 +274,7 @@ Options:
     abi_version: abiVersion,
     plugin_deps: pluginDeps,
     sdk_language: "assemblyscript",
+    language: "assemblyscript",
     sdk_version: "0.1.0",
     created_at: new Date().toISOString(),
   };

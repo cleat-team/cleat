@@ -50,6 +50,7 @@ from .memory import (
     decode_await_promise_result,
     decode_await_signals_result,
     decode_cleat_call_result,
+    decode_dual_string_result,
     decode_poll_cancellation_result,
     decode_poll_signal_result,
     decode_simple_result,
@@ -126,6 +127,29 @@ try:
     from ._wit.wit_world.imports.plugin import (
         plugin_call as _import_plugin_call,
         plugin_call_streaming as _import_plugin_call_streaming,
+    )
+    from ._wit.wit_world.imports.durable_scope import (
+        set_scope as _import_set_scope,
+        get_scope as _import_get_scope,
+        uuid as _import_uuid,
+    )
+    from ._wit.wit_world.imports.durable_stream_state import (
+        set_state as _import_stream_set_state,
+        get_state as _import_stream_get_state,
+        delete_state as _import_stream_delete_state,
+        incr_state as _import_stream_incr_state,
+        has_state as _import_stream_has_state,
+        list_state as _import_stream_list_state,
+    )
+    from ._wit.wit_world.imports.durable_extended_lifecycle import (
+        continue_as_new_versioned as _import_cleat_continue_as_new_versioned,
+        side_effect as _import_cleat_side_effect,
+    )
+    from ._wit.wit_world.imports.durable_extended_children import (
+        child_workflow_in_schema as _import_cleat_child_workflow_in_schema,
+    )
+    from ._wit.wit_world.imports.durable_fetch import (
+        fetch as _import_cleat_fetch,
     )
 
     _USING_WASM = True
@@ -1015,11 +1039,13 @@ class HostCalls:
         return key
 
     def set_scope(self, object_type: str, instance_key: str) -> str:
-        """Set the state key prefix for virtual object instances.
+        """Set the virtual object scope via the host ABI.
 
-        All subsequent ``set_state``/``get_state``/etc calls are
-        automatically prefixed with ``"vo:<object_type>:<instance_key>:"``.
-        Returns the previous scope prefix for stack-style save/restore.
+        Calls the host ``durable-scope.set-scope`` import to set the
+        virtual object scope and returns the previous scope as a JSON string.
+
+        Also updates the local scope prefix so that ``_scoped_key`` works
+        for service-call-based state operations.
 
         Parameters
         ----------
@@ -1031,16 +1057,40 @@ class HostCalls:
         Returns
         -------
         str
-            The previous scope prefix (empty string if none was set).
+            The previous scope as a JSON string (empty string if none was
+            set).
         """
-        prev = self._scope_prefix
+        ot_len = write_string(SCRATCH_BASE, object_type, OUT_BUF_SIZE // 2)
+        ik_offset = SCRATCH_BASE + OUT_BUF_SIZE // 2
+        ik_len = write_string(ik_offset, instance_key, OUT_BUF_SIZE // 2)
+
+        result = _import_set_scope(
+            SCRATCH_BASE, ot_len,
+            ik_offset, ik_len,
+            OUTPUT_OFFSET, OUT_BUF_SIZE,
+        )
+
+        prev_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"set_scope(object_type='{object_type}', instance_key='{instance_key}') failed: "
+                f"{_error_code_name(err_code)} (code {err_code})"
+            )
+
+        prev_scope = read_string(OUTPUT_OFFSET, prev_len) if prev_len > 0 else ""
+
+        # Keep local scope in sync for _scoped_key compatibility.
         self._scope_prefix = (
             f"vo:{object_type}:{instance_key}:" if object_type and instance_key else ""
         )
-        return prev
+
+        return prev_scope
 
     def get_scope(self) -> tuple[str, str]:
-        """Get the current virtual object scope.
+        """Get the current virtual object scope via the host ABI.
+
+        Calls the host ``durable-scope.get-scope`` import to retrieve
+        the current object type and instance key from the runtime.
 
         Returns
         -------
@@ -1048,14 +1098,25 @@ class HostCalls:
             ``(object_type, instance_key)`` or ``("", "")`` if no scope is
             active.
         """
-        if not self._scope_prefix:
-            return "", ""
-        # Parse "vo:<type>:<key>:" format
-        prefix = self._scope_prefix.rstrip(":")
-        parts = prefix.split(":", 2)
-        if len(parts) == 3 and parts[0] == "vo":
-            return parts[1], parts[2]
-        return "", ""
+        ot_buf_size = OUT_BUF_SIZE // 2
+        ik_buf_offset = OUTPUT_OFFSET + ot_buf_size
+        ik_buf_size = OUT_BUF_SIZE - ot_buf_size
+
+        result = _import_get_scope(
+            OUTPUT_OFFSET, ot_buf_size,
+            ik_buf_offset, ik_buf_size,
+        )
+
+        ot_len, ik_len, err_code = decode_dual_string_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"get_scope failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+
+        object_type = read_string(OUTPUT_OFFSET, ot_len) if ot_len > 0 else ""
+        instance_key = read_string(ik_buf_offset, ik_len) if ik_len > 0 else ""
+
+        return (object_type, instance_key)
 
     def clear_scope(self) -> str:
         """Remove the current scope and return the previous scope prefix.
@@ -1075,9 +1136,10 @@ class HostCalls:
     # --------------------------------------------------------------------
 
     def uuid(self, seed: str) -> str:
-        """Return a deterministic UUID scoped to the current workflow
-        and the given *seed*. The same seed always produces the same UUID
-        for this workflow instance.
+        """Generate a deterministic UUID from a seed via the host ABI.
+
+        Calls the host ``durable-scope.uuid`` import.  The same seed
+        always produces the same UUID for this workflow instance.
 
         Useful for generating predictable entity IDs, correlation IDs, or
         other identifiers that must be stable across workflow replays.
@@ -1092,20 +1154,14 @@ class HostCalls:
         str
             A UUID-formatted string (e.g. ``"550e8400-e29b-... "``).
         """
-        wf_id = self.current_workflow_id()
-        data = (wf_id + ":" + seed).encode("utf-8")
-        h = hashlib.sha256(data).digest()[:16]
-        # Set UUIDv5 version and variant bits
-        h_bytes = bytearray(h)
-        h_bytes[6] = (h_bytes[6] & 0x0F) | 0x50  # Version 5
-        h_bytes[8] = (h_bytes[8] & 0x3F) | 0x80  # Variant 1
-        return (
-            f"{h_bytes[0:4].hex()}-"
-            f"{h_bytes[4:6].hex()}-"
-            f"{h_bytes[6:8].hex()}-"
-            f"{h_bytes[8:10].hex()}-"
-            f"{h_bytes[10:16].hex()}"
-        )
+        seed_len = write_string(SCRATCH_BASE, seed, OUT_BUF_SIZE)
+        result = _import_uuid(SCRATCH_BASE, seed_len, OUTPUT_OFFSET, OUT_BUF_SIZE)
+        uuid_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"uuid(seed='{seed}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        return read_string(OUTPUT_OFFSET, uuid_len) if uuid_len > 0 else ""
 
     # --------------------------------------------------------------------
     # 1. now — wall-clock time
@@ -1749,6 +1805,66 @@ class HostCalls:
         return self.fetch_json(url, "GET", result_type=result_type)
 
     # --------------------------------------------------------------------
+    # 11e. host_fetch — direct WASM import for HTTP fetch
+    # --------------------------------------------------------------------
+
+    def host_fetch(self, method: str, url: str, headers: str = "", body: str = "") -> str:
+        """Perform an HTTP fetch via the host ``durable-fetch.fetch`` import.
+
+        Unlike :meth:`fetch` which routes through ``call("http", "fetch", ...)``,
+        this method calls the direct WASM import for HTTP fetch (ABI 2.45).
+
+        Parameters
+        ----------
+        method : str
+            HTTP method (e.g. ``"GET"``, ``"POST"``).
+        url : str
+            The URL to fetch.
+        headers : str
+            HTTP headers as a JSON string (e.g. ``'{"Authorization": "Bearer x"}'``).
+        body : str
+            Request body for POST/PUT requests.
+
+        Returns
+        -------
+        str
+            The response as a JSON string containing ``body``, ``status``,
+            and ``headers`` fields.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error from the fetch.
+        """
+        method_len = write_string(SCRATCH_BASE, method, OUT_BUF_SIZE // 4)
+        url_offset = SCRATCH_BASE + method_len
+        remaining = OUT_BUF_SIZE - method_len
+        url_len = write_string(url_offset, url, remaining)
+        headers_offset = url_offset + url_len
+        remaining -= url_len
+        headers_len = write_string(headers_offset, headers, remaining)
+        body_offset = headers_offset + headers_len
+        remaining -= headers_len
+        body_len = write_string(body_offset, body, remaining)
+
+        result = _import_fetch(
+            SCRATCH_BASE, method_len,
+            url_offset, url_len,
+            headers_offset, headers_len,
+            body_offset, body_len,
+            OUTPUT_OFFSET, OUT_BUF_SIZE,
+        )
+
+        resp_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            err_msg = read_string(OUTPUT_OFFSET, resp_len) if resp_len > 0 else "unknown error"
+            raise RuntimeError(
+                f"host_fetch(url='{url}') failed: {err_msg} (code {err_code})"
+            )
+
+        return read_string(OUTPUT_OFFSET, resp_len)
+
+    # --------------------------------------------------------------------
     # 12. await_signals — wait for signals
     # --------------------------------------------------------------------
 
@@ -2033,6 +2149,83 @@ class HostCalls:
         return read_string(OUTPUT_OFFSET, run_id_len)
 
     # --------------------------------------------------------------------
+    # 15b. child_workflow_in_schema — cross-instance child workflow
+    # --------------------------------------------------------------------
+
+    def child_workflow_in_schema(
+        self,
+        schema: str,
+        name: str,
+        input: Any,
+        version: int = 0,
+        priority: int = 0,
+        policy: str = "",
+    ) -> str:
+        """Start a child workflow in a different schema (cross-instance).
+
+        Calls the host ``durable-extended-children.child-workflow-in-schema``
+        import.  The child runs in the specified schema namespace, enabling
+        cross-instance workflow cooperation.
+
+        Parameters
+        ----------
+        schema : str
+            Target schema name for the child workflow.
+        name : str
+            Child workflow definition name.
+        input : Any
+            Input for the child workflow.  Dicts are JSON-serialised
+            automatically.
+        version : int
+            Explicit workflow definition version (0 = host default).
+        priority : int
+            Scheduling priority (0 = highest).
+        policy : str
+            Parent-close policy (e.g. ``"abandon"``, ``"terminate"``).
+            Empty string means host default.
+
+        Returns
+        -------
+        str
+            The child workflow's run ID.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error starting the child.
+        """
+        input_str = self._marshal(input)
+
+        schema_len = write_string(SCRATCH_BASE, schema, OUT_BUF_SIZE)
+        name_offset = SCRATCH_BASE + schema_len
+        remaining = OUT_BUF_SIZE - schema_len
+        name_len = write_string(name_offset, name, remaining)
+        input_offset = name_offset + name_len
+        remaining -= name_len
+        input_len = write_string(input_offset, input_str, remaining)
+        policy_offset = input_offset + input_len
+        remaining -= input_len
+        policy_len = write_string(policy_offset, policy, remaining)
+
+        result = _import_child_workflow_in_schema(
+            SCRATCH_BASE, schema_len,
+            name_offset, name_len,
+            input_offset, input_len,
+            version, priority,
+            policy_offset, policy_len,
+            OUTPUT_OFFSET, OUT_BUF_SIZE,
+        )
+
+        run_id_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"child_workflow_in_schema(schema='{schema}', name='{name}') failed: "
+                f"{_error_code_name(err_code)} (code {err_code})"
+            )
+
+        return read_string(OUTPUT_OFFSET, run_id_len)
+
+    # --------------------------------------------------------------------
     # 16. await_child — wait for a child workflow
     # --------------------------------------------------------------------
 
@@ -2287,6 +2480,150 @@ class HostCalls:
         inp: dict = {"prefix": prefix}
         result = self.call("state", "list", inp)
         return json.loads(result)
+
+    # --------------------------------------------------------------------
+    # 24b-24g. Stream state operations (durable-stream-state ABI 2.37-2.44)
+    # --------------------------------------------------------------------
+
+    def stream_set_state(self, key: str, value: Any) -> None:
+        """Set a Stream R state key-value pair via the host ABI.
+
+        Calls the host ``durable-stream-state.set-state`` import.
+        Unlike :meth:`set_state` (which routes through the ``"state"``
+        service), this calls the direct WASM import for stream state.
+
+        Parameters
+        ----------
+        key : str
+            State key.
+        value : Any
+            State value.  Dicts are JSON-serialised automatically.
+        """
+        val_str = self._marshal(value)
+        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
+        val_offset = SCRATCH_BASE + key_len
+        remaining = OUT_BUF_SIZE - key_len
+        val_len = write_string(val_offset, val_str, remaining)
+
+        result = _import_stream_set_state(SCRATCH_BASE, key_len, val_offset, val_len)
+        _, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"stream_set_state(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+
+    def stream_get_state(self, key: str) -> str:
+        """Get a Stream R state value via the host ABI.
+
+        Calls the host ``durable-stream-state.get-state`` import.
+
+        Parameters
+        ----------
+        key : str
+            State key to retrieve.
+
+        Returns
+        -------
+        str
+            The stored value as a JSON string, or empty string if the key
+            does not exist.
+        """
+        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
+        result = _import_stream_get_state(SCRATCH_BASE, key_len, OUTPUT_OFFSET, OUT_BUF_SIZE)
+        val_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"stream_get_state(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        return read_string(OUTPUT_OFFSET, val_len) if val_len > 0 else ""
+
+    def stream_delete_state(self, key: str) -> None:
+        """Delete a Stream R state key via the host ABI.
+
+        Calls the host ``durable-stream-state.delete-state`` import.
+        """
+        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
+        result = _import_stream_delete_state(SCRATCH_BASE, key_len)
+        _, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"stream_delete_state(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+
+    def stream_incr_state(self, key: str, delta: int = 1) -> int:
+        """Atomically increment a Stream R numeric state value via the host ABI.
+
+        Calls the host ``durable-stream-state.incr-state`` import.
+
+        Parameters
+        ----------
+        key : str
+            State key to increment.
+        delta : int
+            Amount to increment by (default ``1``).
+
+        Returns
+        -------
+        int
+            The new value after incrementing.
+        """
+        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
+        result = _import_stream_incr_state(SCRATCH_BASE, key_len, delta)
+        new_val, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"stream_incr_state(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        return new_val
+
+    def stream_has_state(self, key: str) -> bool:
+        """Check if a Stream R state key exists via the host ABI.
+
+        Calls the host ``durable-stream-state.has-state`` import.
+
+        Parameters
+        ----------
+        key : str
+            State key to check.
+
+        Returns
+        -------
+        bool
+            ``True`` if the key exists.
+        """
+        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
+        result = _import_stream_has_state(SCRATCH_BASE, key_len)
+        found, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"stream_has_state(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        return bool(found)
+
+    def stream_list_state(self, prefix: str = "") -> list[str]:
+        """List Stream R state keys by prefix via the host ABI.
+
+        Calls the host ``durable-stream-state.list-state`` import.
+
+        Parameters
+        ----------
+        prefix : str
+            Optional prefix to filter keys by.
+
+        Returns
+        -------
+        list[str]
+            List of matching state keys.
+        """
+        prefix_len = write_string(SCRATCH_BASE, prefix, OUT_BUF_SIZE)
+        result = _import_stream_list_state(SCRATCH_BASE, prefix_len, OUTPUT_OFFSET, OUT_BUF_SIZE)
+        list_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"stream_list_state(prefix='{prefix}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        list_json = read_string(OUTPUT_OFFSET, list_len) if list_len > 0 else "[]"
+        return json.loads(list_json)
 
     # --------------------------------------------------------------------
     # 25. create_promise — create a cleat promise
@@ -2728,6 +3065,78 @@ class HostCalls:
             raise RuntimeError(
                 f"extend_timeout(additional_ms={additional_ms}) failed: {_error_code_name(err_code)} (code {err_code})"
             )
+
+    # --------------------------------------------------------------------
+    # 27c. continue_as_new_versioned — versioned history compaction
+    # --------------------------------------------------------------------
+
+    def continue_as_new_versioned(self, input: Any, new_version: int) -> None:
+        """Replace workflow input and restart execution with an explicit version.
+
+        Calls the host ``durable-extended-lifecycle.continue-as-new-versioned``
+        import.  Like :meth:`continue_as_new` but also sets the workflow
+        definition version for the restarted run.
+
+        Parameters
+        ----------
+        input : Any
+            New input for the restarted workflow.  Dicts are JSON-serialised
+            automatically.
+        new_version : int
+            Explicit workflow definition version for the restarted run.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        input_str = self._marshal(input)
+        input_len = write_string(SCRATCH_BASE, input_str, OUT_BUF_SIZE)
+
+        result = _import_continue_as_new_versioned(SCRATCH_BASE, input_len, new_version)
+
+        _, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"continue_as_new_versioned(new_version={new_version}) failed: "
+                f"{_error_code_name(err_code)} (code {err_code})"
+            )
+
+    # --------------------------------------------------------------------
+    # 27d. side_effect — record non-deterministic computation result
+    # --------------------------------------------------------------------
+
+    def side_effect(self, result: str) -> str:
+        """Record a non-deterministic computation result in event history.
+
+        Calls the host ``durable-extended-lifecycle.side-effect`` import.
+        This allows the workflow to capture the result of a non-deterministic
+        operation (e.g. reading a random value, calling an external API
+        directly) so it can be replayed deterministically.
+
+        Parameters
+        ----------
+        result : str
+            The result of the non-deterministic computation (JSON string).
+
+        Returns
+        -------
+        str
+            The recorded side-effect identifier or value from the host.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        result_len = write_string(SCRATCH_BASE, result, OUT_BUF_SIZE)
+        resp = _import_side_effect(SCRATCH_BASE, result_len, OUTPUT_OFFSET, OUT_BUF_SIZE)
+        out_len, err_code = decode_simple_result(resp)
+        if err_code != 0:
+            raise RuntimeError(
+                f"side_effect failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        return read_string(OUTPUT_OFFSET, out_len)
 
     # --------------------------------------------------------------------
     # 28. run_detached — execute detached from cancellation
@@ -3555,3 +3964,212 @@ def _import_cleat_extend_timeout(additional_ms: int) -> int:
     raise NotImplementedError(
         "cleat_extend_timeout can only be called within a cleat WASM runtime."
     )
+
+
+# ========================================================================
+# NEW: Module-level stubs for durable-scope, durable-stream-state,
+# durable-extended-lifecycle, durable-extended-children, and
+# durable-fetch imports.
+#
+# TODO: When WIT bindings are regenerated with componentize-py, add
+# corresponding import lines to the try block at the top of this file
+# (around line 67) so these functions resolve to the real WASM FFI
+# imports when running in a cleat WASM runtime.
+# ========================================================================
+
+
+# -- durable-scope.set-scope ---------------------------------------------------
+
+
+def _import_set_scope(
+    obj_type_ptr: int,
+    obj_type_len: int,
+    inst_key_ptr: int,
+    inst_key_len: int,
+    prev_scope_ptr: int,
+    prev_scope_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_set_scope")``."""
+    raise NotImplementedError("set_scope can only be called within a cleat WASM runtime.")
+
+
+# -- durable-scope.get-scope ---------------------------------------------------
+
+
+def _import_get_scope(
+    obj_type_ptr: int,
+    obj_type_max_len: int,
+    inst_key_ptr: int,
+    inst_key_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_get_scope")``."""
+    raise NotImplementedError("get_scope can only be called within a cleat WASM runtime.")
+
+
+# -- durable-scope.uuid --------------------------------------------------------
+
+
+def _import_uuid(
+    seed_ptr: int,
+    seed_len: int,
+    uuid_ptr: int,
+    uuid_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_uuid")``."""
+    raise NotImplementedError("uuid can only be called within a cleat WASM runtime.")
+
+
+# -- durable-stream-state.set-state --------------------------------------------
+
+
+def _import_stream_set_state(
+    key_ptr: int,
+    key_len: int,
+    val_ptr: int,
+    val_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_set_state")``."""
+    raise NotImplementedError(
+        "stream_set_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.get-state --------------------------------------------
+
+
+def _import_stream_get_state(
+    key_ptr: int,
+    key_len: int,
+    out_ptr: int,
+    max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_get_state")``."""
+    raise NotImplementedError(
+        "stream_get_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.delete-state -----------------------------------------
+
+
+def _import_stream_delete_state(
+    key_ptr: int,
+    key_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_delete_state")``."""
+    raise NotImplementedError(
+        "stream_delete_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.incr-state -------------------------------------------
+
+
+def _import_stream_incr_state(
+    key_ptr: int,
+    key_len: int,
+    delta: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_incr_state")``."""
+    raise NotImplementedError(
+        "stream_incr_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.has-state --------------------------------------------
+
+
+def _import_stream_has_state(
+    key_ptr: int,
+    key_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_has_state")``."""
+    raise NotImplementedError(
+        "stream_has_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.list-state -------------------------------------------
+
+
+def _import_stream_list_state(
+    prefix_ptr: int,
+    prefix_len: int,
+    out_ptr: int,
+    max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_list_state")``."""
+    raise NotImplementedError(
+        "stream_list_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-extended-lifecycle.continue-as-new-versioned ----------------------
+
+
+def _import_continue_as_new_versioned(
+    input_ptr: int,
+    input_len: int,
+    new_version: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_continue_as_new_versioned")``."""
+    raise NotImplementedError(
+        "continue_as_new_versioned can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-extended-lifecycle.side-effect ------------------------------------
+
+
+def _import_side_effect(
+    result_ptr: int,
+    result_len: int,
+    out_ptr: int,
+    out_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_side_effect")``."""
+    raise NotImplementedError(
+        "side_effect can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-extended-children.child-workflow-in-schema ------------------------
+
+
+def _import_child_workflow_in_schema(
+    schema_ptr: int,
+    schema_len: int,
+    name_ptr: int,
+    name_len: int,
+    input_ptr: int,
+    input_len: int,
+    version: int,
+    priority: int,
+    policy_ptr: int,
+    policy_len: int,
+    run_id_ptr: int,
+    run_id_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_child_workflow_in_schema")``."""
+    raise NotImplementedError(
+        "child_workflow_in_schema can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-fetch.fetch -------------------------------------------------------
+
+
+def _import_fetch(
+    method_ptr: int,
+    method_len: int,
+    url_ptr: int,
+    url_len: int,
+    headers_ptr: int,
+    headers_len: int,
+    body_ptr: int,
+    body_len: int,
+    resp_ptr: int,
+    resp_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_fetch")``."""
+    raise NotImplementedError("fetch can only be called within a cleat WASM runtime.")

@@ -220,6 +220,18 @@ mod imports {
         // cleat_await_all_children - ABI 2.43, one string in (JSON run_ids), one string out
         pub fn cleat_await_all_children(run_ids_ptr: *const u8, run_ids_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
 
+        // cleat_poll_child - ABI 2.44, one string in (run_id), one string out, non-blocking
+        pub fn cleat_poll_child(
+            run_id_ptr: *const u8, run_id_len: u32,
+            result_ptr: *mut u8, result_max_len: u32,
+        ) -> i64;
+
+        // cleat_await_any_child - ABI 2.45, one string in (JSON run_ids), one string out, blocking
+        pub fn cleat_await_any_child(
+            run_ids_ptr: *const u8, run_ids_len: u32,
+            result_ptr: *mut u8, result_max_len: u32,
+        ) -> i64;
+
         // cleat_call_retry - 3 string pairs, 4 i64, 1 string pair (nonRetryableErrorsJSON), 1 string out
         #[link_name = "cleat_call_retry"]
         pub fn cleat_call_with_retry(
@@ -1121,6 +1133,44 @@ impl HostCalls {
         let (result_len, err_code) = memory::decode_simple_result(result);
         if err_code != 0 {
             return Err(format!("await_all_children(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code));
+        }
+        let resp = unsafe { memory::read_string(buf.as_ptr(), result_len) };
+        Ok(resp)
+    }
+
+    /// Poll a single child workflow for completion without suspending. Returns (result, error).
+    pub fn poll_child(&self, run_id: &str) -> (String, Option<String>) {
+        let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let r = unsafe {
+            imports::cleat_poll_child(
+                run_id.as_ptr(), run_id.len() as u32,
+                result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (result_len, err_code) = memory::decode_simple_result(r);
+        if err_code != 0 {
+            return (String::new(), Some(format!("poll_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code)));
+        }
+        let result = unsafe { memory::read_string(result_buf.as_ptr(), result_len) };
+        (result, None)
+    }
+
+    /// Await any of the given child workflows to complete. Returns the result JSON.
+    pub fn await_any_child(&self, run_ids: &[&str]) -> Result<String, String> {
+        let run_ids_json = serde_json::to_string(run_ids).map_err(|e| format!("serialize run_ids: {}", e))?;
+        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_await_any_child(
+                run_ids_json.as_ptr(), run_ids_json.len() as u32,
+                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        if result == memory::SUSPEND_SENTINEL {
+            std::panic::panic_any(crate::SuspendSentinel);
+        }
+        let (result_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("await_any_child(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code));
         }
         let resp = unsafe { memory::read_string(buf.as_ptr(), result_len) };
         Ok(resp)

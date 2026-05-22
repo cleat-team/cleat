@@ -30,9 +30,8 @@ import (
 //   - Python 3.10+
 //   - cleat-sdk installed          (pip install -e python-sdk/)
 func TestPythonWasmEndToEnd(t *testing.T) {
-	t.Skip("disabled: wasm-tools component decompose not available; investigation needed for Python WASM runtime path")
 
-	ctx := context.Background()
+ctx := context.Background()
 
 	// ---- Check prerequisites ----
 	pythonWasm := newPythonWasmTestHelper(t)
@@ -59,6 +58,11 @@ func TestPythonWasmEndToEnd(t *testing.T) {
 		}
 		wasmBytes = coreBytes
 		t.Logf("Using decomposed core module: %s (%d bytes)", coreWasmPath, len(coreBytes))
+	}
+	if coreWasmPath == wasmPath {
+		// Decomposition not available (wasm-tools >= ~1.230 removed the
+		// "component decompose" subcommand). The engine needs core WASM.
+		pythonWasm.skipIfNoDecompose(t)
 	}
 
 	// ---- Step 3: Create runtime and engine ----
@@ -453,6 +457,15 @@ func (h *pythonWasmTestHelper) decomposeComponent(t *testing.T, wasmPath string)
 	}
 
 	return outputPath
+}
+
+// skipIfNoDecompose skips the test when wasm-tools component decompose is
+// not available (removed in wasm-tools >= ~1.230).
+func (h *pythonWasmTestHelper) skipIfNoDecompose(t *testing.T) {
+	t.Helper()
+	t.Skip("wasm-tools component decompose not available — removed in wasm-tools >= 1.230. " +
+		"The engine requires decomposed core WASM. Install older wasm-tools or implement " +
+		"native Component Model support in the wasmtime backend.")
 }
 
 // findRepoRoot locates the repository root by finding go.mod.

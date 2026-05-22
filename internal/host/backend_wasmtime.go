@@ -248,6 +248,18 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if err := b.registerCleatFetch(linker); err != nil {
 		return nil, fmt.Errorf("host: register cleat_fetch: %w", err)
 	}
+	if err := b.registerCleatPollChild(linker); err != nil {
+		return nil, fmt.Errorf("host: register cleat_poll_child: %w", err)
+	}
+	if err := b.registerCleatAwaitAnyChild(linker); err != nil {
+		return nil, fmt.Errorf("host: register cleat_await_any_child: %w", err)
+	}
+	if err := b.registerCleatJsonParse(linker); err != nil {
+		return nil, fmt.Errorf("host: register cleat_json_parse: %w", err)
+	}
+	if err := b.registerCleatJsonStringify(linker); err != nil {
+		return nil, fmt.Errorf("host: register cleat_json_stringify: %w", err)
+	}
 	if err := b.registerCleatComplete(linker, &completeResult, &completeErr); err != nil {
 		return nil, fmt.Errorf("host: register cleat_complete: %w", err)
 	}
@@ -339,7 +351,18 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Call the entry point. The return value is a single i64 encoding
 	// the error code (low 32 bits) and output length (high 32 bits).
-	results, callErr := fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
+	// Wrap in recover to handle wasmtime-go internal panics (e.g., from
+	// modules with unexpected import/export configurations).
+	var results interface{}
+	var callErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callErr = fmt.Errorf("host: wasmtime panic in %q: %v", entryPoint, r)
+			}
+		}()
+		results, callErr = fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
+	}()
 
 	// Check for a result delivered via cleat_complete before treating
 	// a trap/proc_exit as an error.
@@ -1758,6 +1781,84 @@ func (b *wasmtimeBackend) registerCleatFetch(linker *wasmtime.Linker) error {
 			return errBadParamInt64
 		}
 		return h.Fetch(context.Background(), nil, method, url, headersJSON, body, uint32(responsePtr), uint32(responseMaxLen))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// cleat_poll_child: (i32,i32, i32,i32) -> i64
+// Polls for a child workflow result without blocking.
+// ---------------------------------------------------------------------------
+
+func (b *wasmtimeBackend) registerCleatPollChild(linker *wasmtime.Linker) error {
+	return linker.FuncWrap("env", "cleat_poll_child", func(caller *wasmtime.Caller,
+		runIDPtr, runIDLen, resultPtr, resultMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		runID, ok := wasmtimeReadServiceName(buf, runIDPtr, runIDLen)
+		if !ok {
+			return errBadParamInt64
+		}
+		return h.PollChild(context.Background(), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// cleat_await_any_child: (i32,i32, i32,i32) -> i64
+// Awaits any one of the given child workflows.
+// ---------------------------------------------------------------------------
+
+func (b *wasmtimeBackend) registerCleatAwaitAnyChild(linker *wasmtime.Linker) error {
+	return linker.FuncWrap("env", "cleat_await_any_child", func(caller *wasmtime.Caller,
+		idsPtr, idsLen, resultPtr, resultMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		runIDsJSON, ok := wasmtimeReadStringValidated(buf, idsPtr, idsLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		return h.AwaitAnyChild(context.Background(), nil, runIDsJSON, uint32(resultPtr), uint32(resultMaxLen))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// cleat_json_parse: (i32,i32, i32,i32) -> i64
+// Validates and normalizes a JSON string via the host's encoding/json.
+// ---------------------------------------------------------------------------
+
+func (b *wasmtimeBackend) registerCleatJsonParse(linker *wasmtime.Linker) error {
+	return linker.FuncWrap("env", "cleat_json_parse", func(caller *wasmtime.Caller,
+		jsonPtr, jsonLen, outPtr, outMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		callCtx := ctxWithMem(context.Background(), buf)
+		return h.JsonParse(callCtx, nil, uint32(jsonPtr), uint32(jsonLen), uint32(outPtr), uint32(outMaxLen))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// cleat_json_stringify: (i32,i32, i32,i32) -> i64
+// Validates and re-serializes a JSON string via the host's encoding/json.
+// ---------------------------------------------------------------------------
+
+func (b *wasmtimeBackend) registerCleatJsonStringify(linker *wasmtime.Linker) error {
+	return linker.FuncWrap("env", "cleat_json_stringify", func(caller *wasmtime.Caller,
+		ptr, len, outPtr, outMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		callCtx := ctxWithMem(context.Background(), buf)
+		return h.JsonStringify(callCtx, nil, uint32(ptr), uint32(len), uint32(outPtr), uint32(outMaxLen))
 	})
 }
 

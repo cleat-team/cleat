@@ -17,6 +17,8 @@ import {
   decodePollSignalResult,
   decodePollCancellationResult,
   decodeAwaitPromiseResult,
+  decodeGetScopeResult,
+  SUSPEND_SENTINEL,
   OUT_BUF_SIZE,
   SCRATCH_BASE,
   OUTPUT_OFFSET,
@@ -41,7 +43,7 @@ function errorCodeName(code: u32): string {
 }
 
 // ═══════════════════════════════════════════════
-// 21 raw host function imports from "env" module
+// Raw host function imports from "env" module
 // ═══════════════════════════════════════════════
 
 /**
@@ -213,27 +215,6 @@ export declare function import_cleat_call(
   opLen: i32,
   reqPtr: i32,
   reqLen: i32,
-  respPtr: i32,
-  respMaxLen: i32,
-): i64;
-
-/**
- * 15b. cleat_call_with_timeout: Make a recorded API call with per-call deadline.
- * (import "env" "cleat_call_with_timeout") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
- *
- * NOTE: This import requires host-side ABI support. If the host does not expose
- * this import, the call will fail at module instantiation. Use timeoutMs=0 to
- * fall back to the standard cleat_call import.
- */
-@external("env", "cleat_call_with_timeout")
-export declare function import_cleat_call_with_timeout(
-  svcPtr: i32,
-  svcLen: i32,
-  opPtr: i32,
-  opLen: i32,
-  reqPtr: i32,
-  reqLen: i32,
-  timeoutMs: i64,
   respPtr: i32,
   respMaxLen: i32,
 ): i64;
@@ -658,6 +639,104 @@ export declare function import_cleat_json_stringify(
   outMaxLen: i32,
 ): i64;
 
+/**
+ * cleat_set_scope: (ptr,len x2, ptr,maxLen) -> i64
+ * (import "env" "cleat_set_scope")
+ */
+@external("env", "cleat_set_scope")
+export declare function import_cleat_set_scope(
+  objTypePtr: i32, objTypeLen: i32,
+  instKeyPtr: i32, instKeyLen: i32,
+  prevScopePtr: i32, prevScopeMaxLen: i32,
+): i64;
+
+/**
+ * cleat_get_scope: (ptr,maxLen x2) -> i64
+ * (import "env" "cleat_get_scope")
+ */
+@external("env", "cleat_get_scope")
+export declare function import_cleat_get_scope(
+  objTypePtr: i32, objTypeMaxLen: i32,
+  instKeyPtr: i32, instKeyMaxLen: i32,
+): i64;
+
+/**
+ * cleat_uuid: (ptr,len, ptr,maxLen) -> i64
+ * (import "env" "cleat_uuid")
+ */
+@external("env", "cleat_uuid")
+export declare function import_cleat_uuid(
+  seedPtr: i32, seedLen: i32,
+  uuidPtr: i32, uuidMaxLen: i32,
+): i64;
+
+/**
+ * cleat_continue_as_new_versioned: (ptr,len,i32) -> i64
+ * (import "env" "cleat_continue_as_new_versioned")
+ */
+@external("env", "cleat_continue_as_new_versioned")
+export declare function import_cleat_continue_as_new_versioned(
+  inputPtr: i32, inputLen: i32,
+  newVersion: i32,
+): i64;
+
+/**
+ * cleat_child_workflow_in_schema: 11 params -> i64
+ * (import "env" "cleat_child_workflow_in_schema")
+ */
+@external("env", "cleat_child_workflow_in_schema")
+export declare function import_cleat_child_workflow_in_schema(
+  schemaPtr: i32, schemaLen: i32,
+  namePtr: i32, nameLen: i32,
+  inputPtr: i32, inputLen: i32,
+  version: i64,
+  priority: i64,
+  policyPtr: i32, policyLen: i32,
+  runIdPtr: i32, runIdMaxLen: i32,
+): i64;
+
+/**
+ * cleat_side_effect: (ptr,len, ptr,maxLen) -> i64
+ * (import "env" "cleat_side_effect")
+ */
+@external("env", "cleat_side_effect")
+export declare function import_cleat_side_effect(
+  resultPtr: i32, resultLen: i32,
+  outPtr: i32, outMaxLen: i32,
+): i64;
+
+/**
+ * cleat_poll_child: (ptr,len, ptr,maxLen) -> i64
+ * (import "env" "cleat_poll_child")
+ */
+@external("env", "cleat_poll_child")
+export declare function import_cleat_poll_child(
+  runIdPtr: i32, runIdLen: i32,
+  resultPtr: i32, resultMaxLen: i32,
+): i64;
+
+/**
+ * cleat_await_any_child: (ptr,len, ptr,maxLen) -> i64
+ * (import "env" "cleat_await_any_child")
+ */
+@external("env", "cleat_await_any_child")
+export declare function import_cleat_await_any_child(
+  runIdsPtr: i32, runIdsLen: i32,
+  resultPtr: i32, resultMaxLen: i32,
+): i64;
+
+/**
+ * plugin_call_streaming: (ptr,len x3, ptr,maxLen) -> i64
+ * (import "env" "plugin_call_streaming")
+ */
+@external("env", "plugin_call_streaming")
+export declare function import_plugin_call_streaming(
+  pluginNamePtr: i32, pluginNameLen: i32,
+  functionNamePtr: i32, functionNameLen: i32,
+  inputPtr: i32, inputLen: i32,
+  responsePtr: i32, responseMaxLen: i32,
+): i64;
+
 // ═══════════════════════════════════════════════
 // High-level result types for HostCalls methods
 // ═══════════════════════════════════════════════
@@ -917,10 +996,6 @@ export class HostCalls {
    * Service, operation, and request JSON are encoded to the scratch buffer,
    * the host call is made, and the response is read from the output buffer.
    *
-   * When timeoutSeconds > 0, the host enforces a per-call deadline. If the host
-   * does not expose the `cleat_call_with_timeout` import, pass 0 to use
-   * the standard (non-timeout) import.
-   *
    * @param service        - Service name (e.g., "payment", "email").
    * @param operation      - Operation name (e.g., "charge", "send").
    * @param requestJson    - Request payload as a JSON string.
@@ -936,10 +1011,6 @@ export class HostCalls {
    *
    * Service, operation, and request JSON are encoded to the scratch buffer,
    * the host call is made, and the response is read from the output buffer.
-   *
-   * When timeoutMs > 0, the host enforces a per-call deadline. If the host
-   * does not expose the `cleat_call_with_timeout` import, pass 0 to use
-   * the standard (non-timeout) import.
    *
    * @param service      - Service name (e.g., "payment", "email").
    * @param operation    - Operation name (e.g., "charge", "send").
@@ -957,32 +1028,17 @@ export class HostCalls {
     remaining -= opLen;
     let reqLen: i32 = this.writeScratch(reqOffset, remaining, requestJson, "requestJson");
 
-    // Call the host import — use the timeout variant when timeoutMs > 0
-    let result: i64;
-    if (timeoutMs > 0) {
-      result = import_cleat_call_with_timeout(
-        SCRATCH_BASE as i32,
-        svcLen,
-        opOffset as i32,
-        opLen,
-        reqOffset as i32,
-        reqLen,
-        timeoutMs,
-        OUTPUT_OFFSET as i32,
-        OUT_BUF_SIZE,
-      );
-    } else {
-      result = import_cleat_call(
-        SCRATCH_BASE as i32,
-        svcLen,
-        opOffset as i32,
-        opLen,
-        reqOffset as i32,
-        reqLen,
-        OUTPUT_OFFSET as i32,
-        OUT_BUF_SIZE,
-      );
-    }
+    // Call the host import
+    let result: i64 = import_cleat_call(
+      SCRATCH_BASE as i32,
+      svcLen,
+      opOffset as i32,
+      opLen,
+      reqOffset as i32,
+      reqLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
 
     // Decode the packed result
     let decoded = decodeCallResult(result);
@@ -1367,6 +1423,37 @@ export class HostCalls {
   }
 
   // ────────────────────────────────────────────
+  // 11a. continueAsNewVersioned
+  // ────────────────────────────────────────────
+
+  /**
+   * Start a new workflow run with fresh input and explicit version.
+   *
+   * After this call, the workflow should return the suspension sentinel
+   * to let the host restart it with the new input and version.
+   *
+   * @param inputJson  - New input JSON for the restarted workflow.
+   * @param newVersion - Explicit workflow version for the restarted run.
+   * @returns An error message on failure, or `null` on success.
+   */
+  continueAsNewVersioned(inputJson: string, newVersion: i32): string | null {
+    let inputLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, inputJson);
+
+    let result: i64 = import_cleat_continue_as_new_versioned(
+      SCRATCH_BASE as i32,
+      inputLen,
+      newVersion,
+    );
+    let decoded = decodeSimpleResult(result);
+
+    if (decoded.errCode !== 0) {
+      return "continueAsNewVersioned() failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
+    }
+
+    return null;
+  }
+
+  // ────────────────────────────────────────────
   // 12. childWorkflow
   // ────────────────────────────────────────────
 
@@ -1446,6 +1533,68 @@ export class HostCalls {
   }
 
   // ────────────────────────────────────────────
+  // 12b. childWorkflowInSchema
+  // ────────────────────────────────────────────
+
+  /**
+   * Start a child workflow instance within a named schema.
+   *
+   * @param schema     - Schema name for the child workflow.
+   * @param name       - Child workflow definition name.
+   * @param inputJson  - Input JSON for the child workflow.
+   * @param version    - Workflow definition version.
+   * @param priority   - Priority (0 = highest).
+   * @param policy     - Child workflow policy JSON.
+   * @returns A DurableResult containing the child run ID on success.
+   */
+  childWorkflowInSchema(
+    schema: string,
+    name: string,
+    inputJson: string,
+    version: i64,
+    priority: i64,
+    policy: string,
+  ): DurableResult<string> {
+    let schemaLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, schema);
+    let nameOffset: usize = SCRATCH_BASE + schemaLen;
+    let remaining: i32 = OUT_BUF_SIZE - schemaLen;
+    let nameLen: i32 = this.writeScratch(nameOffset, remaining, name, "name");
+    let inputOffset: usize = nameOffset + nameLen;
+    remaining -= nameLen;
+    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
+    let policyOffset: usize = inputOffset + inputLen;
+    remaining -= inputLen;
+    let policyLen: i32 = this.writeScratch(policyOffset, remaining, policy, "policy");
+
+    let result: i64 = import_cleat_child_workflow_in_schema(
+      SCRATCH_BASE as i32,
+      schemaLen,
+      nameOffset as i32,
+      nameLen,
+      inputOffset as i32,
+      inputLen,
+      version,
+      priority,
+      policyOffset as i32,
+      policyLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+
+    if (decoded.errCode !== 0) {
+      return new DurableResult<string>(
+        "",
+        "childWorkflowInSchema(schema='" + schema + "', name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
+      );
+    }
+
+    let runId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+    return new DurableResult<string>(runId, null);
+  }
+
+  // ────────────────────────────────────────────
   // 13. awaitChild
   // ────────────────────────────────────────────
 
@@ -1485,6 +1634,82 @@ export class HostCalls {
 
     let childResult: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
     return new DurableResult<string>(childResult, null);
+  }
+
+  // ────────────────────────────────────────────
+  // 13a. pollChild — non-blocking child poll
+  // ────────────────────────────────────────────
+
+  /**
+   * Poll a child workflow for completion without suspending.
+   *
+   * Non-blocking — returns immediately with the result if the child
+   * has completed, or an empty result if not yet complete.
+   *
+   * @param runId - The child workflow run ID.
+   * @returns A DurableResult containing the child's result JSON on success.
+   */
+  pollChild(runId: string): DurableResult<string> {
+    let runIdLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, runId);
+
+    let result: i64 = import_cleat_poll_child(
+      SCRATCH_BASE as i32,
+      runIdLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    // pollChild is non-blocking, no suspend check needed
+    let decoded = decodeSimpleResult(result);
+
+    if (decoded.errCode !== 0) {
+      return new DurableResult<string>(
+        "",
+        "pollChild(runId='" + runId + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
+      );
+    }
+
+    let childResult: string = decoded.extra > 0
+      ? this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32)
+      : "";
+    return new DurableResult<string>(childResult, null);
+  }
+
+  // ────────────────────────────────────────────
+  // 13b. awaitAnyChild — wait for first child to complete
+  // ────────────────────────────────────────────
+
+  /**
+   * Wait for the first of the given child workflows to complete.
+   *
+   * If none of the children have completed yet, the workflow
+   * suspends by returning the suspension sentinel.
+   *
+   * @param runIds - JSON array of child workflow run IDs.
+   * @returns The result from the first completed child, or null on
+   *          suspend or error.
+   */
+  awaitAnyChild(runIds: string): string | null {
+    let runIdsLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, runIds);
+
+    let result: i64 = import_cleat_await_any_child(
+      SCRATCH_BASE as i32,
+      runIdsLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    // Check for suspend sentinel
+    if ((result as u64) === (SUSPEND_SENTINEL as u64)) {
+      setWorkflowSuspended();
+      return null;
+    }
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      return null;
+    }
+    return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
   }
 
   // ────────────────────────────────────────────
@@ -1769,6 +1994,61 @@ export class HostCalls {
   }
 
   // ────────────────────────────────────────────
+  // 19a. pluginCallStreaming
+  // ────────────────────────────────────────────
+
+  /**
+   * Call a plugin function via the host runtime with streaming support.
+   *
+   * Plugin name, function name, and input JSON are encoded to the scratch
+   * buffer sequentially, the host call is made, and the response is read
+   * from the output buffer. Supports streaming responses from the plugin.
+   *
+   * @param pluginName    - Name of the plugin (e.g., "blobstore", "slacknotify").
+   * @param functionName  - Plugin function name (e.g., "put", "get").
+   * @param inputJson     - Input payload as a JSON string.
+   * @returns The plugin call outcome with response JSON or error details.
+   */
+  pluginCallStreaming(pluginName: string, functionName: string, inputJson: string): PluginCallOutcome {
+    // Encode input strings sequentially into the scratch buffer
+    let pluginNameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, pluginName);
+    let fnOffset: usize = SCRATCH_BASE + pluginNameLen;
+    let remaining: i32 = OUT_BUF_SIZE - pluginNameLen;
+    let fnLen: i32 = this.writeScratch(fnOffset, remaining, functionName, "functionName");
+    let inputOffset: usize = fnOffset + fnLen;
+    remaining -= fnLen;
+    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
+
+    // Call the host import
+    let result: i64 = import_plugin_call_streaming(
+      SCRATCH_BASE as i32,
+      pluginNameLen,
+      fnOffset as i32,
+      fnLen,
+      inputOffset as i32,
+      inputLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    // Decode the packed result (same bit layout as plugin_call)
+    let decoded = decodeCallResult(result);
+    let responseLen: i32 = decoded.responseLen as i32;
+
+    // On error, the output buffer contains an error message
+    if (decoded.errCode !== 0) {
+      let errMsg: string =
+        responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "pluginCallStreaming(" + pluginName + "." + functionName + ") failed: unknown error (code " + decoded.errCode.toString() + ")";
+      return new PluginCallOutcome("", errMsg, decoded.callErrorCode);
+    }
+
+    // Success: read the response
+    let resp: string =
+      responseLen > 0 ? this.memory.readString(OUTPUT_OFFSET, responseLen) : "";
+    return new PluginCallOutcome(resp, null, 0);
+  }
+
+  // ────────────────────────────────────────────
   // 20. currentWorkflowId
   // ────────────────────────────────────────────
 
@@ -1791,7 +2071,9 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Set the state key prefix for virtual object instances.
+   * Set the state key prefix for virtual object instances via the host
+   * and update the local scope prefix.
+   *
    * All subsequent setQueryState calls are automatically prefixed
    * with "vo:<objectType>:<instanceKey>:".
    *
@@ -1800,12 +2082,29 @@ export class HostCalls {
    * @returns The previous scope prefix (empty string if none was set).
    */
   setScope(objectType: string, instanceKey: string): string {
-    let prev: string = this._scopePrefix;
+    let objTypeLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, objectType);
+    let instOffset: usize = SCRATCH_BASE + objTypeLen;
+    let remaining: i32 = OUT_BUF_SIZE - objTypeLen;
+    let instKeyLen: i32 = this.writeScratch(instOffset, remaining, instanceKey, "instanceKey");
+
+    let result: i64 = import_cleat_set_scope(
+      SCRATCH_BASE as i32,
+      objTypeLen,
+      instOffset as i32,
+      instKeyLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    let prevScope: string = decoded.extra > 0
+      ? this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32)
+      : "";
     this._scopePrefix =
       objectType.length > 0 && instanceKey.length > 0
         ? "vo:" + objectType + ":" + instanceKey + ":"
         : "";
-    return prev;
+    return prevScope;
   }
 
   // ────────────────────────────────────────────
@@ -1813,21 +2112,29 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Get the current virtual object scope.
+   * Get the current virtual object scope from the host.
    *
    * @returns A tuple [objectType, instanceKey] or ["", ""] if no scope
    *          is set.
    */
   getScope(): string[] {
-    if (this._scopePrefix.length === 0) {
-      return ["", ""];
-    }
-    let trimmed: string = this._scopePrefix.substring(0, this._scopePrefix.length - 1);
-    let parts: string[] = trimmed.split(":");
-    if (parts.length === 3 && parts[0] === "vo") {
-      return [parts[1], parts[2]];
-    }
-    return ["", ""];
+    let halfSize: i32 = OUT_BUF_SIZE / 2;
+    let result: i64 = import_cleat_get_scope(
+      OUTPUT_OFFSET as i32,
+      halfSize,
+      (OUTPUT_OFFSET + halfSize) as i32,
+      halfSize,
+    );
+    let lengths = decodeGetScopeResult(result);
+    let objTypeLen: i32 = lengths[0] as i32;
+    let instKeyLen: i32 = lengths[1] as i32;
+    let objType: string = objTypeLen > 0
+      ? this.memory.readString(OUTPUT_OFFSET, objTypeLen)
+      : "";
+    let instKey: string = instKeyLen > 0
+      ? this.memory.readString(OUTPUT_OFFSET + halfSize, instKeyLen)
+      : "";
+    return [objType, instKey];
   }
 
   // ────────────────────────────────────────────
@@ -1835,90 +2142,61 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Remove the current scope and return the previous scope prefix.
+   * Remove the current scope on both the host and locally.
    *
-   * @returns The scope prefix that was active before clearing (empty
-   *          string if none was set).
+   * Calls cleat_set_scope with empty strings to clear the host-side
+   * virtual object scope, and resets the local scope prefix.
+   *
+   * @returns The previous scope JSON string (empty if none was set).
    */
   clearScope(): string {
+    // Call cleat_set_scope with empty strings to clear host-side scope
+    let result: i64 = import_cleat_set_scope(
+      0, 0,
+      0, 0,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(result);
+    let prevScope: string =
+      decoded.extra > 0
+        ? this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32)
+        : "";
+
+    // Clear local scope prefix
     let prev: string = this._scopePrefix;
     this._scopePrefix = "";
-    return prev;
+    return prevScope.length > 0 ? prevScope : prev;
   }
 
   // ────────────────────────────────────────────
-  // 24. uuid — deterministic ID generation
+  // 24. uuid — deterministic ID generation via host
   // ────────────────────────────────────────────
 
   /**
-   * Return a deterministic UUID scoped to the current workflow
-   * and the given seed. Same seed always produces the same UUID for
-   * this workflow instance.
+   * Return a deterministic UUID via the host runtime.
    *
-   * Uses a 128-bit FNV-1a hash of "{workflowID}:{seed}" to produce
-   * a UUID-formatted string.
+   * The host generates a UUID scoped to the current workflow and seed.
+   * Same seed always produces the same UUID for this workflow instance.
    *
    * @param seed - A seed string that determines the UUID within this
    *               workflow.
-   * @returns A UUID-formatted string.
+   * @returns A UUID-formatted string, or empty string on error.
    */
   uuid(seed: string): string {
-    let wfId: string = this.currentWorkflowId();
-    let data: string = wfId + ":" + seed;
-
-    // FNV-1a 128-bit hash for deterministic UUID generation
-    let h1: u64 = 0xcbf29ce484222325;
-    let h2: u64 = 0x6c62272e07bb0142;
-    for (let i: i32 = 0; i < data.length; i++) {
-      let c: u32 = data.charCodeAt(i);
-      h1 ^= c;
-      h1 *= 0x100000001b3;
-      h2 ^= c;
-      h2 *= 0x100000001b3;
+    let seedLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, seed);
+    let result: i64 = import_cleat_uuid(
+      SCRATCH_BASE as i32,
+      seedLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      return "";
     }
-
-    // Set UUIDv5 version bits in byte 6 (top nibble of h1's 7th byte)
-    // h1 byte 6 is at bits 8-15: clear top nibble, set version 5
-    h1 = (h1 & ~(u64(0xf0) << 8)) | (u64(0x50) << 8);
-
-    // Set UUID variant 1 bits in byte 8 (top nibble of h2's 1st byte)
-    // h2 byte 0 is at bits 56-63: clear top 2 bits, set variant 1
-    h2 = (h2 & ~(u64(0xc0) << 56)) | (u64(0x80) << 56);
-
-    // Format as UUID: XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-    let hexChars: string = "0123456789abcdef";
-    let parts: string[] = ["", "", "", "", ""];
-
-    // Part 0 (8 hex chars): first 32 bits from h1 (bits 63-32)
-    // Part 1 (4 hex chars): next 16 bits from h1 (bits 31-16)
-    // Part 2 (4 hex chars): last 16 bits from h1 (bits 15-0)
-    let temp: u64 = h1;
-    for (let i: i32 = 0; i < 8; i++) {
-      parts[0] += hexChars.charAt((temp >> 60) as u32);
-      temp <<= 4;
-    }
-    for (let i: i32 = 0; i < 4; i++) {
-      parts[1] += hexChars.charAt((temp >> 60) as u32);
-      temp <<= 4;
-    }
-    for (let i: i32 = 0; i < 4; i++) {
-      parts[2] += hexChars.charAt((temp >> 60) as u32);
-      temp <<= 4;
-    }
-
-    // Part 3 (4 hex chars): first 16 bits from h2 (bits 63-48)
-    // Part 4 (12 hex chars): remaining 48 bits from h2 (bits 47-0)
-    temp = h2;
-    for (let i: i32 = 0; i < 4; i++) {
-      parts[3] += hexChars.charAt((temp >> 60) as u32);
-      temp <<= 4;
-    }
-    for (let i: i32 = 0; i < 12; i++) {
-      parts[4] += hexChars.charAt((temp >> 60) as u32);
-      temp <<= 4;
-    }
-
-    return parts[0] + "-" + parts[1] + "-" + parts[2] + "-" + parts[3] + "-" + parts[4];
+    return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
   }
 
   // ────────────────────────────────────────────
@@ -2151,6 +2429,38 @@ export class HostCalls {
       return "signalWorkflow(targetRunId='" + targetRunId + "', signalName='" + signalName + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 28a. sideEffect — cache and return a deterministic side effect result
+  // ────────────────────────────────────────────
+
+  /**
+   * Record a side effect result and return the cached value on replay.
+   *
+   * On first execution, the result is recorded in the event history.
+   * On replay, the previously recorded result is returned instead of
+   * re-executing the side effect.
+   *
+   * @param result - The side effect result JSON to record.
+   * @returns The cached result on replay, or the same result on first
+   *          execution. Returns null on error.
+   */
+  sideEffect(result: string): string | null {
+    let resultLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, result);
+
+    let hostResult: i64 = import_cleat_side_effect(
+      SCRATCH_BASE as i32,
+      resultLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    let decoded = decodeSimpleResult(hostResult);
+    if (decoded.errCode !== 0 || decoded.extra === 0) {
+      return null;
+    }
+    return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
   }
 
   // ────────────────────────────────────────────

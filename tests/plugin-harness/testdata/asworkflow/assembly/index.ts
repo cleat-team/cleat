@@ -18,8 +18,12 @@ import {
 
 function callBuilt(h: HostCalls, pluginName: string, funcName: string, inputJson: string): string {
   let r: PluginCallOutcome = h.pluginCall(pluginName, funcName, inputJson);
-  if (r.isError) {
-    return '{"error":"' + escapeJson(r.error) + '"}';
+  if (r.error !== null || r.response.length == 0 || r.response == "null") {
+    let msg: string = "empty response";
+    if (r.error !== null) {
+      msg = r.error!;
+    }
+    return '{"error":"' + escapeJson(msg) + '"}';
   }
   return r.response;
 }
