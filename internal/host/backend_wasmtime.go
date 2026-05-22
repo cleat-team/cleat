@@ -1757,6 +1757,35 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 	// ---- Step 3: Walk instance DAG ----
 	instances := make([]*wasmtime.Instance, len(bundle.Instances))
 
+	// Resolve FromExports chains: walk transitively to find the actual
+	// instantiated instance that provides exports for each instance index.
+	actualProvider := make([]int, len(bundle.Instances))
+	for i := range actualProvider {
+		actualProvider[i] = i
+	}
+	// Iterate to closure: follow FromExports chains until we reach an
+	// instantiated instance or hit a fixed point.
+	for changed := true; changed; {
+		changed = false
+		for i, inst := range bundle.Instances {
+			if inst.ModuleIndex >= 0 {
+				continue // has its own module, no need to resolve further
+			}
+			// Try to resolve through any FromExports entry.
+			for _, fe := range inst.FromExports {
+				src := fe.SourceInstance
+				if src >= 0 && src < len(actualProvider) && actualProvider[src] != i {
+					next := actualProvider[src]
+					if bundle.Instances[next].ModuleIndex >= 0 && actualProvider[i] != next {
+						actualProvider[i] = next
+						changed = true
+						break
+					}
+				}
+			}
+		}
+	}
+
 	for i, inst := range bundle.Instances {
 		if inst.ModuleIndex < 0 {
 			// FromExports-only alias — no module of its own.
@@ -1764,12 +1793,17 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 		}
 		cm := compiled[inst.ModuleIndex]
 
-		// Build a map from import module name to source instance index.
+		// Build a map from import module name to source instance index,
+		// resolving through FromExports chains to the actual instantiated instance.
 		importNameToInstance := make(map[string]int, len(inst.Args))
 		for _, arg := range inst.Args {
-			importNameToInstance[arg.Name] = arg.InstanceIndex
+			resolved := arg.InstanceIndex
+			if resolved >= 0 && resolved < len(actualProvider) {
+				resolved = actualProvider[resolved]
+			}
+			importNameToInstance[arg.Name] = resolved
 			if arg.Name == "" {
-				importNameToInstance[componentAdapterModule] = arg.InstanceIndex
+				importNameToInstance[componentAdapterModule] = resolved
 			}
 		}
 
@@ -1804,6 +1838,9 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				break
 			}
 		}
+
+		// Fill unresolved WASI 0.2.0 imports with traps.
+		_ = linker.DefineUnknownImportsAsTraps(cm)
 
 		modInst, err := linker.Instantiate(store, cm)
 		if err != nil {
