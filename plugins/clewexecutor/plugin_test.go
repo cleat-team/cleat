@@ -195,6 +195,116 @@ func TestExtractPhaseNoMatch(t *testing.T) {
 	}
 }
 
+func TestExtractTokenUsage(t *testing.T) {
+	// Normal output with modelUsage, usage, total_cost_usd -> correct TokenUsage.
+	t.Run("normal", func(t *testing.T) {
+		stdout := `{
+			"modelUsage": {"claude-sonnet-4-6": {"inputTokens": 1234}},
+			"total_cost_usd": 0.042,
+			"usage": {
+				"input_tokens": 1200,
+				"output_tokens": 300,
+				"cache_read_input_tokens": 100,
+				"cache_creation_input_tokens": 50
+			}
+		}`
+		got := extractTokenUsage(stdout)
+		if got == nil {
+			t.Fatal("expected non-nil TokenUsage")
+		}
+		if got.InputTokens != 1200 {
+			t.Errorf("InputTokens: expected 1200, got %d", got.InputTokens)
+		}
+		if got.OutputTokens != 300 {
+			t.Errorf("OutputTokens: expected 300, got %d", got.OutputTokens)
+		}
+		if got.CacheReadInputTokens != 100 {
+			t.Errorf("CacheReadInputTokens: expected 100, got %d", got.CacheReadInputTokens)
+		}
+		if got.CacheCreationTokens != 50 {
+			t.Errorf("CacheCreationTokens: expected 50, got %d", got.CacheCreationTokens)
+		}
+		if got.CostUSD != 0.042 {
+			t.Errorf("CostUSD: expected 0.042, got %f", got.CostUSD)
+		}
+		if got.Model != "claude-sonnet-4-6" {
+			t.Errorf("Model: expected 'claude-sonnet-4-6', got %q", got.Model)
+		}
+	})
+
+	// modelUsage with single entry -> picks the model key.
+	t.Run("single_model", func(t *testing.T) {
+		stdout := `{
+			"modelUsage": {"claude-opus-4-7": {"inputTokens": 500}},
+			"total_cost_usd": 0.015,
+			"usage": {"input_tokens": 500, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+		}`
+		got := extractTokenUsage(stdout)
+		if got == nil {
+			t.Fatal("expected non-nil TokenUsage")
+		}
+		if got.Model != "claude-opus-4-7" {
+			t.Errorf("Model: expected 'claude-opus-4-7', got %q", got.Model)
+		}
+	})
+
+	// Empty modelUsage -> model is "".
+	t.Run("empty_model_usage", func(t *testing.T) {
+		stdout := `{
+			"modelUsage": {},
+			"total_cost_usd": 0.0,
+			"usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
+		}`
+		got := extractTokenUsage(stdout)
+		if got == nil {
+			t.Fatal("expected non-nil TokenUsage")
+		}
+		if got.Model != "" {
+			t.Errorf("Model: expected '', got %q", got.Model)
+		}
+	})
+
+	// Invalid JSON -> returns nil.
+	t.Run("invalid_json", func(t *testing.T) {
+		got := extractTokenUsage("not json")
+		if got != nil {
+			t.Error("expected nil for invalid JSON")
+		}
+	})
+
+	// Missing usage fields -> zero values, no panic.
+	t.Run("missing_usage_fields", func(t *testing.T) {
+		stdout := `{
+			"modelUsage": {"claude-sonnet-4-6": {"inputTokens": 100}},
+			"total_cost_usd": 0.01
+		}`
+		got := extractTokenUsage(stdout)
+		if got == nil {
+			t.Fatal("expected non-nil TokenUsage")
+		}
+		if got.InputTokens != 0 {
+			t.Errorf("InputTokens: expected 0, got %d", got.InputTokens)
+		}
+		if got.OutputTokens != 0 {
+			t.Errorf("OutputTokens: expected 0, got %d", got.OutputTokens)
+		}
+		if got.Model != "claude-sonnet-4-6" {
+			t.Errorf("Model: expected 'claude-sonnet-4-6', got %q", got.Model)
+		}
+		if got.CostUSD != 0.01 {
+			t.Errorf("CostUSD: expected 0.01, got %f", got.CostUSD)
+		}
+	})
+
+	// Empty string -> returns nil.
+	t.Run("empty_string", func(t *testing.T) {
+		got := extractTokenUsage("")
+		if got != nil {
+			t.Error("expected nil for empty string")
+		}
+	})
+}
+
 func TestBuildPrompt(t *testing.T) {
 	in := runPhaseInput{
 		TaskID:      "cleat-212",
