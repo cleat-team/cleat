@@ -1979,37 +1979,46 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 }
 
 // enforceParentClosePolicy applies ParentClosePolicy to all child workflows
-// of the given parent workflow. Runs as a best-effort operation.
-//
-// Note: This runs without RLS transaction context because it is called with
-// context.Background() from post-commit cleanup. For non-default tenants, the
-// RLS default will filter to the default tenant only. This is acceptable
-// because the operation is best-effort and child workflows typically share
-// the parent's tenant (inherited at creation).
+// of the given parent workflow. Best-effort post-commit cleanup.
 func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
-	// Terminate children with TERMINATE policy.
-	s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = 'parent workflow terminated'
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
 	`, parentWorkflowID)
+	tx.Commit()
 
-	// Request cancellation for children with REQUEST_CANCEL policy.
-	s.db.ExecContext(ctx, `
+	tx2, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return
+	}
+	defer tx2.Rollback()
+	tx2.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
 	`, parentWorkflowID)
+	tx2.Commit()
 }
 
 // wakeParent sets the parent workflow's next_wake_at to now so it immediately
 // detects child completion. Runs as a best-effort post-commit operation.
 func (s *PostgresStore) wakeParent(ctx context.Context, childID string) {
-	s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET next_wake_at = now()
 		WHERE id = (
@@ -2017,6 +2026,7 @@ func (s *PostgresStore) wakeParent(ctx context.Context, childID string) {
 		)
 		AND status = 'ready'
 	`, childID)
+	tx.Commit()
 }
 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
@@ -2480,6 +2490,14 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 		return err
 	}
 
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET next_wake_at = now()
+		WHERE id = $1 AND status = 'ready'
+	`, workflowID)
+	if err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 

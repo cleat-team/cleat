@@ -1363,25 +1363,35 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 // ---------------------------------------------------------------------------
 
 // enforceParentClosePolicy applies ParentClosePolicy to all child workflows
-// of the given parent workflow. Runs as a best-effort operation.
+// of the given parent workflow. Best-effort post-commit cleanup.
 func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
-	// Terminate children with TERMINATE policy.
-	s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed', error_msg = 'parent workflow terminated'
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'TERMINATE'
 		  AND status NOT IN ('done', 'failed')
 	`, parentWorkflowID)
+	tx.Commit()
 
-	// Request cancellation for children with REQUEST_CANCEL policy.
-	s.db.ExecContext(ctx, `
+	tx2, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return
+	}
+	defer tx2.Rollback()
+	tx2.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET cancellation_requested = 1
 		WHERE parent_workflow_id = @p1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
 		  AND status NOT IN ('done', 'failed')
 	`, parentWorkflowID)
+	tx2.Commit()
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,6 +1637,14 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		return err
 	}
 
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET next_wake_at = SYSUTCDATETIME()
+		WHERE id = @p1 AND status = 'ready'
+	`, workflowID)
+	if err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -2802,11 +2820,16 @@ func (s *MSSQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef 
 }
 
 // DeleteExpiredEvents deletes event history rows for completed/failed workflows
-// whose completed_at is older than the cutoff.
+// whose completed_at is older than the cutoff. Each batch runs in its own transaction
+// to set RLS tenant context.
 func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		result, err := s.db.ExecContext(ctx, `
+		tx, err := s.beginTxWithContext(ctx)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: begin: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `
 			DELETE FROM event_history
 			WHERE workflow_id IN (
 				SELECT id FROM workflow_instances
@@ -2818,7 +2841,11 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 			)
 		`, olderThan)
 		if err != nil {
+			tx.Rollback()
 			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: commit: %w", err)
 		}
 		n, _ := result.RowsAffected()
 		totalDeleted += n
@@ -2830,7 +2857,11 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 
 	// Also batch cleanup compaction states.
 	for {
-		result, err := s.db.ExecContext(ctx, `
+		tx, err := s.beginTxWithContext(ctx)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: begin compaction: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
 			WHERE id IN (
@@ -2844,8 +2875,10 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 			)
 		`, olderThan)
 		if err != nil {
+			tx.Rollback()
 			break
 		}
+		tx.Commit()
 		n, _ := result.RowsAffected()
 		if n == 0 {
 			break

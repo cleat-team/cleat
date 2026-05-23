@@ -1554,7 +1554,11 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithMaxQuotaChildren(w.maxQuotaChildren),
 		host.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
 			host.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
+<<<<<<< HEAD
 		}
+=======
+	}
+>>>>>>> 527eeca (feat: add --max-workflow-duration flag and signal wake-up fix)
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
 	if cks, ok := w.store.(host.ConcurrencyKeyStore); ok {

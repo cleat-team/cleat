@@ -121,6 +121,18 @@ to other workers.
 How long the worker waits between dispatch-loop iterations when no runnable
 workflows are found. Uses progressive backoff up to 6x this value.
 
+### --max-workflow-duration
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `0` | Max wall-clock duration per workflow execution |
+
+Maximum wall-clock time a single workflow execution may take (including replay).
+Workflows that exceed this duration are cancelled and fail with a timeout error.
+Set to `0` (default) to disable the limit.
+
+Example: `--max-workflow-duration 5m`
+
 ---
 
 ## Memory Management

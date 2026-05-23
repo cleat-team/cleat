@@ -168,6 +168,19 @@ func refundPayment(h cleat.HostCalls, chargeID string) error {
 	return err
 }
 
+// LongRunning performs many HostCalls in a tight loop to burn wall-clock time
+// without triggering WASM suspension. Each DurableCall is sub-millisecond so
+// the engine keeps executing -- the context deadline is the only exit path.
+// iterations controls how many calls are made; 500_000 is roughly 5 seconds.
+func LongRunning(h cleat.HostCalls, iterations int) (string, error) {
+	for i := 0; i < iterations; i++ {
+		if _, err := h.DurableCall("noop", "", ""); err != nil {
+			return "", err
+		}
+	}
+	return "done", nil
+}
+
 func notifyCustomer(h cleat.HostCalls, userID, trackingID string) error {
 	req, _ := json.Marshal(map[string]string{
 		"user_id":     userID,
