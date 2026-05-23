@@ -48,6 +48,67 @@ func TestDeliverSignal(t *testing.T) {
 	}
 }
 
+func TestDeliverSignalWakesWorkflow(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			t.Parallel()
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			setupTestData(t, store)
+
+			ctx := context.Background()
+
+			// --- Case 1: status='ready' ---
+			// Create a ready workflow and set next_wake_at far in the future.
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1,
+				json.RawMessage(`{}`), "wakeup-ready", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun (ready): %v", err)
+			}
+
+			futureTime := time.Now().Add(1 * time.Hour)
+			updateWorkflowNextWakeAt(t, store, runID, futureTime)
+
+			// Deliver a signal — expect next_wake_at to be updated to now().
+			beforeDeliver := time.Now()
+			if err := store.DeliverSignal(ctx, runID, "wake-signal", "{}"); err != nil {
+				t.Fatalf("DeliverSignal (ready): %v", err)
+			}
+
+			nw := queryWorkflowNextWakeAt(t, store, runID)
+			diff := nw.Sub(beforeDeliver)
+			if diff < -time.Second || diff > time.Second {
+				t.Errorf("ready case: next_wake_at %v not within 1s of %v (diff=%v)",
+					nw, beforeDeliver, diff)
+			}
+
+			// --- Case 2: status='running' (guard) ---
+			runID2, _, err := store.StartNewRun(ctx, "", "test-workflow", 1,
+				json.RawMessage(`{}`), "wakeup-running", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun (running): %v", err)
+			}
+
+			setWorkflowStatus(t, store, runID2, "running")
+			futureTime2 := time.Now().Add(1 * time.Hour)
+			updateWorkflowNextWakeAt(t, store, runID2, futureTime2)
+
+			// Deliver a signal — next_wake_at should NOT change (status is 'running', not 'ready').
+			if err := store.DeliverSignal(ctx, runID2, "wake-signal-2", "{}"); err != nil {
+				t.Fatalf("DeliverSignal (running): %v", err)
+			}
+
+			nw2 := queryWorkflowNextWakeAt(t, store, runID2)
+			diff2 := nw2.Sub(futureTime2)
+			if diff2 < -time.Second || diff2 > time.Second {
+				t.Errorf("running case: next_wake_at %v should be close to %v (diff=%v) — was changed despite status='running'",
+					nw2, futureTime2, diff2)
+			}
+		})
+	}
+}
+
 func TestPollAndClaimSignal(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
@@ -849,4 +910,79 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// updateWorkflowNextWakeAt sets the next_wake_at column via raw SQL.
+// Uses a type switch to handle dialect-specific parameter placeholders.
+func updateWorkflowNextWakeAt(t *testing.T, store WorkflowStore, workflowID string, tval time.Time) {
+	t.Helper()
+	switch s := store.(type) {
+	case *PostgresStore:
+		_, err := s.db.Exec(`UPDATE workflow_instances SET next_wake_at = $1 WHERE id = $2`, tval, workflowID)
+		if err != nil {
+			t.Fatalf("updateWorkflowNextWakeAt (postgres): %v", err)
+		}
+	case *MySQLStore:
+		_, err := s.db.Exec(`UPDATE workflow_instances SET next_wake_at = ? WHERE id = ?`, tval, workflowID)
+		if err != nil {
+			t.Fatalf("updateWorkflowNextWakeAt (mysql): %v", err)
+		}
+	case *MSSQLStore:
+		_, err := s.db.Exec(`UPDATE workflow_instances SET next_wake_at = @p1 WHERE id = @p2`, tval, workflowID)
+		if err != nil {
+			t.Fatalf("updateWorkflowNextWakeAt (mssql): %v", err)
+		}
+	default:
+		t.Fatalf("updateWorkflowNextWakeAt: unknown store type %T", store)
+	}
+}
+
+// queryWorkflowNextWakeAt returns next_wake_at from the database.
+func queryWorkflowNextWakeAt(t *testing.T, store WorkflowStore, workflowID string) time.Time {
+	t.Helper()
+	var nw time.Time
+	switch s := store.(type) {
+	case *PostgresStore:
+		err := s.db.QueryRow(`SELECT next_wake_at FROM workflow_instances WHERE id = $1`, workflowID).Scan(&nw)
+		if err != nil {
+			t.Fatalf("queryWorkflowNextWakeAt (postgres): %v", err)
+		}
+	case *MySQLStore:
+		err := s.db.QueryRow(`SELECT next_wake_at FROM workflow_instances WHERE id = ?`, workflowID).Scan(&nw)
+		if err != nil {
+			t.Fatalf("queryWorkflowNextWakeAt (mysql): %v", err)
+		}
+	case *MSSQLStore:
+		err := s.db.QueryRow(`SELECT next_wake_at FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&nw)
+		if err != nil {
+			t.Fatalf("queryWorkflowNextWakeAt (mssql): %v", err)
+		}
+	default:
+		t.Fatalf("queryWorkflowNextWakeAt: unknown store type %T", store)
+	}
+	return nw
+}
+
+// setWorkflowStatus sets the status column via raw SQL.
+func setWorkflowStatus(t *testing.T, store WorkflowStore, workflowID, status string) {
+	t.Helper()
+	switch s := store.(type) {
+	case *PostgresStore:
+		_, err := s.db.Exec(`UPDATE workflow_instances SET status = $1 WHERE id = $2`, status, workflowID)
+		if err != nil {
+			t.Fatalf("setWorkflowStatus (postgres): %v", err)
+		}
+	case *MySQLStore:
+		_, err := s.db.Exec(`UPDATE workflow_instances SET status = ? WHERE id = ?`, status, workflowID)
+		if err != nil {
+			t.Fatalf("setWorkflowStatus (mysql): %v", err)
+		}
+	case *MSSQLStore:
+		_, err := s.db.Exec(`UPDATE workflow_instances SET status = @p1 WHERE id = @p2`, status, workflowID)
+		if err != nil {
+			t.Fatalf("setWorkflowStatus (mssql): %v", err)
+		}
+	default:
+		t.Fatalf("setWorkflowStatus: unknown store type %T", store)
+	}
 }

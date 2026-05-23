@@ -83,6 +83,13 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Detect Component Model binaries and dispatch to the component execution path.
 	if isComponentWasm(wasmBytes) {
+		// Try native component model via CGo first.
+		if result, err := b.ExecuteComponentCGo(wasmBytes, entryPoint, []byte(input), OutBufSize); err == nil {
+			return result, nil
+		} else {
+			fmt.Printf("[CGO_COMPONENT] CGo path failed (falling back): %v\n", err)
+		}
+		// Fall back to manual decomposition + instantiation.
 		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
 		if bundleErr != nil {
 			return nil, fmt.Errorf("host: parse component bundle: %w", bundleErr)
@@ -2160,6 +2167,71 @@ if pendingCount > 0 {
 				u32s = append(u32s, binary.LittleEndian.Uint32(data[j*4:]))
 			}
 			fmt.Printf("[WIT_SCAN] first 64 u32s at offset 0: %v\n", u32s)
+
+			// Search for the string "run" near the metadata to understand entry layout.
+			const dumpBase = 988128
+			// Dump around offset 596 (where the string table likely starts).
+			strBase := dumpBase + 596
+			if strBase+256 <= len(data) {
+				fmt.Printf("[WIT_DUMP] string table at metadata+596:\n")
+				for row := 0; row < 16; row++ {
+					off := strBase + row*16
+					vals := make([]uint32, 4)
+					for j := 0; j < 4; j++ { vals[j] = binary.LittleEndian.Uint32(data[off+j*4:]) }
+					ascii := ""
+					for j := 0; j < 16; j++ {
+						b := data[off+j]
+						if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
+					}
+					fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
+						row*16, vals[0], vals[1], vals[2], vals[3], ascii)
+				}
+			}
+			for scan := dumpBase; scan < dumpBase+65536 && scan < len(data)-4; scan++ {
+				if data[scan] == 'r' && data[scan+1] == 'u' && data[scan+2] == 'n' {
+					// Found "run" - dump surrounding u32 values
+					base := (scan - 40) & ^3 // align to 4 bytes, 40 bytes before
+					if base < 0 { base = 0 }
+					fmt.Printf("[WIT_DUMP] found 'run' at offset %d (metadata+%d):\n", scan, scan-dumpBase)
+					for row := 0; row < 12; row++ {
+						off := base + row*16
+						vals := make([]uint32, 4)
+						for j := 0; j < 4; j++ {
+							if off+j*4+4 <= len(data) {
+								vals[j] = binary.LittleEndian.Uint32(data[off+j*4:])
+							}
+						}
+						ascii := ""
+						for j := 0; j < 16; j++ {
+							if off+j < len(data) {
+								b := data[off+j]
+								if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
+							}
+						}
+						fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
+							row*16, vals[0], vals[1], vals[2], vals[3], ascii)
+					}
+					break
+				}
+			}
+			if len(data) > dumpBase+512 {
+				fmt.Printf("[WIT_SCAN] hex dump at %d:\n", dumpBase)
+				for row := 0; row < 32; row++ {
+					off := dumpBase + row*16
+					vals := make([]uint32, 4)
+					for j := 0; j < 4; j++ {
+						vals[j] = binary.LittleEndian.Uint32(data[off+j*4:])
+					}
+					// Also show ASCII
+					ascii := ""
+					for j := 0; j < 16; j++ {
+						b := data[off+j]
+						if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
+					}
+					fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
+						row*16, vals[0], vals[1], vals[2], vals[3], ascii)
+				}
+			}
 
 			// Scan for the metadata signature: 16 small u32 counts
 			// followed by type arrays. The counts[14] is export_funcs.

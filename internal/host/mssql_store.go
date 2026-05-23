@@ -1367,6 +1367,7 @@ func (s *MSSQLStore) StartNewRun(ctx context.Context, runID, defName string, def
 func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
+		log.Printf("[store] enforceParentClosePolicy: begin TERMINATE tx: %v", err)
 		return
 	}
 	defer tx.Rollback()
@@ -1381,6 +1382,7 @@ func (s *MSSQLStore) enforceParentClosePolicy(ctx context.Context, parentWorkflo
 
 	tx2, err := s.beginTxWithContext(ctx)
 	if err != nil {
+		log.Printf("[store] enforceParentClosePolicy: begin REQUEST_CANCEL tx: %v", err)
 		return
 	}
 	defer tx2.Rollback()
