@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -761,4 +762,67 @@ func TestRLSTenantIsolation(t *testing.T) {
 	}
 
 	t.Log("RLS tenant isolation test passed")
+}
+
+
+// TestIntegrationWorkflowMaxDuration verifies that the WithDefaultWorkflowTimeout
+// option cancels execution when a workflow exceeds its wall-clock duration limit.
+func TestIntegrationWorkflowMaxDuration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	db := testutil.TestDB(t, testutil.DialectPostgres)
+	defer db.Close()
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+
+	ctx := context.Background()
+	runID := fmt.Sprintf("int-timeout-%d", time.Now().UnixNano())
+	defName := "test-timeout-workflow"
+
+	// Build WASM from testdata/basic (includes LongRunning export).
+	wasmPath := buildTestWasm(t)
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatalf("read WASM: %v", err)
+	}
+
+	// Insert workflow definition.
+	if _, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points) VALUES ($1, $2, $3, $4)`,
+		defName, 1, wasmBytes, `{long_running}`); err != nil {
+		t.Fatalf("insert workflow_defs: %v", err)
+	}
+
+	// Insert a workflow instance in 'ready' status.
+	// 500000 HostCall iterations takes ~5s wall-clock time, beyond the 1s timeout.
+	input := `{"iterations":500000}`
+	if _, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input) VALUES ($1, $2, $3, $4, $5)`,
+		runID, defName, 1, "ready", input); err != nil {
+		t.Fatalf("insert workflow_instances: %v", err)
+	}
+
+	defer func() {
+		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
+		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
+		db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
+	}()
+
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	// Create engine with a 1-second timeout (well below 5s execution time).
+	engine := NewEngine(rt, &mockCaller{}, WithDefaultWorkflowTimeout(1*time.Second))
+
+	_, _, _, _, _, err = engine.Execute(ctx, wasmBytes, "long_running", json.RawMessage(input))
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("expected context.DeadlineExceeded, got: %v", err)
+	}
+
+	t.Log("Workflow max duration integration test passed")
 }

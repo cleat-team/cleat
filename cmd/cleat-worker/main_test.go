@@ -238,6 +238,7 @@ func TestWorkerFlags(t *testing.T) {
 	ci := fs.Duration("compaction-interval", 5*time.Minute, "")
 	sf := fs.String("shards-file", "", "")
 	pc := fs.String("plugin-config", "", "")
+	mwd := fs.Duration("max-workflow-duration", 0, "")
 	if err := fs.Parse([]string{
 		"--db", "postgres://localhost/cleat",
 		"--concurrency", "20",
@@ -247,6 +248,7 @@ func TestWorkerFlags(t *testing.T) {
 		"--task-queue", "gpu,high-memory",
 		"--compaction-threshold", "500",
 		"--compaction-interval", "10m",
+		"--max-workflow-duration", "2m",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -280,6 +282,9 @@ func TestWorkerFlags(t *testing.T) {
 	if *pc != "" {
 		t.Errorf("plugin-config = %q, want empty", *pc)
 	}
+	if *mwd != 2*time.Minute {
+		t.Errorf("max-workflow-duration = %v, want 2m", *mwd)
+	}
 }
 
 func TestWorkerFlag_Defaults(t *testing.T) {
@@ -288,6 +293,7 @@ func TestWorkerFlag_Defaults(t *testing.T) {
 	conc := fs.Int("concurrency", 10, "")
 	tq := fs.String("task-queue", "default", "")
 	ct := fs.Int("compaction-threshold", host.DefaultCompactionThreshold, "")
+	mwd := fs.Duration("max-workflow-duration", 0, "")
 	if err := fs.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
@@ -299,6 +305,9 @@ func TestWorkerFlag_Defaults(t *testing.T) {
 	}
 	if *tq != "default" {
 		t.Errorf("default task-queue = %q", *tq)
+	}
+	if *mwd != 0 {
+		t.Errorf("default max-workflow-duration = %v, want 0", *mwd)
 	}
 	if *ct != host.DefaultCompactionThreshold {
 		t.Errorf("default compaction-threshold = %d, want %d", *ct, host.DefaultCompactionThreshold)

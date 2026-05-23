@@ -1568,6 +1568,14 @@ func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 		return err
 	}
 
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET next_wake_at = NOW(6)
+		WHERE id = ? AND status = 'ready' AND tenant_id = ?
+	`, workflowID, s.tenantID)
+	if err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
