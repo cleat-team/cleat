@@ -180,18 +180,25 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					completeErr = fmt.Sprintf("wasm _start panic: %v", r)
+					// Only report the panic as an error if the workflow
+					// didn't already deliver a result via cleat_complete.
+					if completeResult == "" && completeErr == "" {
+						completeErr = fmt.Sprintf("wasm _start panic: %v", r)
+					}
 				}
 			}()
 			startFn.Call(store)
 		}()
 
 		// Result is delivered via cleat_complete hook.
-		if completeErr != "" {
-			return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr)
-		}
 		if completeResult != "" {
 			return &ExecResult{Result: completeResult, Suspended: false}, nil
+		}
+		if completeErr != "" {
+			// Return workflow-level errors as the result string so
+			// callers (including replay divergence detection) can
+			// inspect the error message.
+			return &ExecResult{Result: completeErr, Suspended: false}, nil
 		}
 		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 	}

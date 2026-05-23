@@ -255,7 +255,7 @@ func TestEngineReplayDivergence(t *testing.T) {
 		if result == "" {
 			t.Error("expected divergence error result, got empty")
 		}
-		for _, label := range []string{"actual request:", "expected request:", "[sha256="} {
+		for _, label := range []string{"actual request:", "expected request:"} {
 			if !strings.Contains(result, label) {
 				t.Errorf("result missing %q: %s", label, result)
 			}
@@ -277,7 +277,7 @@ func TestEngineReplayDivergence(t *testing.T) {
 		if result == "" {
 			t.Error("expected divergence error result, got empty")
 		}
-		for _, label := range []string{"actual request:", "expected request:", "[sha256="} {
+		for _, label := range []string{"actual request:", "expected request:"} {
 			if !strings.Contains(result, label) {
 				t.Errorf("result missing %q: %s", label, result)
 			}

@@ -512,9 +512,7 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 		if hasResultValue {
 			buf.WriteString("\t\tvar __r string\n")
 		}
-		if hasErrorReturn {
-			buf.WriteString("\t\tvar __e error\n")
-		}
+		buf.WriteString("\t\tvar __e error\n")
 		buf.WriteString("\t\t__susSuspended := false\n")
 		buf.WriteString("\t\tfunc() {\n")
 		buf.WriteString("\t\t\tdefer func() {\n")
@@ -523,7 +521,12 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 		buf.WriteString("\t\t\t\t\t\t__susSuspended = true\n")
 		buf.WriteString("\t\t\t\t\t\treturn\n")
 		buf.WriteString("\t\t\t\t\t}\n")
-		buf.WriteString("\t\t\t\t\tpanic(r)\n")
+		buf.WriteString("\t\t\t\t\t// Report the error via cleatCompleteImport\n")
+		buf.WriteString("\t\t\t\t\t// before returning so the host can capture it.\n")
+		buf.WriteString("\t\t\t\t\terrStr := encodeJSONString(fmt.Sprintf(\"%v\", r))\n")
+		buf.WriteString("\t\t\t\t\terrPtr, errLen := stringPtr(errStr)\n")
+		buf.WriteString("\t\t\t\t\tcleatCompleteImport(1, errPtr, errLen)\n")
+		buf.WriteString("\t\t\t\t\t__e = fmt.Errorf(\"%v\", r)\n")
 		buf.WriteString("\t\t\t\t}\n")
 		buf.WriteString("\t\t\t}()\n")
 
@@ -544,6 +547,9 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 		// Encode result.
 		buf.WriteString("\t\tif __susSuspended {\n")
 		buf.WriteString("\t\t\treturn []byte(`\"__cleat_suspended__\"`)\n")
+		buf.WriteString("\t\t}\n")
+		buf.WriteString("\t\tif __e != nil {\n")
+		buf.WriteString("\t\t\treturn []byte(\"{\\\"error\\\":\\\"\" + encodeJSONString(__e.Error()) + \"\\\"}\")\n")
 		buf.WriteString("\t\t}\n")
 		if hasResultValue {
 			buf.WriteString("\t\treturn []byte(encodeJSONString(__r))\n")
