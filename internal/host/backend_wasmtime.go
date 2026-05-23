@@ -83,6 +83,13 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Detect Component Model binaries and dispatch to the component execution path.
 	if isComponentWasm(wasmBytes) {
+		// Try native component model via CGo first.
+		if result, err := b.ExecuteComponentCGo(wasmBytes, entryPoint, []byte(input), OutBufSize); err == nil {
+			return result, nil
+		} else {
+			fmt.Printf("[CGO_COMPONENT] CGo path failed (falling back): %v\n", err)
+		}
+		// Fall back to manual decomposition + instantiation.
 		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
 		if bundleErr != nil {
 			return nil, fmt.Errorf("host: parse component bundle: %w", bundleErr)
@@ -2135,9 +2142,8 @@ if pendingCount > 0 {
 	}
 
 	// ---- Step 3c: Scan for wit_dylib metadata blob ----
-	// The metadata is embedded in the adapter module's data section.
-	// __wasm_call_ctors may not call wit_dylib_initialize directly,
-	// so we scan memory for the metadata signature and call it here.
+	// Dump the first 256 u32 values from the adapter instance's memory
+	// to find the metadata blob, then call wit_dylib_initialize.
 	if b.witDylib != nil {
 		for _, inst := range instances {
 			if inst == nil {
@@ -2152,15 +2158,103 @@ if pendingCount > 0 {
 				continue
 			}
 			data := m.UnsafeData(store)
+			if len(data) < 256 {
+				continue
+			}
+			// Dump first 256 bytes as u32 for diagnostics.
+			var u32s []uint32
+			for j := 0; j < 64 && j*4+4 <= len(data); j++ {
+				u32s = append(u32s, binary.LittleEndian.Uint32(data[j*4:]))
+			}
+			fmt.Printf("[WIT_SCAN] first 64 u32s at offset 0: %v\n", u32s)
+
+			// Search for the string "run" near the metadata to understand entry layout.
+			const dumpBase = 988128
+			// Dump around offset 596 (where the string table likely starts).
+			strBase := dumpBase + 596
+			if strBase+256 <= len(data) {
+				fmt.Printf("[WIT_DUMP] string table at metadata+596:\n")
+				for row := 0; row < 16; row++ {
+					off := strBase + row*16
+					vals := make([]uint32, 4)
+					for j := 0; j < 4; j++ { vals[j] = binary.LittleEndian.Uint32(data[off+j*4:]) }
+					ascii := ""
+					for j := 0; j < 16; j++ {
+						b := data[off+j]
+						if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
+					}
+					fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
+						row*16, vals[0], vals[1], vals[2], vals[3], ascii)
+				}
+			}
+			for scan := dumpBase; scan < dumpBase+65536 && scan < len(data)-4; scan++ {
+				if data[scan] == 'r' && data[scan+1] == 'u' && data[scan+2] == 'n' {
+					// Found "run" - dump surrounding u32 values
+					base := (scan - 40) & ^3 // align to 4 bytes, 40 bytes before
+					if base < 0 { base = 0 }
+					fmt.Printf("[WIT_DUMP] found 'run' at offset %d (metadata+%d):\n", scan, scan-dumpBase)
+					for row := 0; row < 12; row++ {
+						off := base + row*16
+						vals := make([]uint32, 4)
+						for j := 0; j < 4; j++ {
+							if off+j*4+4 <= len(data) {
+								vals[j] = binary.LittleEndian.Uint32(data[off+j*4:])
+							}
+						}
+						ascii := ""
+						for j := 0; j < 16; j++ {
+							if off+j < len(data) {
+								b := data[off+j]
+								if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
+							}
+						}
+						fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
+							row*16, vals[0], vals[1], vals[2], vals[3], ascii)
+					}
+					break
+				}
+			}
+			if len(data) > dumpBase+512 {
+				fmt.Printf("[WIT_SCAN] hex dump at %d:\n", dumpBase)
+				for row := 0; row < 32; row++ {
+					off := dumpBase + row*16
+					vals := make([]uint32, 4)
+					for j := 0; j < 4; j++ {
+						vals[j] = binary.LittleEndian.Uint32(data[off+j*4:])
+					}
+					// Also show ASCII
+					ascii := ""
+					for j := 0; j < 16; j++ {
+						b := data[off+j]
+						if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
+					}
+					fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
+						row*16, vals[0], vals[1], vals[2], vals[3], ascii)
+				}
+			}
+
+			// Scan for the metadata signature: 16 small u32 counts
+			// followed by type arrays. The counts[14] is export_funcs.
 			for ptr := 0; ptr < len(data)-64; ptr += 4 {
-				nResources := binary.LittleEndian.Uint32(data[ptr:])
 				nExportFuncs := binary.LittleEndian.Uint32(data[ptr+56:])
-				if nResources == 0 && nExportFuncs >= 1 && nExportFuncs <= 20 {
+				// Check that the first 13 counts are all < 1000 (reasonable)
+				allSmall := true
+				for j := 0; j < 13; j++ {
+					v := binary.LittleEndian.Uint32(data[ptr+j*4:])
+					if v > 1000 {
+						allSmall = false
+						break
+					}
+				}
+				if allSmall && nExportFuncs >= 1 && nExportFuncs <= 20 {
+					fmt.Printf("[WIT_SCAN] potential metadata at ptr=%d, export_funcs=%d\n", ptr, nExportFuncs)
 					if err := b.witDylib.initialize(m, store, int32(ptr)); err == nil {
+						fmt.Printf("[WIT_SCAN] initialized OK, %d export funcs\n", len(b.witDylib.exportFuncs))
 						break
 					}
 				}
 			}
+			break // only check first instance with memory
 		}
 	}
 
@@ -2652,6 +2746,9 @@ func (b *wasmtimeBackend) perExportRoute(store wasmtime.Storelike, cm *wasmtime.
 // read/write operations needed by componentize-py generated modules.
 func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime.Linker, impTy *wasmtime.ImportType) {
 	name := *impTy.Name()
+	if strings.HasPrefix(name, "wit_dylib_") || name == "cabi_realloc" {
+		fmt.Printf("[DEFINE] %s\n", name)
+	}
 	functype := impTy.Type().FuncType()
 	makeNoop := func() *wasmtime.Func {
 		return wasmtime.NewFunc(store, functype,
@@ -2839,7 +2936,55 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 		_ = linker.Define(store, "env", name, fn)
 
 	case "wit_dylib_export_call", "wit_dylib_export_async_callback":
-		_ = linker.Define(store, "env", name, makeNoop())
+		if name == "wit_dylib_export_call" {
+			fn := wasmtime.NewFunc(store, functype,
+				func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					if len(args) < 2 || b.witDylib == nil {
+						fmt.Printf("[DISPATCH] early exit: len=%d witDylib=%v\n", len(args), b.witDylib != nil)
+						return nil, nil
+					}
+					elemIdx := b.witDylib.getExportElemIndex(args[1].I32())
+					if elemIdx < 0 {
+						return nil, nil
+					}
+					tableExp := caller.GetExport("__indirect_function_table")
+					if tableExp == nil {
+						return nil, nil
+					}
+					table := tableExp.Table()
+					if table == nil {
+						fmt.Printf("[DISPATCH] table is nil\n")
+						return nil, nil
+					}
+					elem, err := table.Get(caller, uint64(elemIdx))
+					fmt.Printf("[DISPATCH] table.Get(elemIdx=%d) err=%v\n", elemIdx, err)
+					if err != nil {
+						return nil, nil
+					}
+					callee := elem.Funcref()
+					if callee == nil {
+						return nil, nil
+					}
+					ctx := args[0].I32()
+					arg3 := b.witDylib.popI32(ctx)
+					arg2 := b.witDylib.popI32(ctx)
+					arg1 := b.witDylib.popI32(ctx)
+					arg0 := b.witDylib.popI32(ctx)
+					callResult, callErr := callee.Call(caller, arg0, arg1, arg2, arg3)
+					if callErr != nil {
+						return nil, wasmtime.NewTrap(callErr.Error())
+					}
+					if r, ok := callResult.(int32); ok {
+						b.witDylib.pushI32(ctx, r)
+					} else if r, ok := callResult.(int64); ok {
+						b.witDylib.pushI64(ctx, r)
+					}
+					return nil, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		} else {
+			_ = linker.Define(store, "env", name, makeNoop())
+		}
 
 	case "wit_dylib_export_async_call":
 		fn := wasmtime.NewFunc(store, functype,
