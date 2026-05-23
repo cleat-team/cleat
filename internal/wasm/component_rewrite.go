@@ -60,7 +60,7 @@ var witToEnvImport = map[string]map[string]string{
 	},
 	"cleat:host-calls/durable-messaging": {
 		"durable-send":            "cleat_send",
-		"durable-schedule-invoke": "schedule_invoke",
+		"durable-schedule-invoke": "cleat_schedule_invoke",
 	},
 	"cleat:host-calls/durable-identity": {
 		"durable-workflow-id": "cleat_workflow_id",
@@ -73,6 +73,29 @@ var witToEnvImport = map[string]map[string]string{
 	"cleat:host-calls/durable-lock": {
 		"durable-acquire-lock": "cleat_acquire_lock",
 		"durable-release-lock": "cleat_release_lock",
+	},
+	"cleat:host-calls/durable-scope": {
+		"set-scope": "cleat_set_scope",
+		"get-scope": "cleat_get_scope",
+		"uuid":      "cleat_uuid",
+	},
+	"cleat:host-calls/durable-stream-state": {
+		"set-state":    "cleat_set_state",
+		"get-state":    "cleat_get_state",
+		"delete-state": "cleat_delete_state",
+		"incr-state":   "cleat_incr_state",
+		"has-state":    "cleat_has_state",
+		"list-state":   "cleat_list_state",
+	},
+	"cleat:host-calls/durable-extended-lifecycle": {
+		"continue-as-new-versioned": "cleat_continue_as_new_versioned",
+		"side-effect":               "cleat_side_effect",
+	},
+	"cleat:host-calls/durable-extended-children": {
+		"child-workflow-in-schema": "cleat_child_workflow_in_schema",
+	},
+	"cleat:host-calls/durable-fetch": {
+		"fetch": "cleat_fetch",
 	},
 }
 

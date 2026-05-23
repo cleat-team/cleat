@@ -1895,10 +1895,53 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 			}
 		}
 
-		// Define no-op stubs for wit_dylib_* imports (Python WASM
-		// component-model ABI) with the module's expected types.
-		// Must run before DefineUnknownImportsAsTraps so no-ops
-		// take precedence over trap stubs.
+
+
+		// wit_dylib_export_start: return non-zero call context.
+		for _, impTy := range cm.Imports() {
+			if impTy.Module() == "env" && impTy.Name() != nil &&
+				*impTy.Name() == "wit_dylib_export_start" &&
+				impTy.Type() != nil && impTy.Type().FuncType() != nil {
+				functype := impTy.Type().FuncType()
+				fn := wasmtime.NewFunc(store, functype,
+					func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						resTypes := functype.Results()
+						results := make([]wasmtime.Val, len(resTypes))
+						for i := range results {
+							results[i] = wasmtime.ValI32(1)
+						}
+						_ = resTypes
+						return results, nil
+					})
+				_ = linker.Define(store, "env", *impTy.Name(), fn)
+				break
+			}
+		}
+
+		// wit_dylib_initialize: pass through the metadata pointer.
+		for _, impTy := range cm.Imports() {
+			if impTy.Module() == "env" && impTy.Name() != nil &&
+				*impTy.Name() == "wit_dylib_initialize" &&
+				impTy.Type() != nil && impTy.Type().FuncType() != nil {
+				functype := impTy.Type().FuncType()
+				fn := wasmtime.NewFunc(store, functype,
+					func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						resTypes := functype.Results()
+						results := make([]wasmtime.Val, len(resTypes))
+						// Pass through first arg as first result (for funcs with results).
+						if len(resTypes) > 0 && len(args) > 0 {
+							results[0] = args[0]
+						}
+						return results, nil
+					})
+				_ = linker.Define(store, "env", *impTy.Name(), fn)
+				break
+			}
+		}
+
+		// No-op stubs for wit_dylib_* (Python component ABI).
+		// These must be defined before traps so __wasm_call_ctors
+		// can call wit_dylib_initialize to set up dispatch tables.
 		for _, impTy := range cm.Imports() {
 			if impTy.Module() != "env" || impTy.Name() == nil ||
 				!strings.HasPrefix(*impTy.Name(), "wit_dylib_") {
@@ -2044,7 +2087,71 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				linker2 := wasmtime.NewLinker(b.engine)
 				var cr2, ce2 string
 				b.registerAllImports(linker2, &cr2, &ce2)
-				_ = linker2.DefineUnknownImportsAsTraps(cm)
+				// wit_dylib_export_start non-zero for fallback.
+			for _, impTy := range cm.Imports() {
+				if impTy.Module() == "env" && impTy.Name() != nil &&
+					*impTy.Name() == "wit_dylib_export_start" &&
+					impTy.Type() != nil && impTy.Type().FuncType() != nil {
+					functype := impTy.Type().FuncType()
+					fn := wasmtime.NewFunc(store, functype,
+						func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+							resTypes := functype.Results()
+							results := make([]wasmtime.Val, len(resTypes))
+							for i := range results {
+								results[i] = wasmtime.ValI32(1)
+							}
+							return results, nil
+						})
+					_ = linker2.Define(store, "env", *impTy.Name(), fn)
+					break
+				}
+			}
+
+			// wit_dylib_initialize passthrough for fallback.
+			for _, impTy := range cm.Imports() {
+				if impTy.Module() == "env" && impTy.Name() != nil &&
+					*impTy.Name() == "wit_dylib_initialize" &&
+					impTy.Type() != nil && impTy.Type().FuncType() != nil {
+					functype := impTy.Type().FuncType()
+					fn := wasmtime.NewFunc(store, functype,
+						func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+							resTypes := functype.Results()
+							results := make([]wasmtime.Val, len(resTypes))
+							if len(resTypes) > 0 && len(args) > 0 {
+								results[0] = args[0]
+							}
+							return results, nil
+						})
+					_ = linker2.Define(store, "env", *impTy.Name(), fn)
+					break
+				}
+			}
+
+			// wit_dylib stubs for fallback linker.
+			for _, impTy := range cm.Imports() {
+				if impTy.Module() != "env" || impTy.Name() == nil ||
+					!strings.HasPrefix(*impTy.Name(), "wit_dylib_") { continue }
+				if impTy.Type() == nil || impTy.Type().FuncType() == nil { continue }
+				functype := impTy.Type().FuncType()
+				fn := wasmtime.NewFunc(store, functype,
+					func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						resTypes := functype.Results()
+						results := make([]wasmtime.Val, len(resTypes))
+						for i, rt := range resTypes {
+							switch rt.Kind() {
+							case wasmtime.KindI32: results[i] = wasmtime.ValI32(0)
+							case wasmtime.KindI64: results[i] = wasmtime.ValI64(0)
+							case wasmtime.KindF32: results[i] = wasmtime.ValF32(0)
+							case wasmtime.KindF64: results[i] = wasmtime.ValF64(0)
+							default: results[i] = wasmtime.ValI32(0)
+							}
+						}
+						return results, nil
+					})
+				_ = linker2.Define(store, "env", *impTy.Name(), fn)
+			}
+
+			_ = linker2.DefineUnknownImportsAsTraps(cm)
 				for _, prevInst := range instances {
 					if prevInst == nil { continue }
 					if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
@@ -2119,6 +2226,26 @@ if pendingCount > 0 {
 	}
 	return nil, fmt.Errorf("host: %d instances still pending after %d passes: %v", pendingCount, maxPasses, pendingList)
 }
+
+	// ---- Step 3b: Call constructors on all core instances ----
+	// Modules compiled with Emscripten or componentize-py export
+	// __wasm_call_ctors which must be called before the entry point
+	// to set up WIT metadata (wit_dylib_initialize) and dispatch tables.
+	for i, inst := range instances {
+		if inst == nil {
+			continue
+		}
+		if f := inst.GetFunc(store, "__wasm_call_ctors"); f != nil {
+			if _, err := f.Call(store); err != nil {
+				return nil, fmt.Errorf("host: __wasm_call_ctors instance %d: %w", i, err)
+			}
+		}
+		if f := inst.GetFunc(store, "__wasm_apply_data_relocs"); f != nil {
+			if _, err := f.Call(store); err != nil {
+				return nil, fmt.Errorf("host: __wasm_apply_data_relocs instance %d: %w", i, err)
+			}
+		}
+	}
 
 	// ---- Step 4: Build resolved exports map per instance ----
 	type resolvedExp struct {
