@@ -447,15 +447,11 @@ func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
 
 // registerEnvStubs registers no-op stubs for optional "env" imports.
 func (b *wasmtimeBackend) registerEnvStubs(linker *wasmtime.Linker) error {
-	// abort is required by AssemblyScript-compiled WASM modules.
-	if err := linker.FuncWrap("env", "abort",
-		func(msg, file, line, col int32) {},
-	); err != nil {
-		// Some modules may not import abort; this is not fatal.
-		if isWasmtimeLinkerError(err) {
-			return err
-		}
-	}
+	// abort is handled by DefineUnknownImportsAsTraps per-instance,
+	// which creates stubs with the module's expected signature.
+	// Manual FuncWrap("abort", ...) can conflict with modules that
+	// declare a different abort signature (e.g. Python components
+	// expect (func) while AssemblyScript expects 4 i32 params).
 	return nil
 }
 
@@ -1786,6 +1782,21 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 		}
 	}
 
+	// Find the CPython runtime instance: the one whose compiled module
+	// has the most exports. The component model DAG's FromExports chains
+	// for GOT.mem / GOT.func may point to adapter instances that lack
+	// the actual CPython symbols; we fall back to this instance for GOT.
+	cpythonRuntimeIdx := -1
+	maxExports := 0
+	for i, inst := range bundle.Instances {
+		if inst.ModuleIndex >= 0 && inst.ModuleIndex < len(compiled) {
+			if n := len(compiled[inst.ModuleIndex].Exports()); n > maxExports {
+				maxExports = n
+				cpythonRuntimeIdx = i
+			}
+		}
+	}
+
 	// Multi-pass instantiation: instances are processed in passes.
 	// Each pass tries to instantiate any still-pending instance that has
 	// a module. If instantiation fails because a dependency isn't ready,
@@ -1822,6 +1833,16 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				importNameToInstance[componentAdapterModule] = resolved
 			}
 		}
+		// For GOT.mem / GOT.func imports, override to the CPython
+		// runtime instance when available. The component model DAG
+		// may route through adapter instances that lack CPython symbols.
+		if cpythonRuntimeIdx >= 0 {
+			for _, arg := range inst.Args {
+				if strings.HasPrefix(arg.Name, "GOT.") {
+					importNameToInstance[arg.Name] = cpythonRuntimeIdx
+				}
+			}
+		}
 
 		linker := wasmtime.NewLinker(b.engine)
 		// Register host functions (WASI, env stubs, teavm stubs, all cleat_*).
@@ -1840,7 +1861,12 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 
 		// Wire cross-module imports: for each import the module declares,
 		// map it to the already-instantiated source instance.
+		// Skip WASI 0.2.0 interface names — adapter signatures may not
+		// match what the module expects. Traps handle them instead.
 		for importName, srcIdx := range importNameToInstance {
+			if strings.Contains(importName, ":") && !strings.HasPrefix(importName, "GOT.") {
+				continue
+			}
 			if srcIdx < 0 || srcIdx >= len(instances) || instances[srcIdx] == nil {
 				continue
 			}
@@ -1862,6 +1888,96 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 			if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
 				_ = linker.Define(store, "env", "memory", memExp)
 				break
+			}
+		}
+
+		// Define no-op stubs for wit_dylib_* imports (Python WASM
+		// component-model ABI) with the module's expected types.
+		// Must run before DefineUnknownImportsAsTraps so no-ops
+		// take precedence over trap stubs.
+		for _, impTy := range cm.Imports() {
+			if impTy.Module() != "env" || impTy.Name() == nil ||
+				!strings.HasPrefix(*impTy.Name(), "wit_dylib_") {
+				continue
+			}
+			if impTy.Type() == nil || impTy.Type().FuncType() == nil {
+				continue
+			}
+			functype := impTy.Type().FuncType()
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					resTypes := functype.Results()
+					results := make([]wasmtime.Val, len(resTypes))
+					for i, rt := range resTypes {
+						switch rt.Kind() {
+						case wasmtime.KindI32:
+							results[i] = wasmtime.ValI32(0)
+						case wasmtime.KindI64:
+							results[i] = wasmtime.ValI64(0)
+						case wasmtime.KindF32:
+							results[i] = wasmtime.ValF32(0)
+						case wasmtime.KindF64:
+							results[i] = wasmtime.ValF64(0)
+						default:
+							results[i] = wasmtime.ValI32(0)
+						}
+					}
+					return results, nil
+				})
+			_ = linker.Define(store, "env", *impTy.Name(), fn)
+		}
+
+		// Final GOT routing: for GOT.mem/GOT.func imports, route
+		// from the CPython runtime with proper mutability handling.
+		for _, impTy := range cm.Imports() {
+			modName := impTy.Module()
+			if modName != "GOT.mem" && modName != "GOT.func" {
+				continue
+			}
+			namePtr := impTy.Name()
+			if namePtr == nil {
+				continue
+			}
+			fieldName := *namePtr
+			if fieldName == "__memory_base" || fieldName == "__table_base" {
+				continue
+			}
+			extType := impTy.Type()
+			if extType == nil || extType.GlobalType() == nil {
+				continue
+			}
+			importGlobalType := extType.GlobalType()
+			routed := false
+			if cpythonRuntimeIdx >= 0 && instances[cpythonRuntimeIdx] != nil {
+				cpythonInst := instances[cpythonRuntimeIdx]
+				cpythonModIdx := bundle.Instances[cpythonRuntimeIdx].ModuleIndex
+				for _, expTy := range compiled[cpythonModIdx].Exports() {
+					if !strings.HasSuffix(expTy.Name(), ":"+fieldName) {
+						continue
+					}
+					candidate := cpythonInst.GetExport(store, expTy.Name())
+					if candidate == nil || candidate.Global() == nil {
+						continue
+					}
+					val := candidate.Global().Get(store)
+					newGType := wasmtime.NewGlobalType(
+						importGlobalType.Content(),
+						importGlobalType.Mutable())
+					if newG, newErr := wasmtime.NewGlobal(store, newGType, val); newErr == nil {
+						_ = linker.Define(store, modName, fieldName, newG)
+						routed = true
+					}
+					break
+				}
+			}
+			if !routed {
+				// Create a default mutable global with the import's type.
+				gType := wasmtime.NewGlobalType(
+					importGlobalType.Content(),
+					importGlobalType.Mutable())
+				if g, err := wasmtime.NewGlobal(store, gType, wasmtime.ValI32(0)); err == nil {
+					_ = linker.Define(store, modName, fieldName, g)
+				}
 			}
 		}
 
@@ -2039,20 +2155,39 @@ if pendingCount > 0 {
 		return nil, fmt.Errorf("host: component export %q not found", entryPoint)
 	}
 
-	if exp.InstanceIndex < 0 || exp.InstanceIndex >= len(instances) {
-		return nil, fmt.Errorf("host: component export %q instance index %d out of range", entryPoint, exp.InstanceIndex)
-	}
-
 	var entryInst *wasmtime.Instance
 	var entryExportName string
 
-	if re, ok2 := resolvedExports[exp.InstanceIndex][exp.Name]; ok2 && re.inst != nil {
-		entryInst = re.inst
-		entryExportName = re.exportName
-	} else if instances[exp.InstanceIndex] != nil {
-		entryInst = instances[exp.InstanceIndex]
-		entryExportName = exp.Name
+	if exp.InstanceIndex >= 0 && exp.InstanceIndex < len(instances) {
+		// Direct instance reference.
+		if re, ok2 := resolvedExports[exp.InstanceIndex][exp.Name]; ok2 && re.inst != nil {
+			entryInst = re.inst
+			entryExportName = re.exportName
+		} else if instances[exp.InstanceIndex] != nil {
+			entryInst = instances[exp.InstanceIndex]
+			entryExportName = exp.Name
+		}
 	} else {
+		// No direct instance reference (e.g. func export without
+		// instance sort). Search all instantiated instances.
+		for i, inst := range instances {
+			if inst == nil {
+				continue
+			}
+			if re, ok2 := resolvedExports[i][exp.Name]; ok2 && re.inst != nil {
+				entryInst = re.inst
+				entryExportName = re.exportName
+				break
+			}
+			if f := inst.GetFunc(store, exp.Name); f != nil {
+				entryInst = inst
+				entryExportName = exp.Name
+				break
+			}
+		}
+	}
+
+	if entryInst == nil {
 		return nil, fmt.Errorf("host: cannot resolve component export %q (instance %d)", entryPoint, exp.InstanceIndex)
 	}
 
@@ -2384,7 +2519,14 @@ func (b *wasmtimeBackend) perExportRoute(store wasmtime.Storelike, cm *wasmtime.
 		// "env" imports are NOT skipped — some have prefixed
 		// names like libpython3.14.so:memory_base that need
 		// suffix matching from other instances.
-		if modName == "wasi_snapshot_preview1" || modName == "teavm" {
+		if modName == "wasi_snapshot_preview1" || modName == "teavm" ||
+			strings.Contains(modName, "wasi:") {
+			continue
+		}
+		if modName == "env" && fieldName != "memory" &&
+			fieldName != "__indirect_function_table" &&
+			fieldName != "__stack_pointer" &&
+			!strings.Contains(fieldName, ":") {
 			continue
 		}
 
