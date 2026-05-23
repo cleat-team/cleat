@@ -178,9 +178,13 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 		// Call _start synchronously. main() processes the work and returns.
 		func() {
-				defer func() { recover() }()
-				startFn.Call(store)
+			defer func() {
+				if r := recover(); r != nil {
+					completeErr = fmt.Sprintf("wasm _start panic: %v", r)
+				}
 			}()
+			startFn.Call(store)
+		}()
 
 		// Result is delivered via cleat_complete hook.
 		if completeErr != "" {
@@ -460,11 +464,12 @@ func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
 
 // registerEnvStubs registers no-op stubs for optional "env" imports.
 func (b *wasmtimeBackend) registerEnvStubs(linker *wasmtime.Linker) error {
-	// abort is handled by DefineUnknownImportsAsTraps per-instance,
-	// which creates stubs with the module's expected signature.
-	// Manual FuncWrap("abort", ...) can conflict with modules that
-	// declare a different abort signature (e.g. Python components
-	// expect (func) while AssemblyScript expects 4 i32 params).
+	// AssemblyScript abort stub. AS modules import env.abort with
+	// (msg i32, file i32, line i32, col i32). Python components may
+	// define abort via DefineUnknownImportsAsTraps with a different
+	// signature — the duplicate definition error from FuncWrap is
+	// benign and can be ignored (the first registration wins).
+	_ = linker.FuncWrap("env", "abort", func(_ int32, _ int32, _ int32, _ int32) {})
 	return nil
 }
 

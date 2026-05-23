@@ -113,7 +113,7 @@ type HostHandler interface {
 }
 
 // registerHostFunctions registers all cleat_* imports on the "env" host module.
-func registerHostFunctions(builder wazero.HostModuleBuilder) {
+func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 	// cleat_call: (ptr,len x3, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen uint32) uint64 {

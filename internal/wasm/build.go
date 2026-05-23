@@ -144,7 +144,29 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		return err
 	}
 
-	mainStub := "package main\n\nfunc main() {\n\t<-make(chan struct{})\n}\n"
+	mainStub := `package main
+
+import "unsafe"
+
+func main() {
+	var entryNameBuf [256]byte
+	var argsBuf [65536]byte
+	ret := cleatPollWorkImport(
+		unsafe.Pointer(&entryNameBuf[0]), 256,
+		unsafe.Pointer(&argsBuf[0]), 65536,
+	)
+	entryNameLen := uint32(ret >> 32)
+	argsLen := uint32(ret)
+	if entryNameLen == 0 {
+		return
+	}
+	entryName := string(entryNameBuf[:entryNameLen])
+	args := argsBuf[:argsLen]
+	result := cleatDispatch(entryName, args)
+	resultPtr, resultLen := stringPtr(string(result))
+	cleatCompleteImport(0, resultPtr, resultLen)
+}
+`
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
 	}

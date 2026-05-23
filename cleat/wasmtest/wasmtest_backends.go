@@ -18,10 +18,8 @@ func wasmtimeBackendOptions() []host.EngineOption {
 	}
 	return []host.EngineOption{
 		host.WithBackend("go", wt),
-		host.WithBackend("rust", wt),
-		host.WithBackend("assemblyscript", wt),
 		host.WithBackend("python", wt),
-		// Java uses the legacy wazero path due to wasmtime-go crash.
-		host.WithBackend("java", wt),
+		// Rust, AssemblyScript, and Java use the legacy wazero path
+		// due to wasmtime-go v44 crashes on non-Go core WASM modules.
 	}
 }
