@@ -1057,7 +1057,8 @@ func (b *wasmtimeBackend) registerCleatRegisterUpdateHandler(linker *wasmtime.Li
 
 func (b *wasmtimeBackend) registerCleatCreatePromise(linker *wasmtime.Linker) error {
 	return linker.FuncWrap("env", "cleat_create_promise", func(caller *wasmtime.Caller,
-		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen int32) int64 {
+		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen int32, ttlMs int64) int64 {
+		_ = ttlMs
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
@@ -1735,6 +1736,9 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 	compiled := make([]*wasmtime.Module, len(bundle.Modules))
 	for i, modBytes := range bundle.Modules {
 		patched := wasm.PatchEmptyImportModuleName(modBytes, componentAdapterModule)
+		if rewritten, rwErr := wasm.RewriteWitImports(patched); rwErr == nil && rewritten != nil {
+			patched = rewritten
+		}
 		m, err := wasmtime.NewModule(b.engine, patched)
 		if err != nil {
 			return nil, fmt.Errorf("host: compile core module %d: %w", i, err)
