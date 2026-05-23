@@ -302,7 +302,7 @@ func TestWithTenant_WithEmptyTenant(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_SetRLSOnTx_EmptyTenant(t *testing.T) {
-	// When tenantID is empty, setRLSOnTx should be a no-op (return nil).
+	// When tenantID is empty, setRLSOnTx should return an error.
 	db := newNoopDB(t)
 	defer db.Close()
 
@@ -316,8 +316,8 @@ func TestPostgresStore_SetRLSOnTx_EmptyTenant(t *testing.T) {
 	defer tx.Rollback()
 
 	err = store.setRLSOnTx(tx)
-	if err != nil {
-		t.Errorf("setRLSOnTx with empty tenant should return nil, got: %v", err)
+	if err == nil {
+		t.Errorf("setRLSOnTx with empty tenant should return an error, got nil")
 	}
 }
 

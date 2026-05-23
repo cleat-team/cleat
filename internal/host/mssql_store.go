@@ -150,7 +150,7 @@ func (s *MSSQLStore) WithTenant(tenantID string) *MSSQLStore {
 // SQL Server equivalent of PostgreSQL's SET session_config.tenant_id.
 func (s *MSSQLStore) setSessionContext(tx *sql.Tx) error {
 	if s.tenantID == "" {
-		return nil
+		return fmt.Errorf("setSessionContext: tenant ID must be set before setting session context for an RLS-scoped transaction")
 	}
 	_, err := tx.Exec(`
 		EXEC sp_set_session_context @key=N'tenant_id', @value=@p1
@@ -249,7 +249,7 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		var traceID sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-				&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 		wf.TraceID = traceID.String
@@ -331,7 +331,7 @@ func (s *MSSQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 		var traceID sql.NullString
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
-				&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID); err != nil {
+			&inputStr, &wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &traceID); err != nil {
 			return nil, fmt.Errorf("claim sticky workflows scan: %w", err)
 		}
 		wf.TraceID = traceID.String
@@ -2621,7 +2621,13 @@ func (s *MSSQLStore) ValidateVersion(ctx context.Context, defName string, defVer
 
 // GetActiveInstanceCountsByVersion returns a map of "name:version" -> count.
 func (s *MSSQLStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get active instance counts: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
 		WHERE status IN ('ready', 'running')
@@ -2642,7 +2648,10 @@ func (s *MSSQLStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[
 		key := name + ":" + fmt.Sprintf("%d", version)
 		counts[key] = count
 	}
-	return counts, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
+	return counts, tx.Commit()
 }
 
 // RecordWorkflowMemorySample inserts a new sample and updates the EWMA summary.
