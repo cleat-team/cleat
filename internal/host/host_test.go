@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1210,4 +1212,27 @@ func TestTruncateWithHash(t *testing.T) {
 			t.Errorf("expected prefix to be first 10 bytes of input")
 		}
 	})
+}
+
+func TestEngineDefaultLogger(t *testing.T) {
+	rt, err := NewRuntime(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := NewEngine(rt, nil)
+	if engine.logger == nil {
+		t.Fatal("expected default logger to be set")
+	}
+}
+
+func TestEngineWithLogger(t *testing.T) {
+	rt, err := NewRuntime(context.Background(), 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	engine := NewEngine(rt, nil, WithLogger(l))
+	if engine.logger != l {
+		t.Fatal("WithLogger did not set the logger")
+	}
 }

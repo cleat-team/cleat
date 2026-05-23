@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -631,6 +631,9 @@ type Engine struct {
 	// stepCallback is an optional callback invoked after each event is consumed
 	// during replay. When nil, step advancement is a no-op increment.
 	stepCallback ReplayStepCallback
+
+	// logger is the structured logger for engine diagnostic output.
+	logger *slog.Logger
 }
 
 // ReplayStepCallback is called after each event is consumed during replay.
@@ -905,6 +908,22 @@ func WithReplayStepCallback(cb ReplayStepCallback) EngineOption {
 	}
 }
 
+// WithLogger sets the structured logger for the engine.
+// If not set, slog.Default() is used.
+func WithLogger(l *slog.Logger) EngineOption {
+	return func(e *Engine) { e.logger = l }
+}
+
+// log returns the engine's structured logger, falling back to slog.Default()
+// when no logger has been configured (e.g., in tests that construct Engine
+// directly rather than through NewEngine).
+func (e *Engine) log() *slog.Logger {
+	if e.logger != nil {
+		return e.logger
+	}
+	return slog.Default()
+}
+
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
 func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine {
 	e := &Engine{
@@ -915,6 +934,9 @@ func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine 
 	}
 	for _, o := range opts {
 		o(e)
+	}
+	if e.logger == nil {
+		e.logger = slog.Default()
 	}
 	return e
 }
@@ -1074,12 +1096,12 @@ func (e *Engine) executeWithBackend(
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if verr := e.workflowEventVerifier(ctx, e.workflowID); verr != nil {
-				log.Printf("[engine] workflow %s: checksum verification failed: %v", e.workflowID, verr)
+				e.log().WarnContext(ctx, "checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", verr)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
 					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, verr)
 				}
-				log.Printf("[engine] workflow %s: checksum verification failed but proceeding (failOnChecksumMismatch=false)", e.workflowID)
+				e.log().WarnContext(ctx, "checksum verification failed but proceeding (failOnChecksumMismatch=false)", "workflow_id", e.workflowID, "tenant_id", e.tenantID)
 			}
 		}
 
@@ -1216,12 +1238,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if err := e.workflowEventVerifier(ctx, e.workflowID); err != nil {
-				log.Printf("[engine] workflow %s: checksum verification failed: %v", e.workflowID, err)
+				e.log().WarnContext(ctx, "replay checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", err)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
 					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, err)
 				}
-				log.Printf("[engine] workflow %s: checksum verification failed but proceeding (failOnChecksumMismatch=false)", e.workflowID)
+				e.log().WarnContext(ctx, "replay checksum verification failed but proceeding (failOnChecksumMismatch=false)", "workflow_id", e.workflowID, "tenant_id", e.tenantID)
 			}
 		}
 
@@ -1605,12 +1627,12 @@ func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferra
 		exportName := "cleat_defer_" + deferID
 		fn := mod.ExportedFunction(exportName)
 		if fn == nil {
-			log.Printf("[engine] defer %q (%s): export %q not found", deferID, description, exportName)
+			e.log().WarnContext(ctx, "defer export not found", "defer_id", deferID, "description", description, "export_name", exportName)
 			continue
 		}
 		_, _, err := e.rt.CallExportWithSuspend(ctx, mod, exportName, []byte("{}"))
 		if err != nil {
-			log.Printf("[engine] defer %q (%s) failed: %v", deferID, description, err)
+			e.log().WarnContext(ctx, "defer execution failed", "defer_id", deferID, "description", description, "error", err)
 		}
 	}
 }
@@ -1771,8 +1793,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	if s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow && !s.autoContinueAsNewTriggered {
 		s.autoContinueAsNewTriggered = true
 		continueAsNewTotal.WithLabelValues("event_cap").Inc()
-		log.Printf("[engine] workflow %s: auto-ContinueAsNew triggered (event_count=%d, max=%d)",
-			s.workflowID, s.eventCount, s.engine.maxEventsPerWorkflow)
+		s.engine.log().InfoContext(ctx, "auto-ContinueAsNew triggered", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "event_count", s.eventCount, "max", s.engine.maxEventsPerWorkflow)
 		s.ContinueAsNew(ctx, m, s.originalInput)
 		m.CloseWithExitCode(ctx, 0)
 		written, _ := s.writeResult(ctx, m, responsePtr, "", responseMaxLen)
@@ -1807,7 +1828,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// exactly-once with write-ahead logging and ambiguity detection.)
 	if s.engine.db != nil {
 		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
-			log.Printf("[engine] freshCall: flushEvent failed for workflow=%s step=%d: %v", s.workflowID, rec.Step, flushErr)
+			s.engine.log().ErrorContext(ctx, "freshCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
 		}
 	}
 
@@ -2032,7 +2053,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 		// Flush immediately so plugin results survive worker crashes.
 		if s.engine.db != nil {
 			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
-				log.Printf("[engine] PluginCall: flushEvent failed for workflow=%s step=%d: %v", s.workflowID, rec.Step, flushErr)
+				s.engine.log().ErrorContext(ctx, "PluginCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
 			}
 		}
 	}
@@ -2680,13 +2701,13 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			count, err := s.engine.workflowStore.GetChildCount(context.Background(), s.workflowID)
 			if err != nil {
 				errMsg := fmt.Sprintf("workflow %s: failed to check child quota: %v", s.workflowID, err)
-				log.Printf("[engine] %s", errMsg)
+				s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 				errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
 				return int64(uint64(errWritten)<<32 | 4)
 			}
 			if count >= s.engine.maxQuotaChildren {
 				errMsg := fmt.Sprintf("workflow %s: child workflow quota exceeded (current %d, max %d)", s.workflowID, count, s.engine.maxQuotaChildren)
-				log.Printf("[engine] %s", errMsg)
+				s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 				errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
 				return int64(uint64(errWritten)<<32 | 4)
 			}
@@ -2721,7 +2742,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		}
 		if err != nil {
 			errMsg := fmt.Sprintf("child workflow %q: start failed: %v", name, err)
-			log.Printf("[engine] %s", errMsg)
+			s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
 			return int64(uint64(errWritten)<<32 | 3) // errCode 3 = not_found
 		}
@@ -3212,7 +3233,7 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	// Persist immediately so events survive worker crashes.
 	if s.engine.db != nil && !s.isReplay {
 		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
-			log.Printf("[engine] recordEvent: flushEvent failed for workflow=%s step=%d type=%s: %v", s.workflowID, rec.Step, rec.EventType, flushErr)
+			s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
 		}
 	}
 }
@@ -3274,7 +3295,7 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 	// Also persist to promise store if available.
 	if s.engine.promiseStore != nil {
 		if err := s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID); err != nil {
-			log.Printf("[engine] create_promise: %v", err)
+			s.engine.log().ErrorContext(ctx, "create_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 
@@ -3367,7 +3388,7 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 	// Check signal authorization before delivering.
 	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
 		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
-			log.Printf("[engine] signal_auth: %v", err)
+			s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			return errSignalAuthRequiredInt
 		}
 	}
@@ -3446,7 +3467,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 	// Check signal authorization before delivering.
 	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
 		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
-			log.Printf("[engine] signal_auth: %v", err)
+			s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			return errSignalAuthRequiredInt
 		}
 	}
@@ -3463,7 +3484,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 	// Deliver to target via signal store if available.
 	if s.engine.signalStore != nil {
 		if err := s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload); err != nil {
-			log.Printf("[engine] deliver_signal: %v", err)
+			s.engine.log().ErrorContext(ctx, "deliver_signal failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 
@@ -3482,7 +3503,7 @@ func (s *execSession) ClearScope(ctx context.Context) {
 		scopeKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
 		if s.engine.concurrencyKeyStore != nil {
 			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
-				log.Printf("[engine] release_concurrency_key: %v", err)
+				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			}
 		}
 		for i, held := range s.heldScopes {
@@ -3517,7 +3538,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 		oldKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
 		if s.engine.concurrencyKeyStore != nil {
 			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, oldKey); err != nil {
-				log.Printf("[engine] release_concurrency_key: %v", err)
+				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			}
 		}
 		for i, held := range s.heldScopes {
@@ -3626,7 +3647,7 @@ func (s *execSession) releaseHeldScopes(ctx context.Context) {
 	}
 	for _, scopeKey := range s.heldScopes {
 		if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
-			log.Printf("[engine] release_concurrency_key: %v", err)
+			s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 	s.heldScopes = nil
@@ -3675,7 +3696,7 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 		if s.engine.maxQuotaConcurrencyKeys > 0 && s.engine.workflowStore != nil {
 			count, err := s.engine.workflowStore.GetConcurrencyKeyCount(ctx, s.workflowID)
 			if err != nil {
-				log.Printf("[engine] workflow %s: failed to check concurrency key quota: %v", s.workflowID, err)
+				s.engine.log().ErrorContext(ctx, "concurrency key quota check failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 				rec := EventRecord{
 					Step:         s.stepCount,
 					EventType:    EventTypeAcquireLock,
@@ -3689,7 +3710,7 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 			}
 			if count >= s.engine.maxQuotaConcurrencyKeys {
 				errMsg := fmt.Sprintf("workflow %s: concurrency key quota exceeded (current %d, max %d)", s.workflowID, count, s.engine.maxQuotaConcurrencyKeys)
-				log.Printf("[engine] %s", errMsg)
+				s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 				rec := EventRecord{
 					Step:         s.stepCount,
 					EventType:    EventTypeAcquireLock,
@@ -3901,7 +3922,7 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 
 	if s.engine.promiseStore != nil {
 		if err := s.engine.promiseStore.ResolvePromise(ctx, s.workflowID, promiseID, value); err != nil {
-			log.Printf("[engine] resolve_promise: %v", err)
+			s.engine.log().ErrorContext(ctx, "resolve_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 	return 0
@@ -3930,7 +3951,7 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 
 	if s.engine.promiseStore != nil {
 		if err := s.engine.promiseStore.RejectPromise(ctx, s.workflowID, promiseID, errMsg); err != nil {
-			log.Printf("[engine] reject_promise: %v", err)
+			s.engine.log().ErrorContext(ctx, "reject_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 	return 0
@@ -4527,7 +4548,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			var encErr error
 
 			if requestStr, encErr = e.encryption.EncryptString(rec.Request); encErr != nil {
-				log.Printf("[engine] encryption failed for field request in workflow %s: %v", workflowID, encErr)
+				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "request", "error", encErr)
 				encryptionErrorsTotal.Inc()
 				tx.Rollback()
 				lastErr = fmt.Errorf("flush event: encrypt request: %w", encErr)
@@ -4537,7 +4558,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				break
 			}
 			if responseStr, encErr = e.encryption.EncryptString(rec.Response); encErr != nil {
-				log.Printf("[engine] encryption failed for field response in workflow %s: %v", workflowID, encErr)
+				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "response", "error", encErr)
 				encryptionErrorsTotal.Inc()
 				tx.Rollback()
 				lastErr = fmt.Errorf("flush event: encrypt response: %w", encErr)
@@ -4547,7 +4568,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				break
 			}
 			if errStr, encErr = e.encryption.EncryptString(rec.Err); encErr != nil {
-				log.Printf("[engine] encryption failed for field err in workflow %s: %v", workflowID, encErr)
+				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "err", "error", encErr)
 				encryptionErrorsTotal.Inc()
 				tx.Rollback()
 				lastErr = fmt.Errorf("flush event: encrypt err: %w", encErr)
@@ -4558,7 +4579,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.SignalPayload != "" {
 				if sigPayload, encErr = e.encryption.EncryptString(rec.SignalPayload); encErr != nil {
-					log.Printf("[engine] encryption failed for field signal_payload in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "signal_payload", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt signal_payload: %w", encErr)
@@ -4570,7 +4591,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.ChildInput != "" {
 				if childInput, encErr = e.encryption.EncryptString(rec.ChildInput); encErr != nil {
-					log.Printf("[engine] encryption failed for field child_input in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "child_input", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt child_input: %w", encErr)
@@ -4582,7 +4603,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.NewInput != "" {
 				if newInput, encErr = e.encryption.EncryptString(rec.NewInput); encErr != nil {
-					log.Printf("[engine] encryption failed for field new_input in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "new_input", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt new_input: %w", encErr)
@@ -4594,7 +4615,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.PluginInput != "" {
 				if pluginInput, encErr = e.encryption.EncryptString(rec.PluginInput); encErr != nil {
-					log.Printf("[engine] encryption failed for field plugin_input in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "plugin_input", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt plugin_input: %w", encErr)
@@ -4606,7 +4627,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.PluginOutput != "" {
 				if pluginOutput, encErr = e.encryption.EncryptString(rec.PluginOutput); encErr != nil {
-					log.Printf("[engine] encryption failed for field plugin_output in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "plugin_output", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt plugin_output: %w", encErr)
@@ -4618,7 +4639,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.PromiseResult != "" {
 				if promiseResult, encErr = e.encryption.EncryptString(rec.PromiseResult); encErr != nil {
-					log.Printf("[engine] encryption failed for field promise_result in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "promise_result", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt promise_result: %w", encErr)
@@ -4630,7 +4651,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.PromiseError != "" {
 				if promiseError, encErr = e.encryption.EncryptString(rec.PromiseError); encErr != nil {
-					log.Printf("[engine] encryption failed for field promise_error in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "promise_error", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt promise_error: %w", encErr)
@@ -4644,7 +4665,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			if len(payloadJSON) > 0 {
 				var encrypted []byte
 				if encrypted, encErr = e.encryption.EncryptJSON(payloadJSON); encErr != nil {
-					log.Printf("[engine] encryption failed for field payload in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "payload", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt payload: %w", encErr)
@@ -4726,8 +4747,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	}
 
 	// All retries exhausted --- log a structured error that can be alerted on.
-	log.Printf("[engine] flushEvent: all %d retries exhausted for workflow=%s step=%d type=%s: %v",
-		len(backoff), workflowID, rec.Step, rec.EventType, lastErr)
+	e.log().ErrorContext(ctx, "flushEvent retries exhausted", "workflow_id", workflowID, "tenant_id", e.tenantID, "step", rec.Step, "event_type", rec.EventType, "error", lastErr)
 	return lastErr
 
 }
@@ -4807,7 +4827,7 @@ func (e *Engine) completeCallEvent(ctx context.Context, workflowID string, rec E
 	if e.encryptSensitivePayloads && e.encryption != nil {
 		s, err := e.encryption.EncryptString(rec.Response)
 		if err != nil {
-			log.Printf("[engine] encryption failed for response in workflow %s step %d: %v", workflowID, rec.Step, err)
+			e.log().ErrorContext(ctx, "encryption failed for response", "workflow_id", workflowID, "tenant_id", e.tenantID, "step", rec.Step, "error", err)
 			encryptionErrorsTotal.Inc()
 			tx.Rollback()
 			return fmt.Errorf("complete call event: encrypt response: %w", err)
@@ -4815,7 +4835,7 @@ func (e *Engine) completeCallEvent(ctx context.Context, workflowID string, rec E
 		responseStr = nullStr(s)
 		s, err = e.encryption.EncryptString(callErr)
 		if err != nil {
-			log.Printf("[engine] encryption failed for error in workflow %s step %d: %v", workflowID, rec.Step, err)
+			e.log().ErrorContext(ctx, "encryption failed for error", "workflow_id", workflowID, "tenant_id", e.tenantID, "step", rec.Step, "error", err)
 			encryptionErrorsTotal.Inc()
 			tx.Rollback()
 			return fmt.Errorf("complete call event: encrypt error: %w", err)

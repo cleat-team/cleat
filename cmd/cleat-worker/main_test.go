@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -337,5 +340,48 @@ func TestWorkerHelpDoesNotPanic(t *testing.T) {
 	fs.Int("concurrency", 10, "")
 	if err := fs.Parse([]string{"--help"}); err != flag.ErrHelp {
 		t.Errorf("expected flag.ErrHelp, got %v", err)
+	}
+}
+
+func TestJSONLogFormat(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger.InfoContext(context.Background(), "test message", "workflow_id", "wf-123", "tenant_id", "t-456")
+
+	var entry map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("log output is not valid JSON: %v\nGot: %s", err, buf.String())
+	}
+	if entry["msg"] != "test message" {
+		t.Errorf("expected msg 'test message', got %v", entry["msg"])
+	}
+	if entry["workflow_id"] != "wf-123" {
+		t.Errorf("expected workflow_id 'wf-123', got %v", entry["workflow_id"])
+	}
+	if entry["tenant_id"] != "t-456" {
+		t.Errorf("expected tenant_id 't-456', got %v", entry["tenant_id"])
+	}
+}
+
+func TestOtelFlagsRegistered(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	otelEndpoint := fs.String("otel-endpoint", "", "OTLP HTTP endpoint")
+	otelDisabled := fs.Bool("otel-disabled", false, "Disable OTel")
+
+	if *otelEndpoint != "" {
+		t.Errorf("expected default --otel-endpoint to be empty, got %q", *otelEndpoint)
+	}
+	if *otelDisabled != false {
+		t.Errorf("expected default --otel-disabled to be false")
+	}
+
+	if err := fs.Parse([]string{"--otel-endpoint", "localhost:4318", "--otel-disabled", "true"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+	if *otelEndpoint != "localhost:4318" {
+		t.Errorf("expected --otel-endpoint=localhost:4318, got %q", *otelEndpoint)
+	}
+	if *otelDisabled != true {
+		t.Errorf("expected --otel-disabled=true")
 	}
 }
