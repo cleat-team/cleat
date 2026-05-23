@@ -62,7 +62,6 @@ type TaskStatus struct {
 	Phase       string `json:"phase"`
 	PhaseUpdate string `json:"phase_updated,omitempty"`
 	Notes       string `json:"notes,omitempty"`
-	Updated     string `json:"updated,omitempty"`
 }
 
 // --- Session types ---
@@ -188,9 +187,9 @@ func IsValidPhase(phase string) bool {
 	return ok
 }
 
-// IsTerminalPhase returns true for terminal states (done, failed, blocked, waiting_on_children).
+// IsTerminalPhase returns true for terminal states.
 func IsTerminalPhase(phase string) bool {
-	return phase == "done" || phase == "failed" || phase == "blocked" || phase == "waiting_on_children"
+	return phase == "done" || phase == "failed"
 }
 
 // CanTransition checks if moving from one phase to another is valid.
@@ -220,23 +219,4 @@ func CanTransition(from, to string) bool {
 // Timestamp returns the current time as an RFC 3339 string.
 func Timestamp() string {
 	return time.Now().UTC().Format(time.RFC3339)
-}
-
-// TimestampDate returns the current date as YYYY-MM-DD (for task entry fields
-// and STATUS.md / TASK.md date fields).
-func TimestampDate() string {
-	return time.Now().UTC().Format("2006-01-02")
-}
-
-// computeTokenCost calculates USD cost from token usage using Claude Sonnet pricing.
-func computeTokenCost(u TokenUsage) float64 {
-	const (
-		inputCostPerMTok     = 3.0
-		outputCostPerMTok    = 15.0
-		cacheReadCostPerMTok = 1.5
-	)
-	input := float64(u.Input) * inputCostPerMTok / 1_000_000.0
-	output := float64(u.Output) * outputCostPerMTok / 1_000_000.0
-	cacheRead := float64(u.CacheRead) * cacheReadCostPerMTok / 1_000_000.0
-	return input + output + cacheRead
 }
