@@ -3,7 +3,6 @@ module github.com/cleat-team/cleat
 go 1.25.7
 
 require (
-	github.com/bytecodealliance/wasmtime-go/v44 v44.0.0
 	github.com/cleat-team/cleat/cleat v0.0.0
 	github.com/go-sql-driver/mysql v1.8.1
 	github.com/google/uuid v1.6.0
@@ -30,6 +29,7 @@ require (
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bytecodealliance/wasmtime-go/v44 v44.0.0
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect

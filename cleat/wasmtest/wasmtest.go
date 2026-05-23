@@ -534,8 +534,8 @@ func NewWasmTestEnv(t *testing.T, opts ...WasmTestEnvOption) *WasmTestEnv {
 	if env.pluginRegistry != nil {
 		engineOpts = append(engineOpts, host.WithPluginRegistry(env.pluginRegistry))
 	}
+	engineOpts = append(engineOpts, wasmtimeBackendOptions()...)
 	env.engine = host.NewEngine(rt, env.caller, engineOpts...)
-
 	return env
 }
 

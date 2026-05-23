@@ -133,6 +133,7 @@ if [ -n "$PYTHON_STAMP" ] && command -v python3 &>/dev/null 2>&1; then
     STAMP_ARGS=("$PYTHON_STAMP" "$WASM_FILE")
     STAMP_ARGS+=(--name "$NAME" --version "$VERSION" --min-version "$MIN_VERSION")
     STAMP_ARGS+=(--abi-version "$ABI_VERSION" --plugin-deps "$PLUGIN_DEPS")
+    STAMP_ARGS+=(--language java)
     if [ -n "$OUTPUT" ]; then
         STAMP_ARGS+=(--output "$OUTPUT")
     fi
@@ -159,6 +160,7 @@ elif [ -x "$CLEAT_CLI" ]; then
   "abi_version": $ABI_VERSION,
   "plugin_deps": $PLUGIN_DEPS,
   "sdk_language": "java",
+  "language": "java",
   "sdk_version": "0.1.0",
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
@@ -189,6 +191,7 @@ else
   "abi_version": $ABI_VERSION,
   "plugin_deps": $PLUGIN_DEPS,
   "sdk_language": "java",
+  "language": "java",
   "sdk_version": "0.1.0",
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }

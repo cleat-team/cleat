@@ -722,6 +722,22 @@ func needsManualJSON(usage *UsageInfo) bool {
 	return false
 }
 
+// needsJSON returns true if any of the used adapter defs reference encoding/json.
+func needsJSON(usage *UsageInfo) bool {
+	for _, hf := range usage.Funcs {
+		adef, ok := adapterDefs[hf.FieldName]
+		if !ok {
+			continue
+		}
+		for _, stmt := range adef.ResultStmts {
+			if strings.Contains(stmt, "json.") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // needsUnsafe returns true if any adapter reads from output buffers.
 func needsUnsafe(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
@@ -808,6 +824,9 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo, target string) []byte
 	}
 	if needsTime(usage) {
 		buf.WriteString("\t\"time\"\n")
+	}
+	if needsJSON(usage) {
+		buf.WriteString("\t\"encoding/json\"\n")
 	}
 	buf.WriteString("\n")
 	buf.WriteString("\t\"github.com/cleat-team/cleat/cleat\"\n")

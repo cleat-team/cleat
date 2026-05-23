@@ -4,12 +4,16 @@ package host
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/bytecodealliance/wasmtime-go/v44"
+
+	"github.com/cleat-team/cleat/internal/wasm"
 )
 
 // Compile-time check: wasmtimeBackend implements WasmBackend.
@@ -73,6 +77,15 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	ctx = withHandler(ctx, session)
 	b.handler = session
 
+	// Detect Component Model binaries and dispatch to the component execution path.
+	if isComponentWasm(wasmBytes) {
+		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
+		if bundleErr != nil {
+			return nil, fmt.Errorf("host: parse component bundle: %w", bundleErr)
+		}
+		return b.ExecuteComponent(ctx, wasmBytes, bundle, entryPoint, input, session)
+	}
+
 	// Compile the WASM module.
 	module, err := wasmtime.NewModule(b.engine, wasmBytes)
 	if err != nil {
@@ -82,177 +95,14 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Create linker and register host functions.
 	linker := wasmtime.NewLinker(b.engine)
-	if err := b.registerWasiStubs(linker); err != nil {
-		return nil, fmt.Errorf("host: register WASI stubs: %w", err)
-	}
-	if err := b.registerEnvStubs(linker); err != nil {
-		return nil, fmt.Errorf("host: register env stubs: %w", err)
-	}
-	if err := b.registerTeavmStubs(linker); err != nil {
-		return nil, fmt.Errorf("host: register teavm stubs: %w", err)
-	}
 
 	// Register cleat_* host functions. We use a closure-based approach:
 	// each function captures a result/error holder so that cleat_complete
 	// can store the workflow result and the Execute method can retrieve
 	// it even when the module subsequently traps (e.g. via proc_exit).
 	var completeResult, completeErr string
-
-	if err := b.registerCleatCall(linker, &completeResult, &completeErr); err != nil {
-		return nil, fmt.Errorf("host: register cleat_call: %w", err)
-	}
-	if err := b.registerCleatSleep(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_sleep: %w", err)
-	}
-	if err := b.registerCleatNow(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_now: %w", err)
-	}
-	if err := b.registerCleatRandom(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_random: %w", err)
-	}
-	if err := b.registerCleatLog(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_log: %w", err)
-	}
-	if err := b.registerCleatVersion(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_version: %w", err)
-	}
-	if err := b.registerCleatMinVersion(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_min_version: %w", err)
-	}
-	if err := b.registerCleatDefer(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_defer: %w", err)
-	}
-	if err := b.registerCleatPollCancellation(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_poll_cancellation: %w", err)
-	}
-	if err := b.registerCleatPollSignal(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_poll_signal: %w", err)
-	}
-	if err := b.registerCleatContinueAsNew(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_continue_as_new: %w", err)
-	}
-	if err := b.registerCleatContinueAsNewVersioned(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_continue_as_new_versioned: %w", err)
-	}
-	if err := b.registerCleatChildWorkflow(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_child_workflow: %w", err)
-	}
-	if err := b.registerCleatChildWorkflowWithOptions(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_child_workflow_with_options: %w", err)
-	}
-	if err := b.registerCleatChildWorkflowInSchema(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_child_workflow_in_schema: %w", err)
-	}
-	if err := b.registerCleatAwaitChild(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_await_child: %w", err)
-	}
-	if err := b.registerCleatAwaitAllChildren(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_await_all_children: %w", err)
-	}
-	if err := b.registerCleatCallRetry(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_call_retry: %w", err)
-	}
-	if err := b.registerCleatAwaitSignals(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_await_signals: %w", err)
-	}
-	if err := b.registerCleatSetQueryState(linker); err != nil {
-		return nil, fmt.Errorf("host: register set_query_state: %w", err)
-	}
-	if err := b.registerCleatCallHeartbeat(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_call_heartbeat: %w", err)
-	}
-	if err := b.registerCleatPluginCall(linker); err != nil {
-		return nil, fmt.Errorf("host: register plugin_call: %w", err)
-	}
-	if err := b.registerCleatPluginCallStreaming(linker); err != nil {
-		return nil, fmt.Errorf("host: register plugin_call_streaming: %w", err)
-	}
-	if err := b.registerCleatRegisterUpdateHandler(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_register_update_handler: %w", err)
-	}
-	if err := b.registerCleatCreatePromise(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_create_promise: %w", err)
-	}
-	if err := b.registerCleatAwaitPromise(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_await_promise: %w", err)
-	}
-	if err := b.registerCleatSendSignalAndWait(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_send_signal_and_wait: %w", err)
-	}
-	if err := b.registerCleatReplyToSignal(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_reply_to_signal: %w", err)
-	}
-	if err := b.registerCleatSignalWorkflow(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_signal_workflow: %w", err)
-	}
-	if err := b.registerCleatSetScope(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_set_scope: %w", err)
-	}
-	if err := b.registerCleatGetScope(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_get_scope: %w", err)
-	}
-	if err := b.registerCleatUUID(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_uuid: %w", err)
-	}
-	if err := b.registerCleatAcquireLock(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_acquire_lock: %w", err)
-	}
-	if err := b.registerCleatReleaseLock(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_release_lock: %w", err)
-	}
-	if err := b.registerCleatSideEffect(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_side_effect: %w", err)
-	}
-	if err := b.registerCleatWorkflowID(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_workflow_id: %w", err)
-	}
-	if err := b.registerCleatRunID(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_run_id: %w", err)
-	}
-	if err := b.registerCleatResolvePromise(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_resolve_promise: %w", err)
-	}
-	if err := b.registerCleatRejectPromise(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_reject_promise: %w", err)
-	}
-	if err := b.registerCleatSend(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_send: %w", err)
-	}
-	if err := b.registerCleatScheduleInvoke(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_schedule_invoke: %w", err)
-	}
-	if err := b.registerCleatRegisterQueryHandler(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_register_query_handler: %w", err)
-	}
-	if err := b.registerCleatRunDetached(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_run_detached: %w", err)
-	}
-	if err := b.registerCleatSetState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_set_state: %w", err)
-	}
-	if err := b.registerCleatGetState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_get_state: %w", err)
-	}
-	if err := b.registerCleatDeleteState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_delete_state: %w", err)
-	}
-	if err := b.registerCleatIncrState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_incr_state: %w", err)
-	}
-	if err := b.registerCleatHasState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_has_state: %w", err)
-	}
-	if err := b.registerCleatListState(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_list_state: %w", err)
-	}
-	if err := b.registerCleatFetch(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_fetch: %w", err)
-	}
-	if err := b.registerCleatComplete(linker, &completeResult, &completeErr); err != nil {
-		return nil, fmt.Errorf("host: register cleat_complete: %w", err)
-	}
-	if err := b.registerCleatPollWork(linker); err != nil {
-		return nil, fmt.Errorf("host: register cleat_poll_work: %w", err)
+	if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+		return nil, fmt.Errorf("host: register imports: %w", err)
 	}
 
 	// Instantiate the module.
@@ -339,7 +189,18 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Call the entry point. The return value is a single i64 encoding
 	// the error code (low 32 bits) and output length (high 32 bits).
-	results, callErr := fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
+	// Wrap in recover to handle wasmtime-go internal panics (e.g., from
+	// modules with unexpected import/export configurations).
+	var results interface{}
+	var callErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callErr = fmt.Errorf("host: wasmtime panic in %q: %v", entryPoint, r)
+			}
+		}()
+		results, callErr = fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
+	}()
 
 	// Check for a result delivered via cleat_complete before treating
 	// a trap/proc_exit as an error.
@@ -588,15 +449,11 @@ func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
 
 // registerEnvStubs registers no-op stubs for optional "env" imports.
 func (b *wasmtimeBackend) registerEnvStubs(linker *wasmtime.Linker) error {
-	// abort is required by AssemblyScript-compiled WASM modules.
-	if err := linker.FuncWrap("env", "abort",
-		func(msg, file, line, col int32) {},
-	); err != nil {
-		// Some modules may not import abort; this is not fatal.
-		if isWasmtimeLinkerError(err) {
-			return err
-		}
-	}
+	// abort is handled by DefineUnknownImportsAsTraps per-instance,
+	// which creates stubs with the module's expected signature.
+	// Manual FuncWrap("abort", ...) can conflict with modules that
+	// declare a different abort signature (e.g. Python components
+	// expect (func) while AssemblyScript expects 4 i32 params).
 	return nil
 }
 
@@ -1202,7 +1059,8 @@ func (b *wasmtimeBackend) registerCleatRegisterUpdateHandler(linker *wasmtime.Li
 
 func (b *wasmtimeBackend) registerCleatCreatePromise(linker *wasmtime.Linker) error {
 	return linker.FuncWrap("env", "cleat_create_promise", func(caller *wasmtime.Caller,
-		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen int32) int64 {
+		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen int32, ttlMs int64) int64 {
+		_ = ttlMs
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
@@ -1762,6 +1620,84 @@ func (b *wasmtimeBackend) registerCleatFetch(linker *wasmtime.Linker) error {
 }
 
 // ---------------------------------------------------------------------------
+// cleat_poll_child: (i32,i32, i32,i32) -> i64
+// Polls for a child workflow result without blocking.
+// ---------------------------------------------------------------------------
+
+func (b *wasmtimeBackend) registerCleatPollChild(linker *wasmtime.Linker) error {
+	return linker.FuncWrap("env", "cleat_poll_child", func(caller *wasmtime.Caller,
+		runIDPtr, runIDLen, resultPtr, resultMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		runID, ok := wasmtimeReadServiceName(buf, runIDPtr, runIDLen)
+		if !ok {
+			return errBadParamInt64
+		}
+		return h.PollChild(context.Background(), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// cleat_await_any_child: (i32,i32, i32,i32) -> i64
+// Awaits any one of the given child workflows.
+// ---------------------------------------------------------------------------
+
+func (b *wasmtimeBackend) registerCleatAwaitAnyChild(linker *wasmtime.Linker) error {
+	return linker.FuncWrap("env", "cleat_await_any_child", func(caller *wasmtime.Caller,
+		idsPtr, idsLen, resultPtr, resultMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		runIDsJSON, ok := wasmtimeReadStringValidated(buf, idsPtr, idsLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		return h.AwaitAnyChild(context.Background(), nil, runIDsJSON, uint32(resultPtr), uint32(resultMaxLen))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// cleat_json_parse: (i32,i32, i32,i32) -> i64
+// Validates and normalizes a JSON string via the host's encoding/json.
+// ---------------------------------------------------------------------------
+
+func (b *wasmtimeBackend) registerCleatJsonParse(linker *wasmtime.Linker) error {
+	return linker.FuncWrap("env", "cleat_json_parse", func(caller *wasmtime.Caller,
+		jsonPtr, jsonLen, outPtr, outMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		callCtx := ctxWithMem(context.Background(), buf)
+		return h.JsonParse(callCtx, nil, uint32(jsonPtr), uint32(jsonLen), uint32(outPtr), uint32(outMaxLen))
+	})
+}
+
+// ---------------------------------------------------------------------------
+// cleat_json_stringify: (i32,i32, i32,i32) -> i64
+// Validates and re-serializes a JSON string via the host's encoding/json.
+// ---------------------------------------------------------------------------
+
+func (b *wasmtimeBackend) registerCleatJsonStringify(linker *wasmtime.Linker) error {
+	return linker.FuncWrap("env", "cleat_json_stringify", func(caller *wasmtime.Caller,
+		ptr, len, outPtr, outMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		callCtx := ctxWithMem(context.Background(), buf)
+		return h.JsonStringify(callCtx, nil, uint32(ptr), uint32(len), uint32(outPtr), uint32(outMaxLen))
+	})
+}
+
+// ---------------------------------------------------------------------------
 // cleat_complete: (i32, i32,i32) -> i64
 // Signals workflow completion. status=0 means success, status=1 means error.
 // The result string is stored via closure variables so the Execute method
@@ -1792,6 +1728,758 @@ func (b *wasmtimeBackend) registerCleatComplete(linker *wasmtime.Linker, complet
 // entryName(ptr,maxLen), argsJSON(ptr,maxLen)
 // Returns the work data set by Execute() before calling _start.
 // ---------------------------------------------------------------------------
+
+// ExecuteComponent executes a WASM Component Model binary by decomposing it
+// into core modules, walking the instance DAG, and routing cross-module imports.
+func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte, bundle *wasm.ComponentBundle, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
+	const componentAdapterModule = "__component_adapter__"
+
+	// ---- Step 1: Compile all core modules ----
+	compiled := make([]*wasmtime.Module, len(bundle.Modules))
+	for i, modBytes := range bundle.Modules {
+		patched := wasm.PatchEmptyImportModuleName(modBytes, componentAdapterModule)
+		if rewritten, rwErr := wasm.RewriteWitImports(patched); rwErr == nil && rewritten != nil {
+			patched = rewritten
+		}
+		m, err := wasmtime.NewModule(b.engine, patched)
+		if err != nil {
+			return nil, fmt.Errorf("host: compile core module %d: %w", i, err)
+		}
+		compiled[i] = m
+		defer m.Close()
+	}
+
+	// ---- Step 2: Create store with WASI ----
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+	wasiConfig := wasmtime.NewWasiConfig()
+	wasiConfig.InheritStderr()
+	store.SetWasi(wasiConfig)
+
+	// ---- Step 3: Walk instance DAG ----
+	instances := make([]*wasmtime.Instance, len(bundle.Instances))
+
+	// Resolve FromExports chains: walk transitively to find the actual
+	// instantiated instance that provides exports for each instance index.
+	actualProvider := make([]int, len(bundle.Instances))
+	for i := range actualProvider {
+		actualProvider[i] = i
+	}
+	// Iterate to closure: follow FromExports chains until we reach an
+	// instantiated instance or hit a fixed point.
+	for changed := true; changed; {
+		changed = false
+		for i, inst := range bundle.Instances {
+			if inst.ModuleIndex >= 0 {
+				continue // has its own module, no need to resolve further
+			}
+			// Try to resolve through any FromExports entry.
+			for _, fe := range inst.FromExports {
+				src := fe.SourceInstance
+				if src >= 0 && src < len(actualProvider) && actualProvider[src] != i {
+					next := actualProvider[src]
+					if bundle.Instances[next].ModuleIndex >= 0 && actualProvider[i] != next {
+						actualProvider[i] = next
+						changed = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// Find the CPython runtime instance: the one whose compiled module
+	// has the most exports. The component model DAG's FromExports chains
+	// for GOT.mem / GOT.func may point to adapter instances that lack
+	// the actual CPython symbols; we fall back to this instance for GOT.
+	cpythonRuntimeIdx := -1
+	maxExports := 0
+	for i, inst := range bundle.Instances {
+		if inst.ModuleIndex >= 0 && inst.ModuleIndex < len(compiled) {
+			if n := len(compiled[inst.ModuleIndex].Exports()); n > maxExports {
+				maxExports = n
+				cpythonRuntimeIdx = i
+			}
+		}
+	}
+
+	// Multi-pass instantiation: instances are processed in passes.
+	// Each pass tries to instantiate any still-pending instance that has
+	// a module. If instantiation fails because a dependency isn't ready,
+	// it is retried in a later pass. This handles complex FromExports
+	// chains and avoids the need for an explicit topological sort.
+	pending := make([]bool, len(bundle.Instances))
+	pendingCount := 0
+	for i, inst := range bundle.Instances {
+		if inst.ModuleIndex >= 0 {
+			pending[i] = true
+			pendingCount++
+		}
+	}
+
+	maxPasses := len(bundle.Instances) + 5
+	for pass := 0; pass < maxPasses && pendingCount > 0; pass++ {
+		progress := false
+		for i, inst := range bundle.Instances {
+			if !pending[i] || inst.ModuleIndex < 0 {
+				continue
+			}
+			cm := compiled[inst.ModuleIndex]
+
+		// Build a map from import module name to source instance index,
+		// resolving through FromExports chains to the actual instantiated instance.
+		importNameToInstance := make(map[string]int, len(inst.Args))
+		for _, arg := range inst.Args {
+			resolved := arg.InstanceIndex
+			if resolved >= 0 && resolved < len(actualProvider) {
+				resolved = actualProvider[resolved]
+			}
+			importNameToInstance[arg.Name] = resolved
+			if arg.Name == "" {
+				importNameToInstance[componentAdapterModule] = resolved
+			}
+		}
+		// For GOT.mem / GOT.func imports, override to the CPython
+		// runtime instance when available. The component model DAG
+		// may route through adapter instances that lack CPython symbols.
+		if cpythonRuntimeIdx >= 0 {
+			for _, arg := range inst.Args {
+				if strings.HasPrefix(arg.Name, "GOT.") {
+					importNameToInstance[arg.Name] = cpythonRuntimeIdx
+				}
+			}
+		}
+
+		linker := wasmtime.NewLinker(b.engine)
+		// Register host functions (WASI, env stubs, teavm stubs, all cleat_*).
+		// Use dummy completeResult/completeErr since component modules don't
+		// use the Go dispatcher cleat_complete protocol.
+		var completeResult, completeErr string
+		if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+			return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
+		}
+
+		// Per-export routing: resolve GOT / libpython imports
+		// from already-instantiated instances before DefineInstance.
+		b.perExportRoute(store, cm, linker, instances, bundle, compiled)
+
+		// Wire cross-module imports: for each import the module declares,		}
+
+		// Wire cross-module imports: for each import the module declares,
+		// map it to the already-instantiated source instance.
+		// Skip WASI 0.2.0 interface names — adapter signatures may not
+		// match what the module expects. Traps handle them instead.
+		for importName, srcIdx := range importNameToInstance {
+			if strings.Contains(importName, ":") && !strings.HasPrefix(importName, "GOT.") {
+				continue
+			}
+			if srcIdx < 0 || srcIdx >= len(instances) || instances[srcIdx] == nil {
+				continue
+			}
+			if err := linker.DefineInstance(store, importName, instances[srcIdx]); err != nil {
+				// "defined twice" is OK — some exports (e.g. abort) are
+				// defined by both registerEnvStubs and the source instance.
+				if !strings.Contains(err.Error(), "defined twice") {
+					return nil, fmt.Errorf("host: define instance %d as %q for instance %d: %w", srcIdx, importName, i, err)
+				}
+			}
+		}
+
+		// Some modules import "memory" from "env" (not as a host function).
+		// Route it from any already-instantiated instance that exports memory.
+		for _, prevInst := range instances {
+			if prevInst == nil {
+				continue
+			}
+			if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
+				_ = linker.Define(store, "env", "memory", memExp)
+				break
+			}
+		}
+		// wit_dylib functions for component model adapter canonical ABI.
+		for _, impTy := range cm.Imports() {
+			if impTy.Module() != "env" || impTy.Name() == nil ||
+				!strings.HasPrefix(*impTy.Name(), "wit_dylib_") {
+				continue
+			}
+			if impTy.Type() == nil || impTy.Type().FuncType() == nil {
+				continue
+			}
+			b.defineWitDylib(store, linker, impTy)
+		}
+		// Final GOT routing: for GOT.mem/GOT.func imports, route
+		// from the CPython runtime with proper mutability handling.
+		for _, impTy := range cm.Imports() {
+			modName := impTy.Module()
+			if modName != "GOT.mem" && modName != "GOT.func" {
+				continue
+			}
+			namePtr := impTy.Name()
+			if namePtr == nil {
+				continue
+			}
+			fieldName := *namePtr
+			if fieldName == "__memory_base" || fieldName == "__table_base" {
+				continue
+			}
+			extType := impTy.Type()
+			if extType == nil || extType.GlobalType() == nil {
+				continue
+			}
+			importGlobalType := extType.GlobalType()
+			routed := false
+			if cpythonRuntimeIdx >= 0 && instances[cpythonRuntimeIdx] != nil {
+				cpythonInst := instances[cpythonRuntimeIdx]
+				cpythonModIdx := bundle.Instances[cpythonRuntimeIdx].ModuleIndex
+				for _, expTy := range compiled[cpythonModIdx].Exports() {
+					if !strings.HasSuffix(expTy.Name(), ":"+fieldName) {
+						continue
+					}
+					candidate := cpythonInst.GetExport(store, expTy.Name())
+					if candidate == nil || candidate.Global() == nil {
+						continue
+					}
+					val := candidate.Global().Get(store)
+					newGType := wasmtime.NewGlobalType(
+						importGlobalType.Content(),
+						importGlobalType.Mutable())
+					if newG, newErr := wasmtime.NewGlobal(store, newGType, val); newErr == nil {
+						_ = linker.Define(store, modName, fieldName, newG)
+						routed = true
+					}
+					break
+				}
+			}
+			if !routed {
+				// Create a default mutable global with the import's type.
+				gType := wasmtime.NewGlobalType(
+					importGlobalType.Content(),
+					importGlobalType.Mutable())
+				if g, err := wasmtime.NewGlobal(store, gType, wasmtime.ValI32(0)); err == nil {
+					_ = linker.Define(store, modName, fieldName, g)
+				}
+			}
+		}
+
+		// Fill unresolved WASI 0.2.0 imports with traps.
+		_ = linker.DefineUnknownImportsAsTraps(cm)
+		// Define placeholder imports for modules that need them.
+		// __indirect_function_table: size from the module's table import
+		// (or a generous default if import info is unavailable).
+		tblMinSize := uint32(1048576)
+		tblHasMax := false
+		tblMaxSize := uint32(0)
+		for _, impTy := range cm.Imports() {
+			if impTy.Module() == "env" && impTy.Name() != nil && *impTy.Name() == "__indirect_function_table" {
+				if extType := impTy.Type(); extType != nil {
+					if tt := extType.TableType(); tt != nil {
+						tblMinSize = tt.Minimum()
+						tblHasMax, tblMaxSize = tt.Maximum()
+					}
+				}
+				break
+			}
+		}
+		tblType := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMinSize, tblHasMax, tblMaxSize)
+		if tbl, err := wasmtime.NewTable(store, tblType, wasmtime.ValFuncref(nil)); err == nil {
+			_ = linker.Define(store, "env", "__indirect_function_table", tbl)
+		}
+		i32Mut := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
+		i32Imm := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
+		if sp, err := wasmtime.NewGlobal(store, i32Mut, wasmtime.ValI32(0)); err == nil {
+			_ = linker.Define(store, "env", "__stack_pointer", sp)
+		}
+		if mb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
+			_ = linker.Define(store, "env", "__memory_base", mb)
+		}
+		if tb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
+			_ = linker.Define(store, "env", "__table_base", tb)
+		}
+		if gmb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(0)); err == nil {
+			_ = linker.Define(store, "GOT.mem", "__memory_base", gmb)
+		}
+		if gtb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1)); err == nil {
+			_ = linker.Define(store, "GOT.func", "__table_base", gtb)
+		}
+
+
+
+		modInst, instErr := linker.Instantiate(store, cm)
+		if instErr != nil {
+			// If the error is a missing import, retry in a later pass
+			// (the dependency may not be instantiated yet).
+			if strings.Contains(instErr.Error(), "unknown import") ||
+				strings.Contains(instErr.Error(), "has not been defined") {
+				continue // retry in next pass
+			}
+			// Element segment / table errors can result from
+			// adapter-provided tables conflicting with our
+			// placeholders. Retry without cross-module routing.
+			if strings.Contains(instErr.Error(), "undefined element") ||
+				strings.Contains(instErr.Error(), "out of bounds") {
+				linker2 := wasmtime.NewLinker(b.engine)
+				var cr2, ce2 string
+				b.registerAllImports(linker2, &cr2, &ce2)
+			// wit_dylib functions for component model adapter canonical ABI (fallback).
+			for _, impTy := range cm.Imports() {
+				if impTy.Module() != "env" || impTy.Name() == nil ||
+					!strings.HasPrefix(*impTy.Name(), "wit_dylib_") {
+					continue
+				}
+				if impTy.Type() == nil || impTy.Type().FuncType() == nil {
+					continue
+				}
+				b.defineWitDylib(store, linker2, impTy)
+			}
+			_ = linker2.DefineUnknownImportsAsTraps(cm)
+				for _, prevInst := range instances {
+					if prevInst == nil { continue }
+					if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
+						_ = linker2.Define(store, "env", "memory", memExp)
+						break
+					}
+				}
+				tblMin2 := uint32(1048576)
+				tblType2 := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMin2, false, 0)
+				if tbl2, _ := wasmtime.NewTable(store, tblType2, wasmtime.ValFuncref(nil)); tbl2 != nil {
+					_ = linker2.Define(store, "env", "__indirect_function_table", tbl2)
+				}
+				i32Imm2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
+				i32Mut2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
+				if sp2, _ := wasmtime.NewGlobal(store, i32Mut2, wasmtime.ValI32(0)); sp2 != nil {
+					_ = linker2.Define(store, "env", "__stack_pointer", sp2)
+				}
+				if mb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); mb2 != nil {
+					_ = linker2.Define(store, "env", "__memory_base", mb2)
+				}
+				if tb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); tb2 != nil {
+					_ = linker2.Define(store, "env", "__table_base", tb2)
+				}
+				if gmb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(0)); gmb2 != nil {
+					_ = linker2.Define(store, "GOT.mem", "__memory_base", gmb2)
+				}
+				if gtb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1)); gtb2 != nil {
+					_ = linker2.Define(store, "GOT.func", "__table_base", gtb2)
+				}
+				// Also run per-export routing for the fresh linker
+				// to resolve GOT / libpython global imports.
+				b.perExportRoute(store, cm, linker2, instances, bundle, compiled)
+				if modInst2, err2 := linker2.Instantiate(store, cm); err2 == nil {
+					instances[i] = modInst2
+					pending[i] = false
+					pendingCount--
+					progress = true
+					continue
+				}
+			}
+			// Build a list of expected import module names for diagnostics.
+			var importMods []string
+			for importName := range importNameToInstance {
+				importMods = append(importMods, importName)
+			}
+			return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args, imports: %v): %w", i, inst.ModuleIndex, len(inst.Args), importMods, instErr)
+		}
+		instances[i] = modInst
+		pending[i] = false
+		pendingCount--
+		progress = true
+	}
+	if !progress {
+		// No instances could be instantiated in this pass.
+		// Build a diagnostic list of whats still pending.
+		var pendingList []int
+		for idx, p := range pending {
+			if p {
+				pendingList = append(pendingList, idx)
+			}
+		}
+		return nil, fmt.Errorf("host: could not instantiate %d instances (stuck at pass %d): pending=%v", pendingCount, pass, pendingList)
+	}
+}
+
+if pendingCount > 0 {
+	var pendingList []int
+	for idx, p := range pending {
+		if p {
+			pendingList = append(pendingList, idx)
+		}
+	}
+	return nil, fmt.Errorf("host: %d instances still pending after %d passes: %v", pendingCount, maxPasses, pendingList)
+}
+
+	// ---- Step 3b: Call constructors on all core instances ----
+	// Modules compiled with Emscripten or componentize-py export
+	// __wasm_call_ctors which must be called before the entry point
+	// to set up WIT metadata (wit_dylib_initialize) and dispatch tables.
+	for i, inst := range instances {
+		if inst == nil {
+			continue
+		}
+		if f := inst.GetFunc(store, "__wasm_call_ctors"); f != nil {
+			if _, err := f.Call(store); err != nil {
+				return nil, fmt.Errorf("host: __wasm_call_ctors instance %d: %w", i, err)
+			}
+		}
+		if f := inst.GetFunc(store, "__wasm_apply_data_relocs"); f != nil {
+			if _, err := f.Call(store); err != nil {
+				return nil, fmt.Errorf("host: __wasm_apply_data_relocs instance %d: %w", i, err)
+			}
+		}
+	}
+
+	// ---- Step 4: Build resolved exports map per instance ----
+	type resolvedExp struct {
+		exportName string
+		inst       *wasmtime.Instance
+	}
+	resolvedExports := make([]map[string]resolvedExp, len(bundle.Instances))
+
+	for i, inst := range bundle.Instances {
+		resolvedExports[i] = make(map[string]resolvedExp)
+		if inst.ModuleIndex >= 0 {
+			modInst := instances[i]
+			if modInst == nil {
+				continue
+			}
+			// Collect function exports by iterating the module's export types.
+			cm := compiled[inst.ModuleIndex]
+			exports := cm.Exports()
+			for _, exp := range exports {
+				if exp.Type().FuncType() != nil {
+					resolvedExports[i][exp.Name()] = resolvedExp{exportName: exp.Name(), inst: modInst}
+				}
+			}
+		}
+		// Apply FromExports aliases.
+		for _, fe := range inst.FromExports {
+			if fe.SourceInstance >= 0 && fe.SourceInstance < len(resolvedExports) {
+				if exp, ok := resolvedExports[fe.SourceInstance][fe.SourceName]; ok {
+					resolvedExports[i][fe.Name] = exp
+				}
+			}
+		}
+	}
+
+	// ---- Step 5: Resolve entry point ----
+	exp, ok := bundle.Exports[entryPoint]
+	if !ok {
+		return nil, fmt.Errorf("host: component export %q not found", entryPoint)
+	}
+
+	var entryInst *wasmtime.Instance
+	var entryExportName string
+
+	if exp.InstanceIndex >= 0 && exp.InstanceIndex < len(instances) {
+		// Direct instance reference.
+		if re, ok2 := resolvedExports[exp.InstanceIndex][exp.Name]; ok2 && re.inst != nil {
+			entryInst = re.inst
+			entryExportName = re.exportName
+		} else if instances[exp.InstanceIndex] != nil {
+			entryInst = instances[exp.InstanceIndex]
+			entryExportName = exp.Name
+		}
+	} else {
+		// No direct instance reference (e.g. func export without
+		// instance sort). Search all instantiated instances.
+		for i, inst := range instances {
+			if inst == nil {
+				continue
+			}
+			if re, ok2 := resolvedExports[i][exp.Name]; ok2 && re.inst != nil {
+				entryInst = re.inst
+				entryExportName = re.exportName
+				break
+			}
+			if f := inst.GetFunc(store, exp.Name); f != nil {
+				entryInst = inst
+				entryExportName = exp.Name
+				break
+			}
+		}
+	}
+
+	if entryInst == nil {
+		return nil, fmt.Errorf("host: cannot resolve component export %q (instance %d)", entryPoint, exp.InstanceIndex)
+	}
+
+	fn := entryInst.GetFunc(store, entryExportName)
+	if fn == nil {
+		return nil, fmt.Errorf("host: component export %q func %q not found", entryPoint, entryExportName)
+	}
+
+	// ---- Step 6: Find memory and set up scratch buffers ----
+	memory := entryInst.GetExport(store, "memory")
+	if memory == nil {
+		// Try other instances for memory.
+		for _, inst := range instances {
+			if inst == nil {
+				continue
+			}
+			if m := inst.GetExport(store, "memory"); m != nil {
+				memory = m
+				break
+			}
+		}
+	}
+	if memory == nil {
+		return nil, fmt.Errorf("host: no exported memory found in component instances")
+	}
+	mem := memory.Memory()
+	if mem == nil {
+		return nil, fmt.Errorf("host: memory export is not a memory")
+	}
+
+	outBufSz := OutBufSize
+	const legacyOffset = uint32(10 * 1024 * 1024)
+	currentSize := uint64(mem.DataSize(store))
+	scratchBase := uint32(currentSize + wasmPageSize)
+	if scratchBase < legacyOffset {
+		scratchBase = legacyOffset
+	}
+	inputOffset := scratchBase
+	outputOffset := scratchBase + outBufSz
+	needed := uint64(outputOffset + outBufSz)
+	if currentSize < needed {
+		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
+		if _, err := mem.Grow(store, pagesNeeded); err != nil {
+			return nil, fmt.Errorf("host: grow memory: %w", err)
+		}
+	}
+
+	// Write input JSON.
+	inputBytes := []byte(input)
+	if len(inputBytes) > 0 {
+		data := mem.UnsafeData(store)
+		if uint64(inputOffset)+uint64(len(inputBytes)) > uint64(len(data)) {
+			return nil, fmt.Errorf("host: input exceeds memory bounds")
+		}
+		copy(data[inputOffset:], inputBytes)
+	}
+
+	// ---- Step 7: Call the entry point ----
+	var results interface{}
+	var callErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callErr = fmt.Errorf("host: wasmtime panic in %q: %v", entryPoint, r)
+			}
+		}()
+		results, callErr = fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
+	}()
+
+	if callErr != nil {
+		return nil, callErr
+	}
+	if results == nil {
+		return nil, fmt.Errorf("host: export %q returned no results", entryPoint)
+	}
+
+	raw, ok := results.(int64)
+	if !ok {
+		return nil, fmt.Errorf("host: export %q returned non-int64 result", entryPoint)
+	}
+
+	if raw == (1 << 62) {
+		return &ExecResult{Suspended: true}, nil
+	}
+
+	errCode, actualLen := decodeExportResult(uint64(raw))
+	if actualLen > outBufSz {
+		return nil, fmt.Errorf("host: export %q: output overflow: wrote %d bytes, buffer is %d bytes", entryPoint, actualLen, outBufSz)
+	}
+
+	data := mem.UnsafeData(store)
+	outputStr := string(data[outputOffset : outputOffset+actualLen])
+	if errCode != 0 {
+		return nil, fmt.Errorf("host: export %q: %s", entryPoint, outputStr)
+	}
+
+	return &ExecResult{Result: outputStr, Suspended: false}, nil
+}
+
+// registerAllImports registers all host function imports on the given linker.
+// Extracted so both Execute and ExecuteComponent can share the same setup.
+func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string) error {
+	if err := b.registerWasiStubs(linker); err != nil {
+		return err
+	}
+	if err := b.registerEnvStubs(linker); err != nil {
+		return err
+	}
+	if err := b.registerTeavmStubs(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCall(linker, completeResult, completeErr); err != nil {
+		return err
+	}
+	if err := b.registerCleatSleep(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatNow(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRandom(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatLog(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatVersion(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatMinVersion(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatDefer(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPollCancellation(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPollSignal(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatContinueAsNew(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatContinueAsNewVersioned(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatChildWorkflow(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatChildWorkflowWithOptions(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatChildWorkflowInSchema(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitChild(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitAllChildren(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPollChild(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitAnyChild(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCallRetry(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitSignals(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSetQueryState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCallHeartbeat(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPluginCall(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatPluginCallStreaming(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRegisterUpdateHandler(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCreatePromise(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAwaitPromise(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSendSignalAndWait(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatReplyToSignal(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSignalWorkflow(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSetScope(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatGetScope(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatUUID(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatAcquireLock(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatReleaseLock(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSideEffect(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatWorkflowID(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRunID(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatResolvePromise(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRejectPromise(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSend(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatScheduleInvoke(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRegisterQueryHandler(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatRunDetached(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatSetState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatGetState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatDeleteState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatIncrState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatHasState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatListState(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatFetch(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatJsonParse(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatJsonStringify(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatComplete(linker, completeResult, completeErr); err != nil {
+		return err
+	}
+	if err := b.registerCleatPollWork(linker); err != nil {
+		return err
+	}
+	return nil
+}
 
 func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
 	return linker.FuncWrap("env", "cleat_poll_work", func(caller *wasmtime.Caller,
@@ -1824,3 +2512,456 @@ func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
 		return (int64(entryLen) << 32) | int64(argsLen)
 	})
 }
+
+// perExportRoute resolves non-host imports by searching already-instantiated
+// instances for matching exports. Exact name match first, then suffix match
+// for prefixed exports (e.g. libpython3.14.so:PyExc_AttributeError matches
+// imports of PyExc_AttributeError). Handles global mutability mismatches.
+func (b *wasmtimeBackend) perExportRoute(store wasmtime.Storelike, cm *wasmtime.Module, linker *wasmtime.Linker, instances []*wasmtime.Instance, bundle *wasm.ComponentBundle, compiled []*wasmtime.Module) {
+	for _, impTy := range cm.Imports() {
+		modName := impTy.Module()
+		namePtr := impTy.Name()
+		if namePtr == nil {
+			continue
+		}
+		fieldName := *namePtr
+
+		// Skip WASI and teavm (handled by registerAllImports).
+		// "env" imports are NOT skipped — some have prefixed
+		// names like libpython3.14.so:memory_base that need
+		// suffix matching from other instances.
+		if modName == "wasi_snapshot_preview1" || modName == "teavm" ||
+			strings.Contains(modName, "wasi:") {
+			continue
+		}
+		if modName == "env" && fieldName != "memory" &&
+			fieldName != "__indirect_function_table" &&
+			fieldName != "__stack_pointer" &&
+			!strings.Contains(fieldName, ":") {
+			continue
+		}
+
+		extType := impTy.Type()
+		if extType == nil {
+			continue
+		}
+		// Search already-instantiated instances — exact then suffix.
+		for prevIdx, prevInst := range instances {
+			if prevInst == nil {
+				continue
+			}
+			exp := prevInst.GetExport(store, fieldName)
+			if exp == nil && prevIdx < len(bundle.Instances) {
+				// Suffix match: source module exports ending in
+				// ":" + fieldName.
+				prevModIdx := bundle.Instances[prevIdx].ModuleIndex
+				if prevModIdx >= 0 && prevModIdx < len(compiled) {
+					for _, expTy := range compiled[prevModIdx].Exports() {
+						en := expTy.Name()
+						if !strings.HasSuffix(en, ":"+fieldName) {
+							continue
+						}
+						candidate := prevInst.GetExport(store, en)
+						if candidate == nil {
+							continue
+						}
+						// Type check before accepting.
+						if (extType.FuncType() != nil && candidate.Func() != nil) ||
+							(extType.GlobalType() != nil && candidate.Global() != nil) ||
+							(extType.MemoryType() != nil && candidate.Memory() != nil) ||
+							(extType.TableType() != nil && candidate.Table() != nil) {
+							exp = candidate
+							break
+						}
+					}
+				}
+			}
+			if exp == nil {
+				continue
+			}
+			// Route the export under the import's module name.
+			// For globals, handle mutability mismatches.
+			if extType.FuncType() != nil && exp.Func() != nil {
+				_ = linker.Define(store, modName, fieldName, exp)
+			} else if extType.GlobalType() != nil && exp.Global() != nil {
+				expGlobal := exp.Global()
+				expGlobalType := expGlobal.Type(store)
+				importGlobalType := extType.GlobalType()
+				if importGlobalType.Mutable() != expGlobalType.Mutable() ||
+					importGlobalType.Content().Kind() != expGlobalType.Content().Kind() {
+					val := expGlobal.Get(store)
+					newGlobalType := wasmtime.NewGlobalType(
+						importGlobalType.Content(),
+						importGlobalType.Mutable())
+					if newGlobal, newErr := wasmtime.NewGlobal(
+						store, newGlobalType, val); newErr == nil {
+						_ = linker.Define(store, modName, fieldName, newGlobal)
+					}
+				} else {
+					_ = linker.Define(store, modName, fieldName, exp)
+				}
+			} else if extType.MemoryType() != nil && exp.Memory() != nil {
+				_ = linker.Define(store, modName, fieldName, exp)
+			} else if extType.TableType() != nil && exp.Table() != nil {
+				_ = linker.Define(store, modName, fieldName, exp)
+			}
+			break
+		}
+	}
+}
+
+// defineWitDylib defines a wit_dylib_* host function for the component model
+// adapter (module 10). These functions implement the canonical ABI memory
+// read/write operations needed by componentize-py generated modules.
+func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime.Linker, impTy *wasmtime.ImportType) {
+	name := *impTy.Name()
+	functype := impTy.Type().FuncType()
+
+	// makeNoop creates a function that returns zeros matching the result types.
+	makeNoop := func() *wasmtime.Func {
+		return wasmtime.NewFunc(store, functype,
+			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+				resTypes := functype.Results()
+				results := make([]wasmtime.Val, len(resTypes))
+				for i, rt := range resTypes {
+					switch rt.Kind() {
+					case wasmtime.KindI32:
+						results[i] = wasmtime.ValI32(0)
+					case wasmtime.KindI64:
+						results[i] = wasmtime.ValI64(0)
+					case wasmtime.KindF32:
+						results[i] = wasmtime.ValF32(0)
+					case wasmtime.KindF64:
+						results[i] = wasmtime.ValF64(0)
+					default:
+						results[i] = wasmtime.ValI32(0)
+					}
+				}
+				return results, nil
+			})
+	}
+
+	switch {
+	case name == "wit_dylib_export_start":
+		// Return ValI32(1) for each result (call context).
+		fn := wasmtime.NewFunc(store, functype,
+			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+				resTypes := functype.Results()
+				results := make([]wasmtime.Val, len(resTypes))
+				for i := range results {
+					results[i] = wasmtime.ValI32(1)
+				}
+				return results, nil
+			})
+		_ = linker.Define(store, "env", name, fn)
+
+	case name == "wit_dylib_initialize":
+		// Pass through first arg as first result (metadata pointer).
+		fn := wasmtime.NewFunc(store, functype,
+			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+				resTypes := functype.Results()
+				results := make([]wasmtime.Val, len(resTypes))
+				if len(resTypes) > 0 && len(args) > 0 {
+					results[0] = args[0]
+				}
+				return results, nil
+			})
+		_ = linker.Define(store, "env", name, fn)
+
+	case name == "wit_dylib_export_call", name == "wit_dylib_export_async_call",
+		name == "wit_dylib_export_async_callback":
+		_ = linker.Define(store, "env", name, makeNoop())
+
+	case name == "wit_dylib_export_finish", name == "wit_dylib_resource_dtor",
+		name == "wit_dylib_dealloc_bytes", name == "cabi_realloc":
+		_ = linker.Define(store, "env", name, makeNoop())
+
+	case name == "wit_dylib_list_append":
+		// Same as push_u32: write 4-byte value at pointer.
+		fn := wasmtime.NewFunc(store, functype,
+			func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+				data, _, memErr := callerMemBuf(caller)
+					if memErr == nil && len(args) >= 2 {
+					ptr := args[len(args)-1].I32()
+					val := uint32(args[0].I32())
+					if ptr >= 0 && int(ptr)+4 <= len(data) {
+						binary.LittleEndian.PutUint32(data[ptr:], val)
+					}
+				}
+				return nil, nil
+			})
+		_ = linker.Define(store, "env", name, fn)
+
+	case name == "wit_dylib_pop_iter", name == "wit_dylib_pop_iter_next":
+		// Same as pop_u32: read 4-byte value from pointer.
+		fn := wasmtime.NewFunc(store, functype,
+			func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+				var val uint32
+				data, _, memErr := callerMemBuf(caller)
+					if memErr == nil && len(args) >= 1 {
+					ptr := args[0].I32()
+					if ptr >= 0 && int(ptr)+4 <= len(data) {
+						val = binary.LittleEndian.Uint32(data[ptr:])
+					}
+				}
+				return []wasmtime.Val{wasmtime.ValI32(int32(val))}, nil
+			})
+		_ = linker.Define(store, "env", name, fn)
+
+	case strings.HasPrefix(name, "wit_dylib_push_"):
+		handlePush := func(suffix string) {
+			switch suffix {
+			case "u32", "s32", "bool", "char", "enum", "flags",
+				"borrow", "own", "future", "stream",
+				"record", "tuple", "variant", "option", "result", "list":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 2 {
+							ptr := args[len(args)-1].I32()
+							val := uint32(args[0].I32())
+							if ptr >= 0 && int(ptr)+4 <= len(data) {
+								binary.LittleEndian.PutUint32(data[ptr:], val)
+							}
+						}
+						return nil, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "u64", "s64":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 2 {
+							ptr := args[len(args)-1].I32()
+							val := uint64(args[0].I64())
+							if ptr >= 0 && int(ptr)+8 <= len(data) {
+								binary.LittleEndian.PutUint64(data[ptr:], val)
+							}
+						}
+						return nil, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "f32":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 2 {
+							ptr := args[len(args)-1].I32()
+							val := args[0].F32()
+							if ptr >= 0 && int(ptr)+4 <= len(data) {
+								binary.LittleEndian.PutUint32(data[ptr:], math.Float32bits(val))
+							}
+						}
+						return nil, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "f64":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 2 {
+							ptr := args[len(args)-1].I32()
+							val := args[0].F64()
+							if ptr >= 0 && int(ptr)+8 <= len(data) {
+								binary.LittleEndian.PutUint64(data[ptr:], math.Float64bits(val))
+							}
+						}
+						return nil, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "u8", "s8":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 2 {
+							ptr := args[len(args)-1].I32()
+							if ptr >= 0 && int(ptr)+1 <= len(data) {
+								data[ptr] = byte(args[0].I32())
+							}
+						}
+						return nil, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "u16", "s16":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 2 {
+							ptr := args[len(args)-1].I32()
+							val := uint16(args[0].I32())
+							if ptr >= 0 && int(ptr)+2 <= len(data) {
+								binary.LittleEndian.PutUint16(data[ptr:], val)
+							}
+						}
+						return nil, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "string":
+				// push_string(dataPtr, dataLen, destPtr) -> ()
+				// Write 8 bytes at destPtr: (dataPtr, dataLen)
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 3 {
+							strPtr := args[0].I32()
+							strLen := args[1].I32()
+							destPtr := args[2].I32()
+							if destPtr >= 0 && int(destPtr)+8 <= len(data) {
+								binary.LittleEndian.PutUint32(data[destPtr:], uint32(strPtr))
+								binary.LittleEndian.PutUint32(data[destPtr+4:], uint32(strLen))
+							}
+						}
+						return nil, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			default:
+				_ = linker.Define(store, "env", name, makeNoop())
+			}
+		}
+		handlePush(name[15:]) // len("wit_dylib_push_") == 15
+
+	case strings.HasPrefix(name, "wit_dylib_pop_"):
+		handlePop := func(suffix string) {
+			switch suffix {
+			case "u32", "s32", "bool", "char", "enum", "flags",
+				"borrow", "own", "future", "stream",
+				"record", "tuple", "variant", "option", "result", "list":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						var val uint32
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 1 {
+							ptr := args[0].I32()
+							if ptr >= 0 && int(ptr)+4 <= len(data) {
+								val = binary.LittleEndian.Uint32(data[ptr:])
+							}
+						}
+						return []wasmtime.Val{wasmtime.ValI32(int32(val))}, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "u64", "s64":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						var val uint64
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 1 {
+							ptr := args[0].I32()
+							if ptr >= 0 && int(ptr)+8 <= len(data) {
+								val = binary.LittleEndian.Uint64(data[ptr:])
+							}
+						}
+						return []wasmtime.Val{wasmtime.ValI64(int64(val))}, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "f32":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						var val float32
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 1 {
+							ptr := args[0].I32()
+							if ptr >= 0 && int(ptr)+4 <= len(data) {
+								bits := binary.LittleEndian.Uint32(data[ptr:])
+								val = math.Float32frombits(bits)
+							}
+						}
+						return []wasmtime.Val{wasmtime.ValF32(val)}, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "f64":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						var val float64
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 1 {
+							ptr := args[0].I32()
+							if ptr >= 0 && int(ptr)+8 <= len(data) {
+								bits := binary.LittleEndian.Uint64(data[ptr:])
+								val = math.Float64frombits(bits)
+							}
+						}
+						return []wasmtime.Val{wasmtime.ValF64(val)}, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "u8", "s8":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						var val byte
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 1 {
+							ptr := args[0].I32()
+							if ptr >= 0 && int(ptr)+1 <= len(data) {
+								val = data[ptr]
+							}
+						}
+						return []wasmtime.Val{wasmtime.ValI32(int32(val))}, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "u16", "s16":
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						var val uint16
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 1 {
+							ptr := args[0].I32()
+							if ptr >= 0 && int(ptr)+2 <= len(data) {
+								val = binary.LittleEndian.Uint16(data[ptr:])
+							}
+						}
+						return []wasmtime.Val{wasmtime.ValI32(int32(val))}, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			case "string":
+				// pop_string(handlePtr, outBufPtr, outMaxLen) -> bytesWritten
+				// Read string handle (dataPtr, dataLen) from memory[handlePtr],
+				// copy string data to outBuf.
+				fn := wasmtime.NewFunc(store, functype,
+					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+						var written int32
+						data, _, memErr := callerMemBuf(caller)
+							if memErr == nil && len(args) >= 3 {
+							handlePtr := args[0].I32()
+							outBuf := args[1].I32()
+							outMax := args[2].I32()
+							if handlePtr >= 0 && int(handlePtr)+8 <= len(data) {
+								strDataPtr := int32(binary.LittleEndian.Uint32(data[handlePtr:]))
+								strLen := int32(binary.LittleEndian.Uint32(data[handlePtr+4:]))
+								copyLen := strLen
+								if copyLen > outMax {
+									copyLen = outMax
+								}
+								if copyLen > 0 && strDataPtr >= 0 && int(strDataPtr)+int(copyLen) <= len(data) &&
+									outBuf >= 0 && int(outBuf)+int(copyLen) <= len(data) {
+									copy(data[outBuf:outBuf+copyLen], data[strDataPtr:strDataPtr+copyLen])
+									written = copyLen
+								}
+							}
+						}
+						return []wasmtime.Val{wasmtime.ValI32(written)}, nil
+					})
+				_ = linker.Define(store, "env", name, fn)
+
+			default:
+				_ = linker.Define(store, "env", name, makeNoop())
+			}
+		}
+		handlePop(name[14:]) // len("wit_dylib_pop_") == 14
+
+	default:
+		_ = linker.Define(store, "env", name, makeNoop())
+	}
+}
+

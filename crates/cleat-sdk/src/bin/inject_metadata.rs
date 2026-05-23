@@ -151,6 +151,7 @@ Options:
         "abi_version": resolved_abi_version,
         "plugin_deps": deps_map,
         "sdk_language": "rust",
+        "language": "rust",
         "sdk_version": "0.1.0",
         "created_at": chrono_now(),
     });

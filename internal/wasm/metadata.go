@@ -260,12 +260,19 @@ func DetectLanguage(wasmBytes []byte) string {
 		return meta.Language
 	}
 
-	// 2. Scan the import section for Component Model patterns.
+	// 2. Check Component Model header (bytes 4-7 = 0x0d 0x00 0x01 0x00).
+	if len(wasmBytes) > 7 &&
+		wasmBytes[4] == 0x0d && wasmBytes[5] == 0x00 &&
+		wasmBytes[6] == 0x01 && wasmBytes[7] == 0x00 {
+		return "python"
+	}
+
+	// 3. Scan the import section for Component Model patterns.
 	if hasComponentModelImports(wasmBytes) {
 		return "python"
 	}
 
-	// 3. Default to Go.
+	// 4. Default to Go.
 	return "go"
 }
 

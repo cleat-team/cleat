@@ -313,6 +313,77 @@ interface plugin {
     ) -> u64;
 }
 
+/// Scoped state / virtual object operations (ABI 2.26-2.28)
+interface durable-scope {
+    /// Set the virtual object scope. Returns the previous scope as a JSON string.
+    set-scope: func(
+        obj-type-ptr: u32, obj-type-len: u32,
+        inst-key-ptr: u32, inst-key-len: u32,
+        prev-scope-ptr: u32, prev-scope-max-len: u32,
+    ) -> u64;
+
+    /// Get the current virtual object scope.
+    get-scope: func(
+        obj-type-ptr: u32, obj-type-max-len: u32,
+        inst-key-ptr: u32, inst-key-max-len: u32,
+    ) -> u64;
+
+    /// Generate a deterministic UUID from a seed.
+    uuid: func(
+        seed-ptr: u32, seed-len: u32,
+        uuid-ptr: u32, uuid-max-len: u32,
+    ) -> u64;
+}
+
+/// State operations (Stream R) (ABI 2.37-2.44)
+interface durable-stream-state {
+    set-state: func(key-ptr: u32, key-len: u32, val-ptr: u32, val-len: u32) -> u64;
+    get-state: func(key-ptr: u32, key-len: u32, out-ptr: u32, max-len: u32) -> u64;
+    delete-state: func(key-ptr: u32, key-len: u32) -> u64;
+    incr-state: func(key-ptr: u32, key-len: u32, delta: u64) -> u64;
+    has-state: func(key-ptr: u32, key-len: u32) -> u64;
+    list-state: func(prefix-ptr: u32, prefix-len: u32, out-ptr: u32, max-len: u32) -> u64;
+}
+
+/// Extended lifecycle (ABI 2.15)
+interface durable-extended-lifecycle {
+    /// Continue as new with an explicit version.
+    continue-as-new-versioned: func(
+        input-ptr: u32, input-len: u32,
+        new-version: u32,
+    ) -> u64;
+
+    /// Record non-deterministic computation result in event history.
+    side-effect: func(
+        result-ptr: u32, result-len: u32,
+        out-ptr: u32, out-max-len: u32,
+    ) -> u64;
+}
+
+/// Extended child workflow operations (ABI 2.10)
+interface durable-extended-children {
+    /// Start a child workflow in a different schema (cross-instance cooperation).
+    child-workflow-in-schema: func(
+        schema-ptr: u32, schema-len: u32,
+        name-ptr: u32, name-len: u32,
+        input-ptr: u32, input-len: u32,
+        version: u64, priority: u64,
+        policy-ptr: u32, policy-len: u32,
+        run-id-ptr: u32, run-id-max-len: u32,
+    ) -> u64;
+}
+
+/// HTTP fetch (ABI 2.45)
+interface durable-fetch {
+    fetch: func(
+        method-ptr: u32, method-len: u32,
+        url-ptr: u32, url-len: u32,
+        headers-ptr: u32, headers-len: u32,
+        body-ptr: u32, body-len: u32,
+        resp-ptr: u32, resp-max-len: u32,
+    ) -> u64;
+}
+
 /// World definition for a cleat workflow WASM component.
 ///
 /// A cleat workflow component imports all host-call interfaces and
@@ -331,6 +402,11 @@ world cleat-workflow {
     import durable-identity;
     import plugin;
     import durable-lock;
+    import durable-scope;
+    import durable-stream-state;
+    import durable-extended-lifecycle;
+    import durable-extended-children;
+    import durable-fetch;
 
     /// Main workflow entry point.
     ///
