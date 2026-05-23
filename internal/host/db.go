@@ -654,7 +654,7 @@ func (s *PostgresStore) decryptPayloadJSON(payloadStr string) string {
 // after BEGIN and before any tenant-scoped queries.
 func (s *PostgresStore) setRLSOnTx(tx *sql.Tx) error {
 	if s.tenantID == "" {
-		return nil
+		return fmt.Errorf("setRLSOnTx: tenant ID must be set before beginning an RLS-scoped transaction")
 	}
 	_, err := tx.Exec("SELECT set_config('cleat.tenant_id', $1, true)", s.tenantID)
 	return err
@@ -1764,7 +1764,13 @@ func (s *PostgresStore) CountActiveInstances(ctx context.Context, name string, v
 
 // GetActiveInstanceCountsByVersion returns a map of "name:version" -> count.
 func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get active instance counts: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
 		WHERE status IN ('ready', 'running')
@@ -1785,7 +1791,10 @@ func (s *PostgresStore) GetActiveInstanceCountsByVersion(ctx context.Context) (m
 		key := name + ":" + fmt.Sprintf("%d", version)
 		counts[key] = count
 	}
-	return counts, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
+	return counts, tx.Commit()
 }
 
 // Heartbeat updates the heartbeat timestamp.
@@ -4087,7 +4096,11 @@ func (s *PostgresStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerD
 func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		result, err := s.db.ExecContext(ctx, `
+		tx, err := s.beginTxWithRLS(ctx)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: begin: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `
 			DELETE FROM event_history
 			WHERE workflow_id IN (
 				SELECT id FROM workflow_instances
@@ -4098,7 +4111,11 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 			)
 		`, olderThan)
 		if err != nil {
+			tx.Rollback()
 			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: commit: %w", err)
 		}
 		n, _ := result.RowsAffected()
 		totalDeleted += n
@@ -4110,7 +4127,11 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 
 	// Also batch cleanup compaction states for those workflows.
 	for {
-		result, err := s.db.ExecContext(ctx, `
+		tx, err := s.beginTxWithRLS(ctx)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: begin compaction: %w", err)
+		}
+		result, err := tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
 			WHERE id IN (
@@ -4123,8 +4144,10 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 			)
 		`, olderThan)
 		if err != nil {
+			tx.Rollback()
 			break
 		}
+		tx.Commit()
 		n, _ := result.RowsAffected()
 		if n == 0 {
 			break

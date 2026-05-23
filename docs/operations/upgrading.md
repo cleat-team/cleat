@@ -532,3 +532,52 @@ Before upgrading PostgreSQL, verify:
   restore, RPO/RTO, and cross-region failover
 - [Deploying to production](deploying-to-production.md) -- configuration,
   monitoring, scaling, and health checks
+
+## RLS Behavior Change: Fail-Open to Fail-Closed (v2.x)
+
+### What changed
+
+Row-level security (RLS) policies previously used a default-tenant fallback when
+no tenant context was set. A query without `cleat.tenant_id` would silently
+return data for the default tenant (`00000000-0000-0000-0000-000000000000`).
+
+As of this release, queries without tenant context **fail with an error**:
+- **PostgreSQL**: The RLS policy calls `cleat.assert_tenant_set()`, which throws
+  `cleat.tenant_id is not set — tenant context required for RLS-scoped query`.
+- **MSSQL**: The application layer returns an error (`tenant ID must be set
+  before setting session context for an RLS-scoped transaction`) before any
+  query reaches the database. The MSSQL RLS security policy was already
+  fail-closed (NULL SESSION_CONTEXT blocks all rows), but the error was silent.
+
+### Migration
+
+Run migration `008_rls_fail_closed.sql`. The migration is idempotent:
+- Creates or replaces the `cleat.assert_tenant_set()` function.
+- Recreates RLS policies to use the new assert function (Postgres).
+
+No application code changes are required for normal operation. The existing
+`WithTenant()` pattern in the dispatch loop already sets tenant context before
+every workflow operation.
+
+### Impact on direct database access
+
+Administrative queries that bypass the application (e.g., `psql` for debugging)
+will fail against RLS-protected tables unless tenant context is set:
+
+```sql
+-- Before running queries against RLS-protected tables:
+SELECT set_config('cleat.tenant_id', '<tenant-uuid>', false);
+```
+
+### Migration ordering
+
+Migrations must be applied in order. Do not re-run migration `002_constraints.sql`
+after migration `008_rls_fail_closed.sql` without first manually dropping the RLS
+policies, because `002_constraints.sql` uses bare `CREATE POLICY` without
+`DROP POLICY IF EXISTS` guards.
+
+### MSSQL limitation
+
+MSSQL security policies require inline table-valued functions for filter
+predicates, which cannot throw errors. The MSSQL RLS policy remains silently
+fail-closed. The application-layer error provides the explicit failure.
