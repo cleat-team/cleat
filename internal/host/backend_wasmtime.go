@@ -3,11 +3,10 @@
 package host
 
 import (
-	"context"
 	"encoding/binary"
+	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
@@ -31,6 +30,11 @@ const errBadParamInt64 int64 = -4294967295
 type wasmtimeBackend struct {
 	engine  *wasmtime.Engine
 	handler HostHandler // current execution session
+
+	// witDylib holds the wit_dylib stack machine state for component
+	// model adapter ABI (push/pop/export_call). Initialized per
+	// ExecuteComponent call.
+	witDylib *witDylibState
 
 	// Work data for the Go dispatcher (cleat_poll_work).
 	workEntryPoint string
@@ -79,6 +83,13 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Detect Component Model binaries and dispatch to the component execution path.
 	if isComponentWasm(wasmBytes) {
+		// Try native component model via CGo first.
+		if result, err := b.ExecuteComponentCGo(wasmBytes, entryPoint, []byte(input), OutBufSize); err == nil {
+			return result, nil
+		} else {
+			fmt.Printf("[CGO_COMPONENT] CGo path failed (falling back): %v\n", err)
+		}
+		// Fall back to manual decomposition + instantiation.
 		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
 		if bundleErr != nil {
 			return nil, fmt.Errorf("host: parse component bundle: %w", bundleErr)
@@ -1788,6 +1799,9 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 		}
 	}
 
+	// Initialize the wit_dylib stack machine for component model ABI.
+	b.witDylib = newWitDylibState()
+
 	// Find the CPython runtime instance: the one whose compiled module
 	// has the most exports. The component model DAG's FromExports chains
 	// for GOT.mem / GOT.func may point to adapter instances that lack
@@ -2124,6 +2138,123 @@ if pendingCount > 0 {
 			if _, err := f.Call(store); err != nil {
 				return nil, fmt.Errorf("host: __wasm_apply_data_relocs instance %d: %w", i, err)
 			}
+		}
+	}
+
+	// ---- Step 3c: Scan for wit_dylib metadata blob ----
+	// Dump the first 256 u32 values from the adapter instance's memory
+	// to find the metadata blob, then call wit_dylib_initialize.
+	if b.witDylib != nil {
+		for _, inst := range instances {
+			if inst == nil {
+				continue
+			}
+			memExp := inst.GetExport(store, "memory")
+			if memExp == nil {
+				continue
+			}
+			m := memExp.Memory()
+			if m == nil {
+				continue
+			}
+			data := m.UnsafeData(store)
+			if len(data) < 256 {
+				continue
+			}
+			// Dump first 256 bytes as u32 for diagnostics.
+			var u32s []uint32
+			for j := 0; j < 64 && j*4+4 <= len(data); j++ {
+				u32s = append(u32s, binary.LittleEndian.Uint32(data[j*4:]))
+			}
+			fmt.Printf("[WIT_SCAN] first 64 u32s at offset 0: %v\n", u32s)
+
+			// Search for the string "run" near the metadata to understand entry layout.
+			const dumpBase = 988128
+			// Dump around offset 596 (where the string table likely starts).
+			strBase := dumpBase + 596
+			if strBase+256 <= len(data) {
+				fmt.Printf("[WIT_DUMP] string table at metadata+596:\n")
+				for row := 0; row < 16; row++ {
+					off := strBase + row*16
+					vals := make([]uint32, 4)
+					for j := 0; j < 4; j++ { vals[j] = binary.LittleEndian.Uint32(data[off+j*4:]) }
+					ascii := ""
+					for j := 0; j < 16; j++ {
+						b := data[off+j]
+						if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
+					}
+					fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
+						row*16, vals[0], vals[1], vals[2], vals[3], ascii)
+				}
+			}
+			for scan := dumpBase; scan < dumpBase+65536 && scan < len(data)-4; scan++ {
+				if data[scan] == 'r' && data[scan+1] == 'u' && data[scan+2] == 'n' {
+					// Found "run" - dump surrounding u32 values
+					base := (scan - 40) & ^3 // align to 4 bytes, 40 bytes before
+					if base < 0 { base = 0 }
+					fmt.Printf("[WIT_DUMP] found 'run' at offset %d (metadata+%d):\n", scan, scan-dumpBase)
+					for row := 0; row < 12; row++ {
+						off := base + row*16
+						vals := make([]uint32, 4)
+						for j := 0; j < 4; j++ {
+							if off+j*4+4 <= len(data) {
+								vals[j] = binary.LittleEndian.Uint32(data[off+j*4:])
+							}
+						}
+						ascii := ""
+						for j := 0; j < 16; j++ {
+							if off+j < len(data) {
+								b := data[off+j]
+								if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
+							}
+						}
+						fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
+							row*16, vals[0], vals[1], vals[2], vals[3], ascii)
+					}
+					break
+				}
+			}
+			if len(data) > dumpBase+512 {
+				fmt.Printf("[WIT_SCAN] hex dump at %d:\n", dumpBase)
+				for row := 0; row < 32; row++ {
+					off := dumpBase + row*16
+					vals := make([]uint32, 4)
+					for j := 0; j < 4; j++ {
+						vals[j] = binary.LittleEndian.Uint32(data[off+j*4:])
+					}
+					// Also show ASCII
+					ascii := ""
+					for j := 0; j < 16; j++ {
+						b := data[off+j]
+						if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
+					}
+					fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
+						row*16, vals[0], vals[1], vals[2], vals[3], ascii)
+				}
+			}
+
+			// Scan for the metadata signature: 16 small u32 counts
+			// followed by type arrays. The counts[14] is export_funcs.
+			for ptr := 0; ptr < len(data)-64; ptr += 4 {
+				nExportFuncs := binary.LittleEndian.Uint32(data[ptr+56:])
+				// Check that the first 13 counts are all < 1000 (reasonable)
+				allSmall := true
+				for j := 0; j < 13; j++ {
+					v := binary.LittleEndian.Uint32(data[ptr+j*4:])
+					if v > 1000 {
+						allSmall = false
+						break
+					}
+				}
+				if allSmall && nExportFuncs >= 1 && nExportFuncs <= 20 {
+					fmt.Printf("[WIT_SCAN] potential metadata at ptr=%d, export_funcs=%d\n", ptr, nExportFuncs)
+					if err := b.witDylib.initialize(m, store, int32(ptr)); err == nil {
+						fmt.Printf("[WIT_SCAN] initialized OK, %d export funcs\n", len(b.witDylib.exportFuncs))
+						break
+					}
+				}
+			}
+			break // only check first instance with memory
 		}
 	}
 
@@ -2615,9 +2746,10 @@ func (b *wasmtimeBackend) perExportRoute(store wasmtime.Storelike, cm *wasmtime.
 // read/write operations needed by componentize-py generated modules.
 func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime.Linker, impTy *wasmtime.ImportType) {
 	name := *impTy.Name()
+	if strings.HasPrefix(name, "wit_dylib_") || name == "cabi_realloc" {
+		fmt.Printf("[DEFINE] %s\n", name)
+	}
 	functype := impTy.Type().FuncType()
-
-	// makeNoop creates a function that returns zeros matching the result types.
 	makeNoop := func() *wasmtime.Func {
 		return wasmtime.NewFunc(store, functype,
 			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
@@ -2625,343 +2757,288 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 				results := make([]wasmtime.Val, len(resTypes))
 				for i, rt := range resTypes {
 					switch rt.Kind() {
-					case wasmtime.KindI32:
-						results[i] = wasmtime.ValI32(0)
-					case wasmtime.KindI64:
-						results[i] = wasmtime.ValI64(0)
-					case wasmtime.KindF32:
-						results[i] = wasmtime.ValF32(0)
-					case wasmtime.KindF64:
-						results[i] = wasmtime.ValF64(0)
-					default:
-						results[i] = wasmtime.ValI32(0)
+					case wasmtime.KindI32: results[i] = wasmtime.ValI32(0)
+					case wasmtime.KindI64: results[i] = wasmtime.ValI64(0)
+					case wasmtime.KindF32: results[i] = wasmtime.ValF32(0)
+					case wasmtime.KindF64: results[i] = wasmtime.ValF64(0)
+					default: results[i] = wasmtime.ValI32(0)
 					}
 				}
 				return results, nil
 			})
 	}
 
-	switch {
-	case name == "wit_dylib_export_start":
-		// Return ValI32(1) for each result (call context).
-		fn := wasmtime.NewFunc(store, functype,
-			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				resTypes := functype.Results()
-				results := make([]wasmtime.Val, len(resTypes))
-				for i := range results {
-					results[i] = wasmtime.ValI32(1)
-				}
-				return results, nil
-			})
-		_ = linker.Define(store, "env", name, fn)
+	// Push functions: ctx = args[0].I32()
+	if strings.HasPrefix(name, "wit_dylib_push_") {
+		kind := name[15:]
+		switch {
+		case kind == "u32" || kind == "s32" || kind == "u8" || kind == "s8" ||
+			kind == "u16" || kind == "s16" || kind == "bool" || kind == "char" ||
+			kind == "flags" || kind == "enum":
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					if b.witDylib != nil { b.witDylib.pushI32(args[0].I32(), args[1].I32()) }
+					return nil, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		case kind == "u64" || kind == "s64":
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					if b.witDylib != nil { b.witDylib.pushI64(args[0].I32(), args[1].I64()) }
+					return nil, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		case kind == "f32":
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					if b.witDylib != nil { b.witDylib.pushF32(args[0].I32(), args[1].F32()) }
+					return nil, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		case kind == "f64":
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					if b.witDylib != nil { b.witDylib.pushF64(args[0].I32(), args[1].F64()) }
+					return nil, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		case kind == "string":
+			fn := wasmtime.NewFunc(store, functype,
+				func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					if b.witDylib != nil && len(args) >= 3 {
+						exp := caller.GetExport("memory")
+						if exp != nil {
+							mem := exp.Memory()
+							if mem != nil {
+								data := mem.UnsafeData(caller)
+								ptr := args[1].I32(); length := args[2].I32()
+								if ptr >= 0 && int(ptr)+int(length) <= len(data) {
+									strData := make([]byte, length)
+									copy(strData, data[ptr:ptr+length])
+									b.witDylib.pushString(args[0].I32(), strData)
+								}
+							}
+						}
+					}
+					return nil, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		default:
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					if b.witDylib != nil && len(args) >= 2 {
+						b.witDylib.pushI32(args[0].I32(), args[1].I32())
+					}
+					return nil, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		}
+		return
+	}
 
-	case name == "wit_dylib_initialize":
-		// Pass through first arg as first result (metadata pointer).
-		fn := wasmtime.NewFunc(store, functype,
-			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				resTypes := functype.Results()
-				results := make([]wasmtime.Val, len(resTypes))
-				if len(resTypes) > 0 && len(args) > 0 {
-					results[0] = args[0]
-				}
-				return results, nil
-			})
-		_ = linker.Define(store, "env", name, fn)
+	// Pop functions: ctx = args[0].I32()
+	if strings.HasPrefix(name, "wit_dylib_pop_") {
+		kind := name[14:]
+		switch {
+		case kind == "u32" || kind == "s32" || kind == "u8" || kind == "s8" ||
+			kind == "u16" || kind == "s16" || kind == "bool" || kind == "char" ||
+			kind == "flags" || kind == "enum":
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					var val int32
+					if b.witDylib != nil { val = b.witDylib.popI32(args[0].I32()) }
+					return []wasmtime.Val{wasmtime.ValI32(val)}, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		case kind == "u64" || kind == "s64":
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					var val int64
+					if b.witDylib != nil { val = b.witDylib.popI64(args[0].I32()) }
+					return []wasmtime.Val{wasmtime.ValI64(val)}, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		case kind == "f32":
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					var val float32
+					if b.witDylib != nil { val = b.witDylib.popF32(args[0].I32()) }
+					return []wasmtime.Val{wasmtime.ValF32(val)}, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		case kind == "f64":
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					var val float64
+					if b.witDylib != nil { val = b.witDylib.popF64(args[0].I32()) }
+					return []wasmtime.Val{wasmtime.ValF64(val)}, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		case kind == "string":
+			fn := wasmtime.NewFunc(store, functype,
+				func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					var length int32
+					if b.witDylib != nil && len(args) >= 2 {
+						exp := caller.GetExport("memory")
+						if exp != nil {
+							mem := exp.Memory()
+							if mem != nil {
+								length = b.witDylib.popString(args[0].I32(), mem, caller, args[1].I32())
+							}
+						}
+					}
+					return []wasmtime.Val{wasmtime.ValI32(length)}, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		default:
+			fn := wasmtime.NewFunc(store, functype,
+				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					if b.witDylib != nil { _ = b.witDylib.popI32(args[0].I32()) }
+					return []wasmtime.Val{wasmtime.ValI32(0)}, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		}
+		return
+	}
 
-	case name == "wit_dylib_export_call", name == "wit_dylib_export_async_call",
-		name == "wit_dylib_export_async_callback":
-		_ = linker.Define(store, "env", name, makeNoop())
-
-	case name == "wit_dylib_export_finish", name == "wit_dylib_resource_dtor",
-		name == "wit_dylib_dealloc_bytes", name == "cabi_realloc":
-		_ = linker.Define(store, "env", name, makeNoop())
-
-	case name == "wit_dylib_list_append":
-		// Same as push_u32: write 4-byte value at pointer.
+	// Export lifecycle and other special functions
+	switch name {
+	case "wit_dylib_initialize":
 		fn := wasmtime.NewFunc(store, functype,
 			func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				data, _, memErr := callerMemBuf(caller)
-					if memErr == nil && len(args) >= 2 {
-					ptr := args[len(args)-1].I32()
-					val := uint32(args[0].I32())
-					if ptr >= 0 && int(ptr)+4 <= len(data) {
-						binary.LittleEndian.PutUint32(data[ptr:], val)
+				if b.witDylib != nil && len(args) >= 1 {
+					exp := caller.GetExport("memory")
+					if exp != nil {
+						mem := exp.Memory()
+						if mem != nil {
+							b.witDylib.initialize(mem, caller, args[0].I32())
+						}
 					}
+				}
+				resTypes := functype.Results()
+				results := make([]wasmtime.Val, len(resTypes))
+				return results, nil
+			})
+		_ = linker.Define(store, "env", name, fn)
+
+	case "wit_dylib_export_start":
+		fn := wasmtime.NewFunc(store, functype,
+			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+				var handle int32
+				if b.witDylib != nil && len(args) >= 1 {
+					handle = b.witDylib.exportStart(args[0].I32())
+				}
+				resTypes := functype.Results()
+				results := make([]wasmtime.Val, len(resTypes))
+				if len(results) > 0 { results[0] = wasmtime.ValI32(handle) }
+				return results, nil
+			})
+		_ = linker.Define(store, "env", name, fn)
+
+	case "wit_dylib_export_call", "wit_dylib_export_async_callback":
+		if name == "wit_dylib_export_call" {
+			fn := wasmtime.NewFunc(store, functype,
+				func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+					if len(args) < 2 || b.witDylib == nil {
+						fmt.Printf("[DISPATCH] early exit: len=%d witDylib=%v\n", len(args), b.witDylib != nil)
+						return nil, nil
+					}
+					elemIdx := b.witDylib.getExportElemIndex(args[1].I32())
+					if elemIdx < 0 {
+						return nil, nil
+					}
+					tableExp := caller.GetExport("__indirect_function_table")
+					if tableExp == nil {
+						return nil, nil
+					}
+					table := tableExp.Table()
+					if table == nil {
+						fmt.Printf("[DISPATCH] table is nil\n")
+						return nil, nil
+					}
+					elem, err := table.Get(caller, uint64(elemIdx))
+					fmt.Printf("[DISPATCH] table.Get(elemIdx=%d) err=%v\n", elemIdx, err)
+					if err != nil {
+						return nil, nil
+					}
+					callee := elem.Funcref()
+					if callee == nil {
+						return nil, nil
+					}
+					ctx := args[0].I32()
+					arg3 := b.witDylib.popI32(ctx)
+					arg2 := b.witDylib.popI32(ctx)
+					arg1 := b.witDylib.popI32(ctx)
+					arg0 := b.witDylib.popI32(ctx)
+					callResult, callErr := callee.Call(caller, arg0, arg1, arg2, arg3)
+					if callErr != nil {
+						return nil, wasmtime.NewTrap(callErr.Error())
+					}
+					if r, ok := callResult.(int32); ok {
+						b.witDylib.pushI32(ctx, r)
+					} else if r, ok := callResult.(int64); ok {
+						b.witDylib.pushI64(ctx, r)
+					}
+					return nil, nil
+				})
+			_ = linker.Define(store, "env", name, fn)
+		} else {
+			_ = linker.Define(store, "env", name, makeNoop())
+		}
+
+	case "wit_dylib_export_async_call":
+		fn := wasmtime.NewFunc(store, functype,
+			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+				resTypes := functype.Results()
+				results := make([]wasmtime.Val, len(resTypes))
+				if len(results) > 0 { results[0] = wasmtime.ValI32(0) }
+				return results, nil
+			})
+		_ = linker.Define(store, "env", name, fn)
+
+	case "wit_dylib_export_finish":
+		fn := wasmtime.NewFunc(store, functype,
+			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+				if b.witDylib != nil && len(args) >= 2 {
+					b.witDylib.exportFinish(args[0].I32())
 				}
 				return nil, nil
 			})
 		_ = linker.Define(store, "env", name, fn)
 
-	case name == "wit_dylib_pop_iter", name == "wit_dylib_pop_iter_next":
-		// Same as pop_u32: read 4-byte value from pointer.
+	case "cabi_realloc":
 		fn := wasmtime.NewFunc(store, functype,
 			func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				var val uint32
-				data, _, memErr := callerMemBuf(caller)
-					if memErr == nil && len(args) >= 1 {
-					ptr := args[0].I32()
-					if ptr >= 0 && int(ptr)+4 <= len(data) {
-						val = binary.LittleEndian.Uint32(data[ptr:])
-					}
+				oldPtr := args[0].I32(); oldSize := args[1].I32()
+				_ = oldSize; _ = args[2].I32() // align
+				newSize := args[3].I32()
+				exp := caller.GetExport("memory")
+				if exp == nil { return []wasmtime.Val{wasmtime.ValI32(0)}, nil }
+				mem := exp.Memory()
+				if mem == nil { return []wasmtime.Val{wasmtime.ValI32(0)}, nil }
+				if oldPtr == 0 && newSize > 0 {
+					data := mem.UnsafeData(caller)
+					newPtr := int32(len(data) - int(newSize) - 64)
+					if newPtr < 0 { newPtr = 0 }
+					return []wasmtime.Val{wasmtime.ValI32(newPtr)}, nil
 				}
-				return []wasmtime.Val{wasmtime.ValI32(int32(val))}, nil
+				return []wasmtime.Val{wasmtime.ValI32(oldPtr)}, nil
 			})
 		_ = linker.Define(store, "env", name, fn)
 
-	case strings.HasPrefix(name, "wit_dylib_push_"):
-		handlePush := func(suffix string) {
-			switch suffix {
-			case "u32", "s32", "bool", "char", "enum", "flags",
-				"borrow", "own", "future", "stream",
-				"record", "tuple", "variant", "option", "result", "list":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 2 {
-							ptr := args[len(args)-1].I32()
-							val := uint32(args[0].I32())
-							if ptr >= 0 && int(ptr)+4 <= len(data) {
-								binary.LittleEndian.PutUint32(data[ptr:], val)
-							}
-						}
-						return nil, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "u64", "s64":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 2 {
-							ptr := args[len(args)-1].I32()
-							val := uint64(args[0].I64())
-							if ptr >= 0 && int(ptr)+8 <= len(data) {
-								binary.LittleEndian.PutUint64(data[ptr:], val)
-							}
-						}
-						return nil, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "f32":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 2 {
-							ptr := args[len(args)-1].I32()
-							val := args[0].F32()
-							if ptr >= 0 && int(ptr)+4 <= len(data) {
-								binary.LittleEndian.PutUint32(data[ptr:], math.Float32bits(val))
-							}
-						}
-						return nil, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "f64":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 2 {
-							ptr := args[len(args)-1].I32()
-							val := args[0].F64()
-							if ptr >= 0 && int(ptr)+8 <= len(data) {
-								binary.LittleEndian.PutUint64(data[ptr:], math.Float64bits(val))
-							}
-						}
-						return nil, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "u8", "s8":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 2 {
-							ptr := args[len(args)-1].I32()
-							if ptr >= 0 && int(ptr)+1 <= len(data) {
-								data[ptr] = byte(args[0].I32())
-							}
-						}
-						return nil, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "u16", "s16":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 2 {
-							ptr := args[len(args)-1].I32()
-							val := uint16(args[0].I32())
-							if ptr >= 0 && int(ptr)+2 <= len(data) {
-								binary.LittleEndian.PutUint16(data[ptr:], val)
-							}
-						}
-						return nil, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "string":
-				// push_string(dataPtr, dataLen, destPtr) -> ()
-				// Write 8 bytes at destPtr: (dataPtr, dataLen)
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 3 {
-							strPtr := args[0].I32()
-							strLen := args[1].I32()
-							destPtr := args[2].I32()
-							if destPtr >= 0 && int(destPtr)+8 <= len(data) {
-								binary.LittleEndian.PutUint32(data[destPtr:], uint32(strPtr))
-								binary.LittleEndian.PutUint32(data[destPtr+4:], uint32(strLen))
-							}
-						}
-						return nil, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			default:
-				_ = linker.Define(store, "env", name, makeNoop())
-			}
-		}
-		handlePush(name[15:]) // len("wit_dylib_push_") == 15
-
-	case strings.HasPrefix(name, "wit_dylib_pop_"):
-		handlePop := func(suffix string) {
-			switch suffix {
-			case "u32", "s32", "bool", "char", "enum", "flags",
-				"borrow", "own", "future", "stream",
-				"record", "tuple", "variant", "option", "result", "list":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						var val uint32
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 1 {
-							ptr := args[0].I32()
-							if ptr >= 0 && int(ptr)+4 <= len(data) {
-								val = binary.LittleEndian.Uint32(data[ptr:])
-							}
-						}
-						return []wasmtime.Val{wasmtime.ValI32(int32(val))}, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "u64", "s64":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						var val uint64
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 1 {
-							ptr := args[0].I32()
-							if ptr >= 0 && int(ptr)+8 <= len(data) {
-								val = binary.LittleEndian.Uint64(data[ptr:])
-							}
-						}
-						return []wasmtime.Val{wasmtime.ValI64(int64(val))}, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "f32":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						var val float32
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 1 {
-							ptr := args[0].I32()
-							if ptr >= 0 && int(ptr)+4 <= len(data) {
-								bits := binary.LittleEndian.Uint32(data[ptr:])
-								val = math.Float32frombits(bits)
-							}
-						}
-						return []wasmtime.Val{wasmtime.ValF32(val)}, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "f64":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						var val float64
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 1 {
-							ptr := args[0].I32()
-							if ptr >= 0 && int(ptr)+8 <= len(data) {
-								bits := binary.LittleEndian.Uint64(data[ptr:])
-								val = math.Float64frombits(bits)
-							}
-						}
-						return []wasmtime.Val{wasmtime.ValF64(val)}, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "u8", "s8":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						var val byte
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 1 {
-							ptr := args[0].I32()
-							if ptr >= 0 && int(ptr)+1 <= len(data) {
-								val = data[ptr]
-							}
-						}
-						return []wasmtime.Val{wasmtime.ValI32(int32(val))}, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "u16", "s16":
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						var val uint16
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 1 {
-							ptr := args[0].I32()
-							if ptr >= 0 && int(ptr)+2 <= len(data) {
-								val = binary.LittleEndian.Uint16(data[ptr:])
-							}
-						}
-						return []wasmtime.Val{wasmtime.ValI32(int32(val))}, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			case "string":
-				// pop_string(handlePtr, outBufPtr, outMaxLen) -> bytesWritten
-				// Read string handle (dataPtr, dataLen) from memory[handlePtr],
-				// copy string data to outBuf.
-				fn := wasmtime.NewFunc(store, functype,
-					func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-						var written int32
-						data, _, memErr := callerMemBuf(caller)
-							if memErr == nil && len(args) >= 3 {
-							handlePtr := args[0].I32()
-							outBuf := args[1].I32()
-							outMax := args[2].I32()
-							if handlePtr >= 0 && int(handlePtr)+8 <= len(data) {
-								strDataPtr := int32(binary.LittleEndian.Uint32(data[handlePtr:]))
-								strLen := int32(binary.LittleEndian.Uint32(data[handlePtr+4:]))
-								copyLen := strLen
-								if copyLen > outMax {
-									copyLen = outMax
-								}
-								if copyLen > 0 && strDataPtr >= 0 && int(strDataPtr)+int(copyLen) <= len(data) &&
-									outBuf >= 0 && int(outBuf)+int(copyLen) <= len(data) {
-									copy(data[outBuf:outBuf+copyLen], data[strDataPtr:strDataPtr+copyLen])
-									written = copyLen
-								}
-							}
-						}
-						return []wasmtime.Val{wasmtime.ValI32(written)}, nil
-					})
-				_ = linker.Define(store, "env", name, fn)
-
-			default:
-				_ = linker.Define(store, "env", name, makeNoop())
-			}
-		}
-		handlePop(name[14:]) // len("wit_dylib_pop_") == 14
+	case "wit_dylib_list_append":
+		fn := wasmtime.NewFunc(store, functype,
+			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
+				if b.witDylib != nil && len(args) >= 2 {
+					b.witDylib.pushI32(args[0].I32(), args[1].I32())
+				}
+				return nil, nil
+			})
+		_ = linker.Define(store, "env", name, fn)
 
 	default:
 		_ = linker.Define(store, "env", name, makeNoop())
 	}
 }
+
 

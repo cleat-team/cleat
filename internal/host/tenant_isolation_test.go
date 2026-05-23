@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -865,6 +866,117 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 			}
 			if reapedB != 1 {
 				t.Errorf("ISOLATION BREACH: expected storeB to reap 1 expired key, got %d (storeA may have cross-tenant-reaped it)", reapedB)
+			}
+		})
+	}
+}
+
+// TestTenantIsolation_ActiveInstanceCounts verifies that GetActiveInstanceCountsByVersion
+// returns only the calling tenant's active instances and does not leak cross-tenant data.
+func TestTenantIsolation_ActiveInstanceCounts(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			if !backend.Enabled() {
+				t.Skipf("%s backend not enabled", backend.Name())
+			}
+			mtBackend, ok := backend.(MultiTenantStoreBackend)
+			if !ok {
+				t.Skipf("%s backend does not support multi-tenant store creation", backend.Name())
+			}
+
+			tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+			storeA, teardownA := mtBackend.SetupForTenant(t, tenantA)
+			defer teardownA()
+			storeB, teardownB := mtBackend.SetupForTenant(t, tenantB)
+			defer teardownB()
+
+			ctx := context.Background()
+
+			def := &WorkflowDef{
+				Name: "test-active-counts", Version: 1,
+				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				ABIVersion: 1, MinVersion: 1,
+			}
+			if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store A: %v", err)
+			}
+			if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+				t.Fatalf("DeployWorkflowDef on store B: %v", err)
+			}
+
+			// Create 3 instances in tenant A, 2 instances in tenant B.
+			for i := 0; i < 3; i++ {
+				_, _, err := storeA.StartNewRun(ctx, "", "test-active-counts", 1,
+					json.RawMessage(`{}`),
+					fmt.Sprintf("a-%d", i), tenantA, 0)
+				if err != nil {
+					t.Fatalf("StartNewRun on store A: %v", err)
+				}
+			}
+			for i := 0; i < 2; i++ {
+				_, _, err := storeB.StartNewRun(ctx, "", "test-active-counts", 1,
+					json.RawMessage(`{}`),
+					fmt.Sprintf("b-%d", i), tenantB, 0)
+				if err != nil {
+					t.Fatalf("StartNewRun on store B: %v", err)
+				}
+			}
+
+			// Store A should see only its own counts.
+			countsA, err := storeA.GetActiveInstanceCountsByVersion(ctx)
+			if err != nil {
+				t.Fatalf("GetActiveInstanceCountsByVersion on store A: %v", err)
+			}
+			if countsA["test-active-counts:1"] != 3 {
+				t.Errorf("store A expected 3 active instances, got %d", countsA["test-active-counts:1"])
+			}
+
+			// Store B should see only its own counts.
+			countsB, err := storeB.GetActiveInstanceCountsByVersion(ctx)
+			if err != nil {
+				t.Fatalf("GetActiveInstanceCountsByVersion on store B: %v", err)
+			}
+			if countsB["test-active-counts:1"] != 2 {
+				t.Errorf("store B expected 2 active instances, got %d", countsB["test-active-counts:1"])
+			}
+		})
+	}
+}
+
+// TestUnauthenticatedQueryRejection verifies that RLS-scoped operations fail
+// when no tenant context is set, rather than silently seeing default-tenant data.
+func TestUnauthenticatedQueryRejection(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			if !backend.Enabled() {
+				t.Skipf("%s backend not enabled", backend.Name())
+			}
+			store, teardown := backend.Setup(t)
+			defer teardown()
+
+			// Only test backends where we can construct a zero-tenant store.
+			switch s := store.(type) {
+			case *PostgresStore:
+				zeroStore := *s
+				zeroStore.tenantID = ""
+				_, err := zeroStore.GetActiveInstanceCountsByVersion(context.Background())
+				if err == nil {
+					t.Error("expected error for unauthenticated query, got nil")
+				}
+			case *MSSQLStore:
+				zeroStore := *s
+				zeroStore.tenantID = ""
+				_, err := zeroStore.GetActiveInstanceCountsByVersion(context.Background())
+				if err == nil {
+					t.Error("expected error for unauthenticated query, got nil")
+				}
+			case *ShardedStore:
+				t.Skip("ShardedStore unauthenticated test requires base store access")
+			default:
+				t.Skipf("unauthenticated rejection test not implemented for %T", store)
 			}
 		})
 	}
