@@ -4,5 +4,5 @@
 HTTP fetch (ABI 2.45)
 """
 
-def fetch(method_ptr: int, method_len: int, url_ptr: int, url_len: int, headers_ptr: int, headers_len: int, body_ptr: int, body_len: int, resp_ptr: int, resp_max_len: int) -> int:
+def fetch(method: str, url: str, headers: str, body: str) -> str:
     raise NotImplementedError

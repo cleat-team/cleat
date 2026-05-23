@@ -6,13 +6,12 @@ Plugin host function extension interface.
 
 
 
-
-def plugin_call(plugin_name_ptr: int, plugin_name_len: int, function_name_ptr: int, function_name_len: int, input_ptr: int, input_len: int, response_ptr: int, response_max_len: int) -> int:
+def plugin_call(plugin_name: str, function_name: str, input: str) -> str:
     """
     Call a plugin host function.
     """
     raise NotImplementedError
-def plugin_call_streaming(plugin_name_ptr: int, plugin_name_len: int, function_name_ptr: int, function_name_len: int, input_ptr: int, input_len: int, event_ptr: int, event_max_len: int) -> int:
+def plugin_call_streaming(plugin_name: str, function_name: str, input: str) -> str:
     """
     Call a streaming plugin host function (for workstream D2b).
     """

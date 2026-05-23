@@ -4,11 +4,11 @@
 Scoped state / virtual object operations (ABI 2.26-2.28)
 """
 
-def set_scope(obj_type_ptr: int, obj_type_len: int, inst_key_ptr: int, inst_key_len: int, prev_scope_ptr: int, prev_scope_max_len: int) -> int:
+def set_scope(obj_type: str, inst_key: str) -> str:
     raise NotImplementedError
 
 def get_scope(obj_type_ptr: int, obj_type_max_len: int, inst_key_ptr: int, inst_key_max_len: int) -> int:
     raise NotImplementedError
 
-def uuid(seed_ptr: int, seed_len: int, uuid_ptr: int, uuid_max_len: int) -> int:
+def uuid(seed: str) -> str:
     raise NotImplementedError

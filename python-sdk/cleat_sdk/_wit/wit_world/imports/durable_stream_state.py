@@ -4,20 +4,20 @@
 State operations (Stream R) (ABI 2.37-2.44)
 """
 
-def set_state(key_ptr: int, key_len: int, val_ptr: int, val_len: int) -> int:
+def set_state(key: str, val: str) -> int:
     raise NotImplementedError
 
-def get_state(key_ptr: int, key_len: int, out_ptr: int, max_len: int) -> int:
+def get_state(key: str) -> str:
     raise NotImplementedError
 
-def delete_state(key_ptr: int, key_len: int) -> int:
+def delete_state(key: str) -> int:
     raise NotImplementedError
 
-def incr_state(key_ptr: int, key_len: int, delta: int) -> int:
+def incr_state(key: str, delta: int) -> int:
     raise NotImplementedError
 
-def has_state(key_ptr: int, key_len: int) -> int:
+def has_state(key: str) -> int:
     raise NotImplementedError
 
-def list_state(prefix_ptr: int, prefix_len: int, out_ptr: int, max_len: int) -> int:
+def list_state(prefix: str) -> str:
     raise NotImplementedError

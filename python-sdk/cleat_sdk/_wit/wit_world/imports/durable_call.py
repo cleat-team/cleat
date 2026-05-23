@@ -19,12 +19,12 @@ def durable_call(service: str, operation: str, request: str) -> str:
     Make a durable (deterministically replayed) call to an external service.
     """
     raise NotImplementedError
-def durable_call_retry(service_ptr: int, service_len: int, operation_ptr: int, operation_len: int, request_ptr: int, request_len: int, max_attempts: int, initial_interval_ms: int, backoff_coefficient_100x: int, max_interval_ms: int, non_retryable_errors_ptr: int, non_retryable_errors_len: int, response_ptr: int, response_max_len: int) -> int:
+def durable_call_retry(service: str, operation: str, request: str, max_attempts: int, initial_interval_ms: int, backoff_coefficient_100x: int, max_interval_ms: int, non_retryable_errors: str) -> str:
     """
     Make a durable call with server-side retry policy.
     """
     raise NotImplementedError
-def durable_call_heartbeat(service_ptr: int, service_len: int, operation_ptr: int, operation_len: int, request_ptr: int, request_len: int, heartbeat_interval_ms: int, response_ptr: int, response_max_len: int) -> int:
+def durable_call_heartbeat(service: str, operation: str, request: str, heartbeat_interval_ms: int) -> str:
     """
     Make a durable call with periodic heartbeat/progress updates.
     """

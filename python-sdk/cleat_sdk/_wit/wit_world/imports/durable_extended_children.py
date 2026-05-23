@@ -4,5 +4,5 @@
 Extended child workflow operations (ABI 2.10)
 """
 
-def child_workflow_in_schema(schema_ptr: int, schema_len: int, name_ptr: int, name_len: int, input_ptr: int, input_len: int, version: int, priority: int, policy_ptr: int, policy_len: int, run_id_ptr: int, run_id_max_len: int) -> int:
+def child_workflow_in_schema(schema: str, name: str, input: str, version: int, priority: int, policy: str) -> str:
     raise NotImplementedError

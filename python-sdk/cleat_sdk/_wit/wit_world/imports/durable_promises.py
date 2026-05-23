@@ -6,23 +6,22 @@ Durable promise create, await, resolve, and reject operations.
 
 
 
-
-def durable_create_promise(name_ptr: int, name_len: int, id_out_ptr: int, id_out_max: int, ttl_ms: int) -> int:
+def durable_create_promise(name: str, ttl_ms: int) -> str:
     """
     Create a durable promise with the given name.
     """
     raise NotImplementedError
-def durable_await_promise(id_ptr: int, id_len: int, timeout_ms: int, result_out_ptr: int, result_out_max: int) -> int:
+def durable_await_promise(id: str, timeout_ms: int) -> str:
     """
     Wait for a durable promise to resolve, with a timeout.
     """
     raise NotImplementedError
-def durable_resolve_promise(id_ptr: int, id_len: int, value_ptr: int, value_len: int) -> int:
+def durable_resolve_promise(id: str, value: str) -> int:
     """
     Resolve a durable promise with a value.
     """
     raise NotImplementedError
-def durable_reject_promise(id_ptr: int, id_len: int, error_ptr: int, error_len: int) -> int:
+def durable_reject_promise(id: str, error: str) -> int:
     """
     Reject a durable promise with an error.
     """

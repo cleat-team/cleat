@@ -6,13 +6,12 @@ Fire-and-forget and scheduled messaging.
 
 
 
-
-def durable_send(svc_ptr: int, svc_len: int, op_ptr: int, op_len: int, req_ptr: int, req_len: int) -> int:
+def durable_send(service: str, operation: str, request: str) -> int:
     """
     Send a fire-and-forget request to an external service.
     """
     raise NotImplementedError
-def durable_schedule_invoke(svc_ptr: int, svc_len: int, op_ptr: int, op_len: int, req_ptr: int, req_len: int, delay_ms: int) -> int:
+def durable_schedule_invoke(service: str, operation: str, request: str, delay_ms: int) -> int:
     """
     Schedule a delayed one-shot invocation.
     """

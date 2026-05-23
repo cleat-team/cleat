@@ -8,6 +8,8 @@ package cleat:host-calls;
 /// Service call operations: recorded, retried, or heartbeated.
 interface durable-call {
     /// Make a durable (deterministically replayed) call to an external service.
+    /// Returns the response JSON string on success, or an error string prefixed
+    /// with "__CLEAT_ERROR__:" on failure.
     durable-call: func(
         service: string,
         operation: string,
@@ -15,35 +17,26 @@ interface durable-call {
     ) -> string;
 
     /// Make a durable call with server-side retry policy.
+    /// Returns the response JSON string on success, or an error on failure.
     durable-call-retry: func(
-        service-ptr: u32,
-        service-len: u32,
-        operation-ptr: u32,
-        operation-len: u32,
-        request-ptr: u32,
-        request-len: u32,
+        service: string,
+        operation: string,
+        request: string,
         max-attempts: u64,
         initial-interval-ms: u64,
         backoff-coefficient-100x: u64,
         max-interval-ms: u64,
-        non-retryable-errors-ptr: u32,
-        non-retryable-errors-len: u32,
-        response-ptr: u32,
-        response-max-len: u32,
-    ) -> u64;
+        non-retryable-errors: string,
+    ) -> string;
 
     /// Make a durable call with periodic heartbeat/progress updates.
+    /// Returns the response JSON string on success, or an error on failure.
     durable-call-heartbeat: func(
-        service-ptr: u32,
-        service-len: u32,
-        operation-ptr: u32,
-        operation-len: u32,
-        request-ptr: u32,
-        request-len: u32,
+        service: string,
+        operation: string,
+        request: string,
         heartbeat-interval-ms: u64,
-        response-ptr: u32,
-        response-max-len: u32,
-    ) -> u64;
+    ) -> string;
 }
 
 /// Timer, clock, random, and log operations.
@@ -58,7 +51,7 @@ interface durable-sleep {
     durable-random: func() -> u64;
 
     /// Log a message to the workflow event history.
-    durable-log: func(msg-ptr: u32, msg-len: u32) -> u64;
+    durable-log: func(msg: string) -> u64;
 }
 
 /// Workflow version introspection.
@@ -73,29 +66,23 @@ interface durable-version {
 /// Workflow lifecycle operations (defer, compaction, cancellation).
 interface durable-lifecycle {
     /// Register a deferred cleanup action to run on workflow exit.
-    durable-defer: func(
-        desc-ptr: u32,
-        desc-len: u32,
-        defer-id-ptr: u32,
-        defer-id-max-len: u32,
-    ) -> u64;
+    /// Returns the generated defer ID.
+    durable-defer: func(desc: string) -> string;
 
     /// Replace workflow input and restart execution (history compaction).
-    durable-continue-as-new: func(input-ptr: u32, input-len: u32) -> u64;
+    durable-continue-as-new: func(input: string) -> u64;
 
     /// Check if workflow cancellation has been requested.
-    durable-poll-cancellation: func(
-        reason-ptr: u32,
-        reason-max-len: u32,
-    ) -> u64;
+    /// Returns the cancellation reason string, or empty if not cancelled.
+    durable-poll-cancellation: func() -> string;
 }
 
 /// Signal send, receive, and correlation operations.
 interface durable-signals {
     /// Wait for one or more external signals, with a timeout.
+    /// Output buffers kept for multi-return (name + payload).
     durable-await-signals: func(
-        names-ptr: u32,
-        names-len: u32,
+        names: string,
         timeout-ms: u64,
         sig-name-ptr: u32,
         sig-name-max-len: u32,
@@ -104,118 +91,86 @@ interface durable-signals {
     ) -> u64;
 
     /// Poll for a specific pending signal (non-blocking).
-    durable-poll-signal: func(
-        name-ptr: u32,
-        name-len: u32,
-        payload-ptr: u32,
-        payload-max-len: u32,
-    ) -> u64;
+    /// Returns the signal payload, or empty string if none.
+    durable-poll-signal: func(name: string) -> string;
 
     /// Send a signal with correlation and wait for a reply.
+    /// Returns the response payload string.
     durable-send-signal-and-wait: func(
-        target-run-id-ptr: u32,
-        target-run-id-len: u32,
-        signal-name-ptr: u32,
-        signal-name-len: u32,
-        payload-ptr: u32,
-        payload-len: u32,
+        target-run-id: string,
+        signal-name: string,
+        payload: string,
         timeout-ms: u64,
-        response-ptr: u32,
-        response-max-len: u32,
-    ) -> u64;
+    ) -> string;
 
     /// Reply to a correlated signal from within a handler.
     durable-reply-to-signal: func(
-        correlation-id-ptr: u32,
-        correlation-id-len: u32,
-        response-ptr: u32,
-        response-len: u32,
+        correlation-id: string,
+        response: string,
     ) -> u64;
 
     /// Send a signal to a target workflow (fire-and-forget, recorded).
     durable-signal-workflow: func(
-        target-run-id-ptr: u32,
-        target-run-id-len: u32,
-        signal-name-ptr: u32,
-        signal-name-len: u32,
-        payload-ptr: u32,
-        payload-len: u32,
+        target-run-id: string,
+        signal-name: string,
+        payload: string,
     ) -> u64;
 }
 
 /// Child workflow spawn and await operations.
 interface durable-children {
     /// Start a child workflow instance (async).
+    /// Returns the child run ID string.
     durable-child-workflow: func(
-        name-ptr: u32,
-        name-len: u32,
-        input-ptr: u32,
-        input-len: u32,
-        run-id-ptr: u32,
-        run-id-max-len: u32,
-    ) -> u64;
+        name: string,
+        input: string,
+    ) -> string;
 
     /// Wait for a single child workflow to complete.
-    durable-await-child: func(
-        run-id-ptr: u32,
-        run-id-len: u32,
-        result-ptr: u32,
-        result-max-len: u32,
-    ) -> u64;
+    /// Returns the child result JSON string.
+    durable-await-child: func(run-id: string) -> string;
 
     /// Wait for multiple child workflows to complete (batch).
-    durable-await-all-children: func(
-        run-ids-json-ptr: u32,
-        run-ids-json-len: u32,
-        results-ptr: u32,
-        results-max-len: u32,
-    ) -> u64;
+    /// Returns the combined results JSON string.
+    durable-await-all-children: func(run-ids-json: string) -> string;
 
     /// Start a child workflow with version, priority, and parent-close-policy options.
+    /// Returns the child run ID string.
     durable-child-workflow-with-options: func(
-        name-ptr: u32, name-len: u32,
-        input-ptr: u32, input-len: u32,
+        name: string,
+        input: string,
         version: u64,
         priority: u64,
-        parent-close-policy-ptr: u32, parent-close-policy-len: u32,
-        run-id-ptr: u32, run-id-max-len: u32,
-    ) -> u64;
+        parent-close-policy: string,
+    ) -> string;
 }
 
 /// Durable promise create, await, resolve, and reject operations.
 interface durable-promises {
     /// Create a durable promise with the given name.
+    /// Returns the generated promise ID string.
     durable-create-promise: func(
-        name-ptr: u32,
-        name-len: u32,
-        id-out-ptr: u32,
-        id-out-max: u32,
+        name: string,
         ttl-ms: u64,
-    ) -> u64;
+    ) -> string;
 
     /// Wait for a durable promise to resolve, with a timeout.
+    /// Returns the resolved value string.
     durable-await-promise: func(
-        id-ptr: u32,
-        id-len: u32,
+        id: string,
         timeout-ms: u64,
-        result-out-ptr: u32,
-        result-out-max: u32,
-    ) -> u64;
+    ) -> string;
 
     /// Resolve a durable promise with a value.
     durable-resolve-promise: func(
-        id-ptr: u32,
-        id-len: u32,
-        value-ptr: u32,
-        value-len: u32,
+        id: string,
+        value: string,
     ) -> u64;
 
     /// Reject a durable promise with an error.
     durable-reject-promise: func(
-        id-ptr: u32,
-        id-len: u32,
-        error-ptr: u32,
-        error-len: u32,
+        id: string,
+        error: string,
     ) -> u64;
 }
 
@@ -231,43 +186,32 @@ interface durable-lock {
 /// Queryable state management.
 interface durable-state {
     /// Set a key-value pair in the workflow's queryable state.
-    set-query-state: func(
-        key-ptr: u32,
-        key-len: u32,
-        val-ptr: u32,
-        val-len: u32,
-    ) -> u64;
+    set-query-state: func(key: string, val: string) -> u64;
 }
 
 /// Update and query handler registration.
 interface durable-handlers {
     /// Register an update handler for external update calls.
-    durable-register-update-handler: func(name-ptr: u32, name-len: u32) -> u64;
+    durable-register-update-handler: func(name: string) -> u64;
 
     /// Register a read-only query handler for external queries.
-    durable-register-query-handler: func(name-ptr: u32, name-len: u32) -> u64;
+    durable-register-query-handler: func(name: string) -> u64;
 }
 
 /// Fire-and-forget and scheduled messaging.
 interface durable-messaging {
     /// Send a fire-and-forget request to an external service.
     durable-send: func(
-        svc-ptr: u32,
-        svc-len: u32,
-        op-ptr: u32,
-        op-len: u32,
-        req-ptr: u32,
-        req-len: u32,
+        service: string,
+        operation: string,
+        request: string,
     ) -> u64;
 
     /// Schedule a delayed one-shot invocation.
     durable-schedule-invoke: func(
-        svc-ptr: u32,
-        svc-len: u32,
-        op-ptr: u32,
-        op-len: u32,
-        req-ptr: u32,
-        req-len: u32,
+        service: string,
+        operation: string,
+        request: string,
         delay-ms: u64,
     ) -> u64;
 }
@@ -275,108 +219,103 @@ interface durable-messaging {
 /// Workflow and run identity introspection.
 interface durable-identity {
     /// Get the current workflow's unique identifier.
-    durable-workflow-id: func(id-ptr: u32, id-max-len: u32) -> u64;
+    durable-workflow-id: func() -> string;
 
     /// Get the current workflow run's unique identifier.
-    durable-run-id: func(id-ptr: u32, id-max-len: u32) -> u64;
+    durable-run-id: func() -> string;
 }
 
 /// Plugin host function extension interface.
 interface plugin {
     /// Call a plugin host function.
+    /// Returns the plugin response JSON string.
     plugin-call: func(
-        plugin-name-ptr: u32,
-        plugin-name-len: u32,
-        function-name-ptr: u32,
-        function-name-len: u32,
-        input-ptr: u32,
-        input-len: u32,
-        response-ptr: u32,
-        response-max-len: u32,
-    ) -> u64;
+        plugin-name: string,
+        function-name: string,
+        input: string,
+    ) -> string;
 
     /// Call a streaming plugin host function (for workstream D2b).
+    /// Returns the streaming event JSON string.
     plugin-call-streaming: func(
-        plugin-name-ptr: u32,
-        plugin-name-len: u32,
-        function-name-ptr: u32,
-        function-name-len: u32,
-        input-ptr: u32,
-        input-len: u32,
-        event-ptr: u32,
-        event-max-len: u32,
-    ) -> u64;
+        plugin-name: string,
+        function-name: string,
+        input: string,
+    ) -> string;
 }
 
 /// Scoped state / virtual object operations (ABI 2.26-2.28)
 interface durable-scope {
-    /// Set the virtual object scope. Returns the previous scope as a JSON string.
+    /// Set the virtual object scope.
+    /// Returns the previous scope as a JSON string.
     set-scope: func(
-        obj-type-ptr: u32, obj-type-len: u32,
-        inst-key-ptr: u32, inst-key-len: u32,
-        prev-scope-ptr: u32, prev-scope-max-len: u32,
-    ) -> u64;
+        obj-type: string,
+        inst-key: string,
+    ) -> string;
 
     /// Get the current virtual object scope.
+    /// Output buffers kept for multi-return (obj-type + inst-key).
     get-scope: func(
-        obj-type-ptr: u32, obj-type-max-len: u32,
-        inst-key-ptr: u32, inst-key-max-len: u32,
+        obj-type-ptr: u32,
+        obj-type-max-len: u32,
+        inst-key-ptr: u32,
+        inst-key-max-len: u32,
     ) -> u64;
 
     /// Generate a deterministic UUID from a seed.
-    uuid: func(
-        seed-ptr: u32, seed-len: u32,
-        uuid-ptr: u32, uuid-max-len: u32,
-    ) -> u64;
+    /// Returns the generated UUID string.
+    uuid: func(seed: string) -> string;
 }
 
 /// State operations (Stream R) (ABI 2.37-2.44)
 interface durable-stream-state {
-    set-state: func(key-ptr: u32, key-len: u32, val-ptr: u32, val-len: u32) -> u64;
-    get-state: func(key-ptr: u32, key-len: u32, out-ptr: u32, max-len: u32) -> u64;
-    delete-state: func(key-ptr: u32, key-len: u32) -> u64;
-    incr-state: func(key-ptr: u32, key-len: u32, delta: u64) -> u64;
-    has-state: func(key-ptr: u32, key-len: u32) -> u64;
-    list-state: func(prefix-ptr: u32, prefix-len: u32, out-ptr: u32, max-len: u32) -> u64;
+    set-state: func(key: string, val: string) -> u64;
+    /// Returns the state value string.
+    get-state: func(key: string) -> string;
+    delete-state: func(key: string) -> u64;
+    incr-state: func(key: string, delta: u64) -> u64;
+    has-state: func(key: string) -> u64;
+    /// Returns the list of keys as a JSON array string.
+    list-state: func(prefix: string) -> string;
 }
 
 /// Extended lifecycle (ABI 2.15)
 interface durable-extended-lifecycle {
     /// Continue as new with an explicit version.
     continue-as-new-versioned: func(
-        input-ptr: u32, input-len: u32,
+        input: string,
         new-version: u32,
     ) -> u64;
 
     /// Record non-deterministic computation result in event history.
-    side-effect: func(
-        result-ptr: u32, result-len: u32,
-        out-ptr: u32, out-max-len: u32,
-    ) -> u64;
+    /// Returns the previously recorded result on replay.
+    side-effect: func(value: string) -> string;
 }
 
 /// Extended child workflow operations (ABI 2.10)
 interface durable-extended-children {
     /// Start a child workflow in a different schema (cross-instance cooperation).
+    /// Returns the child run ID string.
     child-workflow-in-schema: func(
-        schema-ptr: u32, schema-len: u32,
-        name-ptr: u32, name-len: u32,
-        input-ptr: u32, input-len: u32,
-        version: u64, priority: u64,
-        policy-ptr: u32, policy-len: u32,
-        run-id-ptr: u32, run-id-max-len: u32,
-    ) -> u64;
+        schema: string,
+        name: string,
+        input: string,
+        version: u64,
+        priority: u64,
+        policy: string,
+    ) -> string;
 }
 
 /// HTTP fetch (ABI 2.45)
 interface durable-fetch {
+    /// Perform a durable HTTP fetch.
+    /// Returns the response JSON string (status, headers, body).
     fetch: func(
-        method-ptr: u32, method-len: u32,
-        url-ptr: u32, url-len: u32,
-        headers-ptr: u32, headers-len: u32,
-        body-ptr: u32, body-len: u32,
-        resp-ptr: u32, resp-max-len: u32,
-    ) -> u64;
+        method: string,
+        url: string,
+        headers: string,
+        body: string,
+    ) -> string;
 }
 
 /// World definition for a cleat workflow WASM component.

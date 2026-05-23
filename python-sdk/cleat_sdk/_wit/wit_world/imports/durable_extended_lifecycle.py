@@ -4,8 +4,8 @@
 Extended lifecycle (ABI 2.15)
 """
 
-def continue_as_new_versioned(input_ptr: int, input_len: int, new_version: int) -> int:
+def continue_as_new_versioned(input: str, new_version: int) -> int:
     raise NotImplementedError
 
-def side_effect(result_ptr: int, result_len: int, out_ptr: int, out_max_len: int) -> int:
+def side_effect(result: str) -> str:
     raise NotImplementedError
