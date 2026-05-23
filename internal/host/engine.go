@@ -630,8 +630,8 @@ type Engine struct {
 	// through to workflow execution spans. When non-empty, WorkflowSpan creates
 	// a parent-linked span for end-to-end trace correlation.
 	traceID string
-	// stepCallback is an optional callback invoked after each event is consumed
-	// during replay. When nil, step advancement is a no-op increment.
+
+	// stepCallback is invoked after each replay event is consumed.
 	stepCallback ReplayStepCallback
 }
 
@@ -647,10 +647,8 @@ type ReplayStepCallback func(step int, event *EventRecord, queryState map[string
 type ReplayStepAction int
 
 const (
-	// ReplayNext continues replay to the next event.
-	ReplayNext ReplayStepAction = iota
-	// ReplayQuit aborts the replay immediately.
-	ReplayQuit
+	ReplayNext  ReplayStepAction = iota // continue replay
+	ReplayQuit                          // abort immediately
 )
 
 // EngineOption configures an Engine.
@@ -1046,20 +1044,21 @@ func (e *Engine) executeWithBackend(
 	}
 
 	session := &execSession{
-		engine:     e,
-		history:    replayHistory,
-		isReplay:   len(replayHistory) > 0,
-		nowMs:      now,
-		deferrals:  make(map[string]string),
-		workflowID: e.workflowID,
-		defName:    e.defName,
-		execRunID:  e.workflowID,
-		tenantID:   e.tenantID,
+		engine:       e,
+		history:      replayHistory,
+		isReplay:     len(replayHistory) > 0,
+		nowMs:        now,
+		deferrals:    make(map[string]string),
+		workflowID:   e.workflowID,
+		defName:      e.defName,
+		execRunID:    e.workflowID,
+		tenantID:     e.tenantID,
 		stepCallback: e.stepCallback,
 	}
 
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel
+
 	execCtx = withHandler(execCtx, session)
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
@@ -1201,6 +1200,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 
 	execCtx, stepCancel := context.WithCancel(ctx)
 	session.stepCancel = stepCancel
+
 	execCtx = withHandler(execCtx, session)
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
@@ -1324,9 +1324,6 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 // point export.
 //
 // The implementation follows the same patterns as executeCompiled: it sets up
-//
-// NOTE: Fresh-execution only (isReplay: false, history: nil). stepCallback and
-// stepCancel are intentionally NOT wired because there is no replay path.
 // an execSession for host function routing, uses the standard CallExport
 // calling convention, and handles suspension and event history the same way.
 func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBundle,
@@ -1346,6 +1343,8 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 	}
 
 	// ---- Step 2: Set up execution session ----
+	// Fresh-execution only (isReplay: false, history: nil). stepCallback and
+	// stepCancel are intentionally NOT wired because there is no replay path.
 	now := nowMs.Load()
 	session := &execSession{
 		engine:     e,
@@ -1714,7 +1713,6 @@ func (s *execSession) invokeStepCallback(ctx context.Context, rec *EventRecord) 
 	if s.stepCallback == nil {
 		return true
 	}
-	// Snapshot queryState to prevent callback from mutating it.
 	qs := make(map[string]string, len(s.queryState))
 	for k, v := range s.queryState {
 		qs[k] = v
@@ -2426,7 +2424,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 				if s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
 					if nextRec.EventType == EventTypeSignalReceived {
-						if !s.advanceReplayStep(ctx, &nextRec) { return 0 }
+						if !s.advanceReplayStep(ctx, &rec) { return 0 }
 						written, _ := s.writeResult(ctx, m, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
 						_, _ = s.writeResult(ctx, m, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
 						return packAwaitSignalsResult(uint32(written), uint32(len(nextRec.SignalPayload)), false, 0)
@@ -2743,7 +2741,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		rec.RunID = runID
 		s.history = append(s.history, rec)
 		s.nowMs = rec.TimestampMs
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 	} else {
 		runID = fmt.Sprintf("child-%s-%d", name, s.stepCount)
 		rec := EventRecord{
@@ -2884,7 +2882,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 				if s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
 					if nextRec.EventType == EventTypeAwaitAnyChild && nextRec.Response != "" {
-						if !s.advanceReplayStep(ctx, &nextRec) { return 0 }
+						if !s.advanceReplayStep(ctx, &rec) { return 0 }
 						written, _ := s.writeResult(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
 						return int64(uint64(written)<<32 | 0)
 					}
@@ -3952,7 +3950,6 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 	if s.isReplay {
 		// On replay, skip (fire-and-forget is recorded but not re-executed).
 		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
 			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 		}
 		return 0
@@ -3986,7 +3983,6 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64 {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
 			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 		}
 		return 0
