@@ -405,14 +405,8 @@ world cleat-workflow {
 
     /// Main workflow entry point.
     ///
-    /// ``args-ptr`` / ``args-len`` point to the serialised input in linear
-    /// memory.  ``out-ptr`` / ``max-out-len`` describe the output buffer.
-    /// Returns a packed i64: bits 0-31 = error code, bits 32-63 = output
-    /// length written.
-    export run: func(
-        args-ptr: u32,
-        args-len: u32,
-        out-ptr: u32,
-        max-out-len: u32,
-    ) -> u64;
+    /// ``args`` is the serialised workflow input JSON. The canonical ABI
+    /// handles lifting/lowering the string through linear memory.
+    /// Returns the serialised workflow result JSON.
+    export run: func(args: string) -> string;
 }

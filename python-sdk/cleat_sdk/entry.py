@@ -28,7 +28,8 @@ import typing
 from typing import Any, Callable, Optional, get_type_hints
 
 from .host_calls import HostCalls, SuspendSentinel
-from .memory import SUSPEND_SENTINEL, encode_export_result, read_string, write_string
+# String sentinel for workflow suspension (matches Go side check).
+SUSPEND_SENTINEL_STR = "__CLEAT_SUSPEND__"
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +184,6 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
     the input JSON.
     """
     import sys
-    from .memory import read_string, write_string
 
     module_name = getattr(func, "__module__", None)
     if module_name is None:
@@ -199,29 +199,17 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
     # Store this wrapper keyed by entry name.
     module._cleat_entry_wrappers[entry_name] = export_wrapper
 
-    def _dispatcher_run(
-        args_ptr: int,
-        args_len: int,
-        out_ptr: int,
-        max_out_len: int,
-    ) -> int:
+    def _dispatcher_run(args_str: str) -> str:
         """WitWorld.run dispatcher -- selects the right entry and delegates."""
         wrappers = module._cleat_entry_wrappers
         if not wrappers:
             raise RuntimeError("No cleat_entry functions registered")
 
         if len(wrappers) == 1:
-            # Single entry: call the only wrapper directly (backward compat).
-            return list(wrappers.values())[0](
-                args_ptr,
-                args_len,
-                out_ptr,
-                max_out_len,
-            )
+            return list(wrappers.values())[0](args_str)
 
         # Multiple entries: dispatch based on __cleat_entry__ in input JSON.
-        input_json = read_string(args_ptr, args_len)
-        input_data: dict = json.loads(input_json) if input_json else {}
+        input_data: dict = json.loads(args_str) if args_str else {}
 
         entry_key = input_data.pop("__cleat_entry__", None)
         if entry_key is None:
@@ -237,11 +225,9 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
                 f"No cleat_entry named '{entry_key}'. Available entries: {list(wrappers.keys())}"
             )
 
-        # Write modified input (without __cleat_entry__) back to memory.
+        # Pass modified input (without __cleat_entry__) to the wrapper.
         modified_json = json.dumps(input_data)
-        new_len = write_string(args_ptr, modified_json, args_len)
-
-        return wrapper(args_ptr, new_len, out_ptr, max_out_len)
+        return wrapper(modified_json)
 
     wrapped = staticmethod(_dispatcher_run)
     module.WitWorld = type("WitWorld", (), {"run": wrapped})
@@ -323,38 +309,19 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
                 continue
             workflow_param_names.append(pname)
 
-        # For Python < 3.10 we cannot rely on ``get_type_hints`` preserving
-        # order, so we additionally reconstruct via ``inspect.signature``.
-        # Union both sources to get annotated param names reliably.
-        hint_names = set(hints.keys())
-        all_param_set = set(all_param_names)
-        # ``get_type_hints`` may omit un-annotated params; merge both.
-        params_with_host = [
-            p for p in all_param_names if p in hint_names or p not in all_param_set - hint_names
-        ]
-        workflow_param_names = [
-            p for p in params_with_host if not (p in hints and hints[p] is HostCalls)
-        ]
-
         workflow_name = name if name is not None else func.__name__
 
         @functools.wraps(func)
-        def export_wrapper(
-            args_ptr: int,
-            args_len: int,
-            out_ptr: int,
-            max_out_len: int,
-        ) -> int:
+        def export_wrapper(args_str: str) -> str:
             """Cleat ABI export wrapper.
 
-            Called by the host runtime with raw memory pointers.  Reads JSON
+            Called by the host runtime with the input JSON string.  Parses
             input, invokes the workflow function, serialises the result, and
-            returns a bit-packed i64 status code.
+            returns the result JSON string.
             """
             try:
-                # (a) Read input JSON from linear memory.
-                input_json = read_string(args_ptr, args_len)
-                input_data: dict[str, Any] = json.loads(input_json) if input_json else {}
+                # (a) Parse input JSON from the string argument.
+                input_data: dict[str, Any] = json.loads(args_str) if args_str else {}
 
                 # (b) Validate that every required workflow parameter appears
                 #     in the deserialised input.
@@ -382,22 +349,17 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
                 result = func(h, **kwargs)
                 result = _unwrap_result(result)
 
-                # (e) Serialise the return value, write it to the output
-                #     buffer, and return a success-packed i64.
-                output_json = json.dumps(result, default=str)
-                bytes_written = write_string(out_ptr, output_json, max_out_len)
-                return encode_export_result(0, bytes_written)
+                # (e) Serialise the return value and return as a string.
+                return json.dumps(result, default=str)
 
             except SuspendSentinel:
                 # The workflow signalled suspension (e.g. sleep on a
-                # fresh execution).  Propagate the sentinel to the host.
-                return SUSPEND_SENTINEL
+                # fresh execution).  Propagate a sentinel string.
+                return SUSPEND_SENTINEL_STR
 
             except Exception as exc:
                 # Any other exception is treated as a workflow error.
-                error_json = json.dumps({"error": str(exc)})
-                bytes_written = write_string(out_ptr, error_json, max_out_len)
-                return encode_export_result(1, bytes_written)
+                return json.dumps({"error": str(exc)})
 
         # Mark the wrapper for introspection tooling.
         export_wrapper._is_cleat_entry = True  # type: ignore[attr-defined]

@@ -66,74 +66,74 @@ from .memory import (
 # when not running in WASM ― the stubs are replaced by real WASM FFI
 # functions at runtime via the componentize-py host adaptor.
 try:
-    from ._wit.wit_world.imports.durable_sleep import (
+    from wit_world.imports.durable_sleep import (
         durable_sleep as _import_cleat_sleep,
         durable_now as _import_cleat_now,
         durable_random as _import_cleat_random,
         durable_log as _import_cleat_log,
     )
-    from ._wit.wit_world.imports.durable_call import (
+    from wit_world.imports.durable_call import (
         durable_call as _import_cleat_call,
         durable_call_retry as _import_cleat_call_retry,
         durable_call_heartbeat as _import_cleat_call_heartbeat,
     )
-    from ._wit.wit_world.imports.durable_signals import (
+    from wit_world.imports.durable_signals import (
         durable_await_signals as _import_cleat_await_signals,
         durable_poll_signal as _import_cleat_poll_signal,
         durable_send_signal_and_wait as _import_cleat_send_signal_and_wait,
         durable_reply_to_signal as _import_cleat_reply_to_signal,
         durable_signal_workflow as _import_cleat_signal_workflow,
     )
-    from ._wit.wit_world.imports.durable_promises import (
+    from wit_world.imports.durable_promises import (
         durable_create_promise as _import_cleat_create_promise,
         durable_await_promise as _import_cleat_await_promise,
         durable_resolve_promise as _import_cleat_resolve_promise,
         durable_reject_promise as _import_cleat_reject_promise,
     )
-    from ._wit.wit_world.imports.durable_children import (
+    from wit_world.imports.durable_children import (
         durable_child_workflow as _import_cleat_child_workflow,
         durable_await_child as _import_cleat_await_child,
         durable_await_all_children as _import_cleat_await_all_children,
         durable_child_workflow_with_options as _import_cleat_child_workflow_with_options,
     )
-    from ._wit.wit_world.imports.durable_lifecycle import (
+    from wit_world.imports.durable_lifecycle import (
         durable_defer as _import_cleat_defer,
         durable_continue_as_new as _import_cleat_continue_as_new,
         durable_poll_cancellation as _import_cleat_poll_cancellation,
     )
-    from ._wit.wit_world.imports.durable_lock import (
+    from wit_world.imports.durable_lock import (
         durable_acquire_lock as _import_cleat_acquire_lock,
         durable_release_lock as _import_cleat_release_lock,
     )
-    from ._wit.wit_world.imports.durable_handlers import (
+    from wit_world.imports.durable_handlers import (
         durable_register_update_handler as _import_cleat_register_update_handler,
         durable_register_query_handler as _import_cleat_register_query_handler,
     )
-    from ._wit.wit_world.imports.durable_state import (
+    from wit_world.imports.durable_state import (
         set_query_state as _import_set_query_state,
     )
-    from ._wit.wit_world.imports.durable_version import (
+    from wit_world.imports.durable_version import (
         durable_version as _import_cleat_version,
         durable_min_version as _import_cleat_min_version,
     )
-    from ._wit.wit_world.imports.durable_identity import (
+    from wit_world.imports.durable_identity import (
         durable_workflow_id as _import_cleat_workflow_id,
         durable_run_id as _import_cleat_run_id,
     )
-    from ._wit.wit_world.imports.durable_messaging import (
+    from wit_world.imports.durable_messaging import (
         durable_send as _import_cleat_send,
         durable_schedule_invoke as _import_cleat_schedule_invoke,
     )
-    from ._wit.wit_world.imports.plugin import (
+    from wit_world.imports.plugin import (
         plugin_call as _import_plugin_call,
         plugin_call_streaming as _import_plugin_call_streaming,
     )
-    from ._wit.wit_world.imports.durable_scope import (
+    from wit_world.imports.durable_scope import (
         set_scope as _import_set_scope,
         get_scope as _import_get_scope,
         uuid as _import_uuid,
     )
-    from ._wit.wit_world.imports.durable_stream_state import (
+    from wit_world.imports.durable_stream_state import (
         set_state as _import_stream_set_state,
         get_state as _import_stream_get_state,
         delete_state as _import_stream_delete_state,
@@ -141,14 +141,14 @@ try:
         has_state as _import_stream_has_state,
         list_state as _import_stream_list_state,
     )
-    from ._wit.wit_world.imports.durable_extended_lifecycle import (
+    from wit_world.imports.durable_extended_lifecycle import (
         continue_as_new_versioned as _import_cleat_continue_as_new_versioned,
         side_effect as _import_cleat_side_effect,
     )
-    from ._wit.wit_world.imports.durable_extended_children import (
+    from wit_world.imports.durable_extended_children import (
         child_workflow_in_schema as _import_cleat_child_workflow_in_schema,
     )
-    from ._wit.wit_world.imports.durable_fetch import (
+    from wit_world.imports.durable_fetch import (
         fetch as _import_cleat_fetch,
     )
 
@@ -1403,21 +1403,34 @@ class HostCalls:
                 OUTPUT_OFFSET,
                 OUT_BUF_SIZE,
             )
+            # Old packed-i64 ABI for the retry path.
+            response_len, call_error_code, err_code = decode_cleat_call_result(result)
+            if err_code != 0:
+                err_msg = read_string(OUTPUT_OFFSET, response_len)
+                if call_error_code != 0:
+                    self._raise_for_call_error(service, operation, err_msg, call_error_code)
+                raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
+            return read_string(OUTPUT_OFFSET, response_len)
         else:
+            # String ABI: durable-call returns response directly as a string.
             result = _import_cleat_call(
                 service,
                 operation,
                 req_str,
             )
-
-        response_len, call_error_code, err_code = decode_cleat_call_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
-            if call_error_code != 0:
-                self._raise_for_call_error(service, operation, err_msg, call_error_code)
-            raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
-
-        return read_string(OUTPUT_OFFSET, response_len)
+            if isinstance(result, str):
+                if result.startswith("__CLEAT_ERROR__:"):
+                    err_msg = result[len("__CLEAT_ERROR__:"):]
+                    raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
+                return result
+            # Fallback: old packed-i64 ABI for non-string result.
+            response_len, call_error_code, err_code = decode_cleat_call_result(result)
+            if err_code != 0:
+                err_msg = read_string(OUTPUT_OFFSET, response_len)
+                if call_error_code != 0:
+                    self._raise_for_call_error(service, operation, err_msg, call_error_code)
+                raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
+            return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
     # 7. call_typed — typed recorded API call

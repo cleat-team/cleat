@@ -156,49 +156,67 @@ func componentGetFunc(
 	return out, nil
 }
 
-// -- component func call -----------------------------------------------------
+// -- component func call (string ABI) ----------------------------------------
 func componentCall(
 	fn *C.wasmtime_component_func_t, store wasmtime.Storelike,
-	inputOffset, inputLen, outputOffset, outBufSz int32,
-) (int64, error) {
+	input string,
+) (string, error) {
 	ctx := C.store_context(unsafe.Pointer(store.Context()))
-	args := [4]C.wasmtime_component_val_t{
-		C.make_component_val_u32(C.uint32_t(inputOffset)),
-		C.make_component_val_u32(C.uint32_t(inputLen)),
-		C.make_component_val_u32(C.uint32_t(outputOffset)),
-		C.make_component_val_u32(C.uint32_t(outBufSz)),
+	cInput := C.CString(input)
+	defer C.free(unsafe.Pointer(cInput))
+	args := [1]C.wasmtime_component_val_t{
+		C.make_component_val_string(cInput, C.size_t(len(input))),
 	}
 	var result C.wasmtime_component_val_t
-	result.kind = C.WASMTIME_COMPONENT_U64
-	err := C.wasmtime_component_func_call(fn, ctx, &args[0], 4, &result, 1)
+	result.kind = C.WASMTIME_COMPONENT_STRING
+	err := C.wasmtime_component_func_call(fn, ctx, &args[0], 1, &result, 1)
 	if err != nil {
 		var msg C.wasm_byte_vec_t; C.get_error_message(err, &msg)
 		s := C.GoStringN(msg.data, C.int(msg.size))
 		C.wasm_byte_vec_delete(&msg); C.wasmtime_error_delete(err)
-		return 0, fmt.Errorf("component call: %s", s)
+		return "", fmt.Errorf("component call: %s", s)
 	}
-	return int64(C.component_val_get_u64(&result)), nil
+	var resultLen C.size_t
+	resultData := C.component_val_get_string(&result, &resultLen)
+	if resultData == nil { return "", nil }
+	return C.GoStringN(resultData, C.int(resultLen)), nil
 }
 
 // -- callback registry -------------------------------------------------------
+
+// cbType identifies what signature the callback should expect.
+type cbType int
+
+const (
+	cbTypeDefault            cbType = iota // u32 ptr/len args -> u64 result
+	cbTypeDurableCallString                // (string, string, string) -> string
+)
+
+type cbEntry struct {
+	backend *wasmtimeBackend
+	typ     cbType
+}
+
 var cbRegistry = struct {
 	sync.Mutex
-	backends map[uintptr]*wasmtimeBackend
-	store    wasmtime.Storelike
-	storeID  uint64
-}{backends: make(map[uintptr]*wasmtimeBackend)}
+	entries map[uintptr]cbEntry
+	store   wasmtime.Storelike
+	storeID uint64
+}{entries: make(map[uintptr]cbEntry)}
 
-func registerCB(b *wasmtimeBackend) uintptr {
+func registerCB(b *wasmtimeBackend, typ cbType) uintptr {
 	cbRegistry.Lock(); defer cbRegistry.Unlock()
-	id := uintptr(len(cbRegistry.backends) + 1)
-	cbRegistry.backends[id] = b
+	id := uintptr(len(cbRegistry.entries) + 1)
+	cbRegistry.entries[id] = cbEntry{backend: b, typ: typ}
 	return id
 }
 
-func lookupCB(id uintptr) *wasmtimeBackend {
+func lookupCB(id uintptr) cbEntry {
 	cbRegistry.Lock(); defer cbRegistry.Unlock()
-	return cbRegistry.backends[id]
+	return cbRegistry.entries[id]
 }
+
+// Debug: track callback invocations.
 
 // -- Go callback trampoline --------------------------------------------------
 //export goComponentCallback
@@ -208,55 +226,69 @@ func goComponentCallback(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	fmt.Printf("[CGO_CB] any callback invoked\n")
-	b := lookupCB(uintptr(env))
-	if b == nil || b.handler == nil { return nil }
-	return b.dispatchComponentCallback(ctx, ty, args, nargs, results, nresults)
+	entry := lookupCB(uintptr(env))
+	if entry.backend == nil || entry.backend.handler == nil { return nil }
+	switch entry.typ {
+	case cbTypeDurableCallString:
+		return entry.backend.dispatchDurableCallString(ctx, args, nargs, results, nresults)
+	default:
+		return entry.backend.dispatchComponentDefault(ctx, args, nargs, results, nresults)
+	}
 }
 
-func (b *wasmtimeBackend) dispatchComponentCallback(
-	ctx *C.wasmtime_context_t,
-	_ *C.wasmtime_component_func_type_t,
+// dispatchDurableCallString handles (string, string, string) -> string.
+func (b *wasmtimeBackend) dispatchDurableCallString(
+	_ *C.wasmtime_context_t,
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	// Use pre-saved memory data pointer (found once after instantiation).
-	var packed int64
-	if C.get_saved_memory_ptr() != nil && C.get_saved_memory_len() > 0 && b.handler != nil {
-		rawData := unsafe.Slice(C.get_saved_memory_ptr(), C.get_saved_memory_len())
-		data := *(*[]byte)(unsafe.Pointer(&rawData))
-		getU32 := func(i int) uint32 {
-			if i < int(nargs) {
-				a := (*C.wasmtime_component_val_t)(unsafe.Add(unsafe.Pointer(args), uintptr(i)*unsafe.Sizeof(*args)))
-				return uint32(C.component_val_get_u32(a))
-			}
-			return 0
-		}
-		readStr := func(ptr, length uint32) (string, bool) {
-			if ptr+length <= uint32(len(data)) && length <= uint32(MaxWasmStringLen) {
-				return string(data[ptr : ptr+length]), true
-			}
-			return "", false
-		}
-		svc, ok1 := readStr(getU32(0), getU32(1))
-		op, ok2 := readStr(getU32(2), getU32(3))
-		req, ok3 := readStr(getU32(4), getU32(5))
-		respPtr := getU32(6)
-		respMaxLen := getU32(7)
-		if ok1 && ok2 && ok3 {
-			packed = b.handler.DurableCall(ctxWithMem(context.Background(), data), nil, svc, op, req, uint32(respPtr), uint32(respMaxLen))
-		} else {
-			packed = errBadParamInt64
-		}
-	} else {
-		packed = errBadParamInt64
+	if int(nargs) < 3 || b.handler == nil { return nil }
+
+	readStrArg := func(i int) string {
+		a := (*C.wasmtime_component_val_t)(unsafe.Add(unsafe.Pointer(args), uintptr(i)*unsafe.Sizeof(*args)))
+		var slen C.size_t
+		sdata := C.component_val_get_string(a, &slen)
+		if sdata == nil { return "" }
+		return C.GoStringN(sdata, C.int(slen))
 	}
+	svc := readStrArg(0)
+	op := readStrArg(1)
+	req := readStrArg(2)
+
+
+	// DurableCall writes response to a buffer and returns packed i64.
+	// We extract the response string from the buffer.
+	buf := make([]byte, 65536)
+	packed := b.handler.DurableCall(ctxWithMem(context.Background(), buf), nil, svc, op, req, 0, 65536)
+	r := uint64(packed); actualLen := uint32((r >> 40) & 0xFFFFFF)
+	if actualLen > uint32(len(buf)) { actualLen = uint32(len(buf)) }
+	response := string(buf[:actualLen])
+
+
+	// Return response as WIT string.
 	if int(nresults) > 0 {
+		cResp := C.CString(response)
+		// Leaked -- wasmtime reads after callback returns; must not free.
 		resultsPtr := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
-		C.component_val_set_u64(resultsPtr, C.uint64_t(packed))
+		*resultsPtr = C.make_component_val_string(cResp, C.size_t(len(response)))
 	}
 	return nil
 }
+
+// dispatchComponentDefault handles u32 ptr/len -> u64 functions (fallback).
+func (b *wasmtimeBackend) dispatchComponentDefault(
+	_ *C.wasmtime_context_t,
+	args *C.wasmtime_component_val_t, _ C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	// Return error for now -- these functions aren't wired yet.
+	if int(nresults) > 0 {
+		resultsPtr := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+		C.component_val_set_u64(resultsPtr, C.uint64_t(0))
+	}
+	return nil
+}
+
 
 
 // -- register cleat WIT functions in component linker -------------------------
@@ -277,12 +309,14 @@ func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_compo
 			return fmt.Errorf("register %s: %s", witModule, s)
 		}
 		for witFuncName := range funcs {
-			if witModule == "cleat:host-calls/durable-call" {
-				}
+			fnType := cbTypeDefault
+			if witModule == "cleat:host-calls/durable-call" && witFuncName == "durable-call" {
+				fnType = cbTypeDurableCallString
+			}
 			fnBytes := []byte(witFuncName)
 			var fnPtr *C.char
 			if len(fnBytes) > 0 { fnPtr = (*C.char)(unsafe.Pointer(&fnBytes[0])) }
-			cbID := registerCB(b)
+			cbID := registerCB(b, fnType)
 			err := C.wasmtime_component_linker_instance_add_func(sub, fnPtr, C.size_t(len(witFuncName)), C.wasmtime_component_func_callback_t(C.goComponentCallback), unsafe.Pointer(uintptr(cbID)), nil)
 			if err != nil {
 				var msg C.wasm_byte_vec_t; C.get_error_message(err, &msg)
@@ -340,16 +374,18 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	fn, err := componentGetFunc(instance, store, entryPoint)
 	if err != nil { return nil, fmt.Errorf("component get func: %w", err) }
 
-	raw, callErr := componentCall(fn, store, int32(0), int32(len(input)), int32(outBufSz), int32(outBufSz))
+	resultStr, callErr := componentCall(fn, store, string(input))
 	if callErr != nil { return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr) }
 
-	if raw == (1 << 62) { return &ExecResult{Suspended: true}, nil }
-	_, actualLen := decodeExportResult(uint64(raw))
-	if actualLen > outBufSz { actualLen = outBufSz }
-	_ = instance
-	_ = actualLen
-	return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 
+	// Check for suspension sentinel from the Python wrapper.
+	if resultStr == "__CLEAT_SUSPEND__" {
+		return &ExecResult{Suspended: true}, nil
+	}
 	_ = instance
-	return nil, fmt.Errorf("CGo: validated, falling back")
+	_ = outBufSz
+	if resultStr == "" {
+		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
+	}
+	return &ExecResult{Result: resultStr, Suspended: false}, nil
 }

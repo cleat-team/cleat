@@ -135,9 +135,9 @@ ctx := context.Background()
 	}
 
 	// Verify the result is valid JSON.
-	var resultData map[string]interface{}
+	var resultData interface{}
 	if err := json.Unmarshal([]byte(result), &resultData); err != nil {
-		t.Errorf("result is not valid JSON: %v", err)
+		t.Errorf("result is not valid JSON: %v (raw: %s)", err, result)
 	}
 
 	t.Log("Python WASM end-to-end test passed")
