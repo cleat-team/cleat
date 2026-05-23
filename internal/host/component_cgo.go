@@ -57,23 +57,18 @@ package host
 // static uint8_t *get_saved_memory_ptr(void) { return saved_memory_ptr; }
 // static size_t get_saved_memory_len(void) { return saved_memory_len; }
 //
-// // Memory access is the remaining gap. The wasmtime C API provides
-// // wasmtime_memory_data(ctx, &mem) to read linear memory, but requires
-// // a valid wasmtime_memory_t handle. Component instantiation creates
-// // memories internally that are not exposed through the public API.
-// // Scanning store indices crashes wasmtime (Rust panic, uncatchable).
+// // Memory access is blocked by wasmtime's public C API.
+// // wasmtime_memory_data(ctx, &handle) requires a valid handle,
+// // but component instantiation creates memories internally without
+// // exposing handles. Rust extern "C" functions catch panics and
+// // abort, making store scanning unsafe and uncatchable.
 // //
-// // Solutions being investigated:
-// //   1. wasmtime C API for store object enumeration (not in public API)
-// //   2. Pre-creating memory with wasmtime_memory_new and sharing it
-// //      with the component via the linker
-// //   3. Accessing store internals through the Go store object
+// // Working alternatives being evaluated:
+// //   1. Use wasmtime internal APIs (require forking wasmtime-go)
+// //   2. Pre-create memory + share with component via linker
+// //   3. Change WIT to use `string` type so canonical ABI lifts args
 // static void save_first_memory_data(wasmtime_context_t *ctx, uint64_t store_id) {
-//     // Memory access is not available through the current wasmtime C API.
-//     // The component creates its own memories internally during
-//     // instantiation, and there is no public function to enumerate
-//     // them. wasmtime_memory_data requires a valid handle, which we
-//     // cannot obtain without unsafe store scanning.
+//     // Memory handles not available through public API.
 // }
 //// // Trampoline for cleat host functions.
 // extern wasmtime_error_t *goComponentCallback(
