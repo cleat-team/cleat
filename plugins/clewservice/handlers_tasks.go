@@ -2,6 +2,7 @@ package clewservice
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -153,7 +154,52 @@ func (p *Plugin) handleTasksPost(w http.ResponseWriter, r *http.Request) {
 // ── clew-133c stubs (501 Not Implemented) ──
 
 func (p *Plugin) handleTaskGet(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	taskID := r.PathValue("id")
+	project := r.URL.Query().Get("project")
+
+	tasks, err := p.readTasksJSON(project)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "tasks.json not found")
+			return
+		}
+		p.logger.Error("read tasks.json", "project", project, "error", err)
+		writeError(w, http.StatusInternalServerError, "read tasks.json: "+err.Error())
+		return
+	}
+
+	entry, ok := tasks.Tasks[taskID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "task not found: "+taskID)
+		return
+	}
+
+	// Read STATUS.md.
+	statusData, err := p.readTaskFile(taskID, "STATUS.md")
+	var status TaskStatus
+	if err != nil {
+		if !os.IsNotExist(err) {
+			p.logger.Error("read STATUS.md", "task", taskID, "error", err)
+			writeError(w, http.StatusInternalServerError, "read STATUS.md: "+err.Error())
+			return
+		}
+		status.Phase = "queued"
+	} else {
+		status = parseStatusMD(statusData)
+	}
+
+	// Try session.json (optional, don't error if missing).
+	var session *SessionJSON
+	s, err := p.readSessionJSON(taskID)
+	if err == nil {
+		session = s
+	}
+
+	writeJSON(w, http.StatusOK, TaskDetailResponse{
+		Task:    entry,
+		Status:  status,
+		Session: session,
+	})
 }
 
 func (p *Plugin) handleTaskContentGet(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +207,112 @@ func (p *Plugin) handleTaskContentGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Plugin) handleTaskResultPost(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	taskID := r.PathValue("id")
+	project := r.URL.Query().Get("project")
+
+	var req SubmitResultRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	if !IsValidPhase(req.Phase) {
+		writeError(w, http.StatusBadRequest, "invalid phase: "+req.Phase)
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Verify task exists.
+	tasks, err := p.readTasksJSON(project)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read tasks.json: "+err.Error())
+		return
+	}
+	entry, ok := tasks.Tasks[taskID]
+	if !ok {
+		writeError(w, http.StatusNotFound, "task not found: "+taskID)
+		return
+	}
+
+	// Read current STATUS.md for phase transition validation.
+	statusData, err := p.readTaskFile(taskID, "STATUS.md")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "read STATUS.md: "+err.Error())
+		return
+	}
+	currentStatus := parseStatusMD(statusData)
+
+	if !CanTransition(currentStatus.Phase, req.Phase) {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("invalid transition: %s -> %s", currentStatus.Phase, req.Phase))
+		return
+	}
+
+	// Compute token cost.
+	costDelta := computeTokenCost(req.TokenUsage)
+
+	// Update STATUS.md atomically.
+	newStatus := TaskStatus{Phase: req.Phase, PhaseUpdate: Timestamp(), Updated: TimestampDate()}
+	patched := patchStatusMD(statusData, newStatus)
+	statusPath, err := p.safePath(filepath.Join("task_state", taskID, "STATUS.md"))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := atomicWrite(statusPath, patched, 0644); err != nil {
+		writeError(w, http.StatusInternalServerError, "write STATUS.md: "+err.Error())
+		return
+	}
+
+	// Update tasks.json.
+	entry.Status = req.Phase
+	entry.Updated = TimestampDate()
+	entry.Cost.SpentUSD += costDelta
+	tasks.Tasks[taskID] = entry
+	tasks.Updated = Timestamp()
+	if err := p.writeTasksJSON(project, tasks); err != nil {
+		writeError(w, http.StatusInternalServerError, "write tasks.json: "+err.Error())
+		return
+	}
+
+	// Update session.json if it exists.
+	if session, err := p.readSessionJSON(taskID); err == nil {
+		session.Phase = req.Phase
+		session.ExitCode = outcomeToExitCode(req.Outcome)
+		if req.TokenUsage.Input+req.TokenUsage.Output > 0 {
+			total := req.TokenUsage.Input + req.TokenUsage.Output + req.TokenUsage.CacheRead
+			session.TokenUsage = &total
+		}
+		if err := p.writeSessionJSON(taskID, session); err != nil {
+			p.logger.Warn("write session.json", "task", taskID, "error", err)
+		}
+	}
+
+	p.logger.Info("result submitted", "task", taskID, "phase", req.Phase)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"phase": req.Phase,
+	})
+}
+
+// outcomeToExitCode converts a text outcome to an exit code.
+func outcomeToExitCode(outcome string) *int {
+	if outcome == "" {
+		return nil
+	}
+	c := 0
+	switch outcome {
+	case "pass", "success", "done":
+	case "should_fix":
+		c = 1
+	case "fail", "failed":
+		c = 2
+	default:
+		return nil
+	}
+	return &c
 }
 
 func (p *Plugin) handleTaskDispatchPost(w http.ResponseWriter, r *http.Request) {
@@ -180,10 +331,3 @@ func (p *Plugin) handleTaskArtifactsGet(w http.ResponseWriter, r *http.Request) 
 	writeError(w, http.StatusNotImplemented, "not implemented")
 }
 
-func (p *Plugin) handleAgentPoll(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
-}
-
-func (p *Plugin) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
-}

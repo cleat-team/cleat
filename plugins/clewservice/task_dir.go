@@ -41,8 +41,7 @@ func (p *Plugin) writeTaskFile(taskID, filename string, data []byte, perm os.Fil
 	return atomicWrite(clean, data, perm)
 }
 
-// parseStatusMD extracts the phase from STATUS.md content.
-// Looks for "**Phase:** <phase>" in the markdown.
+// parseStatusMD extracts fields from STATUS.md content.
 func parseStatusMD(content []byte) TaskStatus {
 	s := TaskStatus{}
 	lines := strings.Split(string(content), "\n")
@@ -53,6 +52,9 @@ func parseStatusMD(content []byte) TaskStatus {
 		}
 		if strings.HasPrefix(trimmed, "**Phase Updated:**") {
 			s.PhaseUpdate = strings.TrimSpace(strings.TrimPrefix(trimmed, "**Phase Updated:**"))
+		}
+		if strings.HasPrefix(trimmed, "**Updated:**") {
+			s.Updated = strings.TrimSpace(strings.TrimPrefix(trimmed, "**Updated:**"))
 		}
 	}
 	if s.Phase == "" {
@@ -70,8 +72,8 @@ func buildStatusMD(status TaskStatus) []byte {
 	return []byte(content)
 }
 
-// patchStatusMD updates only the Phase and Phase Updated lines in an existing
-// STATUS.md, preserving all other content (review outcomes, history, etc.).
+// patchStatusMD updates only the Phase, Phase Updated, and Updated lines in an
+// existing STATUS.md, preserving all other content (review outcomes, history, etc.).
 func patchStatusMD(existing []byte, status TaskStatus) []byte {
 	if len(existing) == 0 {
 		return buildStatusMD(status)
@@ -79,6 +81,7 @@ func patchStatusMD(existing []byte, status TaskStatus) []byte {
 	lines := strings.Split(string(existing), "\n")
 	var out []string
 	foundPhase := false
+	foundPhaseUpdated := false
 	foundUpdated := false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
@@ -89,6 +92,11 @@ func patchStatusMD(existing []byte, status TaskStatus) []byte {
 			if status.PhaseUpdate != "" {
 				out = append(out, "**Phase Updated:** "+status.PhaseUpdate)
 			}
+			foundPhaseUpdated = true
+		} else if strings.HasPrefix(trimmed, "**Updated:**") {
+			if status.Updated != "" {
+				out = append(out, "**Updated:** "+status.Updated)
+			}
 			foundUpdated = true
 		} else {
 			out = append(out, line)
@@ -97,8 +105,11 @@ func patchStatusMD(existing []byte, status TaskStatus) []byte {
 	if !foundPhase {
 		out = append(out, "**Phase:** "+status.Phase)
 	}
-	if !foundUpdated && status.PhaseUpdate != "" {
+	if !foundPhaseUpdated && status.PhaseUpdate != "" {
 		out = append(out, "**Phase Updated:** "+status.PhaseUpdate)
+	}
+	if !foundUpdated && status.Updated != "" {
+		out = append(out, "**Updated:** "+status.Updated)
 	}
 	return []byte(strings.Join(out, "\n"))
 }

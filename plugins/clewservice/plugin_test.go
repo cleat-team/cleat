@@ -591,10 +591,10 @@ func TestStatusMDPreservation(t *testing.T) {
 		t.Fatal(err)
 	}
 	statusStr := string(statusData)
-	if !strings.Contains(statusStr, "Review Round 1: PASS") {
+	if !strings.Contains(statusStr, "**Review Round 1:** PASS") {
 		t.Errorf("STATUS.md did not preserve Review Round 1: %s", statusStr)
 	}
-	if !strings.Contains(statusStr, "Review Round 2: SHOULD_FIX") {
+	if !strings.Contains(statusStr, "**Review Round 2:** SHOULD_FIX") {
 		t.Errorf("STATUS.md did not preserve Review Round 2: %s", statusStr)
 	}
 	if !strings.Contains(statusStr, "Some notes here") {
@@ -644,5 +644,370 @@ func TestResultPhaseFromStatusMD(t *testing.T) {
 	if w2.Code != http.StatusOK {
 		t.Errorf("valid transition (STATUS.md queued→exploring): status %d, want 200 (body: %s)",
 			w2.Code, w2.Body.String())
+	}
+}
+
+// ── clew-133c tests ──
+
+func TestTaskGet(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+	mux := setupTestMux(t, p)
+
+	req := httptest.NewRequest("GET", "/api/tasks/clew-001", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/tasks/clew-001: status %d, want 200", w.Code)
+	}
+	var resp TaskDetailResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Task.ID != "clew-001" {
+		t.Errorf("Task.ID=%s, want clew-001", resp.Task.ID)
+	}
+	if resp.Status.Phase != "queued" {
+		t.Errorf("Status.Phase=%s, want queued", resp.Status.Phase)
+	}
+	if resp.Session == nil {
+		t.Error("Session is nil, want non-nil (session.json exists in setup)")
+	}
+}
+
+func TestTaskGetNotFound(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+	mux := setupTestMux(t, p)
+
+	req := httptest.NewRequest("GET", "/api/tasks/clew-999", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("GET /api/tasks/clew-999: status %d, want 404", w.Code)
+	}
+	var errResp ErrorResponse
+	json.NewDecoder(w.Body).Decode(&errResp)
+	if !strings.Contains(errResp.Error, "task not found") {
+		t.Errorf("error message: %q, want containing 'task not found'", errResp.Error)
+	}
+}
+
+func TestTaskGetNoSession(t *testing.T) {
+	p, root := setupTestPlugin(t)
+	os.MkdirAll(filepath.Join(root, "task_state", "clew-002"), 0755)
+	os.WriteFile(filepath.Join(root, "task_state", "clew-002", "STATUS.md"),
+		[]byte("# Status\n\n**Phase:** done\n"), 0644)
+
+	mux := setupTestMux(t, p)
+
+	req := httptest.NewRequest("GET", "/api/tasks/clew-002", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/tasks/clew-002: status %d, want 200", w.Code)
+	}
+	var resp TaskDetailResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.Task.ID != "clew-002" {
+		t.Errorf("Task.ID=%s, want clew-002", resp.Task.ID)
+	}
+	if resp.Session != nil {
+		t.Error("Session should be nil when session.json does not exist")
+	}
+}
+
+func TestTaskResultPostInvalidPhase(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+	mux := setupTestMux(t, p)
+
+	body := strings.NewReader(`{"phase":"bogus","outcome":"fail"}`)
+	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("POST result invalid phase: status %d, want 400", w.Code)
+	}
+	var errResp ErrorResponse
+	json.NewDecoder(w.Body).Decode(&errResp)
+	if !strings.Contains(errResp.Error, "invalid phase") {
+		t.Errorf("error message: %q, want containing 'invalid phase'", errResp.Error)
+	}
+}
+
+func TestTaskResultPostTokenCost(t *testing.T) {
+	p, root := setupTestPlugin(t)
+	mux := setupTestMux(t, p)
+
+	tasksPath := filepath.Join(root, "task_state", "tasks.json")
+	data, _ := os.ReadFile(tasksPath)
+	var tasksBefore TasksJSON
+	json.Unmarshal(data, &tasksBefore)
+	initialCost := tasksBefore.Tasks["clew-001"].Cost.SpentUSD
+
+	body := strings.NewReader(`{"phase":"exploring","outcome":"pass","token_usage":{"input":1000,"output":500}}`)
+	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST result token cost: status %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+
+	data, _ = os.ReadFile(tasksPath)
+	var tasksAfter TasksJSON
+	json.Unmarshal(data, &tasksAfter)
+	newCost := tasksAfter.Tasks["clew-001"].Cost.SpentUSD
+	if newCost <= initialCost {
+		t.Errorf("cost.spent_usd not incremented: before=%f, after=%f", initialCost, newCost)
+	}
+	expectedDelta := 0.0105
+	delta := newCost - initialCost
+	if delta < expectedDelta-0.001 || delta > expectedDelta+0.001 {
+		t.Errorf("cost delta=%f, want ~%f", delta, expectedDelta)
+	}
+}
+
+func TestTaskResultPostToTerminal(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+	mux := setupTestMux(t, p)
+
+	body := strings.NewReader(`{"phase":"failed","outcome":"fail"}`)
+	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST result to terminal: status %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["phase"] != "failed" {
+		t.Errorf("phase=%v, want failed", resp["phase"])
+	}
+}
+
+func TestTaskResultPostNotFound(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+	mux := setupTestMux(t, p)
+
+	body := strings.NewReader(`{"phase":"exploring","outcome":"pass"}`)
+	req := httptest.NewRequest("POST", "/api/tasks/clew-999/result", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("POST result not found: status %d, want 404", w.Code)
+	}
+}
+
+func TestAgentHeartbeat(t *testing.T) {
+	p, root := setupTestPlugin(t)
+	session := SessionJSON{
+		TaskID: "clew-001",
+		Status: "running",
+		Role:   "worker",
+	}
+	sessionData, _ := json.Marshal(session)
+	os.WriteFile(filepath.Join(root, "task_state", "clew-001", "session.json"), sessionData, 0644)
+
+	mux := setupTestMux(t, p)
+
+	body := strings.NewReader(`{"task_id":"clew-001","agent_id":"agent-42"}`)
+	req := httptest.NewRequest("POST", "/api/agent/heartbeat", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST heartbeat: status %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+
+	sessionData, err := os.ReadFile(filepath.Join(root, "task_state", "clew-001", "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated SessionJSON
+	json.Unmarshal(sessionData, &updated)
+	if updated.HeartbeatAt == "" {
+		t.Error("heartbeat_at is empty, want non-empty RFC 3339 timestamp")
+	}
+	if updated.AgentID != "agent-42" {
+		t.Errorf("agent_id=%s, want agent-42", updated.AgentID)
+	}
+	if updated.Role != "worker" {
+		t.Errorf("role=%s, want worker (should be preserved)", updated.Role)
+	}
+}
+
+func TestAgentHeartbeatNoSession(t *testing.T) {
+	p, root := setupTestPlugin(t)
+	os.Remove(filepath.Join(root, "task_state", "clew-001", "session.json"))
+
+	mux := setupTestMux(t, p)
+
+	body := strings.NewReader(`{"task_id":"clew-001"}`)
+	req := httptest.NewRequest("POST", "/api/agent/heartbeat", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("POST heartbeat no session: status %d, want 404 (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestAgentPollBasic(t *testing.T) {
+	p, root := setupTestPlugin(t)
+	os.Remove(filepath.Join(root, "task_state", "clew-001", "session.json"))
+
+	mux := setupTestMux(t, p)
+
+	req := httptest.NewRequest("GET", "/api/agent/poll", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/agent/poll: status %d, want 200", w.Code)
+	}
+	var resp PollResponse
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp.TaskID != "clew-001" {
+		t.Errorf("poll task_id=%s, want clew-001", resp.TaskID)
+	}
+	if resp.Priority != 1 {
+		t.Errorf("poll priority=%d, want 1", resp.Priority)
+	}
+	if resp.Subject == "" {
+		t.Error("poll subject is empty")
+	}
+	if resp.TaskPath != "task_state/clew-001" {
+		t.Errorf("poll task_path=%s, want task_state/clew-001", resp.TaskPath)
+	}
+}
+
+func TestAgentPollSkipsActive(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+	// clew-001 has session.json, so it is skipped. clew-002 is done, so no
+	// eligible queued tasks remain -> 204.
+	mux := setupTestMux(t, p)
+
+	req := httptest.NewRequest("GET", "/api/agent/poll", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNoContent {
+		t.Errorf("GET /api/agent/poll with active session: status %d, want 204", w.Code)
+	}
+}
+
+func TestTaskResultPost(t *testing.T) {
+	p, root := setupTestPlugin(t)
+	mux := setupTestMux(t, p)
+
+	// Write session.json before result POST.
+	session := SessionJSON{TaskID: "clew-001", Status: "running", Phase: "queued"}
+	sessionData, _ := json.MarshalIndent(session, "", "  ")
+	sessionData = append(sessionData, '\n')
+	os.WriteFile(filepath.Join(root, "task_state", "clew-001", "session.json"), sessionData, 0644)
+
+	body := strings.NewReader(`{"phase":"exploring","outcome":"pass","token_usage":{"input":1000,"output":500}}`)
+	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST /api/tasks/clew-001/result: status %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+
+	// Verify STATUS.md was updated on disk.
+	statusData, err := os.ReadFile(filepath.Join(root, "task_state", "clew-001", "STATUS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(statusData), "**Phase:** exploring") {
+		t.Errorf("STATUS.md should contain exploring, got: %s", string(statusData))
+	}
+
+	// Verify tasks.json entry status updated.
+	tasksData, _ := os.ReadFile(filepath.Join(root, "task_state", "tasks.json"))
+	var tasks TasksJSON
+	json.Unmarshal(tasksData, &tasks)
+	if tasks.Tasks["clew-001"].Status != "exploring" {
+		t.Errorf("tasks.json status=%s, want exploring", tasks.Tasks["clew-001"].Status)
+	}
+
+	// Verify session.json was updated with result fields.
+	sessData, _ := os.ReadFile(filepath.Join(root, "task_state", "clew-001", "session.json"))
+	var updatedSession SessionJSON
+	json.Unmarshal(sessData, &updatedSession)
+	if updatedSession.Phase != "exploring" {
+		t.Errorf("session.phase=%s, want exploring", updatedSession.Phase)
+	}
+	if updatedSession.ExitCode == nil || *updatedSession.ExitCode != 0 {
+		t.Errorf("session.exit_code should be 0, got %v", updatedSession.ExitCode)
+	}
+	if updatedSession.TokenUsage == nil || *updatedSession.TokenUsage != 1500 {
+		t.Errorf("session.token_usage should be 1500, got %v", updatedSession.TokenUsage)
+	}
+}
+
+func TestTaskResultPostInvalidTransition(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+	mux := setupTestMux(t, p)
+
+	body := strings.NewReader(`{"phase":"planning","outcome":"pass"}`)
+	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("POST queued->planning: status %d, want 400", w.Code)
+	}
+	var errResp ErrorResponse
+	json.NewDecoder(w.Body).Decode(&errResp)
+	if !strings.Contains(errResp.Error, "invalid transition") {
+		t.Errorf("error=%q, want contains 'invalid transition'", errResp.Error)
+	}
+}
+
+func TestCanTransition(t *testing.T) {
+	tests := []struct {
+		from, to string
+		want     bool
+	}{
+		// Valid +1 forward steps.
+		{"queued", "exploring", true},
+		{"exploring", "planning", true},
+		{"planning", "plan_review", true},
+		{"plan_review", "implementing", true},
+		{"implementing", "impl_review", true},
+		{"impl_review", "done", true},
+		// Skip steps (invalid).
+		{"queued", "planning", false},
+		{"queued", "implementing", false},
+		{"exploring", "plan_review", false},
+		// From terminal to any valid phase.
+		{"failed", "queued", true},
+		{"failed", "exploring", true},
+		{"blocked", "implementing", true},
+		{"waiting_on_children", "done", true},
+		// Any phase to terminal.
+		{"queued", "failed", true},
+		{"exploring", "blocked", true},
+		{"implementing", "waiting_on_children", true},
+		// Invalid target phase.
+		{"queued", "bogus", false},
+		{"failed", "nonexistent", false},
+		// Backwards (invalid).
+		{"exploring", "queued", false},
+		{"done", "impl_review", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.from+"->"+tc.to, func(t *testing.T) {
+			got := CanTransition(tc.from, tc.to)
+			if got != tc.want {
+				t.Errorf("CanTransition(%s, %s) = %v, want %v", tc.from, tc.to, got, tc.want)
+			}
+		})
 	}
 }
