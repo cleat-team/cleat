@@ -2242,15 +2242,20 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 
 		if rec.EventType != EventTypeCall {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, service, operation, rec.Service, rec.Op)
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, service, operation, rec.Service, rec.Op,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
