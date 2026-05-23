@@ -31,6 +31,20 @@ import (
 // maxAttempts, preventing a misconfigured WASM module from retrying forever.
 const MaxRetryAttempts = 100
 
+// maxPayloadLen limits payload text included in divergence error messages
+// to prevent log explosion. Full content is represented by its SHA-256 hash.
+const maxPayloadLen = 4096
+
+// truncateWithHash truncates s to maxLen bytes, appending "... [sha256=<hash>]"
+// if truncation occurred. Returns s unchanged if len(s) <= maxLen.
+func truncateWithHash(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	h := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%s... [sha256=%x]", s[:maxLen], h)
+}
+
 // EventType classifies event history records.
 type EventType string
 
@@ -1740,15 +1754,20 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 
 		if rec.EventType != EventTypeCall {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, service, operation, rec.Service, rec.Op)
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, service, operation, rec.Service, rec.Op,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
@@ -1798,15 +1817,22 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 
 		if rec.EventType != EventTypePluginCall {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s.\n  actual input: %s\n  expected (cached) input: %s\n  expected (cached) output: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType,
+				truncateWithHash(inputJSON, maxPayloadLen),
+				truncateWithHash(rec.PluginInput, maxPayloadLen),
+				truncateWithHash(rec.PluginOutput, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.PluginName != pluginName || rec.PluginFunc != functionName {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc)
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s.\n  actual input: %s\n  expected (cached) input: %s\n  expected (cached) output: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc,
+				truncateWithHash(inputJSON, maxPayloadLen),
+				truncateWithHash(rec.PluginInput, maxPayloadLen),
+				truncateWithHash(rec.PluginOutput, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
@@ -2909,7 +2935,20 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 
 		if rec.EventType != EventTypeAwaitAllChildren {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s.\n  actual run IDs: %s\n  expected run IDs: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType,
+				truncateWithHash(runIDsJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
+			written, _ := s.writeResult(ctx, m, resultsPtr, errMsg, resultsMaxLen)
+			return packAwaitChildResult(uint32(written), 1)
+		}
+
+		if runIDsJSON != rec.Request {
+			replayFailuresTotal.Inc()
+			errMsg := fmt.Sprintf("replay divergence at step %d: await_all_children run IDs mismatch.\n  actual run IDs: %s\n  expected run IDs: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step,
+				truncateWithHash(runIDsJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, resultsPtr, errMsg, resultsMaxLen)
 			return packAwaitChildResult(uint32(written), 1)
 		}
@@ -4153,8 +4192,16 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			s.stepCount++
-			if rec.EventType != EventTypeFetch || rec.FetchMethod != method || rec.FetchURL != url {
-				written, _ := s.writeResult(ctx, m, responsePtr, "replay divergence", responseMaxLen)
+			if rec.EventType != EventTypeFetch || rec.FetchMethod != method || rec.FetchURL != url || rec.FetchBody != body {
+				replayFailuresTotal.Inc()
+				errMsg := fmt.Sprintf("replay divergence at step %d: Fetch mismatch.\n  workflow: %s %s\n  history: %s %s\n  actual body: %s\n  expected body: %s\n  expected response: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+					rec.Step,
+					method, url,
+					rec.FetchMethod, rec.FetchURL,
+					truncateWithHash(body, maxPayloadLen),
+					truncateWithHash(rec.FetchBody, maxPayloadLen),
+					truncateWithHash(rec.FetchResponse, maxPayloadLen))
+				written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 				return packSimpleResult(1, written)
 			}
 			if rec.Err != "" {

@@ -2,7 +2,9 @@ package host
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -232,23 +234,53 @@ func TestEngineReplayDivergence(t *testing.T) {
 		t.Fatalf("Execute: %v", err)
 	}
 
-	// Tamper with history to cause divergence: change the first
-	// service name. The Engine returns this as an error response
-	// to the workflow via cleat_call (not as a Replay error).
-	if len(history) > 0 {
-		history[0].Service = "different_service"
+	if len(history) == 0 {
+		t.Skip("WASM execution returned empty history; cannot test divergence (pre-existing environment issue)")
 	}
 
-	caller2 := &mockCaller{}
-	engine2 := NewEngine(rt, caller2, WithBackend("go", backend))
-	result, _, _, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, history)
-	if err != nil {
-		t.Logf("Replay error (expected if divergence bails out): %v", err)
-	}
-	// The result should contain the divergence error message.
-	if result != "" && !strings.Contains(result, "divergence") && !strings.Contains(result, "error") {
-		t.Logf("Replay result (no explicit divergence, may have exited_replay): %s", result)
-	}
+	t.Run("event_type_mismatch_enriched", func(t *testing.T) {
+		hist := make([]EventRecord, len(history))
+		copy(hist, history)
+		if len(hist) > 0 {
+			hist[0].EventType = "sleep"
+		}
+		caller := &mockCaller{}
+		engine := NewEngine(rt, caller, WithBackend("go", backend))
+		result, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, hist)
+		if err != nil {
+			t.Logf("Replay error (expected): %v", err)
+		}
+		if result == "" {
+			t.Error("expected divergence error result, got empty")
+		}
+		for _, label := range []string{"actual request:", "expected request:", "[sha256="} {
+			if !strings.Contains(result, label) {
+				t.Errorf("result missing %q: %s", label, result)
+			}
+		}
+	})
+
+	t.Run("service_mismatch_enriched", func(t *testing.T) {
+		hist := make([]EventRecord, len(history))
+		copy(hist, history)
+		if len(hist) > 0 {
+			hist[0].Service = "different_service"
+		}
+		caller := &mockCaller{}
+		engine := NewEngine(rt, caller, WithBackend("go", backend))
+		result, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, hist)
+		if err != nil {
+			t.Logf("Replay error (expected if divergence bails out): %v", err)
+		}
+		if result == "" {
+			t.Error("expected divergence error result, got empty")
+		}
+		for _, label := range []string{"actual request:", "expected request:", "[sha256="} {
+			if !strings.Contains(result, label) {
+				t.Errorf("result missing %q: %s", label, result)
+			}
+		}
+	})
 }
 
 func TestEngineExecuteCancelOrder(t *testing.T) {
@@ -1093,4 +1125,89 @@ func buildTestWasm(t *testing.T) string {
 	}
 	t.Fatalf("no .wasm file found in %s", tmpDir)
 	return ""
+}
+
+func TestTruncateWithHash(t *testing.T) {
+	t.Run("no_truncation", func(t *testing.T) {
+		result := truncateWithHash("hello", 10)
+		if result != "hello" {
+			t.Errorf("expected 'hello', got %q", result)
+		}
+	})
+
+	t.Run("equal_length", func(t *testing.T) {
+		result := truncateWithHash("hello", 5)
+		if result != "hello" {
+			t.Errorf("expected 'hello', got %q", result)
+		}
+	})
+
+	t.Run("truncation", func(t *testing.T) {
+		result := truncateWithHash("hello world", 5)
+		if !strings.HasPrefix(result, "hello") {
+			t.Errorf("expected prefix 'hello', got %q", result)
+		}
+		if !strings.Contains(result, "... [sha256=") {
+			t.Errorf("expected sha256 suffix, got %q", result)
+		}
+		// Verify the hash is correct (64 hex chars)
+		hashStart := strings.Index(result, "[sha256=")
+		if hashStart < 0 {
+			t.Fatal("sha256 marker not found")
+		}
+		hashEnd := strings.Index(result[hashStart:], "]")
+		if hashEnd < 0 {
+			t.Fatal("closing bracket not found")
+		}
+		hashHex := result[hashStart+8 : hashStart+hashEnd]
+		if len(hashHex) != 64 {
+			t.Errorf("expected 64 hex chars, got %d: %q", len(hashHex), hashHex)
+		}
+		expectedHash := fmt.Sprintf("%x", sha256.Sum256([]byte("hello world")))
+		if hashHex != expectedHash {
+			t.Errorf("hash mismatch: got %s, expected %s", hashHex, expectedHash)
+		}
+	})
+
+	t.Run("empty_string", func(t *testing.T) {
+		result := truncateWithHash("", 10)
+		if result != "" {
+			t.Errorf("expected empty string, got %q", result)
+		}
+	})
+
+	t.Run("exact_maxlen", func(t *testing.T) {
+		s := strings.Repeat("a", 4096)
+		result := truncateWithHash(s, 4096)
+		if result != s {
+			t.Errorf("expected unchanged string, got different result")
+		}
+	})
+
+	t.Run("one_over_maxlen", func(t *testing.T) {
+		s := strings.Repeat("a", 4097)
+		result := truncateWithHash(s, 4096)
+		if !strings.HasPrefix(result, strings.Repeat("a", 4096)) {
+			t.Errorf("expected 4096 'a' prefix")
+		}
+		if !strings.Contains(result, "... [sha256=") {
+			t.Errorf("expected sha256 suffix, got %q", result)
+		}
+	})
+
+	t.Run("unicode_bytes", func(t *testing.T) {
+		// Go len counts bytes; 3-byte UTF-8 characters
+		s := "你好世界！" // 5 chars, 15 bytes (3 bytes each)
+		result := truncateWithHash(s, 10)
+		if len(result) <= 10 {
+			t.Errorf("expected result longer than 10 bytes due to hash suffix, got len %d", len(result))
+		}
+		if !strings.Contains(result, "... [sha256=") {
+			t.Errorf("expected sha256 suffix, got %q", result)
+		}
+		// The truncated portion should be the first 10 bytes
+		if !strings.HasPrefix(result, s[:10]) {
+			t.Errorf("expected prefix to be first 10 bytes of input")
+		}
+	})
 }
