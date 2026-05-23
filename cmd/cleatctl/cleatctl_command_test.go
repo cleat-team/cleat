@@ -37,6 +37,7 @@ type mockStore struct {
 	appendEventHistoryFn               func(ctx context.Context, workflowID string, rec host.EventRecord) error
 	appendEventHistoryBatchFn          func(ctx context.Context, workflowID string, recs []host.EventRecord) error
 	loadWASMFn                         func(ctx context.Context, defName string, defVersion int) ([]byte, error)
+	getWASMLengthFn                    func(ctx context.Context, defName string, defVersion int) (int64, error)
 	listVersionsFn                     func(ctx context.Context, defName string) ([]int, error)
 	heartbeatFn                        func(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
 	batchHeartbeatFn                   func(ctx context.Context, workerID string) (int64, error)
@@ -136,6 +137,13 @@ func (m *mockStore) LoadWASM(ctx context.Context, defName string, defVersion int
 		return m.loadWASMFn(ctx, defName, defVersion)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
+	if m.getWASMLengthFn != nil {
+		return m.getWASMLengthFn(ctx, defName, defVersion)
+	}
+	return 0, nil
 }
 
 func (m *mockStore) ListVersions(ctx context.Context, defName string) ([]int, error) {

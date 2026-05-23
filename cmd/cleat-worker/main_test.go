@@ -116,17 +116,17 @@ func TestDetermineEntryPoint(t *testing.T) {
 		input json.RawMessage
 		want  string
 	}{
-		{"nil input", nil, "handle_incident"},
-		{"empty JSON", json.RawMessage(""), "handle_incident"},
-		{"empty object", json.RawMessage("{}"), "handle_incident"},
+		{"nil input", nil, ""},
+		{"empty JSON", json.RawMessage(""), ""},
+		{"empty object", json.RawMessage("{}"), ""},
 		{"with entry point", json.RawMessage(`{"__entry_point":"myfunc"}`), "myfunc"},
 		{"with entry point and other fields", json.RawMessage(`{"__entry_point":"handler","order_id":"abc"}`), "handler"},
 		{"case sensitivity", json.RawMessage(`{"__entry_point":"handle_incident"}`), "handle_incident"},
-		{"empty entry point value", json.RawMessage(`{"__entry_point":""}`), "handle_incident"},
+		{"empty entry point value", json.RawMessage(`{"__entry_point":""}`), ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := determineEntryPoint(tt.input)
+			got := determineEntryPoint(tt.input, nil)
 			if got != tt.want {
 				t.Errorf("determineEntryPoint(%s) = %q, want %q", string(tt.input), got, tt.want)
 			}
