@@ -9,15 +9,10 @@ package cleat:host-calls;
 interface durable-call {
     /// Make a durable (deterministically replayed) call to an external service.
     durable-call: func(
-        service-ptr: u32,
-        service-len: u32,
-        operation-ptr: u32,
-        operation-len: u32,
-        request-ptr: u32,
-        request-len: u32,
-        response-ptr: u32,
-        response-max-len: u32,
-    ) -> u64;
+        service: string,
+        operation: string,
+        request: string,
+    ) -> string;
 
     /// Make a durable call with server-side retry policy.
     durable-call-retry: func(

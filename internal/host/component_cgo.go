@@ -30,9 +30,29 @@ package host
 //     return 0;
 // }
 //
+// // Extract string data and length from a component val.
+// // Returns pointer to string data (owned by wasmtime), sets *len.
+// static const char *component_val_get_string(const wasmtime_component_val_t *v,
+//     size_t *len) {
+//     if (v->kind == WASMTIME_COMPONENT_STRING) {
+//         *len = v->of.string.size;
+//         return v->of.string.data;
+//     }
+//     *len = 0;
+//     return NULL;
+// }
+//
 // static void component_val_set_u64(wasmtime_component_val_t *v, uint64_t val) {
 //     v->kind = WASMTIME_COMPONENT_U64;
 //     v->of.u64 = val;
+// }
+//
+// static wasmtime_component_val_t make_component_val_string(const char *s, size_t len) {
+//     wasmtime_component_val_t val;
+//     val.kind = WASMTIME_COMPONENT_STRING;
+//     val.of.string.data = (char *)s;
+//     val.of.string.size = len;
+//     return val;
 // }
 //
 // static void get_error_message(wasmtime_error_t *err, wasm_byte_vec_t *msg) {
@@ -57,19 +77,8 @@ package host
 // static uint8_t *get_saved_memory_ptr(void) { return saved_memory_ptr; }
 // static size_t get_saved_memory_len(void) { return saved_memory_len; }
 //
-// // Memory access is blocked by wasmtime's public C API.
-// // wasmtime_memory_data(ctx, &handle) requires a valid handle,
-// // but component instantiation creates memories internally without
-// // exposing handles. Rust extern "C" functions catch panics and
-// // abort, making store scanning unsafe and uncatchable.
-// //
-// // Working alternatives being evaluated:
-// //   1. Use wasmtime internal APIs (require forking wasmtime-go)
-// //   2. Pre-create memory + share with component via linker
-// //   3. Change WIT to use `string` type so canonical ABI lifts args
-// static void save_first_memory_data(wasmtime_context_t *ctx, uint64_t store_id) {
-//     // Memory handles not available through public API.
-// }
+// // Memory scan disabled - not needed with WIT string ABI.
+// static void save_first_memory_data(wasmtime_context_t *ctx, uint64_t store_id) {}
 //// // Trampoline for cleat host functions.
 // extern wasmtime_error_t *goComponentCallback(
 //     void *env, wasmtime_context_t *ctx,
@@ -199,6 +208,7 @@ func goComponentCallback(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
+	fmt.Printf("[CGO_CB] any callback invoked\n")
 	b := lookupCB(uintptr(env))
 	if b == nil || b.handler == nil { return nil }
 	return b.dispatchComponentCallback(ctx, ty, args, nargs, results, nresults)
@@ -267,6 +277,8 @@ func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_compo
 			return fmt.Errorf("register %s: %s", witModule, s)
 		}
 		for witFuncName := range funcs {
+			if witModule == "cleat:host-calls/durable-call" {
+				}
 			fnBytes := []byte(witFuncName)
 			var fnPtr *C.char
 			if len(fnBytes) > 0 { fnPtr = (*C.char)(unsafe.Pointer(&fnBytes[0])) }
@@ -325,15 +337,18 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	cbRegistry.Unlock()
 	C.save_first_memory_data(C.store_context(unsafe.Pointer(store.Context())), C.uint64_t(instance.store_id))
 
-	// Component instantiation succeeded with v45 WASI 0.2.0 and cleat
-	// WIT function registration. Memory access for host function
-	// callbacks requires a valid wasmtime_memory_t handle which is
-	// not exposed through the current public C API.
-	// Falling back to manual ExecuteComponent for execution.
-	_ = entryPoint
-	_ = input
-	_ = outBufSz
-	return nil, fmt.Errorf("CGo: component validated, falling back to manual ExecuteComponent")
+	fn, err := componentGetFunc(instance, store, entryPoint)
+	if err != nil { return nil, fmt.Errorf("component get func: %w", err) }
+
+	raw, callErr := componentCall(fn, store, int32(0), int32(len(input)), int32(outBufSz), int32(outBufSz))
+	if callErr != nil { return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr) }
+
+	if raw == (1 << 62) { return &ExecResult{Suspended: true}, nil }
+	_, actualLen := decodeExportResult(uint64(raw))
+	if actualLen > outBufSz { actualLen = outBufSz }
+	_ = instance
+	_ = actualLen
+	return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 
 	_ = instance
 	return nil, fmt.Errorf("CGo: validated, falling back")

@@ -3,11 +3,18 @@
 """
 Service call operations: recorded, retried, or heartbeated.
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
 
 
 
-
-def durable_call(service_ptr: int, service_len: int, operation_ptr: int, operation_len: int, request_ptr: int, request_len: int, response_ptr: int, response_max_len: int) -> int:
+def durable_call(service: str, operation: str, request: str) -> str:
     """
     Make a durable (deterministically replayed) call to an external service.
     """

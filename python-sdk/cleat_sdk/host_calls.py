@@ -1405,14 +1405,9 @@ class HostCalls:
             )
         else:
             result = _import_cleat_call(
-                SCRATCH_BASE,
-                svc_len,
-                op_offset,
-                op_len,
-                req_offset,
-                req_len,
-                OUTPUT_OFFSET,
-                OUT_BUF_SIZE,
+                service,
+                operation,
+                req_str,
             )
 
         response_len, call_error_code, err_code = decode_cleat_call_result(result)
