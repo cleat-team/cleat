@@ -2380,8 +2380,11 @@ func (b *wasmtimeBackend) perExportRoute(store wasmtime.Storelike, cm *wasmtime.
 		}
 		fieldName := *namePtr
 
-		// Skip host module names (handled by registerAllImports + traps).
-		if modName == "env" || modName == "wasi_snapshot_preview1" || modName == "teavm" {
+		// Skip WASI and teavm (handled by registerAllImports).
+		// "env" imports are NOT skipped — some have prefixed
+		// names like libpython3.14.so:memory_base that need
+		// suffix matching from other instances.
+		if modName == "wasi_snapshot_preview1" || modName == "teavm" {
 			continue
 		}
 
