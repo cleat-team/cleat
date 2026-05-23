@@ -1983,6 +1983,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
+		log.Printf("[store] enforceParentClosePolicy: begin TERMINATE tx: %v", err)
 		return
 	}
 	defer tx.Rollback()
@@ -1997,6 +1998,7 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 
 	tx2, err := s.beginTxWithRLS(ctx)
 	if err != nil {
+		log.Printf("[store] enforceParentClosePolicy: begin REQUEST_CANCEL tx: %v", err)
 		return
 	}
 	defer tx2.Rollback()
@@ -2015,6 +2017,7 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 func (s *PostgresStore) wakeParent(ctx context.Context, childID string) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
+		log.Printf("[store] wakeParent: begin tx: %v", err)
 		return
 	}
 	defer tx.Rollback()
