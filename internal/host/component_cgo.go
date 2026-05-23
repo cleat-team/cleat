@@ -2,7 +2,8 @@
 
 package host
 
-// #cgo CFLAGS:-I/home/rcownie/go/pkg/mod/github.com/bytecodealliance/wasmtime-go/v44@v44.0.0/build/include
+// #cgo CFLAGS:-I/tmp/wasmtime-v45/wasmtime-v45.0.0-x86_64-linux-c-api/include -I/home/rcownie/go/pkg/mod/github.com/bytecodealliance/wasmtime-go/v44@v44.0.0/build/include
+// #cgo linux,amd64 LDFLAGS:-L/tmp/wasmtime-v45/wasmtime-v45.0.0-x86_64-linux-c-api/lib -lwasmtime -lm -ldl -pthread
 // #include <wasmtime.h>
 // #include <wasmtime/component/component.h>
 // #include <wasmtime/component/linker.h>
@@ -56,35 +57,25 @@ package host
 // static uint8_t *get_saved_memory_ptr(void) { return saved_memory_ptr; }
 // static size_t get_saved_memory_len(void) { return saved_memory_len; }
 //
+// // Memory access is the remaining gap. The wasmtime C API provides
+// // wasmtime_memory_data(ctx, &mem) to read linear memory, but requires
+// // a valid wasmtime_memory_t handle. Component instantiation creates
+// // memories internally that are not exposed through the public API.
+// // Scanning store indices crashes wasmtime (Rust panic, uncatchable).
+// //
+// // Solutions being investigated:
+// //   1. wasmtime C API for store object enumeration (not in public API)
+// //   2. Pre-creating memory with wasmtime_memory_new and sharing it
+// //      with the component via the linker
+// //   3. Accessing store internals through the Go store object
 // static void save_first_memory_data(wasmtime_context_t *ctx, uint64_t store_id) {
-//     if (saved_memory_ptr != NULL) return; // already found
-//     for (uint32_t idx = 1; idx < 2000; idx++) {
-//         wasmtime_memory_t mem;
-//         memset(&mem, 0, sizeof(mem));
-//         mem.store_id = store_id;
-//         mem.__private1 = idx;
-//         uint8_t *ptr = wasmtime_memory_data(ctx, &mem);
-//         if (ptr != NULL) {
-//             saved_memory_ptr = ptr;
-//             saved_memory_len = wasmtime_memory_data_size(ctx, &mem);
-//             return;
-//         }
-//     }
+//     // Memory access is not available through the current wasmtime C API.
+//     // The component creates its own memories internally during
+//     // instantiation, and there is no public function to enumerate
+//     // them. wasmtime_memory_data requires a valid handle, which we
+//     // cannot obtain without unsafe store scanning.
 // }
-//
-// // Helper to create an empty list-of-tuples result for get-environment.
-// static void set_empty_list_result(wasmtime_component_val_t *result) {
-//     result->kind = WASMTIME_COMPONENT_LIST;
-//     result->of.list.size = 0;
-//     result->of.list.data = NULL;
-// }
-//
-// // Trampoline for cleat host functions.
-// extern wasmtime_error_t *goWasiCallback(
-//     void *env, wasmtime_context_t *ctx,
-//     wasmtime_component_func_type_t *ty,
-//     wasmtime_component_val_t *args, size_t nargs,
-//     wasmtime_component_val_t *results, size_t nresults);
+//// // Trampoline for cleat host functions.
 // extern wasmtime_error_t *goComponentCallback(
 //     void *env, wasmtime_context_t *ctx,
 //     wasmtime_component_func_type_t *ty,
@@ -264,20 +255,6 @@ func (b *wasmtimeBackend) dispatchComponentCallback(
 
 
 // -- register cleat WIT functions in component linker -------------------------
-//export goWasiCallback
-func goWasiCallback(
-	env unsafe.Pointer, ctx *C.wasmtime_context_t,
-	ty *C.wasmtime_component_func_type_t,
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	// Return empty list for get-environment.
-	if int(nresults) > 0 {
-		resultsPtr := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
-		C.set_empty_list_result(resultsPtr)
-	}
-	return nil
-}
 
 func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_component_linker_t) error {
 	root := C.wasmtime_component_linker_root(linker)
@@ -332,17 +309,11 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 
 	C.wasmtime_component_linker_allow_shadowing(linker, true)
 
-	// Manually register wasi:cli/environment@0.2.0 (v44 add_wasip2 bug).
-	root := C.wasmtime_component_linker_root(linker)
-	if root != nil {
-		envName := C.CString("wasi:cli/environment@0.2.0")
-		var envInst *C.wasmtime_component_linker_instance_t
-		if envErr := C.wasmtime_component_linker_instance_add_instance(root, envName, C.size_t(len("wasi:cli/environment@0.2.0")), &envInst); envErr == nil {
-			fnName := C.CString("get-environment")
-			C.wasmtime_component_linker_instance_add_func(envInst, fnName, C.size_t(len("get-environment")), C.wasmtime_component_func_callback_t(C.goWasiCallback), nil, nil)
-			C.free(unsafe.Pointer(fnName))
-		}
-		C.free(unsafe.Pointer(envName))
+	if wasiErr := C.wasmtime_component_linker_add_wasip2(linker); wasiErr != nil {
+		var msg C.wasm_byte_vec_t; C.get_error_message(wasiErr, &msg)
+		s := C.GoStringN(msg.data, C.int(msg.size))
+		C.wasm_byte_vec_delete(&msg); C.wasmtime_error_delete(wasiErr)
+		return nil, fmt.Errorf("wasi add: %s", s)
 	}
 
 	if err := b.registerCleatComponentImports(linker); err != nil {
@@ -359,23 +330,16 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	cbRegistry.Unlock()
 	C.save_first_memory_data(C.store_context(unsafe.Pointer(store.Context())), C.uint64_t(instance.store_id))
 
-	fn, err := componentGetFunc(instance, store, entryPoint)
-	if err != nil { return nil, fmt.Errorf("component get func: %w", err) }
+	// Component instantiation succeeded with v45 WASI 0.2.0 and cleat
+	// WIT function registration. Memory access for host function
+	// callbacks requires a valid wasmtime_memory_t handle which is
+	// not exposed through the current public C API.
+	// Falling back to manual ExecuteComponent for execution.
+	_ = entryPoint
+	_ = input
+	_ = outBufSz
+	return nil, fmt.Errorf("CGo: component validated, falling back to manual ExecuteComponent")
 
-	raw, callErr := componentCall(fn, store, int32(0), int32(len(input)), int32(outBufSz), int32(outBufSz))
-	if callErr != nil { return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr) }
-
-	if raw == (1 << 62) { return &ExecResult{Suspended: true}, nil }
-
-	_, actualLen := decodeExportResult(uint64(raw))
-	if actualLen > outBufSz { actualLen = outBufSz }
 	_ = instance
-
-	// Try reading output from memory.
-	if C.get_saved_memory_ptr() != nil && C.get_saved_memory_len() > 0 {
-		outBytes := C.GoBytes(unsafe.Pointer(C.get_saved_memory_ptr()), C.int(outBufSz))
-		return &ExecResult{Result: string(outBytes), Suspended: false}, nil
-	}
-
-	return &ExecResult{Result: `"ok"`, Suspended: false}, nil
+	return nil, fmt.Errorf("CGo: validated, falling back")
 }
