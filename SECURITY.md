@@ -166,6 +166,16 @@ The PostgreSQL database is a critical trust component:
 - **Data integrity**: Event history, workflow definitions, and workflow state are
   stored in PostgreSQL. Corruption or unauthorized modification of this data
   could lead to incorrect workflow execution, replay divergence, or data leakage.
+- **Event history checksum verification** (enabled by default): Each event in the
+  history carries a SHA-256 checksum that chains to the previous event, forming a
+  tamper-evident hash chain. On every workflow replay, the worker verifies the
+  entire chain from the first event to the latest. If any checksum does not match
+  (indicating tampering, corruption, or a partial write), the replay is aborted
+  with an error. This protects against database-level tampering, storage corruption,
+  and WAL replay corruption. Verification can be disabled with
+  `--disable-checksum-verification` for bulk replay or performance-sensitive
+  environments, but this removes the ability to detect tampered event history
+  and could lead to silent replay divergence.
 - **Injection vectors**: Workflow inputs and signal payloads pass through
   PostgreSQL as JSONB. While JSONB is typed and parameterized queries are used,
   any SQL injection in event history processing would compromise the entire

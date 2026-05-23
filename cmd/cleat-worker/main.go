@@ -128,9 +128,15 @@ func main() {
 	maxQuotaChildren := flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
 	maxQuotaConcurrencyKeys := flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
 
+	// Max wall-clock duration per workflow execution.
+	maxWorkflowDuration := flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
+
 	// Health check interval for watchdog.
 	healthCheckInterval := flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
 	maxPluginConnections := flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
+
+	otelEndpoint := flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
+	otelDisabled := flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
 
 	flag.Parse()
 
@@ -140,6 +146,12 @@ func main() {
 
 	workerID := generateWorkerID()
 	log.Printf("[worker %s] Starting with concurrency=%d", workerID, *concurrency)
+
+	if *disableChecksumVerification {
+		log.Printf("[worker %s] Event history checksum verification: DISABLED", workerID)
+	} else {
+		log.Printf("[worker %s] Event history checksum verification: enabled (--disable-checksum-verification to opt out)", workerID)
+	}
 
 	// Handle --generate-api-key (standalone mode: generate key and exit).
 	if *generateAPIKeyFor != "" {
@@ -177,6 +189,9 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	shutdownTelemetry := setupTelemetry(ctx, *otelEndpoint, *otelDisabled, workerID)
+	defer shutdownTelemetry()
 
 	taskQueues := strings.Split(*taskQueuesStr, ",")
 
@@ -674,6 +689,7 @@ func main() {
 
 	w := &Worker{
 		id:                          workerID,
+		logger:                      logger,
 		store:                       store,
 		concurrency:                 *concurrency,
 		heartbeatInterval:           *heartbeatInterval,
@@ -700,6 +716,7 @@ func main() {
 		maxQuotaEvents:              *maxQuotaEvents,
 		maxQuotaChildren:            *maxQuotaChildren,
 		maxQuotaConcurrencyKeys:     *maxQuotaConcurrencyKeys,
+		maxWorkflowDuration:         *maxWorkflowDuration,
 		healthCheckInterval:         *healthCheckInterval,
 		encryption:                  payloadEncryption,
 		encryptSensitivePayloads:    *encryptSensitivePayloads,
@@ -976,6 +993,7 @@ type loopContext struct {
 
 type Worker struct {
 	id                   string
+	logger               *slog.Logger
 	store                host.WorkflowStore
 	concurrency          int
 	heartbeatInterval    time.Duration
@@ -1029,6 +1047,9 @@ type Worker struct {
 	maxQuotaEvents          int
 	maxQuotaChildren        int
 	maxQuotaConcurrencyKeys int
+
+	// Maximum wall-clock duration per workflow execution (0 = no limit).
+	maxWorkflowDuration time.Duration
 
 	// Health check interval for watchdog.
 	healthCheckInterval time.Duration
@@ -1532,7 +1553,8 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithMaxQuotaEvents(w.maxQuotaEvents),
 		host.WithMaxQuotaChildren(w.maxQuotaChildren),
 		host.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
-	}
+			host.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
+		}
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
 	if cks, ok := w.store.(host.ConcurrencyKeyStore); ok {
