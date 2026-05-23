@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -30,6 +30,20 @@ import (
 // MaxRetryAttempts is the worker-enforced ceiling for DurableCallWithRetry
 // maxAttempts, preventing a misconfigured WASM module from retrying forever.
 const MaxRetryAttempts = 100
+
+// maxPayloadLen limits payload text included in divergence error messages
+// to prevent log explosion. Full content is represented by its SHA-256 hash.
+const maxPayloadLen = 4096
+
+// truncateWithHash truncates s to maxLen bytes, appending "... [sha256=<hash>]"
+// if truncation occurred. Returns s unchanged if len(s) <= maxLen.
+func truncateWithHash(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	h := sha256.Sum256([]byte(s))
+	return fmt.Sprintf("%s... [sha256=%x]", s[:maxLen], h)
+}
 
 // EventType classifies event history records.
 type EventType string
@@ -614,7 +628,31 @@ type Engine struct {
 	// through to workflow execution spans. When non-empty, WorkflowSpan creates
 	// a parent-linked span for end-to-end trace correlation.
 	traceID string
+	// stepCallback is an optional callback invoked after each event is consumed
+	// during replay. When nil, step advancement is a no-op increment.
+	stepCallback ReplayStepCallback
+
+	// logger is the structured logger for engine diagnostic output.
+	logger *slog.Logger
 }
+
+// ReplayStepCallback is called after each event is consumed during replay.
+// step is the 0-based index within the replay history.
+// event is a pointer to the EventRecord that was just consumed (may be nil for
+// inline paths that don't construct a full record).
+// queryState is a snapshot (cloned copy) of the current key-value state.
+// Return ReplayQuit to abort the replay immediately (cancels the execution context).
+type ReplayStepCallback func(step int, event *EventRecord, queryState map[string]string) ReplayStepAction
+
+// ReplayStepAction is the return value from a ReplayStepCallback.
+type ReplayStepAction int
+
+const (
+	// ReplayNext continues replay to the next event.
+	ReplayNext ReplayStepAction = iota
+	// ReplayQuit aborts the replay immediately.
+	ReplayQuit
+)
 
 // EngineOption configures an Engine.
 type EngineOption func(*Engine)
@@ -862,6 +900,30 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 	}
 }
 
+// WithReplayStepCallback sets a callback that is invoked after each event
+// is consumed during replay. Return ReplayQuit to abort the replay.
+func WithReplayStepCallback(cb ReplayStepCallback) EngineOption {
+	return func(e *Engine) {
+		e.stepCallback = cb
+	}
+}
+
+// WithLogger sets the structured logger for the engine.
+// If not set, slog.Default() is used.
+func WithLogger(l *slog.Logger) EngineOption {
+	return func(e *Engine) { e.logger = l }
+}
+
+// log returns the engine's structured logger, falling back to slog.Default()
+// when no logger has been configured (e.g., in tests that construct Engine
+// directly rather than through NewEngine).
+func (e *Engine) log() *slog.Logger {
+	if e.logger != nil {
+		return e.logger
+	}
+	return slog.Default()
+}
+
 // NewEngine creates an Engine backed by the given Runtime and ServiceCaller.
 func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine {
 	e := &Engine{
@@ -872,6 +934,9 @@ func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine 
 	}
 	for _, o := range opts {
 		o(e)
+	}
+	if e.logger == nil {
+		e.logger = slog.Default()
 	}
 	return e
 }
@@ -1000,9 +1065,12 @@ func (e *Engine) executeWithBackend(
 		defName:    e.defName,
 		execRunID:  e.workflowID,
 		tenantID:   e.tenantID,
+		stepCallback: e.stepCallback,
 	}
 
-	execCtx := withHandler(ctx, session)
+	execCtx, stepCancel := context.WithCancel(ctx)
+	session.stepCancel = stepCancel
+	execCtx = withHandler(execCtx, session)
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
 		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
@@ -1028,12 +1096,12 @@ func (e *Engine) executeWithBackend(
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if verr := e.workflowEventVerifier(ctx, e.workflowID); verr != nil {
-				log.Printf("[engine] workflow %s: checksum verification failed: %v", e.workflowID, verr)
+				e.log().WarnContext(ctx, "checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", verr)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
 					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, verr)
 				}
-				log.Printf("[engine] workflow %s: checksum verification failed but proceeding (failOnChecksumMismatch=false)", e.workflowID)
+				e.log().WarnContext(ctx, "checksum verification failed but proceeding (failOnChecksumMismatch=false)", "workflow_id", e.workflowID, "tenant_id", e.tenantID)
 			}
 		}
 
@@ -1138,9 +1206,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		tenantID:      e.tenantID,
 		originalInput: string(input),
 		eventCount:    e.initialEventCount,
+		stepCallback:  e.stepCallback,
 	}
 
-	execCtx := withHandler(ctx, session)
+	execCtx, stepCancel := context.WithCancel(ctx)
+	session.stepCancel = stepCancel
+	execCtx = withHandler(execCtx, session)
 
 	execCtx, workflowSpan := telemetry.WorkflowSpan(execCtx,
 		e.workflowID, e.defName, e.defVersion, e.tenantID, e.traceID)
@@ -1167,12 +1238,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// (a) Checksum verification.
 		if e.workflowEventVerifier != nil {
 			if err := e.workflowEventVerifier(ctx, e.workflowID); err != nil {
-				log.Printf("[engine] workflow %s: checksum verification failed: %v", e.workflowID, err)
+				e.log().WarnContext(ctx, "replay checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", err)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
 					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, err)
 				}
-				log.Printf("[engine] workflow %s: checksum verification failed but proceeding (failOnChecksumMismatch=false)", e.workflowID)
+				e.log().WarnContext(ctx, "replay checksum verification failed but proceeding (failOnChecksumMismatch=false)", "workflow_id", e.workflowID, "tenant_id", e.tenantID)
 			}
 		}
 
@@ -1263,6 +1334,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 // point export.
 //
 // The implementation follows the same patterns as executeCompiled: it sets up
+//
+// NOTE: Fresh-execution only (isReplay: false, history: nil). stepCallback and
+// stepCancel are intentionally NOT wired because there is no replay path.
 // an execSession for host function routing, uses the standard CallExport
 // calling convention, and handles suspension and event history the same way.
 func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBundle,
@@ -1553,12 +1627,12 @@ func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferra
 		exportName := "cleat_defer_" + deferID
 		fn := mod.ExportedFunction(exportName)
 		if fn == nil {
-			log.Printf("[engine] defer %q (%s): export %q not found", deferID, description, exportName)
+			e.log().WarnContext(ctx, "defer export not found", "defer_id", deferID, "description", description, "export_name", exportName)
 			continue
 		}
 		_, _, err := e.rt.CallExportWithSuspend(ctx, mod, exportName, []byte("{}"))
 		if err != nil {
-			log.Printf("[engine] defer %q (%s) failed: %v", deferID, description, err)
+			e.log().WarnContext(ctx, "defer execution failed", "defer_id", deferID, "description", description, "error", err)
 		}
 	}
 }
@@ -1624,6 +1698,45 @@ type execSession struct {
 	// Incremented per freshCall; compared against maxEventsPerWorkflow for
 	// auto-ContinueAsNew without querying the database.
 	eventCount int
+
+	// stepCallback is the installed ReplayStepCallback (nil means no callback).
+	stepCallback ReplayStepCallback
+
+	// stepCancel cancels the execution context when the step callback returns
+	// ReplayQuit.
+	stepCancel context.CancelFunc
+}
+
+// advanceReplayStep increments stepCount and invokes the step callback if set.
+// rec may be nil for inline replay paths without a full EventRecord.
+// Returns false if the callback returned ReplayQuit (caller should abort).
+func (s *execSession) advanceReplayStep(ctx context.Context, rec *EventRecord) bool {
+	s.stepCount++
+	if s.stepCallback == nil {
+		return true
+	}
+	return s.invokeStepCallback(ctx, rec)
+}
+
+// invokeStepCallback invokes the step callback if set, building a queryState
+// snapshot. Returns false if the callback returned ReplayQuit.
+func (s *execSession) invokeStepCallback(ctx context.Context, rec *EventRecord) bool {
+	if s.stepCallback == nil {
+		return true
+	}
+	// Snapshot queryState to prevent callback from mutating it.
+	qs := make(map[string]string, len(s.queryState))
+	for k, v := range s.queryState {
+		qs[k] = v
+	}
+	action := s.stepCallback(s.stepCount-1, rec, qs)
+	if action == ReplayQuit {
+		if s.stepCancel != nil {
+			s.stepCancel()
+		}
+		return false
+	}
+	return true
 }
 
 var _ HostHandler = (*execSession)(nil)
@@ -1680,8 +1793,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	if s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow && !s.autoContinueAsNewTriggered {
 		s.autoContinueAsNewTriggered = true
 		continueAsNewTotal.WithLabelValues("event_cap").Inc()
-		log.Printf("[engine] workflow %s: auto-ContinueAsNew triggered (event_count=%d, max=%d)",
-			s.workflowID, s.eventCount, s.engine.maxEventsPerWorkflow)
+		s.engine.log().InfoContext(ctx, "auto-ContinueAsNew triggered", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "event_count", s.eventCount, "max", s.engine.maxEventsPerWorkflow)
 		s.ContinueAsNew(ctx, m, s.originalInput)
 		m.CloseWithExitCode(ctx, 0)
 		written, _ := s.writeResult(ctx, m, responsePtr, "", responseMaxLen)
@@ -1716,7 +1828,7 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 	// exactly-once with write-ahead logging and ambiguity detection.)
 	if s.engine.db != nil {
 		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
-			log.Printf("[engine] freshCall: flushEvent failed for workflow=%s step=%d: %v", s.workflowID, rec.Step, flushErr)
+			s.engine.log().ErrorContext(ctx, "freshCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
 		}
 	}
 
@@ -1736,19 +1848,24 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 		if rec.EventType != EventTypeCall {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, service, operation, rec.Service, rec.Op)
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, service, operation, rec.Service, rec.Op,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
@@ -1794,19 +1911,26 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 		if rec.EventType != EventTypePluginCall {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s.\n  actual input: %s\n  expected (cached) input: %s\n  expected (cached) output: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType,
+				truncateWithHash(inputJSON, maxPayloadLen),
+				truncateWithHash(rec.PluginInput, maxPayloadLen),
+				truncateWithHash(rec.PluginOutput, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.PluginName != pluginName || rec.PluginFunc != functionName {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc)
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s.\n  actual input: %s\n  expected (cached) input: %s\n  expected (cached) output: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc,
+				truncateWithHash(inputJSON, maxPayloadLen),
+				truncateWithHash(rec.PluginInput, maxPayloadLen),
+				truncateWithHash(rec.PluginOutput, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
@@ -1929,7 +2053,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 		// Flush immediately so plugin results survive worker crashes.
 		if s.engine.db != nil {
 			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
-				log.Printf("[engine] PluginCall: flushEvent failed for workflow=%s step=%d: %v", s.workflowID, rec.Step, flushErr)
+				s.engine.log().ErrorContext(ctx, "PluginCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
 			}
 		}
 	}
@@ -2083,7 +2207,7 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 		if rec.EventType != EventTypePluginCallStreamChunk {
 			break
 		}
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 		chunk := plugin.StreamEvent{
 			Index:   rec.StreamChunkIndex,
@@ -2203,7 +2327,7 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 	for s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
 		if rec.EventType == EventTypeHeartbeat {
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			continue
 		}
 		break
@@ -2212,19 +2336,24 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 	// Now find the matching call event.
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 		if rec.EventType != EventTypeCall {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
 
 		if rec.Service != service || rec.Op != operation {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
-				rec.Step, service, operation, rec.Service, rec.Op)
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, service, operation, rec.Service, rec.Op,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 			return packDurableCallResult(int(written), 1, 1)
 		}
@@ -2295,18 +2424,18 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeSignalReceived {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				written, _ := s.writeResult(ctx, m, sigNamePtr, rec.SignalName, sigNameMaxLen)
 				_, _ = s.writeResult(ctx, m, payloadPtr, rec.SignalPayload, payloadMaxLen)
 				return packAwaitSignalsResult(uint32(written), uint32(len(rec.SignalPayload)), false, 0)
 			}
 			if rec.EventType == EventTypeAwaitSignals {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				// Check if there's a following signal_received event.
 				if s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
 					if nextRec.EventType == EventTypeSignalReceived {
-						s.stepCount++
+						if !s.advanceReplayStep(ctx, &nextRec) { return 0 }
 						written, _ := s.writeResult(ctx, m, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
 						_, _ = s.writeResult(ctx, m, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
 						return packAwaitSignalsResult(uint32(written), uint32(len(nextRec.SignalPayload)), false, 0)
@@ -2364,7 +2493,7 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeDefer {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 				written, _ := s.writeResult(ctx, m, deferIDPtr, rec.DeferID, deferIDMaxLen)
 				return int64(uint64(written)<<32 | 0)
@@ -2428,7 +2557,7 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeContinueAsNew {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				s.suspendErr = &SuspendError{
 					Reason:   "continue_as_new",
 					NewInput: rec.NewInput,
@@ -2460,7 +2589,7 @@ func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeContinueAsNew {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				s.suspendErr = &SuspendError{
 					Reason:     "continue_as_new",
 					NewInput:   rec.NewInput,
@@ -2536,7 +2665,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeChildWorkflow {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 				written, _ := s.writeResult(ctx, m, runIDPtr, rec.RunID, runIDMaxLen)
 				return int64(uint64(written)<<32 | 0)
@@ -2572,13 +2701,13 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			count, err := s.engine.workflowStore.GetChildCount(context.Background(), s.workflowID)
 			if err != nil {
 				errMsg := fmt.Sprintf("workflow %s: failed to check child quota: %v", s.workflowID, err)
-				log.Printf("[engine] %s", errMsg)
+				s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 				errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
 				return int64(uint64(errWritten)<<32 | 4)
 			}
 			if count >= s.engine.maxQuotaChildren {
 				errMsg := fmt.Sprintf("workflow %s: child workflow quota exceeded (current %d, max %d)", s.workflowID, count, s.engine.maxQuotaChildren)
-				log.Printf("[engine] %s", errMsg)
+				s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 				errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
 				return int64(uint64(errWritten)<<32 | 4)
 			}
@@ -2613,7 +2742,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		}
 		if err != nil {
 			errMsg := fmt.Sprintf("child workflow %q: start failed: %v", name, err)
-			log.Printf("[engine] %s", errMsg)
+			s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
 			return int64(uint64(errWritten)<<32 | 3) // errCode 3 = not_found
 		}
@@ -2650,7 +2779,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 			if rec.EventType == EventTypeAwaitChild {
 				if rec.Response != "" || rec.Err != "" {
 					// Cached result available — return it.
-					s.stepCount++
+					if !s.advanceReplayStep(ctx, &rec) { return 0 }
 					if rec.Err != "" {
 						written, _ := s.writeResult(ctx, m, resultPtr, rec.Err, resultMaxLen)
 						return packAwaitChildResult(uint32(written), 1)
@@ -2750,7 +2879,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeAwaitAnyChild {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				if rec.Response != "" {
 					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
 					return int64(uint64(written)<<32 | 0)
@@ -2764,7 +2893,7 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 				if s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
 					if nextRec.EventType == EventTypeAwaitAnyChild && nextRec.Response != "" {
-						s.stepCount++
+						if !s.advanceReplayStep(ctx, &nextRec) { return 0 }
 						written, _ := s.writeResult(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
 						return int64(uint64(written)<<32 | 0)
 					}
@@ -2905,11 +3034,24 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 		if rec.EventType != EventTypeAwaitAllChildren {
 			replayFailuresTotal.Inc()
-			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s. Run 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).", rec.Step, rec.EventType)
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected await_all_children, got %s.\n  actual run IDs: %s\n  expected run IDs: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType,
+				truncateWithHash(runIDsJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
+			written, _ := s.writeResult(ctx, m, resultsPtr, errMsg, resultsMaxLen)
+			return packAwaitChildResult(uint32(written), 1)
+		}
+
+		if runIDsJSON != rec.Request {
+			replayFailuresTotal.Inc()
+			errMsg := fmt.Sprintf("replay divergence at step %d: await_all_children run IDs mismatch.\n  actual run IDs: %s\n  expected run IDs: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step,
+				truncateWithHash(runIDsJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
 			written, _ := s.writeResult(ctx, m, resultsPtr, errMsg, resultsMaxLen)
 			return packAwaitChildResult(uint32(written), 1)
 		}
@@ -3052,7 +3194,7 @@ func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, n
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeUpdateHandler {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				return 0
 			}
 		}
@@ -3091,7 +3233,7 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	// Persist immediately so events survive worker crashes.
 	if s.engine.db != nil && !s.isReplay {
 		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
-			log.Printf("[engine] recordEvent: flushEvent failed for workflow=%s step=%d type=%s: %v", s.workflowID, rec.Step, rec.EventType, flushErr)
+			s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
 		}
 	}
 }
@@ -3124,7 +3266,7 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeCreatePromise {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 				written, _ := s.writeResult(ctx, m, promiseIDPtr, rec.PromiseID, promiseIDMaxLen)
 				return packSimpleResult(0, written)
@@ -3153,7 +3295,7 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 	// Also persist to promise store if available.
 	if s.engine.promiseStore != nil {
 		if err := s.engine.promiseStore.CreatePromise(ctx, s.workflowID, name, promiseID); err != nil {
-			log.Printf("[engine] create_promise: %v", err)
+			s.engine.log().ErrorContext(ctx, "create_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 
@@ -3167,17 +3309,17 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypePromiseResolved {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				written, _ := s.writeResult(ctx, m, resultPtr, rec.PromiseResult, resultMaxLen)
 				return packAwaitPromiseResult(uint32(written), false, 0)
 			}
 			if rec.EventType == EventTypePromiseRejected {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				written, _ := s.writeResult(ctx, m, resultPtr, rec.PromiseError, resultMaxLen)
 				return packAwaitPromiseResult(uint32(written), false, 1)
 			}
 			if rec.EventType == EventTypeAwaitPromise {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				// Promise was pending in original execution. Check if resolved now.
 				s.exitReplay()
 			}
@@ -3234,7 +3376,7 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeSignalReceived {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 				written, _ := s.writeResult(ctx, m, responsePtr, rec.SignalPayload, responseMaxLen)
 				return packSimpleResult(0, written)
@@ -3246,7 +3388,7 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 	// Check signal authorization before delivering.
 	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
 		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
-			log.Printf("[engine] signal_auth: %v", err)
+			s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			return errSignalAuthRequiredInt
 		}
 	}
@@ -3291,7 +3433,7 @@ func (s *execSession) ReplyToSignal(ctx context.Context, m api.Module, correlati
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeSignalReceived {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				return 0
 			}
 		}
@@ -3315,7 +3457,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeSignalReceived {
-				s.stepCount++
+				if !s.advanceReplayStep(ctx, &rec) { return 0 }
 				return 0
 			}
 		}
@@ -3325,7 +3467,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 	// Check signal authorization before delivering.
 	if s.engine.requireSignalAuth && s.engine.signalAuthCheck != nil {
 		if err := s.engine.signalAuthCheck(ctx, targetRunID, s.defName); err != nil {
-			log.Printf("[engine] signal_auth: %v", err)
+			s.engine.log().ErrorContext(ctx, "signal_auth failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			return errSignalAuthRequiredInt
 		}
 	}
@@ -3342,7 +3484,7 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 	// Deliver to target via signal store if available.
 	if s.engine.signalStore != nil {
 		if err := s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload); err != nil {
-			log.Printf("[engine] deliver_signal: %v", err)
+			s.engine.log().ErrorContext(ctx, "deliver_signal failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 
@@ -3361,7 +3503,7 @@ func (s *execSession) ClearScope(ctx context.Context) {
 		scopeKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
 		if s.engine.concurrencyKeyStore != nil {
 			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
-				log.Printf("[engine] release_concurrency_key: %v", err)
+				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			}
 		}
 		for i, held := range s.heldScopes {
@@ -3396,7 +3538,7 @@ func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectTyp
 		oldKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
 		if s.engine.concurrencyKeyStore != nil {
 			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, oldKey); err != nil {
-				log.Printf("[engine] release_concurrency_key: %v", err)
+				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 			}
 		}
 		for i, held := range s.heldScopes {
@@ -3472,7 +3614,7 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 		if rec.EventType != EventTypeScopeAcquired {
 			return packSimpleResult(1, 0)
@@ -3505,7 +3647,7 @@ func (s *execSession) releaseHeldScopes(ctx context.Context) {
 	}
 	for _, scopeKey := range s.heldScopes {
 		if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
-			log.Printf("[engine] release_concurrency_key: %v", err)
+			s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 	s.heldScopes = nil
@@ -3554,7 +3696,7 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 		if s.engine.maxQuotaConcurrencyKeys > 0 && s.engine.workflowStore != nil {
 			count, err := s.engine.workflowStore.GetConcurrencyKeyCount(ctx, s.workflowID)
 			if err != nil {
-				log.Printf("[engine] workflow %s: failed to check concurrency key quota: %v", s.workflowID, err)
+				s.engine.log().ErrorContext(ctx, "concurrency key quota check failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 				rec := EventRecord{
 					Step:         s.stepCount,
 					EventType:    EventTypeAcquireLock,
@@ -3568,7 +3710,7 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 			}
 			if count >= s.engine.maxQuotaConcurrencyKeys {
 				errMsg := fmt.Sprintf("workflow %s: concurrency key quota exceeded (current %d, max %d)", s.workflowID, count, s.engine.maxQuotaConcurrencyKeys)
-				log.Printf("[engine] %s", errMsg)
+				s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 				rec := EventRecord{
 					Step:         s.stepCount,
 					EventType:    EventTypeAcquireLock,
@@ -3617,7 +3759,7 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 func (s *execSession) replayAcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64 {
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 		if rec.EventType != EventTypeAcquireLock {
 			return packAcquireLockResult(false, 1)
@@ -3666,7 +3808,7 @@ func (s *execSession) freshReleaseLock(ctx context.Context, m api.Module, key st
 func (s *execSession) replayReleaseLock(ctx context.Context, m api.Module, key string) int64 {
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 		if rec.EventType != EventTypeReleaseLock {
 			return int64(1)
@@ -3705,7 +3847,7 @@ func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, compute
 func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		s.stepCount++
+		if !s.advanceReplayStep(ctx, &rec) { return 0 }
 
 		if rec.EventType != EventTypeSideEffect {
 			replayFailuresTotal.Inc()
@@ -3761,7 +3903,7 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			if rec.EventType == EventTypePromiseResolved {
 				return 0
 			}
@@ -3780,7 +3922,7 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 
 	if s.engine.promiseStore != nil {
 		if err := s.engine.promiseStore.ResolvePromise(ctx, s.workflowID, promiseID, value); err != nil {
-			log.Printf("[engine] resolve_promise: %v", err)
+			s.engine.log().ErrorContext(ctx, "resolve_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 	return 0
@@ -3790,7 +3932,7 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			if rec.EventType == EventTypePromiseRejected {
 				return 0
 			}
@@ -3809,7 +3951,7 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 
 	if s.engine.promiseStore != nil {
 		if err := s.engine.promiseStore.RejectPromise(ctx, s.workflowID, promiseID, errMsg); err != nil {
-			log.Printf("[engine] reject_promise: %v", err)
+			s.engine.log().ErrorContext(ctx, "reject_promise failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
 		}
 	}
 	return 0
@@ -3819,7 +3961,8 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 	if s.isReplay {
 		// On replay, skip (fire-and-forget is recorded but not re-executed).
 		if s.stepCount < len(s.history) {
-			s.stepCount++
+			rec := s.history[s.stepCount]
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 		}
 		return 0
 	}
@@ -3852,7 +3995,8 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64 {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
-			s.stepCount++
+			rec := s.history[s.stepCount]
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 		}
 		return 0
 	}
@@ -3901,7 +4045,7 @@ func (s *execSession) SetState(ctx context.Context, m api.Module, key, value str
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "set" || rec.StateKey != key {
 				return 1
 			}
@@ -3935,7 +4079,7 @@ func (s *execSession) GetState(ctx context.Context, m api.Module, key string, va
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "get" || rec.StateKey != key {
 				return packSimpleResult(1, 0)
 			}
@@ -3967,7 +4111,7 @@ func (s *execSession) DeleteState(ctx context.Context, m api.Module, key string)
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "del" || rec.StateKey != key {
 				return 1
 			}
@@ -4002,7 +4146,7 @@ func (s *execSession) IncrState(ctx context.Context, m api.Module, key string, d
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "incr" || rec.StateKey != key {
 				return 0
 			}
@@ -4043,7 +4187,7 @@ func (s *execSession) HasState(ctx context.Context, m api.Module, key string) in
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "has" || rec.StateKey != key {
 				return 0
 			}
@@ -4078,7 +4222,7 @@ func (s *execSession) ListState(ctx context.Context, m api.Module, prefix string
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "list" || rec.StateKey != prefix {
 				return packSimpleResult(1, 0)
 			}
@@ -4116,7 +4260,7 @@ func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, input
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
 			if rec.EventType != EventTypeRunDetached || rec.DetachedName != name {
 				return 1
 			}
@@ -4152,9 +4296,17 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			s.stepCount++
-			if rec.EventType != EventTypeFetch || rec.FetchMethod != method || rec.FetchURL != url {
-				written, _ := s.writeResult(ctx, m, responsePtr, "replay divergence", responseMaxLen)
+			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if rec.EventType != EventTypeFetch || rec.FetchMethod != method || rec.FetchURL != url || rec.FetchBody != body {
+				replayFailuresTotal.Inc()
+				errMsg := fmt.Sprintf("replay divergence at step %d: Fetch mismatch.\n  workflow: %s %s\n  history: %s %s\n  actual body: %s\n  expected body: %s\n  expected response: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+					rec.Step,
+					method, url,
+					rec.FetchMethod, rec.FetchURL,
+					truncateWithHash(body, maxPayloadLen),
+					truncateWithHash(rec.FetchBody, maxPayloadLen),
+					truncateWithHash(rec.FetchResponse, maxPayloadLen))
+				written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 				return packSimpleResult(1, written)
 			}
 			if rec.Err != "" {
@@ -4396,7 +4548,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			var encErr error
 
 			if requestStr, encErr = e.encryption.EncryptString(rec.Request); encErr != nil {
-				log.Printf("[engine] encryption failed for field request in workflow %s: %v", workflowID, encErr)
+				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "request", "error", encErr)
 				encryptionErrorsTotal.Inc()
 				tx.Rollback()
 				lastErr = fmt.Errorf("flush event: encrypt request: %w", encErr)
@@ -4406,7 +4558,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				break
 			}
 			if responseStr, encErr = e.encryption.EncryptString(rec.Response); encErr != nil {
-				log.Printf("[engine] encryption failed for field response in workflow %s: %v", workflowID, encErr)
+				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "response", "error", encErr)
 				encryptionErrorsTotal.Inc()
 				tx.Rollback()
 				lastErr = fmt.Errorf("flush event: encrypt response: %w", encErr)
@@ -4416,7 +4568,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 				break
 			}
 			if errStr, encErr = e.encryption.EncryptString(rec.Err); encErr != nil {
-				log.Printf("[engine] encryption failed for field err in workflow %s: %v", workflowID, encErr)
+				e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "err", "error", encErr)
 				encryptionErrorsTotal.Inc()
 				tx.Rollback()
 				lastErr = fmt.Errorf("flush event: encrypt err: %w", encErr)
@@ -4427,7 +4579,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.SignalPayload != "" {
 				if sigPayload, encErr = e.encryption.EncryptString(rec.SignalPayload); encErr != nil {
-					log.Printf("[engine] encryption failed for field signal_payload in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "signal_payload", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt signal_payload: %w", encErr)
@@ -4439,7 +4591,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.ChildInput != "" {
 				if childInput, encErr = e.encryption.EncryptString(rec.ChildInput); encErr != nil {
-					log.Printf("[engine] encryption failed for field child_input in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "child_input", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt child_input: %w", encErr)
@@ -4451,7 +4603,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.NewInput != "" {
 				if newInput, encErr = e.encryption.EncryptString(rec.NewInput); encErr != nil {
-					log.Printf("[engine] encryption failed for field new_input in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "new_input", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt new_input: %w", encErr)
@@ -4463,7 +4615,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.PluginInput != "" {
 				if pluginInput, encErr = e.encryption.EncryptString(rec.PluginInput); encErr != nil {
-					log.Printf("[engine] encryption failed for field plugin_input in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "plugin_input", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt plugin_input: %w", encErr)
@@ -4475,7 +4627,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.PluginOutput != "" {
 				if pluginOutput, encErr = e.encryption.EncryptString(rec.PluginOutput); encErr != nil {
-					log.Printf("[engine] encryption failed for field plugin_output in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "plugin_output", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt plugin_output: %w", encErr)
@@ -4487,7 +4639,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.PromiseResult != "" {
 				if promiseResult, encErr = e.encryption.EncryptString(rec.PromiseResult); encErr != nil {
-					log.Printf("[engine] encryption failed for field promise_result in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "promise_result", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt promise_result: %w", encErr)
@@ -4499,7 +4651,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			}
 			if rec.PromiseError != "" {
 				if promiseError, encErr = e.encryption.EncryptString(rec.PromiseError); encErr != nil {
-					log.Printf("[engine] encryption failed for field promise_error in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "promise_error", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt promise_error: %w", encErr)
@@ -4513,7 +4665,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			if len(payloadJSON) > 0 {
 				var encrypted []byte
 				if encrypted, encErr = e.encryption.EncryptJSON(payloadJSON); encErr != nil {
-					log.Printf("[engine] encryption failed for field payload in workflow %s: %v", workflowID, encErr)
+					e.log().ErrorContext(ctx, "encryption failed", "workflow_id", workflowID, "tenant_id", e.tenantID, "field", "payload", "error", encErr)
 					encryptionErrorsTotal.Inc()
 					tx.Rollback()
 					lastErr = fmt.Errorf("flush event: encrypt payload: %w", encErr)
@@ -4595,8 +4747,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	}
 
 	// All retries exhausted --- log a structured error that can be alerted on.
-	log.Printf("[engine] flushEvent: all %d retries exhausted for workflow=%s step=%d type=%s: %v",
-		len(backoff), workflowID, rec.Step, rec.EventType, lastErr)
+	e.log().ErrorContext(ctx, "flushEvent retries exhausted", "workflow_id", workflowID, "tenant_id", e.tenantID, "step", rec.Step, "event_type", rec.EventType, "error", lastErr)
 	return lastErr
 
 }
@@ -4676,7 +4827,7 @@ func (e *Engine) completeCallEvent(ctx context.Context, workflowID string, rec E
 	if e.encryptSensitivePayloads && e.encryption != nil {
 		s, err := e.encryption.EncryptString(rec.Response)
 		if err != nil {
-			log.Printf("[engine] encryption failed for response in workflow %s step %d: %v", workflowID, rec.Step, err)
+			e.log().ErrorContext(ctx, "encryption failed for response", "workflow_id", workflowID, "tenant_id", e.tenantID, "step", rec.Step, "error", err)
 			encryptionErrorsTotal.Inc()
 			tx.Rollback()
 			return fmt.Errorf("complete call event: encrypt response: %w", err)
@@ -4684,7 +4835,7 @@ func (e *Engine) completeCallEvent(ctx context.Context, workflowID string, rec E
 		responseStr = nullStr(s)
 		s, err = e.encryption.EncryptString(callErr)
 		if err != nil {
-			log.Printf("[engine] encryption failed for error in workflow %s step %d: %v", workflowID, rec.Step, err)
+			e.log().ErrorContext(ctx, "encryption failed for error", "workflow_id", workflowID, "tenant_id", e.tenantID, "step", rec.Step, "error", err)
 			encryptionErrorsTotal.Inc()
 			tx.Rollback()
 			return fmt.Errorf("complete call event: encrypt error: %w", err)

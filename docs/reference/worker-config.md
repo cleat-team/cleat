@@ -594,3 +594,23 @@ starting the worker.
 Example:
 
     cleat-worker --db "postgres://..." --generate-api-key "00000000-0000-0000-0000-000000000000"
+
+## Observability / OpenTelemetry
+
+### --otel-endpoint
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | OTLP HTTP endpoint for trace export (e.g., `localhost:4318`) |
+
+When set, the worker exports OpenTelemetry traces to the specified OTLP HTTP
+endpoint. Leave empty to disable trace export (default).
+
+### --otel-disabled
+
+| Type | Default | Description |
+|------|---------|-------------|
+| bool | `false` | Disable OpenTelemetry trace export |
+
+Force-disables trace export even when `--otel-endpoint` is set. Useful for
+temporarily suppressing trace export without changing the endpoint configuration.
