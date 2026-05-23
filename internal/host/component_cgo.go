@@ -73,7 +73,6 @@ import (
 	"github.com/bytecodealliance/wasmtime-go/v44"
 	"github.com/cleat-team/cleat/internal/wasm"
 )
-
 // componentCallbackRegistry maps integer IDs to backend pointers.
 // This avoids passing Go pointers directly to C (CGo pointer rules).
 var componentCallbackRegistry = struct {
@@ -265,6 +264,8 @@ func goComponentCallback(
 }
 
 // dispatchComponentCallback handles a component-model function call.
+// TODO: implement memory access via the component store to enable
+// actual host function dispatch. Currently returns success (0).
 func (b *wasmtimeBackend) dispatchComponentCallback(
 	ctx *C.wasmtime_context_t,
 	_ *C.wasmtime_component_func_type_t,
@@ -273,53 +274,16 @@ func (b *wasmtimeBackend) dispatchComponentCallback(
 	results *C.wasmtime_component_val_t,
 	nresults C.size_t,
 ) *C.wasmtime_error_t {
-	// For now: make all functions return success with zero results.
-	// The actual host function dispatch will read from the component
-	// memory via the context/store.
-	h := b.handler
-	_ = h
 	_ = ctx
+	_ = args
 	_ = nargs
-	_ = nresults
-
-	// Zero-initialize all results.
-	argsSlice := unsafe.Slice(args, nargs)
 	resultsSlice := unsafe.Slice(results, nresults)
-
-	// Extract u32 args using C helpers (CGo can't access union fields directly).
-	getU32 := func(i int) uint32 {
-		if i < len(argsSlice) {
-			return uint32(C.component_val_get_u32(&argsSlice[i]))
-		}
-		return 0
-	}
-
-	svcPtr := getU32(0)
-	svcLen := getU32(1)
-	opPtr := getU32(2)
-	opLen := getU32(3)
-	reqPtr := getU32(4)
-	reqLen := getU32(5)
-	respPtr := getU32(6)
-	respMaxLen := getU32(7)
-
-	// We need memory access. The context has the store, which has WASM memory.
-	// Use the store to read/write linear memory.
-	_ = svcPtr
-	_ = svcLen
-	_ = opPtr
-	_ = opLen
-	_ = reqPtr
-	_ = reqLen
-	_ = respPtr
-	_ = respMaxLen
-
-	// For now: just set a zero result.
 	if len(resultsSlice) > 0 {
 		C.component_val_set_u64(&resultsSlice[0], 0)
 	}
 	return nil
 }
+
 
 // registerCleatComponentImports registers all cleat host functions
 // under their WIT names in the component linker.
@@ -426,7 +390,7 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		fmt.Printf("[CGO_WASI] add_wasip2 succeeded\n")
 	}
 
-	// Register cleat host functions under their WIT names.
+// Register cleat host functions under their WIT names.
 	if err := b.registerCleatComponentImports(linker); err != nil {
 		return nil, fmt.Errorf("cleat component imports: %w", err)
 	}
@@ -435,29 +399,13 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	if err != nil {
 		return nil, err
 	}
-
-	fn, err := componentGetFunc(instance, store, entryPoint)
-	if err != nil {
-		return nil, err
-	}
-
-	raw, callErr := componentCall(fn, store,
-		int32(0), int32(len(input)), int32(outBufSz), int32(outBufSz),
-	)
-	if callErr != nil {
-		return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr)
-	}
-
-	if raw == (1 << 62) {
-		return &ExecResult{Suspended: true}, nil
-	}
-
-	_, actualLen := decodeExportResult(uint64(raw))
-	if actualLen > outBufSz {
-		actualLen = outBufSz
-	}
 	_ = instance
-	_ = actualLen
 
-	return &ExecResult{Result: `"ok"`, Suspended: false}, nil
+	// The CGo component model path works: compilation, instantiation,
+	// WASI 0.2 provisioning, and cleat host function registration all
+	// succeed. However, the component callback trampoline does not yet
+	// have access to WASM linear memory for reading/writing host
+	// function arguments. Return an error to fall back to the manual
+	// ExecuteComponent path which handles memory correctly.
+	return nil, fmt.Errorf("CGo path succeeded (component model validated), falling back to manual ExecuteComponent")
 }
