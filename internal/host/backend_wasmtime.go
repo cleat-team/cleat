@@ -1832,6 +1832,12 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 			return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
 		}
 
+		// Per-export routing: resolve GOT / libpython imports
+		// from already-instantiated instances before DefineInstance.
+		b.perExportRoute(store, cm, linker, instances, bundle, compiled)
+
+		// Wire cross-module imports: for each import the module declares,		}
+
 		// Wire cross-module imports: for each import the module declares,
 		// map it to the already-instantiated source instance.
 		for importName, srcIdx := range importNameToInstance {
@@ -1900,61 +1906,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 			_ = linker.Define(store, "GOT.func", "__table_base", gtb)
 		}
 
-		// Per-export fallback: for imports not already resolved by
-		// DefineInstance or the placeholder globals above, search
-		// already-instantiated instances for matching exports and
-		// route them under the import's module name.
-		// This handles GOT.mem::PyExc_SystemError etc. where the
-		// CPython runtime exports individual symbols that other
-		// modules import through GOT module names.
-		for _, impTy := range cm.Imports() {
-			modName := impTy.Module()
-			namePtr := impTy.Name()
-			if namePtr == nil {
-				continue
-			}
-			fieldName := *namePtr
 
-			// Skip host module names (handled by registerAllImports + traps).
-			if modName == "env" || modName == "wasi_snapshot_preview1" || modName == "teavm" {
-				continue
-			}
-
-			// Skip if source instance was already instantiated
-			// (DefineInstance already routed all its exports).
-			if srcIdx, ok := importNameToInstance[modName]; ok {
-				if srcIdx >= 0 && srcIdx < len(instances) && instances[srcIdx] != nil {
-					continue
-				}
-				// Source not yet instantiated — fall through to per-export search.
-			}
-
-			// Search already-instantiated instances for this export name.
-			for _, prevInst := range instances {
-				if prevInst == nil {
-					continue
-				}
-				exp := prevInst.GetExport(store, fieldName)
-				if exp == nil {
-					continue
-				}
-				extType := impTy.Type()
-				if extType == nil {
-					continue
-				}
-				// Route the export under the import's module name.
-				if extType.FuncType() != nil && exp.Func() != nil {
-					_ = linker.Define(store, modName, fieldName, exp)
-				} else if extType.GlobalType() != nil && exp.Global() != nil {
-					_ = linker.Define(store, modName, fieldName, exp)
-				} else if extType.MemoryType() != nil && exp.Memory() != nil {
-					_ = linker.Define(store, modName, fieldName, exp)
-				} else if extType.TableType() != nil && exp.Table() != nil {
-					_ = linker.Define(store, modName, fieldName, exp)
-				}
-				break
-			}
-		}
 
 		modInst, instErr := linker.Instantiate(store, cm)
 		if instErr != nil {
@@ -2002,6 +1954,9 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				if gtb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1)); gtb2 != nil {
 					_ = linker2.Define(store, "GOT.func", "__table_base", gtb2)
 				}
+				// Also run per-export routing for the fresh linker
+				// to resolve GOT / libpython global imports.
+				b.perExportRoute(store, cm, linker2, instances, bundle, compiled)
 				if modInst2, err2 := linker2.Instantiate(store, cm); err2 == nil {
 					instances[i] = modInst2
 					pending[i] = false
@@ -2410,5 +2365,92 @@ func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
 
 		return (int64(entryLen) << 32) | int64(argsLen)
 	})
+}
+
+// perExportRoute resolves non-host imports by searching already-instantiated
+// instances for matching exports. Exact name match first, then suffix match
+// for prefixed exports (e.g. libpython3.14.so:PyExc_AttributeError matches
+// imports of PyExc_AttributeError). Handles global mutability mismatches.
+func (b *wasmtimeBackend) perExportRoute(store wasmtime.Storelike, cm *wasmtime.Module, linker *wasmtime.Linker, instances []*wasmtime.Instance, bundle *wasm.ComponentBundle, compiled []*wasmtime.Module) {
+	for _, impTy := range cm.Imports() {
+		modName := impTy.Module()
+		namePtr := impTy.Name()
+		if namePtr == nil {
+			continue
+		}
+		fieldName := *namePtr
+
+		// Skip host module names (handled by registerAllImports + traps).
+		if modName == "env" || modName == "wasi_snapshot_preview1" || modName == "teavm" {
+			continue
+		}
+
+		extType := impTy.Type()
+		if extType == nil {
+			continue
+		}
+		// Search already-instantiated instances — exact then suffix.
+		for prevIdx, prevInst := range instances {
+			if prevInst == nil {
+				continue
+			}
+			exp := prevInst.GetExport(store, fieldName)
+			if exp == nil && prevIdx < len(bundle.Instances) {
+				// Suffix match: source module exports ending in
+				// ":" + fieldName.
+				prevModIdx := bundle.Instances[prevIdx].ModuleIndex
+				if prevModIdx >= 0 && prevModIdx < len(compiled) {
+					for _, expTy := range compiled[prevModIdx].Exports() {
+						en := expTy.Name()
+						if !strings.HasSuffix(en, ":"+fieldName) {
+							continue
+						}
+						candidate := prevInst.GetExport(store, en)
+						if candidate == nil {
+							continue
+						}
+						// Type check before accepting.
+						if (extType.FuncType() != nil && candidate.Func() != nil) ||
+							(extType.GlobalType() != nil && candidate.Global() != nil) ||
+							(extType.MemoryType() != nil && candidate.Memory() != nil) ||
+							(extType.TableType() != nil && candidate.Table() != nil) {
+							exp = candidate
+							break
+						}
+					}
+				}
+			}
+			if exp == nil {
+				continue
+			}
+			// Route the export under the import's module name.
+			// For globals, handle mutability mismatches.
+			if extType.FuncType() != nil && exp.Func() != nil {
+				_ = linker.Define(store, modName, fieldName, exp)
+			} else if extType.GlobalType() != nil && exp.Global() != nil {
+				expGlobal := exp.Global()
+				expGlobalType := expGlobal.Type(store)
+				importGlobalType := extType.GlobalType()
+				if importGlobalType.Mutable() != expGlobalType.Mutable() ||
+					importGlobalType.Content().Kind() != expGlobalType.Content().Kind() {
+					val := expGlobal.Get(store)
+					newGlobalType := wasmtime.NewGlobalType(
+						importGlobalType.Content(),
+						importGlobalType.Mutable())
+					if newGlobal, newErr := wasmtime.NewGlobal(
+						store, newGlobalType, val); newErr == nil {
+						_ = linker.Define(store, modName, fieldName, newGlobal)
+					}
+				} else {
+					_ = linker.Define(store, modName, fieldName, exp)
+				}
+			} else if extType.MemoryType() != nil && exp.Memory() != nil {
+				_ = linker.Define(store, modName, fieldName, exp)
+			} else if extType.TableType() != nil && exp.Table() != nil {
+				_ = linker.Define(store, modName, fieldName, exp)
+			}
+			break
+		}
+	}
 }
 
