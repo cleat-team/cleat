@@ -302,12 +302,16 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
         all_param_names = list(sig.parameters.keys())
 
         workflow_param_names: list[str] = []
+        required_param_names: list[str] = []
         for pname in all_param_names:
             # The HostCalls parameter is injected by the framework and is never
             # part of the serialised input JSON.
             if pname in hints and hints[pname] is HostCalls:
                 continue
             workflow_param_names.append(pname)
+            param = sig.parameters[pname]
+            if param.default is inspect.Parameter.empty:
+                required_param_names.append(pname)
 
         workflow_name = name if name is not None else func.__name__
 
@@ -323,9 +327,9 @@ def cleat_entry(name: Optional[str] = None) -> Callable:
                 # (a) Parse input JSON from the string argument.
                 input_data: dict[str, Any] = json.loads(args_str) if args_str else {}
 
-                # (b) Validate that every required workflow parameter appears
-                #     in the deserialised input.
-                missing = [p for p in workflow_param_names if p not in input_data]
+                # (b) Validate that every required (no-default) workflow parameter
+                #     appears in the deserialised input.
+                missing = [p for p in required_param_names if p not in input_data]
                 if missing:
                     raise ValueError(f"Missing required parameters: {', '.join(missing)}")
 
