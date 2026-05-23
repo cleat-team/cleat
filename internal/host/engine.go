@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -525,6 +526,7 @@ type Engine struct {
 	pluginCallGuard      *PluginCallGuard
 	pluginCallObserver   PluginCallObserver
 	tenantID             string
+	logger               *slog.Logger // structured logger; defaults to slog.Default()
 	db                   *sql.DB  // tenant-scoped database connection for plugin host functions
 	maxRetries           int      // worker-configured ceiling for retry attempts; 0 means use MaxRetryAttempts
 	schema               string   // this instance's PostgreSQL schema name
@@ -875,6 +877,13 @@ func WithDefaultWorkflowTimeout(d time.Duration) EngineOption {
 	return func(e *Engine) { e.defaultWorkflowTimeout = d }
 }
 
+// WithLogger sets the structured logger for the engine.
+// Engine uses the provided logger for all internal log output.
+// If not set, slog.Default() is used.
+func WithLogger(l *slog.Logger) EngineOption {
+	return func(e *Engine) { e.logger = l }
+}
+
 // WithContinueAsNewHandler sets a handler that the engine calls when a
 // ContinueAsNew suspend is detected. The handler should persist the
 // transition atomically (events + new run + old run completion).
@@ -915,6 +924,9 @@ func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine 
 	}
 	for _, o := range opts {
 		o(e)
+	}
+	if e.logger == nil {
+		e.logger = slog.Default()
 	}
 	return e
 }
