@@ -360,3 +360,53 @@ func TestWalCorruption_ReplayVerification(t *testing.T) {
 		t.Errorf("expected error to mention step 2 or checksum mismatch, got: %v", err)
 	}
 }
+
+// TestWalCorruption_DefaultOnReplayFailure verifies the default-on checksum
+// verification semantics: the exact verifier function wired via
+// WithWorkflowEventVerifier(store.VerifyWorkflowEvents, true) fails on corrupted
+// checksums, which causes engine replay to abort.
+func TestWalCorruption_DefaultOnReplayFailure(t *testing.T) {
+	db := testDB(t)
+	defer db.Close()
+
+	testutil.SetupMinimalSchema(t, db, testutil.DialectPostgres)
+	store := host.NewPostgresStore(db)
+	ctx := context.Background()
+	runID := fmt.Sprintf("int-default-on-%d", time.Now().UnixNano())
+
+	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
+		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+	if err != nil {
+		t.Fatalf("create workflow: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
+		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
+	})
+
+	events := []host.EventRecord{
+		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "op0", Request: `{"a":1}`, Response: `{"ok":true}`},
+		{Step: 1, EventType: host.EventTypeCall, Service: "svc", Op: "op1", Request: `{"b":2}`, Response: `{"ok":true}`},
+	}
+	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
+		t.Fatalf("append events: %v", err)
+	}
+
+	if err := store.VerifyWorkflowEvents(ctx, runID); err != nil {
+		t.Fatalf("expected no error before tampering, got: %v", err)
+	}
+
+	// Corrupt a checksum.
+	_, err = db.Exec(`UPDATE event_history SET checksum = 'corrupted' WHERE workflow_id = $1 AND step = 1`, runID)
+	if err != nil {
+		t.Fatalf("corrupt checksum: %v", err)
+	}
+
+	err = store.VerifyWorkflowEvents(ctx, runID)
+	if err == nil {
+		t.Fatal("VerifyWorkflowEvents must return error on checksum corruption (default-on replay would silently succeed)")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Errorf("error message must contain 'checksum mismatch', got: %v", err)
+	}
+}
