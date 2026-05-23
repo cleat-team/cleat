@@ -11,7 +11,10 @@ import (
 // The outer key is the WIT module name (the import module in the decomposed
 // core WASM). The inner key is the WIT function name (the import field name).
 // The value is the flat function name to use under the "env" module.
-var witToEnvImport = map[string]map[string]string{
+// WitToEnvImport maps WIT (module, function) pairs to flat "env" function names.
+// Exported for use by the wasmtime backend to register host functions under
+// WIT module names in addition to "env".
+var WitToEnvImport = map[string]map[string]string{
 	"cleat:host-calls/durable-call": {
 		"durable-call":           "cleat_call",
 		"durable-call-retry":     "cleat_call_retry",
@@ -271,7 +274,7 @@ func RewriteWitImports(wasmBytes []byte) ([]byte, error) {
 		entryEnd := pos2
 
 		// Check if this import matches a WIT-style module/function pair.
-		if witFuncs, ok := witToEnvImport[moduleName]; ok {
+		if witFuncs, ok := WitToEnvImport[moduleName]; ok {
 			if newFieldName, ok2 := witFuncs[fieldName]; ok2 {
 				anyRewrite = true
 
