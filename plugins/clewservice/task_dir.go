@@ -70,6 +70,39 @@ func buildStatusMD(status TaskStatus) []byte {
 	return []byte(content)
 }
 
+// patchStatusMD updates only the Phase and Phase Updated lines in an existing
+// STATUS.md, preserving all other content (review outcomes, history, etc.).
+func patchStatusMD(existing []byte, status TaskStatus) []byte {
+	if len(existing) == 0 {
+		return buildStatusMD(status)
+	}
+	lines := strings.Split(string(existing), "\n")
+	var out []string
+	foundPhase := false
+	foundUpdated := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "**Phase:**") {
+			out = append(out, "**Phase:** "+status.Phase)
+			foundPhase = true
+		} else if strings.HasPrefix(trimmed, "**Phase Updated:**") {
+			if status.PhaseUpdate != "" {
+				out = append(out, "**Phase Updated:** "+status.PhaseUpdate)
+			}
+			foundUpdated = true
+		} else {
+			out = append(out, line)
+		}
+	}
+	if !foundPhase {
+		out = append(out, "**Phase:** "+status.Phase)
+	}
+	if !foundUpdated && status.PhaseUpdate != "" {
+		out = append(out, "**Phase Updated:** "+status.PhaseUpdate)
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
 // readSessionJSON reads and parses session.json for a task.
 func (p *Plugin) readSessionJSON(taskID string) (*SessionJSON, error) {
 	data, err := p.readTaskFile(taskID, "session.json")

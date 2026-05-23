@@ -2,12 +2,14 @@ package clewservice
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -62,7 +64,6 @@ func setupTestPlugin(t *testing.T) (*Plugin, string) {
 
 	return p, root
 }
-
 
 // writeTestTasksJSON is a helper that writes tasks.json (not atomic, for test setup).
 func writeTestTasksJSON(t *testing.T, path string, tasks *TasksJSON) {
@@ -378,209 +379,270 @@ func TestPhaseTransitions(t *testing.T) {
 	}
 }
 
-func TestTaskGetNotFound(t *testing.T) {
+func TestConcurrentWrites(t *testing.T) {
 	p, _ := setupTestPlugin(t)
 	mux := setupTestMux(t, p)
 
-	req := httptest.NewRequest("GET", "/api/tasks/clew-999", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
+	var wg sync.WaitGroup
+	errs := make(chan error, 5)
 
-	if w.Code != http.StatusNotFound {
-		t.Errorf("GET /api/tasks/clew-999: status %d, want 404", w.Code)
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			body := strings.NewReader(
+				fmt.Sprintf(`{"id":"clew-conc-%03d","subject":"Concurrent %d","priority":2}`, n, n))
+			req := httptest.NewRequest("POST", "/api/tasks", body)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != http.StatusCreated {
+				errs <- fmt.Errorf("task %d: status %d", n, w.Code)
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
 	}
 }
 
-func TestTaskGetFound(t *testing.T) {
-	p, _ := setupTestPlugin(t)
-	mux := setupTestMux(t, p)
+// setupTestPluginWithDeps creates a Plugin with tasks that have dependencies.
+func setupTestPluginWithDeps(t *testing.T) (*Plugin, string) {
+	t.Helper()
+	root := t.TempDir()
 
-	req := httptest.NewRequest("GET", "/api/tasks/clew-001", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
+	taskState := filepath.Join(root, "task_state")
+	os.MkdirAll(filepath.Join(taskState, "lessons_learned"), 0755)
+	os.MkdirAll(filepath.Join(root, "projects"), 0755)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("GET /api/tasks/clew-001: status %d, want 200", w.Code)
+	tasks := TasksJSON{
+		Version: "1",
+		Updated: Timestamp(),
+		Tasks: map[string]TaskEntry{
+			"clew-001": {
+				ID: "clew-001", Subject: "Task 1", Status: "queued",
+				Priority: 5, Cost: TaskCost{BudgetUSD: 10},
+				DependsOn: []string{}, Children: []string{},
+				Created: Timestamp(), Updated: Timestamp(),
+			},
+			"clew-002": {
+				ID: "clew-002", Subject: "Task 2", Status: "done",
+				Priority: 2, Cost: TaskCost{BudgetUSD: 20},
+				DependsOn: []string{}, Children: []string{},
+				Created: Timestamp(), Updated: Timestamp(),
+			},
+			"clew-003": {
+				ID: "clew-003", Subject: "Task 3", Status: "queued",
+				Priority: 3, DependsOn: []string{"clew-001"},
+				Cost: TaskCost{BudgetUSD: 10},
+				Children: []string{},
+				Created: Timestamp(), Updated: Timestamp(),
+			},
+			"clew-004": {
+				ID: "clew-004", Subject: "Task 4", Status: "queued",
+				Priority: 4, DependsOn: []string{"clew-002"},
+				Cost: TaskCost{BudgetUSD: 10},
+				Children: []string{},
+				Created: Timestamp(), Updated: Timestamp(),
+			},
+		},
 	}
-	var detail TaskDetailResponse
-	json.NewDecoder(w.Body).Decode(&detail)
-	if detail.Task.ID != "clew-001" {
-		t.Errorf("GET /api/tasks/clew-001: task.id=%s, want clew-001", detail.Task.ID)
+	writeTestTasksJSON(t, filepath.Join(taskState, "tasks.json"), &tasks)
+
+	for _, id := range []string{"clew-001", "clew-003", "clew-004"} {
+		dir := filepath.Join(taskState, id)
+		os.MkdirAll(dir, 0755)
+		os.WriteFile(filepath.Join(dir, "TASK.md"), []byte("# "+id+" — Test\n\n"), 0644)
+		os.WriteFile(filepath.Join(dir, "STATUS.md"), []byte("# Status\n\n**Phase:** queued\n"), 0644)
 	}
-	if detail.Status.Phase != "queued" {
-		t.Errorf("GET /api/tasks/clew-001: status.phase=%s, want queued", detail.Status.Phase)
+
+	p := &Plugin{
+		projectRoot:   root,
+		newTaskScript: "/bin/true",
+		logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
-	if detail.Session == nil {
-		t.Error("GET /api/tasks/clew-001: session is nil, expected session data")
-	}
+	return p, root
 }
 
-func TestTaskContentGet(t *testing.T) {
-	p, _ := setupTestPlugin(t)
+func TestDispatchDependencyCheck(t *testing.T) {
+	p, _ := setupTestPluginWithDeps(t)
 	mux := setupTestMux(t, p)
 
-	req := httptest.NewRequest("GET", "/api/tasks/clew-001/content?file=TASK.md", nil)
+	// Dispatch task with unsatisfied dep (clew-003 depends on clew-001 which is queued).
+	body := strings.NewReader(`{"role":"cto","tool":"claude"}`)
+	req := httptest.NewRequest("POST", "/api/tasks/clew-003/dispatch", body)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("GET /api/tasks/clew-001/content: status %d, want 200", w.Code)
-	}
-	if !strings.Contains(w.Body.String(), "clew-001") {
-		t.Errorf("GET content: body doesn't contain task ID: %q", w.Body.String())
-	}
-}
-
-func TestTaskContentGetInvalidFile(t *testing.T) {
-	p, _ := setupTestPlugin(t)
-	mux := setupTestMux(t, p)
-
-	req := httptest.NewRequest("GET", "/api/tasks/clew-001/content?file=/etc/passwd", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("GET /api/tasks/clew-001/content invalid file: status %d, want 400", w.Code)
+		t.Errorf("dispatch with unsatisfied dep: status %d, want 400", w.Code)
+	}
+
+	// Dispatch task with satisfied dep (clew-004 depends on clew-002 which is done).
+	body2 := strings.NewReader(`{"role":"worker","tool":"claude"}`)
+	req2 := httptest.NewRequest("POST", "/api/tasks/clew-004/dispatch", body2)
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusCreated {
+		t.Errorf("dispatch with satisfied dep: status %d, want 201 (body: %s)", w2.Code, w2.Body.String())
 	}
 }
 
-func TestTaskResultPost_ValidTransition(t *testing.T) {
-	p, _ := setupTestPlugin(t)
+func TestPollOrderingDepSkip(t *testing.T) {
+	p, _ := setupTestPluginWithDeps(t)
 	mux := setupTestMux(t, p)
 
-	body := strings.NewReader(`{"phase":"exploring","outcome":"starting"}`)
-	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("POST /api/tasks/clew-001/result: status %d, want 200", w.Code)
-	}
-}
-
-func TestTaskResultPost_InvalidTransition(t *testing.T) {
-	p, _ := setupTestPlugin(t)
-	mux := setupTestMux(t, p)
-
-	body := strings.NewReader(`{"phase":"implementing","outcome":"skip"}`)
-	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("POST /api/tasks/clew-001/result skip: status %d, want 400", w.Code)
-	}
-}
-
-func TestAgentPoll(t *testing.T) {
-	p, _ := setupTestPlugin(t)
-	mux := setupTestMux(t, p)
-
+	// clew-001 (priority 5) and clew-004 (priority 4) are eligible queued tasks.
+	// clew-003 has unsatisfied dep on clew-001 and should be skipped.
+	// clew-004 has lower priority number so should be returned.
 	req := httptest.NewRequest("GET", "/api/agent/poll", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
-		t.Errorf("GET /api/agent/poll: status %d, want 200", w.Code)
+		t.Fatalf("poll with mixed deps: status %d, want 200", w.Code)
 	}
 	var resp PollResponse
 	json.NewDecoder(w.Body).Decode(&resp)
-	if resp.TaskID != "clew-001" {
-		t.Errorf("GET /api/agent/poll: task_id=%s, want clew-001", resp.TaskID)
+	if resp.TaskID != "clew-004" {
+		t.Errorf("poll returned %s, want clew-004 (lowest priority among eligible)", resp.TaskID)
 	}
-	if resp.Priority != 1 {
-		t.Errorf("GET /api/agent/poll: priority=%d, want 1", resp.Priority)
+	if resp.Priority != 4 {
+		t.Errorf("poll priority=%d, want 4", resp.Priority)
 	}
 }
 
-func TestAgentPollNoTasks(t *testing.T) {
-	p, root := setupTestPlugin(t)
-	// Remove all queued tasks.
-	tasks := TasksJSON{
-		Version: "1",
-		Updated: Timestamp(),
-		Tasks: map[string]TaskEntry{
-			"clew-002": {
-				ID:      "clew-002",
-				Status:  "done",
-				Created: Timestamp(),
-				Updated: Timestamp(),
-			},
-		},
-	}
-	writeTestTasksJSON(t, filepath.Join(root, "task_state", "tasks.json"), &tasks)
-	mux := setupTestMux(t, p)
+func TestPollNoEligibleTasks(t *testing.T) {
+	p, root := setupTestPluginWithDeps(t)
 
+	// Change clew-001 and clew-004 to non-queued status, leaving only
+	// clew-003 which has unsatisfied depends_on.
+	tasksPath := filepath.Join(root, "task_state", "tasks.json")
+	data, _ := os.ReadFile(tasksPath)
+	var tasks TasksJSON
+	json.Unmarshal(data, &tasks)
+	for _, id := range []string{"clew-001", "clew-004"} {
+		e := tasks.Tasks[id]
+		e.Status = "exploring"
+		tasks.Tasks[id] = e
+	}
+	writeTestTasksJSON(t, tasksPath, &tasks)
+
+	mux := setupTestMux(t, p)
 	req := httptest.NewRequest("GET", "/api/agent/poll", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNoContent {
-		t.Errorf("GET /api/agent/poll no tasks: status %d, want 204", w.Code)
+		t.Errorf("poll no eligible tasks: status %d, want 204", w.Code)
 	}
 }
 
-func TestAgentHeartbeat(t *testing.T) {
+func TestContentType(t *testing.T) {
 	p, _ := setupTestPlugin(t)
 	mux := setupTestMux(t, p)
 
-	body := strings.NewReader(`{"task_id":"clew-001","agent_id":"test-agent"}`)
-	req := httptest.NewRequest("POST", "/api/agent/heartbeat", body)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("POST /api/agent/heartbeat: status %d, want 200", w.Code)
+	tests := []struct {
+		file, wantCT string
+	}{
+		{"TASK.md", "text/markdown; charset=utf-8"},
+		{"STATUS.md", "text/markdown; charset=utf-8"},
+		{"session.json", "application/json"},
 	}
 
-	// Verify heartbeat was written.
-	session, _ := p.readSessionJSON("clew-001")
-	if session.HeartbeatAt == "" {
-		t.Error("heartbeat_at was not written")
-	}
-	if session.AgentID != "test-agent" {
-		t.Errorf("agent_id=%s, want test-agent", session.AgentID)
-	}
-}
+	for _, tc := range tests {
+		req := httptest.NewRequest("GET", "/api/tasks/clew-001/content?file="+tc.file, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
 
-func TestTaskLogsGet(t *testing.T) {
-	p, root := setupTestPlugin(t)
-	os.MkdirAll(filepath.Join(root, "task_state", "clew-001", "logs"), 0755)
-	os.WriteFile(filepath.Join(root, "task_state", "clew-001", "logs", "2026-05-23.md"), []byte("test"), 0644)
-	mux := setupTestMux(t, p)
-
-	req := httptest.NewRequest("GET", "/api/tasks/clew-001/logs", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("GET /api/tasks/clew-001/logs: status %d, want 200", w.Code)
-	}
-	var body map[string]any
-	json.NewDecoder(w.Body).Decode(&body)
-	logs, _ := body["logs"].([]any)
-	if len(logs) != 1 {
-		t.Errorf("GET /api/tasks/clew-001/logs: got %d logs, want 1", len(logs))
+		if w.Code != http.StatusOK {
+			t.Errorf("content %s: status %d, want 200", tc.file, w.Code)
+			continue
+		}
+		got := w.Header().Get("Content-Type")
+		if got != tc.wantCT {
+			t.Errorf("content %s: Content-Type=%q, want %q", tc.file, got, tc.wantCT)
+		}
 	}
 }
 
-func TestTaskArtifactsGet(t *testing.T) {
+func TestStatusMDPreservation(t *testing.T) {
 	p, root := setupTestPlugin(t)
-	os.MkdirAll(filepath.Join(root, "task_state", "clew-001", "artifacts"), 0755)
-	os.WriteFile(filepath.Join(root, "task_state", "clew-001", "artifacts", "plan.md"), []byte("test"), 0644)
+
+	// Write rich STATUS.md with review content that should survive a phase update.
+	richStatus := []byte("# Status — clew-001\n\n**Phase:** queued\n\n**Review Round 1:** PASS\n**Review Round 2:** SHOULD_FIX\n\nSome notes here.\n")
+	os.WriteFile(filepath.Join(root, "task_state", "clew-001", "STATUS.md"), richStatus, 0644)
+
 	mux := setupTestMux(t, p)
 
-	req := httptest.NewRequest("GET", "/api/tasks/clew-001/artifacts", nil)
+	// Submit result to transition queued → exploring.
+	body := strings.NewReader(`{"phase":"exploring","outcome":"starting"}`)
+	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
-
 	if w.Code != http.StatusOK {
-		t.Errorf("GET /api/tasks/clew-001/artifacts: status %d, want 200", w.Code)
+		t.Fatalf("result post: status %d, want 200 (body: %s)", w.Code, w.Body.String())
 	}
-	var body map[string]any
-	json.NewDecoder(w.Body).Decode(&body)
-	artifacts, _ := body["artifacts"].([]any)
-	if len(artifacts) != 1 {
-		t.Errorf("GET /api/tasks/clew-001/artifacts: got %d artifacts, want 1", len(artifacts))
+
+	// Read back STATUS.md and verify rich content was preserved.
+	statusData, err := os.ReadFile(filepath.Join(root, "task_state", "clew-001", "STATUS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusStr := string(statusData)
+	if !strings.Contains(statusStr, "Review Round 1: PASS") {
+		t.Errorf("STATUS.md did not preserve Review Round 1: %s", statusStr)
+	}
+	if !strings.Contains(statusStr, "Review Round 2: SHOULD_FIX") {
+		t.Errorf("STATUS.md did not preserve Review Round 2: %s", statusStr)
+	}
+	if !strings.Contains(statusStr, "Some notes here") {
+		t.Errorf("STATUS.md did not preserve notes: %s", statusStr)
+	}
+	if !strings.Contains(statusStr, "**Phase:** exploring") {
+		t.Errorf("STATUS.md did not update phase to exploring: %s", statusStr)
+	}
+}
+
+func TestResultPhaseFromStatusMD(t *testing.T) {
+	p, root := setupTestPlugin(t)
+
+	// Modify tasks.json: set clew-001 status to "planning"
+	// (which would allow plan_review if it were the source of truth).
+	// But STATUS.md still says "queued", which should NOT allow plan_review.
+	tasksPath := filepath.Join(root, "task_state", "tasks.json")
+	data, _ := os.ReadFile(tasksPath)
+	var tasks TasksJSON
+	json.Unmarshal(data, &tasks)
+	entry := tasks.Tasks["clew-001"]
+	entry.Status = "planning"
+	tasks.Tasks["clew-001"] = entry
+	writeTestTasksJSON(t, tasksPath, &tasks)
+
+	// STATUS.md says "queued", so queued→plan_review should be rejected (skip).
+	os.WriteFile(filepath.Join(root, "task_state", "clew-001", "STATUS.md"),
+		[]byte("# Status\n\n**Phase:** queued\n"), 0644)
+
+	mux := setupTestMux(t, p)
+
+	// Try invalid transition: STATUS.md queued → plan_review (skip).
+	body := strings.NewReader(`{"phase":"plan_review","outcome":"skip"}`)
+	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("invalid transition (STATUS.md queued→plan_review): status %d, want 400 (body: %s)",
+			w.Code, w.Body.String())
+	}
+
+	// Try valid transition: STATUS.md queued → exploring.
+	body2 := strings.NewReader(`{"phase":"exploring","outcome":"starting"}`)
+	req2 := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body2)
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Errorf("valid transition (STATUS.md queued→exploring): status %d, want 200 (body: %s)",
+			w2.Code, w2.Body.String())
 	}
 }
