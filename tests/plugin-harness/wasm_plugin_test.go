@@ -324,7 +324,7 @@ func TestPluginCalls_Wasm_Go(t *testing.T) {
 		"pgvector.upsert", "pgvector.search", "pgvector.delete",
 		"slack-notify.send_message",
 		"webhook-ingest.await_webhook",
-		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
+		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream", "llm.chat_stream",
 	}
 	for _, key := range expectedKeys {
 		if _, ok := results[key]; !ok {
@@ -426,7 +426,7 @@ func TestPluginCalls_Wasm_Rust(t *testing.T) {
 		"pgvector.upsert", "pgvector.search", "pgvector.delete",
 		"slack-notify.send_message",
 		"webhook-ingest.await_webhook",
-		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
+		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream", "llm.chat_stream",
 	}
 	for _, key := range expectedKeys {
 		if _, ok := results[key]; !ok {
@@ -512,7 +512,7 @@ func TestPluginCalls_Wasm_AS(t *testing.T) {
 		"pgvector.upsert", "pgvector.search", "pgvector.delete",
 		"slack-notify.send_message",
 		"webhook-ingest.await_webhook",
-		"llm.chat", "llm.embed", "llm.list_models",
+		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
 	}
 	for _, key := range expectedKeys {
 		if _, ok := results[key]; !ok {
@@ -595,7 +595,7 @@ func TestPluginCalls_Wasm_Python(t *testing.T) {
 		"pgvector.upsert", "pgvector.search", "pgvector.delete",
 		"slack-notify.send_message",
 		"webhook-ingest.await_webhook",
-		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
+		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream", "llm.chat_stream",
 	}
 	for _, key := range expectedKeys {
 		if _, ok := results[key]; !ok {
@@ -665,7 +665,7 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 		"pgvector.upsert", "pgvector.search", "pgvector.delete",
 		"slack-notify.send_message",
 		"webhook-ingest.await_webhook",
-		"llm.chat", "llm.embed", "llm.list_models",
+		"llm.chat", "llm.embed", "llm.list_models", "llm.chat_stream",
 	}
 	for _, key := range expectedKeys {
 		if _, ok := results[key]; !ok {

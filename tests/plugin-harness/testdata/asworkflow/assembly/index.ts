@@ -102,6 +102,18 @@ export function call_all_plugins(h: HostCalls, _input: string): string {
   parts.push(',"llm.list_models":');
   parts.push(callBuilt(h, "llm", "list_models", '{"provider":"openai"}'));
 
+  // llm.chat_stream (streaming)
+  let streamResult: PluginCallOutcome = h.pluginCallStreaming(
+    "llm", "chat_stream",
+    '{"provider":"openai","model":"mock-model","messages":[{"role":"user","content":"hello"}]}'
+  );
+  parts.push(',"llm.chat_stream":');
+  if (streamResult.error !== null || streamResult.response.length == 0) {
+    parts.push('{"error":"' + escapeJson(streamResult.error !== null ? streamResult.error! : "empty response") + '"}');
+  } else {
+    parts.push(streamResult.response);
+  }
+
   let result: string = "{" + parts.join("") + "}";
   return result;
 }
