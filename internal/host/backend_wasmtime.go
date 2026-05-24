@@ -171,45 +171,47 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		copy(data[inputOffset:], inputBytes)
 	}
 
-	// If the module is a Go wasip1 module (exports _start with a dispatcher
-	// loop), use the cleat_poll_work dispatcher protocol. Non-Go modules
-	// (e.g., TeaVM/Java) may also export _start for their runtime init but
-	// don't support the dispatcher protocol — those use the direct call path.
+	// If the module exports _start, call it first. Go wasip1 modules use
+	// the cleat_poll_work dispatcher protocol to route work. Java/TeaVM
+	// modules need _start for runtime init (shadow stack, fiber state)
+	// before the entry point can be called directly.
 	lang := wasm.DetectLanguage(wasmBytes)
 	if lang == "go" {
 		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
-		b.workEntryPoint = entryPoint
-		b.workInput = []byte(input)
+			b.workEntryPoint = entryPoint
+			b.workInput = []byte(input)
 
-		// Call _start synchronously. main() processes the work and returns.
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Only report the panic as an error if the workflow
-					// didn't already deliver a result via cleat_complete.
-					if completeResult == "" && completeErr == "" {
-						completeErr = fmt.Sprintf("wasm _start panic: %v", r)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						if completeResult == "" && completeErr == "" {
+							completeErr = fmt.Sprintf("wasm _start panic: %v", r)
+						}
 					}
-				}
+				}()
+				startFn.Call(store)
 			}()
-			startFn.Call(store)
-		}()
 
-		// Result is delivered via cleat_complete hook.
-		if completeResult != "" {
-			return &ExecResult{Result: completeResult, Suspended: false}, nil
+			if completeResult != "" {
+				return &ExecResult{Result: completeResult, Suspended: false}, nil
+			}
+			if completeErr != "" {
+				return &ExecResult{Result: completeErr, Suspended: false}, nil
+			}
+			return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 		}
-		if completeErr != "" {
-			// Return workflow-level errors as the result string so
-			// callers (including replay divergence detection) can
-			// inspect the error message.
-			return &ExecResult{Result: completeErr, Suspended: false}, nil
-		}
-		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
+	} else if lang == "java" {
+		// TeaVM modules need _start to initialize the runtime (shadow
+		// stack, fiber system, thread-local globals) before any export
+		// can be called. Call it synchronously and wait for return.
+		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
+			if _, err := startFn.Call(store); err != nil {
+				return nil, fmt.Errorf("host: teaVM _start failed: %w", err)
+			}
 		}
 	}
 
-	// Call the export directly (non-Go modules, or Go modules without _start).
+// Call the export directly (non-Go modules, or Go modules without _start).
 	fn := instance.GetFunc(store, entryPoint)
 	if fn == nil {
 		return nil, fmt.Errorf("host: export %q not found", entryPoint)

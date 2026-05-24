@@ -20,8 +20,8 @@ func wasmtimeBackendOptions() []host.EngineOption {
 		host.WithBackend("go", wt),
 		host.WithBackend("assemblyscript", wt),
 		host.WithBackend("python", wt),
-		// Rust (wasm32-wasip1) and Java (TeaVM) still crash on
-		// wasmtime-go v44 fn.Call — Rust hits nil pointer in the
-		// WASI + non-Go path, Java hits unreachable in TeaVM runtime.
+		host.WithBackend("java", wt),
+		// Rust (wasm32-wasip1) still hits nil pointer dereference
+		// in wasmtime-go v44 fn.Call on the WASI + non-Go path.
 	}
 }
