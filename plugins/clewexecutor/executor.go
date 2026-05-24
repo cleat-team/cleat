@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -536,6 +537,44 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 	out := checkCIOutput{CIStatus: "passing", PRURL: prURL, Details: "all checks passed"}
 	b, _ := json.Marshal(out)
 	return string(b), nil
+}
+
+// writeStatus atomically updates the **Phase:** line in STATUS.md.
+// Input: {"task_id":"...","project_root":"...","project":"...","phase":"..."}
+func (p *Plugin) writeStatus(ctx context.Context, inputJSON string) (string, error) {
+	var req struct {
+		TaskID      string `json:"task_id"`
+		ProjectRoot string `json:"project_root"`
+		Project     string `json:"project"`
+		Phase       string `json:"phase"`
+	}
+	if err := json.Unmarshal([]byte(inputJSON), &req); err != nil {
+		return "", fmt.Errorf("write_status: %w", err)
+	}
+	if req.TaskID == "" || req.ProjectRoot == "" || req.Phase == "" {
+		return "", fmt.Errorf("write_status: missing required field")
+	}
+
+	td := taskDir(req.ProjectRoot, req.Project, req.TaskID)
+	statusPath := filepath.Join(td, "STATUS.md")
+
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return "", fmt.Errorf("write_status: %w", err)
+	}
+
+	re := regexp.MustCompile(`\*\*Phase:\*\*\s*.+`)
+	newData := re.ReplaceAll(data, []byte("**Phase:** "+req.Phase))
+
+	tmpPath := statusPath + ".tmp"
+	if err := os.WriteFile(tmpPath, newData, 0644); err != nil {
+		return "", fmt.Errorf("write_status: %w", err)
+	}
+	if err := os.Rename(tmpPath, statusPath); err != nil {
+		return "", fmt.Errorf("write_status: %w", err)
+	}
+
+	return `{"ok":true}`, nil
 }
 
 // buildPrompt constructs the agent prompt matching clew-run.sh patterns.
