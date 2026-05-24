@@ -23,20 +23,6 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	}, p.checkCI); err != nil {
 		return err
 	}
-	if err := scope.Register(plugin.FuncOptions{
-		Name:       "validate_files",
-		Idempotent: true,
-	}, p.validateFiles); err != nil {
-		return err
-	}
-	if err := scope.Register(plugin.FuncOptions{
-		Name:       "read_file",
-		Idempotent: true,
-	}, p.readFile); err != nil {
-		return err
-	}
-	return scope.Register(plugin.FuncOptions{
-		Name:       "create_task",
-		Idempotent: true,
-	}, p.createTask)
+	// TODO: implement validateFiles, readFile, createTask on Plugin
+	return nil
 }
