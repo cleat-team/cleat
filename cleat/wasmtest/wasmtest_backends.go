@@ -18,8 +18,10 @@ func wasmtimeBackendOptions() []host.EngineOption {
 	}
 	return []host.EngineOption{
 		host.WithBackend("go", wt),
+		host.WithBackend("assemblyscript", wt),
 		host.WithBackend("python", wt),
-		// Rust, AssemblyScript, and Java use the legacy wazero path
-		// due to wasmtime-go v44 crashes on non-Go core WASM modules.
+		// Rust (wasm32-wasip1) and Java (TeaVM) still crash on
+		// wasmtime-go v44 fn.Call — Rust hits nil pointer in the
+		// WASI + non-Go path, Java hits unreachable in TeaVM runtime.
 	}
 }

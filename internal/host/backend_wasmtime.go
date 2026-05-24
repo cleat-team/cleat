@@ -73,9 +73,14 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Configure WASI for Go wasip1 module support.
 	// The module may need WASI for stack/goroutine management even though we
 	// override time/random functions for determinism.
-	wasiConfig := wasmtime.NewWasiConfig()
-	wasiConfig.InheritStderr()
-	store.SetWasi(wasiConfig)
+	// Skip for modules that don't import from WASI (AS, Rust cdylib, TeaVM)
+	// to avoid wasmtime-go v44 nil pointer dereference during fn.Call.
+	needsWasi := wasm.HasWasiImports(wasmBytes)
+	if needsWasi {
+		wasiConfig := wasmtime.NewWasiConfig()
+		wasiConfig.InheritStderr()
+		store.SetWasi(wasiConfig)
+	}
 
 	// Wrap context so host functions can find the session.
 	ctx = withHandler(ctx, session)
@@ -112,7 +117,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// can store the workflow result and the Execute method can retrieve
 	// it even when the module subsequently traps (e.g. via proc_exit).
 	var completeResult, completeErr string
-	if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi); err != nil {
 		return nil, fmt.Errorf("host: register imports: %w", err)
 	}
 
@@ -166,13 +171,13 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		copy(data[inputOffset:], inputBytes)
 	}
 
-	// If the module exports _start (Go wasip1), use the cleat_poll_work
-	// dispatcher protocol. We store the entry point + input on the backend,
-	// then call _start synchronously. main() calls cleat_poll_work (which
-	// returns the work), dispatches to the entry point, and calls
-	// cleat_complete with the result. All WASM execution stays on one
-	// goroutine, avoiding the Go wasip1 reentrancy issue.
-	if startFn := instance.GetFunc(store, "_start"); startFn != nil {
+	// If the module is a Go wasip1 module (exports _start with a dispatcher
+	// loop), use the cleat_poll_work dispatcher protocol. Non-Go modules
+	// (e.g., TeaVM/Java) may also export _start for their runtime init but
+	// don't support the dispatcher protocol — those use the direct call path.
+	lang := wasm.DetectLanguage(wasmBytes)
+	if lang == "go" {
+		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
 		b.workEntryPoint = entryPoint
 		b.workInput = []byte(input)
 
@@ -201,9 +206,10 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			return &ExecResult{Result: completeErr, Suspended: false}, nil
 		}
 		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
+		}
 	}
 
-	// Non-Go module: call the export directly.
+	// Call the export directly (non-Go modules, or Go modules without _start).
 	fn := instance.GetFunc(store, entryPoint)
 	if fn == nil {
 		return nil, fmt.Errorf("host: export %q not found", entryPoint)
@@ -465,6 +471,17 @@ func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
 	); err != nil {
 		return err
 	}
+
+	// environ_get and environ_sizes_get are imported by Rust wasm32-wasip1
+	// modules. wasmtime-go v44's DefineWasi() may or may not provide them
+	// depending on the exact C library version. Provide fallback stubs;
+	// errors from duplicate definition are benign.
+	_ = linker.FuncWrap("wasi_snapshot_preview1", "environ_get",
+		func(_ int32, _ int32) int32 { return 0 },
+	)
+	_ = linker.FuncWrap("wasi_snapshot_preview1", "environ_sizes_get",
+		func(_ int32, _ int32) int32 { return 0 },
+	)
 
 	return nil
 }
@@ -1881,7 +1898,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 		// Use dummy completeResult/completeErr since component modules don't
 		// use the Go dispatcher cleat_complete protocol.
 		var completeResult, completeErr string
-		if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+		if err := b.registerAllImports(linker, &completeResult, &completeErr, true); err != nil {
 			return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
 		}
 
@@ -2045,7 +2062,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				strings.Contains(instErr.Error(), "out of bounds") {
 				linker2 := wasmtime.NewLinker(b.engine)
 				var cr2, ce2 string
-				b.registerAllImports(linker2, &cr2, &ce2)
+				b.registerAllImports(linker2, &cr2, &ce2, true)
 			// wit_dylib functions for component model adapter canonical ABI (fallback).
 			for _, impTy := range cm.Imports() {
 				if impTy.Module() != "env" || impTy.Name() == nil ||
@@ -2443,9 +2460,11 @@ if pendingCount > 0 {
 
 // registerAllImports registers all host function imports on the given linker.
 // Extracted so both Execute and ExecuteComponent can share the same setup.
-func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string) error {
-	if err := b.registerWasiStubs(linker); err != nil {
-		return err
+func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool) error {
+	if needsWasi {
+		if err := b.registerWasiStubs(linker); err != nil {
+			return err
+		}
 	}
 	if err := b.registerEnvStubs(linker); err != nil {
 		return err
