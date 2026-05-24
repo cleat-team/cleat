@@ -11,7 +11,7 @@ import (
 )
 
 // runBuildRust compiles a Rust workflow crate to WASM using cargo.
-// Uses wasm32-wasip1 (no WASI) to avoid non-deterministic
+// Uses wasm32-unknown-unknown (no WASI) to avoid non-deterministic
 // WASI imports (environ_get etc.) that break replay determinism.
 func runBuildRust(pattern, outDir string) {
 	cargoDir := pattern
@@ -30,8 +30,8 @@ func runBuildRust(pattern, outDir string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("  Compiling Rust WASM module (wasm32-wasip1)...\n")
-	cmd := exec.Command("cargo", "build", "--target", "wasm32-wasip1", "--release")
+	fmt.Printf("  Compiling Rust WASM module (wasm32-unknown-unknown)...\n")
+	cmd := exec.Command("cargo", "build", "--target", "wasm32-unknown-unknown", "--release")
 	cmd.Dir = cargoDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -39,14 +39,14 @@ func runBuildRust(pattern, outDir string) {
 
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cargo build failed: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Make sure the wasm32-wasip1 target is installed:\n")
-		fmt.Fprintf(os.Stderr, "  rustup target add wasm32-wasip1\n")
+		fmt.Fprintf(os.Stderr, "Make sure the wasm32-unknown-unknown target is installed:\n")
+		fmt.Fprintf(os.Stderr, "  rustup target add wasm32-unknown-unknown\n")
 		os.Exit(1)
 	}
 
 	// Locate the output .wasm file.
 	crateName := extractCrateName(cargoToml)
-	wasmBuildDir := filepath.Join(cargoDir, "target", "wasm32-wasip1", "release")
+	wasmBuildDir := filepath.Join(cargoDir, "target", "wasm32-unknown-unknown", "release")
 	srcWasm := filepath.Join(wasmBuildDir, crateName+".wasm")
 
 	if _, err := os.Stat(srcWasm); os.IsNotExist(err) {

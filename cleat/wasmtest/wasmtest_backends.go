@@ -21,7 +21,8 @@ func wasmtimeBackendOptions() []host.EngineOption {
 		host.WithBackend("assemblyscript", wt),
 		host.WithBackend("python", wt),
 		host.WithBackend("java", wt),
-		// Rust (wasm32-wasip1) still hits nil pointer dereference
-		// in wasmtime-go v44 fn.Call on the WASI + non-Go path.
+		// Rust crates are compiled with wasm32-unknown-unknown (no WASI),
+		// but wasmtime-go v44 still crashes on fn.Call for Rust cdylib
+		// core modules regardless of import set.
 	}
 }
