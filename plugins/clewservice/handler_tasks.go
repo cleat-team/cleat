@@ -414,9 +414,33 @@ func outcomeToExitCode(outcome string) *int {
 // ── clew-133c stubs ──
 
 func (p *Plugin) handleTaskLogsGet(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	taskID := r.PathValue("id")
+	dir, err := p.taskDir(taskID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	logs, err := listDir(filepath.Join(dir, "logs"), 0, true)
+	if err != nil {
+		p.logger.Error("list logs", "task", taskID, "error", err)
+		writeError(w, http.StatusInternalServerError, "list logs: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"logs": logs})
 }
 
 func (p *Plugin) handleTaskArtifactsGet(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	taskID := r.PathValue("id")
+	dir, err := p.taskDir(taskID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	artifacts, err := listDir(filepath.Join(dir, "artifacts"), 0, false)
+	if err != nil {
+		p.logger.Error("list artifacts", "task", taskID, "error", err)
+		writeError(w, http.StatusInternalServerError, "list artifacts: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"artifacts": artifacts})
 }

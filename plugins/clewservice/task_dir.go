@@ -13,7 +13,8 @@ import (
 // it does not escape via path traversal.
 func (p *Plugin) safePath(subpath string) (string, error) {
 	clean := filepath.Clean(filepath.Join(p.projectRoot, subpath))
-	if !strings.HasPrefix(clean, p.projectRoot) {
+	rel, err := filepath.Rel(p.projectRoot, clean)
+	if err != nil || strings.HasPrefix(rel, "..") {
 		return "", fmt.Errorf("path traversal: %s", subpath)
 	}
 	return clean, nil
@@ -44,7 +45,8 @@ func (p *Plugin) readTaskFile(taskID, filename string) ([]byte, error) {
 	}
 	path := filepath.Join(dir, filename)
 	clean := filepath.Clean(path)
-	if !strings.HasPrefix(clean, p.projectRoot) {
+	rel, err := filepath.Rel(p.projectRoot, clean)
+	if err != nil || strings.HasPrefix(rel, "..") {
 		return nil, fmt.Errorf("path traversal: %s", filename)
 	}
 	return os.ReadFile(clean)
@@ -58,7 +60,8 @@ func (p *Plugin) writeTaskFile(taskID, filename string, data []byte, perm os.Fil
 	}
 	path := filepath.Join(dir, filename)
 	clean := filepath.Clean(path)
-	if !strings.HasPrefix(clean, p.projectRoot) {
+	rel, err := filepath.Rel(p.projectRoot, clean)
+	if err != nil || strings.HasPrefix(rel, "..") {
 		return fmt.Errorf("path traversal: %s", filename)
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {

@@ -84,14 +84,14 @@ func (p *Plugin) handleProjectsPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if project already exists.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Check if project already exists (inside mutex to prevent TOCTOU).
 	if _, err := os.Stat(projDir); err == nil {
 		writeError(w, http.StatusConflict, "project already exists: "+req.Name)
 		return
 	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	if err := os.MkdirAll(projDir, 0755); err != nil {
 		p.logger.Error("create project dir", "project", req.Name, "error", err)
