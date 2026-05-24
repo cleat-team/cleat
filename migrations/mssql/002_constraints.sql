@@ -119,6 +119,24 @@ IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.workf
 -- the session-scoped tenant_id. Applied as a FILTER PREDICATE on each table.
 -- When SESSION_CONTEXT returns NULL (no tenant set), the predicate blocks
 -- all access (NULL = <value> evaluates to UNKNOWN → row filtered out).
+-- Security policies (drop before recreating the function, since they
+-- reference it and prevent ALTER).
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
+    DROP SECURITY POLICY dbo.TenantFilter_Defs;
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Instances')
+    DROP SECURITY POLICY dbo.TenantFilter_Instances;
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_EventHistory')
+    DROP SECURITY POLICY dbo.TenantFilter_EventHistory;
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Signals')
+    DROP SECURITY POLICY dbo.TenantFilter_Signals;
+
+IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Schedules')
+    DROP SECURITY POLICY dbo.TenantFilter_Schedules;
+
 CREATE OR ALTER FUNCTION dbo.fn_tenant_filter(@tenant_id UNIQUEIDENTIFIER)
 RETURNS TABLE
 WITH SCHEMABINDING
@@ -126,34 +144,24 @@ AS
 RETURN SELECT 1 AS access
     WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER);
 
--- Security policies (drop+recreate for idempotency).
+-- Recreate security policies.
 
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Defs')
-    DROP SECURITY POLICY dbo.TenantFilter_Defs;
 CREATE SECURITY POLICY dbo.TenantFilter_Defs
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_defs
 WITH (STATE = ON);
 
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Instances')
-    DROP SECURITY POLICY dbo.TenantFilter_Instances;
 CREATE SECURITY POLICY dbo.TenantFilter_Instances
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_instances
 WITH (STATE = ON);
 
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_EventHistory')
-    DROP SECURITY POLICY dbo.TenantFilter_EventHistory;
 CREATE SECURITY POLICY dbo.TenantFilter_EventHistory
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.event_history
 WITH (STATE = ON);
 
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Signals')
-    DROP SECURITY POLICY dbo.TenantFilter_Signals;
 CREATE SECURITY POLICY dbo.TenantFilter_Signals
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_signals
 WITH (STATE = ON);
 
-IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'TenantFilter_Schedules')
-    DROP SECURITY POLICY dbo.TenantFilter_Schedules;
 CREATE SECURITY POLICY dbo.TenantFilter_Schedules
     ADD FILTER PREDICATE dbo.fn_tenant_filter(tenant_id) ON dbo.workflow_schedules
 WITH (STATE = ON);
