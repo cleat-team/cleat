@@ -489,7 +489,8 @@ func selectMigrationSQL(dialect plugin.Dialect, m plugin.Migration) string {
 // splitSQL splits SQL text on semicolons, discarding empty fragments.
 func splitSQL(sql string) []string {
 	// Split on semicolons, but skip semicolons that appear inside
-	// dollar-quoted strings (Postgres $$...$$ or $tag$...$tag$).
+	// dollar-quoted strings (Postgres $$...$$ or $tag$...$tag$)
+	// or inside SQL line comments (-- ... up to end of line).
 	var stmts []string
 	var buf strings.Builder
 	inDollar := false
@@ -499,6 +500,14 @@ func splitSQL(sql string) []string {
 
 	for i < n {
 		c := sql[i]
+
+		// Skip SQL line comments (-- to end of line).
+		if !inDollar && c == '-' && i+1 < n && sql[i+1] == '-' {
+			for i < n && sql[i] != '\n' && sql[i] != '\r' {
+				i++
+			}
+			continue
+		}
 
 		// Detect start of dollar-quoted string.
 		if !inDollar && c == '$' {
