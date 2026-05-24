@@ -39,7 +39,7 @@ func TestSmokeAllEndpoints(t *testing.T) {
 		{"GET", "/api/tasks/smoke-001", "", []int{200}},
 		// --- Result submission (POST /api/tasks/{id}/result) ---
 		// Valid transition queued->exploring; STATUS.md exists from task creation.
-		{"POST", "/api/tasks/smoke-001/result", `{"phase":"exploring","outcome":"completed"}`, []int{200}},
+		{"POST", "/api/tasks/smoke-001/result", `{"phase":"exploring","outcome":"pass"}`, []int{200}},
 		// --- Agent heartbeat (POST /api/agent/heartbeat) ---
 		// No session.json seeded -> readSessionJSON fails -> 404.
 		{"POST", "/api/agent/heartbeat", `{"task_id":"smoke-001","agent_id":"agent-1"}`, []int{404}},

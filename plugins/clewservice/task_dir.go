@@ -129,9 +129,9 @@ func listDir(dirPath string, limit int, reverse bool) ([]string, error) {
 
 // patchStatusMD updates only the Phase, Phase Updated, and Updated lines in an
 // existing STATUS.md, preserving all other content (review outcomes, history, etc.).
-func patchStatusMD(existing []byte, status TaskStatus) []byte {
+func patchStatusMD(existing []byte, status TaskStatus, taskID string) []byte {
 	if len(existing) == 0 {
-		return buildStatusMD(status.Notes, status.Phase, 0)
+		return buildStatusMD(taskID, status.Phase, 0)
 	}
 	lines := strings.Split(string(existing), "\n")
 	var out []string

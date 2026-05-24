@@ -197,6 +197,22 @@ func IsValidPhase(phase string) bool {
 	return ok
 }
 
+// ValidOutcomes is the set of recognized outcome strings.
+var ValidOutcomes = map[string]bool{
+	"":           true,
+	"pass":       true,
+	"success":    true,
+	"done":       true,
+	"should_fix": true,
+	"fail":       true,
+	"failed":     true,
+}
+
+// IsValidOutcome returns true if the outcome is a recognized value.
+func IsValidOutcome(outcome string) bool {
+	return ValidOutcomes[outcome]
+}
+
 // IsTerminalPhase returns true for terminal states (done, failed, blocked, waiting_on_children).
 func IsTerminalPhase(phase string) bool {
 	return phase == "done" || phase == "failed" || phase == "blocked" || phase == "waiting_on_children"

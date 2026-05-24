@@ -603,7 +603,7 @@ func TestStatusMDPreservation(t *testing.T) {
 	mux := setupTestMux(t, p)
 
 	// Submit result to transition queued → exploring.
-	body := strings.NewReader(`{"phase":"exploring","outcome":"starting"}`)
+	body := strings.NewReader(`{"phase":"exploring","outcome":"pass"}`)
 	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -653,7 +653,7 @@ func TestResultPhaseFromStatusMD(t *testing.T) {
 	mux := setupTestMux(t, p)
 
 	// Try invalid transition: STATUS.md queued → plan_review (skip).
-	body := strings.NewReader(`{"phase":"plan_review","outcome":"skip"}`)
+	body := strings.NewReader(`{"phase":"plan_review","outcome":"pass"}`)
 	req := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
@@ -663,7 +663,7 @@ func TestResultPhaseFromStatusMD(t *testing.T) {
 	}
 
 	// Try valid transition: STATUS.md queued → exploring.
-	body2 := strings.NewReader(`{"phase":"exploring","outcome":"starting"}`)
+	body2 := strings.NewReader(`{"phase":"exploring","outcome":"pass"}`)
 	req2 := httptest.NewRequest("POST", "/api/tasks/clew-001/result", body2)
 	w2 := httptest.NewRecorder()
 	mux.ServeHTTP(w2, req2)
