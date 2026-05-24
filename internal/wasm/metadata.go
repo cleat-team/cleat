@@ -281,6 +281,11 @@ func DetectLanguage(wasmBytes []byte) string {
 	return "go"
 }
 
+// HasWasiImports scans the WASM binary for wasi_snapshot_preview1 import module.
+func HasWasiImports(wasmBytes []byte) bool {
+	return strings.Contains(string(wasmBytes), "wasi_snapshot_preview1")
+}
+
 // hasComponentModelImports scans the WASM import section for module names
 // that contain "cleat:" — the prefix used by the Component Model toolchain
 // (e.g., componentize-py).

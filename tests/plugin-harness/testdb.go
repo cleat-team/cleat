@@ -489,7 +489,9 @@ func selectMigrationSQL(dialect plugin.Dialect, m plugin.Migration) string {
 // splitSQL splits SQL text on semicolons, discarding empty fragments.
 func splitSQL(sql string) []string {
 	// Split on semicolons, but skip semicolons that appear inside
-	// dollar-quoted strings (Postgres $$...$$ or $tag$...$tag$).
+	// dollar-quoted strings (Postgres $$...$$ or $tag$...$tag$)
+	// or inside SQL line comments (-- ... up to end of line).
+	// Also handle MSSQL GO batch separators (GO on its own line).
 	var stmts []string
 	var buf strings.Builder
 	inDollar := false
@@ -497,8 +499,44 @@ func splitSQL(sql string) []string {
 	i := 0
 	n := len(sql)
 
+	// isGO reports whether the text starting at i and ending at j (exclusive)
+	// is a MSSQL GO batch separator (case-insensitive, on its own line).
+	isGO := func(start, end int) bool {
+		word := strings.TrimSpace(sql[start:end])
+		return strings.EqualFold(word, "GO") || strings.EqualFold(word, "GO\n") || strings.EqualFold(word, "GO\r")
+	}
+
 	for i < n {
 		c := sql[i]
+
+		// Skip SQL line comments (-- to end of line).
+		if !inDollar && c == '-' && i+1 < n && sql[i+1] == '-' {
+			for i < n && sql[i] != '\n' && sql[i] != '\r' {
+				i++
+			}
+			continue
+		}
+
+		// Split on newline-bounded GO batch separator (MSSQL).
+		if !inDollar && c == '\n' {
+			j := i + 1
+			for j < n && (sql[j] == ' ' || sql[j] == '\t') { j++ }
+			k := j
+			for k < n && sql[k] != '\n' && sql[k] != '\r' && sql[k] != ';' { k++ }
+			if isGO(j, k) {
+				// Emit any buffered statement before the GO.
+				trimmed := strings.TrimSpace(buf.String())
+				if trimmed != "" {
+					stmts = append(stmts, trimmed)
+				}
+				buf.Reset()
+				i = k
+				continue
+			}
+			buf.WriteByte(c)
+			i++
+			continue
+		}
 
 		// Detect start of dollar-quoted string.
 		if !inDollar && c == '$' {

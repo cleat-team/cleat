@@ -1,6 +1,7 @@
 -- cleat postgres tables
 
 CREATE SCHEMA IF NOT EXISTS admin;
+CREATE SCHEMA IF NOT EXISTS cleat;
 CREATE OR REPLACE FUNCTION admin.create_tenant_role(p_tenant_id UUID) RETURNS TEXT AS $$
 DECLARE
     v_role_name TEXT;

@@ -305,11 +305,11 @@ func TestPluginCalls_Wasm_Go(t *testing.T) {
 	// string containing the actual result object.  Unwrap it first.
 	var rawJSON string
 	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
-		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.500s", err, result)
+		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.2000s", err, result)
 	}
 	var results map[string]interface{}
 	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-		t.Fatalf("failed to parse result JSON: %v\nraw: %.500s", err, rawJSON)
+		t.Fatalf("failed to parse result JSON: %v\nraw: %.2000s", err, rawJSON)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 
@@ -408,11 +408,11 @@ func TestPluginCalls_Wasm_Rust(t *testing.T) {
 	}
 	var rawJSON string
 	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
-		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.500s", err, result)
+		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.2000s", err, result)
 	}
 	var results map[string]interface{}
 	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-		t.Fatalf("failed to parse result JSON: %v\nraw: %.500s", err, rawJSON)
+		t.Fatalf("failed to parse result JSON: %v\nraw: %.2000s", err, rawJSON)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 
@@ -498,7 +498,7 @@ func TestPluginCalls_Wasm_AS(t *testing.T) {
 	// Use json.Decoder which is more lenient than Unmarshal for trailing data.
 	dec := json.NewDecoder(strings.NewReader(result))
 	if err := dec.Decode(&results); err != nil {
-		t.Fatalf("AS result JSON parse failed: %v\nraw: %.500s", err, result)
+		t.Fatalf("AS result JSON parse failed: %v\nraw: %.2000s", err, result)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 
@@ -576,11 +576,11 @@ func TestPluginCalls_Wasm_Python(t *testing.T) {
 	// string containing the actual result object. Unwrap it first.
 	var rawJSON string
 	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
-		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.500s", err, result)
+		t.Fatalf("failed to decode outer wrapper: %v\nraw: %.2000s", err, result)
 	}
 	var results map[string]interface{}
 	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-		t.Fatalf("failed to parse result JSON: %v\nraw: %.500s", err, rawJSON)
+		t.Fatalf("failed to parse result JSON: %v\nraw: %.2000s", err, rawJSON)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 
@@ -643,15 +643,16 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 	if result == "ok" || result == `"ok"` || strings.Contains(result, "wasmtime panic") {
 		t.Skipf("Java module crashed (wasmtime-go compat): raw: %.200s", result)
 	}
-	// TeaVM encodes the result as a JSON string (double-encoded), matching
-	// the Go/Python/AS convention. Unwrap the outer string first.
+	// TeaVM encodes the result as a JSON-encoded string matching the
+	// Go/Python/AS convention. Unwrap the outer JSON string, then
+	// parse the inner JSON object.
+	var results map[string]interface{}
 	var rawJSON string
 	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
-		t.Skipf("failed to decode outer wrapper (TeaVM encoding): %v\nraw: %.500s", err, result)
+		t.Skipf("failed to decode outer wrapper: %v\nraw: %.500s", err, result)
 	}
-	var results map[string]interface{}
 	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-		t.Skipf("Java result JSON parse failed (may be TeaVM encoding issue): %v\nraw: %.500s", err, rawJSON)
+		t.Skipf("failed to parse result JSON: %v", err)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 

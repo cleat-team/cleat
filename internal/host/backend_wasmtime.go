@@ -73,9 +73,14 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Configure WASI for Go wasip1 module support.
 	// The module may need WASI for stack/goroutine management even though we
 	// override time/random functions for determinism.
-	wasiConfig := wasmtime.NewWasiConfig()
-	wasiConfig.InheritStderr()
-	store.SetWasi(wasiConfig)
+	// Skip for modules that don't import from WASI (AS, Rust cdylib, TeaVM)
+	// to avoid wasmtime-go v44 nil pointer dereference during fn.Call.
+	needsWasi := wasm.HasWasiImports(wasmBytes)
+	if needsWasi {
+		wasiConfig := wasmtime.NewWasiConfig()
+		wasiConfig.InheritStderr()
+		store.SetWasi(wasiConfig)
+	}
 
 	// Wrap context so host functions can find the session.
 	ctx = withHandler(ctx, session)
@@ -112,7 +117,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// can store the workflow result and the Execute method can retrieve
 	// it even when the module subsequently traps (e.g. via proc_exit).
 	var completeResult, completeErr string
-	if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi); err != nil {
 		return nil, fmt.Errorf("host: register imports: %w", err)
 	}
 
@@ -166,44 +171,47 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		copy(data[inputOffset:], inputBytes)
 	}
 
-	// If the module exports _start (Go wasip1), use the cleat_poll_work
-	// dispatcher protocol. We store the entry point + input on the backend,
-	// then call _start synchronously. main() calls cleat_poll_work (which
-	// returns the work), dispatches to the entry point, and calls
-	// cleat_complete with the result. All WASM execution stays on one
-	// goroutine, avoiding the Go wasip1 reentrancy issue.
-	if startFn := instance.GetFunc(store, "_start"); startFn != nil {
-		b.workEntryPoint = entryPoint
-		b.workInput = []byte(input)
+	// If the module exports _start, call it first. Go wasip1 modules use
+	// the cleat_poll_work dispatcher protocol to route work. Java/TeaVM
+	// modules need _start for runtime init (shadow stack, fiber state)
+	// before the entry point can be called directly.
+	lang := wasm.DetectLanguage(wasmBytes)
+	if lang == "go" {
+		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
+			b.workEntryPoint = entryPoint
+			b.workInput = []byte(input)
 
-		// Call _start synchronously. main() processes the work and returns.
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					// Only report the panic as an error if the workflow
-					// didn't already deliver a result via cleat_complete.
-					if completeResult == "" && completeErr == "" {
-						completeErr = fmt.Sprintf("wasm _start panic: %v", r)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						if completeResult == "" && completeErr == "" {
+							completeErr = fmt.Sprintf("wasm _start panic: %v", r)
+						}
 					}
-				}
+				}()
+				startFn.Call(store)
 			}()
-			startFn.Call(store)
-		}()
 
-		// Result is delivered via cleat_complete hook.
-		if completeResult != "" {
-			return &ExecResult{Result: completeResult, Suspended: false}, nil
+			if completeResult != "" {
+				return &ExecResult{Result: completeResult, Suspended: false}, nil
+			}
+			if completeErr != "" {
+				return &ExecResult{Result: completeErr, Suspended: false}, nil
+			}
+			return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 		}
-		if completeErr != "" {
-			// Return workflow-level errors as the result string so
-			// callers (including replay divergence detection) can
-			// inspect the error message.
-			return &ExecResult{Result: completeErr, Suspended: false}, nil
+	} else if lang == "java" {
+		// TeaVM modules need _start to initialize the runtime (shadow
+		// stack, fiber system, thread-local globals) before any export
+		// can be called. Call it synchronously and wait for return.
+		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
+			if _, err := startFn.Call(store); err != nil {
+				return nil, fmt.Errorf("host: teaVM _start failed: %w", err)
+			}
 		}
-		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 	}
 
-	// Non-Go module: call the export directly.
+// Call the export directly (non-Go modules, or Go modules without _start).
 	fn := instance.GetFunc(store, entryPoint)
 	if fn == nil {
 		return nil, fmt.Errorf("host: export %q not found", entryPoint)
@@ -465,6 +473,17 @@ func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
 	); err != nil {
 		return err
 	}
+
+	// environ_get and environ_sizes_get are imported by Rust wasm32-wasip1
+	// modules. wasmtime-go v44's DefineWasi() may or may not provide them
+	// depending on the exact C library version. Provide fallback stubs;
+	// errors from duplicate definition are benign.
+	_ = linker.FuncWrap("wasi_snapshot_preview1", "environ_get",
+		func(_ int32, _ int32) int32 { return 0 },
+	)
+	_ = linker.FuncWrap("wasi_snapshot_preview1", "environ_sizes_get",
+		func(_ int32, _ int32) int32 { return 0 },
+	)
 
 	return nil
 }
@@ -1881,7 +1900,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 		// Use dummy completeResult/completeErr since component modules don't
 		// use the Go dispatcher cleat_complete protocol.
 		var completeResult, completeErr string
-		if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+		if err := b.registerAllImports(linker, &completeResult, &completeErr, true); err != nil {
 			return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
 		}
 
@@ -2045,7 +2064,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				strings.Contains(instErr.Error(), "out of bounds") {
 				linker2 := wasmtime.NewLinker(b.engine)
 				var cr2, ce2 string
-				b.registerAllImports(linker2, &cr2, &ce2)
+				b.registerAllImports(linker2, &cr2, &ce2, true)
 			// wit_dylib functions for component model adapter canonical ABI (fallback).
 			for _, impTy := range cm.Imports() {
 				if impTy.Module() != "env" || impTy.Name() == nil ||
@@ -2443,9 +2462,11 @@ if pendingCount > 0 {
 
 // registerAllImports registers all host function imports on the given linker.
 // Extracted so both Execute and ExecuteComponent can share the same setup.
-func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string) error {
-	if err := b.registerWasiStubs(linker); err != nil {
-		return err
+func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool) error {
+	if needsWasi {
+		if err := b.registerWasiStubs(linker); err != nil {
+			return err
+		}
 	}
 	if err := b.registerEnvStubs(linker); err != nil {
 		return err
