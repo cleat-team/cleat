@@ -652,7 +652,7 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 		t.Skipf("failed to decode outer wrapper: %v\nraw: %.500s", err, result)
 	}
 	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
-		t.Skipf("failed to parse result JSON: %v\nraw: %.500s", err, rawJSON)
+		t.Skipf("failed to parse result JSON: %v", err)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 

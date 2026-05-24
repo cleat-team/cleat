@@ -116,7 +116,8 @@ public class PluginHarnessWorkflow {
               .append(escapeJson(streamResult.getError()))
               .append("\"}");
         } else {
-            sb.append(streamResult.getValue());
+            String val = streamResult.getValue();
+            sb.append(val != null && !val.isEmpty() ? val : "{}");
         }
 
         sb.append("}");
@@ -140,7 +141,8 @@ public class PluginHarnessWorkflow {
         if (result.isErr()) {
             sb.append("{\"error\":\"").append(escapeJson(result.getError())).append("\"}");
         } else {
-            sb.append(result.getValue());
+            String val = result.getValue();
+            sb.append(val != null && !val.isEmpty() ? val : "{}");
         }
     }
 
