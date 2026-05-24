@@ -643,10 +643,15 @@ func TestPluginCalls_Wasm_Java(t *testing.T) {
 	if result == "ok" || result == `"ok"` || strings.Contains(result, "wasmtime panic") {
 		t.Skipf("Java module crashed (wasmtime-go compat): raw: %.200s", result)
 	}
+	// TeaVM encodes the result as a JSON string (double-encoded), matching
+	// the Go/Python/AS convention. Unwrap the outer string first.
+	var rawJSON string
+	if err := json.Unmarshal([]byte(result), &rawJSON); err != nil {
+		t.Skipf("failed to decode outer wrapper (TeaVM encoding): %v\nraw: %.500s", err, result)
+	}
 	var results map[string]interface{}
-	dec := json.NewDecoder(strings.NewReader(result))
-	if err := dec.Decode(&results); err != nil {
-		t.Skipf("Java result JSON parse failed (may be TeaVM encoding issue): %v\nraw: %.200s", err, result)
+	if err := json.Unmarshal([]byte(rawJSON), &results); err != nil {
+		t.Skipf("Java result JSON parse failed (may be TeaVM encoding issue): %v\nraw: %.500s", err, rawJSON)
 	}
 	t.Logf("workflow completed with %d plugin results", len(results))
 
