@@ -1,8 +1,9 @@
 package clewservice
 
 import (
+	"errors"
+	"io/fs"
 	"net/http"
-	"os"
 	"sort"
 )
 
@@ -11,7 +12,7 @@ func (p *Plugin) handleDashboardSummary(w http.ResponseWriter, r *http.Request) 
 	project := r.URL.Query().Get("project")
 	tasks, err := p.readTasksJSON(project)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			writeError(w, http.StatusNotFound, "tasks.json not found")
 			return
 		}

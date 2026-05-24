@@ -6,8 +6,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// taskIDPattern matches new-task.sh's ID validation.
+// Must match: ^[a-z]+(-[a-z]+)*-[0-9]{3}[a-z]?$
+var taskIDPattern = regexp.MustCompile(`^[a-z]+(-[a-z]+)*-[0-9]{3}[a-z]?$`)
 
 // handleTasksGet returns tasks.json content, optionally filtered by ?since=<RFC3339>.
 func (p *Plugin) handleTasksGet(w http.ResponseWriter, r *http.Request) {
@@ -23,8 +28,6 @@ func (p *Plugin) handleTasksGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Polling support: return full response if no ?since= parameter.
-	// If ?since=<timestamp>, filter tasks updated after that timestamp.
 	since := r.URL.Query().Get("since")
 	if since != "" {
 		filtered := map[string]TaskEntry{}
@@ -55,10 +58,15 @@ func (p *Plugin) handleTasksPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate task ID format (e.g., "clew-140").
-	if !strings.Contains(req.ID, "-") {
+	// Validate task ID format matching new-task.sh.
+	if !taskIDPattern.MatchString(req.ID) {
 		writeError(w, http.StatusBadRequest, "invalid task ID format: "+req.ID)
 		return
+	}
+
+	// Default budget to 10 (matching new-task.sh).
+	if req.Budget <= 0 {
+		req.Budget = 10
 	}
 
 	project := r.URL.Query().Get("project")
@@ -80,11 +88,19 @@ func (p *Plugin) handleTasksPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check parent exists if specified.
+	if req.Parent != "" {
+		if _, ok := tasks.Tasks[req.Parent]; !ok {
+			writeError(w, http.StatusBadRequest, "parent task not found: "+req.Parent)
+			return
+		}
+	}
+
 	if req.Priority <= 0 {
 		req.Priority = 3
 	}
 
-	now := Timestamp()
+	now := TimestampDate()
 	entry := TaskEntry{
 		ID:       req.ID,
 		Subject:  req.Subject,
@@ -93,7 +109,7 @@ func (p *Plugin) handleTasksPost(w http.ResponseWriter, r *http.Request) {
 		Children: []string{},
 		DependsOn: []string{},
 		Cost: TaskCost{
-			BudgetUSD: 0,
+			BudgetUSD: float64(req.Budget),
 			SpentUSD:  0,
 		},
 		Created: now,
@@ -110,30 +126,50 @@ func (p *Plugin) handleTasksPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tasks.Tasks[req.ID] = entry
-	tasks.Updated = now
+	tasks.Updated = Timestamp()
 
-	// Create task directory.
+	// Create task directory with logs/ and artifacts/ subdirectories.
 	taskDir, err := p.taskDir(req.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := os.MkdirAll(taskDir, 0755); err != nil {
-		p.logger.Error("create task dir", "task", req.ID, "error", err)
+	if err := os.MkdirAll(filepath.Join(taskDir, "logs"), 0755); err != nil {
+		p.logger.Error("create logs dir", "task", req.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "create task directory: "+err.Error())
+		return
+	}
+	if err := os.MkdirAll(filepath.Join(taskDir, "artifacts"), 0755); err != nil {
+		p.logger.Error("create artifacts dir", "task", req.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "create task directory: "+err.Error())
 		return
 	}
 
-	// Write TASK.md.
-	taskMD := []byte("# " + req.ID + " — " + req.Subject + "\n\n**Status:** queued\n**Created:** " + now + "\n")
+	// Parent string for TASK.md.
+	parentStr := req.Parent
+	if parentStr == "" {
+		parentStr = "none"
+	}
+
+	// Write TASK.md matching new-task.sh format exactly.
+	taskMD := []byte(
+		"# " + req.ID + " — " + req.Subject + "\n\n" +
+			"**Status:** queued\n" +
+			"**Priority:** " + fmt.Sprintf("%d", req.Priority) + "\n" +
+			"**Parent:** " + parentStr + "\n" +
+			"**Depends on:** none\n\n" +
+			"## What\n\nTODO\n\n" +
+			"## Scope\n\nTODO\n\n" +
+			"## Acceptance\n\n- [ ] TODO\n",
+	)
 	if err := atomicWrite(filepath.Join(taskDir, "TASK.md"), taskMD, 0644); err != nil {
 		p.logger.Error("write TASK.md", "task", req.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "write TASK.md: "+err.Error())
 		return
 	}
 
-	// Write STATUS.md.
-	statusMD := []byte("# Status — " + req.ID + "\n\n**Phase:** queued\n**Created:** " + now + "\n")
+	// Write STATUS.md matching new-task.sh format exactly.
+	statusMD := buildStatusMD(req.ID, "queued", req.Budget)
 	if err := atomicWrite(filepath.Join(taskDir, "STATUS.md"), statusMD, 0644); err != nil {
 		p.logger.Error("write STATUS.md", "task", req.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "write STATUS.md: "+err.Error())
@@ -151,8 +187,8 @@ func (p *Plugin) handleTasksPost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, entry)
 }
 
-// ── clew-133c stubs (501 Not Implemented) ──
-
+// handleTaskGet returns full task details including STATUS.md, session.json,
+// logs, and artifacts.
 func (p *Plugin) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	project := r.URL.Query().Get("project")
@@ -195,17 +231,59 @@ func (p *Plugin) handleTaskGet(w http.ResponseWriter, r *http.Request) {
 		session = s
 	}
 
+	// List logs (reverse chron, max 20) and artifacts.
+	taskDir, err := p.taskDir(taskID)
+	logs := []string{}
+	artifacts := []string{}
+	if err == nil {
+		logs, _ = listDir(filepath.Join(taskDir, "logs"), 20, true)
+		artifacts, _ = listDir(filepath.Join(taskDir, "artifacts"), 0, false)
+	}
+
 	writeJSON(w, http.StatusOK, TaskDetailResponse{
-		Task:    entry,
-		Status:  status,
-		Session: session,
+		Task:      entry,
+		Status:    status,
+		Session:   session,
+		Logs:      logs,
+		Artifacts: artifacts,
 	})
 }
 
+// handleTaskContentGet serves a specific file from a task directory.
+// GET /api/tasks/{id}/content?file=<filename>
 func (p *Plugin) handleTaskContentGet(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	taskID := r.PathValue("id")
+	filename := r.URL.Query().Get("file")
+	if filename == "" {
+		writeError(w, http.StatusBadRequest, "file parameter is required")
+		return
+	}
+
+	data, err := p.readTaskFile(taskID, filename)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "file not found: "+filename)
+			return
+		}
+		p.logger.Error("read task file", "task", taskID, "file", filename, "error", err)
+		writeError(w, http.StatusInternalServerError, "read file: "+err.Error())
+		return
+	}
+
+	// Determine Content-Type from file extension.
+	contentType := "application/octet-stream"
+	if strings.HasSuffix(filename, ".md") {
+		contentType = "text/markdown; charset=utf-8"
+	} else if strings.HasSuffix(filename, ".json") {
+		contentType = "application/json"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
+// handleTaskResultPost handles phase transition result submission.
 func (p *Plugin) handleTaskResultPost(w http.ResponseWriter, r *http.Request) {
 	taskID := r.PathValue("id")
 	project := r.URL.Query().Get("project")
@@ -290,6 +368,19 @@ func (p *Plugin) handleTaskResultPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Write TASK.md if Content is provided.
+	if req.Content != "" {
+		taskMDPath, err := p.safePath(filepath.Join("task_state", taskID, "TASK.md"))
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err := atomicWrite(taskMDPath, []byte(req.Content), 0644); err != nil {
+			writeError(w, http.StatusInternalServerError, "write TASK.md: "+err.Error())
+			return
+		}
+	}
+
 	p.logger.Info("result submitted", "task", taskID, "phase", req.Phase)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":    true,
@@ -315,13 +406,7 @@ func outcomeToExitCode(outcome string) *int {
 	return &c
 }
 
-func (p *Plugin) handleTaskDispatchPost(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
-}
-
-func (p *Plugin) handleTaskCancelPost(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
-}
+// ── clew-133c stubs ──
 
 func (p *Plugin) handleTaskLogsGet(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotImplemented, "not implemented")
@@ -330,4 +415,3 @@ func (p *Plugin) handleTaskLogsGet(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) handleTaskArtifactsGet(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusNotImplemented, "not implemented")
 }
-

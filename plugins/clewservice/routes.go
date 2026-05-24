@@ -28,6 +28,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 	mux.HandleFunc("GET /api/dashboard/summary", p.handleDashboardSummary)
 	mux.HandleFunc("GET /api/lessons", p.handleLessonsGet)
+	mux.HandleFunc("GET /api/content/{path...}", p.handleContentGet)
 
 	return nil
 }
