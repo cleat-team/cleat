@@ -56,6 +56,13 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 	return nil
 }
 
+// PerExecution returns a new backend that shares the wasmtime Engine
+// but has its own per-execution handler and work data, eliminating
+// the data race when Execute is called concurrently.
+func (b *wasmtimeBackend) PerExecution() WasmBackend {
+	return &wasmtimeBackend{engine: b.engine}
+}
+
 // Execute compiles, instantiates, and runs a core WASM module via wasmtime.
 //
 // The session provides the HostHandler for all host function calls. The

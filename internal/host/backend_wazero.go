@@ -42,6 +42,11 @@ func (b *wazeroBackend) Runtime() *Runtime {
 	return b.rt
 }
 
+// PerExecution returns a new backend that shares the Runtime.
+func (b *wazeroBackend) PerExecution() WasmBackend {
+	return &wazeroBackend{rt: b.rt}
+}
+
 // Execute compiles, instantiates, initialises, and runs a WASM module.
 //
 // The session provides the HostHandler for all host function calls

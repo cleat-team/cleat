@@ -24,4 +24,10 @@ type WasmBackend interface {
 
 	// Name returns a human-readable backend name for diagnostics.
 	Name() string
+
+	// PerExecution returns a new backend instance that shares the underlying
+	// compilation engine but has its own per-execution mutable state (handler,
+	// work data). This is required by the engine to prevent data races when
+	// Execute is called concurrently from multiple goroutines.
+	PerExecution() WasmBackend
 }

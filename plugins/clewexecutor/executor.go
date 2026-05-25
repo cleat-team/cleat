@@ -150,6 +150,31 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 			return string(b), nil
 		}
 
+		// Phase-skip guard: when STATUS.md has advanced past the workflow
+		// phase, skip the agent entirely. Do not write STATUS.md — let the
+		// workflow continue to its next phase. Prevents the explore loop
+		// where re-dispatching a task resets STATUS.md on every cycle.
+		if (in.Phase == "explore" || in.Phase == "plan" || in.Phase == "implement") &&
+			phaseOrder[phase] > phaseOrder[wfStatusPhase] {
+			now := time.Now().Format(time.RFC3339)
+			rec := &sessionRecord{
+				Phase:         phase,
+				WorkflowPhase: in.Phase,
+				Started:       now,
+				Ended:         now,
+				Status:        "completed",
+			}
+			_ = writeSession(sessionPath, rec)
+			out := runPhaseOutput{
+				PhaseChanged: false,
+				Started:      now,
+				Ended:        now,
+				Status:       "completed",
+			}
+			b, _ := json.Marshal(out)
+			return string(b), nil
+		}
+
 		lookupPhase := laterPhase(phase, wfStatusPhase)
 		r, err := roleForPhase(lookupPhase)
 		if err != nil {
