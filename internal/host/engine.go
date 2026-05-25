@@ -1113,19 +1113,21 @@ func (e *Engine) executeWithBackend(
 		}
 	}
 
-	// Delegate to the backend for compilation, instantiation, and export calling.
-	res, callErr := backend.Execute(execCtx, wasmBytes, entryPoint, input, session)
-	if callErr != nil {
-		// Non-suspend error (trap, panic, timeout, or cancellation).
-		// Try running defers on a fresh module.
-		if len(session.deferrals) > 0 {
-			e.runDefers(context.Background(), wasmBytes, session.deferrals)
-		}
-		session.releaseHeldScopes(context.Background())
-		if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("%s", enriched)
-		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, callErr
+		// Use a per-execution backend instance to prevent data races on
+		// the handler/work-data fields when Execute is called concurrently.
+		execBackend := backend.PerExecution()
+		res, callErr := execBackend.Execute(execCtx, wasmBytes, entryPoint, input, session)
+		if callErr != nil {
+			// Non-suspend error (trap, panic, timeout, or cancellation).
+			// Try running defers on a fresh module.
+			if len(session.deferrals) > 0 {
+				e.runDefers(context.Background(), wasmBytes, session.deferrals)
+			}
+			session.releaseHeldScopes(context.Background())
+			if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("%s", enriched)
+			}
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, callErr
 	}
 
 	if res.Suspended || session.suspendErr != nil {
