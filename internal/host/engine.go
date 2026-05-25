@@ -1699,6 +1699,10 @@ type execSession struct {
 	// auto-ContinueAsNew without querying the database.
 	eventCount int
 
+	// mu protects maps (queryState, stateStore, signals, deferrals) from
+	// concurrent access when wasmtime host functions race with Go dispatch.
+	mu sync.Mutex
+
 	// stepCallback is the installed ReplayStepCallback (nil means no callback).
 	stepCallback ReplayStepCallback
 
@@ -3182,10 +3186,12 @@ func (s *execSession) MinVersion(ctx context.Context) int64 {
 }
 
 func (s *execSession) SetQueryState(ctx context.Context, m api.Module, key, value string) int64 {
+	s.mu.Lock()
 	if s.queryState == nil {
 		s.queryState = make(map[string]string)
 	}
 	s.queryState[key] = value
+	s.mu.Unlock()
 	return 0
 }
 

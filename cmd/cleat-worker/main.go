@@ -1077,6 +1077,8 @@ type Worker struct {
 
 	// loopCtxMap holds per-loop cancellation contexts for clean restart.
 	loopCtxMap map[string]*loopContext
+
+	loopMu sync.Mutex // protects loopFuncs and loopCtxMap from concurrent access
 }
 
 // DrainComplete returns a channel that is closed when the drain completes
@@ -1089,7 +1091,10 @@ func (w *Worker) DrainComplete() <-chan struct{} {
 // If no per-loop context has been set up yet (initial startup), it falls
 // back to the worker-level context so that shutdown still works.
 func (w *Worker) getLoopCtx(name string) context.Context {
-	if lc, ok := w.loopCtxMap[name]; ok {
+	w.loopMu.Lock()
+	lc, ok := w.loopCtxMap[name]
+	w.loopMu.Unlock()
+	if ok {
 		return lc.ctx
 	}
 	return w.ctx
@@ -1104,7 +1109,9 @@ func (w *Worker) getLoopCtx(name string) context.Context {
 // correct (original) channel.
 func (w *Worker) launchLoop(name string, fn func()) {
 	w.wg.Add(1)
+	w.loopMu.Lock()
 	done := w.loopCtxMap[name].done
+	w.loopMu.Unlock()
 	go func() {
 		defer close(done)
 		w.withPanicRecovery(name, fn)()
@@ -2792,7 +2799,14 @@ func (w *Worker) watchdogLoop() {
 // prevents goroutine leaks and double execution when the watchdog detects a
 // stale loop.
 func (w *Worker) restartLoop(name string) {
+	w.loopMu.Lock()
 	fn, ok := w.loopFuncs[name]
+	var prev *loopContext
+	if p, pok := w.loopCtxMap[name]; pok {
+		prev = p
+	}
+	w.loopMu.Unlock()
+
 	if !ok {
 		w.logger.WarnContext(w.ctx, "watchdog: no restart function registered", "worker_id", w.id, "loop", name)
 		return
@@ -2807,8 +2821,9 @@ func (w *Worker) restartLoop(name string) {
 	w.healthTracker.recordRestart(name)
 
 	// Cancel the old loop context (if one exists) and wait for the old goroutine
-	// to acknowledge cancellation via its done channel.
-	if prev, ok := w.loopCtxMap[name]; ok {
+	// to acknowledge cancellation via its done channel. Do this outside the lock
+	// because the wait can take up to 5 seconds.
+	if prev != nil {
 		prev.cancel()
 		select {
 		case <-prev.done:
@@ -2821,7 +2836,9 @@ func (w *Worker) restartLoop(name string) {
 	// Create a fresh per-loop context and done channel.
 	ctx, cancel := context.WithCancel(w.ctx)
 	done := make(chan struct{})
+	w.loopMu.Lock()
 	w.loopCtxMap[name] = &loopContext{ctx: ctx, cancel: cancel, done: done}
+	w.loopMu.Unlock()
 
 	w.wg.Add(1)
 	go func() {
