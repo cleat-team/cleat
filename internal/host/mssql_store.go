@@ -2935,10 +2935,11 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 				WHERE status = 'dead_lettered'
 				  AND completed_at IS NOT NULL
 				  AND completed_at < @p1
+				  AND tenant_id = @p2
 				ORDER BY id
 				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
 			)
-		`, sql.Named("p1", olderThan))
+		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
 		}
