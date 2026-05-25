@@ -81,3 +81,15 @@ func (p *Plugin) Init(ctx context.Context, env *pluginapi.Environment) error {
 	)
 	return nil
 }
+
+// InitStandalone initializes the plugin for standalone binary use (no cleat
+// plugin system). Sets projectRoot and defaults.
+func (p *Plugin) InitStandalone(projectRoot string) error {
+	p.projectRoot = projectRoot
+	p.newTaskScript = projectRoot + "/src/new-task.sh"
+	p.logger = slog.Default()
+	p.logger.Info("clewservice: initialized (standalone)",
+		"project_root", p.projectRoot,
+	)
+	return nil
+}
