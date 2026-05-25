@@ -35,6 +35,7 @@ func runDebug(ctx context.Context, store host.WorkflowStore, db *sql.DB, args []
 			osExit(1)
 		}
 		return
+		}
 
 	runDebugStep(ctx, store, db, flags.workflowID, flags.entryPoint)
 }
