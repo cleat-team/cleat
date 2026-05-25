@@ -19,6 +19,7 @@ import (
 type runPhaseInput struct {
 	TaskID       string `json:"task_id"`
 	Project      string `json:"project"`
+	TaskStatePath string `json:"task_state_path,omitempty"`
 	ProjectRoot  string `json:"project_root"`
 	Workdir      string `json:"workdir"`
 	Phase        string `json:"phase,omitempty"`
@@ -73,7 +74,7 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		return string(b), nil
 	}
 
-	td := taskDir(in.ProjectRoot, in.Project, in.TaskID)
+	td := taskDir(in.ProjectRoot, in.TaskStatePath, in.TaskID)
 	statusPath := filepath.Join(td, "STATUS.md")
 	sessionPath := filepath.Join(td, "session.json")
 
@@ -568,10 +569,11 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 // Input: {"task_id":"...","project_root":"...","project":"...","phase":"..."}
 func (p *Plugin) writeStatus(ctx context.Context, inputJSON string) (string, error) {
 	var req struct {
-		TaskID      string `json:"task_id"`
-		ProjectRoot string `json:"project_root"`
-		Project     string `json:"project"`
-		Phase       string `json:"phase"`
+		TaskID        string `json:"task_id"`
+		ProjectRoot   string `json:"project_root"`
+		Project       string `json:"project"`
+		TaskStatePath string `json:"task_state_path,omitempty"`
+		Phase         string `json:"phase"`
 	}
 	if err := json.Unmarshal([]byte(inputJSON), &req); err != nil {
 		return "", fmt.Errorf("write_status: %w", err)
@@ -580,7 +582,7 @@ func (p *Plugin) writeStatus(ctx context.Context, inputJSON string) (string, err
 		return "", fmt.Errorf("write_status: missing required field")
 	}
 
-	td := taskDir(req.ProjectRoot, req.Project, req.TaskID)
+	td := taskDir(req.ProjectRoot, req.TaskStatePath, req.TaskID)
 	statusPath := filepath.Join(td, "STATUS.md")
 
 	data, err := os.ReadFile(statusPath)
