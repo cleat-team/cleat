@@ -1113,10 +1113,11 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 				WHERE status = 'dead_lettered'
 				  AND completed_at IS NOT NULL
 				  AND completed_at < ?
+				  AND tenant_id = ?
 				ORDER BY id
 				LIMIT 10000
 			)
-		`, olderThan)
+		`, olderThan, s.tenantID)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
 		}
