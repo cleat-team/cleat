@@ -199,6 +199,11 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 				startFn.Call(store)
 			}()
 
+				if completeResult == `"__cleat_suspended__"` {
+					return &ExecResult{Suspended: true}, nil
+				}
+
+
 			if completeResult != "" {
 				return &ExecResult{Result: completeResult, Suspended: false}, nil
 			}
@@ -244,6 +249,11 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if completeErr != "" {
 		return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr)
 	}
+				if completeResult == `"__cleat_suspended__"` {
+					return &ExecResult{Suspended: true}, nil
+				}
+
+
 	if completeResult != "" {
 		return &ExecResult{Result: completeResult, Suspended: false}, nil
 	}
@@ -387,6 +397,11 @@ func (b *wasmtimeBackend) executeViaDispatcher(
 		if completeErr != "" {
 			return nil, fmt.Errorf("host: %q failed: %s", entryPoint, completeErr)
 		}
+				if completeResult == `"__cleat_suspended__"` {
+					return &ExecResult{Suspended: true}, nil
+				}
+
+
 		if completeResult != "" {
 			return &ExecResult{Result: completeResult, Suspended: false}, nil
 		}
@@ -801,7 +816,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflow(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.ChildWorkflow(context.Background(), nil, wfName, wfInput, uint32(runIDPtr), uint32(runIDMaxLen))
+		return h.ChildWorkflow(ctxWithMem(context.Background(), buf), nil, wfName, wfInput, uint32(runIDPtr), uint32(runIDMaxLen))
 	})
 }
 
@@ -830,7 +845,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.ChildWorkflowWithOptions(context.Background(), nil, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
+		return h.ChildWorkflowWithOptions(ctxWithMem(context.Background(), buf), nil, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
 	})
 }
 
@@ -883,7 +898,7 @@ func (b *wasmtimeBackend) registerCleatAwaitChild(linker *wasmtime.Linker) error
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.AwaitChild(context.Background(), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
+		return h.AwaitChild(ctxWithMem(context.Background(), buf), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
 	})
 }
 
@@ -903,7 +918,7 @@ func (b *wasmtimeBackend) registerCleatAwaitAllChildren(linker *wasmtime.Linker)
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.AwaitAllChildren(context.Background(), nil, runIDsJSON, uint32(resultsPtr), uint32(resultsMaxLen))
+		return h.AwaitAllChildren(ctxWithMem(context.Background(), buf), nil, runIDsJSON, uint32(resultsPtr), uint32(resultsMaxLen))
 	})
 }
 
@@ -1047,7 +1062,7 @@ func (b *wasmtimeBackend) registerCleatPluginCall(linker *wasmtime.Linker) error
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.PluginCall(context.Background(), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
+		return h.PluginCall(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
 	})
 }
 
@@ -1078,7 +1093,7 @@ func (b *wasmtimeBackend) registerCleatPluginCallStreaming(linker *wasmtime.Link
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.PluginCallStreaming(context.Background(), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
+		return h.PluginCallStreaming(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
 	})
 }
 
@@ -1685,7 +1700,7 @@ func (b *wasmtimeBackend) registerCleatPollChild(linker *wasmtime.Linker) error 
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.PollChild(context.Background(), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
+		return h.PollChild(ctxWithMem(context.Background(), buf), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
 	})
 }
 
@@ -1706,7 +1721,7 @@ func (b *wasmtimeBackend) registerCleatAwaitAnyChild(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.AwaitAnyChild(context.Background(), nil, runIDsJSON, uint32(resultPtr), uint32(resultMaxLen))
+		return h.AwaitAnyChild(ctxWithMem(context.Background(), buf), nil, runIDsJSON, uint32(resultPtr), uint32(resultMaxLen))
 	})
 }
 

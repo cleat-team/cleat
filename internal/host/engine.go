@@ -1117,7 +1117,7 @@ func (e *Engine) executeWithBackend(
 		// the handler/work-data fields when Execute is called concurrently.
 		execBackend := backend.PerExecution()
 		res, callErr := execBackend.Execute(execCtx, wasmBytes, entryPoint, input, session)
-		if callErr != nil {
+		if callErr != nil && session.suspendErr == nil {
 			// Non-suspend error (trap, panic, timeout, or cancellation).
 			// Try running defers on a fresh module.
 			if len(session.deferrals) > 0 {
@@ -1135,6 +1135,9 @@ func (e *Engine) executeWithBackend(
 		if se == nil {
 			se = &SuspendError{Reason: "workflow suspended"}
 		}
+			if se.Until.IsZero() {
+				se.Until = time.Now().Add(30 * time.Second)
+			}
 
 		susResult := &SuspendResult{
 			History:      session.history,
@@ -1263,9 +1266,6 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 			se := session.suspendErr
 			if se == nil {
 				se = &SuspendError{Reason: "workflow suspended"}
-			}
-			if se.Until.IsZero() {
-				se.Until = time.Now().Add(30 * time.Second)
 			}
 			if se.Until.IsZero() {
 				se.Until = time.Now().Add(30 * time.Second)
@@ -1546,6 +1546,9 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			se := session.suspendErr
 			if se == nil {
 				se = &SuspendError{Reason: "workflow suspended"}
+			if se.Until.IsZero() {
+				se.Until = time.Now().Add(30 * time.Second)
+			}
 			}
 
 			susResult := &SuspendResult{
