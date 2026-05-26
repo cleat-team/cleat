@@ -735,6 +735,7 @@ func main() {
 		encryption:                  payloadEncryption,
 		encryptSensitivePayloads:    *encryptSensitivePayloads,
 		drainCh:                     make(chan struct{}),
+		parentWakeCh:                make(chan struct{}, 1),
 	}
 
 	// Initialize memory-aware concurrency controller.
@@ -1066,6 +1067,11 @@ type Worker struct {
 	// Maximum wall-clock duration per workflow execution (0 = no limit).
 	maxWorkflowDuration time.Duration
 
+	// parentWakeCh is signaled when a workflow reaches a terminal status
+	// (done/failed). The dispatch loop selects on this channel to skip its
+	// idle sleep, waking immediately to claim the newly-ready parent.
+	parentWakeCh chan struct{}
+
 	// Health check interval for watchdog.
 	healthCheckInterval time.Duration
 
@@ -1290,6 +1296,7 @@ func (w *Worker) dispatchLoop() {
 				select {
 				case <-w.ctx.Done():
 					return
+			case <-w.parentWakeCh:
 				case <-time.After(backoff):
 				}
 				continue
@@ -1317,6 +1324,7 @@ func (w *Worker) dispatchLoop() {
 					select {
 					case <-w.ctx.Done():
 						return
+			case <-w.parentWakeCh:
 					case <-time.After(backoff):
 					}
 					continue
@@ -1340,6 +1348,8 @@ func (w *Worker) dispatchLoop() {
 			select {
 			case <-w.ctx.Done():
 				return
+		case <-w.parentWakeCh:
+			idleTicks = 0 // reset backoff, poll immediately
 			case <-time.After(sleep):
 			}
 			continue
@@ -1759,6 +1769,15 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		return
 	}
 	dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
+
+	// Signal the dispatch loop to poll immediately. The parent
+	// was woken atomically inside FinalizeWorkflowSegment.
+	if finalStatus == "done" || finalStatus == "failed" {
+		select {
+		case w.parentWakeCh <- struct{}{}:
+		default:
+		}
+	}
 
 	// Post-finalization: logging and non-DB side effects.
 	if finalStatus == "done" {
@@ -2732,6 +2751,8 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 			if r := recover(); r != nil {
 			_ = string(debug.Stack())
 				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r)
+				stack := string(debug.Stack())
+				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r, "stack", stack)
 				w.healthTracker.recordPanic(name)
 				backgroundLoopsTotal.WithLabelValues(name, "panic").Inc()
 			}
