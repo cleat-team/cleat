@@ -2802,6 +2802,13 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 				// Don't advance stepCount; the fresh execution will record
 				// the result at this same step, overwriting the empty event.
 				s.exitReplay()
+			} else {
+				// Event type mismatch — replay divergence.
+				replayFailuresTotal.Inc()
+				errMsg := fmt.Sprintf("replay divergence at step %d: expected await_child, got %s.\n  run ID: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+					rec.Step, rec.EventType, runID)
+				written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
+				return packAwaitChildResult(uint32(written), 1)
 			}
 		} else {
 			s.exitReplay()
