@@ -65,7 +65,8 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				local_step INTEGER NOT NULL DEFAULT 0,
 				global_seq BIGINT NOT NULL DEFAULT 0,
 				created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-				PRIMARY KEY (workflow_id, step))`,
+				PRIMARY KEY (workflow_id, step),
+				FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE)`,
 			`CREATE TABLE IF NOT EXISTS workflow_signals (
 				workflow_id TEXT NOT NULL, signal_name TEXT NOT NULL,
 				payload JSONB NOT NULL DEFAULT '{}',
@@ -125,7 +126,8 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				local_step INTEGER NOT NULL DEFAULT 0,
 				global_seq BIGINT NOT NULL DEFAULT 0,
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
-				PRIMARY KEY (workflow_id, step))`,
+				PRIMARY KEY (workflow_id, step),
+				FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE)`,
 			`CREATE TABLE IF NOT EXISTS workflow_signals (
 				workflow_id VARCHAR(255) NOT NULL, signal_name VARCHAR(255) NOT NULL,
 				payload JSON NOT NULL DEFAULT ('{}'),
@@ -201,7 +203,9 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					local_step INTEGER NOT NULL DEFAULT 0,
 					global_seq BIGINT NOT NULL DEFAULT 0,
 					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
-					PRIMARY KEY (workflow_id, step))`,
+					PRIMARY KEY (workflow_id, step),
+					CONSTRAINT fk_event_history_workflow FOREIGN KEY (workflow_id)
+						REFERENCES workflow_instances(id) ON DELETE CASCADE)`,
 			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_signals')
 				CREATE TABLE workflow_signals (
 					workflow_id NVARCHAR(64) NOT NULL,
@@ -302,6 +306,19 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS tenant_id UUID`,
 			`ALTER TABLE concurrency_keys ADD COLUMN IF NOT EXISTS tenant_id TEXT`,
 			`ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS allowed_signals JSONB DEFAULT NULL`,
+			// Ensure event_history FK with CASCADE exists (for idempotency when
+			// the table was created by an older CREATE TABLE IF NOT EXISTS).
+			`DO $$
+			BEGIN
+			    IF NOT EXISTS (
+			        SELECT 1 FROM pg_constraint con
+			        JOIN pg_class rel ON rel.oid = con.conrelid
+			        WHERE rel.relname = 'event_history' AND con.contype = 'f'
+			    ) THEN
+			        ALTER TABLE event_history ADD CONSTRAINT fk_event_history_workflow
+			            FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE;
+			    END IF;
+			END $$;`,
 			// Memory statistics tables (migration 010)
 			`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
 				id BIGSERIAL PRIMARY KEY,
