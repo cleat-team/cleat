@@ -260,7 +260,25 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	execCtx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(execCtx, bin, args...)
-	cmd.Dir = in.Workdir
+
+	// Isolate this task in a git worktree so concurrent tasks don't
+	// collide on the same working directory.
+	worktreeDir := filepath.Join(in.Workdir, "worktrees", in.TaskID)
+	if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
+		branchName := "clew-" + in.TaskID
+		exec.Command("git", "-C", in.Workdir, "fetch", "origin", "develop").Run()
+		addCmd := exec.Command("git", "-C", in.Workdir, "worktree", "add",
+			"-b", branchName, worktreeDir, "origin/develop")
+		if addCmd.Run() != nil {
+			exec.Command("git", "-C", in.Workdir, "worktree", "add",
+				worktreeDir, branchName).Run()
+		}
+	}
+	if _, err := os.Stat(worktreeDir); err == nil {
+		cmd.Dir = worktreeDir
+	} else {
+		cmd.Dir = in.Workdir
+	}
 	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr cappedBuffer
@@ -417,6 +435,7 @@ Error: exit code %d
 // checkCIInput is the JSON input for the check_ci host function.
 type checkCIInput struct {
 	Workdir string `json:"workdir"`
+	TaskID  string `json:"task_id,omitempty"`
 }
 
 // checkCIOutput is the JSON output from the check_ci host function.
@@ -439,7 +458,16 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 		return string(b), nil
 	}
 
-	branchCmd := exec.CommandContext(ctx, "git", "-C", in.Workdir, "branch", "--show-current")
+	// Resolve the isolated worktree if one exists for this task.
+	ciDir := in.Workdir
+	if in.TaskID != "" {
+		wtDir := filepath.Join(in.Workdir, "worktrees", in.TaskID)
+		if _, err := os.Stat(wtDir); err == nil {
+			ciDir = wtDir
+		}
+	}
+
+	branchCmd := exec.CommandContext(ctx, "git", "-C", ciDir, "branch", "--show-current")
 	branchOut, err := branchCmd.Output()
 	if err != nil {
 		var stderr string
@@ -466,7 +494,7 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 		"--json", "number,state,url,statusCheckRollup",
 		"--limit", "1",
 	)
-	ghCmd.Dir = in.Workdir
+	ghCmd.Dir = ciDir
 	ghOut, ghErr := ghCmd.Output()
 	if ghErr != nil {
 		var exitErr *exec.ExitError
@@ -519,7 +547,7 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 	conflictCmd := exec.CommandContext(ctx, "gh", "pr", "view", strconv.Itoa(pr.Number),
 		"--json", "mergeable",
 	)
-	conflictCmd.Dir = in.Workdir
+	conflictCmd.Dir = ciDir
 	if conflictOut, conflictErr := conflictCmd.Output(); conflictErr == nil {
 		var conflictInfo struct {
 			Mergeable string `json:"mergeable"`
