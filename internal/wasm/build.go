@@ -150,7 +150,6 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 	} else {
 		mainStub = "package main\n\nimport \"runtime\"\n\nfunc main() {\n\t// Keep a goroutine always runnable to prevent Go WASI\n\t// deadlock detection from firing proc_exit(2).\n\t// Use runtime.Gosched() rather than time.Sleep because\n\t// time.Sleep calls poll_oneoff in WASI, which blocks the\n\t// goroutine and would itself trigger deadlock detection.\n\tdone := make(chan struct{})\n\tgo func() {\n\t\tfor {\n\t\t\tselect {\n\t\t\tcase <-done:\n\t\t\t\treturn\n\t\t\tdefault:\n\t\t\t\truntime.Gosched()\n\t\t\t}\n\t\t}\n\t}()\n\t<-done\n}\n"
 	}
-`
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
 	}
