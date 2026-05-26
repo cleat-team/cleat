@@ -720,6 +720,20 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 				log.Printf("idempotency update failed (non-fatal): %v", err)
 			}
 		}
+
+		// Atomically wake the parent inside the same transaction.
+		// Committed atomically with the child's terminal status.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET next_wake_at = NOW(6)
+			WHERE id = (
+				SELECT parent_workflow_id FROM workflow_instances WHERE id = ? AND tenant_id = ?
+			)
+			AND status = 'ready'
+			AND tenant_id = ?
+		`, runID, s.tenantID, s.tenantID); err != nil {
+			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

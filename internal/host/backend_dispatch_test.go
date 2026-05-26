@@ -32,6 +32,8 @@ func (m *mockBackend) Close(ctx context.Context) error {
 	return nil
 }
 
+func (m *mockBackend) PerExecution() WasmBackend { return m }
+
 // ---------------------------------------------------------------------------
 // wasmWithLanguage constructs a minimal valid WASM binary that has a
 // "cleat.metadata" custom section carrying the given language string.
@@ -419,3 +421,5 @@ func (b *errBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoint s
 }
 
 func (b *errBackend) Close(ctx context.Context) error { return nil }
+
+func (b *errBackend) PerExecution() WasmBackend { return b }
