@@ -2880,7 +2880,9 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 			tx.Rollback()
 			break
 		}
-		tx.Commit()
+		if err := tx.Commit(); err != nil {
+			break
+		}
 		n, _ := result.RowsAffected()
 		if n == 0 {
 			break
