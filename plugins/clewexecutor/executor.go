@@ -74,9 +74,23 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		return string(b), nil
 	}
 
+	// Ensure this task has an isolated git worktree before any phase logic.
+	// Safe to call on every invocation — idempotent when worktree exists.
+	worktreeDir := filepath.Join(in.Workdir, "worktrees", in.TaskID)
+	if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
+		branchName := in.TaskID
+		exec.Command("git", "-C", in.Workdir, "fetch", "origin", "develop").Run()
+		addCmd := exec.Command("git", "-C", in.Workdir, "worktree", "add",
+			"-b", branchName, worktreeDir, "origin/develop")
+		if addCmd.Run() != nil {
+			exec.Command("git", "-C", in.Workdir, "worktree", "add",
+				worktreeDir, branchName).Run()
+		}
+		p.logger.Info("clew-executor: created worktree", "task_id", in.TaskID, "dir", worktreeDir)
+	}
+
 	td := taskDir(in.ProjectRoot, in.TaskStatePath, in.TaskID)
 	statusPath := filepath.Join(td, "STATUS.md")
-	sessionPath := filepath.Join(td, "session.json")
 
 	phase, err := extractPhase(statusPath)
 	if err != nil {
@@ -85,97 +99,11 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		return string(b), nil
 	}
 
-	// Idempotency: check session.json for matching phase AND workflow phase.
-	// Without the workflow phase check, review_plan and implement phases
-	// (which both see STATUS.md "plan_review") would collide in the cache.
-	if rec, _ := readSession(sessionPath); rec != nil &&
-		rec.Phase == phase && rec.Status == "completed" && rec.WorkflowPhase == in.Phase {
-		reviewOutcome := rec.ReviewOutcome
-		if reviewOutcome == "" {
-			role, _ := roleForPhase(phase)
-			if role == "reviewer" {
-				reviewOutcome = determineReviewOutcome(filepath.Join(td, "artifacts"), nil)
-			}
-		}
-		out := runPhaseOutput{
-			ExitCode:         rec.ExitCode,
-			PhaseChanged:     rec.PhaseChanged,
-			NewPhase:         rec.NewPhase,
-			ReviewOutcome:    reviewOutcome,
-			ArtifactsWritten: rec.ArtifactsWritten,
-			FindingsCount:    rec.FindingsCount,
-			Started:          rec.Started,
-			Ended:            rec.Ended,
-			Status:           rec.Status,
-			Cached:           true,
-			CrashLog:         rec.CrashLog,
-			DurationMs:       rec.DurationMs,
-			TokenUsage:       rec.TokenUsage,
-		}
-		b, _ := json.Marshal(out)
-		return string(b), nil
-	}
 
-	// Use the later of STATUS.md phase and workflow phase for role lookup.
-	// If STATUS.md is ahead (e.g. "implementing" vs wf "explore"), use it —
-	// an explorer adds no value when a plan is already approved.
-	// If the workflow phase is ahead (e.g. "implement" vs "plan_review"),
-	// use it — the reviewer passed and we need a developer now.
+	// Determine the agent role from STATUS.md phase.
 	role := in.RoleOverride
 	if role == "" {
 		wfStatusPhase := workflowPhaseToStatusPhase(in.Phase)
-
-		// Convergence guard: when STATUS.md has advanced past a review
-		// phase (e.g. CTO/human manually advanced it), return PASS to
-		// prevent the workflow from entering a retry loop dispatching
-		// non-reviewer roles with empty ReviewOutcome.
-		if (in.Phase == "review_plan" || in.Phase == "review_impl") &&
-			phaseOrder[phase] > phaseOrder[wfStatusPhase] {
-			now := time.Now().Format(time.RFC3339)
-			rec := &sessionRecord{
-				Phase:         phase,
-				WorkflowPhase: in.Phase,
-				ReviewOutcome: "PASS",
-				Started:       now,
-				Ended:         now,
-				Status:        "completed",
-			}
-			_ = writeSession(sessionPath, rec)
-			out := runPhaseOutput{
-				ReviewOutcome: "PASS",
-				Started:       now,
-				Ended:         now,
-				Status:        "completed",
-			}
-			b, _ := json.Marshal(out)
-			return string(b), nil
-		}
-
-		// Phase-skip guard: when STATUS.md has advanced past the workflow
-		// phase, skip the agent entirely. Do not write STATUS.md — let the
-		// workflow continue to its next phase. Prevents the explore loop
-		// where re-dispatching a task resets STATUS.md on every cycle.
-		if (in.Phase == "explore" || in.Phase == "plan" || in.Phase == "implement") &&
-			phaseOrder[phase] > phaseOrder[wfStatusPhase] {
-			now := time.Now().Format(time.RFC3339)
-			rec := &sessionRecord{
-				Phase:         phase,
-				WorkflowPhase: in.Phase,
-				Started:       now,
-				Ended:         now,
-				Status:        "completed",
-			}
-			_ = writeSession(sessionPath, rec)
-			out := runPhaseOutput{
-				PhaseChanged: false,
-				Started:      now,
-				Ended:        now,
-				Status:       "completed",
-			}
-			b, _ := json.Marshal(out)
-			return string(b), nil
-		}
-
 		lookupPhase := laterPhase(phase, wfStatusPhase)
 		r, err := roleForPhase(lookupPhase)
 		if err != nil {
@@ -208,24 +136,6 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	// hasn't changed since the last review, skip the review and escalate.
 	// Prevents the review loop from exhausting max rounds when the planner
 	// or developer doesn't actually update the work product between rounds.
-	if role == "reviewer" {
-		escalated := checkReviewEscalation(td, in.Phase)
-		if escalated != "" {
-			now := time.Now().Format(time.RFC3339)
-			out := runPhaseOutput{
-				ExitCode:      0,
-				PhaseChanged:  true,
-				NewPhase:      phase,
-				ReviewOutcome: escalated,
-				FindingsCount: 1,
-				Started:       now,
-				Ended:         now,
-				Status:        "completed",
-			}
-			b, _ := json.Marshal(out)
-			return string(b), nil
-		}
-	}
 
 	prompt, err := buildPrompt(in, role, td, protocolPath, phase)
 	if err != nil {
@@ -261,24 +171,13 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	defer cancel()
 	cmd := exec.CommandContext(execCtx, bin, args...)
 
-	// Isolate this task in a git worktree so concurrent tasks don't
-	// collide on the same working directory.
-	worktreeDir := filepath.Join(in.Workdir, "worktrees", in.TaskID)
-	if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
-		branchName := "clew-" + in.TaskID
-		exec.Command("git", "-C", in.Workdir, "fetch", "origin", "develop").Run()
-		addCmd := exec.Command("git", "-C", in.Workdir, "worktree", "add",
-			"-b", branchName, worktreeDir, "origin/develop")
-		if addCmd.Run() != nil {
-			exec.Command("git", "-C", in.Workdir, "worktree", "add",
-				worktreeDir, branchName).Run()
-		}
-	}
+	// Use the isolated worktree if it was created above.
 	if _, err := os.Stat(worktreeDir); err == nil {
 		cmd.Dir = worktreeDir
 	} else {
 		cmd.Dir = in.Workdir
 	}
+
 	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr cappedBuffer
@@ -379,39 +278,6 @@ Error: exit code %d
 
 	startedStr := started.Format(time.RFC3339)
 	endedStr := ended.Format(time.RFC3339)
-
-	var existingTaskID, existingRole, existingTool, existingModel string
-	if existing, _ := readSession(sessionPath); existing != nil {
-		existingTaskID = existing.TaskID
-		existingRole = existing.Role
-		existingTool = existing.Tool
-		existingModel = existing.Model
-	}
-	if existingTaskID == "" {
-		existingTaskID = in.TaskID
-	}
-
-	rec := &sessionRecord{
-		Phase:            phase,
-		WorkflowPhase:    in.Phase,
-		ExitCode:         exitCode,
-		PhaseChanged:     phaseWasChanged,
-		NewPhase:         newPhase,
-		ReviewOutcome:    reviewOutcome,
-		ArtifactsWritten: artifactsWritten,
-		FindingsCount:    findingsCount,
-		Started:          startedStr,
-		Ended:            endedStr,
-		Status:           status,
-		CrashLog:         crashLogPath,
-		DurationMs:       durationMs,
-		TaskID:           existingTaskID,
-		Role:             existingRole,
-		Tool:             existingTool,
-		Model:            existingModel,
-		TokenUsage:       tu,
-	}
-	_ = writeSession(sessionPath, rec)
 
 	out := runPhaseOutput{
 		ExitCode:         exitCode,
@@ -995,43 +861,6 @@ func latestReviewFile(td, currentPhase string) string {
 		}
 	}
 	return bestName
-}
-
-// checkReviewEscalation detects when the review loop should stop because
-// the work product hasn't been updated since the last review.
-// Returns "PASS" if the work artifact is older than the latest review file,
-// meaning the planner/developer didn't address the previous review findings
-// and further review rounds would be wasted. The task advances with findings
-// deferred to the implementer.
-// Returns "" if no escalation is needed (no prior review, or work was updated).
-func checkReviewEscalation(td, reviewPhase string) string {
-	var workFile string
-	switch reviewPhase {
-	case "review_plan":
-		workFile = filepath.Join(td, "artifacts", "plan.md")
-	case "review_impl":
-		workFile = filepath.Join(td, "artifacts", "implementation.md")
-	default:
-		return ""
-	}
-	workInfo, err := os.Stat(workFile)
-	if err != nil {
-		return "" // no work file yet — can't escalate
-	}
-	latestReview := latestReviewFile(td, "")
-	if latestReview == "" {
-		return "" // no prior review
-	}
-	reviewInfo, err := os.Stat(filepath.Join(td, "artifacts", latestReview))
-	if err != nil {
-		return ""
-	}
-	// If the work artifact hasn't been modified since the last review,
-	// the review loop is stuck — pass with fixes deferred.
-	if !workInfo.ModTime().After(reviewInfo.ModTime()) {
-		return "PASS"
-	}
-	return ""
 }
 
 // listArtifactFiles returns a map of artifact filename → modtime.
