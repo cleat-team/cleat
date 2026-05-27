@@ -1,6 +1,7 @@
 package host
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,19 @@ func TestDivergencePayloadEnrichment(t *testing.T) {
 		}
 		if len(result) > maxPayloadLen+100 {
 			t.Errorf("truncated result too long: %d bytes", len(result))
+		}
+	})
+
+	t.Run("await_child_event_type", func(t *testing.T) {
+		msg := fmt.Sprintf("replay divergence at step 0: expected await_child, got %s.\n  run ID: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+			"sleep", "run-1")
+		for _, label := range []string{
+			"expected await_child",
+			"run ID:",
+		} {
+			if !strings.Contains(msg, label) {
+				t.Errorf("message missing label %q: %s", label, msg)
+			}
 		}
 	})
 }
