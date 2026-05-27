@@ -103,9 +103,7 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	// Determine the agent role from STATUS.md phase.
 	role := in.RoleOverride
 	if role == "" {
-		wfStatusPhase := workflowPhaseToStatusPhase(in.Phase)
-		lookupPhase := laterPhase(phase, wfStatusPhase)
-		r, err := roleForPhase(lookupPhase)
+		r, err := roleForPhase(workflowPhaseToStatusPhase(in.Phase))
 		if err != nil {
 			out := runPhaseOutput{Status: "failed", Error: err.Error()}
 			b, _ := json.Marshal(out)
@@ -618,21 +616,6 @@ func workflowPhaseToStatusPhase(wfPhase string) string {
 }
 
 
-	// phaseOrder maps clew status phases to their ordinal position.
-	var phaseOrder = map[string]int{
-		"queued": 0, "exploring": 1, "planning": 2, "plan_review": 3,
-		"implementing": 4, "impl_review": 5,
-		"create_pr": 6, "ci_wait": 7, "ci_fix": 8, "merge": 9,
-		"surveying": 11, "briefing": 12, "done": 10,
-	}
-
-	// laterPhase returns whichever phase is further along in the lifecycle.
-	func laterPhase(a, b string) string {
-		if phaseOrder[a] >= phaseOrder[b] {
-			return a
-		}
-		return b
-	}
 // matchReviewOutcome checks a single line for a review outcome marker.
 // Returns "PASS", "BLOCKER", "SHOULD_FIX", or "".
 func matchReviewOutcome(line string) string {
