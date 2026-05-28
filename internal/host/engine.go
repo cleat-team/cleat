@@ -1263,10 +1263,11 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				se = &SuspendError{Reason: "workflow suspended"}
 			}
 			if se.Until.IsZero() {
-				se.Until = time.Now().Add(30 * time.Second)
-			}
-			if se.Until.IsZero() {
-				se.Until = time.Now().Add(30 * time.Second)
+				// Default: wake in 10 minutes. External events (child
+				// completion via wakeParent, signal delivery) wake the
+				// parent earlier. This fallback catches edge cases where
+				// the wake mechanism fails and prevents infinite hangs.
+				se.Until = time.Now().Add(10 * time.Minute)
 			}
 
 			// If ContinueAsNew was triggered and the engine has a handler,

@@ -1348,6 +1348,7 @@ func (w *Worker) dispatchLoop() {
 }
 
 func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
+	ctx := w.ctx
 	defer w.wg.Done()
 	defer w.inflight.Delete(wf.ID)
 	defer func() {
@@ -1554,12 +1555,8 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithMaxQuotaEvents(w.maxQuotaEvents),
 		host.WithMaxQuotaChildren(w.maxQuotaChildren),
 		host.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
-			host.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
-<<<<<<< HEAD
-		}
-=======
+		host.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
 	}
->>>>>>> 527eeca (feat: add --max-workflow-duration flag and signal wake-up fix)
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
 	if cks, ok := w.store.(host.ConcurrencyKeyStore); ok {
@@ -2421,6 +2418,7 @@ func decodeULEB128(buf []byte, pos int) (uint32, int) {
 // Errors during defer execution are logged but do not prevent other defers
 // from running.
 func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
+	ctx := w.ctx
 	memoryPages := uint32(0)
 	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
 		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
@@ -2713,7 +2711,7 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 	return func() {
 		defer func() {
 			if r := recover(); r != nil {
-				stack := string(debug.Stack())
+				_ = string(debug.Stack())
 				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r)
 				w.healthTracker.recordPanic(name)
 				backgroundLoopsTotal.WithLabelValues(name, "panic").Inc()
