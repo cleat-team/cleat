@@ -95,8 +95,12 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 				reviewOutcome = determineReviewOutcome(filepath.Join(td, "artifacts"), nil)
 			}
 		}
-		// Advance STATUS.md so the next dispatch doesn't hit this cache again.
-		if rec.NewPhase != "" && rec.NewPhase != phase {
+		// Only advance STATUS.md for read-only analysis phases (explore, plan).
+		// Implement, create_pr, and merge produce real work — cache hits on
+		// those should NOT advance the phase, so the task is re-dispatched
+		// and a real Claude Code session runs.
+		if rec.NewPhase != "" && rec.NewPhase != phase &&
+			(in.Phase == "explore" || in.Phase == "plan") {
 			patchPhase(statusPath, rec.NewPhase)
 		}
 		out := runPhaseOutput{
