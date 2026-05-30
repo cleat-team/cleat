@@ -6,28 +6,27 @@ Signal send, receive, and correlation operations.
 
 
 
-
-def durable_await_signals(names_ptr: int, names_len: int, timeout_ms: int, sig_name_ptr: int, sig_name_max_len: int, payload_ptr: int, payload_max_len: int) -> int:
+def durable_await_signals(names: str, timeout_ms: int, sig_name_ptr: int, sig_name_max_len: int, payload_ptr: int, payload_max_len: int) -> int:
     """
     Wait for one or more external signals, with a timeout.
     """
     raise NotImplementedError
-def durable_poll_signal(name_ptr: int, name_len: int, payload_ptr: int, payload_max_len: int) -> int:
+def durable_poll_signal(name: str) -> str:
     """
     Poll for a specific pending signal (non-blocking).
     """
     raise NotImplementedError
-def durable_send_signal_and_wait(target_run_id_ptr: int, target_run_id_len: int, signal_name_ptr: int, signal_name_len: int, payload_ptr: int, payload_len: int, timeout_ms: int, response_ptr: int, response_max_len: int) -> int:
+def durable_send_signal_and_wait(target_run_id: str, signal_name: str, payload: str, timeout_ms: int) -> str:
     """
     Send a signal with correlation and wait for a reply.
     """
     raise NotImplementedError
-def durable_reply_to_signal(correlation_id_ptr: int, correlation_id_len: int, response_ptr: int, response_len: int) -> int:
+def durable_reply_to_signal(correlation_id: str, response: str) -> int:
     """
     Reply to a correlated signal from within a handler.
     """
     raise NotImplementedError
-def durable_signal_workflow(target_run_id_ptr: int, target_run_id_len: int, signal_name_ptr: int, signal_name_len: int, payload_ptr: int, payload_len: int) -> int:
+def durable_signal_workflow(target_run_id: str, signal_name: str, payload: str) -> int:
     """
     Send a signal to a target workflow (fire-and-forget, recorded).
     """

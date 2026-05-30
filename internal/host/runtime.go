@@ -40,6 +40,12 @@ type Runtime struct {
 	MemoryLimitPages uint32        // max WASM linear memory in pages (64KB each)
 	fuelLimit         uint64        // max WASM fuel (function calls) per invocation; 0 = no limit
 
+	// Work data for the Go dispatcher (cleat_poll_work).
+	// Set by CallExportWithSuspend before calling _start, read by the
+	// cleat_poll_work host function to deliver work into the guest.
+	workEntryPoint string
+	workInput      []byte
+
 		// Fields for cleat_complete host function (see imports.go).
 		// When the WASM export calls cleat_complete before returning,
 		// the result is stored here so CallExportWithSuspend can
@@ -98,6 +104,8 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 		WithMemoryLimitPages(memoryLimitPages)
 	rt := wazero.NewRuntimeWithConfig(ctx, rtCfg)
 
+	r := &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second, MemoryLimitPages: memoryLimitPages, fuelLimit: instructionLimit}
+
 	// WASI is required by Go wasip1 modules for goroutine/stack management.
 	// We build WASI with clock_time_get and random_get stubbed out so that
 	// workflow code calling time.Now() or crypto/rand through WASI panics
@@ -148,13 +156,13 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 		WithFunc(func(_ context.Context, _ api.Module, msg, file, line, col uint32) {}).
 		Export("abort")
 
-	registerHostFunctions(envBuilder)
+	registerHostFunctions(envBuilder, r)
 	if _, err := envBuilder.Instantiate(ctx); err != nil {
 		rt.Close(ctx)
 		return nil, fmt.Errorf("host: instantiating env module: %w", err)
 	}
 
-	return &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second, MemoryLimitPages: memoryLimitPages, fuelLimit: instructionLimit}, nil
+	return r, nil
 }
 
 // Close releases all resources held by the runtime.
@@ -470,6 +478,10 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// proc_exit (which returns as a fn.Call error), we can retrieve the result.
 	complete := &cleatComplete{}
 	callCtx = context.WithValue(callCtx, &cleatCompleteKey, complete)
+
+	// Set work data for Go dispatcher (cleat_poll_work host function).
+	r.workEntryPoint = exportName
+	r.workInput = inputJSON
 
 	results, err := fn.Call(callCtx,
 		uint64(inputOffset),

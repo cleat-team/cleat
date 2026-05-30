@@ -255,7 +255,7 @@ func (p *Plugin) handleTaskResultPost(w http.ResponseWriter, r *http.Request) {
 
 	// Update STATUS.md atomically.
 	newStatus := TaskStatus{Phase: req.Phase, PhaseUpdate: Timestamp(), Updated: TimestampDate()}
-	patched := patchStatusMD(statusData, newStatus)
+	patched := patchStatusMD(statusData, newStatus, taskID)
 	statusPath, err := p.safePath(filepath.Join("task_state", taskID, "STATUS.md"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

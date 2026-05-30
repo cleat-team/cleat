@@ -63,3 +63,4 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.logger.Info("clew-executor: initialized", "agent_bin", p.agentBin)
 	return nil
 }
+

@@ -1214,6 +1214,19 @@ func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 				log.Printf("idempotency update failed (non-fatal): %v", err)
 			}
 		}
+
+		// Atomically wake the parent inside the same transaction.
+		// Committed atomically with the child's terminal status.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET next_wake_at = SYSUTCDATETIME()
+			WHERE id = (
+				SELECT parent_workflow_id FROM workflow_instances WHERE id = @p1
+			)
+			AND status = 'ready'
+		`, runID); err != nil {
+			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -2880,7 +2893,9 @@ func (s *MSSQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 			tx.Rollback()
 			break
 		}
-		tx.Commit()
+		if err := tx.Commit(); err != nil {
+			break
+		}
 		n, _ := result.RowsAffected()
 		if n == 0 {
 			break
@@ -2935,10 +2950,11 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 				WHERE status = 'dead_lettered'
 				  AND completed_at IS NOT NULL
 				  AND completed_at < @p1
+				  AND tenant_id = @p2
 				ORDER BY id
 				OFFSET 0 ROWS FETCH NEXT 10000 ROWS ONLY
 			)
-		`, sql.Named("p1", olderThan))
+		`, sql.Named("p1", olderThan), sql.Named("p2", s.tenantID))
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
 		}

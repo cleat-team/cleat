@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 type runPhaseInput struct {
 	TaskID       string `json:"task_id"`
 	Project      string `json:"project"`
+	TaskStatePath string `json:"task_state_path,omitempty"`
 	ProjectRoot  string `json:"project_root"`
 	Workdir      string `json:"workdir"`
 	Phase        string `json:"phase,omitempty"`
@@ -72,9 +74,23 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		return string(b), nil
 	}
 
-	td := taskDir(in.ProjectRoot, in.Project, in.TaskID)
+	// Ensure this task has an isolated git worktree before any phase logic.
+	// Safe to call on every invocation — idempotent when worktree exists.
+	worktreeDir := filepath.Join(in.Workdir, "worktrees", in.TaskID)
+	if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
+		branchName := in.TaskID
+		exec.Command("git", "-C", in.Workdir, "fetch", "origin", "develop").Run()
+		addCmd := exec.Command("git", "-C", in.Workdir, "worktree", "add",
+			"-b", branchName, worktreeDir, "origin/develop")
+		if addCmd.Run() != nil {
+			exec.Command("git", "-C", in.Workdir, "worktree", "add",
+				worktreeDir, branchName).Run()
+		}
+		p.logger.Info("clew-executor: created worktree", "task_id", in.TaskID, "dir", worktreeDir)
+	}
+
+	td := taskDir(in.ProjectRoot, in.TaskStatePath, in.TaskID)
 	statusPath := filepath.Join(td, "STATUS.md")
-	sessionPath := filepath.Join(td, "session.json")
 
 	phase, err := extractPhase(statusPath)
 	if err != nil {
@@ -83,82 +99,12 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		return string(b), nil
 	}
 
-	// Idempotency: check session.json for matching phase AND workflow phase.
-	// Without the workflow phase check, review_plan and implement phases
-	// (which both see STATUS.md "plan_review") would collide in the cache.
-	if rec, _ := readSession(sessionPath); rec != nil &&
-		rec.Phase == phase && rec.Status == "completed" && rec.WorkflowPhase == in.Phase {
-		reviewOutcome := rec.ReviewOutcome
-		if reviewOutcome == "" {
-			role, _ := roleForPhase(phase)
-			if role == "reviewer" {
-				reviewOutcome = determineReviewOutcome(filepath.Join(td, "artifacts"), nil)
-			}
-		}
-		// Only advance STATUS.md for read-only analysis phases (explore, plan).
-		// Implement, create_pr, and merge produce real work — cache hits on
-		// those should NOT advance the phase, so the task is re-dispatched
-		// and a real Claude Code session runs.
-		if rec.NewPhase != "" && rec.NewPhase != phase &&
-			(in.Phase == "explore" || in.Phase == "plan") {
-			patchPhase(statusPath, rec.NewPhase)
-		}
-		out := runPhaseOutput{
-			ExitCode:         rec.ExitCode,
-			PhaseChanged:     rec.PhaseChanged,
-			NewPhase:         rec.NewPhase,
-			ReviewOutcome:    reviewOutcome,
-			ArtifactsWritten: rec.ArtifactsWritten,
-			FindingsCount:    rec.FindingsCount,
-			Started:          rec.Started,
-			Ended:            rec.Ended,
-			Status:           rec.Status,
-			Cached:           true,
-			CrashLog:         rec.CrashLog,
-			DurationMs:       rec.DurationMs,
-			TokenUsage:       rec.TokenUsage,
-		}
-		b, _ := json.Marshal(out)
-		return string(b), nil
-	}
 
-	// Use the later of STATUS.md phase and workflow phase for role lookup.
-	// If STATUS.md is ahead (e.g. "implementing" vs wf "explore"), use it —
-	// an explorer adds no value when a plan is already approved.
-	// If the workflow phase is ahead (e.g. "implement" vs "plan_review"),
-	// use it — the reviewer passed and we need a developer now.
+
+	// Determine the agent role from STATUS.md phase.
 	role := in.RoleOverride
 	if role == "" {
-		wfStatusPhase := workflowPhaseToStatusPhase(in.Phase)
-
-		// Convergence guard: when STATUS.md has advanced past a review
-		// phase (e.g. CTO/human manually advanced it), return PASS to
-		// prevent the workflow from entering a retry loop dispatching
-		// non-reviewer roles with empty ReviewOutcome.
-		if (in.Phase == "review_plan" || in.Phase == "review_impl") &&
-			phaseOrder[phase] > phaseOrder[wfStatusPhase] {
-			now := time.Now().Format(time.RFC3339)
-			rec := &sessionRecord{
-				Phase:         phase,
-				WorkflowPhase: in.Phase,
-				ReviewOutcome: "PASS",
-				Started:       now,
-				Ended:         now,
-				Status:        "completed",
-			}
-			_ = writeSession(sessionPath, rec)
-			out := runPhaseOutput{
-				ReviewOutcome: "PASS",
-				Started:       now,
-				Ended:         now,
-				Status:        "completed",
-			}
-			b, _ := json.Marshal(out)
-			return string(b), nil
-		}
-
-		lookupPhase := laterPhase(phase, wfStatusPhase)
-		r, err := roleForPhase(lookupPhase)
+		r, err := roleForPhase(workflowPhaseToStatusPhase(in.Phase))
 		if err != nil {
 			out := runPhaseOutput{Status: "failed", Error: err.Error()}
 			b, _ := json.Marshal(out)
@@ -189,24 +135,6 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	// hasn't changed since the last review, skip the review and escalate.
 	// Prevents the review loop from exhausting max rounds when the planner
 	// or developer doesn't actually update the work product between rounds.
-	if role == "reviewer" {
-		escalated := checkReviewEscalation(td, in.Phase)
-		if escalated != "" {
-			now := time.Now().Format(time.RFC3339)
-			out := runPhaseOutput{
-				ExitCode:      0,
-				PhaseChanged:  true,
-				NewPhase:      phase,
-				ReviewOutcome: escalated,
-				FindingsCount: 1,
-				Started:       now,
-				Ended:         now,
-				Status:        "completed",
-			}
-			b, _ := json.Marshal(out)
-			return string(b), nil
-		}
-	}
 
 	prompt, err := buildPrompt(in, role, td, protocolPath, phase)
 	if err != nil {
@@ -241,7 +169,14 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	execCtx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(execCtx, bin, args...)
-	cmd.Dir = in.Workdir
+
+	// Use the isolated worktree if it was created above.
+	if _, err := os.Stat(worktreeDir); err == nil {
+		cmd.Dir = worktreeDir
+	} else {
+		cmd.Dir = in.Workdir
+	}
+
 	cmd.Stdin = strings.NewReader(prompt)
 
 	var stdout, stderr cappedBuffer
@@ -343,39 +278,6 @@ Error: exit code %d
 	startedStr := started.Format(time.RFC3339)
 	endedStr := ended.Format(time.RFC3339)
 
-	var existingTaskID, existingRole, existingTool, existingModel string
-	if existing, _ := readSession(sessionPath); existing != nil {
-		existingTaskID = existing.TaskID
-		existingRole = existing.Role
-		existingTool = existing.Tool
-		existingModel = existing.Model
-	}
-	if existingTaskID == "" {
-		existingTaskID = in.TaskID
-	}
-
-	rec := &sessionRecord{
-		Phase:            phase,
-		WorkflowPhase:    in.Phase,
-		ExitCode:         exitCode,
-		PhaseChanged:     phaseWasChanged,
-		NewPhase:         newPhase,
-		ReviewOutcome:    reviewOutcome,
-		ArtifactsWritten: artifactsWritten,
-		FindingsCount:    findingsCount,
-		Started:          startedStr,
-		Ended:            endedStr,
-		Status:           status,
-		CrashLog:         crashLogPath,
-		DurationMs:       durationMs,
-		TaskID:           existingTaskID,
-		Role:             existingRole,
-		Tool:             existingTool,
-		Model:            existingModel,
-		TokenUsage:       tu,
-	}
-	_ = writeSession(sessionPath, rec)
-
 	out := runPhaseOutput{
 		ExitCode:         exitCode,
 		PhaseChanged:     phaseWasChanged,
@@ -398,6 +300,7 @@ Error: exit code %d
 // checkCIInput is the JSON input for the check_ci host function.
 type checkCIInput struct {
 	Workdir string `json:"workdir"`
+	TaskID  string `json:"task_id,omitempty"`
 }
 
 // checkCIOutput is the JSON output from the check_ci host function.
@@ -420,7 +323,16 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 		return string(b), nil
 	}
 
-	branchCmd := exec.CommandContext(ctx, "git", "-C", in.Workdir, "branch", "--show-current")
+	// Resolve the isolated worktree if one exists for this task.
+	ciDir := in.Workdir
+	if in.TaskID != "" {
+		wtDir := filepath.Join(in.Workdir, "worktrees", in.TaskID)
+		if _, err := os.Stat(wtDir); err == nil {
+			ciDir = wtDir
+		}
+	}
+
+	branchCmd := exec.CommandContext(ctx, "git", "-C", ciDir, "branch", "--show-current")
 	branchOut, err := branchCmd.Output()
 	if err != nil {
 		var stderr string
@@ -447,7 +359,7 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 		"--json", "number,state,url,statusCheckRollup",
 		"--limit", "1",
 	)
-	ghCmd.Dir = in.Workdir
+	ghCmd.Dir = ciDir
 	ghOut, ghErr := ghCmd.Output()
 	if ghErr != nil {
 		var exitErr *exec.ExitError
@@ -500,7 +412,7 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 	conflictCmd := exec.CommandContext(ctx, "gh", "pr", "view", strconv.Itoa(pr.Number),
 		"--json", "mergeable",
 	)
-	conflictCmd.Dir = in.Workdir
+	conflictCmd.Dir = ciDir
 	if conflictOut, conflictErr := conflictCmd.Output(); conflictErr == nil {
 		var conflictInfo struct {
 			Mergeable string `json:"mergeable"`
@@ -544,6 +456,45 @@ func (p *Plugin) checkCI(ctx context.Context, inputJSON string) (string, error) 
 	out := checkCIOutput{CIStatus: "passing", PRURL: prURL, Details: "all checks passed"}
 	b, _ := json.Marshal(out)
 	return string(b), nil
+}
+
+// writeStatus atomically updates the **Phase:** line in STATUS.md.
+// Input: {"task_id":"...","project_root":"...","project":"...","phase":"..."}
+func (p *Plugin) writeStatus(ctx context.Context, inputJSON string) (string, error) {
+	var req struct {
+		TaskID        string `json:"task_id"`
+		ProjectRoot   string `json:"project_root"`
+		Project       string `json:"project"`
+		TaskStatePath string `json:"task_state_path,omitempty"`
+		Phase         string `json:"phase"`
+	}
+	if err := json.Unmarshal([]byte(inputJSON), &req); err != nil {
+		return "", fmt.Errorf("write_status: %w", err)
+	}
+	if req.TaskID == "" || req.ProjectRoot == "" || req.Phase == "" {
+		return "", fmt.Errorf("write_status: missing required field")
+	}
+
+	td := taskDir(req.ProjectRoot, req.TaskStatePath, req.TaskID)
+	statusPath := filepath.Join(td, "STATUS.md")
+
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return "", fmt.Errorf("write_status: %w", err)
+	}
+
+	re := regexp.MustCompile(`\*\*Phase:\*\*\s*.+`)
+	newData := re.ReplaceAll(data, []byte("**Phase:** "+req.Phase))
+
+	tmpPath := statusPath + ".tmp"
+	if err := os.WriteFile(tmpPath, newData, 0644); err != nil {
+		return "", fmt.Errorf("write_status: %w", err)
+	}
+	if err := os.Rename(tmpPath, statusPath); err != nil {
+		return "", fmt.Errorf("write_status: %w", err)
+	}
+
+	return `{"ok":true}`, nil
 }
 
 // buildPrompt constructs the agent prompt matching clew-run.sh patterns.
@@ -671,21 +622,6 @@ func workflowPhaseToStatusPhase(wfPhase string) string {
 }
 
 
-	// phaseOrder maps clew status phases to their ordinal position.
-	var phaseOrder = map[string]int{
-		"queued": 0, "exploring": 1, "planning": 2, "plan_review": 3,
-		"implementing": 4, "impl_review": 5,
-		"create_pr": 6, "ci_wait": 7, "ci_fix": 8, "merge": 9,
-		"surveying": 11, "briefing": 12, "done": 10,
-	}
-
-	// laterPhase returns whichever phase is further along in the lifecycle.
-	func laterPhase(a, b string) string {
-		if phaseOrder[a] >= phaseOrder[b] {
-			return a
-		}
-		return b
-	}
 // matchReviewOutcome checks a single line for a review outcome marker.
 // Returns "PASS", "BLOCKER", "SHOULD_FIX", or "".
 func matchReviewOutcome(line string) string {
@@ -914,43 +850,6 @@ func latestReviewFile(td, currentPhase string) string {
 		}
 	}
 	return bestName
-}
-
-// checkReviewEscalation detects when the review loop should stop because
-// the work product hasn't been updated since the last review.
-// Returns "PASS" if the work artifact is older than the latest review file,
-// meaning the planner/developer didn't address the previous review findings
-// and further review rounds would be wasted. The task advances with findings
-// deferred to the implementer.
-// Returns "" if no escalation is needed (no prior review, or work was updated).
-func checkReviewEscalation(td, reviewPhase string) string {
-	var workFile string
-	switch reviewPhase {
-	case "review_plan":
-		workFile = filepath.Join(td, "artifacts", "plan.md")
-	case "review_impl":
-		workFile = filepath.Join(td, "artifacts", "implementation.md")
-	default:
-		return ""
-	}
-	workInfo, err := os.Stat(workFile)
-	if err != nil {
-		return "" // no work file yet — can't escalate
-	}
-	latestReview := latestReviewFile(td, "")
-	if latestReview == "" {
-		return "" // no prior review
-	}
-	reviewInfo, err := os.Stat(filepath.Join(td, "artifacts", latestReview))
-	if err != nil {
-		return ""
-	}
-	// If the work artifact hasn't been modified since the last review,
-	// the review loop is stuck — pass with fixes deferred.
-	if !workInfo.ModTime().After(reviewInfo.ModTime()) {
-		return "PASS"
-	}
-	return ""
 }
 
 // listArtifactFiles returns a map of artifact filename → modtime.

@@ -6,8 +6,7 @@ Queryable state management.
 
 
 
-
-def set_query_state(key_ptr: int, key_len: int, val_ptr: int, val_len: int) -> int:
+def set_query_state(key: str, val: str) -> int:
     """
     Set a key-value pair in the workflow's queryable state.
     """

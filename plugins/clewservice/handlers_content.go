@@ -46,3 +46,31 @@ func (p *Plugin) handleLessonsGet(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{"lessons": lessons})
 }
+
+// handleContentGet serves static content files (task artifacts, plans, etc.).
+func (p *Plugin) handleContentGet(w http.ResponseWriter, r *http.Request) {
+	contentPath := r.PathValue("path")
+	if contentPath == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	safePath, err := p.safePath(contentPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	data, err := os.ReadFile(safePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, "not found: "+contentPath)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "read file: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write(data)
+}

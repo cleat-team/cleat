@@ -6,13 +6,12 @@ Workflow and run identity introspection.
 
 
 
-
-def durable_workflow_id(id_ptr: int, id_max_len: int) -> int:
+def durable_workflow_id() -> str:
     """
     Get the current workflow's unique identifier.
     """
     raise NotImplementedError
-def durable_run_id(id_ptr: int, id_max_len: int) -> int:
+def durable_run_id() -> str:
     """
     Get the current workflow run's unique identifier.
     """

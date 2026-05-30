@@ -160,6 +160,11 @@ class CleatTestHarness(HostCalls):
         # Query state store
         self._query_state: dict[str, str] = {}
 
+        # Scope state (virtual object scope)
+        self._scope_object_type: str = ""
+        self._scope_instance_key: str = ""
+        self._scope_prefix: str = ""
+
     # ------------------------------------------------------------------
     # Stub configuration
     # ------------------------------------------------------------------
@@ -313,6 +318,9 @@ class CleatTestHarness(HostCalls):
         self._query_state.clear()
         self._version_val = 1
         self._min_version_val = 1
+        self._scope_object_type = ""
+        self._scope_instance_key = ""
+        self._scope_prefix = ""
 
     # ------------------------------------------------------------------
     # Test assertions
@@ -663,6 +671,44 @@ class CleatTestHarness(HostCalls):
     def extend_timeout(self, additional_ms: int) -> None:
         """Extend the workflow's execution timeout (no-op in test harness)."""
         pass
+
+    # ------------------------------------------------------------------
+    # Scope management (virtual object lifecycle)
+    # ------------------------------------------------------------------
+
+    def set_scope(self, object_type: str, instance_key: str) -> str:
+        """Set the current virtual object scope.
+
+        Returns the previous scope prefix (empty string if none was set).
+        """
+        prev = self._scope_prefix
+        self._scope_object_type = object_type
+        self._scope_instance_key = instance_key
+        self._scope_prefix = (
+            f"vo:{object_type}:{instance_key}:" if object_type and instance_key else ""
+        )
+        return prev
+
+    def get_scope(self) -> tuple[str, str]:
+        """Return the current virtual object scope.
+
+        Returns ``(object_type, instance_key)`` or ``("", "")`` if no
+        scope is active.
+        """
+        return (self._scope_object_type, self._scope_instance_key)
+
+    def clear_scope(self) -> str:
+        """Remove the current scope and return the previous scope prefix."""
+        prev = self._scope_prefix
+        self._scope_object_type = ""
+        self._scope_instance_key = ""
+        self._scope_prefix = ""
+        return prev
+
+    def uuid(self, seed: str) -> str:
+        """Generate a deterministic UUID from a seed."""
+        # Return a hash-based deterministic UUID for testing
+        return f"test-uuid-{seed}"
 
     def send(self, service: str, operation: str, request: Any) -> None:
         req_str = self._marshal(request)

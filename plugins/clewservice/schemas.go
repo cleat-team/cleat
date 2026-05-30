@@ -19,19 +19,19 @@ type CreateProjectRequest struct {
 
 // TaskEntry is a single task in tasks.json.
 type TaskEntry struct {
-	ID             string    `json:"id"`
-	Subject        string    `json:"subject"`
-	Description    string    `json:"description,omitempty"`
-	Status         string    `json:"status"`
-	Priority       int       `json:"priority"`
-	Parent         *string   `json:"parent"`
-	Children       []string  `json:"children"`
-	DependsOn      []string  `json:"depends_on"`
-	Contract       *string   `json:"contract"`
-	AssignedAgent  *string   `json:"assigned_agent"`
-	Cost           TaskCost  `json:"cost"`
-	Created        string    `json:"created"`
-	Updated        string    `json:"updated"`
+	ID            string   `json:"id"`
+	Subject       string   `json:"subject"`
+	Description   string   `json:"description,omitempty"`
+	Status        string   `json:"status"`
+	Priority      int      `json:"priority"`
+	Parent        *string  `json:"parent"`
+	Children      []string `json:"children"`
+	DependsOn     []string `json:"depends_on"`
+	Contract      *string  `json:"contract"`
+	AssignedAgent *string  `json:"assigned_agent"`
+	Cost          TaskCost `json:"cost"`
+	Created       string   `json:"created"`
+	Updated       string   `json:"updated"`
 }
 
 // TaskCost tracks budget and spending.
@@ -53,6 +53,7 @@ type CreateTaskRequest struct {
 	Subject  string `json:"subject"`
 	Parent   string `json:"parent,omitempty"`
 	Priority int    `json:"priority"`
+	Budget   int    `json:"budget,omitempty"`
 }
 
 // --- Status types ---
@@ -69,19 +70,19 @@ type TaskStatus struct {
 
 // SessionJSON is the session.json dispatch state.
 type SessionJSON struct {
-	TaskID         string  `json:"task_id"`
-	Role           string  `json:"role"`
-	Tool           string  `json:"tool"`
-	Model          string  `json:"model,omitempty"`
-	Started        string  `json:"started,omitempty"`
-	Ended          string  `json:"ended,omitempty"`
-	Phase          string  `json:"phase,omitempty"`
-	Status         string  `json:"status"`
-	WorkflowRunID  string  `json:"workflow_run_id,omitempty"`
-	ExitCode       *int    `json:"exit_code,omitempty"`
-	TokenUsage     *int    `json:"token_usage,omitempty"`
-	HeartbeatAt    string  `json:"heartbeat_at,omitempty"`
-	AgentID        string  `json:"agent_id,omitempty"`
+	TaskID        string `json:"task_id"`
+	Role          string `json:"role"`
+	Tool          string `json:"tool"`
+	Model         string `json:"model,omitempty"`
+	Started       string `json:"started,omitempty"`
+	Ended         string `json:"ended,omitempty"`
+	Phase         string `json:"phase,omitempty"`
+	Status        string `json:"status"`
+	WorkflowRunID string `json:"workflow_run_id,omitempty"`
+	ExitCode      *int   `json:"exit_code,omitempty"`
+	TokenUsage    *int   `json:"token_usage,omitempty"`
+	HeartbeatAt   string `json:"heartbeat_at,omitempty"`
+	AgentID       string `json:"agent_id,omitempty"`
 }
 
 // --- Result types ---
@@ -101,6 +102,7 @@ type SubmitResultRequest struct {
 	ArtifactsWritten []string   `json:"artifacts_written,omitempty"`
 	FindingsCount    int        `json:"findings_count,omitempty"`
 	Notes            string     `json:"notes,omitempty"`
+	Content          string     `json:"content,omitempty"`
 }
 
 // DispatchRequest is the request body for POST /api/tasks/{id}/dispatch.
@@ -116,15 +118,20 @@ type HeartbeatRequest struct {
 	AgentID string `json:"agent_id"`
 }
 
+// CancelRequest is the request body for POST /api/tasks/{id}/cancel.
+type CancelRequest struct {
+	TaskID string `json:"task_id"`
+}
+
 // --- Dashboard types ---
 
 // DashboardSummary is the response from GET /api/dashboard/summary.
 type DashboardSummary struct {
-	TotalTasks     int               `json:"total_tasks"`
-	TasksByStatus  map[string]int    `json:"tasks_by_status"`
-	TotalSpentUSD  float64           `json:"total_spent_usd"`
-	TotalBudgetUSD float64           `json:"total_budget_usd"`
-	RecentActivity []ActivityEntry   `json:"recent_activity"`
+	TotalTasks     int             `json:"total_tasks"`
+	TasksByStatus  map[string]int  `json:"tasks_by_status"`
+	TotalSpentUSD  float64         `json:"total_spent_usd"`
+	TotalBudgetUSD float64         `json:"total_budget_usd"`
+	RecentActivity []ActivityEntry `json:"recent_activity"`
 }
 
 // ActivityEntry is a single activity event for the dashboard feed.
@@ -138,9 +145,11 @@ type ActivityEntry struct {
 
 // TaskDetailResponse is the response from GET /api/tasks/{id}.
 type TaskDetailResponse struct {
-	Task    TaskEntry    `json:"task"`
-	Status  TaskStatus   `json:"status"`
-	Session *SessionJSON `json:"session,omitempty"`
+	Task      TaskEntry    `json:"task"`
+	Status    TaskStatus   `json:"status"`
+	Session   *SessionJSON `json:"session,omitempty"`
+	Logs      []string     `json:"logs"`
+	Artifacts []string     `json:"artifacts"`
 }
 
 // --- Agent poll types ---
@@ -188,6 +197,22 @@ func IsValidPhase(phase string) bool {
 	return ok
 }
 
+// ValidOutcomes is the set of recognized outcome strings.
+var ValidOutcomes = map[string]bool{
+	"":           true,
+	"pass":       true,
+	"success":    true,
+	"done":       true,
+	"should_fix": true,
+	"fail":       true,
+	"failed":     true,
+}
+
+// IsValidOutcome returns true if the outcome is a recognized value.
+func IsValidOutcome(outcome string) bool {
+	return ValidOutcomes[outcome]
+}
+
 // IsTerminalPhase returns true for terminal states (done, failed, blocked, waiting_on_children).
 func IsTerminalPhase(phase string) bool {
 	return phase == "done" || phase == "failed" || phase == "blocked" || phase == "waiting_on_children"
@@ -196,6 +221,7 @@ func IsTerminalPhase(phase string) bool {
 // CanTransition checks if moving from one phase to another is valid.
 // Terminal phases (failed, blocked) can transition to anything.
 // Forward progress of exactly one step is required in the linear chain.
+// Same-phase transitions are allowed (retry support).
 func CanTransition(from, to string) bool {
 	if !IsValidPhase(to) {
 		return false
@@ -213,8 +239,8 @@ func CanTransition(from, to string) bool {
 	if toOrd < 0 {
 		return true
 	}
-	// Forward progression of exactly one step in the linear chain.
-	return toOrd == fromOrd+1
+	// Forward progression of exactly one step, or same phase (retry).
+	return toOrd == fromOrd || toOrd == fromOrd+1
 }
 
 // Timestamp returns the current time as an RFC 3339 string.

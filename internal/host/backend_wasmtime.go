@@ -56,6 +56,13 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 	return nil
 }
 
+// PerExecution returns a new backend that shares the wasmtime Engine
+// but has its own per-execution handler and work data, eliminating
+// the data race when Execute is called concurrently.
+func (b *wasmtimeBackend) PerExecution() WasmBackend {
+	return &wasmtimeBackend{engine: b.engine}
+}
+
 // Execute compiles, instantiates, and runs a core WASM module via wasmtime.
 //
 // The session provides the HostHandler for all host function calls. The
@@ -73,9 +80,14 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Configure WASI for Go wasip1 module support.
 	// The module may need WASI for stack/goroutine management even though we
 	// override time/random functions for determinism.
-	wasiConfig := wasmtime.NewWasiConfig()
-	wasiConfig.InheritStderr()
-	store.SetWasi(wasiConfig)
+	// Skip for modules that don't import from WASI (AS, Rust cdylib, TeaVM)
+	// to avoid wasmtime-go v44 nil pointer dereference during fn.Call.
+	needsWasi := wasm.HasWasiImports(wasmBytes)
+	if needsWasi {
+		wasiConfig := wasmtime.NewWasiConfig()
+		wasiConfig.InheritStderr()
+		store.SetWasi(wasiConfig)
+	}
 
 	// Wrap context so host functions can find the session.
 	ctx = withHandler(ctx, session)
@@ -112,7 +124,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// can store the workflow result and the Execute method can retrieve
 	// it even when the module subsequently traps (e.g. via proc_exit).
 	var completeResult, completeErr string
-	if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi); err != nil {
 		return nil, fmt.Errorf("host: register imports: %w", err)
 	}
 
@@ -166,33 +178,52 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		copy(data[inputOffset:], inputBytes)
 	}
 
-	// If the module exports _start (Go wasip1), use the cleat_poll_work
-	// dispatcher protocol. We store the entry point + input on the backend,
-	// then call _start synchronously. main() calls cleat_poll_work (which
-	// returns the work), dispatches to the entry point, and calls
-	// cleat_complete with the result. All WASM execution stays on one
-	// goroutine, avoiding the Go wasip1 reentrancy issue.
-	if startFn := instance.GetFunc(store, "_start"); startFn != nil {
-		b.workEntryPoint = entryPoint
-		b.workInput = []byte(input)
+	// If the module exports _start, call it first. Go wasip1 modules use
+	// the cleat_poll_work dispatcher protocol to route work. Java/TeaVM
+	// modules need _start for runtime init (shadow stack, fiber state)
+	// before the entry point can be called directly.
+	lang := wasm.DetectLanguage(wasmBytes)
+	if lang == "go" {
+		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
+			b.workEntryPoint = entryPoint
+			b.workInput = []byte(input)
 
-		// Call _start synchronously. main() processes the work and returns.
-		func() {
-				defer func() { recover() }()
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						if completeResult == "" && completeErr == "" {
+							completeErr = fmt.Sprintf("wasm _start panic: %v", r)
+						}
+					}
+				}()
 				startFn.Call(store)
 			}()
 
-		// Result is delivered via cleat_complete hook.
-		if completeErr != "" {
-			return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr)
+				if completeResult == `"__cleat_suspended__"` {
+					return &ExecResult{Suspended: true}, nil
+				}
+
+
+			if completeResult != "" {
+				return &ExecResult{Result: completeResult, Suspended: false}, nil
+			}
+			if completeErr != "" {
+				return &ExecResult{Result: completeErr, Suspended: false}, nil
+			}
+			return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 		}
-		if completeResult != "" {
-			return &ExecResult{Result: completeResult, Suspended: false}, nil
+	} else if lang == "java" {
+		// TeaVM modules need _start to initialize the runtime (shadow
+		// stack, fiber system, thread-local globals) before any export
+		// can be called. Call it synchronously and wait for return.
+		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
+			if _, err := startFn.Call(store); err != nil {
+				return nil, fmt.Errorf("host: teaVM _start failed: %w", err)
+			}
 		}
-		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 	}
 
-	// Non-Go module: call the export directly.
+// Call the export directly (non-Go modules, or Go modules without _start).
 	fn := instance.GetFunc(store, entryPoint)
 	if fn == nil {
 		return nil, fmt.Errorf("host: export %q not found", entryPoint)
@@ -218,6 +249,11 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if completeErr != "" {
 		return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr)
 	}
+				if completeResult == `"__cleat_suspended__"` {
+					return &ExecResult{Suspended: true}, nil
+				}
+
+
 	if completeResult != "" {
 		return &ExecResult{Result: completeResult, Suspended: false}, nil
 	}
@@ -361,6 +397,11 @@ func (b *wasmtimeBackend) executeViaDispatcher(
 		if completeErr != "" {
 			return nil, fmt.Errorf("host: %q failed: %s", entryPoint, completeErr)
 		}
+				if completeResult == `"__cleat_suspended__"` {
+					return &ExecResult{Suspended: true}, nil
+				}
+
+
 		if completeResult != "" {
 			return &ExecResult{Result: completeResult, Suspended: false}, nil
 		}
@@ -455,16 +496,28 @@ func (b *wasmtimeBackend) registerWasiStubs(linker *wasmtime.Linker) error {
 		return err
 	}
 
+	// environ_get and environ_sizes_get are imported by Rust wasm32-wasip1
+	// modules. wasmtime-go v44's DefineWasi() may or may not provide them
+	// depending on the exact C library version. Provide fallback stubs;
+	// errors from duplicate definition are benign.
+	_ = linker.FuncWrap("wasi_snapshot_preview1", "environ_get",
+		func(_ int32, _ int32) int32 { return 0 },
+	)
+	_ = linker.FuncWrap("wasi_snapshot_preview1", "environ_sizes_get",
+		func(_ int32, _ int32) int32 { return 0 },
+	)
+
 	return nil
 }
 
 // registerEnvStubs registers no-op stubs for optional "env" imports.
 func (b *wasmtimeBackend) registerEnvStubs(linker *wasmtime.Linker) error {
-	// abort is handled by DefineUnknownImportsAsTraps per-instance,
-	// which creates stubs with the module's expected signature.
-	// Manual FuncWrap("abort", ...) can conflict with modules that
-	// declare a different abort signature (e.g. Python components
-	// expect (func) while AssemblyScript expects 4 i32 params).
+	// AssemblyScript abort stub. AS modules import env.abort with
+	// (msg i32, file i32, line i32, col i32). Python components may
+	// define abort via DefineUnknownImportsAsTraps with a different
+	// signature — the duplicate definition error from FuncWrap is
+	// benign and can be ignored (the first registration wins).
+	_ = linker.FuncWrap("env", "abort", func(_ int32, _ int32, _ int32, _ int32) {})
 	return nil
 }
 
@@ -763,7 +816,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflow(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.ChildWorkflow(context.Background(), nil, wfName, wfInput, uint32(runIDPtr), uint32(runIDMaxLen))
+		return h.ChildWorkflow(ctxWithMem(context.Background(), buf), nil, wfName, wfInput, uint32(runIDPtr), uint32(runIDMaxLen))
 	})
 }
 
@@ -792,7 +845,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.ChildWorkflowWithOptions(context.Background(), nil, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
+		return h.ChildWorkflowWithOptions(ctxWithMem(context.Background(), buf), nil, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
 	})
 }
 
@@ -845,7 +898,7 @@ func (b *wasmtimeBackend) registerCleatAwaitChild(linker *wasmtime.Linker) error
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.AwaitChild(context.Background(), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
+		return h.AwaitChild(ctxWithMem(context.Background(), buf), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
 	})
 }
 
@@ -865,7 +918,7 @@ func (b *wasmtimeBackend) registerCleatAwaitAllChildren(linker *wasmtime.Linker)
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.AwaitAllChildren(context.Background(), nil, runIDsJSON, uint32(resultsPtr), uint32(resultsMaxLen))
+		return h.AwaitAllChildren(ctxWithMem(context.Background(), buf), nil, runIDsJSON, uint32(resultsPtr), uint32(resultsMaxLen))
 	})
 }
 
@@ -1009,7 +1062,7 @@ func (b *wasmtimeBackend) registerCleatPluginCall(linker *wasmtime.Linker) error
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.PluginCall(context.Background(), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
+		return h.PluginCall(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
 	})
 }
 
@@ -1040,7 +1093,7 @@ func (b *wasmtimeBackend) registerCleatPluginCallStreaming(linker *wasmtime.Link
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.PluginCallStreaming(context.Background(), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
+		return h.PluginCallStreaming(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, inputJSON, uint32(responsePtr), uint32(responseMaxLen))
 	})
 }
 
@@ -1647,7 +1700,7 @@ func (b *wasmtimeBackend) registerCleatPollChild(linker *wasmtime.Linker) error 
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.PollChild(context.Background(), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
+		return h.PollChild(ctxWithMem(context.Background(), buf), nil, runID, uint32(resultPtr), uint32(resultMaxLen))
 	})
 }
 
@@ -1668,7 +1721,7 @@ func (b *wasmtimeBackend) registerCleatAwaitAnyChild(linker *wasmtime.Linker) er
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.AwaitAnyChild(context.Background(), nil, runIDsJSON, uint32(resultPtr), uint32(resultMaxLen))
+		return h.AwaitAnyChild(ctxWithMem(context.Background(), buf), nil, runIDsJSON, uint32(resultPtr), uint32(resultMaxLen))
 	})
 }
 
@@ -1869,7 +1922,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 		// Use dummy completeResult/completeErr since component modules don't
 		// use the Go dispatcher cleat_complete protocol.
 		var completeResult, completeErr string
-		if err := b.registerAllImports(linker, &completeResult, &completeErr); err != nil {
+		if err := b.registerAllImports(linker, &completeResult, &completeErr, true); err != nil {
 			return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
 		}
 
@@ -2033,7 +2086,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				strings.Contains(instErr.Error(), "out of bounds") {
 				linker2 := wasmtime.NewLinker(b.engine)
 				var cr2, ce2 string
-				b.registerAllImports(linker2, &cr2, &ce2)
+				b.registerAllImports(linker2, &cr2, &ce2, true)
 			// wit_dylib functions for component model adapter canonical ABI (fallback).
 			for _, impTy := range cm.Imports() {
 				if impTy.Module() != "env" || impTy.Name() == nil ||
@@ -2431,9 +2484,11 @@ if pendingCount > 0 {
 
 // registerAllImports registers all host function imports on the given linker.
 // Extracted so both Execute and ExecuteComponent can share the same setup.
-func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string) error {
-	if err := b.registerWasiStubs(linker); err != nil {
-		return err
+func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool) error {
+	if needsWasi {
+		if err := b.registerWasiStubs(linker); err != nil {
+			return err
+		}
 	}
 	if err := b.registerEnvStubs(linker); err != nil {
 		return err

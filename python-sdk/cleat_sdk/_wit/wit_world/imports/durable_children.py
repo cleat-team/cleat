@@ -6,30 +6,28 @@ Child workflow spawn and await operations.
 
 
 
-
-def durable_child_workflow(name_ptr: int, name_len: int, input_ptr: int, input_len: int, run_id_ptr: int, run_id_max_len: int) -> int:
+def durable_child_workflow(name: str, input: str) -> str:
     """
     Start a child workflow instance (async).
     """
     raise NotImplementedError
-def durable_await_child(run_id_ptr: int, run_id_len: int, result_ptr: int, result_max_len: int) -> int:
+def durable_await_child(run_id: str) -> str:
     """
     Wait for a single child workflow to complete.
     """
     raise NotImplementedError
-def durable_await_all_children(run_ids_json_ptr: int, run_ids_json_len: int, results_ptr: int, results_max_len: int) -> int:
+def durable_await_all_children(run_ids_json: str) -> str:
     """
     Wait for multiple child workflows to complete (batch).
     """
     raise NotImplementedError
 def durable_child_workflow_with_options(
-    name_ptr: int, name_len: int,
-    input_ptr: int, input_len: int,
+    name: str,
+    input: str,
     version: int,
     priority: int,
-    parent_close_policy_ptr: int, parent_close_policy_len: int,
-    run_id_ptr: int, run_id_max_len: int,
-) -> int:
+    parent_close_policy: str,
+) -> str:
     """
     Start a child workflow with version, priority, and parent-close-policy options.
     """

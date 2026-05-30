@@ -6,7 +6,6 @@ Timer, clock, random, and log operations.
 
 
 
-
 def durable_sleep(duration_ms: int) -> int:
     """
     Suspend workflow execution for a duration (in milliseconds).
@@ -22,7 +21,7 @@ def durable_random() -> int:
     Get a deterministic random 64-bit value.
     """
     raise NotImplementedError
-def durable_log(msg_ptr: int, msg_len: int) -> int:
+def durable_log(msg: str) -> int:
     """
     Log a message to the workflow event history.
     """

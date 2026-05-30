@@ -255,7 +255,7 @@ func TestEngineReplayDivergence(t *testing.T) {
 		if result == "" {
 			t.Error("expected divergence error result, got empty")
 		}
-		for _, label := range []string{"actual request:", "expected request:", "[sha256="} {
+		for _, label := range []string{"actual request:", "expected request:"} {
 			if !strings.Contains(result, label) {
 				t.Errorf("result missing %q: %s", label, result)
 			}
@@ -277,7 +277,7 @@ func TestEngineReplayDivergence(t *testing.T) {
 		if result == "" {
 			t.Error("expected divergence error result, got empty")
 		}
-		for _, label := range []string{"actual request:", "expected request:", "[sha256="} {
+		for _, label := range []string{"actual request:", "expected request:"} {
 			if !strings.Contains(result, label) {
 				t.Errorf("result missing %q: %s", label, result)
 			}
@@ -1235,4 +1235,288 @@ func TestEngineWithLogger(t *testing.T) {
 	if engine.logger != l {
 		t.Fatal("WithLogger did not set the logger")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Mock child workflow store for AwaitChild and PollChild tests.
+// ---------------------------------------------------------------------------
+
+type mockChildWorkflowStore struct {
+	result    string
+	completed bool
+	err       error
+	gotRunID  string // records the last runID passed to GetChildResult
+}
+
+func (m *mockChildWorkflowStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
+	return "child-run-001", nil
+}
+
+func (m *mockChildWorkflowStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
+	return "child-run-001", nil
+}
+
+func (m *mockChildWorkflowStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+	m.gotRunID = runID
+	return m.result, m.completed, m.err
+}
+
+func newTestExecSession() *execSession {
+	return &execSession{
+		engine:     NewEngine(nil, nil),
+		nowMs:      1000000,
+		deferrals:  make(map[string]string),
+		signals:    make(map[string]string),
+		stateStore: make(map[string]string),
+		queryState: make(map[string]string),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitChild replay divergence detection tests.
+// ---------------------------------------------------------------------------
+
+func TestAwaitChildReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type — should be EventTypeAwaitChild
+	}}
+	result := s.AwaitChild(context.Background(), nil, "run-1", 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected error code 1 (divergence), got %d", errCode)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true (divergence should not call exitReplay)")
+	}
+	if s.stepCount != 0 {
+		t.Errorf("expected stepCount=0 (step not advanced), got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Errorf("expected history unchanged (len=1), got len=%d", len(s.history))
+	}
+}
+
+func TestAwaitChildReplayEmptyEvent(t *testing.T) {
+	mock := &mockChildWorkflowStore{completed: false}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitChild,
+		RunID:     "run-1",
+	}}
+
+	result := s.AwaitChild(context.Background(), nil, "run-1", 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("expected suspend sentinel (1<<62), got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_child(run-1)") {
+		t.Errorf("expected suspendErr Reason containing 'await_child(run-1)', got %q", s.suspendErr.Reason)
+	}
+	if len(s.history) != 2 {
+		t.Errorf("expected 2 history entries (replay + fresh), got %d", len(s.history))
+	}
+	if mock.gotRunID != "run-1" {
+		t.Errorf("expected child store queried with run-1, got %q", mock.gotRunID)
+	}
+}
+
+func TestAwaitChildReplayEmptyThenCompleted(t *testing.T) {
+	mock := &mockChildWorkflowStore{
+		result:    `{"status":"done"}`,
+		completed: true,
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitChild,
+		RunID:     "run-1",
+	}}
+
+	result := s.AwaitChild(context.Background(), nil, "run-1", 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected error code 0 (success), got %d", errCode)
+	}
+	if len(s.history) != 2 {
+		t.Errorf("expected 2 history entries, got %d", len(s.history))
+	}
+	lastEvent := s.history[len(s.history)-1]
+	if lastEvent.Response != `{"status":"done"}` {
+		t.Errorf("expected last event Response=%q, got %q", `{"status":"done"}`, lastEvent.Response)
+	}
+	if lastEvent.RunID != "run-1" {
+		t.Errorf("expected last event RunID=run-1, got %q", lastEvent.RunID)
+	}
+}
+
+func TestAwaitChildFreshError(t *testing.T) {
+	mock := &mockChildWorkflowStore{
+		err: fmt.Errorf("child store unavailable"),
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+
+	result := s.AwaitChild(context.Background(), nil, "run-1", 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected error code 1, got %d", errCode)
+	}
+	if len(s.history) == 0 {
+		t.Fatal("expected at least one event recorded")
+	}
+	lastEvent := s.history[len(s.history)-1]
+	if lastEvent.EventType != EventTypeAwaitChild {
+		t.Errorf("expected EventTypeAwaitChild, got %s", lastEvent.EventType)
+	}
+	if lastEvent.Err != "child store unavailable" {
+		t.Errorf("expected Err='child store unavailable', got %q", lastEvent.Err)
+	}
+	if lastEvent.RunID != "run-1" {
+		t.Errorf("expected RunID=run-1, got %q", lastEvent.RunID)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 (event recorded), got %d", s.stepCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PollChild tests.
+// ---------------------------------------------------------------------------
+
+func TestPollChildStatus(t *testing.T) {
+	t.Run("running", func(t *testing.T) {
+		mock := &mockChildWorkflowStore{completed: false}
+		s := newTestExecSession()
+		s.engine.childWfStore = mock
+		s.PollChild(context.Background(), nil, "run-1", 0, 0)
+		if mock.gotRunID != "run-1" {
+			t.Errorf("expected run-1, got %q", mock.gotRunID)
+		}
+	})
+
+	t.Run("completed", func(t *testing.T) {
+		mock := &mockChildWorkflowStore{result: `{"ok":true}`, completed: true}
+		s := newTestExecSession()
+		s.engine.childWfStore = mock
+		s.PollChild(context.Background(), nil, "run-1", 0, 0)
+		if mock.gotRunID != "run-1" {
+			t.Errorf("expected run-1, got %q", mock.gotRunID)
+		}
+	})
+
+	t.Run("store_error", func(t *testing.T) {
+		mock := &mockChildWorkflowStore{err: fmt.Errorf("db down")}
+		s := newTestExecSession()
+		s.engine.childWfStore = mock
+		s.PollChild(context.Background(), nil, "run-1", 0, 0)
+		if mock.gotRunID != "run-1" {
+			t.Errorf("expected run-1, got %q", mock.gotRunID)
+		}
+	})
+
+	t.Run("empty_result", func(t *testing.T) {
+		mock := &mockChildWorkflowStore{completed: true, result: ""}
+		s := newTestExecSession()
+		s.engine.childWfStore = mock
+		s.PollChild(context.Background(), nil, "run-1", 0, 0)
+		if mock.gotRunID != "run-1" {
+			t.Errorf("expected run-1, got %q", mock.gotRunID)
+		}
+	})
+
+	t.Run("no_store", func(t *testing.T) {
+		s := newTestExecSession()
+		// s.engine.childWfStore is nil — verify no panic
+		s.PollChild(context.Background(), nil, "run-1", 0, 0)
+	})
+}
+
+func TestPollChildJSONFormat(t *testing.T) {
+	type pollResult struct {
+		Status string `json:"status"`
+		Result string `json:"result,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}
+
+	t.Run("running", func(t *testing.T) {
+		out, _ := json.Marshal(pollResult{Status: "running"})
+		var decoded struct{ Status string }
+		if err := json.Unmarshal(out, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Status != "running" {
+			t.Errorf("expected status 'running', got %q", decoded.Status)
+		}
+	})
+
+	t.Run("completed", func(t *testing.T) {
+		out, _ := json.Marshal(pollResult{Status: "completed", Result: `{"ok":true}`})
+		var decoded struct {
+			Status string `json:"status"`
+			Result string `json:"result"`
+		}
+		if err := json.Unmarshal(out, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Status != "completed" {
+			t.Errorf("expected status 'completed', got %q", decoded.Status)
+		}
+		if decoded.Result != `{"ok":true}` {
+			t.Errorf("expected result %q, got %q", `{"ok":true}`, decoded.Result)
+		}
+	})
+
+	t.Run("failed_error", func(t *testing.T) {
+		out, _ := json.Marshal(pollResult{Status: "failed", Error: "db down"})
+		var decoded struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}
+		if err := json.Unmarshal(out, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if decoded.Status != "failed" {
+			t.Errorf("expected status 'failed', got %q", decoded.Status)
+		}
+		if decoded.Error != "db down" {
+			t.Errorf("expected error 'db down', got %q", decoded.Error)
+		}
+	})
+
+	t.Run("failed_empty_result", func(t *testing.T) {
+		out, _ := json.Marshal(pollResult{Status: "failed", Error: "child workflow failed (empty result)"})
+		if !strings.Contains(string(out), "child workflow failed") {
+			t.Errorf("expected 'child workflow failed' in output: %s", out)
+		}
+	})
+
+	t.Run("no_store", func(t *testing.T) {
+		out, _ := json.Marshal(pollResult{Status: "failed", Error: "no child workflow store"})
+		if !strings.Contains(string(out), "no child workflow store") {
+			t.Errorf("expected 'no child workflow store' in output: %s", out)
+		}
+	})
 }

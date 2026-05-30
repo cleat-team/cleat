@@ -1113,19 +1113,21 @@ func (e *Engine) executeWithBackend(
 		}
 	}
 
-	// Delegate to the backend for compilation, instantiation, and export calling.
-	res, callErr := backend.Execute(execCtx, wasmBytes, entryPoint, input, session)
-	if callErr != nil {
-		// Non-suspend error (trap, panic, timeout, or cancellation).
-		// Try running defers on a fresh module.
-		if len(session.deferrals) > 0 {
-			e.runDefers(context.Background(), wasmBytes, session.deferrals)
-		}
-		session.releaseHeldScopes(context.Background())
-		if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("%s", enriched)
-		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, callErr
+		// Use a per-execution backend instance to prevent data races on
+		// the handler/work-data fields when Execute is called concurrently.
+		execBackend := backend.PerExecution()
+		res, callErr := execBackend.Execute(execCtx, wasmBytes, entryPoint, input, session)
+		if callErr != nil && session.suspendErr == nil {
+			// Non-suspend error (trap, panic, timeout, or cancellation).
+			// Try running defers on a fresh module.
+			if len(session.deferrals) > 0 {
+				e.runDefers(context.Background(), wasmBytes, session.deferrals)
+			}
+			session.releaseHeldScopes(context.Background())
+			if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("%s", enriched)
+			}
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, callErr
 	}
 
 	if res.Suspended || session.suspendErr != nil {
@@ -1133,6 +1135,9 @@ func (e *Engine) executeWithBackend(
 		if se == nil {
 			se = &SuspendError{Reason: "workflow suspended"}
 		}
+			if se.Until.IsZero() {
+				se.Until = time.Now().Add(30 * time.Second)
+			}
 
 		susResult := &SuspendResult{
 			History:      session.history,
@@ -1545,6 +1550,9 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			se := session.suspendErr
 			if se == nil {
 				se = &SuspendError{Reason: "workflow suspended"}
+			if se.Until.IsZero() {
+				se.Until = time.Now().Add(30 * time.Second)
+			}
 			}
 
 			susResult := &SuspendResult{
@@ -1699,6 +1707,10 @@ type execSession struct {
 	// Incremented per freshCall; compared against maxEventsPerWorkflow for
 	// auto-ContinueAsNew without querying the database.
 	eventCount int
+
+	// mu protects maps (queryState, stateStore, signals, deferrals) from
+	// concurrent access when wasmtime host functions race with Go dispatch.
+	mu sync.Mutex
 
 	// stepCallback is the installed ReplayStepCallback (nil means no callback).
 	stepCallback ReplayStepCallback
@@ -2513,7 +2525,9 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 	}
 	s.recordEvent(rec)
 
+	s.mu.Lock()
 	s.deferrals[deferID] = description
+	s.mu.Unlock()
 
 	written, _ := s.writeResult(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
 	return int64(uint64(written)<<32 | 0)
@@ -2792,6 +2806,13 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 				// Don't advance stepCount; the fresh execution will record
 				// the result at this same step, overwriting the empty event.
 				s.exitReplay()
+			} else {
+				// Event type mismatch — replay divergence.
+				replayFailuresTotal.Inc()
+				errMsg := fmt.Sprintf("replay divergence at step %d: expected await_child, got %s.\n  run ID: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+					rec.Step, rec.EventType, runID)
+				written, _ := s.writeResult(ctx, m, resultPtr, errMsg, resultMaxLen)
+				return packAwaitChildResult(uint32(written), 1)
 			}
 		} else {
 			s.exitReplay()
@@ -3183,10 +3204,12 @@ func (s *execSession) MinVersion(ctx context.Context) int64 {
 }
 
 func (s *execSession) SetQueryState(ctx context.Context, m api.Module, key, value string) int64 {
+	s.mu.Lock()
 	if s.queryState == nil {
 		s.queryState = make(map[string]string)
 	}
 	s.queryState[key] = value
+	s.mu.Unlock()
 	return 0
 }
 
@@ -4050,19 +4073,23 @@ func (s *execSession) SetState(ctx context.Context, m api.Module, key, value str
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "set" || rec.StateKey != key {
 				return 1
 			}
+			s.mu.Lock()
 			if s.stateStore == nil {
 				s.stateStore = make(map[string]string)
 			}
 			s.stateStore[key] = rec.StateValue
+			s.mu.Unlock()
 			return 0
 		}
 		s.exitReplay()
 	}
 
+	s.mu.Lock()
 	if s.stateStore == nil {
 		s.stateStore = make(map[string]string)
 	}
 	s.stateStore[key] = value
+	s.mu.Unlock()
 
 	rec := EventRecord{
 		Step:       s.stepCount,
@@ -4090,10 +4117,12 @@ func (s *execSession) GetState(ctx context.Context, m api.Module, key string, va
 		s.exitReplay()
 	}
 
+	s.mu.Lock()
 	value := ""
 	if s.stateStore != nil {
 		value = s.stateStore[key]
 	}
+	s.mu.Unlock()
 
 	rec := EventRecord{
 		Step:       s.stepCount,
@@ -4116,17 +4145,21 @@ func (s *execSession) DeleteState(ctx context.Context, m api.Module, key string)
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "del" || rec.StateKey != key {
 				return 1
 			}
+			s.mu.Lock()
 			if s.stateStore != nil {
 				delete(s.stateStore, key)
 			}
+			s.mu.Unlock()
 			return 0
 		}
 		s.exitReplay()
 	}
 
+	s.mu.Lock()
 	if s.stateStore != nil {
 		delete(s.stateStore, key)
 	}
+	s.mu.Unlock()
 
 	rec := EventRecord{
 		Step:      s.stepCount,
@@ -4151,16 +4184,19 @@ func (s *execSession) IncrState(ctx context.Context, m api.Module, key string, d
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "incr" || rec.StateKey != key {
 				return 0
 			}
+			s.mu.Lock()
 			if s.stateStore == nil {
 				s.stateStore = make(map[string]string)
 			}
 			s.stateStore[key] = rec.StateValue
+			s.mu.Unlock()
 			newVal, _ := strconv.ParseInt(rec.StateValue, 10, 64)
 			return newVal
 		}
 		s.exitReplay()
 	}
 
+	s.mu.Lock()
 	if s.stateStore == nil {
 		s.stateStore = make(map[string]string)
 	}
@@ -4171,6 +4207,7 @@ func (s *execSession) IncrState(ctx context.Context, m api.Module, key string, d
 	}
 	newVal := current + delta
 	s.stateStore[key] = fmt.Sprintf("%d", newVal)
+	s.mu.Unlock()
 
 	rec := EventRecord{
 		Step:       s.stepCount,
@@ -4200,12 +4237,14 @@ func (s *execSession) HasState(ctx context.Context, m api.Module, key string) in
 		s.exitReplay()
 	}
 
+	s.mu.Lock()
 	exists := int64(0)
 	if s.stateStore != nil {
 		if _, ok := s.stateStore[key]; ok {
 			exists = 1
 		}
 	}
+	s.mu.Unlock()
 
 	rec := EventRecord{
 		Step:       s.stepCount,
@@ -4233,6 +4272,7 @@ func (s *execSession) ListState(ctx context.Context, m api.Module, prefix string
 		s.exitReplay()
 	}
 
+	s.mu.Lock()
 	var keys []string
 	if s.stateStore != nil {
 		for k := range s.stateStore {
@@ -4241,6 +4281,7 @@ func (s *execSession) ListState(ctx context.Context, m api.Module, prefix string
 			}
 		}
 	}
+	s.mu.Unlock()
 	sort.Strings(keys)
 	keysJSON, _ := json.Marshal(keys)
 

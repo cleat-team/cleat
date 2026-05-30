@@ -1443,6 +1443,20 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 				log.Printf("idempotency update failed (non-fatal): %v", err)
 			}
 		}
+
+		// Atomically wake the parent inside the same transaction.
+		// Committed atomically with the child's terminal status so the
+		// parent is never left waiting on AwaitChild.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET next_wake_at = now()
+			WHERE id = (
+				SELECT parent_workflow_id FROM workflow_instances WHERE id = $1
+			)
+			AND status = 'ready'
+		`, runID); err != nil {
+			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1454,8 +1468,6 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		s.ClearStickyWorker(context.Background(), runID)
 		s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
 		s.enforceParentClosePolicy(context.Background(), runID)
-		// Wake the parent workflow immediately so it can pick up the child's result.
-		s.wakeParent(context.Background(), runID)
 	}
 
 	return nil
@@ -2012,25 +2024,6 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 	tx2.Commit()
 }
 
-// wakeParent sets the parent workflow's next_wake_at to now so it immediately
-// detects child completion. Runs as a best-effort post-commit operation.
-func (s *PostgresStore) wakeParent(ctx context.Context, childID string) {
-	tx, err := s.beginTxWithRLS(ctx)
-	if err != nil {
-		log.Printf("[store] wakeParent: begin tx: %v", err)
-		return
-	}
-	defer tx.Rollback()
-	tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET next_wake_at = now()
-		WHERE id = (
-			SELECT parent_workflow_id FROM workflow_instances WHERE id = $1
-		)
-		AND status = 'ready'
-	`, childID)
-	tx.Commit()
-}
 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
@@ -4168,7 +4161,9 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 			tx.Rollback()
 			break
 		}
-		tx.Commit()
+		if err := tx.Commit(); err != nil {
+			break
+		}
 		n, _ := result.RowsAffected()
 		if n == 0 {
 			break

@@ -81,7 +81,9 @@ func main() {
 		runRestoreWorkflow(ctx, store, db, args[1:])
 	case "replay":
 		runReplay(ctx, store, db, args[1:])
-	case "check-db":
+		case "debug":
+			runDebug(ctx, store, db, args[1:])
+		case "check-db":
 		runCheckDB(ctx, db, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
@@ -106,6 +108,7 @@ Commands:
   restore-workflow <id> <file>    restore a single workflow from NDJSON backup
   replay <id> --entry-point <n>   replay a workflow's event history for diagnostics
   check-db [--verbose]            verify database connectivity and schema health
+  debug <id> [--entry-point <n>]     step-through workflow event replay
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

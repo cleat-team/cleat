@@ -689,6 +689,17 @@ func main() {
 		logger.InfoContext(context.Background(), "WASM disk cache configured", "worker_id", workerID, "dir", *wasmCacheDir, "max_files", *wasmDiskCacheMaxFiles)
 	}
 
+	// Register the wasmtime backend for Go WASM modules. If wasmtime is not
+	// available (e.g., libwasmtime.so not found), fall back to the legacy
+	// wazero runtime by leaving the backend as nil.
+	var wasmtimeBackend host.WasmBackend
+	if wt, err := host.NewWasmtimeBackend(ctx); err == nil {
+		wasmtimeBackend = wt
+		logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID)
+	} else {
+		logger.WarnContext(context.Background(), "wasmtime backend unavailable, using legacy wazero for Go WASM", "worker_id", workerID, "error", err)
+	}
+
 	w := &Worker{
 		id:                          workerID,
 		logger:                      logger,
@@ -715,6 +726,7 @@ func main() {
 		wasmMemoryMaxMB:             wasmMemoryMaxMB,
 		wasmInstructionLimit:        wasmInstructionLimit,
 		wasmDiskCache:               wasmDiskCache,
+		wasmtimeBackend:              wasmtimeBackend,
 		maxQuotaEvents:              *maxQuotaEvents,
 		maxQuotaChildren:            *maxQuotaChildren,
 		maxQuotaConcurrencyKeys:     *maxQuotaConcurrencyKeys,
@@ -723,6 +735,7 @@ func main() {
 		encryption:                  payloadEncryption,
 		encryptSensitivePayloads:    *encryptSensitivePayloads,
 		drainCh:                     make(chan struct{}),
+		parentWakeCh:                make(chan struct{}, 1),
 	}
 
 	// Initialize memory-aware concurrency controller.
@@ -1037,6 +1050,7 @@ type Worker struct {
 	wasmMemoryMaxMB             *int
 	wasmInstructionLimit        *int
 	wasmDiskCache               *host.WasmDiskCache
+	wasmtimeBackend              host.WasmBackend
 
 	drainCh   chan struct{}
 	drainOnce sync.Once
@@ -1053,6 +1067,11 @@ type Worker struct {
 	// Maximum wall-clock duration per workflow execution (0 = no limit).
 	maxWorkflowDuration time.Duration
 
+	// parentWakeCh is signaled when a workflow reaches a terminal status
+	// (done/failed). The dispatch loop selects on this channel to skip its
+	// idle sleep, waking immediately to claim the newly-ready parent.
+	parentWakeCh chan struct{}
+
 	// Health check interval for watchdog.
 	healthCheckInterval time.Duration
 
@@ -1065,6 +1084,8 @@ type Worker struct {
 
 	// loopCtxMap holds per-loop cancellation contexts for clean restart.
 	loopCtxMap map[string]*loopContext
+
+	loopMu sync.Mutex // protects loopFuncs and loopCtxMap from concurrent access
 }
 
 // DrainComplete returns a channel that is closed when the drain completes
@@ -1077,7 +1098,10 @@ func (w *Worker) DrainComplete() <-chan struct{} {
 // If no per-loop context has been set up yet (initial startup), it falls
 // back to the worker-level context so that shutdown still works.
 func (w *Worker) getLoopCtx(name string) context.Context {
-	if lc, ok := w.loopCtxMap[name]; ok {
+	w.loopMu.Lock()
+	lc, ok := w.loopCtxMap[name]
+	w.loopMu.Unlock()
+	if ok {
 		return lc.ctx
 	}
 	return w.ctx
@@ -1092,7 +1116,9 @@ func (w *Worker) getLoopCtx(name string) context.Context {
 // correct (original) channel.
 func (w *Worker) launchLoop(name string, fn func()) {
 	w.wg.Add(1)
+	w.loopMu.Lock()
 	done := w.loopCtxMap[name].done
+	w.loopMu.Unlock()
 	go func() {
 		defer close(done)
 		w.withPanicRecovery(name, fn)()
@@ -1270,6 +1296,7 @@ func (w *Worker) dispatchLoop() {
 				select {
 				case <-w.ctx.Done():
 					return
+			case <-w.parentWakeCh:
 				case <-time.After(backoff):
 				}
 				continue
@@ -1297,6 +1324,7 @@ func (w *Worker) dispatchLoop() {
 					select {
 					case <-w.ctx.Done():
 						return
+			case <-w.parentWakeCh:
 					case <-time.After(backoff):
 					}
 					continue
@@ -1320,6 +1348,8 @@ func (w *Worker) dispatchLoop() {
 			select {
 			case <-w.ctx.Done():
 				return
+		case <-w.parentWakeCh:
+			idleTicks = 0 // reset backoff, poll immediately
 			case <-time.After(sleep):
 			}
 			continue
@@ -1348,12 +1378,11 @@ func (w *Worker) dispatchLoop() {
 }
 
 func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
-	ctx := w.ctx
 	defer w.wg.Done()
 	defer w.inflight.Delete(wf.ID)
 	defer func() {
 		if r := recover(); r != nil {
-			w.logger.ErrorContext(ctx, "PANIC in workflow", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", r)
+			w.logger.ErrorContext(context.Background(), "PANIC in workflow", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", r)
 			w.releaseOrFail(wf, fmt.Sprintf("panic: %v", r))
 		}
 	}()
@@ -1379,7 +1408,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		traceID = generateTraceID()
 	}
 	if err := w.store.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
-		w.logger.WarnContext(ctx, "failed to set trace_id", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		w.logger.WarnContext(context.Background(), "failed to set trace_id", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 	}
 
 	// ---- Load WASM ----
@@ -1387,7 +1416,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	wasmBytes, err := w.loadWASM(wf.DefName, wf.DefVersion)
 	wasmCompileDuration.WithLabelValues(wf.DefName).Observe(time.Since(wasmStart).Seconds())
 	if err != nil {
-		w.logger.ErrorContext(ctx, "failed to load WASM", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		w.logger.ErrorContext(context.Background(), "failed to load WASM", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 		var ce *host.CleatError
@@ -1418,7 +1447,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			requiredMB := float64(requiredPages) * 65536 / 1024 / 1024
 			errMsg := fmt.Sprintf("module requires %d pages (%.0f MB) but max is %d pages (%d MB); increase --wasm-memory-max-mb or reduce module memory usage",
 				requiredPages, requiredMB, allowedPages, *w.wasmMemoryMaxMB)
-			w.logger.ErrorContext(ctx, "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)
+			w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, host.ErrUnknown.String(), "", nil)
@@ -1430,7 +1459,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	history, err := w.store.LoadEventHistory(w.ctx, wf.ID)
 	if err != nil {
 		if isConnectionError(err) {
-			w.logger.WarnContext(ctx, "DB down loading history", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+			w.logger.WarnContext(context.Background(), "DB down loading history", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 			return
 		}
@@ -1440,7 +1469,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		return
 	}
 
-	w.logger.InfoContext(ctx, "loaded history events", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "count", len(history))
+	w.logger.InfoContext(context.Background(), "loaded history events", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "count", len(history))
 
 	// ---- Determine entry point ----
 	entryPoint := determineEntryPoint(wf.Input, wasmBytes)
@@ -1457,7 +1486,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	var compactionState *host.CompactionState
 	compactionState, err = w.store.LoadCompactionState(w.ctx, wf.ID)
 	if err != nil {
-		w.logger.WarnContext(ctx, "failed to load compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		w.logger.WarnContext(context.Background(), "failed to load compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		compactionState = nil
 	}
 
@@ -1466,7 +1495,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
 		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
 		if memoryPages > 65536 {
-			w.logger.WarnContext(ctx, "wasm-memory-max-mb exceeded", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+			w.logger.WarnContext(context.Background(), "wasm-memory-max-mb exceeded", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 			memoryPages = 65536
 		}
 	}
@@ -1496,7 +1525,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		err := fmt.Errorf(
 			"version mismatch: workflow instance %s expects def_version %d but WASM binary metadata reports version %d (def=%s). The workflow_defs row and the deployed WASM binary are out of sync.",
 			wf.ID, wf.DefVersion, wfMeta.WorkflowVersion, wf.DefName)
-		w.logger.ErrorContext(ctx, "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "version_check", nil)
@@ -1519,7 +1548,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				err := fmt.Errorf(
 					"missing plugin: workflow requires plugin %q version %s but it is not installed in this worker. Available plugins: %v",
 					pluginName, requiredVersion, pluginNames(workerPlugins))
-				w.logger.ErrorContext(ctx, "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
@@ -1529,7 +1558,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				err := fmt.Errorf(
 					"plugin version mismatch: workflow requires plugin %q version %s but worker has version %s",
 					pluginName, requiredVersion, workerVersion)
-				w.logger.ErrorContext(ctx, "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
@@ -1545,6 +1574,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithWorkflowID(wf.ID),
 		host.WithTraceID(traceID),
 		host.WithTenantID(wf.TenantID),
+		host.WithBackend("go", w.wasmtimeBackend),
 		host.WithWorkflowStore(w.store),
 		host.WithChildWorkflowStore(w.store),
 		host.WithPluginRegistry(w.pluginRegistry),
@@ -1590,7 +1620,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if w.tenantPools != nil && wf.TenantID != "" {
 		tenantDB, err := w.tenantPools.For(w.ctx, wf.TenantID)
 		if err != nil {
-			w.logger.ErrorContext(ctx, "cannot get tenant pool", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+			w.logger.ErrorContext(context.Background(), "cannot get tenant pool", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), host.ErrUnknown.String(), "", nil)
@@ -1600,7 +1630,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 	if compactionState != nil {
 		engineOpts = append(engineOpts, host.WithCompactionState(compactionState))
-		w.logger.InfoContext(ctx, "loaded compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "compacted_step", compactionState.CompactedStep)
+		w.logger.InfoContext(context.Background(), "loaded compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "compacted_step", compactionState.CompactedStep)
 	}
 	// When replaying, validate version compatibility between the old
 	// workflow definition (from the instance) and the new definition
@@ -1648,7 +1678,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		}
 	}
 	if err != nil {
-		w.logger.ErrorContext(ctx, "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 		var ce *host.CleatError
@@ -1686,16 +1716,16 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if suspended != nil && suspended.Reason == "continue_as_new" {
 		// ContinueAsNew: atomically append events, create a new run, and
 		// complete the current one — all in a single database transaction.
-		w.logger.InfoContext(ctx, "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
 		if err != nil {
-			w.logger.ErrorContext(ctx, "continue_as_new failed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+			w.logger.ErrorContext(context.Background(), "continue_as_new failed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("continue_as_new: %v", err), host.ErrUnknown.String(), "", nil)
 			return
 		}
-		w.logger.InfoContext(ctx, "continued as new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "new_run_id", newRunID)
+		w.logger.InfoContext(context.Background(), "continued as new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "new_run_id", newRunID)
 		workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(time.Since(workflowStartTime).Seconds())
 		return
@@ -1715,11 +1745,11 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if err != nil {
 		dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
 		if isConnectionError(err) {
-			w.logger.WarnContext(ctx, "DB down finalizing", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+			w.logger.WarnContext(context.Background(), "DB down finalizing", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 			return
 		}
-		w.logger.ErrorContext(ctx, "finalize error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+		w.logger.ErrorContext(context.Background(), "finalize error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 		var ce *host.CleatError
@@ -1740,6 +1770,15 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 	dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
 
+	// Signal the dispatch loop to poll immediately. The parent
+	// was woken atomically inside FinalizeWorkflowSegment.
+	if finalStatus == "done" || finalStatus == "failed" {
+		select {
+		case w.parentWakeCh <- struct{}{}:
+		default:
+		}
+	}
+
 	// Post-finalization: logging and non-DB side effects.
 	if finalStatus == "done" {
 		// Workflow completed. Run any registered defer callbacks in LIFO order.
@@ -1750,9 +1789,9 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		duration := time.Since(workflowStartTime)
 		workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(duration.Seconds())
 		workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
-		w.logger.InfoContext(ctx, "workflow completed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "duration", duration)
+		w.logger.InfoContext(context.Background(), "workflow completed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "duration", duration)
 	} else {
-		w.logger.InfoContext(ctx, "workflow suspended", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "reason", suspended.Reason, "wake_at", suspended.SuspendUntil)
+		w.logger.InfoContext(context.Background(), "workflow suspended", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "reason", suspended.Reason, "wake_at", suspended.SuspendUntil)
 	}
 }
 
@@ -2418,18 +2457,17 @@ func decodeULEB128(buf []byte, pos int) (uint32, int) {
 // Errors during defer execution are logged but do not prevent other defers
 // from running.
 func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
-	ctx := w.ctx
 	memoryPages := uint32(0)
 	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
 		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
 		if memoryPages > 65536 {
-			w.logger.WarnContext(ctx, "runDefers: wasm-memory-max-mb exceeded", "worker_id", w.id)
+			w.logger.WarnContext(context.Background(), "runDefers: wasm-memory-max-mb exceeded", "worker_id", w.id)
 			memoryPages = 65536
 		}
 	}
 	rt, err := host.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 	if err != nil {
-		w.logger.ErrorContext(ctx, "runDefers: create runtime failed", "worker_id", w.id, "error", err)
+		w.logger.ErrorContext(context.Background(), "runDefers: create runtime failed", "worker_id", w.id, "error", err)
 		return
 	}
 	defer rt.Close(w.ctx)
@@ -2466,9 +2504,9 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 		deferName := "cleat_defer_" + entry.id
 		_, err := engine.RunDefer(w.ctx, wasmBytes, deferName, nil)
 		if err != nil {
-			w.logger.ErrorContext(ctx, "defer execution failed", "worker_id", w.id, "defer_id", entry.id, "description", entry.desc, "error", err)
+			w.logger.ErrorContext(context.Background(), "defer execution failed", "worker_id", w.id, "defer_id", entry.id, "description", entry.desc, "error", err)
 		} else {
-			w.logger.InfoContext(ctx, "defer completed", "worker_id", w.id, "defer_id", entry.id, "description", entry.desc)
+			w.logger.InfoContext(context.Background(), "defer completed", "worker_id", w.id, "defer_id", entry.id, "description", entry.desc)
 		}
 	}
 }
@@ -2713,6 +2751,8 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 			if r := recover(); r != nil {
 				_ = string(debug.Stack())
 				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r)
+				stack := string(debug.Stack())
+				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r, "stack", stack)
 				w.healthTracker.recordPanic(name)
 				backgroundLoopsTotal.WithLabelValues(name, "panic").Inc()
 			}
@@ -2781,7 +2821,14 @@ func (w *Worker) watchdogLoop() {
 // prevents goroutine leaks and double execution when the watchdog detects a
 // stale loop.
 func (w *Worker) restartLoop(name string) {
+	w.loopMu.Lock()
 	fn, ok := w.loopFuncs[name]
+	var prev *loopContext
+	if p, pok := w.loopCtxMap[name]; pok {
+		prev = p
+	}
+	w.loopMu.Unlock()
+
 	if !ok {
 		w.logger.WarnContext(w.ctx, "watchdog: no restart function registered", "worker_id", w.id, "loop", name)
 		return
@@ -2796,8 +2843,9 @@ func (w *Worker) restartLoop(name string) {
 	w.healthTracker.recordRestart(name)
 
 	// Cancel the old loop context (if one exists) and wait for the old goroutine
-	// to acknowledge cancellation via its done channel.
-	if prev, ok := w.loopCtxMap[name]; ok {
+	// to acknowledge cancellation via its done channel. Do this outside the lock
+	// because the wait can take up to 5 seconds.
+	if prev != nil {
 		prev.cancel()
 		select {
 		case <-prev.done:
@@ -2810,7 +2858,9 @@ func (w *Worker) restartLoop(name string) {
 	// Create a fresh per-loop context and done channel.
 	ctx, cancel := context.WithCancel(w.ctx)
 	done := make(chan struct{})
+	w.loopMu.Lock()
 	w.loopCtxMap[name] = &loopContext{ctx: ctx, cancel: cancel, done: done}
+	w.loopMu.Unlock()
 
 	w.wg.Add(1)
 	go func() {

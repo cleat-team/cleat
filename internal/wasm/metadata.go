@@ -272,8 +272,18 @@ func DetectLanguage(wasmBytes []byte) string {
 		return "python"
 	}
 
-	// 4. Default to Go.
+	// 4. Scan import section for language-specific import patterns.
+	if lang := detectLanguageFromImports(wasmBytes); lang != "" {
+		return lang
+	}
+
+	// 5. Default to Go.
 	return "go"
+}
+
+// HasWasiImports scans the WASM binary for wasi_snapshot_preview1 import module.
+func HasWasiImports(wasmBytes []byte) bool {
+	return strings.Contains(string(wasmBytes), "wasi_snapshot_preview1")
 }
 
 // hasComponentModelImports scans the WASM import section for module names
@@ -290,6 +300,90 @@ func hasComponentModelImports(wasmBytes []byte) bool {
 		}
 	}
 	return false
+}
+
+// detectLanguageFromImports scans the WASM import section for language-specific
+// patterns that identify the source language when no metadata is present.
+func detectLanguageFromImports(wasmBytes []byte) string {
+	imports, err := readImportSection(wasmBytes)
+	if err != nil {
+		return ""
+	}
+	for _, imp := range imports {
+		// TeaVM-compiled Java modules import from the "teavm" module.
+		if imp.module == "teavm" {
+			return "java"
+		}
+		// AssemblyScript modules import env.abort for runtime error handling.
+		if imp.module == "env" && imp.field == "abort" {
+			return "assemblyscript"
+		}
+	}
+	return ""
+}
+
+// wasmImport represents a single WASM import entry.
+type wasmImport struct {
+	module string
+	field  string
+}
+
+// readImportSection extracts all (module, field) pairs from the WASM import section.
+func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
+	if len(wasmBytes) < 8 || !hasWasmHeader(wasmBytes) {
+		return nil, fmt.Errorf("not a valid WASM binary")
+	}
+
+	var imports []wasmImport
+	offset := 8
+
+	for offset < len(wasmBytes) {
+		sectionID := wasmBytes[offset]
+		offset++
+		size, n := decodeULEB128(wasmBytes[offset:])
+		if n <= 0 {
+			return nil, fmt.Errorf("corrupt WASM at offset %d", offset)
+		}
+		offset += n
+		sectionEnd := offset + int(size)
+		if int(size) > len(wasmBytes)-offset {
+			return nil, fmt.Errorf("section size %d overflows", size)
+		}
+
+		if sectionID != 2 {
+			offset = sectionEnd
+			continue
+		}
+
+		count, nn := decodeULEB128(wasmBytes[offset:])
+		if nn <= 0 {
+			return nil, fmt.Errorf("failed to decode import count")
+		}
+		offset += nn
+
+		for i := uint32(0); i < count; i++ {
+			// Module name.
+			nameLen, nn := decodeULEB128(wasmBytes[offset:])
+			if nn <= 0 { return nil, fmt.Errorf("failed to decode module name len") }
+			offset += nn
+			moduleName := string(wasmBytes[offset : offset+int(nameLen)])
+			offset += int(nameLen)
+
+			// Field name.
+			fieldLen, nn := decodeULEB128(wasmBytes[offset:])
+			if nn <= 0 { return nil, fmt.Errorf("failed to decode field name len") }
+			offset += nn
+			fieldName := string(wasmBytes[offset : offset+int(fieldLen)])
+			offset += int(fieldLen)
+
+			// Skip kind byte.
+			if offset < sectionEnd { offset++ }
+
+			imports = append(imports, wasmImport{module: moduleName, field: fieldName})
+		}
+		return imports, nil
+	}
+	return imports, nil
 }
 
 // readImportModuleNames extracts the module names from the import section

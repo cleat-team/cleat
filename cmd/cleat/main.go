@@ -451,6 +451,7 @@ func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut boo
 		WorkflowVersion:      1,
 		ABIVersion:           wasm.CurrentABIVersion,
 		MinCompatibleVersion: wasm.CurrentABIVersion,
+		Language:             "go",
 		PluginDeps:           derivePluginDeps(usage),
 		ChildVersions:        childVersions,
 	}

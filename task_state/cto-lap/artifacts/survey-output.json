@@ -1,0 +1,11 @@
+{
+  "decomps_ready": [],
+  "decomps_needing_review": [],
+  "tasks_to_close": [
+    {
+      "task_id": "cleat-228a",
+      "reason": "Engine plumbing complete. engine.go.bak deleted in 0664fec. advanceReplayStep has 42 references on develop. 10+ independent verifications corroborate. Task is done."
+    }
+  ],
+  "budget_spent_today": 0.00
+}
