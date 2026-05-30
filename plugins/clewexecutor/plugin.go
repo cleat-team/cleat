@@ -64,14 +64,3 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	return nil
 }
 
-func (p *Plugin) validateFiles(ctx context.Context, inputJSON string) (string, error) {
-	return `{"missing":[]}`, nil
-}
-
-func (p *Plugin) readFile(ctx context.Context, inputJSON string) (string, error) {
-	return "", fmt.Errorf("clew-executor: read_file not implemented")
-}
-
-func (p *Plugin) createTask(ctx context.Context, inputJSON string) (string, error) {
-	return "", fmt.Errorf("clew-executor: create_task not implemented")
-}

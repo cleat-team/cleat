@@ -847,7 +847,15 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 			return uint64(handlerFromContext(ctx).JsonStringify(ctx, m, ptr, len, outPtr, outMaxLen))
 		}).Export("cleat_json_stringify")
 
-			// cleat_complete signals workflow completion with a result or error.
+		// cleat_poll_work supplies entry point + input to Go wasip1
+	// modules via their _start/main path. Normal Go WASM builds call this
+	// from main() to receive work before dispatching to the entry point.
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		entryPtr, entryMaxLen, argsPtr, argsMaxLen uint32) uint64 {
+		return 0
+	}).Export("cleat_poll_work")
+
+		// cleat_complete signals workflow completion with a result or error.
 		// This is called by the WASM export wrapper BEFORE returning, so the
 		// worker can capture the result even if the Go WASI runtime subsequently
 		// calls proc_exit (which would overwrite the normal return value).

@@ -83,6 +83,16 @@ func writeSession(path string, rec *sessionRecord) error {
 
 var phaseRe = regexp.MustCompile(`\*\*Phase:\*\*\s*(\w+)`)
 
+// patchPhase updates the **Phase:** line in STATUS.md.
+func patchPhase(statusPath, newPhase string) error {
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return err
+	}
+	patched := phaseRe.ReplaceAll(data, []byte("**Phase:** "+newPhase))
+	return os.WriteFile(statusPath, patched, 0644)
+}
+
 // extractPhase reads STATUS.md and extracts **Phase:** <value> via regex.
 func extractPhase(statusPath string) (string, error) {
 	data, err := os.ReadFile(statusPath)

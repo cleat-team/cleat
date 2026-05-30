@@ -1585,8 +1585,8 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		host.WithMaxQuotaEvents(w.maxQuotaEvents),
 		host.WithMaxQuotaChildren(w.maxQuotaChildren),
 		host.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
-			host.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
-		}
+		host.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
+	}
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
 	if cks, ok := w.store.(host.ConcurrencyKeyStore); ok {
@@ -2749,7 +2749,7 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 	return func() {
 		defer func() {
 			if r := recover(); r != nil {
-			_ = string(debug.Stack())
+				_ = string(debug.Stack())
 				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r)
 				stack := string(debug.Stack())
 				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r, "stack", stack)

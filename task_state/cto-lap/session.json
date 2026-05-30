@@ -1,0 +1,24 @@
+{
+  "phase": "briefing",
+  "wf_phase": "surveying-lap90",
+  "exit_code": 0,
+  "phase_changed": false,
+  "new_phase": "briefing",
+  "review_outcome": "",
+  "artifacts_written": [
+    "survey-output.json"
+  ],
+  "findings_count": 0,
+  "started": "2026-05-25T16:50:16-04:00",
+  "ended": "2026-05-25T16:56:12-04:00",
+  "status": "completed",
+  "task_id": "cto-lap",
+  "token_usage": {
+    "input_tokens": 61583,
+    "output_tokens": 18558,
+    "cache_read_input_tokens": 801920,
+    "cache_creation_input_tokens": 0,
+    "cost_usd": 1.3422549999999998,
+    "model": "deepseek-v4-flash"
+  }
+}

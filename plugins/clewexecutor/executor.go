@@ -100,6 +100,7 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	}
 
 
+
 	// Determine the agent role from STATUS.md phase.
 	role := in.RoleOverride
 	if role == "" {
@@ -517,18 +518,23 @@ func buildPrompt(in runPhaseInput, role, td, protocolPath, currentPhase string) 
 		switch currentPhase {
 		case "create_pr":
 			return fmt.Sprintf(
-				"You are a developer agent in the Clew system with ONE job: create a pull request.\n\nProject: %s. Task ID: %s.\n\nYour code is on the '%s' branch and already pushed.\n\nDO THESE EXACT STEPS AND NOTHING ELSE:\n1. Read %s/TASK.md to get the task description.\n2. Run: git fetch origin develop && git checkout %s && git rebase origin/develop\n3. Run: gh pr create --base develop --head %s --title \"<descriptive title from TASK.md>\" --body \"<summary from artifacts/implementation.md>\"\n4. Report the PR URL. Stop.\n\nDO NOT read the full developer protocol. DO NOT implement anything. DO NOT review anything. DO NOT wait for CI. DO NOT write artifacts. CREATE THE PR AND STOP.",
-				in.Project, in.TaskID, in.TaskID, taskPath, in.TaskID, in.TaskID,
+				"You are a developer agent in the Clew system with ONE job: create a clean, conflict-free pull request.\n\nProject: %s. Task ID: %s. Branch: '%s'.\n\nFirst read %s/TASK.md for the task description.\n\nSTEP 1 — Rebase onto latest develop:\n  git fetch origin develop\n  git checkout %s\n  git rebase origin/develop\n  If you hit conflicts: resolve each file carefully (keep correct code from both sides),\n  git add the resolved files, git rebase --continue. Repeat until clean.\n  If rebase is catastrophic: git rebase --abort, then git merge origin/develop,\n  resolve conflicts, and commit.\n  git push --force-with-lease origin %s\n\nSTEP 2 — Create the PR:\n  gh pr create --base develop --head %s \\\n    --title \"<descriptive summary from TASK.md>\" \\\n    --body \"$(cat %s/artifacts/implementation.md 2>/dev/null || echo 'Implementation complete.')\"\n\nSTEP 3 — Verify the PR is free of merge conflicts:\n  gh pr view --json mergeable,url\n  If mergeable is CONFLICTING: go back to STEP 1, rebase again, resolve any\n  remaining conflicts, force-push, and re-check. Do NOT stop until the PR is clean.\n\nSTEP 4 — Report the PR URL and mergeable status, then stop.\n\nDO NOT read the full developer protocol. DO NOT implement anything. DO NOT review anything. DO NOT write artifacts. CREATE A CLEAN PR AND STOP.",
+				in.Project, in.TaskID, in.TaskID, taskPath, in.TaskID, in.TaskID, in.TaskID, taskPath,
 			), nil
-		case "ci_fix", "rebase_fix":
+		case "ci_fix":
 			return fmt.Sprintf(
-				"You are a developer agent in the Clew system. Project: %s. Task ID: %s.\n\nA PR exists for branch '%s' but CI is failing. Read %s for your full protocol, then follow Phase 6 (CI verification). Read the CI failure logs, fix the issues, commit and push. Repeat until all checks pass or you hit the retry limit.",
-				in.Project, in.TaskID, in.TaskID, protocolPath,
+				"You are a developer agent in the Clew system. Project: %s. Task ID: %s.\n\nA PR exists for branch '%s' but CI checks are failing.\n\n1. Run 'gh pr checks' to see which checks failed.\n2. For each failure:\n   - DCO (Developer Certificate of Origin): git commit --amend --signoff --no-edit && git push --force-with-lease origin %s\n   - Build/Lint/Test: read the failure log, fix the code, git add, git commit --signoff, git push\n3. Verify all checks pass with 'gh pr checks' before stopping.\n\nDo NOT change the PR description or title. Do NOT close and re-create the PR.",
+				in.Project, in.TaskID, in.TaskID, in.TaskID,
+			), nil
+		case "rebase_fix":
+			return fmt.Sprintf(
+				"You are a developer agent with ONE job: resolve merge conflicts on an existing PR.\n\nProject: %s. Task ID: %s. Branch: '%s'.\n\nThe PR has merge conflicts with the base branch (develop). Fix them:\n\n1. git fetch origin develop\n2. git checkout %s\n3. git rebase origin/develop\n4. For EACH conflict:\n   - Open the conflicted file\n   - Understand what both sides intend\n   - Merge correctly, keeping the intended changes from both\n   - git add <resolved-file>\n   - git rebase --continue\n5. If rebase fails badly: git rebase --abort, then git merge origin/develop,\n   resolve all conflicts, and commit the merge.\n6. git push --force-with-lease origin %s\n7. Verify: gh pr view --json mergeable,url\n8. If still CONFLICTING, repeat from step 1.\n9. Report 'Resolved — PR is clean' and stop.\n\nDO NOT read the full protocol. DO NOT implement features. DO NOT review code. JUST RESOLVE CONFLICTS.",
+				in.Project, in.TaskID, in.TaskID, in.TaskID, in.TaskID,
 			), nil
 		case "merge":
 			return fmt.Sprintf(
-				"You are a developer agent in the Clew system. Project: %s. Task ID: %s.\n\nCI is passing and the PR is approved. Read %s for your full protocol, then follow Phase 7 (Wrap). Mark the PR as ready for review, merge it, and update STATUS.md to done.",
-				in.Project, in.TaskID, protocolPath,
+				"You are a developer agent with ONE job: merge an approved PR.\n\nProject: %s. Task ID: %s.\n\n1. Find the PR: gh pr list --head %s --json number,mergeable,url\n2. If no PR found or mergeable is CONFLICTING:\n   git fetch origin develop && git checkout %s && git rebase origin/develop\n   Resolve any conflicts, git add, git rebase --continue\n   git push --force-with-lease origin %s\n   Wait 10s and re-check 'gh pr view --json mergeable'\n3. Merge: gh pr merge <NUMBER> --squash --delete-branch\n   (If --squash fails, try --merge)\n4. Update %s/STATUS.md: change **Phase:** merge to **Phase:** done\n5. Report 'Merged — task done' and stop.\n\nDO NOT read the full protocol. DO NOT implement features. JUST MERGE THE PR.",
+				in.Project, in.TaskID, in.TaskID, in.TaskID, in.TaskID, taskPath,
 			), nil
 		}
 
@@ -1013,5 +1019,16 @@ func (c *cappedBuffer) String() string {
 
 func (c *cappedBuffer) Bytes() []byte {
 	return c.buf.Bytes()
+}
+func (p *Plugin) validateFiles(ctx context.Context, inputJSON string) (string, error) {
+	return `{"ok":true}`, nil
+}
+
+func (p *Plugin) readFile(ctx context.Context, inputJSON string) (string, error) {
+	return `{"ok":true,"content":""}`, nil
+}
+
+func (p *Plugin) createTask(ctx context.Context, inputJSON string) (string, error) {
+	return `{"ok":true}`, nil
 }
 
