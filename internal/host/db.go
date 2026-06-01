@@ -1457,6 +1457,22 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		`, runID); err != nil {
 			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
 		}
+
+			// Also populate the parent's await_child event with the child's
+			// result so the parent can replay it directly without needing
+			// a fresh GetChildResult query (which requires exitReplay).
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE event_history
+				SET response = $2
+				WHERE workflow_id = (
+					SELECT parent_workflow_id FROM workflow_instances WHERE id = $1
+				)
+				AND event_type = 'await_child'
+				AND run_id = $1
+				AND (response IS NULL OR response = '')
+			`, runID, result); err != nil {
+				log.Printf("[store] parent event update failed (non-fatal): %v", err)
+			}
 	}
 
 	if err := tx.Commit(); err != nil {

@@ -13,7 +13,7 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	}
 	if err := scope.Register(plugin.FuncOptions{
 		Name:       "run_phase",
-		Idempotent: true,
+		Idempotent: false, // NOT idempotent — runs Claude, produces different output each time
 	}, p.runPhase); err != nil {
 		return err
 	}

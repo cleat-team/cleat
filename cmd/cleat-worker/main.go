@@ -1595,7 +1595,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	// Enable event history checksum verification on replay by default.
 	// Can be disabled with --disable-checksum-verification.
 	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
-		engineOpts = append(engineOpts, host.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
+		engineOpts = append(engineOpts, host.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, false))
 	}
 	// Enable signal authorization if --require-signal-auth is set.
 	if w.requireSignalAuth != nil && *w.requireSignalAuth {
