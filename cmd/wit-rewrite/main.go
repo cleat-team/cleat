@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cleat-team/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/wasm"
 )
 
 func main() {

@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	host "github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -29,13 +29,13 @@ import (
 
 // stressMockCaller records all service calls for test assertions.
 type stressMockCaller struct {
-	calls []host.CallRecord
+	calls []engine.CallRecord
 }
 
 func (m *stressMockCaller) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
 	resp := stressMockResponse(service, operation)
-	m.calls = append(m.calls, host.CallRecord{
-		EventType: host.EventTypeCall,
+	m.calls = append(m.calls, engine.CallRecord{
+		EventType: engine.EventTypeCall,
 		Service:   service, Op: operation, Request: requestJSON, Response: resp,
 	})
 	return resp, nil
@@ -131,10 +131,10 @@ func buildStressWasm(t *testing.T) []byte {
 // result string, event history, and the mock caller used (for call-count
 // assertions). The wasmBytes parameter should come from a single call to
 // buildStressWasm to avoid redundant compilation.
-func executePlaceOrder(ctx context.Context, t *testing.T, rt *host.Runtime, wasmBytes []byte, input json.RawMessage) (string, []host.EventRecord, *stressMockCaller) {
+func executePlaceOrder(ctx context.Context, t *testing.T, rt *engine.Runtime, wasmBytes []byte, input json.RawMessage) (string, []engine.EventRecord, *stressMockCaller) {
 	t.Helper()
 	caller := &stressMockCaller{}
-	eng := host.NewEngine(rt, caller)
+	eng := engine.NewEngine(rt, caller)
 
 	result, history, suspended, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
@@ -165,7 +165,7 @@ func TestReplayStressBasic(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{"UserID":"stress-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestReplayStressBasic(t *testing.T) {
 	const replayCount = 100
 	for i := 0; i < replayCount; i++ {
 		replayCaller := &stressMockCaller{}
-		engine := host.NewEngine(rt, replayCaller)
+		engine := engine.NewEngine(rt, replayCaller)
 
 		result2, history2, suspended2, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, history)
 		if err != nil {
@@ -245,7 +245,7 @@ func TestReplayStressRandomCrashPoints(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{"UserID":"crash-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -287,7 +287,7 @@ func TestReplayStressRandomCrashPoints(t *testing.T) {
 			prefix := fullHistory[:splitAt]
 
 			replayCaller := &stressMockCaller{}
-			engine := host.NewEngine(rt, replayCaller)
+			engine := engine.NewEngine(rt, replayCaller)
 
 			// Replay from the truncated history. The engine replays the prefix
 			// events, then continues execution for steps beyond the prefix.
@@ -360,7 +360,7 @@ func TestReplayStressFuzzedEventOrder(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 
 	// Event type codes (matching compaction_fuzz_test.go conventions).
 	// We use a representative subset that exercises all the core field groups.
@@ -392,7 +392,7 @@ func TestReplayStressFuzzedEventOrder(t *testing.T) {
 
 	// Generate a random event record from a random code generator.
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	genEvent := func(step int) host.EventRecord {
+	genEvent := func(step int) engine.EventRecord {
 		cg := codeGens[rng.Intn(len(codeGens))]
 
 		// Build fuzz seed bytes then parse them (to replicate the same
@@ -402,9 +402,9 @@ func TestReplayStressFuzzedEventOrder(t *testing.T) {
 
 		if len(events) == 0 {
 			// Fallback: produce a simple Call event.
-			return host.EventRecord{
+			return engine.EventRecord{
 				Step:      step,
-				EventType: host.EventTypeCall,
+				EventType: engine.EventTypeCall,
 				Service:   "svc",
 				Op:        fmt.Sprintf("op-%d", step),
 				Request:   `{}`,
@@ -429,7 +429,7 @@ func TestReplayStressFuzzedEventOrder(t *testing.T) {
 			}()
 
 			// Generate a random sequence of events.
-			events := make([]host.EventRecord, size)
+			events := make([]engine.EventRecord, size)
 			for i := 0; i < size; i++ {
 				events[i] = genEvent(i)
 			}
@@ -485,7 +485,7 @@ func TestReplayDivergenceDetection(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{"UserID":"div-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		tampered[0].Service = "tampered_service"
 
 		caller := &stressMockCaller{}
-		engine := host.NewEngine(rt, caller)
+		engine := engine.NewEngine(rt, caller)
 		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatal("expected divergence error for changed service name, got nil")
@@ -529,7 +529,7 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		tampered[0].Op = "tampered_operation"
 
 		caller := &stressMockCaller{}
-		engine := host.NewEngine(rt, caller)
+		engine := engine.NewEngine(rt, caller)
 		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatal("expected divergence error for changed operation name, got nil")
@@ -545,12 +545,12 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		tampered := copyHistory(cleanHistory)
 		// The workflow produces call events; change one to await_signals.
 		oldType := tampered[1].EventType
-		tampered[1].EventType = host.EventTypeAwaitSignals
+		tampered[1].EventType = engine.EventTypeAwaitSignals
 		tampered[1].SignalNames = "fake_signal"
 		tampered[1].TimeoutMs = 5000
 
 		caller := &stressMockCaller{}
-		engine := host.NewEngine(rt, caller)
+		engine := engine.NewEngine(rt, caller)
 		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatalf("expected divergence error for changed event type (%s -> await_signals), got nil", oldType)
@@ -563,12 +563,12 @@ func TestReplayDivergenceDetection(t *testing.T) {
 
 	// ---- Tamper case 4: Insert an extra event ----
 	t.Run("inserted_extra_event", func(t *testing.T) {
-		tampered := make([]host.EventRecord, len(cleanHistory)+1)
+		tampered := make([]engine.EventRecord, len(cleanHistory)+1)
 		// Insert a synthetic event at position 2, shifting the rest.
 		copy(tampered, cleanHistory[:2])
-		tampered[2] = host.EventRecord{
+		tampered[2] = engine.EventRecord{
 			Step:      2,
-			EventType: host.EventTypeCall,
+			EventType: engine.EventTypeCall,
 			Service:   "nonexistent",
 			Op:        "nobody",
 			Request:   `{}`,
@@ -581,7 +581,7 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		}
 
 		caller := &stressMockCaller{}
-		engine := host.NewEngine(rt, caller)
+		engine := engine.NewEngine(rt, caller)
 		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatal("expected divergence error for inserted extra event, got nil")
@@ -597,7 +597,7 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		if len(cleanHistory) < 3 {
 			t.Skip("need at least 3 events for removal test")
 		}
-		tampered := append([]host.EventRecord{}, cleanHistory...)
+		tampered := append([]engine.EventRecord{}, cleanHistory...)
 		// Remove event at index 1 (middle).
 		tampered = append(tampered[:1], tampered[2:]...)
 		// Fix step numbers.
@@ -606,7 +606,7 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		}
 
 		caller := &stressMockCaller{}
-		engine := host.NewEngine(rt, caller)
+		engine := engine.NewEngine(rt, caller)
 		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatal("expected divergence error for removed event, got nil")
@@ -633,7 +633,7 @@ func TestReplayHashConsistency(t *testing.T) {
 	ctx := context.Background()
 	input := json.RawMessage(`{"UserID":"hash-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -650,7 +650,7 @@ func TestReplayHashConsistency(t *testing.T) {
 	const replayCount = 20
 	for i := 0; i < replayCount; i++ {
 		caller := &stressMockCaller{}
-		engine := host.NewEngine(rt, caller)
+		engine := engine.NewEngine(rt, caller)
 		_, resultHistory, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, history)
 		if err != nil {
 			t.Fatalf("Replay %d: %v", i, err)
@@ -677,8 +677,8 @@ func TestReplayHashConsistency(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // copyHistory makes a deep copy of an EventRecord slice.
-func copyHistory(h []host.EventRecord) []host.EventRecord {
-	out := make([]host.EventRecord, len(h))
+func copyHistory(h []engine.EventRecord) []engine.EventRecord {
+	out := make([]engine.EventRecord, len(h))
 	copy(out, h)
 	return out
 }
@@ -711,7 +711,7 @@ func fuzzSeed(typeCode byte, strs []string, ints ...int64) []byte {
 // parseFuzzEvents interprets a byte slice as a sequence of length-prefixed
 // events (matching the encoding in compaction_fuzz_test.go). Every byte
 // sequence produces a valid (possibly empty) result.
-func parseFuzzEvents(data []byte) []host.EventRecord {
+func parseFuzzEvents(data []byte) []engine.EventRecord {
 	// Event type codes (must match those in compaction_fuzz_test.go).
 	const (
 		eventCodeCall              = 0
@@ -742,46 +742,46 @@ func parseFuzzEvents(data []byte) []host.EventRecord {
 		eventCodeDurableSchedule   = 25
 	)
 
-	codeToEventType := map[int]host.EventType{
-		eventCodeCall:             host.EventTypeCall,
-		eventCodeAwaitSignals:     host.EventTypeAwaitSignals,
-		eventCodeSignalReceived:   host.EventTypeSignalReceived,
-		eventCodeDefer:            host.EventTypeDefer,
-		eventCodeChildWorkflow:    host.EventTypeChildWorkflow,
-		eventCodeAwaitChild:       host.EventTypeAwaitChild,
-		eventCodeContinueAsNew:    host.EventTypeContinueAsNew,
-		eventCodeHeartbeat:        host.EventTypeHeartbeat,
-		eventCodeAwaitAllChildren: host.EventTypeAwaitAllChildren,
-		eventCodePluginCall:       host.EventTypePluginCall,
-		eventCodePluginCallStream: host.EventTypePluginCallStreamChunk,
-		eventCodeCreatePromise:    host.EventTypeCreatePromise,
-		eventCodeAwaitPromise:     host.EventTypeAwaitPromise,
-		eventCodePromiseResolved:  host.EventTypePromiseResolved,
-		eventCodePromiseRejected:  host.EventTypePromiseRejected,
-		eventCodeUpdateHandler:    host.EventTypeUpdateHandler,
-		eventCodeStateMutation:    host.EventTypeStateMutation,
-		eventCodeRunDetached:      host.EventTypeRunDetached,
-		eventCodeSideEffect:       host.EventTypeSideEffect,
-		eventCodeScopeAcquired:    host.EventTypeScopeAcquired,
-		eventCodeAcquireLock:      host.EventTypeAcquireLock,
-		eventCodeReleaseLock:      host.EventTypeReleaseLock,
-		eventCodeFetch:            host.EventTypeFetch,
-		eventCodeDurableLog:       host.EventTypeDurableLog,
-		eventCodeDurableSend:      host.EventTypeDurableSend,
-		eventCodeDurableSchedule:  host.EventTypeDurableScheduleInvoke,
+	codeToEventType := map[int]engine.EventType{
+		eventCodeCall:             engine.EventTypeCall,
+		eventCodeAwaitSignals:     engine.EventTypeAwaitSignals,
+		eventCodeSignalReceived:   engine.EventTypeSignalReceived,
+		eventCodeDefer:            engine.EventTypeDefer,
+		eventCodeChildWorkflow:    engine.EventTypeChildWorkflow,
+		eventCodeAwaitChild:       engine.EventTypeAwaitChild,
+		eventCodeContinueAsNew:    engine.EventTypeContinueAsNew,
+		eventCodeHeartbeat:        engine.EventTypeHeartbeat,
+		eventCodeAwaitAllChildren: engine.EventTypeAwaitAllChildren,
+		eventCodePluginCall:       engine.EventTypePluginCall,
+		eventCodePluginCallStream: engine.EventTypePluginCallStreamChunk,
+		eventCodeCreatePromise:    engine.EventTypeCreatePromise,
+		eventCodeAwaitPromise:     engine.EventTypeAwaitPromise,
+		eventCodePromiseResolved:  engine.EventTypePromiseResolved,
+		eventCodePromiseRejected:  engine.EventTypePromiseRejected,
+		eventCodeUpdateHandler:    engine.EventTypeUpdateHandler,
+		eventCodeStateMutation:    engine.EventTypeStateMutation,
+		eventCodeRunDetached:      engine.EventTypeRunDetached,
+		eventCodeSideEffect:       engine.EventTypeSideEffect,
+		eventCodeScopeAcquired:    engine.EventTypeScopeAcquired,
+		eventCodeAcquireLock:      engine.EventTypeAcquireLock,
+		eventCodeReleaseLock:      engine.EventTypeReleaseLock,
+		eventCodeFetch:            engine.EventTypeFetch,
+		eventCodeDurableLog:       engine.EventTypeDurableLog,
+		eventCodeDurableSend:      engine.EventTypeDurableSend,
+		eventCodeDurableSchedule:  engine.EventTypeDurableScheduleInvoke,
 	}
 
-	var events []host.EventRecord
+	var events []engine.EventRecord
 	r := &fuzzByteReader{data: data}
 
 	for step := 0; r.remaining() > 0; step++ {
 		typeCode := int(r.readByte()) % 27
-		ev := host.EventRecord{
+		ev := engine.EventRecord{
 			Step:      step,
 			EventType: codeToEventType[typeCode],
 		}
 		if ev.EventType == "" {
-			ev.EventType = host.EventTypeCall
+			ev.EventType = engine.EventTypeCall
 		}
 
 		switch typeCode {
@@ -912,99 +912,99 @@ func (r *fuzzByteReader) readInt64() int64 {
 // eventFieldsMatch compares all round-tripped fields of two EventRecords.
 // This is a copy of the logic in compaction_fuzz_test.go adapted for the
 // integrity test package (which cannot access unexported test functions).
-func eventFieldsMatch(a, b host.EventRecord) bool {
+func eventFieldsMatch(a, b engine.EventRecord) bool {
 	if a.Step != b.Step || a.EventType != b.EventType {
 		return false
 	}
 	switch a.EventType {
-	case host.EventTypeCall:
+	case engine.EventTypeCall:
 		return a.Service == b.Service &&
 			a.Op == b.Op &&
 			a.Request == b.Request &&
 			a.Response == b.Response &&
 			a.Err == b.Err
-	case host.EventTypeAwaitSignals:
+	case engine.EventTypeAwaitSignals:
 		return a.SignalNames == b.SignalNames &&
 			a.TimeoutMs == b.TimeoutMs
-	case host.EventTypeSignalReceived:
+	case engine.EventTypeSignalReceived:
 		return a.SignalName == b.SignalName &&
 			a.SignalPayload == b.SignalPayload
-	case host.EventTypeDefer:
+	case engine.EventTypeDefer:
 		return a.DeferID == b.DeferID &&
 			a.DeferDescription == b.DeferDescription
-	case host.EventTypeChildWorkflow:
+	case engine.EventTypeChildWorkflow:
 		return a.ChildName == b.ChildName &&
 			a.ChildInput == b.ChildInput &&
 			a.RunID == b.RunID
-	case host.EventTypeAwaitChild:
+	case engine.EventTypeAwaitChild:
 		return a.RunID == b.RunID &&
 			a.Response == b.Response &&
 			a.Err == b.Err
-	case host.EventTypeContinueAsNew:
+	case engine.EventTypeContinueAsNew:
 		return a.NewInput == b.NewInput
-	case host.EventTypeHeartbeat:
+	case engine.EventTypeHeartbeat:
 		return a.Service == b.Service &&
 			a.Op == b.Op
-	case host.EventTypeAwaitAllChildren:
+	case engine.EventTypeAwaitAllChildren:
 		return a.Response == b.Response
-	case host.EventTypePluginCall:
+	case engine.EventTypePluginCall:
 		return a.PluginName == b.PluginName &&
 			a.PluginFunc == b.PluginFunc &&
 			a.PluginInput == b.PluginInput &&
 			a.PluginOutput == b.PluginOutput &&
 			a.PluginError == b.PluginError
-	case host.EventTypePluginCallStreamChunk:
+	case engine.EventTypePluginCallStreamChunk:
 		return a.PluginName == b.PluginName &&
 			a.PluginFunc == b.PluginFunc &&
 			a.PluginInput == b.PluginInput &&
 			a.PluginOutput == b.PluginOutput &&
 			a.PluginError == b.PluginError
-	case host.EventTypeSideEffect:
+	case engine.EventTypeSideEffect:
 		return a.SideEffectResult == b.SideEffectResult
-	case host.EventTypeCreatePromise:
+	case engine.EventTypeCreatePromise:
 		return a.PromiseName == b.PromiseName &&
 			a.PromiseID == b.PromiseID
-	case host.EventTypeAwaitPromise:
+	case engine.EventTypeAwaitPromise:
 		return a.PromiseID == b.PromiseID
-	case host.EventTypePromiseResolved:
+	case engine.EventTypePromiseResolved:
 		return a.PromiseID == b.PromiseID &&
 			a.PromiseResult == b.PromiseResult
-	case host.EventTypePromiseRejected:
+	case engine.EventTypePromiseRejected:
 		return a.PromiseID == b.PromiseID &&
 			a.PromiseError == b.PromiseError
-	case host.EventTypeUpdateHandler:
+	case engine.EventTypeUpdateHandler:
 		return a.UpdateHandlerName == b.UpdateHandlerName
-	case host.EventTypeStateMutation:
+	case engine.EventTypeStateMutation:
 		return a.StateKey == b.StateKey &&
 			a.StateValue == b.StateValue &&
 			a.StateDelta == b.StateDelta &&
 			a.StateOp == b.StateOp
-	case host.EventTypeRunDetached:
+	case engine.EventTypeRunDetached:
 		return a.DetachedName == b.DetachedName &&
 			a.DetachedInput == b.DetachedInput &&
 			a.DetachedRunID == b.DetachedRunID
-	case host.EventTypeFetch:
+	case engine.EventTypeFetch:
 		return a.FetchMethod == b.FetchMethod &&
 			a.FetchURL == b.FetchURL &&
 			a.FetchResponse == b.FetchResponse &&
 			a.Err == b.Err
-	case host.EventTypeScopeAcquired:
+	case engine.EventTypeScopeAcquired:
 		return a.ScopeKey == b.ScopeKey
-	case host.EventTypeAcquireLock:
+	case engine.EventTypeAcquireLock:
 		return a.LockKey == b.LockKey &&
 			a.LockTTLMs == b.LockTTLMs &&
 			a.LockAcquired == b.LockAcquired
-	case host.EventTypeReleaseLock:
+	case engine.EventTypeReleaseLock:
 		return a.LockKey == b.LockKey
-	case host.EventTypeDurableLog:
+	case engine.EventTypeDurableLog:
 		return a.Message == b.Message &&
 			a.LogLevel == b.LogLevel &&
 			a.LogKV == b.LogKV
-	case host.EventTypeDurableSend:
+	case engine.EventTypeDurableSend:
 		return a.Service == b.Service &&
 			a.Op == b.Op &&
 			a.Request == b.Request
-	case host.EventTypeDurableScheduleInvoke:
+	case engine.EventTypeDurableScheduleInvoke:
 		return a.Service == b.Service &&
 			a.Op == b.Op &&
 			a.Request == b.Request &&
@@ -1014,7 +1014,7 @@ func eventFieldsMatch(a, b host.EventRecord) bool {
 }
 
 // dumpEventDiff prints the differing fields between two events on t.Log.
-func dumpEventDiff(t *testing.T, a, b host.EventRecord) {
+func dumpEventDiff(t *testing.T, a, b engine.EventRecord) {
 	t.Helper()
 	if a.Step != b.Step {
 		t.Logf("  Step: %d vs %d", a.Step, b.Step)
@@ -1024,62 +1024,62 @@ func dumpEventDiff(t *testing.T, a, b host.EventRecord) {
 		return
 	}
 	switch a.EventType {
-	case host.EventTypeCall:
+	case engine.EventTypeCall:
 		mismatchStr("Service", a.Service, b.Service, t)
 		mismatchStr("Op", a.Op, b.Op, t)
 		mismatchStr("Request", a.Request, b.Request, t)
 		mismatchStr("Response", a.Response, b.Response, t)
 		mismatchStr("Err", a.Err, b.Err, t)
-	case host.EventTypeAwaitSignals:
+	case engine.EventTypeAwaitSignals:
 		mismatchStr("SignalNames", a.SignalNames, b.SignalNames, t)
 		mismatchInt("TimeoutMs", a.TimeoutMs, b.TimeoutMs, t)
-	case host.EventTypeSignalReceived:
+	case engine.EventTypeSignalReceived:
 		mismatchStr("SignalName", a.SignalName, b.SignalName, t)
 		mismatchStr("SignalPayload", a.SignalPayload, b.SignalPayload, t)
-	case host.EventTypeDefer:
+	case engine.EventTypeDefer:
 		mismatchStr("DeferID", a.DeferID, b.DeferID, t)
 		mismatchStr("DeferDescription", a.DeferDescription, b.DeferDescription, t)
-	case host.EventTypeChildWorkflow:
+	case engine.EventTypeChildWorkflow:
 		mismatchStr("ChildName", a.ChildName, b.ChildName, t)
 		mismatchStr("ChildInput", a.ChildInput, b.ChildInput, t)
 		mismatchStr("RunID", a.RunID, b.RunID, t)
-	case host.EventTypePluginCall:
+	case engine.EventTypePluginCall:
 		mismatchStr("PluginName", a.PluginName, b.PluginName, t)
 		mismatchStr("PluginFunc", a.PluginFunc, b.PluginFunc, t)
 		mismatchStr("PluginInput", a.PluginInput, b.PluginInput, t)
 		mismatchStr("PluginOutput", a.PluginOutput, b.PluginOutput, t)
 		mismatchStr("PluginError", a.PluginError, b.PluginError, t)
-	case host.EventTypePromiseResolved:
+	case engine.EventTypePromiseResolved:
 		mismatchStr("PromiseID", a.PromiseID, b.PromiseID, t)
 		mismatchStr("PromiseResult", a.PromiseResult, b.PromiseResult, t)
-	case host.EventTypePromiseRejected:
+	case engine.EventTypePromiseRejected:
 		mismatchStr("PromiseID", a.PromiseID, b.PromiseID, t)
 		mismatchStr("PromiseError", a.PromiseError, b.PromiseError, t)
-	case host.EventTypeStateMutation:
+	case engine.EventTypeStateMutation:
 		mismatchStr("StateKey", a.StateKey, b.StateKey, t)
 		mismatchStr("StateValue", a.StateValue, b.StateValue, t)
 		mismatchInt("StateDelta", a.StateDelta, b.StateDelta, t)
 		mismatchStr("StateOp", a.StateOp, b.StateOp, t)
-	case host.EventTypeAcquireLock:
+	case engine.EventTypeAcquireLock:
 		mismatchStr("LockKey", a.LockKey, b.LockKey, t)
 		mismatchInt("LockTTLMs", a.LockTTLMs, b.LockTTLMs, t)
 		mismatchInt("LockAcquired", int64(a.LockAcquired), int64(b.LockAcquired), t)
-	case host.EventTypeReleaseLock:
+	case engine.EventTypeReleaseLock:
 		mismatchStr("LockKey", a.LockKey, b.LockKey, t)
-	case host.EventTypeFetch:
+	case engine.EventTypeFetch:
 		mismatchStr("FetchMethod", a.FetchMethod, b.FetchMethod, t)
 		mismatchStr("FetchURL", a.FetchURL, b.FetchURL, t)
 		mismatchStr("FetchResponse", a.FetchResponse, b.FetchResponse, t)
 		mismatchStr("Err", a.Err, b.Err, t)
-	case host.EventTypeDurableLog:
+	case engine.EventTypeDurableLog:
 		mismatchStr("Message", a.Message, b.Message, t)
 		mismatchStr("LogLevel", a.LogLevel, b.LogLevel, t)
 		mismatchStr("LogKV", a.LogKV, b.LogKV, t)
-	case host.EventTypeDurableSend:
+	case engine.EventTypeDurableSend:
 		mismatchStr("Service", a.Service, b.Service, t)
 		mismatchStr("Op", a.Op, b.Op, t)
 		mismatchStr("Request", a.Request, b.Request, t)
-	case host.EventTypeDurableScheduleInvoke:
+	case engine.EventTypeDurableScheduleInvoke:
 		mismatchStr("Service", a.Service, b.Service, t)
 		mismatchStr("Op", a.Op, b.Op, t)
 		mismatchStr("Request", a.Request, b.Request, t)

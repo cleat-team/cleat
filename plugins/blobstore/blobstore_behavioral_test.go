@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -673,7 +673,7 @@ func TestPluginInitDefaults(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: db},
+		DB:     &engine.SQLDBAdapter{DB: db},
 		Mux:    http.NewServeMux(),
 		Logger: slog.Default(),
 	}
@@ -699,7 +699,7 @@ func TestPluginInitWithConfig(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: db},
+		DB:     &engine.SQLDBAdapter{DB: db},
 		Mux:    http.NewServeMux(),
 		Logger: slog.Default(),
 		Config: []byte(`{"backend":"memory"}`),
@@ -726,7 +726,7 @@ func TestPluginInitInvalidConfig(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: db},
+		DB:     &engine.SQLDBAdapter{DB: db},
 		Mux:    http.NewServeMux(),
 		Logger: slog.Default(),
 		Config: []byte(`{bad json`),
@@ -750,7 +750,7 @@ func TestPluginInitNilLogger(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:  &host.SQLDBAdapter{DB: db},
+		DB:  &engine.SQLDBAdapter{DB: db},
 		Mux: http.NewServeMux(),
 		// Logger is nil — Init should use slog.Default()
 	}
@@ -773,7 +773,7 @@ func TestPluginInitS3Backend(t *testing.T) {
 	ctx := context.Background()
 
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: db},
+		DB:     &engine.SQLDBAdapter{DB: db},
 		Mux:    http.NewServeMux(),
 		Logger: slog.Default(),
 		Config: []byte(`{"backend":"s3","bucket":"test-bucket","region":"us-east-1","endpoint":"localhost:9000"}`),
@@ -1139,7 +1139,7 @@ func setupSelectiveErrorDB(t *testing.T, failExecPatterns, failQueryPatterns []s
 	t.Cleanup(func() { errDB.Close() })
 
 	p := &Plugin{
-		db:      &host.SQLDBAdapter{DB: errDB},
+		db:      &engine.SQLDBAdapter{DB: errDB},
 		backend: newTestMemBackend(),
 		logger:  slog.Default(),
 		config:  Config{Backend: "memory"},
@@ -1150,6 +1150,6 @@ func setupSelectiveErrorDB(t *testing.T, failExecPatterns, failQueryPatterns []s
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(errDB), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(errDB), false)(mux)
 	return p, handler, store, clock
 }

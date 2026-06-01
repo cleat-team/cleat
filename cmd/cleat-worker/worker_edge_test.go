@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -86,10 +86,10 @@ func TestDBCaller_CallHTTPFetchEmptyURL(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRegistryAdapter_RegisterEmptyName(t *testing.T) {
-	reg := host.NewPluginRegistry()
+	reg := engine.NewPluginRegistry()
 	adapter := &hostPluginRegistryAdapter{
 		registry:       reg,
-		streamRegistry: host.NewPluginStreamRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
 		pluginName:     "test-plugin",
 	}
 	err := adapter.Register(plugin.FuncOptions{Name: ""}, nil)
@@ -102,10 +102,10 @@ func TestRegistryAdapter_RegisterEmptyName(t *testing.T) {
 }
 
 func TestRegistryAdapter_RegisterInvalidChars(t *testing.T) {
-	reg := host.NewPluginRegistry()
+	reg := engine.NewPluginRegistry()
 	adapter := &hostPluginRegistryAdapter{
 		registry:       reg,
-		streamRegistry: host.NewPluginStreamRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
 		pluginName:     "test-plugin",
 	}
 	err := adapter.Register(plugin.FuncOptions{Name: "bad/name"}, nil)
@@ -118,10 +118,10 @@ func TestRegistryAdapter_RegisterInvalidChars(t *testing.T) {
 }
 
 func TestRegistryAdapter_RegisterNullByte(t *testing.T) {
-	reg := host.NewPluginRegistry()
+	reg := engine.NewPluginRegistry()
 	adapter := &hostPluginRegistryAdapter{
 		registry:       reg,
-		streamRegistry: host.NewPluginStreamRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
 		pluginName:     "test-plugin",
 	}
 	err := adapter.Register(plugin.FuncOptions{Name: "bad\x00name"}, nil)
@@ -134,10 +134,10 @@ func TestRegistryAdapter_RegisterNullByte(t *testing.T) {
 }
 
 func TestRegistryAdapter_RegisterDuplicate(t *testing.T) {
-	reg := host.NewPluginRegistry()
+	reg := engine.NewPluginRegistry()
 	adapter := &hostPluginRegistryAdapter{
 		registry:       reg,
-		streamRegistry: host.NewPluginStreamRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
 		pluginName:     "test-plugin",
 	}
 	fn := func(_ context.Context, _ string) (string, error) { return "ok", nil }
@@ -155,10 +155,10 @@ func TestRegistryAdapter_RegisterDuplicate(t *testing.T) {
 }
 
 func TestRegistryAdapter_RegisterIdempotent(t *testing.T) {
-	reg := host.NewPluginRegistry()
+	reg := engine.NewPluginRegistry()
 	adapter := &hostPluginRegistryAdapter{
 		registry:       reg,
-		streamRegistry: host.NewPluginStreamRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
 		pluginName:     "test-plugin",
 	}
 	fn := func(_ context.Context, _ string) (string, error) { return "ok", nil }
@@ -175,10 +175,10 @@ func TestRegistryAdapter_RegisterIdempotent(t *testing.T) {
 }
 
 func TestRegistryAdapter_RegisterSuccess(t *testing.T) {
-	reg := host.NewPluginRegistry()
+	reg := engine.NewPluginRegistry()
 	adapter := &hostPluginRegistryAdapter{
 		registry:       reg,
-		streamRegistry: host.NewPluginStreamRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
 		pluginName:     "test-plugin",
 	}
 	fn := func(_ context.Context, _ string) (string, error) { return "ok", nil }
@@ -195,8 +195,8 @@ func TestRegistryAdapter_RegisterSuccess(t *testing.T) {
 
 func TestRegistryAdapter_RegisterStreamEmptyName(t *testing.T) {
 	adapter := &hostPluginRegistryAdapter{
-		registry:       host.NewPluginRegistry(),
-		streamRegistry: host.NewPluginStreamRegistry(),
+		registry:       engine.NewPluginRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
 		pluginName:     "test-plugin",
 	}
 	err := adapter.RegisterStream(plugin.FuncOptions{Name: ""}, nil)
@@ -210,8 +210,8 @@ func TestRegistryAdapter_RegisterStreamEmptyName(t *testing.T) {
 
 func TestRegistryAdapter_RegisterStreamInvalidChars(t *testing.T) {
 	adapter := &hostPluginRegistryAdapter{
-		registry:       host.NewPluginRegistry(),
-		streamRegistry: host.NewPluginStreamRegistry(),
+		registry:       engine.NewPluginRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
 		pluginName:     "test-plugin",
 	}
 	err := adapter.RegisterStream(plugin.FuncOptions{Name: "bad/name"}, nil)
@@ -225,7 +225,7 @@ func TestRegistryAdapter_RegisterStreamInvalidChars(t *testing.T) {
 
 func TestRegistryAdapter_RegisterStreamNilRegistry(t *testing.T) {
 	adapter := &hostPluginRegistryAdapter{
-		registry:       host.NewPluginRegistry(),
+		registry:       engine.NewPluginRegistry(),
 		streamRegistry: nil,
 		pluginName:     "test-plugin",
 	}
@@ -239,9 +239,9 @@ func TestRegistryAdapter_RegisterStreamNilRegistry(t *testing.T) {
 }
 
 func TestRegistryAdapter_RegisterStreamDuplicate(t *testing.T) {
-	reg := host.NewPluginStreamRegistry()
+	reg := engine.NewPluginStreamRegistry()
 	adapter := &hostPluginRegistryAdapter{
-		registry:       host.NewPluginRegistry(),
+		registry:       engine.NewPluginRegistry(),
 		streamRegistry: reg,
 		pluginName:     "test-plugin",
 	}
@@ -259,8 +259,8 @@ func TestRegistryAdapter_RegisterStreamDuplicate(t *testing.T) {
 
 func TestRegistryAdapter_RegisterStreamSuccess(t *testing.T) {
 	adapter := &hostPluginRegistryAdapter{
-		registry:       host.NewPluginRegistry(),
-		streamRegistry: host.NewPluginStreamRegistry(),
+		registry:       engine.NewPluginRegistry(),
+		streamRegistry: engine.NewPluginStreamRegistry(),
 		pluginName:     "test-plugin",
 	}
 	sfn := func(_ context.Context, _ string) (<-chan plugin.StreamEvent, error) {

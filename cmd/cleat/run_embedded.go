@@ -13,7 +13,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 func runEmbedded(args []string) {
@@ -82,7 +82,7 @@ func runEmbedded(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	rt, rtErr := host.NewRuntime(ctx, 0, 0)
+	rt, rtErr := engine.NewRuntime(ctx, 0, 0)
 	if rtErr != nil {
 		fmt.Fprintf(os.Stderr, "Error creating runtime: %v\n", rtErr)
 		os.Exit(1)
@@ -91,7 +91,7 @@ func runEmbedded(args []string) {
 
 	// Use a mock caller that logs and returns placeholder responses.
 	caller := &logCaller{}
-	engine := host.NewEngine(rt, caller)
+	engine := engine.NewEngine(rt, caller)
 
 	// ---- Run the workflow ----
 	fmt.Printf("Running %s.%s with input: %s\n", wfName, *entryPoint, *inputJSON)

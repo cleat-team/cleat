@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 var currentDialect plugin.Dialect
@@ -22,6 +22,11 @@ func init() {
 		Description: "Event-driven workflow triggers — subscribe workflows to domain events",
 		Author:      "cleat",
 	}, func() plugin.Plugin { return &Plugin{} })
+}
+
+// New creates a new Plugin instance.
+func New() plugin.Plugin {
+	return &Plugin{}
 }
 
 // Plugin implements event-driven workflow triggers with tenant-isolated

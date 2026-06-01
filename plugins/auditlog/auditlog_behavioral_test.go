@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -474,7 +474,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 90},
 	}
@@ -485,7 +485,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	}
 
 	// Auth middleware -> Plugin middleware -> Mux.
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(p.Middleware(mux))
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.Middleware(mux))
 	return p, handler, store
 }
 
@@ -626,7 +626,7 @@ func TestFilterByTenant(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 90},
 	}
@@ -636,7 +636,7 @@ func TestFilterByTenant(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(p.Middleware(mux))
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.Middleware(mux))
 
 	// Query as tenant A — should only see the GET /tenant-a event.
 	req := httptest.NewRequest("GET", "/audit/events", nil)
@@ -700,7 +700,7 @@ func TestFilterByTimeRange(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 90},
 	}
@@ -710,7 +710,7 @@ func TestFilterByTimeRange(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	// Query with from=now-1h, to=now+1h — should only get /current.
 	from := now.Add(-1 * time.Hour).Format(time.RFC3339)
@@ -752,7 +752,7 @@ func TestFilterByMethod(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 90},
 	}
@@ -762,7 +762,7 @@ func TestFilterByMethod(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	req := authedRequest("GET", "/audit/events?method=POST", nil)
 	rec := httptest.NewRecorder()
@@ -800,7 +800,7 @@ func TestFilterByStatus(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 90},
 	}
@@ -810,7 +810,7 @@ func TestFilterByStatus(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	req := authedRequest("GET", "/audit/events?status=404", nil)
 	rec := httptest.NewRecorder()
@@ -852,7 +852,7 @@ func TestRetentionCleanup(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 90},
 	}
@@ -901,7 +901,7 @@ func TestQueryEventsLimit(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 90},
 	}
@@ -911,7 +911,7 @@ func TestQueryEventsLimit(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	req := authedRequest("GET", "/audit/events?limit=2", nil)
 	rec := httptest.NewRecorder()
@@ -1071,7 +1071,7 @@ func TestAL_CleanupRetention_NoEvents(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		config: Config{RetentionDays: 90},
 	}

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	host "github.com/cleat-team/cleat/engine"
 
 	_ "github.com/lib/pq"
 )
@@ -90,7 +90,7 @@ func testDB(t *testing.T) *sql.DB {
 // measureThroughput creates numWorkflows with eventsPerWF events each, using
 // workerCount goroutines, and returns the total elapsed time and
 // events-per-second throughput.
-func measureThroughput(t *testing.T, store *host.PostgresStore, db *sql.DB, ctx context.Context, numWorkflows, eventsPerWF, workerCount int) (time.Duration, float64) {
+func measureThroughput(t *testing.T, store *engine.PostgresStore, db *sql.DB, ctx context.Context, numWorkflows, eventsPerWF, workerCount int) (time.Duration, float64) {
 	t.Helper()
 
 	// Create workflow instances.
@@ -130,9 +130,9 @@ func measureThroughput(t *testing.T, store *host.PostgresStore, db *sql.DB, ctx 
 		go func() {
 			defer wg.Done()
 			for item := range workItems {
-				rec := host.EventRecord{
+				rec := engine.EventRecord{
 					Step:      item.step,
-					EventType: host.EventTypeCall,
+					EventType: engine.EventTypeCall,
 					Service:   "svc",
 					Op:        "op",
 					Request:   `{}`,
@@ -170,7 +170,7 @@ func TestThroughputSingleWorker(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	const numWorkflows = 20
@@ -196,7 +196,7 @@ func TestThroughputMultiWorker(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	workerCounts := []int{2, 4, 8}
@@ -224,7 +224,7 @@ func TestThroughputScalingEfficiency(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	const numWorkflows = 50

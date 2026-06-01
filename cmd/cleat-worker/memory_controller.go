@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // MemoryControllerState is an immutable snapshot of the memory controller
@@ -40,7 +40,7 @@ const (
 // system memory pressure and task queue depth.
 type MemoryController struct {
 	monitor               *MemoryMonitor
-	store                 host.WorkflowStore
+	store                 engine.WorkflowStore
 	workerID              string
 	configuredConcurrency int
 
@@ -66,7 +66,7 @@ type MemoryController struct {
 // targets the configuredConcurrency when under no pressure.
 func NewMemoryController(
 	monitor *MemoryMonitor,
-	store host.WorkflowStore,
+	store engine.WorkflowStore,
 	workerID string,
 	configuredConcurrency int,
 	softLimit, hardLimit float64,

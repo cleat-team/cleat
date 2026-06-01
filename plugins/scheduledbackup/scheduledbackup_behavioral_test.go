@@ -19,9 +19,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // =========================================================================
@@ -1099,7 +1099,7 @@ func newSBPlugin(t *testing.T) (*Plugin, *sbDB, *sql.DB) {
 	fdb := newSBDB()
 	rawDB := sql.OpenDB(&sbConnector{db: fdb})
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: rawDB},
+		db:     &engine.SQLDBAdapter{DB: rawDB},
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -1966,7 +1966,7 @@ func TestSB_Run_NilDB(t *testing.T) {
 
 func TestSB_Run_NoDSN(t *testing.T) {
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: &sql.DB{}},
+		db:     &engine.SQLDBAdapter{DB: &sql.DB{}},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	ctx, cancel := context.WithCancel(context.Background())

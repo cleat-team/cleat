@@ -1,24 +1,27 @@
-// Package pluginapi re-exports types from internal/plugin for external plugin authors.
-// Plugin modules outside the github.com/cleat-team/cleat module tree must import this
-// package instead of internal/plugin.
+// Package pluginapi is a compatibility shim that re-exports types from
+// github.com/cleat-team/cleat/plugin. It exists so that plugins written
+// against the old pluginapi import path continue to compile after the
+// internal/plugin → plugin promotion.
 package pluginapi
 
-import "github.com/cleat-team/cleat/internal/plugin"
+import "github.com/cleat-team/cleat/plugin"
 
-// Types re-exported for plugin authors.
+// Types
 type (
-	PluginInfo     = plugin.PluginInfo
-	Plugin         = plugin.Plugin
-	Environment    = plugin.Environment
+	PluginInfo    = plugin.PluginInfo
+	Plugin        = plugin.Plugin
+	Environment   = plugin.Environment
+	Migration     = plugin.Migration
+	PluginDB      = plugin.PluginDB
 	DatabaseAccess = plugin.DatabaseAccess
 )
 
-// Register re-exports the plugin registration function.
-var Register = plugin.Register
-
-// Database access levels.
+// Constants
 const (
 	DatabaseAccessNone      = plugin.DatabaseAccessNone
 	DatabaseAccessReadOnly  = plugin.DatabaseAccessReadOnly
 	DatabaseAccessReadWrite = plugin.DatabaseAccessReadWrite
 )
+
+// Functions
+var Register = plugin.Register

@@ -1,6 +1,6 @@
 package eventtriggers
 
-import "github.com/cleat-team/cleat/internal/plugin"
+import "github.com/cleat-team/cleat/plugin"
 
 // Migrations returns the database schema for event subscription management and
 // event storage. Tables are idempotent (IF NOT EXISTS) and safe to run

@@ -43,14 +43,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
 // In-memory store implementations
 // ---------------------------------------------------------------------------
 
-// InMemorySignalStore implements host.SignalStore with in-memory maps.
+// InMemorySignalStore implements engine.SignalStore with in-memory maps.
 type InMemorySignalStore struct {
 	mu            sync.Mutex
 	signals       map[string][]pendingSignal   // workflowID -> pending signals
@@ -122,7 +122,7 @@ func (s *InMemorySignalStore) ClearCancelled(workflowID string) {
 	delete(s.cancelled, workflowID)
 }
 
-// InMemoryPromiseStore implements host.PromiseStore with an in-memory map.
+// InMemoryPromiseStore implements engine.PromiseStore with an in-memory map.
 type InMemoryPromiseStore struct {
 	mu       sync.Mutex
 	promises map[string]*promiseState // promiseID -> state
@@ -179,7 +179,7 @@ func (s *InMemoryPromiseStore) GetPromise(_ context.Context, _, promiseID string
 	return ps.status, ps.result, ps.errMsg, nil
 }
 
-// InMemoryChildWorkflowStore implements host.ChildWorkflowStore with an
+// InMemoryChildWorkflowStore implements engine.ChildWorkflowStore with an
 // in-memory map. Child workflows are simulated: StartChildWorkflow records
 // the invocation with a generated run ID and stores the input; GetChildResult
 // returns the pre-configured result immediately (simulating instant completion).
@@ -292,7 +292,7 @@ func (s *InMemoryChildWorkflowStore) StartChildWorkflow(_ context.Context, paren
 	return runID, nil
 }
 
-func (s *InMemoryChildWorkflowStore) StartChildWorkflowAtomic(_ context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event host.EventRecord, priority int) (string, error) {
+func (s *InMemoryChildWorkflowStore) StartChildWorkflowAtomic(_ context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event engine.EventRecord, priority int) (string, error) {
 	return s.StartChildWorkflow(context.Background(), parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
 
@@ -308,7 +308,7 @@ func (s *InMemoryChildWorkflowStore) GetChildResult(_ context.Context, runID str
 	return "", false, nil
 }
 
-// InMemoryConcurrencyKeyStore implements host.ConcurrencyKeyStore with an
+// InMemoryConcurrencyKeyStore implements engine.ConcurrencyKeyStore with an
 // in-memory map.
 type InMemoryConcurrencyKeyStore struct {
 	mu   sync.Mutex
@@ -357,7 +357,7 @@ func (s *InMemoryConcurrencyKeyStore) ReleaseConcurrencyKey(_ context.Context, k
 	return nil
 }
 
-// TestWorkflowState implements host.WorkflowState for testing.
+// TestWorkflowState implements engine.WorkflowState for testing.
 type TestWorkflowState struct {
 	VersionVal    int
 	MinVersionVal int
@@ -382,10 +382,10 @@ func (s *TestWorkflowState) ChildVersion(name string) (int, bool) {
 	return v, ok
 }
 
-// mockCaller implements host.ServiceCaller and records all calls made.
+// mockCaller implements engine.ServiceCaller and records all calls made.
 type mockCaller struct {
 	mu    sync.Mutex
-	Calls []host.EventRecord
+	Calls []engine.EventRecord
 }
 
 func (m *mockCaller) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
@@ -393,8 +393,8 @@ func (m *mockCaller) Call(_ context.Context, service, operation, requestJSON str
 	defer m.mu.Unlock()
 
 	resp := defaultResponse(service, operation)
-	m.Calls = append(m.Calls, host.EventRecord{
-		EventType: host.EventTypeCall,
+	m.Calls = append(m.Calls, engine.EventRecord{
+		EventType: engine.EventTypeCall,
 		Service:   service,
 		Op:        operation,
 		Request:   requestJSON,
@@ -445,11 +445,11 @@ type WasmTestEnv struct {
 	t       *testing.T
 	ctx     context.Context
 	cancel  context.CancelFunc
-	rt      *host.Runtime
+	rt      *engine.Runtime
 	caller  *mockCaller
-	engine  *host.Engine
+	engine  *engine.Engine
 
-	pluginRegistry    *host.PluginRegistry
+	pluginRegistry    *engine.PluginRegistry
 
 	SignalStore        *InMemorySignalStore
 	PromiseStore       *InMemoryPromiseStore
@@ -484,7 +484,7 @@ func WithDefVersion(v int) WasmTestEnvOption {
 }
 
 // WithPluginRegistry sets the plugin registry for plugin host function dispatch.
-func WithPluginRegistry(pr *host.PluginRegistry) WasmTestEnvOption {
+func WithPluginRegistry(pr *engine.PluginRegistry) WasmTestEnvOption {
 	return func(e *WasmTestEnv) { e.pluginRegistry = pr }
 }
 
@@ -495,7 +495,7 @@ func NewWasmTestEnv(t *testing.T, opts ...WasmTestEnvOption) *WasmTestEnv {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		cancel()
 		t.Fatalf("wasmtest: NewRuntime: %v", err)
@@ -521,32 +521,32 @@ func NewWasmTestEnv(t *testing.T, opts ...WasmTestEnvOption) *WasmTestEnv {
 		o(env)
 	}
 
-	engineOpts := []host.EngineOption{
-		host.WithSignalStore(env.SignalStore),
-		host.WithPromiseStore(env.PromiseStore),
-		host.WithWorkflowState(env.WorkflowState),
-		host.WithWorkflowID(env.WorkflowID),
-		host.WithDefName(env.DefName),
-		host.WithChildWorkflowStore(env.ChildWorkflowStore),
-		host.WithConcurrencyKeyStore(env.ConcurrencyStore),
-		host.WithDefVersion(env.DefVersion),
+	engineOpts := []engine.EngineOption{
+		engine.WithSignalStore(env.SignalStore),
+		engine.WithPromiseStore(env.PromiseStore),
+		engine.WithWorkflowState(env.WorkflowState),
+		engine.WithWorkflowID(env.WorkflowID),
+		engine.WithDefName(env.DefName),
+		engine.WithChildWorkflowStore(env.ChildWorkflowStore),
+		engine.WithConcurrencyKeyStore(env.ConcurrencyStore),
+		engine.WithDefVersion(env.DefVersion),
 	}
 	if env.pluginRegistry != nil {
-		engineOpts = append(engineOpts, host.WithPluginRegistry(env.pluginRegistry))
+		engineOpts = append(engineOpts, engine.WithPluginRegistry(env.pluginRegistry))
 	}
 	engineOpts = append(engineOpts, wasmtimeBackendOptions()...)
-	env.engine = host.NewEngine(rt, env.caller, engineOpts...)
+	env.engine = engine.NewEngine(rt, env.caller, engineOpts...)
 	return env
 }
 
 // H returns the underlying Engine for direct access (e.g., to set up
 // additional options not exposed by WasmTestEnv).
-func (e *WasmTestEnv) H() *host.Engine {
+func (e *WasmTestEnv) H() *engine.Engine {
 	return e.engine
 }
 
 // Runtime returns the underlying Runtime.
-func (e *WasmTestEnv) Runtime() *host.Runtime {
+func (e *WasmTestEnv) Runtime() *engine.Runtime {
 	return e.rt
 }
 
@@ -625,7 +625,7 @@ func (e *WasmTestEnv) BuildWasm(t *testing.T, pkgPath string) []byte {
 
 // Execute runs a fresh workflow execution and returns the result, event
 // history, and any error.
-func (e *WasmTestEnv) Execute(t *testing.T, wasmBytes []byte, entryPoint string, inputJSON string) (string, []host.EventRecord, error) {
+func (e *WasmTestEnv) Execute(t *testing.T, wasmBytes []byte, entryPoint string, inputJSON string) (string, []engine.EventRecord, error) {
 	t.Helper()
 
 	result, history, suspended, _, _, err := e.engine.Execute(e.ctx, wasmBytes, entryPoint, json.RawMessage(inputJSON))
@@ -641,7 +641,7 @@ func (e *WasmTestEnv) Execute(t *testing.T, wasmBytes []byte, entryPoint string,
 
 // Replay replays a workflow from existing event history and returns the
 // result and any divergence error.
-func (e *WasmTestEnv) Replay(t *testing.T, wasmBytes []byte, entryPoint string, inputJSON string, history []host.EventRecord) (string, error) {
+func (e *WasmTestEnv) Replay(t *testing.T, wasmBytes []byte, entryPoint string, inputJSON string, history []engine.EventRecord) (string, error) {
 	t.Helper()
 
 	result, _, suspended, _, _, err := e.engine.Replay(e.ctx, wasmBytes, entryPoint, json.RawMessage(inputJSON), history)

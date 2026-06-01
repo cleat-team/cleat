@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // cleanupOrphanedHistoryQuery marks running backup_history rows as failed when

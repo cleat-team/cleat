@@ -19,10 +19,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/host/testutil"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // TestKVStoreBehavioral_MultiBackend runs the kvstore plugin's behavioral
@@ -69,7 +69,7 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 			}
 
 			// Initialise the plugin with the real database connection.
-			p.db = &host.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB}
 			p.mux = http.NewServeMux()
 			p.logger = slog.Default()
 			p.config = Config{MaxValueSize: 1_048_576}

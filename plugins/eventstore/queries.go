@@ -1,6 +1,6 @@
 package eventstore
 
-import "github.com/cleat-team/cleat/internal/plugin"
+import "github.com/cleat-team/cleat/plugin"
 
 // Dialect-specific query variants for structurally different SQL.
 var insertEventReturning = plugin.Query{

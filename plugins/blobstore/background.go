@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // Run starts the TTL cleanup goroutine. It runs every hour, deleting expired

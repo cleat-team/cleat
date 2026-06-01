@@ -22,7 +22,7 @@ import (
 // ---------------------------------------------------------------------------
 
 // TestPipelineWithDurableTest verifies the full diamond DAG pipeline
-// executes through the cleattest mock host.
+// executes through the cleattest mock engine.
 func TestPipelineWithDurableTest(t *testing.T) {
 	env := cleattest.NewTestEnv()
 	env.OnChildWorkflow("extract").Return(`{"data":"extracted"}`, nil)
@@ -62,7 +62,7 @@ func TestPipelineTaskError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestDAGExecuteDiamond verifies a diamond DAG executes correctly through
-// the cleattest mock host.
+// the cleattest mock engine.
 func TestDAGExecuteDiamond(t *testing.T) {
 	env := cleattest.NewTestEnv()
 	env.OnChildWorkflow("extract").Return(`{"data":"extracted"}`, nil)

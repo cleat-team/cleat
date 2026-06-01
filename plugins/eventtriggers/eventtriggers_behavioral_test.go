@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
-		"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
+		"github.com/cleat-team/cleat/engine"
 	)
 
 // ---------------------------------------------------------------------------
@@ -1884,7 +1884,7 @@ func TestRun_ContextCancellation(t *testing.T) {
 	// Use a non-nil *sql.DB (zero value) to exercise the ticker path in Run
 	// without needing a real database connection.
 	p := &Plugin{}
-	if err := p.Init(context.Background(), &plugin.Environment{DB: &host.SQLDBAdapter{DB: &sql.DB{}}}); err != nil {
+	if err := p.Init(context.Background(), &plugin.Environment{DB: &engine.SQLDBAdapter{DB: &sql.DB{}}}); err != nil {
 		t.Fatalf("Init() returned error: %v", err)
 	}
 
@@ -3063,7 +3063,7 @@ func setupETPlugin(t *testing.T) (*Plugin, http.Handler, *etDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -3072,7 +3072,7 @@ func setupETPlugin(t *testing.T) (*Plugin, http.Handler, *etDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 	return p, handler, store
 }
 
@@ -3383,7 +3383,7 @@ func TestRegisterAndUnregisterAwaiter(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -3401,7 +3401,7 @@ func TestRegisterAndUnregisterAwaiter(t *testing.T) {
 	}
 
 	// Unregister.
-	unregisterAwaiter(context.Background(), &host.SQLDBAdapter{DB: db}, slog.New(slog.NewTextHandler(io.Discard, nil)), "wf-123", "order.created")
+	unregisterAwaiter(context.Background(), &engine.SQLDBAdapter{DB: db}, slog.New(slog.NewTextHandler(io.Discard, nil)), "wf-123", "order.created")
 
 	store.mu.RLock()
 	n = len(store.awaiters)
@@ -3428,7 +3428,7 @@ func TestAwaitEventFindsAndConsumesEvent(t *testing.T) {
 	})
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -3476,7 +3476,7 @@ func TestAwaitEventNoEvent(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -3517,7 +3517,7 @@ func TestAwaitEventWithAwaiterRegistration(t *testing.T) {
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 

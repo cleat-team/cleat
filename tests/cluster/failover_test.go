@@ -15,11 +15,11 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // requireDB is like testStore but skips if CLEAT_TEST_DB is unavailable.
-func requireDB(t *testing.T) (*sql.DB, *host.PostgresStore) {
+func requireDB(t *testing.T) (*sql.DB, *engine.PostgresStore) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("Skipping in short mode")
@@ -36,7 +36,7 @@ func requireDB(t *testing.T) (*sql.DB, *host.PostgresStore) {
 		t.Skipf("Skipping: cannot ping database: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return db, host.NewPostgresStore(db, "queue-1", "queue-2", "queue-3")
+	return db, engine.NewPostgresStore(db, "queue-1", "queue-2", "queue-3")
 }
 
 // TestKillWorkerMidExecution kills one worker and verifies that in-flight
@@ -243,7 +243,7 @@ func TestFullClusterRestart(t *testing.T) {
 		t.Fatal("Expected to claim a workflow")
 	}
 
-	events := []host.EventRecord{
+	events := []engine.EventRecord{
 		{Step: 1, EventType: "call", Service: "svc", Op: "op1", Request: `{}`, Response: `{"ok":true}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, wf.ID, events); err != nil {

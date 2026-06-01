@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // runReplay replays a workflow's event history to diagnose issues.
@@ -16,7 +16,7 @@ import (
 // Reads the workflow instance, its WASM binary, and its event history, then
 // replays through the engine and reports results. This is a diagnostic tool
 // for debugging stuck or unexpectedly-failed workflows.
-func runReplay(ctx context.Context, store host.WorkflowStore, db *sql.DB, args []string) {
+func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
 	flags := parseReplayFlags(args)
 	if flags == nil {
 		return // usage already printed
@@ -56,15 +56,15 @@ func runReplay(ctx context.Context, store host.WorkflowStore, db *sql.DB, args [
 
 	// Build a minimal Engine for replay with a stub caller that returns
 	// an error if replay diverges into fresh execution.
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating runtime: %v\n", err)
 		osExit(1)
 	}
 
-	engine := host.NewEngine(rt, &replayStubCaller{},
-		host.WithDefName(inst.DefName),
-		host.WithDefVersion(inst.DefVersion),
+	engine := engine.NewEngine(rt, &replayStubCaller{},
+		engine.WithDefName(inst.DefName),
+		engine.WithDefVersion(inst.DefVersion),
 	)
 
 	if verbose {
@@ -199,7 +199,7 @@ Examples:
 }
 
 // loadWorkflowInstance loads a single workflow instance by ID from the database.
-func loadWorkflowInstance(ctx context.Context, db *sql.DB, id string) (*host.WorkflowInstance, error) {
+func loadWorkflowInstance(ctx context.Context, db *sql.DB, id string) (*engine.WorkflowInstance, error) {
 	row := db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, min_version, status, input,
 		       COALESCE(result, ''), COALESCE(error, ''), COALESCE(error_code, ''),
@@ -209,7 +209,7 @@ func loadWorkflowInstance(ctx context.Context, db *sql.DB, id string) (*host.Wor
 		WHERE id = $1
 	`, id)
 
-	var inst host.WorkflowInstance
+	var inst engine.WorkflowInstance
 	err := row.Scan(
 		&inst.ID, &inst.DefName, &inst.DefVersion, &inst.MinVersion,
 		&inst.Status, &inst.Input, &inst.Result, &inst.Error,

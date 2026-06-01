@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/internal/plugingen"
 )
 

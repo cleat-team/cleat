@@ -9,12 +9,12 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // testStore returns a *sql.DB and a PostgresStore for tests.
 // It follows the same pattern as internal/host/fault_test.go's testDB().
-func testStore(t *testing.T, taskQueues ...string) (*sql.DB, *host.PostgresStore) {
+func testStore(t *testing.T, taskQueues ...string) (*sql.DB, *engine.PostgresStore) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("Skipping cluster test in short mode")
@@ -31,7 +31,7 @@ func testStore(t *testing.T, taskQueues ...string) (*sql.DB, *host.PostgresStore
 		t.Skipf("Skipping cluster test: cannot ping database: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return db, host.NewPostgresStore(db, taskQueues...)
+	return db, engine.NewPostgresStore(db, taskQueues...)
 }
 
 // cleanTestWorkflows removes test workflows from the database.
@@ -217,7 +217,7 @@ func TestClusterBasicWorkflowExecution(t *testing.T) {
 	}
 
 	// Append an execution event.
-	events := []host.EventRecord{
+	events := []engine.EventRecord{
 		{Step: 1, EventType: "call", Service: "test", Op: "ping", Request: `{}`, Response: `{"ok":true}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, wf.ID, events); err != nil {

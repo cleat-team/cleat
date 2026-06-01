@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/llm/providers"
 )
 

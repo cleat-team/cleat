@@ -1,5 +1,5 @@
 // Package cleattest provides a mock HostCalls implementation for testing
-// workflows without compiling to WASM or running a full host.
+// workflows without compiling to WASM or running a full engine.
 //
 // NOTE: This test SDK package intentionally uses Go features (channels,
 // timers) that may be flagged by `cleat vet`. These are safe here because

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -22,18 +22,18 @@ func TestDispatchLoop_CapacityLimit(t *testing.T) {
 	// skip claiming and sleep instead.
 	ms := &mockStore{}
 	claimAttempts := 0
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 		claimAttempts++
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 		return nil, nil
 	}
 
 	w := newTestWorkerWithConcurrency(ms, 1)
 
 	// Fill inflight to capacity.
-	w.inflight.Store("wf-busy-1", &host.WorkflowInstance{ID: "wf-busy-1", DefName: "test", DefVersion: 1})
+	w.inflight.Store("wf-busy-1", &engine.WorkflowInstance{ID: "wf-busy-1", DefName: "test", DefVersion: 1})
 
 	// Run briefly then cancel.
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -66,12 +66,12 @@ func TestDispatchLoop_StickyReclaim(t *testing.T) {
 	loadWASMCh := make(chan struct{})
 	claimedCh := make(chan struct{})
 
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
-		return []*host.WorkflowInstance{
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
+		return []*engine.WorkflowInstance{
 			{ID: "wf-sticky-reclaim", DefName: "test", DefVersion: 1, Status: "ready"},
 		}, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 		return nil, nil
 	}
 	ms.loadWASMFn = func(ctx context.Context, defName string, defVersion int) ([]byte, error) {
@@ -129,7 +129,7 @@ func TestHeartbeatLoop_SuccessPreservesInflight(t *testing.T) {
 
 	w := newTestWorker(ms)
 	w.heartbeatInterval = 5 * time.Millisecond
-	w.inflight.Store("wf-alive-1", &host.WorkflowInstance{ID: "wf-alive-1"})
+	w.inflight.Store("wf-alive-1", &engine.WorkflowInstance{ID: "wf-alive-1"})
 
 	done := make(chan struct{})
 	w.wg.Add(1)
@@ -173,8 +173,8 @@ func TestHeartbeatLoop_LostOwnership(t *testing.T) {
 
 	w := newTestWorker(ms)
 	w.heartbeatInterval = 5 * time.Millisecond
-	w.inflight.Store("wf-lost-own", &host.WorkflowInstance{ID: "wf-lost-own"})
-	w.inflight.Store("wf-keep-1", &host.WorkflowInstance{ID: "wf-keep-1"})
+	w.inflight.Store("wf-lost-own", &engine.WorkflowInstance{ID: "wf-lost-own"})
+	w.inflight.Store("wf-keep-1", &engine.WorkflowInstance{ID: "wf-keep-1"})
 
 	done := make(chan struct{})
 	w.wg.Add(1)
@@ -214,7 +214,7 @@ func TestWaitForDB_RetriesOnError(t *testing.T) {
 	ms := &mockStore{}
 	attempts := 0
 	const connErrMsg = "connection refused"
-	ms.claimWorkflowFn = func(ctx context.Context, workerID string) (*host.WorkflowInstance, error) {
+	ms.claimWorkflowFn = func(ctx context.Context, workerID string) (*engine.WorkflowInstance, error) {
 		attempts++
 		if attempts <= 2 {
 			return nil, errors.New(connErrMsg)
@@ -244,7 +244,7 @@ func TestWaitForDB_ImmediateSuccess(t *testing.T) {
 	// after a single call.
 	ms := &mockStore{}
 	attempts := 0
-	ms.claimWorkflowFn = func(ctx context.Context, workerID string) (*host.WorkflowInstance, error) {
+	ms.claimWorkflowFn = func(ctx context.Context, workerID string) (*engine.WorkflowInstance, error) {
 		attempts++
 		return nil, nil
 	}
@@ -280,7 +280,7 @@ func TestReleaseOrFail_NoError(t *testing.T) {
 	w.id = "test-worker"
 
 	nextWake := time.Now().Add(time.Hour)
-	w.releaseOrFail(&host.WorkflowInstance{ID: "wf-release-1", NextWakeAt: nextWake}, "")
+	w.releaseOrFail(&engine.WorkflowInstance{ID: "wf-release-1", NextWakeAt: nextWake}, "")
 
 	if !released {
 		t.Error("expected ReleaseWorkflow to be called")

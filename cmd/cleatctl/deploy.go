@@ -9,10 +9,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
-func runDeploy(ctx context.Context, store host.WorkflowStore, db *sql.DB, args []string) {
+func runDeploy(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
 	if len(args) < 1 {
 		printDeployUsage()
 		osExit(1)
@@ -45,7 +45,7 @@ Subcommands:
 // workflow version. It computes the new version number automatically by
 // incrementing the latest deployed version. If an exact version already
 // exists with the same SHA256 hash, the deployment is skipped.
-func deployWorkflow(ctx context.Context, store host.WorkflowStore, db *sql.DB, args []string) {
+func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy workflow <name> <wasm-file>")
 		osExit(1)
@@ -108,7 +108,7 @@ func deployWorkflow(ctx context.Context, store host.WorkflowStore, db *sql.DB, a
 		}
 	}
 
-	def := &host.WorkflowDef{
+	def := &engine.WorkflowDef{
 		Name:       name,
 		Version:    nextVersion,
 		WASMBytes:  wasmBytes,

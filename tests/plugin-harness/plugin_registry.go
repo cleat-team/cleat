@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // BuildPluginRegistry discovers, initialises, and registers all plugins. It
@@ -26,7 +26,7 @@ func BuildPluginRegistry(
 	dialect plugin.Dialect,
 	mockServers *MockServers,
 	config map[string]interface{},
-) (*host.PluginRegistry, *host.PluginStreamRegistry, []*plugin.LoadedPlugin) {
+) (*engine.PluginRegistry, *engine.PluginStreamRegistry, []*plugin.LoadedPlugin) {
 	t.Helper()
 
 	// 1. Discover all registered plugins.
@@ -54,8 +54,8 @@ func BuildPluginRegistry(
 	plugin.InitAll(ctx, env, loadedPlugins)
 
 	// 4. Create host registries.
-	pr := host.NewPluginRegistry()
-	psr := host.NewPluginStreamRegistry()
+	pr := engine.NewPluginRegistry()
+	psr := engine.NewPluginStreamRegistry()
 
 	// 5. Register host functions for plugins that implement HasHostFunctions.
 	for _, lp := range loadedPlugins {
@@ -107,20 +107,20 @@ type pluginStreamPlugin interface {
 // does not need to pass it on every Register call.
 type hostFuncAdapter struct {
 	pluginName string
-	registry   *host.PluginRegistry
+	registry   *engine.PluginRegistry
 }
 
 // Register adds a plugin host function to the host registry. The plugin name
 // is the one captured at adapter creation time.
 func (a *hostFuncAdapter) Register(opts plugin.FuncOptions, fn plugin.PluginFunc) error {
-	return a.registry.Register(a.pluginName, opts.Name, host.PluginFunc(fn))
+	return a.registry.Register(a.pluginName, opts.Name, fn)
 }
 
 // streamFuncAdapter adapts the plugin-level StreamFuncRegistry to the
 // host-level PluginStreamRegistry.
 type streamFuncAdapter struct {
 	pluginName string
-	registry   *host.PluginStreamRegistry
+	registry   *engine.PluginStreamRegistry
 }
 
 // RegisterStream adds a streaming plugin host function to the host registry.

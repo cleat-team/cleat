@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -469,7 +469,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeKVStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		mux:    http.NewServeMux(),
 		logger: slog.Default(),
 		config: Config{MaxValueSize: 1_048_576},
@@ -479,7 +479,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeKVStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(p.mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
 	return p, handler, store
 }
 

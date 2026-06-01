@@ -14,8 +14,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // fakeConnector implements driver.Connector for testing pgvector SQL operations.
@@ -418,7 +418,7 @@ func TestInit(t *testing.T) {
 		DefaultCollection: "default",
 	}
 	cfgJSON, _ := json.Marshal(cfg)
-	env := &plugin.Environment{DB: &host.SQLDBAdapter{DB: db}, Config: cfgJSON}
+	env := &plugin.Environment{DB: &engine.SQLDBAdapter{DB: db}, Config: cfgJSON}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() returned error: %v", err)
 	}
@@ -434,7 +434,7 @@ func TestInitDefaults(t *testing.T) {
 	db, _ := fakeDB(t)
 
 	p := &Plugin{}
-	env := &plugin.Environment{DB: &host.SQLDBAdapter{DB: db}}
+	env := &plugin.Environment{DB: &engine.SQLDBAdapter{DB: db}}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() with no config returned error: %v", err)
 	}
@@ -447,7 +447,7 @@ func TestInitInvalidConfig(t *testing.T) {
 	db, _ := fakeDB(t)
 
 	p := &Plugin{}
-	env := &plugin.Environment{DB: &host.SQLDBAdapter{DB: db}, Config: []byte(`not valid json`)}
+	env := &plugin.Environment{DB: &engine.SQLDBAdapter{DB: db}, Config: []byte(`not valid json`)}
 	err := p.Init(context.Background(), env)
 	if err == nil {
 		t.Fatal("expected error for invalid config, got nil")
@@ -577,7 +577,7 @@ func TestSearchMissingCollection(t *testing.T) {
 
 func TestSearchNonexistentCollection(t *testing.T) {
 	db, _ := fakeDB(t)
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	_, err := p.search(tenantCtx(), `{"collection":"nonexistent","query_vector":[0.1,0.2]}`)
 	if err == nil {
 		t.Fatal("expected error for nonexistent collection")
@@ -597,7 +597,7 @@ func TestSearchDefaultTopK(t *testing.T) {
 		embedding: []float64{0.1, 0.2, 0.3},
 	}
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(searchInput{
 		Collection:  "docs",
 		QueryVector: []float64{0.1, 0.2, 0.3},
@@ -626,7 +626,7 @@ func TestSearchNoVector(t *testing.T) {
 		externalID: "doc1", content: "hello", metadataJSON: []byte(`{}`),
 	}
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(searchInput{
 		Collection: "docs",
 		TopK:       5,
@@ -652,7 +652,7 @@ func TestSearchWithMetadata(t *testing.T) {
 		externalID: "doc1", content: "hello", metadataJSON: metaJSON,
 	}
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(searchInput{
 		Collection:  "docs",
 		QueryVector: []float64{0.1, 0.2},
@@ -698,7 +698,7 @@ func TestUpsertMissingCollection(t *testing.T) {
 
 func TestUpsertNonexistentCollection(t *testing.T) {
 	db, _ := fakeDB(t)
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	_, err := p.upsert(tenantCtx(), `{"collection":"nonexistent","external_id":"ext1"}`)
 	if err == nil {
 		t.Fatal("expected error for nonexistent collection")
@@ -709,7 +709,7 @@ func TestUpsertWithExternalID(t *testing.T) {
 	db, fc := fakeDB(t)
 	fc.addCollection("docs", 1536)
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(upsertInput{
 		Collection: "docs",
 		ExternalID: "ext1",
@@ -733,7 +733,7 @@ func TestUpsertWithoutEmbedding(t *testing.T) {
 	db, fc := fakeDB(t)
 	fc.addCollection("docs", 1536)
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(upsertInput{
 		Collection: "docs",
 		Content:    "content without embedding",
@@ -784,7 +784,7 @@ func TestDeleteMissingID(t *testing.T) {
 
 func TestDeleteNonexistentCollection(t *testing.T) {
 	db, _ := fakeDB(t)
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	_, err := p.delete(tenantCtx(), `{"collection":"nonexistent","id":"any"}`)
 	if err == nil {
 		t.Fatal("expected error for nonexistent collection")
@@ -795,7 +795,7 @@ func TestDeleteByID(t *testing.T) {
 	db, fc := fakeDB(t)
 	fc.addCollection("docs", 1536)
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	// Delete with either id or external_id set — the fake DB doesn't filter by both yet.
 	input, _ := json.Marshal(deleteInput{Collection: "docs", ID: "any"})
 	out, err := p.delete(tenantCtx(), string(input))
@@ -830,7 +830,7 @@ func TestSearchNoResults(t *testing.T) {
 	db, fc := fakeDB(t)
 	fc.addCollection("empty", 1536)
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(searchInput{
 		Collection:  "empty",
 		QueryVector: []float64{0.1, 0.2},
@@ -855,7 +855,7 @@ func TestSearchNoVectorNoResults(t *testing.T) {
 	db, fc := fakeDB(t)
 	fc.addCollection("empty", 1536)
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(searchInput{
 		Collection: "empty",
 		TopK:       5,
@@ -875,7 +875,7 @@ func TestUpsertWithExternalIDWithoutEmbedding(t *testing.T) {
 	db, fc := fakeDB(t)
 	fc.addCollection("docs", 1536)
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(upsertInput{
 		Collection: "docs",
 		ExternalID: "ext-no-vec",
@@ -897,7 +897,7 @@ func TestUpsertWithoutExternalIDWithEmbedding(t *testing.T) {
 	db, fc := fakeDB(t)
 	fc.addCollection("docs", 1536)
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(upsertInput{
 		Collection: "docs",
 		Content:    "new vector",
@@ -918,7 +918,7 @@ func TestDeleteByExternalID(t *testing.T) {
 	db, fc := fakeDB(t)
 	fc.addCollection("docs", 1536)
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	input, _ := json.Marshal(deleteInput{
 		Collection: "docs",
 		ExternalID: "ext-to-delete",
@@ -937,7 +937,7 @@ func TestInitNilLogger(t *testing.T) {
 
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB: &host.SQLDBAdapter{DB: db},
+		DB: &engine.SQLDBAdapter{DB: db},
 	}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() returned error: %v", err)

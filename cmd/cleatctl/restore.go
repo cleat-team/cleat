@@ -9,7 +9,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ import (
 //   - The backup must be in NDJSON format produced by cleatctl backup-workflow
 //     or a compatible tool.
 //   - Tenants, schedules, and workflow_defs are NOT restored by this command.
-func runRestoreWorkflow(ctx context.Context, store host.WorkflowStore, db *sql.DB, args []string) {
+func runRestoreWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: cleatctl restore-workflow <workflow-id> <backup-file>")
 		osExit(1)

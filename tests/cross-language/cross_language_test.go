@@ -20,7 +20,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/cleat/wasmtest"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // findProjectRoot walks up from the working directory to find the repo root.
@@ -252,7 +252,7 @@ func TestRustWorkflow_DivergenceDetection(t *testing.T) {
 	defer env.Close()
 
 	ctx := context.Background()
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestRustWorkflow_DivergenceDetection(t *testing.T) {
 	inputJSON := json.RawMessage(`{"user_id":"test-user","cart":[{"sku":"SKU-001","quantity":2}]}`)
 
 	caller := &callRecorder{}
-	engine := host.NewEngine(rt, caller)
+	engine := engine.NewEngine(rt, caller)
 	result, history, _, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", inputJSON)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -270,10 +270,10 @@ func TestRustWorkflow_DivergenceDetection(t *testing.T) {
 		t.Fatal("expected non-empty history")
 	}
 
-	corrupted := make([]host.EventRecord, len(history))
+	corrupted := make([]engine.EventRecord, len(history))
 	copy(corrupted, history)
 	for i := range corrupted {
-		if corrupted[i].EventType == host.EventTypeCall {
+		if corrupted[i].EventType == engine.EventTypeCall {
 			corrupted[i].Service = "nonexistent"
 			break
 		}
@@ -490,10 +490,10 @@ func TestCrossReplay_DivergenceDetection(t *testing.T) {
 	}
 
 	// Corrupt a service call in the history.
-	corrupted := make([]host.EventRecord, len(history))
+	corrupted := make([]engine.EventRecord, len(history))
 	copy(corrupted, history)
 	for i := range corrupted {
-		if corrupted[i].EventType == host.EventTypeCall {
+		if corrupted[i].EventType == engine.EventTypeCall {
 			corrupted[i].Service = "nonexistent"
 			break
 		}
@@ -515,7 +515,7 @@ func TestCrossReplay_DivergenceDetection(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type callRecorder struct {
-	calls []host.EventRecord
+	calls []engine.EventRecord
 }
 
 func (c *callRecorder) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
@@ -530,8 +530,8 @@ func (c *callRecorder) Call(_ context.Context, service, operation, requestJSON s
 	default:
 		resp = fmt.Sprintf(`{"result":"ok-%s-%s"}`, service, operation)
 	}
-	c.calls = append(c.calls, host.EventRecord{
-		EventType: host.EventTypeCall,
+	c.calls = append(c.calls, engine.EventRecord{
+		EventType: engine.EventTypeCall,
 		Service:   service,
 		Op:        operation,
 		Request:   requestJSON,
@@ -542,7 +542,7 @@ func (c *callRecorder) Call(_ context.Context, service, operation, requestJSON s
 
 // verifyCallSequence checks that the event history contains the expected
 // service/operation calls in order.
-func verifyCallSequence(t *testing.T, history []host.EventRecord, expected []struct{ svc, op string }) {
+func verifyCallSequence(t *testing.T, history []engine.EventRecord, expected []struct{ svc, op string }) {
 	t.Helper()
 
 	var calls []struct{ svc, op string }

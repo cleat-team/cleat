@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -319,7 +319,7 @@ func newFFPlugin(t *testing.T) (*Plugin, *ffDB, *sql.DB) {
 	fdb := newFFDB()
 	rawDB := sql.OpenDB(&ffConnector{db: fdb})
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: rawDB},
+		db:     &engine.SQLDBAdapter{DB: rawDB},
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -840,7 +840,7 @@ func TestFF_CreateFlag_NilRulesDefaultsToEmptyArray(t *testing.T) {
 func TestFF_Init_WithConfig(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: sql.OpenDB(&ffConnector{db: newFFDB()})},
+		DB:     &engine.SQLDBAdapter{DB: sql.OpenDB(&ffConnector{db: newFFDB()})},
 		Mux:    http.NewServeMux(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Config: json.RawMessage(`{"default_rollout":50}`),
@@ -856,7 +856,7 @@ func TestFF_Init_WithConfig(t *testing.T) {
 func TestFF_Init_InvalidConfig(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: sql.OpenDB(&ffConnector{db: newFFDB()})},
+		DB:     &engine.SQLDBAdapter{DB: sql.OpenDB(&ffConnector{db: newFFDB()})},
 		Mux:    http.NewServeMux(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Config: json.RawMessage(`not json`),
