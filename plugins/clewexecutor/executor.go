@@ -90,21 +90,16 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	}
 
 	td := taskDir(in.ProjectRoot, in.TaskStatePath, in.TaskID)
-	statusPath := filepath.Join(td, "STATUS.md")
 
-	phase, err := extractPhase(statusPath)
-	if err != nil {
-		out := runPhaseOutput{Status: "failed", Error: err.Error()}
-		b, _ := json.Marshal(out)
-		return string(b), nil
-	}
+	// Use the workflow phase as the canonical phase. STATUS.md is a file
+	// on disk that may not be accessible (clew-service runs remotely).
+	// The WASM workflow drives phase transitions; the executor follows.
+	statusPhase := workflowPhaseToStatusPhase(in.Phase)
 
-
-
-	// Determine the agent role from STATUS.md phase.
+	// Determine the agent role from the workflow phase.
 	role := in.RoleOverride
 	if role == "" {
-		r, err := roleForPhase(workflowPhaseToStatusPhase(in.Phase))
+		r, err := roleForPhase(statusPhase)
 		if err != nil {
 			out := runPhaseOutput{Status: "failed", Error: err.Error()}
 			b, _ := json.Marshal(out)
@@ -136,7 +131,7 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 	// Prevents the review loop from exhausting max rounds when the planner
 	// or developer doesn't actually update the work product between rounds.
 
-	prompt, err := buildPrompt(in, role, td, protocolPath, phase)
+	prompt, err := buildPrompt(in, role, td, protocolPath, statusPhase)
 	if err != nil {
 		out := runPhaseOutput{Status: "failed", Error: err.Error()}
 		b, _ := json.Marshal(out)
@@ -198,16 +193,16 @@ func (p *Plugin) runPhase(ctx context.Context, inputJSON string) (string, error)
 		}
 	}
 
-	// Determine new phase by re-reading STATUS.md after the agent ran.
-	newPhase := phase
-	if np, err := extractPhase(statusPath); err == nil {
+	// Determine new phase. Try STATUS.md first (best-effort — agent may
+	// have updated it), then fall back to natural phase progression.
+	newPhase := statusPhase
+	statusPath := filepath.Join(td, "STATUS.md")
+	if np, err := extractPhase(statusPath); err == nil && np != statusPhase {
 		newPhase = np
+	} else {
+		newPhase = nextPhase(statusPhase)
 	}
-	phaseWasChanged := newPhase != phase
-	if !phaseWasChanged {
-		newPhase = nextPhase(phase)
-		phaseWasChanged = newPhase != phase
-	}
+	phaseWasChanged := newPhase != statusPhase
 
 	newSnapshot := listArtifactFiles(artifactsDir)
 	artifactsWritten := diffArtifacts(snapshot, newSnapshot)
@@ -262,7 +257,7 @@ Error: exit code %d
 
 ## stderr (last 200 lines)
 %s
-`, in.TaskID, in.TaskID, phase, exitCode, durationMs,
+`, in.TaskID, in.TaskID, statusPhase, exitCode, durationMs,
 			started.Format(time.RFC3339), ended.Format(time.RFC3339),
 			exitCode,
 			tailLines(stdout.String(), 200), tailLines(stderr.String(), 200))
@@ -533,7 +528,7 @@ func buildPrompt(in runPhaseInput, role, td, protocolPath, currentPhase string) 
 			), nil
 		case "merge":
 			return fmt.Sprintf(
-				"You are a developer agent with ONE job: merge an approved PR.\n\nProject: %s. Task ID: %s.\n\nSTEP 1 — Find the PR:\n  gh pr list --head %s --json number,mergeable,url,statusCheckRollup\n  If no PR found: report and stop.\n\nSTEP 2 — Check for pre-existing CI failures (NOT caused by this PR):\n  gh pr checks <NUMBER> --json name,conclusion -q '.[] | select(.conclusion=="FAILURE") | .name' > /tmp/pr_fails.txt\n  gh pr checks <NUMBER> --json name,conclusion -q '.[] | select(.conclusion=="FAILURE") | .name' > /tmp/develop_fails.txt  # after checking develop HEAD\n  If ALL PR failures are also in develop failures:\n    gh pr merge <NUMBER> --squash --delete-branch --admin\n    Skip to STEP 5.\n\nSTEP 3 — Fix remaining failures:\n  git fetch origin develop\n  git checkout %s\n  git rebase origin/develop\n  If conflicts: resolve, git add, git rebase --continue.\n  git commit --amend --signoff --no-edit\n  git push --force-with-lease origin %s\n\nSTEP 4 — Merge:\n  gh pr merge <NUMBER> --squash --delete-branch\n  (If --squash fails, try --merge. If pre-existing failures remain, use --admin)\n\nSTEP 5 — Update status:\n  Edit %s/STATUS.md: change **Phase:** merge to **Phase:** done\n\nReport 'Merged — task done' and stop.",
+				"You are a developer agent with ONE job: merge an approved PR.\n\nProject: %s. Task ID: %s.\n\nSTEP 1 — Find the PR:\n  gh pr list --head %s --json number,mergeable,url,statusCheckRollup\n  If no PR found: report and stop.\n\nSTEP 2 — Check for pre-existing CI failures (NOT caused by this PR):\n  gh pr checks <NUMBER> --json name,conclusion -q '.[] | select(.conclusion==\"FAILURE\") | .name' > /tmp/pr_fails.txt\n  gh pr checks <NUMBER> --json name,conclusion -q '.[] | select(.conclusion==\"FAILURE\") | .name' > /tmp/develop_fails.txt  # after checking develop HEAD\n  If ALL PR failures are also in develop failures:\n    gh pr merge <NUMBER> --squash --delete-branch --admin\n    Skip to STEP 5.\n\nSTEP 3 — Fix remaining failures:\n  git fetch origin develop\n  git checkout %s\n  git rebase origin/develop\n  If conflicts: resolve, git add, git rebase --continue.\n  git commit --amend --signoff --no-edit\n  git push --force-with-lease origin %s\n\nSTEP 4 — Merge:\n  gh pr merge <NUMBER> --squash --delete-branch\n  (If --squash fails, try --merge. If pre-existing failures remain, use --admin)\n\nSTEP 5 — Update status:\n  Edit %s/STATUS.md: change **Phase:** merge to **Phase:** done\n\nReport 'Merged — task done' and stop.",
 				in.Project, in.TaskID, in.TaskID, in.TaskID, in.TaskID, taskPath,
 			), nil
 		}

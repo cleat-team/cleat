@@ -2802,7 +2802,8 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
 					return packAwaitChildResult(uint32(written), 0)
 				}
-				// No cached result yet — fall through to fresh to re-check.
+				s.engine.log().InfoContext(ctx, "await_child: no cached result, exitReplay to fresh", "workflow_id", s.workflowID, "runID", runID, "step", rec.Step)
+			// No cached result yet — fall through to fresh to re-check.
 				// Don't advance stepCount; the fresh execution will record
 				// the result at this same step, overwriting the empty event.
 				s.exitReplay()
