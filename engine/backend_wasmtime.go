@@ -144,49 +144,22 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		return nil, fmt.Errorf("host: memory export is not a memory")
 	}
 
-	// Place scratch buffers at the end of current WASM memory to avoid
-	// collision with the module's heap, but never below the legacy 10 MiB
-	// offset. Some WASM SDKs (Java/TeaVM, AssemblyScript) hardcode the
-	// 10 MiB convention and will break if the buffer moves lower.
-	outBufSz := OutBufSize // 1 MB default, configurable
-	const legacyOffset = uint32(10 * 1024 * 1024) // 10 MiB
-
-	currentSize := uint64(mem.DataSize(store))
-	scratchBase := uint32(currentSize + wasmPageSize) // one guard page after current heap
-	if scratchBase < legacyOffset {
-		scratchBase = legacyOffset
-	}
-	inputOffset := scratchBase
-	outputOffset := scratchBase + outBufSz
-
-	// Grow memory if needed to fit the scratch region.
-	needed := uint64(outputOffset + outBufSz)
-	if currentSize < needed {
-		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
-		if _, err := mem.Grow(store, pagesNeeded); err != nil {
-			return nil, fmt.Errorf("host: grow memory: %w", err)
-		}
-	}
-
-	// Write input JSON into WASM linear memory.
-	inputBytes := []byte(input)
-	if len(inputBytes) > 0 {
-		data := mem.UnsafeData(store)
-		if uint64(inputOffset)+uint64(len(inputBytes)) > uint64(len(data)) {
-			return nil, fmt.Errorf("host: input exceeds memory bounds")
-		}
-		copy(data[inputOffset:], inputBytes)
-	}
+	lang := wasm.DetectLanguage(wasmBytes)
 
 	// If the module exports _start, call it first. Go wasip1 modules use
 	// the cleat_poll_work dispatcher protocol to route work. Java/TeaVM
 	// modules need _start for runtime init (shadow stack, fiber state)
 	// before the entry point can be called directly.
-	lang := wasm.DetectLanguage(wasmBytes)
 	if lang == "go" {
 		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
 			b.workEntryPoint = entryPoint
 			b.workInput = []byte(input)
+
+			// Write work data to a fixed WASM memory location (offset 1024)
+			// so main() can read it without calling cleat_poll_work.
+			// This works around a Go 1.25 pointer-passing bug for modules
+			// with specific import counts.
+			b.writeWorkToFixedMemory(mem, store, entryPoint, []byte(input))
 
 			func() {
 				defer func() {
@@ -223,7 +196,36 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		}
 	}
 
-// Call the export directly (non-Go modules, or Go modules without _start).
+	// Set up scratch buffers for the direct export call (non-Go path).
+	outBufSz := OutBufSize // 1 MB default, configurable
+	const legacyOffset = uint32(10 * 1024 * 1024) // 10 MiB
+
+	currentSize := uint64(mem.DataSize(store))
+	scratchBase := uint32(currentSize + wasmPageSize)
+	if scratchBase < legacyOffset {
+		scratchBase = legacyOffset
+	}
+	inputOffset := scratchBase
+	outputOffset := scratchBase + outBufSz
+
+	needed := uint64(outputOffset + outBufSz)
+	if currentSize < needed {
+		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
+		if _, err := mem.Grow(store, pagesNeeded); err != nil {
+			return nil, fmt.Errorf("host: grow memory: %w", err)
+		}
+	}
+
+	inputBytes := []byte(input)
+	if len(inputBytes) > 0 {
+		data := mem.UnsafeData(store)
+		if uint64(inputOffset)+uint64(len(inputBytes)) > uint64(len(data)) {
+			return nil, fmt.Errorf("host: input exceeds memory bounds")
+		}
+		copy(data[inputOffset:], inputBytes)
+	}
+
+	// Call the export directly (non-Go modules, or Go modules without _start).
 	fn := instance.GetFunc(store, entryPoint)
 	if fn == nil {
 		return nil, fmt.Errorf("host: export %q not found", entryPoint)
@@ -2665,6 +2667,48 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 		return err
 	}
 	return nil
+}
+
+// writeWorkToFixedMemory writes the entry point name and input JSON to a
+// fixed location in WASM linear memory (offset 1024). Go WASM modules built
+// with the fixed-memory main stub read from this location instead of calling
+// cleat_poll_work. This avoids a Go 1.25 compiler bug where unsafe.Pointer
+// parameters passed through //go:wasmimport can carry garbage values for
+// modules with specific import table configurations.
+const fixedWorkOffset = 1024
+const fixedWorkMaxEntry = 256
+const fixedWorkMaxInput = 65536
+
+func (b *wasmtimeBackend) writeWorkToFixedMemory(mem *wasmtime.Memory, store wasmtime.Storelike, entryPoint string, input []byte) {
+	data := mem.UnsafeData(store)
+	if len(data) < fixedWorkOffset+8 {
+		return
+	}
+	entryLen := len(entryPoint)
+	if entryLen > fixedWorkMaxEntry {
+		entryLen = fixedWorkMaxEntry
+	}
+	inputLen := len(input)
+	if inputLen > fixedWorkMaxInput {
+		inputLen = fixedWorkMaxInput
+	}
+
+	// Layout: [entryLen:4][inputLen:4][entryBytes...][inputBytes...]
+	putU32LE(data[fixedWorkOffset:fixedWorkOffset+4], uint32(entryLen))
+	putU32LE(data[fixedWorkOffset+4:fixedWorkOffset+8], uint32(inputLen))
+	if entryLen > 0 {
+		copy(data[fixedWorkOffset+8:fixedWorkOffset+8+entryLen], entryPoint[:entryLen])
+	}
+	if inputLen > 0 {
+		copy(data[fixedWorkOffset+8+entryLen:fixedWorkOffset+8+entryLen+inputLen], input[:inputLen])
+	}
+}
+
+func putU32LE(b []byte, v uint32) {
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
 }
 
 func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {

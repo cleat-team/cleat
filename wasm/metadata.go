@@ -286,6 +286,14 @@ func HasWasiImports(wasmBytes []byte) bool {
 	return strings.Contains(string(wasmBytes), "wasi_snapshot_preview1")
 }
 
+// HasImport checks whether a WASM binary imports a specific function
+// from a specific module. This is used to detect features like the
+// cleat_poll_work dispatch protocol.
+func HasImport(wasmBytes []byte, module, name string) bool {
+	return strings.Contains(string(wasmBytes), module) &&
+		strings.Contains(string(wasmBytes), name)
+}
+
 // hasComponentModelImports scans the WASM import section for module names
 // that contain "cleat:" — the prefix used by the Component Model toolchain
 // (e.g., componentize-py).
@@ -366,6 +374,9 @@ func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 			nameLen, nn := decodeULEB128(wasmBytes[offset:])
 			if nn <= 0 { return nil, fmt.Errorf("failed to decode module name len") }
 			offset += nn
+			if int(nameLen) > sectionEnd-offset {
+				return nil, fmt.Errorf("corrupt WASM import %d: name overflows section", i)
+			}
 			moduleName := string(wasmBytes[offset : offset+int(nameLen)])
 			offset += int(nameLen)
 
@@ -373,6 +384,9 @@ func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 			fieldLen, nn := decodeULEB128(wasmBytes[offset:])
 			if nn <= 0 { return nil, fmt.Errorf("failed to decode field name len") }
 			offset += nn
+			if int(fieldLen) > sectionEnd-offset {
+				return nil, fmt.Errorf("corrupt WASM import %d: field name overflows section", i)
+			}
 			fieldName := string(wasmBytes[offset : offset+int(fieldLen)])
 			offset += int(fieldLen)
 
