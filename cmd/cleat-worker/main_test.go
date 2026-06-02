@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 func TestGenerateWorkerID(t *testing.T) {
@@ -237,7 +237,7 @@ func TestWorkerFlags(t *testing.T) {
 	poll := fs.Duration("poll", 500*time.Millisecond, "")
 	apiAddr := fs.String("api-addr", "", "")
 	tq := fs.String("task-queue", "default", "")
-	ct := fs.Int("compaction-threshold", host.DefaultCompactionThreshold, "")
+	ct := fs.Int("compaction-threshold", engine.DefaultCompactionThreshold, "")
 	ci := fs.Duration("compaction-interval", 5*time.Minute, "")
 	sf := fs.String("shards-file", "", "")
 	pc := fs.String("plugin-config", "", "")
@@ -295,7 +295,7 @@ func TestWorkerFlag_Defaults(t *testing.T) {
 	db := fs.String("db", "", "")
 	conc := fs.Int("concurrency", 10, "")
 	tq := fs.String("task-queue", "default", "")
-	ct := fs.Int("compaction-threshold", host.DefaultCompactionThreshold, "")
+	ct := fs.Int("compaction-threshold", engine.DefaultCompactionThreshold, "")
 	mwd := fs.Duration("max-workflow-duration", 0, "")
 	if err := fs.Parse(nil); err != nil {
 		t.Fatal(err)
@@ -312,8 +312,8 @@ func TestWorkerFlag_Defaults(t *testing.T) {
 	if *mwd != 0 {
 		t.Errorf("default max-workflow-duration = %v, want 0", *mwd)
 	}
-	if *ct != host.DefaultCompactionThreshold {
-		t.Errorf("default compaction-threshold = %d, want %d", *ct, host.DefaultCompactionThreshold)
+	if *ct != engine.DefaultCompactionThreshold {
+		t.Errorf("default compaction-threshold = %d, want %d", *ct, engine.DefaultCompactionThreshold)
 	}
 }
 

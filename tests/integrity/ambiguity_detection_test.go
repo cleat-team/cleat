@@ -8,27 +8,27 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	host "github.com/cleat-team/cleat/engine"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "github.com/lib/pq"
 )
 
 // pendingSentinel is the sentinel value used by the engine to mark a DurableCall
 // whose external call was dispatched but whose outcome was not persisted before
-// a crash. Exported as host.PendingSentinel from internal/host/engine.go.
-const pendingSentinel = host.PendingSentinel
+// a crash. Exported as engine.PendingSentinel from internal/host/engine.go.
+const pendingSentinel = engine.PendingSentinel
 
 // ---- Mock caller ----
 
 // ambigRecorder records all service calls for test assertions.
 type ambigRecorder struct {
-	calls []host.EventRecord
+	calls []engine.EventRecord
 }
 
 func (r *ambigRecorder) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
 	resp := mockAmbigResponse(service, operation)
-	r.calls = append(r.calls, host.EventRecord{
-		EventType: host.EventTypeCall,
+	r.calls = append(r.calls, engine.EventRecord{
+		EventType: engine.EventTypeCall,
 		Service:   service,
 		Op:        operation,
 		Request:   requestJSON,
@@ -63,14 +63,14 @@ func mockAmbigResponse(service, operation string) string {
 // ---- Engine setup helper ----
 
 // setupEngine creates a Runtime and Engine with a fresh ambigRecorder.
-func setupEngine(t *testing.T, ctx context.Context) (*host.Runtime, *host.Engine, *ambigRecorder) {
+func setupEngine(t *testing.T, ctx context.Context) (*engine.Runtime, *engine.Engine, *ambigRecorder) {
 	t.Helper()
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	caller := &ambigRecorder{}
-	engine := host.NewEngine(rt, caller)
+	engine := engine.NewEngine(rt, caller)
 	return rt, engine, caller
 }
 
@@ -113,7 +113,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 	// Also test with DB: store the full history, load it back, and verify.
 	db := testDB(t)
 	defer db.Close()
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	runID := fmt.Sprintf("int-ambig-trunc-%d", time.Now().UnixNano())
 	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
 		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
@@ -145,13 +145,13 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 			truncated := loadedHistory[:K]
 
 			replayCaller := &ambigRecorder{}
-			rt2, err := host.NewRuntime(ctx, 0, 0)
+			rt2, err := engine.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				t.Fatalf("NewRuntime: %v", err)
 			}
 			defer rt2.Close(ctx)
 
-			engine2 := host.NewEngine(rt2, replayCaller)
+			engine2 := engine.NewEngine(rt2, replayCaller)
 			result2, _, suspended2, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, truncated)
 
 			if K == N {
@@ -308,14 +308,14 @@ func TestPendingSentinelDetection(t *testing.T) {
 			modifiedHistory[tt.injectStep].Err = pendingSentinel
 			modifiedHistory[tt.injectStep].Response = ""
 
-			rt2, err := host.NewRuntime(ctx, 0, 0)
+			rt2, err := engine.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				t.Fatalf("NewRuntime: %v", err)
 			}
 			defer rt2.Close(ctx)
 
 			replayCaller := &ambigRecorder{}
-			engine2 := host.NewEngine(rt2, replayCaller)
+			engine2 := engine.NewEngine(rt2, replayCaller)
 			_, _, _, _, _, replayErr := engine2.Replay(ctx, wasmBytes, "place_order", input, modifiedHistory)
 
 			if tt.expectError && replayErr == nil {
@@ -380,25 +380,25 @@ func TestAmbiguityMetricIncrements(t *testing.T) {
 	}
 
 	// Record the initial metric value.
-	before := testutil.ToFloat64(host.AmbiguousCallsTotalCounter())
+	before := testutil.ToFloat64(engine.AmbiguousCallsTotalCounter())
 
 	// Create a modified history with pendingSentinel at step 0 to trigger ambiguity.
 	modifiedHistory := cloneHistory(history)
 	modifiedHistory[0].Err = pendingSentinel
 	modifiedHistory[0].Response = ""
 
-	rt2, err := host.NewRuntime(ctx, 0, 0)
+	rt2, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	defer rt2.Close(ctx)
 
 	replayCaller := &ambigRecorder{}
-	engine2 := host.NewEngine(rt2, replayCaller)
+	engine2 := engine.NewEngine(rt2, replayCaller)
 	engine2.Replay(ctx, wasmBytes, "place_order", input, modifiedHistory)
 
 	// Check the metric increased.
-	after := testutil.ToFloat64(host.AmbiguousCallsTotalCounter())
+	after := testutil.ToFloat64(engine.AmbiguousCallsTotalCounter())
 	if after <= before {
 		t.Errorf("AmbiguousCallsTotal did not increase: before=%f, after=%f", before, after)
 	} else {
@@ -420,7 +420,7 @@ func TestAmbiguityMetricIncrements(t *testing.T) {
 			# TYPE cleat_ambiguous_calls_total counter
 			cleat_ambiguous_calls_total %.0f
 		`, after)
-		if err := testutil.CollectAndCompare(host.AmbiguousCallsTotalCounter(), strings.NewReader(expected), "cleat_ambiguous_calls_total"); err != nil {
+		if err := testutil.CollectAndCompare(engine.AmbiguousCallsTotalCounter(), strings.NewReader(expected), "cleat_ambiguous_calls_total"); err != nil {
 			// Non-fatal: the metric exists and is incremented; the comparison
 			// format check is secondary.
 			t.Logf("Metric name verification: %v", err)
@@ -478,13 +478,13 @@ func TestReplayWithInjectedCrashPoints(t *testing.T) {
 			truncated := history[:K]
 
 			replayCaller := &ambigRecorder{}
-			rt2, err := host.NewRuntime(ctx, 0, 0)
+			rt2, err := engine.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				t.Fatalf("NewRuntime: %v", err)
 			}
 			defer rt2.Close(ctx)
 
-			engine2 := host.NewEngine(rt2, replayCaller)
+			engine2 := engine.NewEngine(rt2, replayCaller)
 			result2, _, suspended2, _, _, err := engine2.Replay(ctx, wasmBytes, "place_order", input, truncated)
 
 			freshCalls := len(replayCaller.calls)
@@ -549,14 +549,14 @@ func TestReplayWithInjectedCrashPoints(t *testing.T) {
 // ---- Helpers ----
 
 // cloneHistory creates a deep copy of an event history slice.
-func cloneHistory(src []host.EventRecord) []host.EventRecord {
-	dst := make([]host.EventRecord, len(src))
+func cloneHistory(src []engine.EventRecord) []engine.EventRecord {
+	dst := make([]engine.EventRecord, len(src))
 	copy(dst, src)
 	return dst
 }
 
 // formatCallServices returns a comma-separated list of service names from calls.
-func formatCallServices(calls []host.EventRecord) string {
+func formatCallServices(calls []engine.EventRecord) string {
 	var svcs []string
 	for _, c := range calls {
 		svcs = append(svcs, c.Service)

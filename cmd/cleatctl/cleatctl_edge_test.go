@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -18,7 +18,7 @@ import (
 func TestRunVersions_DispatchList(t *testing.T) {
 	var called bool
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			called = true
 			return nil, nil
 		},
@@ -97,8 +97,8 @@ func TestRunVersions_DispatchActive(t *testing.T) {
 
 func TestRunVersions_DispatchGC(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
 			}, nil
 		},
@@ -125,12 +125,12 @@ func TestRunDeploy_DispatchWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	path := writeWASM(t, dir, []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00})
 
-	var capturedDef *host.WorkflowDef
+	var capturedDef *engine.WorkflowDef
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return nil, nil
 		},
-		deployWorkflowDefFn: func(_ context.Context, def *host.WorkflowDef) error {
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
 			capturedDef = def
 			return nil
 		},
@@ -205,7 +205,7 @@ func TestPurgeVersion_UpperCaseY(t *testing.T) {
 
 func TestActiveInstances_WithNameListError(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return nil, errors.New("list failed")
 		},
 	}

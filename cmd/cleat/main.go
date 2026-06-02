@@ -30,9 +30,9 @@ import (
 	"github.com/cleat-team/cleat/internal/analyzer"
 	"github.com/cleat-team/cleat/internal/callgraph"
 	"github.com/cleat-team/cleat/internal/closure"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/internal/transform"
-	"github.com/cleat-team/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/wasm"
 )
 
 var dbConnStr string
@@ -1222,7 +1222,7 @@ func getDBConnStr() string {
 	// Fall back to credential provider.
 	// For the "env" provider this checks --db, DATABASE_URL, then CLEAT_DATABASE_URL.
 	if dbCredProviderName != "" {
-		provider, err := host.NewDBCredentialProvider(dbCredProviderName, "", dbCredPath)
+		provider, err := engine.NewDBCredentialProvider(dbCredProviderName, "", dbCredPath)
 		if err == nil {
 			connStr, err := provider.GetConnectionString(context.Background())
 			if err == nil && connStr != "" {
@@ -1342,7 +1342,7 @@ func runSchedule(args []string) {
 		os.Exit(1)
 	}
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	switch subCmd {
@@ -1365,8 +1365,8 @@ func runSchedule(args []string) {
 		}
 		name := fsArgs[0]
 
-		nextRun := host.NextCronTime(*cronExpr, time.Now())
-		sch := host.Schedule{
+		nextRun := engine.NextCronTime(*cronExpr, time.Now())
+		sch := engine.Schedule{
 			Name:           name,
 			DefName:        *defName,
 			EntryPoint:     *entryPoint,

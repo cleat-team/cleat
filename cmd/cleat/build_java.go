@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cleat-team/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/wasm"
 )
 
 // runBuildJava compiles a Java workflow to WASM using Gradle and the TeaVM plugin.

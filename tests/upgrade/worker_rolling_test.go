@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	host "github.com/cleat-team/cleat/engine"
 )
 
 // TestRollingWorkerRestart simulates restarting workers one at a time and
@@ -17,7 +17,7 @@ func TestRollingWorkerRestart(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	const numWorkflows = 50
@@ -72,9 +72,9 @@ func TestRollingWorkerRestart(t *testing.T) {
 			}
 
 			// Append a completion event.
-			rec := host.EventRecord{
+			rec := engine.EventRecord{
 				Step:      0,
-				EventType: host.EventTypeCall,
+				EventType: engine.EventTypeCall,
 				Service:   "svc",
 				Op:        "complete",
 				Request:   `{}`,
@@ -135,7 +135,7 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	const numWorkflows = 30
@@ -206,9 +206,9 @@ func TestRollingRestartNoDuplicateExecution(t *testing.T) {
 			}
 
 			// Append event and complete.
-			rec := host.EventRecord{
+			rec := engine.EventRecord{
 				Step:      0,
-				EventType: host.EventTypeCall,
+				EventType: engine.EventTypeCall,
 				Service:   "svc",
 				Op:        "execute",
 				Request:   `{}`,

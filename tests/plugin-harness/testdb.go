@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // OpenTestDB opens a database connection and creates an isolated schema

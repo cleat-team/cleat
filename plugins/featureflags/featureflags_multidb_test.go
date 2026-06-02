@@ -22,10 +22,10 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/host/testutil"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // testBackendTenantID is the tenant UUID used for multi-backend test requests.
@@ -75,7 +75,7 @@ func TestFFBehavioral_MultiBackend(t *testing.T) {
 			}
 
 			// Initialise the plugin with the real database connection.
-			p.db = &host.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB}
 			p.mux = http.NewServeMux()
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 

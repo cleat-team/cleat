@@ -20,9 +20,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -738,7 +738,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, *fakeNotifyStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -785,7 +785,7 @@ func buildHandler(t *testing.T, p *Plugin, store *fakeNotifyStore) http.Handler 
 	}
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
-	return auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	return auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 }
 
 // ---------------------------------------------------------------------------
@@ -1015,7 +1015,7 @@ func TestHostFunctionSendWebhook(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID.String(),
 		WorkflowID: "wf-test",
-		DB:         p.db.(*host.SQLDBAdapter).DB,
+		DB:         p.db.(*engine.SQLDBAdapter).DB,
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
@@ -1061,7 +1061,7 @@ func TestHostFunctionInvalidWebhook(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID.String(),
 		WorkflowID: "wf-test",
-		DB:         p.db.(*host.SQLDBAdapter).DB,
+		DB:         p.db.(*engine.SQLDBAdapter).DB,
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
@@ -1083,7 +1083,7 @@ func TestHostFunctionMissingWebhookID(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID.String(),
 		WorkflowID: "wf-test",
-		DB:         p.db.(*host.SQLDBAdapter).DB,
+		DB:         p.db.(*engine.SQLDBAdapter).DB,
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
@@ -1101,7 +1101,7 @@ func TestHostFunctionMissingEventType(t *testing.T) {
 	cc := &plugin.CallContext{
 		TenantID:   testTenantID.String(),
 		WorkflowID: "wf-test",
-		DB:         p.db.(*host.SQLDBAdapter).DB,
+		DB:         p.db.(*engine.SQLDBAdapter).DB,
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 

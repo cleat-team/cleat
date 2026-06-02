@@ -36,7 +36,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 
 	_ "github.com/lib/pq"
 )
@@ -46,7 +46,7 @@ import (
 // ---------------------------------------------------------------------------
 
 var benchDB *sql.DB
-var benchStore host.WorkflowStore
+var benchStore engine.WorkflowStore
 
 func TestMain(m *testing.M) {
 	dsn := os.Getenv("CLEAT_DB_BENCH_DSN")
@@ -78,7 +78,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	factory := host.NewPostgresStoreFactory(benchDB, "cleat_bench")
+	factory := engine.NewPostgresStoreFactory(benchDB, "cleat_bench")
 	store, closer, err := factory.OpenStore(context.Background(), "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open store: %v\n", err)
@@ -164,8 +164,8 @@ func benchWorkflowID() string {
 	return "bench-" + uuid.New().String()
 }
 
-func benchEvent(step int) host.EventRecord {
-	return host.EventRecord{
+func benchEvent(step int) engine.EventRecord {
+	return engine.EventRecord{
 		Step:      step,
 		EventType: "call",
 		Service:   "bench-svc",

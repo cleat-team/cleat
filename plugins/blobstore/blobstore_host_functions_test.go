@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -34,7 +34,7 @@ func setupHostFuncTest(t *testing.T) (*Plugin, *fakeDBStore, *fakeClock) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:      &host.SQLDBAdapter{DB: db},
+		db:      &engine.SQLDBAdapter{DB: db},
 		backend: newTestMemBackend(),
 		logger:  slog.Default(),
 		config:  Config{Backend: "memory"},

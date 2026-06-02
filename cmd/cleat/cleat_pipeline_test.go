@@ -17,7 +17,7 @@ import (
 
 	"github.com/cleat-team/cleat/internal/analyzer"
 	"github.com/cleat-team/cleat/internal/closure"
-	"github.com/cleat-team/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/wasm"
 )
 
 // ---------------------------------------------------------------------------

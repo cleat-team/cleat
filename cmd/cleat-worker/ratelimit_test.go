@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/auth"
+	"github.com/cleat-team/cleat/auth"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 )

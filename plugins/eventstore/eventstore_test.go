@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
-		"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
+		"github.com/cleat-team/cleat/engine"
 	)
 
 // ---------------------------------------------------------------------------
@@ -422,7 +422,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeEventStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		mux:    http.NewServeMux(),
 		logger: slog.Default(),
 		config: Config{MaxEventSize: 1 * 1024 * 1024},
@@ -432,7 +432,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeEventStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(p.mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
 	return p, handler, store
 }
 
@@ -463,7 +463,7 @@ func TestInfo(t *testing.T) {
 func TestInit(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: &sql.DB{}},
+		DB:     &engine.SQLDBAdapter{DB: &sql.DB{}},
 		Mux:    http.NewServeMux(),
 		Config: []byte(`{"max_event_size": 2097152}`),
 	}
@@ -490,7 +490,7 @@ func TestInit(t *testing.T) {
 func TestInitWithDefaults(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB:  &host.SQLDBAdapter{DB: &sql.DB{}},
+		DB:  &engine.SQLDBAdapter{DB: &sql.DB{}},
 		Mux: http.NewServeMux(),
 	}
 
@@ -836,7 +836,7 @@ func TestRunCancelledContext(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		config: Config{RetentionDays: -1}, // disable retention
 	}
@@ -857,7 +857,7 @@ func TestCleanupRetentionDisabled(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		config: Config{RetentionDays: -1},
 	}
@@ -1024,13 +1024,13 @@ func TestHandleReadDBError(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		mux:    http.NewServeMux(),
 		logger: slog.Default(),
 		config: Config{MaxEventSize: 1 * 1024 * 1024},
 	}
 	p.RegisterRoutes(p.mux)
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(p.mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
 
 	// Append an event (should succeed).
 	store.mu.Lock()
@@ -1125,7 +1125,7 @@ func TestCleanupRetentionDefault(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		config: Config{RetentionDays: 0},
 	}
@@ -1147,13 +1147,13 @@ func TestHandleAppendDBError(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		mux:    http.NewServeMux(),
 		logger: slog.Default(),
 		config: Config{MaxEventSize: 1 * 1024 * 1024},
 	}
 	p.RegisterRoutes(p.mux)
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(p.mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
 
 	req := authedRequest("POST", "/events/fail-append", bytes.NewReader([]byte(`{"x":1}`)))
 	rec := httptest.NewRecorder()

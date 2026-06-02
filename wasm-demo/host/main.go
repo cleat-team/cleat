@@ -45,7 +45,7 @@ type workflowState struct {
 	FinalErr   string       `json:"final_err,omitempty"`
 }
 
-// host is the durable execution host. It wraps a workflow and intercepts every
+// host is the durable execution engine. It wraps a workflow and intercepts every
 // API call to provide durability (caching, checkpointing, replay).
 type host struct {
 	state     *workflowState

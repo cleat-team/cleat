@@ -43,11 +43,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/migration"
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/migration"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/wasm"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
@@ -56,8 +56,6 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 
 	// Plugins
-	_ "github.com/cleat-team/cleat/plugins/clewexecutor"
-	_ "github.com/cleat-team/cleat/plugins/clewservice"
 	_ "github.com/cleat-team/cleat/plugins/llm"
 	// _ "github.com/cleat-team/cleat/plugins/pgvector"  // requires pgvector extension
 )
@@ -81,7 +79,7 @@ func main() {
 	pollInterval := flag.Duration("poll", 5*time.Second, "Poll interval when no work")
 	apiAddr := flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
 	taskQueuesStr := flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
-	compactionThreshold := flag.Int("compaction-threshold", host.DefaultCompactionThreshold, "Number of events before history compaction triggers")
+	compactionThreshold := flag.Int("compaction-threshold", engine.DefaultCompactionThreshold, "Number of events before history compaction triggers")
 	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
 	shardsFile := flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
 	pluginConfigFile := flag.String("plugin-config", "", "path to plugin config JSON file")
@@ -111,8 +109,8 @@ func main() {
 	disableChecksumVerification := flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
 	wasmMemoryMaxMB := flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
 	wasmInstructionLimit := flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; monitored via wazero function listener)")
-	wasmOutputBufferSize := flag.Int("wasm-output-buffer-size", host.DefaultOutBufSize, "WASM output buffer size in bytes (default 1 MiB)")
-	wasmMaxStringLen := flag.Int("wasm-max-string-len", host.DefaultMaxWasmStringLen, "Maximum WASM string parameter length in bytes (default 1 MiB)")
+	wasmOutputBufferSize := flag.Int("wasm-output-buffer-size", engine.DefaultOutBufSize, "WASM output buffer size in bytes (default 1 MiB)")
+	wasmMaxStringLen := flag.Int("wasm-max-string-len", engine.DefaultMaxWasmStringLen, "Maximum WASM string parameter length in bytes (default 1 MiB)")
 	wasmCacheDir := flag.String("wasm-cache-dir", "", "Directory for disk-backed compiled WASM module cache (empty disables)")
 	wasmDiskCacheMaxFiles := flag.Int("wasm-disk-cache-max-files", 100, "Max files in the disk-backed compiled WASM module cache (LRU eviction)")
 	redactPatternsFile := flag.String("redact-patterns-file", "", "Path to file with custom redaction patterns (one per line)")
@@ -141,8 +139,8 @@ func main() {
 	flag.Parse()
 
 	// Set WASM output buffer size before any Runtime is created.
-	host.OutBufSize = uint32(*wasmOutputBufferSize)
-	host.MaxWasmStringLen = uint32(*wasmMaxStringLen)
+	engine.OutBufSize = uint32(*wasmOutputBufferSize)
+	engine.MaxWasmStringLen = uint32(*wasmMaxStringLen)
 
 	workerID := generateWorkerID()
 
@@ -203,8 +201,8 @@ func main() {
 
 	// Plugin state (populated in both sharded and non-sharded paths).
 	var (
-		pluginRegistry       = host.NewPluginRegistry()
-		pluginStreamRegistry = host.NewPluginStreamRegistry()
+		pluginRegistry       = engine.NewPluginRegistry()
+		pluginStreamRegistry = engine.NewPluginStreamRegistry()
 		plugList             []*plugin.LoadedPlugin
 		plugHandler          http.Handler
 		plugMux              *http.ServeMux
@@ -215,12 +213,12 @@ func main() {
 
 	defaultTenantID := "00000000-0000-0000-0000-000000000000"
 
-	var store host.WorkflowStore
+	var store engine.WorkflowStore
 	var db *sql.DB
 	var pluginDB *sql.DB
 	var tenantPools *plugin.TenantPools
-	var factory host.StoreFactory
-	var payloadEncryption *host.PayloadEncryption
+	var factory engine.StoreFactory
+	var payloadEncryption *engine.PayloadEncryption
 	if *shardsFile != "" {
 		configs, err := loadShardConfigs(*shardsFile)
 		if err != nil {
@@ -234,7 +232,7 @@ func main() {
 		}
 
 		// Load encryption key if configured (sharded path).
-		var payloadEncryption *host.PayloadEncryption
+		var payloadEncryption *engine.PayloadEncryption
 		if *encryptSensitivePayloads {
 			if *encryptionKeyFile == "" {
 				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --encryption-key-file", "worker_id", workerID); os.Exit(1)
@@ -246,7 +244,7 @@ func main() {
 				logger.ErrorContext(context.Background(), "failed to read encryption key file", "worker_id", workerID, "error", kerr); os.Exit(1)
 			}
 			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := host.NewPayloadEncryption(keyStr)
+			pe, perr := engine.NewPayloadEncryption(keyStr)
 			if perr != nil {
 				logger.ErrorContext(context.Background(), "invalid encryption key", "worker_id", workerID, "error", perr); os.Exit(1)
 			}
@@ -254,7 +252,7 @@ func main() {
 			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
 		}
 		// Build stores, DB connections, and closers for each shard.
-		stores := make([]host.WorkflowStore, len(configs))
+		stores := make([]engine.WorkflowStore, len(configs))
 		closers := make([]func() error, len(configs))
 		shardDBs := make([]*sql.DB, len(configs))
 		for i, cfg := range configs {
@@ -279,7 +277,7 @@ func main() {
 			sdb.SetConnMaxLifetime(5 * time.Minute)
 
 			shardDBs[i] = sdb
-			f := host.NewPostgresStoreFactory(sdb, cfg.Schema)
+			f := engine.NewPostgresStoreFactory(sdb, cfg.Schema)
 			if payloadEncryption != nil {
 				f.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 			}
@@ -295,7 +293,7 @@ func main() {
 			closers[i] = closer.Close
 		}
 
-		shardedStore, err := host.NewShardedStore(configs, stores, closers)
+		shardedStore, err := engine.NewShardedStore(configs, stores, closers)
 		if err != nil {
 			logger.ErrorContext(context.Background(), "failed to create sharded store", "worker_id", workerID, "error", err); os.Exit(1)
 		}
@@ -329,7 +327,7 @@ func main() {
 		}
 	} else {
 		// Resolve DB connection string via the configured credential provider.
-		credProvider, credErr := host.NewDBCredentialProvider(*dbCredentialProvider, *dbURL, *dbCredentialPath)
+		credProvider, credErr := engine.NewDBCredentialProvider(*dbCredentialProvider, *dbURL, *dbCredentialPath)
 		if credErr != nil {
 			logger.ErrorContext(context.Background(), "credential provider error", "worker_id", workerID, "error", credErr); os.Exit(1)
 		}
@@ -360,7 +358,7 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = host.NewPostgresStoreFactory(db, *schemaName)
+			factory = engine.NewPostgresStoreFactory(db, *schemaName)
 
 			// Create per-tenant database connection pools for tenant-scoped plugin operations.
 			baseDSN := baseDSNFromURL(*dbURL)
@@ -390,7 +388,7 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = host.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL))
+			factory = engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL))
 
 			// Create plugin-dedicated connection pool.
 			if *maxPluginConnections > 0 {
@@ -406,7 +404,7 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		case "mssql":
-			factory = host.NewMSSQLStoreFactory(*dbURL)
+			factory = engine.NewMSSQLStoreFactory(*dbURL)
 			// Open a connection to verify and for plugin/migration use.
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -449,7 +447,7 @@ func main() {
 				logger.ErrorContext(context.Background(), "failed to read encryption key file", "worker_id", workerID, "error", kerr); os.Exit(1)
 			}
 			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := host.NewPayloadEncryption(keyStr)
+			pe, perr := engine.NewPayloadEncryption(keyStr)
 			if perr != nil {
 				logger.ErrorContext(context.Background(), "invalid encryption key", "worker_id", workerID, "error", perr); os.Exit(1)
 			}
@@ -458,7 +456,7 @@ func main() {
 		}
 
 		// Propagate encryption to the store factory.
-		if pgFactory, ok := factory.(*host.PostgresStoreFactory); ok && payloadEncryption != nil {
+		if pgFactory, ok := factory.(*engine.PostgresStoreFactory); ok && payloadEncryption != nil {
 			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 		}
 
@@ -509,7 +507,7 @@ func main() {
 			if len(versions) == 0 {
 				return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
 			}
-			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "", host.DefaultTenantUUID, 0)
+			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "", engine.DefaultTenantUUID, 0)
 			return runID, err
 		},
 
@@ -537,7 +535,7 @@ func main() {
 	// For MySQL, the factory creates a per-tenant database that needs its
 	// own copy of the schema. Run core and plugin migrations on it.
 	if *driver == "mysql" {
-		if mf, ok := factory.(*host.MySQLStoreFactory); ok {
+		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
 			tenantDB, terr := mf.TenantDB(ctx, defaultTenantID)
 			if terr != nil {
 				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr); os.Exit(1)
@@ -655,7 +653,7 @@ func main() {
 
 	// Load custom redaction patterns from file (if configured).
 	if *redactPatternsFile != "" {
-		if err := host.LoadRedactPatterns(*redactPatternsFile); err != nil {
+		if err := engine.LoadRedactPatterns(*redactPatternsFile); err != nil {
 			logger.ErrorContext(context.Background(), "redact patterns error", "worker_id", workerID, "error", err); os.Exit(1)
 		}
 	}
@@ -684,7 +682,7 @@ func main() {
 	}
 
 	// Create disk-backed compiled WASM module cache.
-	wasmDiskCache := host.NewWasmDiskCache(*wasmCacheDir, *wasmDiskCacheMaxFiles)
+	wasmDiskCache := engine.NewWasmDiskCache(*wasmCacheDir, *wasmDiskCacheMaxFiles)
 	if wasmDiskCache != nil {
 		logger.InfoContext(context.Background(), "WASM disk cache configured", "worker_id", workerID, "dir", *wasmCacheDir, "max_files", *wasmDiskCacheMaxFiles)
 	}
@@ -692,8 +690,8 @@ func main() {
 	// Register the wasmtime backend for Go WASM modules. If wasmtime is not
 	// available (e.g., libwasmtime.so not found), fall back to the legacy
 	// wazero runtime by leaving the backend as nil.
-	var wasmtimeBackend host.WasmBackend
-	if wt, err := host.NewWasmtimeBackend(ctx); err == nil {
+	var wasmtimeBackend engine.WasmBackend
+	if wt, err := engine.NewWasmtimeBackend(ctx); err == nil {
 		wasmtimeBackend = wt
 		logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID)
 	} else {
@@ -774,7 +772,7 @@ func main() {
 		mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
 
 		// Version management endpoints.
-		host.RegisterVersionHandler(mux, store)
+		engine.RegisterVersionHandler(mux, store)
 
 		// Plugin discovery endpoint.
 		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
@@ -1009,12 +1007,12 @@ type loopContext struct {
 type Worker struct {
 	id                   string
 	logger               *slog.Logger
-	store                host.WorkflowStore
+	store                engine.WorkflowStore
 	concurrency          int
 	heartbeatInterval    time.Duration
 	pollInterval         time.Duration
-	pluginRegistry       *host.PluginRegistry
-	pluginStreamRegistry *host.PluginStreamRegistry
+	pluginRegistry       *engine.PluginRegistry
+	pluginStreamRegistry *engine.PluginStreamRegistry
 	tenantPools          *plugin.TenantPools
 	plugList             []*plugin.LoadedPlugin
 
@@ -1023,8 +1021,8 @@ type Worker struct {
 	draining atomic.Bool
 	wg       sync.WaitGroup
 
-	inflight    sync.Map // map[workflowID]*host.WorkflowInstance
-	execEngines sync.Map // map[workflowID]*host.Engine
+	inflight    sync.Map // map[workflowID]*engine.WorkflowInstance
+	execEngines sync.Map // map[workflowID]*engine.Engine
 	wasmCache   *wasmLRUCache
 
 	scheduleMu       sync.Mutex
@@ -1049,14 +1047,14 @@ type Worker struct {
 	requireSignalAuth           *bool
 	wasmMemoryMaxMB             *int
 	wasmInstructionLimit        *int
-	wasmDiskCache               *host.WasmDiskCache
-	wasmtimeBackend              host.WasmBackend
+	wasmDiskCache               *engine.WasmDiskCache
+	wasmtimeBackend              engine.WasmBackend
 
 	drainCh   chan struct{}
 	drainOnce sync.Once
 
 	// Encryption at rest for sensitive event payloads.
-	encryption               *host.PayloadEncryption
+	encryption               *engine.PayloadEncryption
 	encryptSensitivePayloads bool
 
 	// Per-workflow resource quotas.
@@ -1128,7 +1126,7 @@ func (w *Worker) launchLoop(name string, fn func()) {
 func (w *Worker) Run() {
 	// Initialize the global time seed so the first workflow execution
 	// (before the dispatch loop updates it) sees a real wall clock.
-	host.UpdateNowMs()
+	engine.UpdateNowMs()
 
 	// Initialize health tracker and loop registry for watchdog.
 	w.healthTracker = newHealthTracker()
@@ -1214,7 +1212,7 @@ func (w *Worker) dispatchLoop() {
 	w.healthTracker.setInterval("dispatch", w.pollInterval)
 
 	// Keep the global time seed fresh for workflow sessions.
-	host.UpdateNowMs()
+	engine.UpdateNowMs()
 
 	const maxBatchSize = 20 // cap claims per query to avoid oversized batches
 	idleTicks := 0
@@ -1308,7 +1306,7 @@ func (w *Worker) dispatchLoop() {
 
 		// Improvement 1: Fill remaining capacity with general batch claim.
 		remaining := batchSize - len(stickyWfs)
-		var generalWfs []*host.WorkflowInstance
+		var generalWfs []*engine.WorkflowInstance
 		if remaining > 0 {
 			var err error
 			generalWfs, err = w.store.ClaimWorkflows(w.ctx, w.id, remaining)
@@ -1377,7 +1375,7 @@ func (w *Worker) dispatchLoop() {
 	}
 }
 
-func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
+func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	defer w.wg.Done()
 	defer w.inflight.Delete(wf.ID)
 	defer func() {
@@ -1419,8 +1417,8 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		w.logger.ErrorContext(context.Background(), "failed to load WASM", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		var ce *host.CleatError
-		errorCode := host.ErrUnknown.String()
+		var ce *engine.CleatError
+		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
 		if errors.As(err, &ce) {
 			errorCode = ce.Code.String()
@@ -1450,7 +1448,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, host.ErrUnknown.String(), "", nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, engine.ErrUnknown.String(), "", nil)
 			return
 		}
 	}
@@ -1465,7 +1463,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		}
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("history load: %v", err), host.ErrUnknown.String(), "", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("history load: %v", err), engine.ErrUnknown.String(), "", nil)
 		return
 	}
 
@@ -1478,12 +1476,12 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
 		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation,
 			"cannot determine entry point: no __entry_point in input and no handle_* export in WASM binary",
-			host.ErrPermanent.String(), "", nil)
+			engine.ErrPermanent.String(), "", nil)
 		return
 	}
 
 	// ---- Load compaction state if present ----
-	var compactionState *host.CompactionState
+	var compactionState *engine.CompactionState
 	compactionState, err = w.store.LoadCompactionState(w.ctx, wf.ID)
 	if err != nil {
 		w.logger.WarnContext(context.Background(), "failed to load compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
@@ -1499,11 +1497,11 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			memoryPages = 65536
 		}
 	}
-	rt, err := host.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
+	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 	if err != nil {
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("create runtime: %v", err), host.ErrUnknown.String(), "", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("create runtime: %v", err), engine.ErrUnknown.String(), "", nil)
 		return
 	}
 	defer rt.Close(w.ctx)
@@ -1528,7 +1526,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "version_check", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "version_check", nil)
 		return
 	}
 
@@ -1551,7 +1549,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "plugin_check", nil)
 				return
 			}
 			if workerVersion != requiredVersion {
@@ -1561,47 +1559,47 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "plugin_check", nil)
 				return
 			}
 		}
 	}
 
 	caller := &dbServiceCaller{store: w.store, workerID: w.id}
-	engineOpts := []host.EngineOption{
-		host.WithSignalStore(w.store.(host.SignalStore)),
-		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),
-		host.WithWorkflowID(wf.ID),
-		host.WithTraceID(traceID),
-		host.WithTenantID(wf.TenantID),
-		host.WithBackend("go", w.wasmtimeBackend),
-		host.WithWorkflowStore(w.store),
-		host.WithChildWorkflowStore(w.store),
-		host.WithPluginRegistry(w.pluginRegistry),
-		host.WithMaxRetryAttempts(w.maxRetries),
-		host.WithSchema(w.schemaName),
-		host.WithPeerSchemas(w.peerSchemas),
-		host.WithEncryption(w.encryption, w.encryptSensitivePayloads),
-		host.WithMaxQuotaEvents(w.maxQuotaEvents),
-		host.WithMaxQuotaChildren(w.maxQuotaChildren),
-		host.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
-		host.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
+	engineOpts := []engine.EngineOption{
+		engine.WithSignalStore(w.store.(engine.SignalStore)),
+		engine.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),
+		engine.WithWorkflowID(wf.ID),
+		engine.WithTraceID(traceID),
+		engine.WithTenantID(wf.TenantID),
+		engine.WithBackend("go", w.wasmtimeBackend),
+		engine.WithWorkflowStore(w.store),
+		engine.WithChildWorkflowStore(w.store),
+		engine.WithPluginRegistry(w.pluginRegistry),
+		engine.WithMaxRetryAttempts(w.maxRetries),
+		engine.WithSchema(w.schemaName),
+		engine.WithPeerSchemas(w.peerSchemas),
+		engine.WithEncryption(w.encryption, w.encryptSensitivePayloads),
+		engine.WithMaxQuotaEvents(w.maxQuotaEvents),
+		engine.WithMaxQuotaChildren(w.maxQuotaChildren),
+		engine.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
+		engine.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
 	}
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
-	if cks, ok := w.store.(host.ConcurrencyKeyStore); ok {
-		engineOpts = append(engineOpts, host.WithConcurrencyKeyStore(cks))
+	if cks, ok := w.store.(engine.ConcurrencyKeyStore); ok {
+		engineOpts = append(engineOpts, engine.WithConcurrencyKeyStore(cks))
 	}
 	// Enable event history checksum verification on replay by default.
 	// Can be disabled with --disable-checksum-verification.
 	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
-		engineOpts = append(engineOpts, host.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, false))
+		engineOpts = append(engineOpts, engine.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, false))
 	}
 	// Enable signal authorization if --require-signal-auth is set.
 	if w.requireSignalAuth != nil && *w.requireSignalAuth {
 		engineOpts = append(engineOpts,
-			host.WithRequireSignalAuth(true),
-			host.WithSignalAuthCheck(func(ctx context.Context, targetWorkflowID, callerDefName string) error {
+			engine.WithRequireSignalAuth(true),
+			engine.WithSignalAuthCheck(func(ctx context.Context, targetWorkflowID, callerDefName string) error {
 				callers, err := w.store.GetAllowedSignalCallers(ctx, targetWorkflowID)
 				if err != nil {
 					return err
@@ -1623,13 +1621,13 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			w.logger.ErrorContext(context.Background(), "cannot get tenant pool", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), host.ErrUnknown.String(), "", nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), engine.ErrUnknown.String(), "", nil)
 			return
 		}
-		engineOpts = append(engineOpts, host.WithDB(tenantDB))
+		engineOpts = append(engineOpts, engine.WithDB(tenantDB))
 	}
 	if compactionState != nil {
-		engineOpts = append(engineOpts, host.WithCompactionState(compactionState))
+		engineOpts = append(engineOpts, engine.WithCompactionState(compactionState))
 		w.logger.InfoContext(context.Background(), "loaded compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "compacted_step", compactionState.CompactedStep)
 	}
 	// When replaying, validate version compatibility between the old
@@ -1638,30 +1636,30 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if len(history) > 0 {
 		oldDef, err := w.store.GetWorkflowDef(w.ctx, wf.DefName, wf.DefVersion)
 		if err == nil && oldDef != nil && wfMeta != nil {
-			newDef := &host.WorkflowDef{
+			newDef := &engine.WorkflowDef{
 				Name:       wfMeta.WorkflowName,
 				Version:    wfMeta.WorkflowVersion,
 				ABIVersion: wfMeta.ABIVersion,
 				MinVersion: wfMeta.MinCompatibleVersion,
 				PluginDeps: wfMeta.PluginDeps,
 			}
-			engineOpts = append(engineOpts, host.WithVersionValidation(func() error {
-				return host.ValidateVersionCompatibility(oldDef, newDef)
+			engineOpts = append(engineOpts, engine.WithVersionValidation(func() error {
+				return engine.ValidateVersionCompatibility(oldDef, newDef)
 			}))
 		}
 	}
 	// Load initial event count so the engine tracks events locally.
 	if w.maxQuotaEvents > 0 {
 		if count, err := w.store.GetEventCount(w.ctx, wf.ID); err == nil {
-			engineOpts = append(engineOpts, host.WithInitialEventCount(count))
+			engineOpts = append(engineOpts, engine.WithInitialEventCount(count))
 		}
 	}
-	engine := host.NewEngine(rt, caller, engineOpts...)
+	eng := engine.NewEngine(rt, caller, engineOpts...)
 
 	// ---- Execute/Resume ----
 	inputJSON := wf.Input
 	engineStart := time.Now()
-	result, resultHistory, suspended, deferrals, queryState, err := engine.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
+	result, resultHistory, suspended, deferrals, queryState, err := eng.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
 	engineElapsed := time.Since(engineStart)
 	if len(history) > 0 {
 		replayDuration.Observe(engineElapsed.Seconds())
@@ -1681,8 +1679,8 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		var ce *host.CleatError
-		errorCode := host.ErrUnknown.String()
+		var ce *engine.CleatError
+		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
 		if errors.As(err, &ce) {
 			errorCode = ce.Code.String()
@@ -1703,13 +1701,13 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	// appropriate atomic method for each path.
 
 	// Collect new events (if any) so the same slice is available to all branches.
-	var newEvents []host.EventRecord
+	var newEvents []engine.EventRecord
 	if len(resultHistory) > len(history) {
 		newEvents = resultHistory[len(history):]
 		// Redact sensitive fields in new events before persisting.
 		for i := range newEvents {
-			newEvents[i].Request = host.Redact(newEvents[i].Request)
-			newEvents[i].Response = host.Redact(newEvents[i].Response)
+			newEvents[i].Request = engine.Redact(newEvents[i].Request)
+			newEvents[i].Response = engine.Redact(newEvents[i].Response)
 		}
 	}
 
@@ -1722,7 +1720,7 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			w.logger.ErrorContext(context.Background(), "continue_as_new failed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("continue_as_new: %v", err), host.ErrUnknown.String(), "", nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("continue_as_new: %v", err), engine.ErrUnknown.String(), "", nil)
 			return
 		}
 		w.logger.InfoContext(context.Background(), "continued as new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "new_run_id", newRunID)
@@ -1752,8 +1750,8 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		w.logger.ErrorContext(context.Background(), "finalize error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		var ce *host.CleatError
-		errorCode := host.ErrUnknown.String()
+		var ce *engine.CleatError
+		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
 		if errors.As(err, &ce) {
 			errorCode = ce.Code.String()
@@ -1951,14 +1949,14 @@ func (w *Worker) scheduleLoop() {
 					continue
 				}
 
-				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "", host.DefaultTenantUUID, 0)
+				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "", engine.DefaultTenantUUID, 0)
 				if serr != nil {
 					w.logger.ErrorContext(w.ctx, "Scheduler: failed to start workflow", "worker_id", w.id, "schedule", sch.Name, "error", serr)
 					continue
 				}
 
 				// Compute next run time and update.
-				nextRun := host.NextCronTime(sch.CronExpression, time.Now())
+				nextRun := engine.NextCronTime(sch.CronExpression, time.Now())
 				if uerr := w.store.UpdateScheduleNextRun(w.ctx, sch.Name, nextRun); uerr != nil {
 					w.logger.ErrorContext(w.ctx, "Scheduler: failed to update next run", "worker_id", w.id, "schedule", sch.Name, "error", uerr)
 				}
@@ -1994,7 +1992,7 @@ func (w *Worker) compactionLoop() {
 				continue
 			}
 			for _, wfID := range candidates {
-				if err := host.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold); err != nil {
+				if err := engine.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold); err != nil {
 					w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
 				}
 			}
@@ -2130,7 +2128,7 @@ func (w *Worker) dispatchPendingUpdates() {
 			// Leave the updates pending for the next claim cycle.
 			return true
 		}
-		env := envVal.(*host.Engine)
+		env := envVal.(*engine.Engine)
 
 		for _, upd := range updates {
 			// Dispatch the update via the engine.
@@ -2235,7 +2233,7 @@ func (w *Worker) waitForDB() {
 	}
 }
 
-func (w *Worker) releaseOrFail(wf *host.WorkflowInstance, errMsg string) {
+func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
 	if errMsg != "" {
 		if strings.Contains(errMsg, "retries exhausted") {
 			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, "", "")
@@ -2248,9 +2246,9 @@ func (w *Worker) releaseOrFail(wf *host.WorkflowInstance, errMsg string) {
 	}
 }
 
-// dbServiceCaller implements host.ServiceCaller for the worker.
+// dbServiceCaller implements engine.ServiceCaller for the worker.
 type dbServiceCaller struct {
-	store    host.WorkflowStore
+	store    engine.WorkflowStore
 	workerID string
 }
 
@@ -2313,7 +2311,7 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 	return string(result), nil
 }
 
-// dbWorkflowState implements host.WorkflowState.
+// dbWorkflowState implements engine.WorkflowState.
 type dbWorkflowState struct {
 	version       int
 	minVersion    int
@@ -2333,10 +2331,10 @@ func (s *dbWorkflowState) ChildVersion(name string) (int, bool) {
 }
 
 // hostPluginRegistryAdapter bridges plugin.FuncRegistry and plugin.StreamFuncRegistry
-// to host.PluginRegistry and host.PluginStreamRegistry.
+// to engine.PluginRegistry and engine.PluginStreamRegistry.
 type hostPluginRegistryAdapter struct {
-	registry       *host.PluginRegistry
-	streamRegistry *host.PluginStreamRegistry
+	registry       *engine.PluginRegistry
+	streamRegistry *engine.PluginStreamRegistry
 	pluginName     string
 }
 
@@ -2351,9 +2349,9 @@ func (a *hostPluginRegistryAdapter) Register(opts plugin.FuncOptions, fn plugin.
 		return fmt.Errorf("function %q already registered for plugin %q", opts.Name, a.pluginName)
 	}
 	if opts.Idempotent {
-		return a.registry.RegisterIdempotent(a.pluginName, opts.Name, host.PluginFunc(fn))
+		return a.registry.RegisterIdempotent(a.pluginName, opts.Name, fn)
 	}
-	return a.registry.Register(a.pluginName, opts.Name, host.PluginFunc(fn))
+	return a.registry.Register(a.pluginName, opts.Name, fn)
 }
 
 func (a *hostPluginRegistryAdapter) RegisterStream(opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
@@ -2465,14 +2463,14 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 			memoryPages = 65536
 		}
 	}
-	rt, err := host.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
+	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 	if err != nil {
 		w.logger.ErrorContext(context.Background(), "runDefers: create runtime failed", "worker_id", w.id, "error", err)
 		return
 	}
 	defer rt.Close(w.ctx)
 
-	engine := host.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id})
+	eng := engine.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id})
 
 	// Collect defer IDs sorted by step number for LIFO ordering.
 	// Map iteration order is random in Go, so we always parse the step
@@ -2502,7 +2500,7 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 
 	for _, entry := range entries {
 		deferName := "cleat_defer_" + entry.id
-		_, err := engine.RunDefer(w.ctx, wasmBytes, deferName, nil)
+		_, err := eng.RunDefer(w.ctx, wasmBytes, deferName, nil)
 		if err != nil {
 			w.logger.ErrorContext(context.Background(), "defer execution failed", "worker_id", w.id, "defer_id", entry.id, "description", entry.desc, "error", err)
 		} else {
@@ -2891,12 +2889,12 @@ func signalCallerAllowed(callers []string, callerDefName string) bool {
 //	  {"name": "shard-0", "conn_str": "postgres://...", "tenants": ["tenant-a"]},
 //	  {"name": "shard-1", "conn_str": "postgres://...", "tenants": ["tenant-b"]}
 //	]
-func loadShardConfigs(path string) ([]host.ShardConfig, error) {
+func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read shards file: %w", err)
 	}
-	var configs []host.ShardConfig
+	var configs []engine.ShardConfig
 	if err := json.Unmarshal(data, &configs); err != nil {
 		return nil, fmt.Errorf("parse shards file: %w", err)
 	}
@@ -3090,7 +3088,7 @@ func rateLimitMiddleware(ipLim *ipRateLimiter, tenantLim *keyedRateLimiter, tena
 // ---- HTTP API server ----
 
 type apiServer struct {
-	store       host.WorkflowStore
+	store       engine.WorkflowStore
 	worker      *Worker
 	maxBodySize int64
 	db          *sql.DB
@@ -3188,7 +3186,7 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	q := r.URL.Query()
-	filter := host.WorkflowFilter{
+	filter := engine.WorkflowFilter{
 		Status:        q.Get("status"),
 		InputContains: q.Get("input_contains"),
 		ErrorContains: q.Get("error_contains"),
@@ -3201,7 +3199,7 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if workflows == nil {
-		workflows = []host.WorkflowInstance{}
+		workflows = []engine.WorkflowInstance{}
 	}
 	s.writeJSON(w, 200, workflows)
 }
@@ -3336,7 +3334,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		tenantID = input.Namespace
 	}
 	if tenantID == "" {
-		tenantID = host.DefaultTenantUUID
+		tenantID = engine.DefaultTenantUUID
 	}
 
 	// Find the latest version of this workflow.
@@ -3372,7 +3370,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// Support Idempotency-Key header for exactly-once semantics.
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	// Redact sensitive fields in the input before storing.
-	in = json.RawMessage(host.Redact(string(in)))
+	in = json.RawMessage(engine.Redact(string(in)))
 	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey, tenantID, input.Priority)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
@@ -3431,7 +3429,7 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	payload := req.Payload
-	payload = host.Redact(payload)
+	payload = engine.Redact(payload)
 	// Check signal authorization for HTTP API callers.
 	// External callers have no defName; they must be allowed via "*" wildcard.
 	if s.worker.requireSignalAuth != nil && *s.worker.requireSignalAuth {
@@ -3500,7 +3498,7 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	if history == nil {
-		history = []host.EventRecord{}
+		history = []engine.EventRecord{}
 	}
 
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
@@ -3564,7 +3562,7 @@ func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	if promises == nil {
-		promises = []host.PromiseInfo{}
+		promises = []engine.PromiseInfo{}
 	}
 	s.writeJSON(w, 200, promises)
 }
@@ -3646,7 +3644,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 		payload = "{}"
 	}
 	// Redact sensitive fields from the payload before persisting.
-	payload = host.Redact(payload)
+	payload = engine.Redact(payload)
 
 	// Check if there's already a pending update with the same name.
 	pending, pErr := s.store.GetPendingUpdateRequests(r.Context(), id)
@@ -3675,7 +3673,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Create an associated promise record so the caller can poll for the result.
-	if ps, ok := s.store.(host.PromiseStore); ok {
+	if ps, ok := s.store.(engine.PromiseStore); ok {
 		if pErr := ps.CreatePromise(r.Context(), id, "update:"+updateName, promiseID); pErr != nil {
 			slog.Warn("failed to create promise for update", "worker_id", id, "update_name", updateName, "error", pErr)
 		}
@@ -3712,7 +3710,7 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if schedules == nil {
-		schedules = []host.Schedule{}
+		schedules = []engine.Schedule{}
 	}
 	s.writeJSON(w, 200, schedules)
 }
@@ -3782,7 +3780,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, 400, "name, cron, and def_name are required")
 		return
 	}
-	sch := host.Schedule{
+	sch := engine.Schedule{
 		Name:           req.Name,
 		DefName:        req.DefName,
 		EntryPoint:     req.EntryPoint,
@@ -3811,7 +3809,7 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load memory stats for enrichment.
-	memoryStats := make(map[string]*host.WorkflowMemoryStats)
+	memoryStats := make(map[string]*engine.WorkflowMemoryStats)
 	if stats, err := s.store.LoadMemoryStats(r.Context()); err == nil {
 		for i := range stats {
 			memoryStats[stats[i].DefName] = &stats[i]
@@ -3826,7 +3824,7 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 		CreatedAt       time.Time                 `json:"created_at"`
 		Deprecated      bool                      `json:"deprecated"`
 		ActiveInstances int                       `json:"active_instances"`
-		Memory          *host.WorkflowMemoryStats `json:"memory,omitempty"`
+		Memory          *engine.WorkflowMemoryStats `json:"memory,omitempty"`
 	}
 
 	var response []defResponse
@@ -3912,7 +3910,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	def := &host.WorkflowDef{
+	def := &engine.WorkflowDef{
 		Name:       req.Name,
 		Version:    version,
 		WASMBytes:  wasmBytes,
@@ -3944,20 +3942,20 @@ func (s *apiServer) inflightCount() int {
 
 // getPluginDB returns the plugin DB adapter, using pluginDB if available
 // (separate pool), falling back to the main db otherwise.
-func getPluginDB(db, pluginDB *sql.DB) *host.SQLDBAdapter {
+func getPluginDB(db, pluginDB *sql.DB) *engine.SQLDBAdapter {
 	if pluginDB != nil {
-		return &host.SQLDBAdapter{DB: pluginDB}
+		return &engine.SQLDBAdapter{DB: pluginDB}
 	}
-	return &host.SQLDBAdapter{DB: db}
+	return &engine.SQLDBAdapter{DB: db}
 }
 
 // getPluginReadOnlyDB returns the read-only plugin DB adapter, using pluginDB
 // if available (separate pool), falling back to the main db otherwise.
-func getPluginReadOnlyDB(db, pluginDB *sql.DB) *host.ReadOnlyDB {
+func getPluginReadOnlyDB(db, pluginDB *sql.DB) *engine.ReadOnlyDB {
 	if pluginDB != nil {
-		return &host.ReadOnlyDB{Inner: pluginDB}
+		return &engine.ReadOnlyDB{Inner: pluginDB}
 	}
-	return &host.ReadOnlyDB{Inner: db}
+	return &engine.ReadOnlyDB{Inner: db}
 }
 
 // handleMetrics serves Prometheus-format metrics.
@@ -4065,8 +4063,8 @@ func updateThroughputGauges() {
 	if elapsed < 5 {
 		return
 	}
-	replayCur := host.ReplayStepCount()
-	freshCur := host.FreshStepCount()
+	replayCur := engine.ReplayStepCount()
+	freshCur := engine.FreshStepCount()
 	if lastThroughputTime.IsZero() {
 		lastReplayStepCount = replayCur
 		lastFreshStepCount = freshCur

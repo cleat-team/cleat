@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 	"golang.org/x/mod/semver"
 )
 
@@ -223,7 +223,7 @@ func runPluginInstall(args []string) {
 	}
 	defer db.Close()
 
-	loader := host.NewPluginLoader(db, nil)
+	loader := engine.NewPluginLoader(db, nil)
 	if err := loader.DeployPlugin(ctx, name, version.Version, wasmBytes, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "Error deploying plugin: %v\n", err)
 		os.Exit(1)
@@ -476,7 +476,7 @@ func runPluginUninstall(args []string) {
 	}
 	defer db.Close()
 
-	loader := host.NewPluginLoader(db, nil)
+	loader := engine.NewPluginLoader(db, nil)
 	if err := loader.DeprecatePlugin(context.Background(), name, version); err != nil {
 		fmt.Fprintf(os.Stderr, "Error deprecating plugin: %v\n", err)
 		os.Exit(1)

@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -278,7 +278,7 @@ func TestNewMemoryBackend(t *testing.T) {
 	db := sql.OpenDB(&memoryFakeConnector{db: newMemoryFakeDB()})
 	t.Cleanup(func() { db.Close() })
 
-	b := newMemoryBackend(&host.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
+	b := newMemoryBackend(&engine.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
 	if b == nil {
 		t.Fatal("newMemoryBackend returned nil")
 	}
@@ -289,7 +289,7 @@ func TestMemoryPutAndGet(t *testing.T) {
 	db := sql.OpenDB(&memoryFakeConnector{db: mdb})
 	t.Cleanup(func() { db.Close() })
 
-	b := newMemoryBackend(&host.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
+	b := newMemoryBackend(&engine.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
 	ctx := context.Background()
 
 	data := []byte("hello world")
@@ -325,7 +325,7 @@ func TestMemoryGetMissing(t *testing.T) {
 	db := sql.OpenDB(&memoryFakeConnector{db: newMemoryFakeDB()})
 	t.Cleanup(func() { db.Close() })
 
-	b := newMemoryBackend(&host.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
+	b := newMemoryBackend(&engine.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
 	ctx := context.Background()
 
 	_, err := b.Get(ctx, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -342,7 +342,7 @@ func TestMemoryDeleteNoop(t *testing.T) {
 	db := sql.OpenDB(&memoryFakeConnector{db: mdb})
 	t.Cleanup(func() { db.Close() })
 
-	b := newMemoryBackend(&host.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
+	b := newMemoryBackend(&engine.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
 	ctx := context.Background()
 
 	data := []byte("persistent data")
@@ -372,7 +372,7 @@ func TestMemoryPutOverwrite(t *testing.T) {
 	db := sql.OpenDB(&memoryFakeConnector{db: mdb})
 	t.Cleanup(func() { db.Close() })
 
-	b := newMemoryBackend(&host.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
+	b := newMemoryBackend(&engine.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
 	ctx := context.Background()
 
 	// Use a deterministic sha256 that won't match actual data
@@ -405,7 +405,7 @@ func TestMemoryConcurrency(t *testing.T) {
 	db := sql.OpenDB(&memoryFakeConnector{db: mdb})
 	t.Cleanup(func() { db.Close() })
 
-	b := newMemoryBackend(&host.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
+	b := newMemoryBackend(&engine.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
@@ -466,7 +466,7 @@ func TestCleanupExpiredRemovesExpired(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 	}
 
@@ -572,7 +572,7 @@ func TestCleanupExpiredKeepsFuture(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 	}
 
@@ -643,7 +643,7 @@ func TestCleanupExpiredSoftDeleted(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 	}
 
@@ -722,7 +722,7 @@ func TestRunStartsAndStopsOnCancel(t *testing.T) {
 		t.Cleanup(func() { db.Close() })
 
 		p := &Plugin{
-			db:     &host.SQLDBAdapter{DB: db},
+			db:     &engine.SQLDBAdapter{DB: db},
 			logger: slog.Default(),
 			config: Config{Backend: "memory"},
 		}
@@ -761,7 +761,7 @@ func TestRunWithDBHandlesCleanup(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		config: Config{Backend: "memory"},
 	}
@@ -847,7 +847,7 @@ func TestCleanupWithActiveWorkflowRefs(t *testing.T) {
 	state.setStatus("wf-active", "running")
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 	}
 
@@ -908,7 +908,7 @@ func TestCleanupWithStaleWorkflowRefs(t *testing.T) {
 	state.setStatus("wf-active", "running")
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 	}
 
@@ -953,7 +953,7 @@ func TestMemoryPutEmptyData(t *testing.T) {
 	db := sql.OpenDB(&memoryFakeConnector{db: mdb})
 	t.Cleanup(func() { db.Close() })
 
-	b := newMemoryBackend(&host.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
+	b := newMemoryBackend(&engine.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
 	ctx := context.Background()
 
 	// Force-synthesize a sha256 for empty data
@@ -978,7 +978,7 @@ func TestMemoryPutLargeBlob(t *testing.T) {
 	db := sql.OpenDB(&memoryFakeConnector{db: mdb})
 	t.Cleanup(func() { db.Close() })
 
-	b := newMemoryBackend(&host.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
+	b := newMemoryBackend(&engine.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
 	ctx := context.Background()
 
 	// 100KB blob
@@ -1010,7 +1010,7 @@ func TestMemoryBackendConcurrentReadWrite(t *testing.T) {
 	db := sql.OpenDB(&memoryFakeConnector{db: mdb})
 	t.Cleanup(func() { db.Close() })
 
-	b := newMemoryBackend(&host.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
+	b := newMemoryBackend(&engine.SQLDBAdapter{DB: db}, plugin.DialectPostgres)
 	ctx := context.Background()
 
 	// Multiple goroutines reading and writing the same key

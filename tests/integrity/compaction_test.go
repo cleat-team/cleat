@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	host "github.com/cleat-team/cleat/engine"
 )
 
 // TestCompactionReducesEventCount verifies that compacting a workflow's event
@@ -15,7 +15,7 @@ func TestCompactionReducesEventCount(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-compact-count-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
@@ -34,11 +34,11 @@ func TestCompactionReducesEventCount(t *testing.T) {
 	const numEvents = 20
 	const threshold = 5
 
-	var events []host.EventRecord
+	var events []engine.EventRecord
 	for i := 0; i < numEvents; i++ {
-		events = append(events, host.EventRecord{
+		events = append(events, engine.EventRecord{
 			Step:     i,
-			EventType: host.EventTypeCall,
+			EventType: engine.EventTypeCall,
 			Service:  "svc",
 			Op:       fmt.Sprintf("op-%d", i),
 			Request:  `{}`,
@@ -59,7 +59,7 @@ func TestCompactionReducesEventCount(t *testing.T) {
 	}
 
 	// Compact the history.
-	if err := host.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
 
@@ -98,7 +98,7 @@ func TestCompactionPreservesState(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-compact-preserve-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
@@ -115,11 +115,11 @@ func TestCompactionPreservesState(t *testing.T) {
 	const numEvents = 15
 	const threshold = 5
 
-	var events []host.EventRecord
+	var events []engine.EventRecord
 	for i := 0; i < numEvents; i++ {
-		events = append(events, host.EventRecord{
+		events = append(events, engine.EventRecord{
 			Step:      i,
-			EventType: host.EventTypeCall,
+			EventType: engine.EventTypeCall,
 			Service:   "svc",
 			Op:        fmt.Sprintf("op-%d", i),
 			Request:   fmt.Sprintf(`{"step":%d}`, i),
@@ -137,7 +137,7 @@ func TestCompactionPreservesState(t *testing.T) {
 	}
 
 	// Compact.
-	if err := host.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
 		t.Fatalf("CompactWorkflowHistory: %v", err)
 	}
 
@@ -179,7 +179,7 @@ func TestCompactionIdempotent(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-compact-idem-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
@@ -196,11 +196,11 @@ func TestCompactionIdempotent(t *testing.T) {
 	const numEvents = 25
 	const threshold = 5
 
-	var events []host.EventRecord
+	var events []engine.EventRecord
 	for i := 0; i < numEvents; i++ {
-		events = append(events, host.EventRecord{
+		events = append(events, engine.EventRecord{
 			Step:      i,
-			EventType: host.EventTypeCall,
+			EventType: engine.EventTypeCall,
 			Service:   "svc",
 			Op:        fmt.Sprintf("op-%d", i),
 			Request:   `{}`,
@@ -212,7 +212,7 @@ func TestCompactionIdempotent(t *testing.T) {
 	}
 
 	// First compaction.
-	if err := host.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
 		t.Fatalf("first compaction: %v", err)
 	}
 	afterFirst, err := store.LoadEventHistory(ctx, runID)
@@ -225,7 +225,7 @@ func TestCompactionIdempotent(t *testing.T) {
 	}
 
 	// Second compaction — should be a no-op since event count is now <= threshold.
-	if err := host.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
+	if err := engine.CompactWorkflowHistory(ctx, store, runID, threshold); err != nil {
 		t.Fatalf("second compaction: %v", err)
 	}
 	afterSecond, err := store.LoadEventHistory(ctx, runID)
@@ -265,7 +265,7 @@ func TestCompactionEdgeCases(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -295,11 +295,11 @@ func TestCompactionEdgeCases(t *testing.T) {
 			}()
 
 			// Insert events.
-			var events []host.EventRecord
+			var events []engine.EventRecord
 			for i := 0; i < tt.numEvents; i++ {
-				events = append(events, host.EventRecord{
+				events = append(events, engine.EventRecord{
 					Step:      i,
-					EventType: host.EventTypeCall,
+					EventType: engine.EventTypeCall,
 					Service:   "svc",
 					Op:        fmt.Sprintf("op-%d", i),
 					Request:   `{}`,
@@ -315,7 +315,7 @@ func TestCompactionEdgeCases(t *testing.T) {
 			beforeCount := tt.numEvents
 
 			// Compact should not error in any edge case.
-			if err := host.CompactWorkflowHistory(ctx, store, runID, tt.threshold); err != nil {
+			if err := engine.CompactWorkflowHistory(ctx, store, runID, tt.threshold); err != nil {
 				t.Fatalf("CompactWorkflowHistory: %v", err)
 			}
 

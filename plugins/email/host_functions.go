@@ -9,7 +9,7 @@ import (
 
 	"github.com/sendgrid/sendgrid-go/helpers/mail"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 const sendgridActivityAPI = "https://api.sendgrid.com/v3/messages"

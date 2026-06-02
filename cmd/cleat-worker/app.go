@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // StartAPIServer creates and starts the HTTP API server with the given
@@ -86,13 +86,13 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
-	workflows, err := s.store.ListWorkflows(r.Context(), host.WorkflowFilter{Status: "dead_lettered", Limit: 100})
+	workflows, err := s.store.ListWorkflows(r.Context(), engine.WorkflowFilter{Status: "dead_lettered", Limit: 100})
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
 	if workflows == nil {
-		workflows = []host.WorkflowInstance{}
+		workflows = []engine.WorkflowInstance{}
 	}
 	s.writeJSON(w, 200, workflows)
 }
@@ -148,7 +148,7 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	runID, alreadyExisted, serr := s.store.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, "", host.DefaultTenantUUID, 0)
+	runID, alreadyExisted, serr := s.store.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, "", engine.DefaultTenantUUID, 0)
 	if serr != nil {
 		s.writeError(w, 500, serr.Error())
 		return

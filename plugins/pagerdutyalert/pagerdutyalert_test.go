@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/engine"
 )
 
 func TestInfo(t *testing.T) {
@@ -288,7 +288,7 @@ func TestHealthSuccess(t *testing.T) {
 	fakeDB := sql.OpenDB(&healthFakeConnector{})
 	defer fakeDB.Close()
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: fakeDB}, logger: slog.Default()}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: fakeDB}, logger: slog.Default()}
 	err := p.Health()
 	if err != nil {
 		t.Errorf("Health() returned unexpected error: %v", err)
@@ -320,7 +320,7 @@ func TestHealthDBError(t *testing.T) {
 	fakeDB := sql.OpenDB(&healthErrorFakeConnector{})
 	defer fakeDB.Close()
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: fakeDB}, logger: slog.Default()}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: fakeDB}, logger: slog.Default()}
 	err := p.Health()
 	if err == nil {
 		t.Fatal("expected error from Health() with failing DB")

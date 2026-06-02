@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	host "github.com/cleat-team/cleat/engine"
 )
 
 // TestReplayProducesIdenticalHistory verifies that loading the same event
@@ -18,7 +18,7 @@ func TestReplayProducesIdenticalHistory(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-replay-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
@@ -32,11 +32,11 @@ func TestReplayProducesIdenticalHistory(t *testing.T) {
 	}()
 
 	// Append a deterministic event sequence.
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "catalog", Op: "LookupItem", Request: `{"sku":"ABC"}`, Response: `{"price":999}`},
-		{Step: 1, EventType: host.EventTypeCall, Service: "inventory", Op: "Reserve", Request: `{"sku":"ABC","qty":1}`, Response: `{"ok":true}`},
-		{Step: 2, EventType: host.EventTypeCall, Service: "payments", Op: "Charge", Request: `{"amount":999}`, Response: `{"charge_id":"ch_123"}`},
-		{Step: 3, EventType: host.EventTypeCall, Service: "shipping", Op: "CreateShipment", Request: `{"order_id":1}`, Response: `{"tracking":"TRACK-1"}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "catalog", Op: "LookupItem", Request: `{"sku":"ABC"}`, Response: `{"price":999}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "inventory", Op: "Reserve", Request: `{"sku":"ABC","qty":1}`, Response: `{"ok":true}`},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "payments", Op: "Charge", Request: `{"amount":999}`, Response: `{"charge_id":"ch_123"}`},
+		{Step: 3, EventType: engine.EventTypeCall, Service: "shipping", Op: "CreateShipment", Request: `{"order_id":1}`, Response: `{"tracking":"TRACK-1"}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -84,7 +84,7 @@ func TestReplayDifferentInputsProducesDifferentHistory(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	// Create two workflows with different event sequences.
@@ -106,16 +106,16 @@ func TestReplayDifferentInputsProducesDifferentHistory(t *testing.T) {
 	runID2 := makeID("b")
 
 	// Workflow A: single call.
-	eventsA := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "opA", Request: `{"input":"a"}`, Response: `{"ok":true}`},
+	eventsA := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "opA", Request: `{"input":"a"}`, Response: `{"ok":true}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID1, eventsA); err != nil {
 		t.Fatalf("append events A: %v", err)
 	}
 
 	// Workflow B: different call.
-	eventsB := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "opB", Request: `{"input":"b"}`, Response: `{"ok":false}`},
+	eventsB := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "opB", Request: `{"input":"b"}`, Response: `{"ok":false}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID2, eventsB); err != nil {
 		t.Fatalf("append events B: %v", err)
@@ -151,7 +151,7 @@ func TestReplayVersionMismatch(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	// Create a workflow definition at version 1 and version 2.
@@ -175,8 +175,8 @@ func TestReplayVersionMismatch(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "v1-op", Request: `{}`, Response: `{}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "v1-op", Request: `{}`, Response: `{}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -219,7 +219,7 @@ func TestReplayHashMismatch(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-hash-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
@@ -233,10 +233,10 @@ func TestReplayHashMismatch(t *testing.T) {
 	}()
 
 	// Append events.
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "a", Op: "op1", Request: `{"x":1}`, Response: `{"ok":true}`},
-		{Step: 1, EventType: host.EventTypeCall, Service: "b", Op: "op2", Request: `{"y":2}`, Response: `{"ok":true}`},
-		{Step: 2, EventType: host.EventTypeCall, Service: "c", Op: "op3", Request: `{"z":3}`, Response: `{"ok":true}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "a", Op: "op1", Request: `{"x":1}`, Response: `{"ok":true}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "b", Op: "op2", Request: `{"y":2}`, Response: `{"ok":true}`},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "c", Op: "op3", Request: `{"z":3}`, Response: `{"ok":true}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)

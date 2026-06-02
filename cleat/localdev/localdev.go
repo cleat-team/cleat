@@ -27,7 +27,7 @@ import (
 const ConcurrencyKeyTTL = 30 * time.Minute
 
 // ServiceCaller makes external API calls on behalf of durable workflows.
-// This mirrors host.ServiceCaller so that users of the localdev package
+// This mirrors engine.ServiceCaller so that users of the localdev package
 // do not need to import internal packages.
 type ServiceCaller interface {
 	Call(ctx context.Context, service, operation, requestJSON string) (responseJSON string, err error)

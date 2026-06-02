@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/cleat"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func TestInfo(t *testing.T) {

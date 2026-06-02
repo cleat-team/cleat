@@ -20,8 +20,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -564,7 +564,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore, *fakeCl
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:      &host.SQLDBAdapter{DB: db},
+		db:      &engine.SQLDBAdapter{DB: db},
 		backend: newTestMemBackend(),
 		logger:  slog.Default(),
 		config:  Config{Backend: "memory"},
@@ -575,7 +575,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore, *fakeCl
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 	return p, handler, store, clock
 }
 
@@ -618,7 +618,7 @@ func TestInit(t *testing.T) {
 		DB:  sql.OpenDB(&fakeConnector{store: newFakeDBStore()}),
 		Mux: http.NewServeMux(),
 	}
-	p.db = &host.SQLDBAdapter{DB: env.DB}
+	p.db = &engine.SQLDBAdapter{DB: env.DB}
 	p.mux = env.Mux
 	p.logger = env.Logger
 	if p.logger == nil {

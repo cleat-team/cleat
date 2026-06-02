@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	host "github.com/cleat-team/cleat/engine"
 
 	_ "github.com/lib/pq"
 )
@@ -102,7 +102,7 @@ func testDB(t *testing.T) *sql.DB {
 }
 
 // createTestWorkflow creates a test workflow instance and returns its ID.
-func createTestWorkflow(t *testing.T, db *sql.DB, store *host.PostgresStore, ctx context.Context) string {
+func createTestWorkflow(t *testing.T, db *sql.DB, store *engine.PostgresStore, ctx context.Context) string {
 	t.Helper()
 	runID := fmt.Sprintf("int-eh-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
@@ -123,15 +123,15 @@ func TestEventHistoryConsistencyAfterFault(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
 	// Insert a batch of events.
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc1", Op: "op1", Request: `{"a":1}`, Response: `{"ok":true}`},
-		{Step: 1, EventType: host.EventTypeCall, Service: "svc1", Op: "op2", Request: `{"b":2}`, Response: `{"ok":true}`},
-		{Step: 2, EventType: host.EventTypeCall, Service: "svc1", Op: "op3", Request: `{"c":3}`, Response: `{"ok":true}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc1", Op: "op1", Request: `{"a":1}`, Response: `{"ok":true}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "svc1", Op: "op2", Request: `{"b":2}`, Response: `{"ok":true}`},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "svc1", Op: "op3", Request: `{"c":3}`, Response: `{"ok":true}`},
 	}
 
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
@@ -144,9 +144,9 @@ func TestEventHistoryConsistencyAfterFault(t *testing.T) {
 	}
 
 	// Simulate a partial write: insert a subset with overlapping steps.
-	partial := []host.EventRecord{
-		{Step: 1, EventType: host.EventTypeCall, Service: "svc1", Op: "op2", Request: `{"b":2}`, Response: `{"ok":true}`},
-		{Step: 3, EventType: host.EventTypeCall, Service: "svc2", Op: "op3", Request: `{}`, Response: `{}`},
+	partial := []engine.EventRecord{
+		{Step: 1, EventType: engine.EventTypeCall, Service: "svc1", Op: "op2", Request: `{"b":2}`, Response: `{"ok":true}`},
+		{Step: 3, EventType: engine.EventTypeCall, Service: "svc2", Op: "op3", Request: `{}`, Response: `{}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, partial); err != nil {
 		t.Fatalf("partial append: %v", err)
@@ -188,15 +188,15 @@ func TestEventHistoryGaps(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
 	// Insert events with gaps (steps 0, 2, 4 — missing 1 and 3).
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "step0", Request: `{}`, Response: `{}`},
-		{Step: 2, EventType: host.EventTypeCall, Service: "svc", Op: "step2", Request: `{}`, Response: `{}`},
-		{Step: 4, EventType: host.EventTypeCall, Service: "svc", Op: "step4", Request: `{}`, Response: `{}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "step0", Request: `{}`, Response: `{}`},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "svc", Op: "step2", Request: `{}`, Response: `{}`},
+		{Step: 4, EventType: engine.EventTypeCall, Service: "svc", Op: "step4", Request: `{}`, Response: `{}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -234,17 +234,17 @@ func TestEventHistoryOrdering(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
 	// Insert events in reverse step order.
-	events := []host.EventRecord{
-		{Step: 4, EventType: host.EventTypeCall, Service: "svc", Op: "last", Request: `{}`, Response: `{}`},
-		{Step: 2, EventType: host.EventTypeCall, Service: "svc", Op: "middle", Request: `{}`, Response: `{}`},
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "first", Request: `{}`, Response: `{}`},
-		{Step: 3, EventType: host.EventTypeCall, Service: "svc", Op: "third", Request: `{}`, Response: `{}`},
-		{Step: 1, EventType: host.EventTypeCall, Service: "svc", Op: "second", Request: `{}`, Response: `{}`},
+	events := []engine.EventRecord{
+		{Step: 4, EventType: engine.EventTypeCall, Service: "svc", Op: "last", Request: `{}`, Response: `{}`},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "svc", Op: "middle", Request: `{}`, Response: `{}`},
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "first", Request: `{}`, Response: `{}`},
+		{Step: 3, EventType: engine.EventTypeCall, Service: "svc", Op: "third", Request: `{}`, Response: `{}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "svc", Op: "second", Request: `{}`, Response: `{}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -277,7 +277,7 @@ func TestEventHistoryLargePayload(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
@@ -285,10 +285,10 @@ func TestEventHistoryLargePayload(t *testing.T) {
 	largeValue := strings.Repeat("x", 100*1024)
 	largePayload := fmt.Sprintf(`{"data":"%s"}`, largeValue)
 
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "large-req", Request: largePayload, Response: `{}`},
-		{Step: 1, EventType: host.EventTypeCall, Service: "svc", Op: "large-resp", Request: `{}`, Response: largePayload},
-		{Step: 2, EventType: host.EventTypeCall, Service: "svc", Op: "both-large", Request: largePayload, Response: largePayload},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "large-req", Request: largePayload, Response: `{}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "svc", Op: "large-resp", Request: `{}`, Response: largePayload},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "svc", Op: "both-large", Request: largePayload, Response: largePayload},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append large payload events: %v", err)

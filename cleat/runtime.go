@@ -25,7 +25,7 @@ import (
 // SuspendSentinel is a sentinel panic value used to suspend workflow execution.
 // When the host returns a suspend signal (e.g., from DurableSleep), the
 // WASM adapter panics with this value. The export wrapper catches it and
-// returns a suspend status code to the host.
+// returns a suspend status code to the engine.
 type SuspendSentinel struct{}
 
 func (SuspendSentinel) Error() string { return "durable: workflow suspended" }
@@ -76,7 +76,7 @@ type Caller interface {
 	DurableCallJSONWithOptions(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 
 	// DurableCallWithHeartbeat makes a long-running durable API call and
-	// invokes onProgress periodically with status updates from the host.
+	// invokes onProgress periodically with status updates from the engine.
 	// The heartbeatInterval controls how often the host sends progress
 	// events. onProgress receives a JSON string with implementation-specific
 	// progress details. Falls back to a regular DurableCall if the host

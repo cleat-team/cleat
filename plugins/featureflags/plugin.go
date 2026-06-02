@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func init() {
@@ -17,6 +17,11 @@ func init() {
 		Description: "Feature flag evaluation with rules and gradual rollout",
 		Author:      "cleat",
 	}, func() plugin.Plugin { return &Plugin{} })
+}
+
+// New creates a new Plugin instance.
+func New() plugin.Plugin {
+	return &Plugin{}
 }
 
 // Plugin implements feature flag evaluation with targeting rules and

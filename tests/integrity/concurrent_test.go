@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	host "github.com/cleat-team/cleat/engine"
 )
 
 // TestConcurrentEventAppends verifies that multiple goroutines appending events
@@ -16,7 +16,7 @@ func TestConcurrentEventAppends(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-conc-append-%d", time.Now().UnixNano())
 	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
@@ -40,12 +40,12 @@ func TestConcurrentEventAppends(t *testing.T) {
 		wg.Add(1)
 		go func(gID int) {
 			defer wg.Done()
-			var events []host.EventRecord
+			var events []engine.EventRecord
 			baseStep := gID * eventsPerGoroutine
 			for i := 0; i < eventsPerGoroutine; i++ {
-				events = append(events, host.EventRecord{
+				events = append(events, engine.EventRecord{
 					Step:      baseStep + i,
-					EventType: host.EventTypeCall,
+					EventType: engine.EventTypeCall,
 					Service:   fmt.Sprintf("worker-%d", gID),
 					Op:        fmt.Sprintf("step-%d", i),
 					Request:   `{}`,
@@ -98,7 +98,7 @@ func TestConcurrentClaimAndHeartbeat(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	// Create a workflow for each contention scenario.
@@ -180,7 +180,7 @@ func TestConcurrentStatusUpdates(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	// Create multiple workflows.

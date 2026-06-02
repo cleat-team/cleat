@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func init() {
@@ -20,6 +20,11 @@ func init() {
 	}, func() plugin.Plugin {
 		return &Plugin{}
 	})
+}
+
+// New creates a new Plugin instance.
+func New() plugin.Plugin {
+	return &Plugin{}
 }
 
 // ProviderConfig holds configuration for a single LLM provider.

@@ -90,8 +90,8 @@ func TestPrototypesCompile(t *testing.T) {
 	// (the Go compiler ensures they exist; this test verifies the test
 	// binary links against them).
 
-	// runVersions has signature: func(ctx context.Context, store host.WorkflowStore, args []string)
-	// runDeploy has signature:  func(ctx context.Context, store host.WorkflowStore, db *sql.DB, args []string)
+	// runVersions has signature: func(ctx context.Context, store engine.WorkflowStore, args []string)
+	// runDeploy has signature:  func(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string)
 	// Just check they are non-nil function values (linkage verification).
 	_ = runVersions
 	_ = runDeploy

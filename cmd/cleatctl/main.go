@@ -26,7 +26,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // osExit is replaced in tests to intercept os.Exit calls.
@@ -62,7 +62,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	factory := host.NewPostgresStoreFactory(db, "public")
+	factory := engine.NewPostgresStoreFactory(db, "public")
 	store, closer, err := factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		log.Fatalf("failed to open store: %v", err)
@@ -81,9 +81,9 @@ func main() {
 		runRestoreWorkflow(ctx, store, db, args[1:])
 	case "replay":
 		runReplay(ctx, store, db, args[1:])
-		case "debug":
-			runDebug(ctx, store, db, args[1:])
-		case "check-db":
+	case "debug":
+		fmt.Println("debug command not yet implemented")
+	case "check-db":
 		runCheckDB(ctx, db, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)

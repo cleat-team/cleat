@@ -20,9 +20,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -782,7 +782,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeJobQueueStore, *
 	fakeEnv := newFakeEnvironment()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		env:    &fakeEnv.Environment,
@@ -792,7 +792,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeJobQueueStore, *
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(p.mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
 	return p, handler, store, clock, fakeEnv
 }
 

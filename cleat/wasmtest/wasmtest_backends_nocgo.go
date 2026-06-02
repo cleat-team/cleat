@@ -2,6 +2,6 @@
 
 package wasmtest
 
-import "github.com/cleat-team/cleat/internal/host"
+import "github.com/cleat-team/cleat/engine"
 
-func wasmtimeBackendOptions() []host.EngineOption { return nil }
+func wasmtimeBackendOptions() []engine.EngineOption { return nil }

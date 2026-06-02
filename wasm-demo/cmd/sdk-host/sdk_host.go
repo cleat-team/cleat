@@ -69,7 +69,7 @@ func newDurableHostFromCheckpoint(state *workflowState) *durableHost {
 	}
 }
 
-// H returns a cleat.HostCalls backed by this host.
+// H returns a cleat.HostCalls backed by this engine.
 func (dh *durableHost) H() cleat.HostCalls {
 	return cleat.NewHostCalls(cleat.HostCallsOptions{
 		DurableCall: func(service, operation, requestJSON string) (string, error) {

@@ -119,10 +119,10 @@ func main() {
 	writeResult(`{"status":"complete","tracking_id":"TRACK-123456"}`, "")
 }
 
-// durableCall makes a durable API call through the host.
+// durableCall makes a durable API call through the engine.
 // Writes a request to stdout, reads the response from stdin.
 func durableCall(service, op, request string) (string, error) {
-	// Send the call request to the host.
+	// Send the call request to the engine.
 	if err := stdout.Encode(callRequest{
 		Type:    "call",
 		Service: service,
@@ -132,7 +132,7 @@ func durableCall(service, op, request string) (string, error) {
 		return "", fmt.Errorf("encode call: %w", err)
 	}
 
-	// Read the response from the host.
+	// Read the response from the engine.
 	var resp callResponse
 	if err := stdin.Decode(&resp); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)

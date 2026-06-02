@@ -20,7 +20,7 @@ import (
 	"log/slog"
 
 	"github.com/cleat-team/cleat/cleat"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RawMessage is a raw JSON-encoded value, replacing RawMessage
@@ -61,6 +61,11 @@ type ExecuteOptions struct {
 // NewDAG creates a new empty DAG.
 func NewDAG() *DAG {
 	return &DAG{tasks: make(map[string]*Task)}
+}
+
+// New creates a new Plugin instance.
+func New() plugin.Plugin {
+	return &Plugin{}
 }
 
 // AddTask adds a task to the DAG. parents lists the names of tasks that must
