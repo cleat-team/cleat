@@ -783,9 +783,14 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 		if !ok {
 			return errBadParam, nil
 		}
-		parentClosePolicy, ok := wasmtimeReadServiceName(buf, policyPtr, policyLen)
-		if !ok {
-			return errBadParam, nil
+		// parentClosePolicy may be empty (default). Zero-length is valid.
+		var parentClosePolicy string
+		if policyLen > 0 {
+			policy, ok := wasmtimeReadServiceName(buf, policyPtr, policyLen)
+			if !ok {
+				return errBadParam, nil
+			}
+			parentClosePolicy = policy
 		}
 		callCtx := ctxWithMem(ctx, buf)
 		return uint64(h.ChildWorkflowWithOptions(callCtx, nil, wfName, wfInput, version, parentClosePolicy, runIDPtr, runIDMaxLen)), nil
