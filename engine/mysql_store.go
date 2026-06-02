@@ -729,7 +729,7 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 			WHERE id = (
 				SELECT parent_workflow_id FROM workflow_instances WHERE id = ? AND tenant_id = ?
 			)
-			AND status = 'ready'
+			AND status IN ('ready', 'suspended')
 			AND tenant_id = ?
 		`, runID, s.tenantID, s.tenantID); err != nil {
 			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)

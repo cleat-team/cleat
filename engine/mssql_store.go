@@ -1223,7 +1223,7 @@ func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 			WHERE id = (
 				SELECT parent_workflow_id FROM workflow_instances WHERE id = @p1
 			)
-			AND status = 'ready'
+			AND status IN ('ready', 'suspended')
 		`, runID); err != nil {
 			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
 		}
@@ -1655,7 +1655,7 @@ func (s *MSSQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET next_wake_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND status = 'ready'
+		WHERE id = @p1 AND status IN ('ready', 'suspended')
 	`, workflowID)
 	if err != nil {
 		return err
@@ -2206,7 +2206,7 @@ func (s *MSSQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, 
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND status = 'ready'
+		WHERE id = @p1 AND status IN ('ready', 'suspended')
 	`, workflowID)
 	return nil
 }
@@ -2225,7 +2225,7 @@ func (s *MSSQLStore) RejectPromise(ctx context.Context, workflowID, promiseID, e
 	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
-		WHERE id = @p1 AND status = 'ready'
+		WHERE id = @p1 AND status IN ('ready', 'suspended')
 	`, workflowID)
 	return nil
 }

@@ -1453,7 +1453,7 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 			WHERE id = (
 				SELECT parent_workflow_id FROM workflow_instances WHERE id = $1
 			)
-			AND status = 'ready'
+			AND status IN ('ready', 'suspended')
 		`, runID); err != nil {
 			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
 		}
@@ -2505,7 +2505,7 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET next_wake_at = now()
-		WHERE id = $1 AND status = 'ready'
+		WHERE id = $1 AND status IN ('ready', 'suspended')
 	`, workflowID)
 	if err != nil {
 		return err
@@ -2975,7 +2975,7 @@ func (s *PostgresStore) ResolvePromise(ctx context.Context, workflowID, promiseI
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = now()
-		WHERE id = $1 AND status = 'ready'
+		WHERE id = $1 AND status IN ('ready', 'suspended')
 	`, workflowID)
 	if err != nil {
 		return err
@@ -3002,7 +3002,7 @@ func (s *PostgresStore) RejectPromise(ctx context.Context, workflowID, promiseID
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = now()
-		WHERE id = $1 AND status = 'ready'
+		WHERE id = $1 AND status IN ('ready', 'suspended')
 	`, workflowID)
 	if err != nil {
 		return err
