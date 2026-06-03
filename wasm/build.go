@@ -150,47 +150,27 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 	} else {
 		mainStub = `package main
 
-import (
-	"runtime"
-	"unsafe"
-)
+	import "unsafe"
 
-func main() {
-	// Read work info from a fixed WASM memory offset (1024).
-	// The wasmtime backend writes the entry point name and input JSON
-	// here before calling _start. The wazero backend doesn't write
-	// anything, so entryNameLen stays 0 and we fall through to the
-	// blocking keep-alive path for direct export calls.
-	const workOffset = 1024
-	workPtr := unsafe.Pointer(uintptr(workOffset))
-	entryNameLen := *(*int32)(workPtr)
-	argsLen := *(*int32)(unsafe.Pointer(uintptr(workOffset + 4)))
-
-	if entryNameLen > 0 && entryNameLen <= 256 && argsLen >= 0 && argsLen <= 65536 {
-		entryBytes := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(workOffset+8))), int(entryNameLen))
-		argsBytes := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(workOffset+8+entryNameLen))), int(argsLen))
-		result := cleatDispatch(string(entryBytes), argsBytes)
+	func main() {
+		var entryNameBuf [256]byte
+		var argsBuf [65536]byte
+		ret := cleatPollWorkImport(
+			unsafe.Pointer(&entryNameBuf[0]), 256,
+			unsafe.Pointer(&argsBuf[0]), 65536,
+		)
+		entryNameLen := uint32(ret >> 32)
+		argsLen := uint32(ret)
+		if entryNameLen == 0 {
+			return
+		}
+		entryName := string(entryNameBuf[:entryNameLen])
+		args := argsBuf[:argsLen]
+		result := cleatDispatch(entryName, args)
 		resultPtr, resultLen := stringPtr(string(result))
 		cleatCompleteImport(0, resultPtr, resultLen)
-		return
 	}
-
-	// Keep a goroutine always runnable to prevent Go WASI
-	// deadlock detection from firing proc_exit(2).
-	done := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				runtime.Gosched()
-			}
-		}
-	}()
-	<-done
-}
-`
+	`
 	}
 	if err := writeFile("gen_main_stub.go", mainStub); err != nil {
 		return err
