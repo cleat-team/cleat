@@ -1543,7 +1543,7 @@ func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID s
 func (s *PostgresStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	var tenantID uuid.UUID
 	err := s.db.QueryRowContext(ctx,
-		`SELECT tenant_id FROM tenant_api_keys
+		`SELECT tenant_id FROM admin.tenant_api_keys
 		 WHERE key_hash = $1 AND revoked_at IS NULL`, keyHash).Scan(&tenantID)
 	if err != nil {
 		return uuid.Nil, err
