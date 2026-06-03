@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"log/slog"
 	"math"
 	"sort"
@@ -2699,6 +2700,9 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		parentID = fmt.Sprintf("unknown-%s-%d", name, s.stepCount)
 	}
 
+	log.Printf("[engine] childWorkflowWithVersion: name=%q version=%d childVersion=%d parentID=%s isReplay=%v stepCount=%d childWfStoreNil=%v",
+		name, version, childVersion, parentID, s.isReplay, s.stepCount, s.engine.childWfStore == nil)
+
 	if s.engine.childWfStore != nil {
 		// Check child workflow quota before creating the child.
 		if s.engine.maxQuotaChildren > 0 && s.engine.workflowStore != nil {
@@ -2742,9 +2746,11 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			}
 			runID, err = css.StartChildWorkflowInSchema(context.Background(), ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
 		} else {
+			log.Printf("[engine] calling StartChildWorkflowAtomic: name=%q parentID=%s childVersion=%d", name, parentID, childVersion)
 			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(context.Background(), "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
 		}
 		if err != nil {
+			log.Printf("[engine] StartChildWorkflowAtomic FAILED: %v", err)
 			errMsg := fmt.Sprintf("child workflow %q: start failed: %v", name, err)
 			s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
