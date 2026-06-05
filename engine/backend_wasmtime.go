@@ -153,7 +153,10 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if lang == "go" {
 		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
 			b.workEntryPoint = entryPoint
-			b.workInput = []byte(input)
+			// Wrap in DispatchWrapper format that gen_wasm_exports.go expects:
+			// {"inputJSON":"<escaped inner JSON>"}
+			escaped, _ := json.Marshal(string(input))
+			b.workInput = []byte(fmt.Sprintf(`{"inputJSON":%s}`, string(escaped)))
 
 			// Write work data to a fixed WASM memory location (offset 1024)
 			// so main() can read it without calling cleat_poll_work.
