@@ -986,7 +986,7 @@ func (b *wasmtimeBackend) registerCleatAwaitSignals(linker *wasmtime.Linker) err
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.DurableAwaitSignals(context.Background(), nil, names, timeoutMs,
+		return h.DurableAwaitSignals(ctxWithMem(context.Background(), buf), nil, names, timeoutMs,
 			uint32(sigNamePtr), uint32(sigNameMaxLen), uint32(payloadPtr), uint32(payloadMaxLen))
 	})
 }
