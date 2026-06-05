@@ -1400,7 +1400,7 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		}
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
-			SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
+			SET status = 'done', result = $3::jsonb, completed_at = now(), assigned_to = NULL, query_state = $4
 			WHERE id = $1 AND assigned_to = $2 AND generation = $5
 		`, runID, workerID, result, string(qsJSON), generation)
 	case "failed":

@@ -2434,7 +2434,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 			}
 			if rec.EventType == EventTypeAwaitSignals {
 				if !s.advanceReplayStep(ctx, &rec) { return 0 }
-				// Check if there's a following signal_received event.
+				// Check if there is a following signal_received event.
 				if s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
 					if nextRec.EventType == EventTypeSignalReceived {
@@ -2444,9 +2444,36 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 						return packAwaitSignalsResult(uint32(written), uint32(len(nextRec.SignalPayload)), false, 0)
 					}
 				}
-				// No signal yet — this is a replay of a wait that hasn't resolved.
-				// Should not happen in practice (we only wake when signal arrives),
-				// but handle gracefully.
+				// No signal_received in history. The signal may have
+				// arrived after suspend (stored in workflow_signals,
+				// not event_history). Check the signal store.
+				if s.engine.signalStore != nil {
+					// SignalNames is a JSON array like ["agent_result"].
+					var names []string
+					if err := json.Unmarshal([]byte(rec.SignalNames), &names); err != nil {
+						names = splitSignalNames(rec.SignalNames)
+					}
+					for _, name := range names {
+						payload, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
+						if err == nil && found {
+							// Record the signal_received event so
+							// subsequent replays find it in history.
+							sigRec := EventRecord{
+								Step:          s.stepCount,
+								EventType:     EventTypeSignalReceived,
+								SignalName:    name,
+								SignalPayload: payload,
+							}
+							s.recordEvent(sigRec)
+							written, _ := s.writeResult(ctx, m, sigNamePtr, name, sigNameMaxLen)
+							_, _ = s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
+							return packAwaitSignalsResult(uint32(written), uint32(len(payload)), false, 0)
+						}
+					}
+				}
+				// No signal found. This is a replay of a wait that has not
+				// resolved. Should not happen (we only wake when signal
+				// arrives), but handle gracefully.
 				return packAwaitSignalsResult(0, 0, true, 0)
 			}
 		}
@@ -2457,7 +2484,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 	if s.engine.signalStore != nil {
 		names := splitSignalNames(signalNames)
 		for _, name := range names {
-			payload, found, err := s.engine.signalStore.PollSignal(ctx, "", name)
+			payload, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
 			if err == nil && found {
 				rec := EventRecord{
 					Step:          s.stepCount,
@@ -2546,7 +2573,7 @@ func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reason
 
 func (s *execSession) PollSignal(ctx context.Context, m api.Module, signalName string, payloadPtr, payloadMaxLen uint32) int64 {
 	if s.engine.signalStore != nil {
-		payload, found, err := s.engine.signalStore.PollSignal(ctx, "", signalName)
+		payload, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, signalName)
 		if err == nil && found {
 
 			written, _ := s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
