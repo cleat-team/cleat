@@ -1393,11 +1393,16 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		if qsJSON == nil {
 			qsJSON = []byte("{}")
 		}
+		// Ensure result is valid JSON for the JSONB column. Empty strings
+		// and non-JSON values cause "invalid input syntax for type json".
+		if result == "" || !json.Valid([]byte(result)) {
+			result = "{}"
+		}
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
 			WHERE id = $1 AND assigned_to = $2 AND generation = $5
-		`, runID, workerID, result, qsJSON, generation)
+		`, runID, workerID, result, string(qsJSON), generation)
 	case "failed":
 		qsJSON, _ := json.Marshal(queryState)
 		if qsJSON == nil {
@@ -1413,7 +1418,7 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 			    assigned_to = NULL,
 			    query_state = $6
 			WHERE id = $1 AND assigned_to = $2 AND generation = $7
-		`, runID, workerID, result, errorCode, errorOp, qsJSON, generation)
+		`, runID, workerID, result, errorCode, errorOp, string(qsJSON), generation)
 	case "ready":
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
@@ -1979,7 +1984,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		    assigned_to = NULL,
 		    query_state = $6
 		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsJSON, generation)
+	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
 	if err != nil {
 		return err
 	}
