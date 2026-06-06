@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"log/slog"
 	"math"
 	"net"
@@ -475,7 +476,7 @@ func main() {
 				log.Fatalf("[worker %s] Failed to read encryption key file: %v", workerID, kerr)
 			}
 			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := host.NewPayloadEncryption(keyStr)
+			pe, perr := engine.NewPayloadEncryption(keyStr)
 			if perr != nil {
 				log.Fatalf("[worker %s] Invalid encryption key: %v", workerID, perr)
 			}
@@ -484,7 +485,7 @@ func main() {
 		}
 
 		// Propagate encryption to the store factory.
-		if pgFactory, ok := factory.(*host.PostgresStoreFactory); ok && payloadEncryption != nil {
+		if pgFactory, ok := factory.(*engine.PostgresStoreFactory); ok && payloadEncryption != nil {
 			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 		}
 
@@ -1181,34 +1182,7 @@ func (w *Worker) Run() {
 	initLoopCtx("memory_reload")
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
-	initLoopCtx("update_dispatch")
-
-	// Initialize health tracker and loop registry for watchdog.
-	w.healthTracker = newHealthTracker()
-	w.loopFuncs = make(map[string]func())
-	w.loopCtxMap = make(map[string]*loopContext)
-
-	// initLoopCtx creates a cancellable per-loop context derived from the
-	// worker context. The initial done channel is never closed (the initial
-	// goroutines are started inline, not via restartLoop); the 5s timeout in
-	// restartLoop guards the wait.
-	initLoopCtx := func(name string) {
-		ctx, cancel := context.WithCancel(w.ctx)
-		w.loopCtxMap[name] = &loopContext{
-			ctx:    ctx,
-			cancel: cancel,
-			done:   make(chan struct{}),
-		}
-	}
-	initLoopCtx("heartbeat")
-	initLoopCtx("reaper")
-	initLoopCtx("concurrency_key_reaper")
-	initLoopCtx("dispatch")
-	initLoopCtx("schedule")
 	initLoopCtx("compaction")
-	initLoopCtx("memory_reload")
-	initLoopCtx("memory_cleanup")
-	initLoopCtx("retention")
 	initLoopCtx("update_dispatch")
 
 	// Background heartbeat goroutine.
@@ -1682,7 +1656,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// Enable event history checksum verification on replay by default.
 	// Can be disabled with --disable-checksum-verification.
 	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
-		engineOpts = append(engineOpts, host.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
+		engineOpts = append(engineOpts, engine.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
 	}
 	// Use tenant-scoped database connection for plugin host functions.
 	if w.tenantPools != nil && wf.TenantID != "" {
