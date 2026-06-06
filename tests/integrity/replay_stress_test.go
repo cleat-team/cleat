@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -184,9 +184,9 @@ func TestReplayStressBasic(t *testing.T) {
 	const replayCount = 100
 	for i := 0; i < replayCount; i++ {
 		replayCaller := &stressMockCaller{}
-		engine := engine.NewEngine(rt, replayCaller)
+		eng := engine.NewEngine(rt, replayCaller)
 
-		result2, history2, suspended2, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, history)
+		result2, history2, suspended2, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, history)
 		if err != nil {
 			t.Fatalf("Replay iteration %d: %v", i, err)
 		}
@@ -287,11 +287,11 @@ func TestReplayStressRandomCrashPoints(t *testing.T) {
 			prefix := fullHistory[:splitAt]
 
 			replayCaller := &stressMockCaller{}
-			engine := engine.NewEngine(rt, replayCaller)
+			eng := engine.NewEngine(rt, replayCaller)
 
 			// Replay from the truncated history. The engine replays the prefix
 			// events, then continues execution for steps beyond the prefix.
-			result2, history2, suspended2, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, prefix)
+			result2, history2, suspended2, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, prefix)
 			if err != nil {
 				t.Fatalf("Replay at split=%d: %v", splitAt, err)
 			}
@@ -507,8 +507,8 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		tampered[0].Service = "tampered_service"
 
 		caller := &stressMockCaller{}
-		engine := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		eng := engine.NewEngine(rt, caller)
+		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatal("expected divergence error for changed service name, got nil")
 		}
@@ -529,8 +529,8 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		tampered[0].Op = "tampered_operation"
 
 		caller := &stressMockCaller{}
-		engine := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		eng := engine.NewEngine(rt, caller)
+		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatal("expected divergence error for changed operation name, got nil")
 		}
@@ -550,8 +550,8 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		tampered[1].TimeoutMs = 5000
 
 		caller := &stressMockCaller{}
-		engine := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		eng := engine.NewEngine(rt, caller)
+		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatalf("expected divergence error for changed event type (%s -> await_signals), got nil", oldType)
 		}
@@ -581,8 +581,8 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		}
 
 		caller := &stressMockCaller{}
-		engine := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		eng := engine.NewEngine(rt, caller)
+		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatal("expected divergence error for inserted extra event, got nil")
 		}
@@ -606,8 +606,8 @@ func TestReplayDivergenceDetection(t *testing.T) {
 		}
 
 		caller := &stressMockCaller{}
-		engine := engine.NewEngine(rt, caller)
-		_, _, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, tampered)
+		eng := engine.NewEngine(rt, caller)
+		_, _, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, tampered)
 		if err == nil {
 			t.Fatal("expected divergence error for removed event, got nil")
 		}
@@ -650,8 +650,8 @@ func TestReplayHashConsistency(t *testing.T) {
 	const replayCount = 20
 	for i := 0; i < replayCount; i++ {
 		caller := &stressMockCaller{}
-		engine := engine.NewEngine(rt, caller)
-		_, resultHistory, _, _, _, err := engine.Replay(ctx, wasmBytes, "place_order", input, history)
+		eng := engine.NewEngine(rt, caller)
+		_, resultHistory, _, _, _, err := eng.Replay(ctx, wasmBytes, "place_order", input, history)
 		if err != nil {
 			t.Fatalf("Replay %d: %v", i, err)
 		}

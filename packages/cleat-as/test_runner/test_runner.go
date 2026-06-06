@@ -334,7 +334,7 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	}).Export("cleat_reject_promise")
 
 	// Instantiate the host module.
-	if _, err := engine.Instantiate(ctx); err != nil {
+	if _, err := host.Instantiate(ctx); err != nil {
 		t.Fatalf("test_runner: instantiating host module: %v", err)
 		return nil
 	}

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // TestWASMVersionUpgrade verifies that registering multiple versions of a

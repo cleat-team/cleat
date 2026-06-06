@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // TestLatencyP50 measures the median (P50) latency for a single event append

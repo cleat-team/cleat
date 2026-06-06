@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // TestConcurrentEventAppends verifies that multiple goroutines appending events

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "github.com/lib/pq"
 )
@@ -70,7 +70,7 @@ func setupEngine(t *testing.T, ctx context.Context) (*engine.Runtime, *engine.En
 		t.Fatalf("NewRuntime: %v", err)
 	}
 	caller := &ambigRecorder{}
-	engine := engine.NewEngine(rt, caller)
+	eng := engine.NewEngine(rt, caller)
 	return rt, engine, caller
 }
 
@@ -97,7 +97,7 @@ func TestAmbiguityDetectionOnTruncatedHistory(t *testing.T) {
 
 	// Execute the place_order workflow to get full event history.
 	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
-	result1, history, suspended, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+	result1, history, suspended, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestPendingSentinelDetection(t *testing.T) {
 	defer rt.Close(ctx)
 
 	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
-	_, history, suspended, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+	_, history, suspended, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestAmbiguityMetricIncrements(t *testing.T) {
 	defer rt.Close(ctx)
 
 	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
-	_, history, suspended, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+	_, history, suspended, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestReplayWithInjectedCrashPoints(t *testing.T) {
 	defer rt.Close(ctx)
 
 	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
-	result1, history, suspended, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+	result1, history, suspended, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

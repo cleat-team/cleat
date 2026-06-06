@@ -146,14 +146,14 @@ func BenchmarkEndToEndLatency(b *testing.B) {
 	defer rt.Close(ctx)
 
 	caller := &benchCaller{}
-	engine := engine.NewEngine(rt, caller)
+	eng := engine.NewEngine(rt, caller)
 
 	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		result, _, _, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+		result, _, _, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 		if err != nil {
 			b.Fatalf("Execute: %v", err)
 		}
@@ -175,7 +175,7 @@ func BenchmarkFreshThroughput(b *testing.B) {
 	defer rt.Close(ctx)
 
 	caller := &benchCaller{}
-	engine := engine.NewEngine(rt, caller)
+	eng := engine.NewEngine(rt, caller)
 
 	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
@@ -183,7 +183,7 @@ func BenchmarkFreshThroughput(b *testing.B) {
 	start := time.Now()
 
 	for i := 0; i < b.N; i++ {
-		result, _, _, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+		result, _, _, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 		if err != nil {
 			b.Fatalf("Execute: %v", err)
 		}
