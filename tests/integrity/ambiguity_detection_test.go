@@ -71,7 +71,7 @@ func setupEngine(t *testing.T, ctx context.Context) (*engine.Runtime, *engine.En
 	}
 	caller := &ambigRecorder{}
 	eng := engine.NewEngine(rt, caller)
-	return rt, engine, caller
+	return rt, eng, caller
 }
 
 // =========================================================================
