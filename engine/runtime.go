@@ -34,26 +34,14 @@ var wazeroInitOnce sync.Once
 // Runtime wraps a wazero runtime with pre-registered host function imports.
 type Runtime struct {
 	wazeroRuntime wazero.Runtime
+	// stdout/stderr are NOT goroutine-safe — they are shared across callers
+	// of InstantiateModuleNamed. Concurrent execution must use the
+	// wazeroBackend.Execute() path, which uses per-backend buffers.
 	stdout        bytes.Buffer
 	stderr        bytes.Buffer
 	callTimeout   time.Duration // per-call WASM execution timeout (0 = none)
 	MemoryLimitPages uint32        // max WASM linear memory in pages (64KB each)
 	fuelLimit         uint64        // max WASM fuel (function calls) per invocation; 0 = no limit
-
-	// Work data for the Go dispatcher (cleat_poll_work).
-	// Set by CallExportWithSuspend before calling _start, read by the
-	// cleat_poll_work host function to deliver work into the guest.
-	workEntryPoint string
-	workInput      []byte
-
-		// Fields for cleat_complete host function (see imports.go).
-		// When the WASM export calls cleat_complete before returning,
-		// the result is stored here so CallExportWithSuspend can
-		// return it even if the Go WASI runtime subsequently calls
-		// proc_exit (which would otherwise overwrite the result).
-		completeMu     sync.Mutex
-		completeResult *string
-		completeErr    *string
 }
 
 // Stdout returns captured stdout output from the most recent module.
@@ -193,6 +181,19 @@ func (r *Runtime) InstantiateModuleNamed(ctx context.Context, compiled wazero.Co
 		WithName(name).
 		WithStdout(&r.stdout).
 		WithStderr(&r.stderr).
+		WithStartFunctions()
+	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
+}
+
+// instantiateModuleNamedWithWriters is like InstantiateModuleNamed but uses
+// the provided writers for stdout/stderr capture instead of the Runtime's
+// shared buffers. This is used by wazeroBackend.Execute() so that concurrent
+// workflow executions each have independent buffers.
+func (r *Runtime) instantiateModuleNamedWithWriters(ctx context.Context, compiled wazero.CompiledModule, name string, stdout, stderr *bytes.Buffer) (api.Module, error) {
+	config := wazero.NewModuleConfig().
+		WithName(name).
+		WithStdout(stdout).
+		WithStderr(stderr).
 		WithStartFunctions()
 	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
 }
@@ -478,10 +479,6 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// proc_exit (which returns as a fn.Call error), we can retrieve the result.
 	complete := &cleatComplete{}
 	callCtx = context.WithValue(callCtx, &cleatCompleteKey, complete)
-
-	// Set work data for Go dispatcher (cleat_poll_work host function).
-	r.workEntryPoint = exportName
-	r.workInput = inputJSON
 
 	results, err := fn.Call(callCtx,
 		uint64(inputOffset),

@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,8 +13,16 @@ var _ WasmBackend = (*wazeroBackend)(nil)
 // wazeroBackend implements WasmBackend using the wazero WASM runtime.
 // It wraps the existing Runtime type and handles compilation,
 // instantiation, execution, and teardown of WASM modules.
+//
+// stdout and stderr are per-backend buffers for capturing WASM output.
+// PerExecution() creates a new backend with independent buffers so that
+// concurrent workflow executions do not share the same bytes.Buffer (which
+// is not goroutine-safe). The Runtime's own stdout/stderr fields remain
+// for backward compatibility with direct callers of InstantiateModuleNamed.
 type wazeroBackend struct {
-	rt *Runtime
+	rt     *Runtime
+	stdout bytes.Buffer
+	stderr bytes.Buffer
 }
 
 // NewWazeroBackend creates a new wazeroBackend with a fresh Runtime.
@@ -65,7 +74,11 @@ func (b *wazeroBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoin
 	defer compiled.Close(ctx)
 
 	// Step 2: Instantiate the compiled module to create a runnable instance.
-	mod, err := b.rt.InstantiateModule(ctx, compiled)
+	// Use per-execution stdout/stderr buffers instead of the Runtime's
+	// shared buffers to prevent data races when Execute is called concurrently.
+	b.stdout.Reset()
+	b.stderr.Reset()
+	mod, err := b.rt.instantiateModuleNamedWithWriters(ctx, compiled, "", &b.stdout, &b.stderr)
 	if err != nil {
 		return nil, fmt.Errorf("host: instantiate module: %w", err)
 	}

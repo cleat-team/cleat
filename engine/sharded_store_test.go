@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -37,6 +38,34 @@ func TestShardedStore_Shards_Empty(t *testing.T) {
 	got := s.Shards()
 	if len(got) != 0 {
 		t.Errorf("expected empty shards, got %d", len(got))
+	}
+}
+
+func TestShardedStore_Close_HoldsLock(t *testing.T) {
+	// Verify no data race when Close() and Shards() run concurrently.
+	var mu sync.Mutex
+	var closed []string
+	shards := []*Shard{
+		{Config: ShardConfig{Name: "shard-0"}, Close: func() error { mu.Lock(); closed = append(closed, "0"); mu.Unlock(); return nil }},
+		{Config: ShardConfig{Name: "shard-1"}, Close: func() error { mu.Lock(); closed = append(closed, "1"); mu.Unlock(); return nil }},
+	}
+	s := &ShardedStore{shards: shards}
+
+	var wg sync.WaitGroup
+	wg.Add(10)
+	for i := 0; i < 5; i++ {
+		go func() { defer wg.Done(); s.Close() }()
+	}
+	for i := 0; i < 5; i++ {
+		go func() { defer wg.Done(); _ = s.Shards() }()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	n := len(closed)
+	mu.Unlock()
+	if n < 2 {
+		t.Errorf("Close() closed %d shards, want at least 2", n)
 	}
 }
 

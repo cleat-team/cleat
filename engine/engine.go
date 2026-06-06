@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -1115,9 +1116,9 @@ func (e *Engine) executeWithBackend(
 			}
 			session.releaseHeldScopes(context.Background())
 			if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("%s", enriched)
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %s", enriched)
 			}
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, callErr
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %w", callErr)
 	}
 
 	if res.Suspended || session.suspendErr != nil {
@@ -1313,9 +1314,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// consistent formatting and serves as a hook for future custom
 		// DWARF parsing from the raw wasm binary.
 		if enriched := resolveWasmTrap(wasmBytes, err.Error()); enriched != "" {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("%s", enriched)
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %s", enriched)
 		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, err
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %w", err)
 	}
 
 	// Workflow completed successfully. Release any held scopes.
@@ -1340,6 +1341,12 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 
 	// ---- Step 1: Compile all core modules ----
 	const componentAdapterModule = "__component_adapter__"
+
+	// Per-execution stdout/stderr buffers to avoid racing on Runtime's
+	// shared buffers when multiple component-model workflows execute
+	// concurrently on the same Runtime.
+	var execStdout, execStderr bytes.Buffer
+
 	compiled := make([]wazero.CompiledModule, len(bundle.Modules))
 	for i, w := range bundle.Modules {
 		w = wasm.PatchEmptyImportModuleName(w, componentAdapterModule)
@@ -1450,7 +1457,9 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			return nil
 		})
 
-		mod, err := e.rt.InstantiateModuleNamed(instantiateCtx, cm, fmt.Sprintf("__core_%d__", i))
+		execStdout.Reset()
+			execStderr.Reset()
+			mod, err := e.rt.instantiateModuleNamedWithWriters(instantiateCtx, cm, fmt.Sprintf("__core_%d__", i), &execStdout, &execStderr)
 		if err != nil {
 			return "", nil, nil, nil, nil, fmt.Errorf("host: instantiate instance %d (module %d): %w", i, inst.ModuleIndex, err)
 		}
@@ -1668,8 +1677,7 @@ type execSession struct {
 	nowMs            int64
 	randomSeq        int64 // monotonic counter for deterministic Random()
 	suspendErr       *SuspendError
-	signals          map[string]string // pending signals delivered during this session
-	deferrals        map[string]string // registered defer callbacks (deferID -> description)
+deferrals        map[string]string // registered defer callbacks (deferID -> description)
 	workflowID       string            // parent workflow instance ID (for child workflows)
 	defName          string            // workflow definition name (for metrics labels)
 	execRunID        string            // current execution run ID
@@ -1698,7 +1706,7 @@ type execSession struct {
 	// auto-ContinueAsNew without querying the database.
 	eventCount int
 
-	// mu protects maps (queryState, stateStore, signals, deferrals) from
+	// mu protects maps (queryState, stateStore, deferrals) from
 	// concurrent access when wasmtime host functions race with Go dispatch.
 	mu sync.Mutex
 
@@ -4082,9 +4090,6 @@ func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, na
 	s.queryHandlers = append(s.queryHandlers, name)
 	return 0
 }
-
-// QueryHandlers returns the list of registered query handler names.
-func (s *execSession) QueryHandlers() []string { return s.queryHandlers }
 
 // ---- Stream R host functions ----
 

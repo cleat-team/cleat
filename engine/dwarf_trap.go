@@ -34,10 +34,10 @@ func resolveWasmTrap(wasmBytes []byte, trapInfo string) string {
 	return enrichTrapMessage(trapInfo)
 }
 
-// enrichTrapMessage wraps a raw trap message with a consistent "WASM trap:" prefix.
+// enrichTrapMessage wraps a raw trap message with a consistent "wasm trap:" prefix.
 func enrichTrapMessage(trapInfo string) string {
 	if trapInfo == "" {
 		return ""
 	}
-	return fmt.Sprintf("WASM trap: %s", trapInfo)
+	return fmt.Sprintf("wasm trap: %s", trapInfo)
 }

@@ -2159,6 +2159,16 @@ func (s *MSSQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 	}
 	defer tx.Rollback()
 
+	// Read current generation for optimistic locking.
+	var gen int64
+	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&gen)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return tx.Commit() // Workflow no longer exists.
+		}
+		return fmt.Errorf("compact history: get generation: %w", err)
+	}
+
 	// Delete events older than keepStep.
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history
@@ -2172,8 +2182,8 @@ func (s *MSSQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET compaction_state = @p2, compaction_step = @p3, compacted_at = SYSUTCDATETIME()
-		WHERE id = @p1
-	`, workflowID, string(compactionState), compactionStep)
+		WHERE id = @p1 AND generation = @p4
+	`, workflowID, string(compactionState), compactionStep, gen)
 	if err != nil {
 		return fmt.Errorf("compact history: update state: %w", err)
 	}
