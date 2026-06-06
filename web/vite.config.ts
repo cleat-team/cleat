@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [svelte()],
   base: '/',
   build: {
-    outDir: '../cmd/cleat-worker/web/dist',
+    outDir: '../cmd/durable-worker/web/dist',
     emptyOutDir: true,
   },
 });

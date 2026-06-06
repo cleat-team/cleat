@@ -30,58 +30,35 @@
 
 | Package | Owns | Depends On |
 |---------|------|------------|
-| `engine/` | Engine, workflow execution loop, replay, signals, WASM runtime | wasm, plugin |
-| `wasm/` | WASM module loading, code generation, adapter | — |
-| `wasmrw/` | WASM read/write helpers | — |
-| `migration/` | Schema DDL runner (PG/MSSQL/MySQL) | — |
-| `auth/` | Tenant auth, RLS middleware | — |
-| `plugin/` | Plugin interface, registry, manifest, host helpers | wasmrw |
+| `internal/host/` | Engine, workflow execution loop, replay, signals | wasm, migration, telemetry |
+| `internal/wasm/` | WASM module loading, wasmtime bindings | — |
+| `internal/wasmrw/` | WASM read/write helpers | wasm |
+| `internal/migration/` | Schema DDL, migrations (PG/MSSQL/MySQL) | — |
+| `internal/auth/` | Tenant auth, RLS policy enforcement | migration |
 | `internal/telemetry/` | OTel setup, span hierarchy | — |
+| `internal/plugin/` | Plugin interface, registry | — |
 | `internal/plugingen/` | Plugin code generation | plugin |
 | `internal/analyzer/` | Static analysis of workflow code | — |
 | `internal/callgraph/` | Call graph construction | analyzer |
 | `internal/closure/` | Transitive closure over dependencies | callgraph |
 | `internal/transform/` | AST transformations | analyzer |
-| `cmd/cleat-worker/` | Worker daemon entry point | engine, migration |
-| `cmd/cleatctl/` | CLI admin/debug tool | engine |
-| `cmd/clew-service/` | Standalone clew HTTP service | engine |
+| `cmd/cleat-worker/` | Worker binary entry point | host |
+| `cmd/cleatctl/` | CLI admin/debug tool | host (read-only) |
+| `cmd/clew-service/` | Standalone clew HTTP service | host |
 
 ## Coupling Matrix
 
-- `cmd/cleat-worker` → `engine`: MEDIUM (consumes Engine API)
-- `cmd/cleat-worker` → `migration`: LOOSE (runs migrations at startup)
-- `cmd/cleatctl` → `engine`: MEDIUM (read-only Engine API for debug)
-- `engine` → `wasm`: TIGHT (shared wasmtime types, WASM execution)
-- `engine` → `plugin`: MEDIUM (plugin loading, call dispatch)
-- `plugin` → `wasmrw`: LOOSE (uses wasmrw.OK / wasmrw.Error helpers)
-- `internal/plugingen` → `plugin`: TIGHT (generates plugin code)
+- `cmd/cleat-worker` → `internal/host`: MEDIUM (consumes Engine API)
+- `cmd/cleatctl` → `internal/host`: MEDIUM (read-only Engine API for debug)
+- `internal/host` → `internal/wasm`: TIGHT (shared wasmtime types, execution)
+- `internal/host` → `internal/migration`: MEDIUM (schema contracts)
+- `internal/host` → `internal/telemetry`: LOOSE (OTel is initialized
+  separately)
+- `internal/wasmrw` → `internal/wasm`: TIGHT (shared WASM primitives)
+- `internal/plugingen` → `internal/plugin`: TIGHT (generates plugin code)
 - `internal/callgraph` → `internal/analyzer`: TIGHT (shared AST types)
 - `internal/closure` → `internal/callgraph`: TIGHT (operates on call graphs)
 - `internal/transform` → `internal/analyzer`: TIGHT (shared AST types)
-
-## Child Workflow API
-
-The HostCalls interface exposes three child workflow APIs. They are not redundant — each serves a distinct purpose:
-
-| API | Signature | WASM Import | Use Case |
-|-----|-----------|-------------|----------|
-| `ChildWorkflow` | `(name, inputJSON string) (runID, error)` | `cleat_child_workflow` | Default: start a child with no special options |
-| `ChildWorkflowWithOptions` | `(name, inputJSON string, opts ChildWorkflowOptions) (runID, error)` | `cleat_child_workflow_with_options` | Start a child with version pinning, parent close policy, or priority |
-| `ChildWorkflowTyped` | `(name string, request interface{}) (runID, error)` | `cleat_child_workflow` (via delegation) | Go-level typed convenience: marshals `request` to JSON, calls `ChildWorkflow` |
-
-**Runtime delegation:**
-
-- `ChildWorkflowTyped` marshals the typed request to JSON and calls `ChildWorkflow`.
-- `ChildWorkflowWithOptions` uses the options handler when available; falls back to `ChildWorkflow` otherwise (backward compat for runtimes without options support).
-- `ChildWorkflow` is the base primitive — lightweight at the WASM boundary (2 params) and sufficient for all calls that don't need version/policy/priority config.
-
-**Guidance:**
-
-- Prefer `ChildWorkflow` for simple child starts — it's the canonical form when no options are needed.
-- Use `ChildWorkflowWithOptions` when you need version pinning, `ParentClosePolicy`, or `Priority`.
-- Use `ChildWorkflowTyped` for type-safe Go ergonomics; it's a thin wrapper around `ChildWorkflow`.
-
-All three APIs remain fully functional. None is deprecated.
 
 ## Data Model
 

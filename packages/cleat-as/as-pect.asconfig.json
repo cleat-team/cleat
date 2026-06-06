@@ -10,7 +10,6 @@
     "exportStart": "_start",
     "runtime": "stub",
     "outFile": "output.wasm",
-    "initialMemory": 200,
     "optimize": false,
     "paths": {
       "@cleat/sdk": "./assembly"

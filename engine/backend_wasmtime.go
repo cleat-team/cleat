@@ -155,10 +155,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			b.workEntryPoint = entryPoint
 			// Wrap in DispatchWrapper format that gen_wasm_exports.go expects:
 			// {"inputJSON":"<escaped inner JSON>"}
-			escaped, err := json.Marshal(string(input))
-			if err != nil {
-				return nil, fmt.Errorf("host: marshal input for dispatch wrapper: %w", err)
-			}
+			escaped, _ := json.Marshal(string(input))
 			b.workInput = []byte(fmt.Sprintf(`{"inputJSON":%s}`, string(escaped)))
 
 			// Write work data to a fixed WASM memory location (offset 1024)

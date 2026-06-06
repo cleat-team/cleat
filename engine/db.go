@@ -656,7 +656,7 @@ func (s *PostgresStore) setRLSOnTx(tx *sql.Tx) error {
 	if s.tenantID == "" {
 		return fmt.Errorf("setRLSOnTx: tenant ID must be set before beginning an RLS-scoped transaction")
 	}
-	_, err := tx.ExecContext(context.Background(), "SELECT set_config('cleat.tenant_id', $1, true)", s.tenantID)
+	_, err := tx.Exec("SELECT set_config('cleat.tenant_id', $1, true)", s.tenantID)
 	return err
 }
 
@@ -1337,9 +1337,6 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	qsJSON, _ := json.Marshal(queryState)
 	if qsJSON == nil {
 		qsJSON = []byte("{}")
-	}
-	if result == "" || !json.Valid([]byte(result)) {
-		result = "{}"
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances

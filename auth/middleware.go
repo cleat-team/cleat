@@ -43,10 +43,7 @@ func Middleware(store engine.WorkflowStore, requireAuth bool) func(http.Handler)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Public paths are always accessible without authentication.
 			path := r.URL.Path
-			if path == "/healthz" || path == "/metrics" ||
-				path == "/" || path == "/index.html" ||
-				strings.HasPrefix(path, "/assets/") ||
-				(path == "/favicon.ico") {
+			if path == "/healthz" || path == "/metrics" {
 				next.ServeHTTP(w, r)
 				return
 			}

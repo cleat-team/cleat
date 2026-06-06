@@ -191,7 +191,6 @@ mod imports {
         pub fn cleat_send(svc_ptr: *const u8, svc_len: u32, op_ptr: *const u8, op_len: u32, req_ptr: *const u8, req_len: u32) -> i64;
 
         // schedule_invoke - ABI 2.34, three strings in, i64 delay
-        #[link_name = "cleat_schedule_invoke"]
         pub fn schedule_invoke(svc_ptr: *const u8, svc_len: u32, op_ptr: *const u8, op_len: u32, req_ptr: *const u8, req_len: u32, delay_ms: i64) -> i64;
 
         // cleat_register_query_handler - ABI 2.35, one string in
@@ -221,13 +220,13 @@ mod imports {
         // cleat_await_all_children - ABI 2.43, one string in (JSON run_ids), one string out
         pub fn cleat_await_all_children(run_ids_ptr: *const u8, run_ids_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
 
-        // cleat_poll_child - ABI 2.24, one string in (run_id), one string out, non-blocking
+        // cleat_poll_child - ABI 2.44, one string in (run_id), one string out, non-blocking
         pub fn cleat_poll_child(
             run_id_ptr: *const u8, run_id_len: u32,
             result_ptr: *mut u8, result_max_len: u32,
         ) -> i64;
 
-        // cleat_await_any_child - ABI 2.25, one string in (JSON run_ids), one string out, blocking
+        // cleat_await_any_child - ABI 2.45, one string in (JSON run_ids), one string out, blocking
         pub fn cleat_await_any_child(
             run_ids_ptr: *const u8, run_ids_len: u32,
             result_ptr: *mut u8, result_max_len: u32,

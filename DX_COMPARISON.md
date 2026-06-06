@@ -19,8 +19,9 @@ validating cleat's architecture against real-world code.
 3. **Go is the only production-ready SDK.** Rust is clean (all core APIs present
    after SDK hardening). Java/TeaVM works with painful build workarounds.
    AssemblyScript is severely constrained by its runtime subset. The Python SDK
-   is the most comprehensive (~13,500 lines, 49 WIT imports, LangChain/LangGraph
-   integration) and `componentize-py` WASM compilation has been validated end-to-end.
+   is the most comprehensive (4,508 lines, 34 WIT imports, LangChain/LangGraph
+   integration) and `componentize-py` WASM compilation has been validated end-to-end
+   end-to-end.
 
 4. **The WASM sandbox is both cleat's superpower and its main friction point** —
    it enables language-agnostic workflows and deterministic replay, but forces
@@ -79,7 +80,8 @@ and call history assertions. Tests run in milliseconds.
 
 ### Rust (1 port — Clean, Core APIs Present)
 
-The smallest SDK at ~2,011 lines (host_calls.rs expanded from 290 to 1,519 during SDK hardening). The port produced a 141 KB WASM binary (release, stripped).
+The smallest SDK at 1,090 lines (host_calls expanded from 537 lines after SDK
+hardening pass). The port produced a 141 KB WASM binary (release, stripped).
 
 **Strengths:**
 - `#[cleat_entry]` proc-macro — compile-time code generation, praised as best DX
@@ -115,6 +117,10 @@ hardening pass added Saga, query state, and a `TestHostCalls` mock harness
 that references all `*_Export` wrappers via `CleatEntryIndex`. When `mainClass` is set to
 `cleat.WorkflowEntry` (the default), TeaVM follows the reference chain and preserves all
 exports automatically. The `preservedClasses` workaround is no longer needed.
+- `JsonHelper.parse()` only supports `String.class` — all inputs must be pre-serialized
+- `String.replace()` compiles to `Pattern.compile()`, unsupported by TeaVM WASM target
+- Multi-project Gradle plugin version conflicts
+- No `fetch_get_json` convenience wrapper
 
 ### AssemblyScript (3 ports — Severely Constrained)
 
@@ -137,12 +143,11 @@ SDK hardening added a `TestEnv` test harness (1,626 lines) and K/V state operati
 
 ### Python (5 ports — Comprehensive SDK, WASM Validated)
 
-The most requested language and the most comprehensive SDK at ~13,500 lines.
-49 WIT imports defined, `@cleat_entry` decorator, `virtual_object` decorator,
+The most requested language and the most comprehensive SDK at 4,508 lines.
+34 WIT imports defined, `@cleat_entry` decorator, `virtual_object` decorator,
 80+ tests, 4 example workflows, and LangChain/LangGraph integration. However,
-the `componentize-py` WASM compilation pipeline and runtime execution have been
-validated end-to-end (cleat-233b) — a Python workflow has been loaded and
-executed in a real cleat worker.
+the `componentize-py` WASM compilation pipeline has been validated end-to-end
+end-to-end — no Python workflow has been confirmed running in a cleat worker.
 
 **Resolved (SDK hardening pass):**
 - `TerminalError` added to core SDK
@@ -348,7 +353,7 @@ The 202 documented issues across 19 ports break down into these categories:
 ### Remaining Gaps (all external tool limitations or by-design tradeoffs)
 
 - `DurableDefer` is description-only, not a closure — by design, Saga is the recommended replacement
-- TeaVM tree-shaking — FIXED via `WorkflowEntry` reference chain (see Java section above)
+- TeaVM tree-shaking — TeaVM limitation, manual `preservedClasses` workaround exists
 - `JsonHelper.parse()` String.class only — TeaVM WASM limitation
 - AS no try/catch / no closures — AssemblyScript `--runtime stub` limitations
 
@@ -356,8 +361,8 @@ The 202 documented issues across 19 ports break down into these categories:
 ### Build System
 
 - TeaVM Gradle plugin resolution (Java)
-- `componentize-py` end-to-end validated (Python — cleat-233b)
-- `@durableEntry` transform partially fixed (AS — AssemblyScript transform limitation)
+- `componentize-py` end-to-end untested (Python)
+- `@durableEntry` tree-shaking by TeaVM (Java — TeaVM limitation)
 - WASM export class warnings with `--runtime stub` (AS — AS limitation)
 
 ### Documentation
@@ -381,12 +386,12 @@ identified during the 19-port analysis are now closed — side-effect caching,
 Virtual Object enforcement, AwaitCondition, per-call timeouts, unit mismatches,
 and lock API are all implemented end-to-end. The Go SDK is production-ready.
 Rust, Java, and AS SDKs have full core API coverage with test harnesses.
-The Python SDK is comprehensive (~13,500 lines, 49 WIT imports, LangChain/
+The Python SDK is comprehensive (4,508 lines, 34 WIT imports, LangChain/
 LangGraph integration) with WASM compilation validated end-to-end.
 
 The only remaining gaps are external tool limitations:
-1. **Python WASM validation** — DONE. `build_wasm.py` + `componentize-py` 0.23.0 produce valid WASM binaries; runtime execution validated end-to-end (cleat-233b)
-2. **TeaVM tree-shaking** — FIXED via `WorkflowEntry` reference chain (see Java section above)
+1. **Python WASM validation** — DONE. `build_wasm.py` + `componentize-py` 0.23.0 produce valid WASM binaries
+2. **TeaVM tree-shaking** — Java entry points must be manually listed (TeaVM limitation)
 3. **AS runtime constraints** — no try/catch, no closures (AssemblyScript `--runtime stub` limitation)
 
 None of these are cleat bugs. They are external tool maturity issues.

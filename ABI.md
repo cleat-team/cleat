@@ -548,10 +548,6 @@ Start a child workflow instance with configurable version and parent close polic
 | 0-31 | `errCode` |
 | 32-63 | `runIDLen` — bytes written to run ID buffer |
 
-**SDK-level typed wrapper.** The Go SDK provides `ChildWorkflowTyped(name, request)` as a convenience that JSON-marshals `request` and delegates to `cleat_child_workflow`. It is not a separate WASM import. The Rust/Java/AssemblyScript/Python SDKs may provide equivalent typed wrappers that also delegate to `cleat_child_workflow`.
-
-**Relationship.** `cleat_child_workflow` (2 params: name, input) is the base primitive. `cleat_child_workflow_with_options` (5 params: name, input, version, parentClosePolicy, priority) extends it with configuration. When options are not needed, prefer `cleat_child_workflow` — it is lighter at the WASM boundary. Both are fully supported; neither is deprecated.
-
 #### 2.21 `cleat_child_workflow_in_schema`
 
 Start a child workflow instance in a different PostgreSQL schema for cross-instance cooperation.
@@ -633,59 +629,7 @@ Batch await for multiple child workflows. Returns a JSON array of child results.
 | 0-7 | `errCode` |
 | 32-63 | `resultLen` — bytes written to results buffer |
 
-#### 2.24 `cleat_poll_child`
-
-Non-blocking poll of a child workflow's status. Returns immediately without suspending, regardless of whether the child has completed.
-
-```
-(func (import "env" "cleat_poll_child")
-  (param i32 i32 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `run_id_ptr` | `i32` | Child run ID pointer |
-| `run_id_len` | `i32` | Child run ID length |
-| `result_ptr` | `i32` | Output buffer for poll result |
-| `result_max_len` | `i32` | Output buffer capacity (65536) |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-| 32-63 | `resultLen` — bytes written to result buffer |
-
-The result is a JSON object: `{"status":"running|completed|failed","result":"...","error":"..."}`. Does not suspend — use `cleat_await_child` or `cleat_await_any_child` for blocking waits.
-
-#### 2.25 `cleat_await_any_child`
-
-Blocking wait for any of multiple child workflows to complete. Suspends the workflow if none of the specified children have finished.
-
-```
-(func (import "env" "cleat_await_any_child")
-  (param i32 i32 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `run_ids_ptr` | `i32` | JSON array of run IDs, e.g. `["run-1","run-2"]` |
-| `run_ids_len` | `i32` | JSON array length |
-| `result_ptr` | `i32` | Output buffer for result |
-| `result_max_len` | `i32` | Output buffer capacity (65536) |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-| 32-63 | `resultLen` — bytes written to result buffer |
-
-The result is a JSON object: `{"run_id":"...","result":"...","error":"..."}`. Children are polled in deterministic sorted order by run ID. If multiple children are complete, returns the first in sorted order. If none are complete, the workflow suspends.
-
-#### 2.26 `cleat_run_detached`
+#### 2.24 `cleat_run_detached`
 
 Run a detached child workflow (fire-and-forget, no result expected).
 
@@ -710,7 +654,7 @@ Run a detached child workflow (fire-and-forget, no result expected).
 
 ### Query and update handlers
 
-#### 2.27 `cleat_register_query_handler`
+#### 2.25 `cleat_register_query_handler`
 
 Register a read-only query handler for the workflow.
 
@@ -731,7 +675,7 @@ Register a read-only query handler for the workflow.
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
-#### 2.28 `cleat_register_update_handler`
+#### 2.26 `cleat_register_update_handler`
 
 Register an update handler for workflow updates (bi-directional RPC). Handler registration is one-way; no output buffer is needed.
 
@@ -752,7 +696,7 @@ Register an update handler for workflow updates (bi-directional RPC). Handler re
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
-#### 2.29 `set_query_state`
+#### 2.27 `set_query_state`
 
 Set a key-value pair in the workflow's query state.
 
@@ -773,7 +717,7 @@ Return value is ignored.
 
 ### Durable key-value state operations
 
-#### 2.30 `cleat_set_state`
+#### 2.28 `cleat_set_state`
 
 Set a key-value pair in the workflow's durable state.
 
@@ -796,7 +740,7 @@ Set a key-value pair in the workflow's durable state.
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
-#### 2.31 `cleat_get_state`
+#### 2.29 `cleat_get_state`
 
 Get the value for a key in the workflow's durable state.
 
@@ -820,7 +764,7 @@ Get the value for a key in the workflow's durable state.
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `valueLen` — bytes written to value buffer |
 
-#### 2.32 `cleat_delete_state`
+#### 2.30 `cleat_delete_state`
 
 Delete a key from the workflow's durable state.
 
@@ -841,7 +785,7 @@ Delete a key from the workflow's durable state.
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
-#### 2.33 `cleat_incr_state`
+#### 2.31 `cleat_incr_state`
 
 Atomically increment a numeric state value by a delta.
 
@@ -864,7 +808,7 @@ Atomically increment a numeric state value by a delta.
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `newValue` — new value after increment |
 
-#### 2.34 `cleat_has_state`
+#### 2.32 `cleat_has_state`
 
 Check if a key exists in the workflow's durable state.
 
@@ -886,7 +830,7 @@ Check if a key exists in the workflow's durable state.
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `exists` — 1 if key exists, 0 otherwise |
 
-#### 2.35 `cleat_list_state`
+#### 2.33 `cleat_list_state`
 
 List state keys matching a given prefix.
 
@@ -912,7 +856,7 @@ List state keys matching a given prefix.
 
 ### Durable promises
 
-#### 2.36 `cleat_create_promise`
+#### 2.34 `cleat_create_promise`
 
 Create a named durable promise. Returns a promise ID that external callers use to resolve or reject the promise.
 
@@ -936,7 +880,7 @@ Create a named durable promise. Returns a promise ID that external callers use t
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `promiseIDLen` — bytes written to promise ID buffer |
 
-#### 2.37 `cleat_await_promise`
+#### 2.35 `cleat_await_promise`
 
 Wait for a promise to be resolved by an external caller. Blocks until resolved or timeout expires.
 
@@ -962,7 +906,7 @@ Wait for a promise to be resolved by an external caller. Blocks until resolved o
 | 16-31 | `timedOut` — non-zero if timeout expired |
 | 32-63 | `resultLen` — bytes written to result buffer |
 
-#### 2.38 `cleat_resolve_promise`
+#### 2.36 `cleat_resolve_promise`
 
 Resolve a durable promise with a value. External callers waiting on this promise will receive the value.
 
@@ -985,7 +929,7 @@ Resolve a durable promise with a value. External callers waiting on this promise
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
-#### 2.39 `cleat_reject_promise`
+#### 2.37 `cleat_reject_promise`
 
 Reject a durable promise with an error message. External callers waiting on this promise will receive the error.
 
@@ -1010,7 +954,7 @@ Reject a durable promise with an error message. External callers waiting on this
 
 ### Scoped state / virtual objects
 
-#### 2.40 `cleat_set_scope`
+#### 2.38 `cleat_set_scope`
 
 Set the virtual object scope for the current workflow execution.
 
@@ -1036,7 +980,7 @@ Set the virtual object scope for the current workflow execution.
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `prevScopeLen` — bytes written to previous scope buffer |
 
-#### 2.41 `cleat_get_scope`
+#### 2.39 `cleat_get_scope`
 
 Get the current virtual object scope.
 
@@ -1061,7 +1005,7 @@ Get the current virtual object scope.
 | 32-47 | `objTypeLen` — bytes written to object type buffer |
 | 48-63 | `instKeyLen` — bytes written to instance key buffer |
 
-#### 2.42 `cleat_uuid`
+#### 2.40 `cleat_uuid`
 
 Generate a deterministic UUID from a seed value.
 
@@ -1087,7 +1031,7 @@ Generate a deterministic UUID from a seed value.
 
 ### Locking
 
-#### 2.43 `cleat_acquire_lock`
+#### 2.41 `cleat_acquire_lock`
 
 Acquire a distributed lock with a TTL.
 
@@ -1109,7 +1053,7 @@ Acquire a distributed lock with a TTL.
 |---|---|
 | 0-31 | `errCode` — 0 = acquired, non-zero = not acquired |
 
-#### 2.44 `cleat_release_lock`
+#### 2.42 `cleat_release_lock`
 
 Release a previously acquired distributed lock.
 
@@ -1132,7 +1076,7 @@ Release a previously acquired distributed lock.
 
 ### Side effects
 
-#### 2.45 `cleat_side_effect`
+#### 2.43 `cleat_side_effect`
 
 Record a non-deterministic computation result. On first execution, the result is stored in event history; on replay, the cached result is returned.
 
@@ -1158,7 +1102,7 @@ Record a non-deterministic computation result. On first execution, the result is
 
 ### Workflow identity
 
-#### 2.46 `cleat_workflow_id`
+#### 2.44 `cleat_workflow_id`
 
 Get the current workflow's unique identifier.
 
@@ -1180,7 +1124,7 @@ Get the current workflow's unique identifier.
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `idLen` — bytes written to ID buffer |
 
-#### 2.47 `cleat_run_id`
+#### 2.45 `cleat_run_id`
 
 Get the current workflow run's unique identifier.
 
@@ -1204,7 +1148,7 @@ Get the current workflow run's unique identifier.
 
 ### Messaging / scheduling
 
-#### 2.48 `cleat_send`
+#### 2.46 `cleat_send`
 
 Send a fire-and-forget request to an external service.
 
@@ -1229,7 +1173,7 @@ Send a fire-and-forget request to an external service.
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
-#### 2.49 `cleat_schedule_invoke`
+#### 2.47 `cleat_schedule_invoke`
 
 Schedule a delayed one-shot invocation of an external service operation.
 
@@ -1257,7 +1201,7 @@ Schedule a delayed one-shot invocation of an external service operation.
 
 ### HTTP fetch
 
-#### 2.50 `cleat_fetch`
+#### 2.48 `cleat_fetch`
 
 Perform an HTTP fetch request. The method, URL, headers (JSON), and body are all configurable.
 
@@ -1289,7 +1233,7 @@ Perform an HTTP fetch request. The method, URL, headers (JSON), and body are all
 
 ### JSON validation helpers
 
-#### 2.53 `cleat_json_parse`
+#### 2.51 `cleat_json_parse`
 
 Parse and validate a JSON string. Returns the canonical (re-serialized) form of the input JSON.
 
@@ -1315,7 +1259,7 @@ Parse and validate a JSON string. Returns the canonical (re-serialized) form of 
 
 If `errCode != 0`, the input was not valid JSON and `bytesWritten` is 0.
 
-#### 2.54 `cleat_json_stringify`
+#### 2.52 `cleat_json_stringify`
 
 Validate and re-serialize a JSON value. Identical behavior to `cleat_json_parse` — both parse then re-serialize via the host's `encoding/json`. Provided as a semantic alias for SDK ergonomics.
 
@@ -1341,7 +1285,7 @@ Validate and re-serialize a JSON value. Identical behavior to `cleat_json_parse`
 
 ### Plugin extensions
 
-#### 2.51 `plugin_call`
+#### 2.49 `plugin_call`
 
 Host-only extension for plugin function calls. Not included in the Go SDK generator; available for non-Go WASM modules.
 
@@ -1370,7 +1314,7 @@ Host-only extension for plugin function calls. Not included in the Go SDK genera
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
-#### 2.52 `plugin_call_streaming`
+#### 2.50 `plugin_call_streaming`
 
 Host-only extension for streaming plugin function calls. Same signature as `plugin_call`; the host handles streaming at the transport layer.
 
@@ -1448,7 +1392,7 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 | Version | Date | Changes |
 |---|---|---|
 | 5 | 2026-05-15 | Added Section 6: Cross-Language Determinism specification covering IEEE 754 floats, map iteration order, JSON canonicalization, GC timing, and RNG. Added cross-language replay guarantee. |
-| 4 | 2026-05-13 | Added `cleat_json_parse` (2.53) and `cleat_json_stringify` (2.54) host functions for JSON validation and normalization via the host runtime. Bumped ABI_VERSION to 4. |
+| 4 | 2026-05-13 | Added `cleat_json_parse` (2.51) and `cleat_json_stringify` (2.52) host functions for JSON validation and normalization via the host runtime. Bumped ABI_VERSION to 4. |
 | 3 | 2026-05-09 | Expanded from 22 to 50 documented host functions. Added all missing imports: `cleat_continue_as_new_versioned`, `cleat_child_workflow_with_options`, `cleat_child_workflow_in_schema`, `cleat_send_signal_and_wait`, `cleat_reply_to_signal`, `cleat_signal_workflow`, `cleat_set_scope`, `cleat_get_scope`, `cleat_uuid`, `cleat_acquire_lock`, `cleat_release_lock`, `cleat_side_effect`, `cleat_workflow_id`, `cleat_run_id`, `cleat_resolve_promise`, `cleat_reject_promise`, `cleat_send`, `cleat_schedule_invoke`, `cleat_register_query_handler`, `cleat_run_detached`, `cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`, `cleat_list_state`, `cleat_fetch`, `plugin_call_streaming`. Reorganized into logical groups. Updated documentation count from 18 to 50. |
 | 2 | 2026-05-06 | Added `cleat_call_retry`, `cleat_call_heartbeat`, `cleat_await_all_children`, and `plugin_call` host functions. Updated documentation count. |
 | 1 | 2026-05-05 | Initial ABI specification. 15 host function imports, export convention, memory layout. |
@@ -1463,7 +1407,7 @@ Cleat workflows must produce identical event histories and results when replayed
 
 All numeric operations MUST conform to IEEE 754-2019. The cleat host runtime does not canonicalize float values in linear memory — each SDK is responsible for ensuring deterministic float behavior.
 
-**NaN canonicalization**: All NaN values MUST be normalized to a single canonical representation when serialized to JSON or compared for equality. The canonical NaN for f64 is quiet NaN with positive sign (`0x7FF8000000000000`). SDKs SHOULD route floats through `cleat_json_stringify` (ABI 2.54) rather than language-native float-to-string conversions, as the host's `encoding/json` produces consistent float representations.
+**NaN canonicalization**: All NaN values MUST be normalized to a single canonical representation when serialized to JSON or compared for equality. The canonical NaN for f64 is quiet NaN with positive sign (`0x7FF8000000000000`). SDKs SHOULD route floats through `cleat_json_stringify` (ABI 2.52) rather than language-native float-to-string conversions, as the host's `encoding/json` produces consistent float representations.
 
 **Minimum requirements**:
 
@@ -1507,7 +1451,7 @@ All JSON output from workflows MUST be canonical to enable bit-identical cross-l
 | Boolean | `true` / `false` (lowercase) |
 | Array | `[...]` with no trailing comma |
 
-**Implementation**: SDKs SHOULD route workflow result JSON through the host's `cleat_json_stringify` (ABI 2.54). The host normalizes JSON through Go's `encoding/json` (parse into `interface{}`, then `json.Marshal`), which produces sorted keys and canonical formatting.
+**Implementation**: SDKs SHOULD route workflow result JSON through the host's `cleat_json_stringify` (ABI 2.52). The host normalizes JSON through Go's `encoding/json` (parse into `interface{}`, then `json.Marshal`), which produces sorted keys and canonical formatting.
 
 For intermediate JSON (e.g., request payloads for `cleat_call`), canonical JSON is not strictly required since the engine matches replay events by step index and service/operation, not by request content. However, canonical intermediate JSON improves debuggability and reduces the risk of non-deterministic workflow behavior.
 
@@ -1564,7 +1508,7 @@ id := rand.Int63()  // WRONG: non-deterministic — replay will diverge
 id, _ := h.DurableRandom()  // Uses cleat_random — deterministic on replay
 ```
 
-Use `cleat_uuid` (ABI 2.42) for deterministic UUID generation from a seed.
+Use `cleat_uuid` (ABI 2.40) for deterministic UUID generation from a seed.
 
 ### 6.6 SDK Compliance Matrix
 
@@ -1576,8 +1520,8 @@ Use `cleat_uuid` (ABI 2.42) for deterministic UUID generation from a seed.
 | JSON canonical output | ✅ encoding/json | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify componentize-py | ✅ via host json_stringify |
 | GC-timing independence | ✅ manual defer | ✅ manual defer | ✅ manual defer | ✅ manual defer |
 | RNG via cleat_random | ✅ | ✅ | ✅ | ✅ |
-| cleat_json_parse (2.53) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
-| cleat_json_stringify (2.54) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
+| cleat_json_parse (2.51) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
+| cleat_json_stringify (2.52) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
 
 ✅ = compliant by default or already implemented  
 ⚠️ = requires explicit use of the recommended pattern (manual or verified)

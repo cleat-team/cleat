@@ -86,12 +86,19 @@ func (*fakeTx) Commit() error   { return nil }
 func (*fakeTx) Rollback() error { return nil }
 
 // QueryContext implements driver.QueryerContext.
+//
+// SELECT queries hold a read lock; INSERT … RETURNING queries hold a write lock
+// (they mutate the store).
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	switch {
-	case strings.Contains(query, "SELECT") && strings.Contains(query, "tenant_api_keys"):
+	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
+	case strings.Contains(query, "INSERT INTO tenants"):
+		c.store.mu.Lock()
+		defer c.store.mu.Unlock()
+		return c.execInsertTenant(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Query: %s", query)
 	}
@@ -103,11 +110,9 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	defer c.store.mu.Unlock()
 
 	switch {
-	case strings.Contains(query, "tenants") && !strings.Contains(query, "tenant_api_keys"):
-		return c.execInsertTenant(args)
-	case strings.Contains(query, "tenant_api_keys") && strings.Contains(query, "INSERT"):
+	case strings.Contains(query, "INSERT INTO tenant_api_keys"):
 		return c.execInsertAPIKey(args)
-	case strings.Contains(query, "tenant_api_keys") && strings.Contains(query, "UPDATE"):
+	case strings.Contains(query, "UPDATE tenant_api_keys SET revoked_at"):
 		return c.execRevokeAPIKey(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec: %s", query)
@@ -140,17 +145,13 @@ func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, err
 
 // execInsertTenant handles:
 //
-//	INSERT INTO tenants (tenant_id, name, display_name) VALUES ($1, $2, $3)
-func (c *fakeConn) execInsertTenant(args []driver.NamedValue) (driver.Result, error) {
-	tid, err := argString(args, 1)
+//	INSERT INTO tenants (name, display_name) VALUES ($1, $2) RETURNING tenant_id
+func (c *fakeConn) execInsertTenant(args []driver.NamedValue) (driver.Rows, error) {
+	name, err := argString(args, 1)
 	if err != nil {
 		return nil, err
 	}
-	name, err := argString(args, 2)
-	if err != nil {
-		return nil, err
-	}
-	displayName, err := argString(args, 3)
+	displayName, err := argString(args, 2)
 	if err != nil {
 		return nil, err
 	}
@@ -162,12 +163,17 @@ func (c *fakeConn) execInsertTenant(args []driver.NamedValue) (driver.Result, er
 		}
 	}
 
+	c.store.nextID++
+	tid := fmt.Sprintf("00000000-0000-0000-0000-%012d", c.store.nextID)
 	c.store.tenants = append(c.store.tenants, fakeTenantRow{
 		tenantID:    tid,
 		name:        name,
 		displayName: displayName,
 	})
-	return &fakeResult{rowsAffected: 1}, nil
+	return &fakeRows{
+		columns: []string{"tenant_id"},
+		data:    [][]driver.Value{{tid}},
+	}, nil
 }
 
 // execInsertAPIKey handles:

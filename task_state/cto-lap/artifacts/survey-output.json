@@ -1,86 +1,11 @@
 {
-  "survey_id": "cto-lap-031",
-  "survey_date": "2026-06-05",
-  "task_id": "cto-lap-031",
-  "ceo_guidance": "task_state/CEO-GUIDANCE.md",
-  "ceo_guidance_date": "2026-06-04",
-  "ceo_budget": 100,
-  "git_head": "98e32dd",
-  "material_change_since_prior": "Infrastructure gaps resolved. INDEX.md and tasks.json now exist. All 6 task directories (231-236) created with TASK.md, CONTRACT.md, STATUS.md — dispatched by cto-lap-032. Prior tasks_to_close (cleat-228b, cleat-230) fully cleaned up. No implementation progress — all tasks in pending phase. Two engine Go files have uncommitted changes (auth/middleware.go, engine/backend_wasmtime.go) that should be examined before implementation begins.",
-  "decomps_ready": [
+  "decomps_ready": [],
+  "decomps_needing_review": [],
+  "tasks_to_close": [
     {
-      "task_id": "cleat-231",
-      "dag_path": "task_state/cleat-231/CONTRACT.md",
-      "depends_on": [],
-      "subject": "ChildWorkflow API cleanup + docs",
-      "budget": 15,
-      "priority": 2,
-      "wave": 1
-    },
-    {
-      "task_id": "cleat-232",
-      "dag_path": "task_state/cleat-232/CONTRACT.md",
-      "depends_on": [],
-      "subject": "Multi-DB test fixes (MySQL, MSSQL)",
-      "budget": 20,
-      "priority": 1,
-      "wave": 1
-    },
-    {
-      "task_id": "cleat-233",
-      "dag_path": "task_state/cleat-233/CONTRACT.md",
-      "depends_on": [],
-      "subject": "SDK test passes (Rust, AssemblyScript, Python)",
-      "budget": 15,
-      "priority": 1,
-      "wave": 1
-    },
-    {
-      "task_id": "cleat-235",
-      "dag_path": "task_state/cleat-235/CONTRACT.md",
-      "depends_on": [],
-      "subject": "Code review (engine, auth, wasm)",
-      "budget": 20,
-      "priority": 2,
-      "wave": 1
-    },
-    {
-      "task_id": "cleat-236",
-      "dag_path": "task_state/cleat-236/CONTRACT.md",
-      "depends_on": [],
-      "subject": "Documentation audit",
-      "budget": 15,
-      "priority": 2,
-      "wave": 1
+      "task_id": "cleat-228a",
+      "reason": "Engine plumbing complete. engine.go.bak deleted in 0664fec. advanceReplayStep has 42 references on develop. 10+ independent verifications corroborate. Task is done."
     }
   ],
-  "decomps_needing_review": [
-    {
-      "task_id": "cleat-234",
-      "dag_path": "task_state/cleat-234/CONTRACT.md",
-      "depends_on": ["cleat-232", "cleat-233"],
-      "subject": "CI enforcement + closure test fix",
-      "budget": 15,
-      "priority": 1,
-      "wave": 2,
-      "blocked_reason": "Dependencies cleat-232 and cleat-233 are still pending. CI enforcement requires green multi-db and SDK tests before starting."
-    }
-  ],
-  "tasks_to_close": [],
-  "budget_spent_today": 0.0,
-  "budget_spent_note": "All $100 remains. No implementation work has begun — all 6 tasks are in pending phase. CTO coordination and infrastructure setup only.",
-  "dispatch_plan": {
-    "wave_1_parallel": ["cleat-231", "cleat-232", "cleat-233", "cleat-235", "cleat-236"],
-    "wave_2_after_deps": ["cleat-234"],
-    "max_concurrent_leaf_tasks": 5
-  },
-  "infrastructure_status": {
-    "INDEX.md": "exists at task_state/INDEX.md — task table, coupling summary, wave plan",
-    "tasks.json": "exists at task_state/tasks.json — 6 tasks, dispatch_plan, coupling data",
-    "task_directories": "all 6 exist (231-236) with TASK.md, CONTRACT.md, STATUS.md",
-    "task_phase": "all pending, dispatched by cto-lap-032, zero execution progress",
-    "prior_close_tasks_cleaned": "cleat-228b and cleat-230 directories removed — fully closed",
-    "uncommitted_engine_files": "auth/middleware.go (7-line public-path diff), engine/backend_wasmtime.go (1-line wasmtime context fix)"
-  },
-  "escalation": "All infrastructure is in place. INDEX.md, tasks.json, 6 task contracts, clean engine, prior close tasks cleaned up. Five independent Wave 1 tasks ready for implementing agents. One Wave 2 task (cleat-234) awaits its dependencies. Two uncommitted engine Go files exist — these should be committed or reverted before implementation begins to avoid merge conflicts. CEO action required: commit or revert engine changes, then trigger implementing agents for Wave 1 tasks (cleat-231, 232, 233, 235, 236)."
+  "budget_spent_today": 0.00
 }

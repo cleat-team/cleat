@@ -61,7 +61,7 @@
             <td>v{wf.def_version}</td>
             <td><StatusBadge status={wf.status} /></td>
             <td>{wf.assigned_to?.slice(0, 8) || '-'}</td>
-            <td>{wf.created_at && !wf.created_at.startsWith('0001-01-01') ? new Date(wf.created_at).toLocaleString() : '-'}</td>
+            <td>{new Date(wf.created_at).toLocaleString()}</td>
           </tr>
         {/each}
       </tbody>

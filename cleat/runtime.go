@@ -255,16 +255,11 @@ type Lifecycle interface {
 	PollCancellation() (cancelled bool, reason string)
 
 	// ChildWorkflow starts a child workflow with its own event history.
-	// This is the base primitive — use when no options are needed.
-	// For version pinning, parent close policy, or priority, use
-	// ChildWorkflowWithOptions instead.
 	ChildWorkflow(name string, inputJSON string) (runID string, err error)
 
 	// ChildWorkflowWithOptions starts a child workflow with version options.
-	// Use ChildWorkflowOptions to pin a specific child version,
-	// set ParentClosePolicy, or assign Priority.
+	// Use ChildWorkflowOptions to pin a specific child version.
 	// When opts.Version is 0 (default), the child uses the parent's version.
-	// Falls back to ChildWorkflow when the options handler is not available.
 	ChildWorkflowWithOptions(name string, inputJSON string, opts ChildWorkflowOptions) (runID string, err error)
 
 	// AwaitChild waits for a child workflow to complete.
@@ -284,9 +279,8 @@ type Lifecycle interface {
 	PollChild(runID string) (status string, result string, err error)
 
 	// ChildWorkflowTyped starts a child workflow with typed input.
-	// Marshals request to JSON internally and calls ChildWorkflow.
-	// This is a Go-SDK convenience wrapper — it is not a separate
-	// WASM import. Use AwaitChildTyped to get the typed result.
+	// Marshals request to JSON internally. Use AwaitChildTyped to
+	// get the typed result.
 	ChildWorkflowTyped(name string, request interface{}) (runID string, err error)
 
 	// AwaitChildTyped waits for a child workflow and unmarshals its result.
@@ -990,8 +984,6 @@ type HostCallsOptions struct {
 	ContinueAsNew                func(newInputJSON string) error
 	ContinueAsNewWithVersion     func(newInputJSON string, newVersion int64) error
 	ChildWorkflow                func(name, inputJSON string) (string, error)
-	// ChildWorkflowWithOptions starts a child with version, parent close policy,
-	// and priority. Falls back to ChildWorkflow when unavailable.
 	ChildWorkflowWithOptions    func(name, inputJSON string, version int, parentClosePolicy string, priority int) (string, error)
 	AwaitChild                   func(runID string) (string, error)
 	AwaitAllChildren              func(runIDs []string) ([]ChildResult, error)
@@ -999,11 +991,7 @@ type HostCallsOptions struct {
 	PollChild                     func(runID string) (status string, result string, err error)
 	DurableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
 	DurableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
-	// ChildWorkflowTyped is a typed convenience wrapper that marshals
-	// its request to JSON and delegates to ChildWorkflow.
 	ChildWorkflowTyped           func(name string, request interface{}) (string, error)
-	// AwaitChildTyped is a typed convenience wrapper that unmarshals
-	// the child result into the provided interface{} pointer.
 	AwaitChildTyped              func(runID string, result interface{}) error
 	Version                   func() int
 	MinVersion                func() int
@@ -1046,9 +1034,7 @@ type HostCallsOptions struct {
 //   Panic:   DurableSleepMs, NowMs, Random — core primitives, nil = programmer error
 //   Error:   DurableCall, DurableCallJSON, DurableCallTyped, DurableCallWithOptions,
 //            DurableCallJSONWithOptions, DurableCallWithHeartbeat, DurableAwaitSignals,
-//            DurableDefer, PollSignal, ContinueAsNew, ChildWorkflow,
-//            ChildWorkflowWithOptions, ChildWorkflowTyped, AwaitChild,
-//            AwaitAllChildren, AwaitAnyChild, PollChild
+//            DurableDefer, PollSignal, ContinueAsNew, ChildWorkflow, AwaitChild, AwaitAllChildren
 //   No-op:   DurableLog, LogKV, PollCancellation, SetQueryState — diagnostic/optional
 //   Default: Version, MinVersion — return 1 when nil
 // ----

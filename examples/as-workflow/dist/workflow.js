@@ -12,6 +12,10 @@ export async function instantiate(module, imports = {}) {
           throw Error(`${message} in ${fileName}:${lineNumber}:${columnNumber}`);
         })();
       },
+      cleat_call_with_timeout(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, timeoutMs, respPtr, respMaxLen) {
+        // ../../packages/cleat-as/assembly/host-calls/import_cleat_call_with_timeout(i32, i32, i32, i32, i32, i32, i64, i32, i32) => i64
+        return cleat_call_with_timeout(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, timeoutMs, respPtr, respMaxLen) || 0n;
+      },
       cleat_call(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen) {
         // ../../packages/cleat-as/assembly/host-calls/import_cleat_call(i32, i32, i32, i32, i32, i32, i32, i32) => i64
         return cleat_call(svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen) || 0n;
