@@ -86,6 +86,8 @@ type mockStore struct {
 	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string, priority int) (string, error)
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
+	countEventHistoryFn                func(ctx context.Context, workflowID string) (int, error)
+	loadEventHistoryPaginatedFn        func(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error)
 }
 
 // ---- mockStore interface methods ----
@@ -1712,6 +1714,9 @@ func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64,
 }
 
 func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error) {
+	if m.loadEventHistoryPaginatedFn != nil {
+		return m.loadEventHistoryPaginatedFn(ctx, workflowID, offset, limit)
+	}
 	return nil, nil
 }
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
@@ -1726,6 +1731,9 @@ func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVers
 	return true, nil
 }
 func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
+	if m.countEventHistoryFn != nil {
+		return m.countEventHistoryFn(ctx, workflowID)
+	}
 	return 0, nil
 }
 func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {

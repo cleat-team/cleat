@@ -82,7 +82,7 @@ func main() {
 	case "replay":
 		runReplay(ctx, store, db, args[1:])
 	case "debug":
-		fmt.Println("debug command not yet implemented")
+		runDebug(ctx, store, db, args[1:])
 	case "check-db":
 		runCheckDB(ctx, db, args[1:])
 	default:
@@ -108,7 +108,7 @@ Commands:
   restore-workflow <id> <file>    restore a single workflow from NDJSON backup
   replay <id> --entry-point <n>   replay a workflow's event history for diagnostics
   check-db [--verbose]            verify database connectivity and schema health
-  debug <id> [--entry-point <n>]     step-through workflow event replay
+  debug <id> [--entry-point <n>] [--watch]  step-through workflow event replay
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

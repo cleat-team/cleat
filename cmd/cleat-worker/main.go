@@ -1238,7 +1238,6 @@ func (w *Worker) dispatchLoop() {
 			w.inflight.Range(func(_, _ interface{}) bool { inflight++; return true })
 			if inflight == 0 {
 				w.logger.InfoContext(w.ctx, "drain complete", "worker_id", w.id)
-				w.cancel()
 				return
 			}
 			time.Sleep(w.pollInterval)
@@ -1364,6 +1363,15 @@ func (w *Worker) dispatchLoop() {
 
 		workflowsClaimed.Add(float64(len(wfs)))
 
+		// Re-check draining after claim to close the TOCTOU window between
+		// the drain check above and the DB claim calls.
+		if w.draining.Load() {
+			for _, wf := range wfs {
+				w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
+			}
+			continue
+		}
+
 		for _, wf := range wfs {
 			w.logger.InfoContext(w.ctx, "claimed workflow", "worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName, "def_version", wf.DefVersion)
 			dispatchLatency.WithLabelValues("").Observe(time.Since(wf.CreatedAt).Seconds())
@@ -1377,6 +1385,7 @@ func (w *Worker) dispatchLoop() {
 
 func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	defer w.wg.Done()
+	defer w.execEngines.Delete(wf.ID)
 	defer w.inflight.Delete(wf.ID)
 	defer func() {
 		if r := recover(); r != nil {
@@ -1463,7 +1472,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("history load: %v", err), engine.ErrUnknown.String(), "", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: history load: %v", wf.ID, err), engine.ErrUnknown.String(), "", nil)
 		return
 	}
 
@@ -1501,7 +1510,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	if err != nil {
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("create runtime: %v", err), engine.ErrUnknown.String(), "", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: create runtime: %v", wf.ID, err), engine.ErrUnknown.String(), "", nil)
 		return
 	}
 	defer rt.Close(w.ctx)
@@ -1655,6 +1664,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 	}
 	eng := engine.NewEngine(rt, caller, engineOpts...)
+	w.execEngines.Store(wf.ID, eng)
 
 	// ---- Execute/Resume ----
 	inputJSON := wf.Input
@@ -2128,7 +2138,10 @@ func (w *Worker) dispatchPendingUpdates() {
 			// Leave the updates pending for the next claim cycle.
 			return true
 		}
-		env := envVal.(*engine.Engine)
+		env, ok := envVal.(*engine.Engine)
+		if !ok {
+			return true
+		}
 
 		for _, upd := range updates {
 			// Dispatch the update via the engine.
@@ -3172,6 +3185,7 @@ func (s *apiServer) handleDrainStatus(w http.ResponseWriter, r *http.Request) {
 	if draining && count == 0 {
 		s.worker.drainOnce.Do(func() {
 			close(s.worker.drainCh)
+			s.worker.cancel()
 		})
 		resp["complete"] = true
 	}
@@ -3299,6 +3313,10 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 }
 
 func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, name string) {
+	if s.worker.draining.Load() {
+		s.writeError(w, 503, "worker is draining; cannot accept new workflows")
+		return
+	}
 	if s.worker.memoryController != nil && !s.worker.memoryController.CanAcceptAPIWorkflows() {
 		s.writeError(w, 503, "worker is under memory pressure; cannot accept new workflows")
 		return

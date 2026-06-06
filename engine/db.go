@@ -2852,6 +2852,16 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 	}
 	defer tx.Rollback()
 
+	// Read current generation for optimistic locking.
+	var gen int64
+	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = $1`, workflowID).Scan(&gen)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return tx.Commit() // Workflow no longer exists.
+		}
+		return fmt.Errorf("compact history: get generation: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history WHERE workflow_id = $1 AND step < $2
 	`, workflowID, keepStep)
@@ -2862,8 +2872,8 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET compaction_state = $1, compacted_at = now(), compaction_step = $2
-		WHERE id = $3
-	`, compactionState, compactionStep, workflowID)
+		WHERE id = $3 AND generation = $4
+	`, compactionState, compactionStep, workflowID, gen)
 	if err != nil {
 		return fmt.Errorf("compact history: update: %w", err)
 	}

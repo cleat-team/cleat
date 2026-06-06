@@ -2,10 +2,14 @@ package engine
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
+	"time"
+
+	"github.com/lib/pq"
 )
 
 // DefaultCompactionThreshold is the default number of events before history
@@ -212,14 +216,46 @@ func CompactWorkflowHistory(ctx context.Context, store WorkflowStore, workflowID
 		return fmt.Errorf("compact: marshal state: %w", err)
 	}
 
-	if err := store.CompactHistory(ctx, workflowID, csJSON, compactedStep, keepStep); err != nil {
-		return fmt.Errorf("compact: store: %w", err)
+	// Retry compact history on deadlock errors (up to 3 attempts, exponential backoff).
+	var compactErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(100*(1<<(attempt-1))) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("compact: context cancelled during retry: %w", ctx.Err())
+			case <-time.After(delay):
+			}
+		}
+		compactErr = store.CompactHistory(ctx, workflowID, csJSON, compactedStep, keepStep)
+		if compactErr == nil {
+			break
+		}
+		if !isCompactionDeadlockError(compactErr) {
+			break // Don't retry non-deadlock errors.
+		}
+	}
+	if compactErr != nil {
+		return fmt.Errorf("compact: store: %w", compactErr)
 	}
 
 	compactionEventsDeletedTotal.Add(float64(compactedStep))
 	log.Printf("compact: workflow=%s events=%d compacted=%d kept=%d state_size=%d",
 		workflowID, len(events), compactedStep, len(events)-keepStep, len(csJSON))
 	return nil
+}
+
+// isCompactionDeadlockError returns true if the error is a database deadlock error.
+// Recognizes PostgreSQL (40P01), MySQL (1213), and MSSQL (1205) deadlock codes.
+func isCompactionDeadlockError(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && pqErr.Code == "40P01" {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "1213") || // MySQL deadlock
+		strings.Contains(msg, "deadlock") ||
+		strings.Contains(msg, "Deadlock")
 }
 
 // extractCompactionState builds a CompactionState from the events being
@@ -491,107 +527,3 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 	return full
 }
 
-// compactionPageSize is the number of rows fetched per page when loading
-// events for compaction. Using a modest page size prevents loading the
-// entire event history into memory at once for workflows with very large
-// histories.
-const compactionPageSize = 1000
-
-// loadAllEventsForCompaction loads all event records for a workflow directly
-// from the database using cursor-based pagination. Instead of loading all
-// rows at once (which could be millions for long-running workflows), it
-// fetches rows in pages of compactionPageSize, keeping memory usage bounded.
-func loadAllEventsForCompaction(ctx context.Context, db *sql.DB, workflowID string) ([]EventRecord, error) {
-	var history []EventRecord
-	offset := 0
-
-	for {
-		rows, err := db.QueryContext(ctx, `
-			SELECT step, event_type, service, operation, request, response, error,
-			       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
-			       defer_description, defer_id, child_name, child_input, run_id, new_input,
-			       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
-		       promise_name, promise_id, promise_result, promise_error,
-		       payload
-			FROM event_history
-			WHERE workflow_id = $1
-			ORDER BY step
-			LIMIT $2 OFFSET $3
-		`, workflowID, compactionPageSize, offset)
-		if err != nil {
-			return nil, fmt.Errorf("load events for compaction (offset=%d): %w", offset, err)
-		}
-
-		var pageCount int
-		for rows.Next() {
-			pageCount++
-			var rec EventRecord
-			var service, op, request, response, errMsg sql.NullString
-			var durationMs, timeoutMs sql.NullInt64
-			var signalNames, signalName, signalPayload sql.NullString
-			var deferDesc, deferID sql.NullString
-			var childName, childInput, runID, newInput sql.NullString
-			var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
-			var promiseName, promiseID, promiseResult, promiseErr sql.NullString
-			var payload sql.NullString
-
-			if err := rows.Scan(&rec.Step, &rec.EventType,
-				&service, &op, &request, &response, &errMsg,
-				&durationMs, &signalNames, &timeoutMs, &signalName, &signalPayload,
-				&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
-				&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
-					&promiseName, &promiseID, &promiseResult, &promiseErr,
-					&payload); err != nil {
-				rows.Close()
-				return nil, fmt.Errorf("scan compaction events (offset=%d): %w", offset, err)
-			}
-
-			rec.Service = service.String
-			rec.Op = op.String
-			rec.Request = request.String
-			rec.Response = response.String
-			rec.Err = errMsg.String
-			rec.DurationMs = durationMs.Int64
-			rec.SignalNames = signalNames.String
-			rec.TimeoutMs = timeoutMs.Int64
-			rec.SignalName = signalName.String
-			rec.SignalPayload = signalPayload.String
-			rec.DeferDescription = deferDesc.String
-			rec.DeferID = deferID.String
-			rec.ChildName = childName.String
-			rec.ChildInput = childInput.String
-			rec.RunID = runID.String
-			rec.NewInput = newInput.String
-			rec.PluginName = pluginName.String
-			rec.PluginFunc = pluginFunc.String
-			rec.PluginInput = pluginInput.String
-			rec.PluginOutput = pluginOutput.String
-			rec.PluginError = pluginErr.String
-			rec.PromiseName = promiseName.String
-			rec.PromiseID = promiseID.String
-			rec.PromiseResult = promiseResult.String
-			rec.PromiseError = promiseErr.String
-
-			// Restore event-type-specific fields from the payload JSON column
-			// (state_key, state_value, fetch_*, lock_*, detached fields, etc.).
-			if payload.Valid {
-				populateFromPayload(&rec, []byte(payload.String))
-			}
-
-			history = append(history, rec)
-		}
-		rows.Close()
-
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("load events for compaction rows (offset=%d): %w", offset, err)
-		}
-
-		// If we got fewer rows than the page size, we've reached the end.
-		if pageCount < compactionPageSize {
-			break
-		}
-		offset += compactionPageSize
-	}
-
-	return history, nil
-}

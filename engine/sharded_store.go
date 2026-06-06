@@ -72,6 +72,8 @@ func NewShardedStore(configs []ShardConfig, stores []WorkflowStore, closers []fu
 
 // Close closes all shard stores.
 func (s *ShardedStore) Close() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, shard := range s.shards {
 		if shard.Close != nil {
 			shard.Close()
