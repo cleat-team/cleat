@@ -38,9 +38,9 @@ jobs:
               return;
             }
 
-            // Exempt main, master (unlikely but handle gracefully)
-            if (branch === 'main' || branch === 'master') {
-              console.log('Branch is main/master — skipping check.');
+            // Exempt main, master, develop (permanent branches)
+            if (branch === 'main' || branch === 'master' || branch === 'develop') {
+              console.log('Branch is main/master/develop — skipping check.');
               return;
             }
 
