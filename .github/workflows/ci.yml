@@ -75,7 +75,7 @@ jobs:
           sudo apt-get install -y -qq shellcheck
 
       - name: Go vet
-        run: go vet ./...
+        run: CGO_ENABLED=0 go vet ./...
 
       - name: Ruff check
         continue-on-error: true
@@ -522,7 +522,7 @@ jobs:
 
       - name: Build Go binaries
         run: |
-          go build ./cmd/...
+          CGO_ENABLED=0 go build ./cmd/...
           echo "[+] Go binaries built successfully"
 
       - name: Build Rust crates
