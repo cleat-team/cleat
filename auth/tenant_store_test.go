@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // --- TenantStore tests ------------------------------------------------------
@@ -20,7 +21,7 @@ func TestTenantStore_CreateTenant(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	tid, err := ts.CreateTenant(context.Background(), "test-tenant", "Test Tenant")
 	if err != nil {
@@ -53,7 +54,7 @@ func TestTenantStore_CreateTenant_ReturnsUUID(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	tid, err := ts.CreateTenant(context.Background(), "returns-uuid", "Test")
 	if err != nil {
@@ -75,7 +76,7 @@ func TestTenantStore_CreateTenant_DuplicateName(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	_, err := ts.CreateTenant(context.Background(), "duplicate", "First")
 	if err != nil {
@@ -97,7 +98,7 @@ func TestTenantStore_CreateTenant_MultipleTenants(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	tid1, err := ts.CreateTenant(context.Background(), "tenant-a", "Tenant A")
 	if err != nil {
@@ -124,7 +125,7 @@ func TestTenantStore_CreateAPIKey(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	tid, err := ts.CreateTenant(context.Background(), "key-tenant", "Key Tenant")
 	if err != nil {
@@ -163,7 +164,7 @@ func TestTenantStore_CreateAPIKey_DifferentKeys(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	tid, err := ts.CreateTenant(context.Background(), "multi-key-tenant", "Multi Key Tenant")
 	if err != nil {
@@ -200,7 +201,7 @@ func TestTenantStore_RevokeAPIKey(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	tid, err := ts.CreateTenant(context.Background(), "revoke-tenant", "Revoke Tenant")
 	if err != nil {
@@ -254,7 +255,7 @@ func TestTenantStore_RevokeAPIKey_NotFoundIsNotError(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	nonexistentKeyID := uuid.MustParse("00000000-0000-0000-0000-ffffffffffff")
 	err := ts.RevokeAPIKey(context.Background(), nonexistentKeyID)
@@ -268,7 +269,7 @@ func TestTenantStore_RevokeAPIKey_DoubleRevokeIsIdempotent(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	tid, err := ts.CreateTenant(context.Background(), "double-revoke-tenant", "Double Revoke")
 	if err != nil {
@@ -308,7 +309,7 @@ func TestTenantStore_RevokeAPIKey_RevokedKeyCannotAuthenticate(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 
 	tid, err := ts.CreateTenant(context.Background(), "auth-after-revoke", "Auth After Revoke")
 	if err != nil {
@@ -399,7 +400,7 @@ func TestNewTenantStore(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 	if ts == nil {
 		t.Fatal("NewTenantStore returned nil")
 	}
@@ -422,7 +423,7 @@ func TestStoreAndMiddleware_EndToEnd(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	ts := NewTenantStore(db)
+	ts := NewTenantStore(db, plugin.DialectPostgres)
 	tid, err := ts.CreateTenant(context.Background(), "e2e-tenant", "E2E Tenant")
 	if err != nil {
 		t.Fatalf("CreateTenant: %v", err)

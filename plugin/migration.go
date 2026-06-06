@@ -235,14 +235,19 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 	return nil
 }
 
+var registerPluginTableQuery = Query{
+	Default: `INSERT INTO admin.plugin_tables (plugin_name, table_name) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+	MySQL:   `INSERT IGNORE INTO plugin_tables (plugin_name, table_name) VALUES (?, ?)`,
+	MSSQL:   `IF NOT EXISTS (SELECT 1 FROM plugin_tables WHERE plugin_name = @p1 AND table_name = @p2) INSERT INTO plugin_tables (plugin_name, table_name) VALUES (@p1, @p2)`,
+}
+
 // RegisterPluginTables inserts entries into admin.plugin_tables so that
 // the tenant provisioning system knows which tables to GRANT.
 // Called during plugin Init after migrations run.
-func RegisterPluginTables(ctx context.Context, db *sql.DB, pluginName string, tableNames []string) error {
+func RegisterPluginTables(ctx context.Context, db *sql.DB, dialect Dialect, pluginName string, tableNames []string) error {
+	query := registerPluginTableQuery.For(dialect)
 	for _, tableName := range tableNames {
-		_, err := db.ExecContext(ctx,
-			`INSERT INTO admin.plugin_tables (plugin_name, table_name) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-			pluginName, tableName)
+		_, err := db.ExecContext(ctx, query, pluginName, tableName)
 		if err != nil {
 			return fmt.Errorf("register plugin table %s.%s: %w", pluginName, tableName, err)
 		}

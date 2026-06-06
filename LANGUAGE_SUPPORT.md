@@ -1,14 +1,14 @@
 # Language Support Analysis for Cleat
 
 Extending cleat's WASM-based workflow model to additional languages.
-Baseline: the Rust SDK is 537 lines (host_calls 290 + memory 126 + proc-macro 121).
+Baseline: the Rust SDK is ~2,011 lines (host_calls 1,519 + memory/lib 69 + proc-macro entry 209 + test_attr 132 + lib 82).
 
 ## The WASM Boundary
 
 Any language must:
 1. **Compile to `wasm32-wasip1` (or `wasm32-unknown-unknown`)** — produce a `.wasm` shared library
 2. **Export functions** with the cleat ABI: `(args_ptr, args_len, out_ptr, max_out_len) -> i64`
-3. **Import 15 host functions** from the `"env"` module with `(ptr, len)` string protocol
+3. **Import ~54 host functions** from the `"env"` module with `(ptr, len)` string protocol
 4. **Read/write linear memory** at a 10 MiB scratch offset for string I/O
 5. **Return the suspend sentinel** `(1 << 62)` for sleep/await-signals
 
@@ -22,7 +22,7 @@ The host runtime doesn't know or care what language produced the WASM bytes.
 
 **How:** `clang --target=wasm32-wasip1` produces standalone WASM. No runtime needed.
 
-**SDK:** A `cleat.h` header declaring the 15 `extern` imports plus inline memory
+**SDK:** A `cleat.h` header declaring the ~54 `extern` imports plus inline memory
 helpers (`read_string`, `write_string`, `encode_export_result`). ~200 lines.
 
 **Transformer:** None needed. The user `#include`s the header and writes `extern "C"`
@@ -45,7 +45,7 @@ for all compiled languages.
 simpler toolchain setup than C — no clang/WASI sysroot needed.
 
 **SDK:** A `cleat.zig` module with comptime-generated import wrappers and memory
-helpers. Zig's `comptime` could auto-generate the 15 import declarations. ~150 lines.
+helpers. Zig's `comptime` could auto-generate the ~54 import declarations. ~150 lines.
 
 **Transformer:** None needed, but Zig's comptime reflection could generate export
 wrappers at compile time without needing a separate proc-macro. Zero build-step
@@ -70,7 +70,7 @@ WASM (no embedded JVM — it's an AOT compiler). Compiles `.class` files to `.wa
 Also works for Kotlin, Scala, and any JVM language.
 
 **SDK:** A `cleat-java` JAR with:
-- `HostCalls` class declaring the 15 native imports via TeaVM's `@Import` annotations
+- `HostCalls` class declaring the ~54 native imports via TeaVM's `@Import` annotations
 - `Memory` helper class for string I/O
 - `@CleatEntry` annotation for marking workflow methods
 
@@ -136,76 +136,62 @@ option but is only "TypeScript-flavored." Real TypeScript via Javy is possible b
 carries significant binary size and debugging overhead. Recommend AssemblyScript
 as a stepping stone.
 
-### Python — SDK exists, WASM FFI incomplete. Remaining: ~4-5 weeks to MVP
+### Python — SDK exists, WASM FFI validated. Remaining: ~5-6 weeks to MVP
 
-**Status (May 2026):** The Python SDK exists at 4,508 lines with full ABI
-conformance — all 22 host imports are defined, the `@cleat_entry` decorator
+**Status (June 2026):** The Python SDK exists at ~13,500 lines with full ABI
+conformance — all ~54 host imports are defined, the `@cleat_entry` decorator
 generates WASM export wrappers, and typed wrappers (Saga, ChildWorkflow,
 Defer, Plugins) are built. 80 tests pass (61 memory/encoding, 19 entry
 decorator). `cleat build --target python` is wired via `componentize-py` in
 `cmd/cleat/build_python.go`. Three example workflows exist (hello, saga,
 child fan-out).
 
-**The critical gap:** The 22 `_import_*` functions in `host_calls.py` are
-implementation stubs that raise `NotImplementedError`. They define the correct
-interface but aren't wired to actual WASM imports. The `componentize-py`
-pipeline exists on disk but has never been validated end-to-end with a real
-cleat worker loading and executing a Python-compiled WASM module.
+**WASM FFI: VALIDATED (cleat-233b).** The `componentize-py` pipeline produces
+valid cleat WASM binaries, and a Python-compiled WASM module has been loaded and
+executed end-to-end in a real cleat worker. The ~54 `_import_*` functions in
+`host_calls.py` are wired to actual WASM imports through `componentize-py`'s WIT
+bindings. SuspendSentinel propagation across the WASM boundary is confirmed.
 
-**What remains (4 phases):**
+**What remains (3 phases):**
 
-*Phase 1: End-to-End WASM Compilation (P0, ~2-3 weeks)*
-1. Verify `componentize-py` produces valid cleat WASM — run hello_workflow.py
-   through the pipeline, load in a cleat worker, execute. Almost certainly
-   something will break on first attempt.
-2. Wire the 22 host imports. `componentize-py` uses WIT (WASM Interface Types)
-   to define imports. Either write a WIT file describing cleat's host imports
-   and generate Python bindings, or use `componentize-py`'s raw import
-   mechanism. The Go SDK uses `//go:wasmimport` directives; Python needs the
-   equivalent.
-3. Validate SuspendSentinel propagation through the actual WASM ABI (the
-   `@cleat_entry` decorator already has the logic but it's untested at the
-   WASM boundary).
-4. Fix whatever breaks. The AS SDK had 11 issues, Java had 11. Python will
-   have its own set.
-
-*Phase 2: Feature Parity with Go SDK (P1, ~2 weeks)*
-5. Add missing HostCalls methods: `HasState`, `ListState`, `LogKV`,
+*Phase 1: Feature Parity with Go SDK (P1, ~2 weeks)*
+1. Add missing HostCalls methods: `HasState`, `ListState`, `LogKV`,
    `FetchJSON`, typed `Promise[T]`, typed update handlers.
-6. Add AI plugin wrappers to `plugins.py`: `llm_chat`, `llm_embed`,
+2. Add AI plugin wrappers to `plugins.py`: `llm_chat`, `llm_embed`,
    `pgvector_search`, `pgvector_upsert`.
-7. Add `cleat init --template agent --language python`.
+3. Add `cleat init --template agent --language python`.
 
-*Phase 3: Ecosystem Integration (P2, ~3-4 weeks)*
-8. LangChain integration — a `CleatCallbackHandler` that records LangChain
+*Phase 2: Ecosystem Integration (P2, ~3-4 weeks)*
+4. LangChain integration — a `CleatCallbackHandler` that records LangChain
    steps as cleat events.
-9. LangGraph checkpointer — a `CleatCheckpointer` using cleat's event
+5. LangGraph checkpointer — a `CleatCheckpointer` using cleat's event
    history as the checkpoint backend.
-10. PyPI publishing — package `cleat-sdk` with versioning, docs, quickstart.
+6. PyPI publishing — package `cleat-sdk` with versioning, docs, quickstart.
 
-*Phase 4: Production Hardening (P3, ongoing)*
-11. Binary size: CPython WASM is 5-20 MB. Options: accept it for server
+*Phase 3: Production Hardening (P3, ongoing)*
+7. Binary size: CPython WASM is 5-20 MB. Options: accept it for server
     deployment, investigate RustPython (2-5 MB) or MicroPython (200-500 KB)
     as lighter alternatives, or use object storage with a `wasm_url` column
     for large blobs rather than storing directly in PostgreSQL.
-12. Fork/port a Python OSS project (Temporal or DBOS example) to find
+8. Fork/port a Python OSS project (Temporal or DBOS example) to find
     real-world issues, as was done for AS and Java.
-13. Async/await support — investigate whether `componentize-py` supports
+9. Async/await support — investigate whether `componentize-py` supports
     async functions via WASI async or a polling mechanism.
 
 **Showstoppers (all fixable):**
-- `componentize-py` is emerging tech with rough edges. Mitigation: the Go SDK
-  proves the ABI works; if `componentize-py` fights back, fall back to a
-  Python→Rust FFI bridge or a gRPC proxy to Go workers.
+- `componentize-py` is emerging tech but end-to-end WASM validation
+  (cleat-233b) confirmed it works for cleat's ABI. The fallback to a
+  Python→Rust FFI bridge remains available but is now unnecessary.
 - Binary size (5-20 MB). Mitigation: server-side deployment tolerates larger
   binaries. `cleat deploy` can use S3 URLs for WASM blobs over a size
   threshold rather than storing in PostgreSQL `BYTEA`.
 
 **Verdict:** The Python SDK is much further along than the original analysis
-assumed. The remaining work is the WASM FFI wiring (~2-3 weeks) plus feature
-parity and ecosystem integration (~5-6 weeks). Total: ~7-9 weeks to an
-AI-ready Python SDK with LangChain integration. The Go-native AI plugins
-(already shipped) provide the proving ground while Python/WASM is completed.
+assumed. WASM FFI wiring is complete (cleat-233b). The remaining work is
+feature parity (~2 weeks) plus ecosystem integration (~3-4 weeks). Total:
+~5-6 weeks to an AI-ready Python SDK with LangChain integration. The Go-native
+AI plugins (already shipped) provide the proving ground while Python/WASM is
+completed.
 
 ### Go — Already Done
 
@@ -215,8 +201,8 @@ WASM compile via standard Go (`--target go`, default) or TinyGo (`--target tinyg
 
 ### Rust — Already Done
 
-`cleat-sdk` crate (290 lines) + `cleat-macro` proc-macro (121 lines) +
-`cleat build --target rust`. ~537 lines total for the SDK.
+`cleat-sdk` crate (~1,588 lines: host_calls 1,519 + lib 69) + `cleat-macro` proc-macro (~423 lines: entry 209 + test_attr 132 + lib 82) +
+`cleat build --target rust`. ~2,011 lines total for the SDK.
 
 ---
 
@@ -229,7 +215,7 @@ WASM compile via standard Go (`--target go`, default) or TinyGo (`--target tinyg
 | **Java/Kotlin** | TeaVM (mature) | ~2-3 weeks | ~2-5 weeks | 200-500 KB | TeaVM classlib subset | 2nd |
 | **AssemblyScript** | asc (mature) | ~1-2 weeks | ~1-3 weeks | 10-50 KB | Not actually TypeScript | 3rd |
 | **TypeScript** | Javy/QuickJS (mature) | ~2-3 weeks | ~3-6 weeks | 1-5 MB | Binary size, debugging | 4th |
-| **Python** | componentize-py | ✅ Done (4.5K lines, 80 tests) | ✅ Done (@cleat_entry) | 5-20 MB | WASM FFI wiring (2-3 wks) | 5th |
+| **Python** | componentize-py | ✅ Done (~13.5K lines, 80 tests) | ✅ Done (@cleat_entry) | 5-20 MB | WASM FFI validated | 5th |
 | **C#/.NET** | NativeAOT-LLVM (exp.) | ~3-5 weeks | ~4-8 weeks | 1-5 MB | Immature toolchain | 6th |
 | **Go** | go / tinygo | ✅ Done | ✅ Done | ~4-10 MB (go), ~50-200 KB (tinygo) | None | Done |
 | **Rust** | cargo build (built-in) | ✅ Done | ✅ Done | ~50-200 KB | None | Done |
@@ -265,11 +251,10 @@ If Python/TypeScript via embedded interpreters is essential, consider:
    embedded-interpreter overhead. Real TypeScript can follow once Javy or Static
    Hermes stabilizes. Note: 11 issues already identified; fixing SDK compilation on
    AS 0.27.32 is the first step.
-4. **Python WASM FFI** (weeks 8-11): The SDK is already built (4,508 lines, 80 tests,
-   full ABI conformance). The remaining work is wiring the 22 host imports via
-   `componentize-py`'s WIT bindings (~2-3 weeks), adding feature parity with Go SDK
-   (~2 weeks), and LangChain/LangGraph integration (~3-4 weeks). Total: ~7-9 weeks
-   to an AI-ready Python SDK.
+4. **Python WASM FFI** (weeks 5-8): The SDK is already built (~13,500 lines, 80 tests,
+   full ABI conformance). WASM FFI wiring is complete (cleat-233b). The remaining work
+   is feature parity with Go SDK (~2 weeks) and LangChain/LangGraph integration
+   (~3-4 weeks). Total: ~5-6 weeks to an AI-ready Python SDK.
 5. **TypeScript via Javy** (months 3-4): After AssemblyScript proves demand. Focus
    on reducing binary size (tree-shaking the JS runtime) and improving debugging.
 

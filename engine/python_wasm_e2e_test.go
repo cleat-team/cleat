@@ -168,8 +168,10 @@ func TestPythonWasmAbiBoundary(t *testing.T) {
 		"cleat_poll_cancellation",
 		"cleat_poll_signal",
 		"cleat_continue_as_new",
+		"cleat_continue_as_new_versioned",
 		"cleat_child_workflow",
 		"cleat_child_workflow_with_options",
+		"cleat_child_workflow_in_schema",
 		"cleat_await_child",
 		"cleat_await_signals",
 		"set_query_state",
@@ -189,6 +191,9 @@ func TestPythonWasmAbiBoundary(t *testing.T) {
 		"cleat_send_signal_and_wait",
 		"cleat_reply_to_signal",
 		"cleat_signal_workflow",
+		"cleat_set_scope",
+		"cleat_get_scope",
+		"cleat_uuid",
 		"cleat_acquire_lock",
 		"cleat_release_lock",
 		"cleat_side_effect",
@@ -201,6 +206,12 @@ func TestPythonWasmAbiBoundary(t *testing.T) {
 		"cleat_has_state",
 		"cleat_list_state",
 		"cleat_fetch",
+		// Child workflow polling
+		"cleat_poll_child",
+		"cleat_await_any_child",
+		// JSON validation helpers
+		"cleat_json_parse",
+		"cleat_json_stringify",
 	}
 	// The list of host functions that can be discovered through the
 	// registerHostFunctions registrations. We verify every expected
@@ -567,6 +578,12 @@ func registeredImportNames() []string {
 		"cleat_has_state",
 		"cleat_list_state",
 		"cleat_fetch",
+		// Child workflow polling
+		"cleat_poll_child",
+		"cleat_await_any_child",
+		// JSON validation helpers
+		"cleat_json_parse",
+		"cleat_json_stringify",
 	}
 }
 

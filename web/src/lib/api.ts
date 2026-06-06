@@ -1,9 +1,31 @@
 import type { WorkflowInstance, EventRecord, Schedule, DAGResponse, WorkflowDefInfo } from './types';
 
 const BASE = '';
+const KEY_STORAGE = 'cleat_api_key';
+
+export function getAPIKey(): string {
+  return localStorage.getItem(KEY_STORAGE) || '';
+}
+
+export function setAPIKey(key: string): void {
+  localStorage.setItem(KEY_STORAGE, key);
+}
+
+export function clearAPIKey(): void {
+  localStorage.removeItem(KEY_STORAGE);
+}
+
+function authHeaders(): Record<string, string> {
+  const key = getAPIKey();
+  if (!key) return {};
+  return { 'X-Cleat-API-Key': key };
+}
 
 async function fetchJSON<T>(url: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(BASE + url, opts);
+  const res = await fetch(BASE + url, {
+    ...opts,
+    headers: { ...authHeaders(), ...(opts?.headers || {}) },
+  });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(body.error || res.statusText);

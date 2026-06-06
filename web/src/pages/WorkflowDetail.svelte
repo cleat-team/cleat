@@ -21,19 +21,28 @@
   let showCancel = $state(false);
   let cancelReason = $state('');
 
+  function formatJSON(v: any): string {
+    if (typeof v === 'string') {
+      try { return JSON.stringify(JSON.parse(v), null, 2); } catch (_) { return v; }
+    }
+    try { return JSON.stringify(v, null, 2); } catch (_) { return String(v); }
+  }
+
+  function fmtDate(ts: string): string {
+    if (!ts || ts.startsWith('0001-01-01')) return '(none)';
+    return new Date(ts).toLocaleString();
+  }
+
   async function load() {
     loading = true;
     error = '';
     dagData = null;
     try {
       [wf, events] = await Promise.all([getWorkflow(workflowId), getWorkflowHistory(workflowId)]);
-      // Fetch DAG data; silently ignore if not available.
       try {
         const dagResp = await getWorkflowDAG(workflowId);
         dagData = dagResp.dag;
-      } catch (_) {
-        // No DAG spec — this is fine.
-      }
+      } catch (_) {}
     } catch (e: any) {
       error = e.message;
     } finally {
@@ -82,10 +91,10 @@
         <tr><td style="font-weight:600; width:120px;">ID</td><td style="font-family:monospace; font-size:0.8rem;">{wf.id}</td></tr>
         <tr><td style="font-weight:600;">Status</td><td>{wf.status}</td></tr>
         <tr><td style="font-weight:600;">Assigned To</td><td>{wf.assigned_to || '(unassigned)'}</td></tr>
-        <tr><td style="font-weight:600;">Created</td><td>{new Date(wf.created_at).toLocaleString()}</td></tr>
-        <tr><td style="font-weight:600;">Updated</td><td>{new Date(wf.updated_at).toLocaleString()}</td></tr>
-        {#if wf.next_wake_at}
-          <tr><td style="font-weight:600;">Next Wake</td><td>{new Date(wf.next_wake_at).toLocaleString()}</td></tr>
+        <tr><td style="font-weight:600;">Created</td><td>{fmtDate(wf.created_at)}</td></tr>
+        <tr><td style="font-weight:600;">Updated</td><td>{fmtDate(wf.updated_at)}</td></tr>
+        {#if wf.next_wake_at && !wf.next_wake_at.startsWith('0001-01-01')}
+          <tr><td style="font-weight:600;">Next Wake</td><td>{fmtDate(wf.next_wake_at)}</td></tr>
         {/if}
         {#if wf.error}
           <tr><td style="font-weight:600; color:var(--color-danger);">Error</td><td style="color:var(--color-danger);">{wf.error}</td></tr>
@@ -102,11 +111,14 @@
     </div>
   </div>
 
-  {#if wf.input && wf.input !== '{}' && wf.input !== '""'}
-    <div class="card">
-      <h3>Input</h3>
-      <pre style="font-size:0.8rem; overflow-x:auto; white-space:pre-wrap;">{JSON.stringify(JSON.parse(wf.input), null, 2)}</pre>
-    </div>
+  {#if wf.input}
+    {@const inputStr = formatJSON(wf.input)}
+    {#if inputStr !== '{}' && inputStr !== '""'}
+      <div class="card">
+        <h3>Input</h3>
+        <pre style="font-size:0.8rem; overflow-x:auto; white-space:pre-wrap;">{inputStr}</pre>
+      </div>
+    {/if}
   {/if}
 
   {#if wf.result && wf.status === 'completed'}
