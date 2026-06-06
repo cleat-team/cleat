@@ -31,7 +31,7 @@ func runDebug(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args 
 
 	if flags.watch {
 		if err := runDebugWatch(ctx, store, flags.workflowID); err != nil {
-			fmt.Fprintf(os.Stderr, "%v\n", err)
+			fmt.Fprintf(os.Stderr, "debug watch failed: %v\n", err)
 			osExit(1)
 		}
 		return
@@ -144,7 +144,7 @@ func runDebugStep(ctx context.Context, store engine.WorkflowStore, db *sql.DB, w
 
 	events, err := store.LoadEventHistory(ctx, workflowID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading event history: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error loading event history for %q: %v\n", workflowID, err)
 		osExit(1)
 	}
 	fmt.Printf("  Events: %d\n", len(events))
@@ -163,7 +163,7 @@ func runDebugStep(ctx context.Context, store engine.WorkflowStore, db *sql.DB, w
 
 	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating runtime: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error creating WASM runtime: %v — check that the system has sufficient resources and the WASM engine is available\n", err)
 		osExit(1)
 	}
 
@@ -217,7 +217,7 @@ func runDebugStep(ctx context.Context, store engine.WorkflowStore, db *sql.DB, w
 		if engineErr == context.Canceled {
 			fmt.Println("Debug session ended.")
 		} else {
-			fmt.Fprintf(os.Stderr, "replay error: %v\n", engineErr)
+			fmt.Fprintf(os.Stderr, "replay error: %v\n  Check that --entry-point matches an export in the deployed WASM and that the workflow event history is not corrupted.\n", engineErr)
 		}
 	} else {
 		fmt.Println("Replay complete.")
@@ -414,7 +414,7 @@ func runDebugWatch(ctx context.Context, store engine.WorkflowStore, workflowID s
 					fmt.Println("Watch ended.")
 					return nil
 				}
-				fmt.Fprintf(os.Stderr, "error polling events: %v\n", err)
+				fmt.Fprintf(os.Stderr, "error polling events for %q: %v\n", workflowID, err)
 				continue
 			}
 

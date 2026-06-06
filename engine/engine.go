@@ -1099,7 +1099,7 @@ func (e *Engine) executeWithBackend(
 		// (b) Version validation (always-on unless allowVersionMismatch).
 		if e.versionValidateFn != nil && !e.allowVersionMismatch {
 			if verr := e.versionValidateFn(); verr != nil {
-				return "", nil, nil, nil, nil, fmt.Errorf("host: version validation failed: %w", verr)
+				return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: version validation failed: %w", e.workflowID, verr)
 			}
 		}
 	}
@@ -1116,9 +1116,9 @@ func (e *Engine) executeWithBackend(
 			}
 			session.releaseHeldScopes(context.Background())
 			if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %s", enriched)
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
 			}
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %w", callErr)
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr)
 	}
 
 	if res.Suspended || session.suspendErr != nil {
@@ -1149,7 +1149,7 @@ func (e *Engine) executeWithBackend(
 			}
 			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, res.Result, session.queryState, priority)
 			if cnErr != nil {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 			}
 			susResult.ContinueAsNewHandled = true
 			susResult.NewRunID = newRunID
@@ -1246,7 +1246,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// (b) Version validation (always-on unless allowVersionMismatch).
 		if e.versionValidateFn != nil && !e.allowVersionMismatch {
 			if err := e.versionValidateFn(); err != nil {
-				return "", nil, nil, nil, nil, fmt.Errorf("host: version validation failed: %w", err)
+				return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: version validation failed: %w", e.workflowID, err)
 			}
 		}
 	}
@@ -1289,7 +1289,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				}
 				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
-					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 				}
 				susResult.ContinueAsNewHandled = true
 				susResult.NewRunID = newRunID
@@ -1314,9 +1314,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// consistent formatting and serves as a hook for future custom
 		// DWARF parsing from the raw wasm binary.
 		if enriched := resolveWasmTrap(wasmBytes, err.Error()); enriched != "" {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %s", enriched)
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
 		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %w", err)
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, err)
 	}
 
 	// Workflow completed successfully. Release any held scopes.
@@ -1353,7 +1353,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		var err error
 		compiled[i], err = e.rt.CompileModule(ctx, w)
 		if err != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: compile core module %d: %w", i, err)
+			return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: compile core module %d: %w", e.workflowID, i, err)
 		}
 		defer compiled[i].Close(ctx)
 	}
@@ -1461,7 +1461,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			execStderr.Reset()
 			mod, err := e.rt.instantiateModuleNamedWithWriters(instantiateCtx, cm, fmt.Sprintf("__core_%d__", i), &execStdout, &execStderr)
 		if err != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: instantiate instance %d (module %d): %w", i, inst.ModuleIndex, err)
+			return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: instantiate instance %d (module %d): %w", e.workflowID, i, inst.ModuleIndex, err)
 		}
 		resolvedInstances[i] = mod
 		cleanupMods = append(cleanupMods, mod)
@@ -1573,7 +1573,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 				}
 				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
-					return "", session.history, nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+					return "", session.history, nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 				}
 				susResult.ContinueAsNewHandled = true
 				susResult.NewRunID = newRunID
