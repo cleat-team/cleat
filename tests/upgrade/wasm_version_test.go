@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"encoding/json"
+
 	"github.com/cleat-team/cleat/engine"
 )
 
