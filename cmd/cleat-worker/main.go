@@ -460,6 +460,34 @@ func main() {
 			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 		}
 
+		// Load encryption key if configured.
+		if *encryptSensitivePayloads {
+			if *driver != "postgres" {
+				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --driver=postgres (MySQL and MSSQL are not yet supported for encryption at rest)", workerID)
+			}
+			if *encryptionKeyFile == "" {
+				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
+			}
+		}
+		if *encryptionKeyFile != "" {
+			keyData, kerr := os.ReadFile(*encryptionKeyFile)
+			if kerr != nil {
+				log.Fatalf("[worker %s] Failed to read encryption key file: %v", workerID, kerr)
+			}
+			keyStr := strings.TrimSpace(string(keyData))
+			pe, perr := host.NewPayloadEncryption(keyStr)
+			if perr != nil {
+				log.Fatalf("[worker %s] Invalid encryption key: %v", workerID, perr)
+			}
+			payloadEncryption = pe
+			log.Printf("[worker %s] Encryption at rest enabled for sensitive payload fields", workerID)
+		}
+
+		// Propagate encryption to the store factory.
+		if pgFactory, ok := factory.(*host.PostgresStoreFactory); ok && payloadEncryption != nil {
+			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
+		}
+
 		s, _, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
 		if err != nil {
 			logger.ErrorContext(context.Background(), "failed to open store", "worker_id", workerID, "error", err); os.Exit(1)
@@ -1155,6 +1183,34 @@ func (w *Worker) Run() {
 	initLoopCtx("retention")
 	initLoopCtx("update_dispatch")
 
+	// Initialize health tracker and loop registry for watchdog.
+	w.healthTracker = newHealthTracker()
+	w.loopFuncs = make(map[string]func())
+	w.loopCtxMap = make(map[string]*loopContext)
+
+	// initLoopCtx creates a cancellable per-loop context derived from the
+	// worker context. The initial done channel is never closed (the initial
+	// goroutines are started inline, not via restartLoop); the 5s timeout in
+	// restartLoop guards the wait.
+	initLoopCtx := func(name string) {
+		ctx, cancel := context.WithCancel(w.ctx)
+		w.loopCtxMap[name] = &loopContext{
+			ctx:    ctx,
+			cancel: cancel,
+			done:   make(chan struct{}),
+		}
+	}
+	initLoopCtx("heartbeat")
+	initLoopCtx("reaper")
+	initLoopCtx("concurrency_key_reaper")
+	initLoopCtx("dispatch")
+	initLoopCtx("schedule")
+	initLoopCtx("compaction")
+	initLoopCtx("memory_reload")
+	initLoopCtx("memory_cleanup")
+	initLoopCtx("retention")
+	initLoopCtx("update_dispatch")
+
 	// Background heartbeat goroutine.
 	w.loopFuncs["heartbeat"] = w.heartbeatLoop
 	w.launchLoop("heartbeat", w.heartbeatLoop)
@@ -1622,6 +1678,11 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 				return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", callerDefName, targetWorkflowID)
 			}),
 		)
+	}
+	// Enable event history checksum verification on replay by default.
+	// Can be disabled with --disable-checksum-verification.
+	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
+		engineOpts = append(engineOpts, host.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
 	}
 	// Use tenant-scoped database connection for plugin host functions.
 	if w.tenantPools != nil && wf.TenantID != "" {

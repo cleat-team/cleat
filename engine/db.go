@@ -3203,6 +3203,30 @@ func (s *PostgresStore) GetEventCount(ctx context.Context, workflowID string) (i
 	return count, tx.Commit()
 }
 
+// GetConcurrencyKeyCount returns the number of non-expired concurrency keys
+// held by the given workflow.
+func (s *PostgresStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM concurrency_keys
+		WHERE workflow_id = $1 AND expires_at > now()
+	`, workflowID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get concurrency key count for %s: %w", workflowID, err)
+	}
+	return count, nil
+}
+
+// GetEventCount returns the event_count for a workflow instance.
+func (s *PostgresStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = $1`, workflowID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("get event count for %s: %w", workflowID, err)
+	}
+	return count, nil
+}
+
 // ---- Sticky Session implementations (Feature 10) ----
 
 // UpdateStickyWorker sets the sticky worker for a workflow.

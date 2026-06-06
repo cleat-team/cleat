@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Multi-Database CI — WorkflowStore test suite against MySQL and SQL Server
 #
-# This workflow runs the WorkflowStore test suite (internal/host/...) against
+# This workflow runs the WorkflowStore test suite (engine/...) against
 # MySQL and SQL Server backends using service containers. It does not run the
 # full CI suite — only the database-specific tests that are skipped when those
 # backends are unavailable.
@@ -60,7 +60,7 @@ jobs:
           go-version: stable
 
       - name: Run tests
-        run: go test -race -count=1 -timeout=300s ./internal/host/...
+        run: go test -race -count=1 -timeout=300s ./engine/...
 
   # -------------------------------------------------------------------------
   # Test SQL Server backend
@@ -103,7 +103,7 @@ jobs:
           go-version: stable
 
       - name: Run tests
-        run: go test -race -count=1 -timeout=300s ./internal/host/...
+        run: go test -race -count=1 -timeout=300s ./engine/...
 
   # -------------------------------------------------------------------------
   # Plugin migration smoke test (all three backends)
@@ -169,7 +169,7 @@ jobs:
           go-version: stable
 
       - name: Run plugin migration tests
-        run: go test -race -count=1 -timeout=300s -run TestPluginMigrations ./internal/host/...
+        run: go test -race -count=1 -timeout=300s -run TestPluginMigrations ./engine/...
 
       - name: Run plugin behavioral tests (all backends)
         run: go test -race -count=1 -timeout=600s -run 'MultiBackend' ./plugins/...

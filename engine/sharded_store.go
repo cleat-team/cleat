@@ -286,6 +286,7 @@ func (s *ShardedStore) AppendEventHistoryBatch(ctx context.Context, workflowID s
 	return shard.Store.AppendEventHistoryBatch(ctx, workflowID, recs)
 }
 
+
 // LoadWASM tries each shard (WASM definitions are replicated across all shards).
 func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	var lastErr error
