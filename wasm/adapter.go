@@ -337,6 +337,22 @@ var adapterDefs = map[string]adapterDef{
 			"return int(uint32(result))",
 		},
 	},
+	"WorkflowID": {
+		FieldName:  "WorkflowID",
+		ReturnType: "string",
+		ResultStmts: []string{
+			"idLen := uint32(result)",
+			"return unsafe.String(&idBuf[0], int(idLen))",
+		},
+	},
+	"RunID": {
+		FieldName:  "RunID",
+		ReturnType: "string",
+		ResultStmts: []string{
+			"idLen := uint32(result)",
+			"return unsafe.String(&idBuf[0], int(idLen))",
+		},
+	},
 	"MinVersion": {
 		FieldName:  "MinVersion",
 		ReturnType: "int",
