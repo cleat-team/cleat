@@ -169,6 +169,11 @@ func validateConstructs(fd *analyzer.FuncDecl, cr *Result) {
 		return
 	}
 
+	// PluginCaller methods are trusted boundaries — skip validation.
+	if fd.RecvType != nil && analyzer.ImplementsPluginCaller(fd.RecvType) {
+		return
+	}
+
 	var fset *token.FileSet
 	if fd.Pkg != nil {
 		fset = fd.Pkg.Fset
@@ -467,6 +472,9 @@ func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName 
 	if analyzer.IsHostCallsType(tv.Type) {
 		return
 	}
+	if analyzer.ImplementsPluginCaller(tv.Type) {
+		return
+	}
 	line := 0
 	if fset != nil {
 		line = fset.Position(call.Pos()).Line
@@ -499,7 +507,12 @@ func checkFuncValueCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 		return
 	}
 	// If it's a *types.Var, it's a function value call — not statically resolvable.
-	if _, isVar := obj.(*types.Var); !isVar {
+	if v, isVar := obj.(*types.Var); isVar {
+		// Check if the variable's type implements PluginCaller.
+		if analyzer.ImplementsPluginCaller(v.Type()) {
+			return
+		}
+	} else {
 		return
 	}
 	line := 0

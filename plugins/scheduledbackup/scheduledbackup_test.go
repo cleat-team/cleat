@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/engine"
 )
 
 func TestInfo(t *testing.T) {
@@ -28,7 +28,7 @@ func TestInfo(t *testing.T) {
 func TestInit(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: &sql.DB{}},
+		DB:     &engine.SQLDBAdapter{DB: &sql.DB{}},
 		Logger: slog.Default(),
 	}
 	if err := p.Init(context.Background(), env); err != nil {
@@ -45,7 +45,7 @@ func TestInit(t *testing.T) {
 func TestInitWithNilLogger(t *testing.T) {
 	p := &Plugin{}
 	env := &plugin.Environment{
-		DB: &host.SQLDBAdapter{DB: &sql.DB{}},
+		DB: &engine.SQLDBAdapter{DB: &sql.DB{}},
 	}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() returned error: %v", err)

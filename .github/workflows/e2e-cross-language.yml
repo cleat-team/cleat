@@ -98,7 +98,7 @@ jobs:
           go test -count=1 -short=false -timeout=10m \
             -v \
             -run "TestRust|TestPython|TestAssemblyScript|TestJava" \
-            ./internal/host/... 2>&1 | tee e2e-report.txt
+            ./engine/... 2>&1 | tee e2e-report.txt
 
       - name: Upload test report
         if: always()

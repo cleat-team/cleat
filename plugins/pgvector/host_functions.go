@@ -4,10 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -80,7 +81,7 @@ type deleteOutput struct {
 // idempotent and safe to re-invoke during replay.
 func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("pgvector: no tenant context")
 	}
 
@@ -103,7 +104,7 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 		FROM pgvector_collections
 		WHERE name = $1
 	`, input.Collection).Scan(&collectionID, &dimensions)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
 	if err != nil {
@@ -189,7 +190,7 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 // updated. Otherwise a new row is inserted.
 func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("pgvector: no tenant context")
 	}
 
@@ -206,7 +207,7 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 	err := p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
 	`, input.Collection).Scan(&collectionID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
 	if err != nil {
@@ -286,7 +287,7 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 // This function is idempotent and safe to re-invoke during replay.
 func (p *Plugin) delete(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("pgvector: no tenant context")
 	}
 
@@ -306,7 +307,7 @@ func (p *Plugin) delete(ctx context.Context, inputJSON string) (string, error) {
 	err := p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
 	`, input.Collection).Scan(&collectionID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
 	if err != nil {

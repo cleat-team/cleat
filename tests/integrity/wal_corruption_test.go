@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/host/testutil"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 
 	_ "github.com/lib/pq"
 )
@@ -23,15 +23,15 @@ func TestWalCorruption_ChecksumTampering(t *testing.T) {
 	// Ensure the checksum column exists.
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
 	// Insert a batch of events with checksums computed by AppendEventHistoryBatch.
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc0", Op: "op0", Request: `{"a":1}`, Response: `{"ok":true}`},
-		{Step: 1, EventType: host.EventTypeCall, Service: "svc1", Op: "op1", Request: `{"b":2}`, Response: `{"ok":true}`},
-		{Step: 2, EventType: host.EventTypeCall, Service: "svc2", Op: "op2", Request: `{"c":3}`, Response: `{"ok":true}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc0", Op: "op0", Request: `{"a":1}`, Response: `{"ok":true}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "svc1", Op: "op1", Request: `{"b":2}`, Response: `{"ok":true}`},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "svc2", Op: "op2", Request: `{"c":3}`, Response: `{"ok":true}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -73,13 +73,13 @@ func TestWalCorruption_PayloadTampering(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
 	// Insert events.
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "original", Request: `{"data":"original"}`, Response: `{}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "original", Request: `{"data":"original"}`, Response: `{}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -115,16 +115,16 @@ func TestWalCorruption_MissingEvent(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
 	// Insert a complete sequence of events.
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "step0", Request: `{}`, Response: `{}`},
-		{Step: 1, EventType: host.EventTypeCall, Service: "svc", Op: "step1", Request: `{}`, Response: `{}`},
-		{Step: 2, EventType: host.EventTypeCall, Service: "svc", Op: "step2", Request: `{}`, Response: `{}`},
-		{Step: 3, EventType: host.EventTypeCall, Service: "svc", Op: "step3", Request: `{}`, Response: `{}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "step0", Request: `{}`, Response: `{}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "svc", Op: "step1", Request: `{}`, Response: `{}`},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "svc", Op: "step2", Request: `{}`, Response: `{}`},
+		{Step: 3, EventType: engine.EventTypeCall, Service: "svc", Op: "step3", Request: `{}`, Response: `{}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -176,15 +176,15 @@ func TestWalCorruption_EventOrdering(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := createTestWorkflow(t, db, store, ctx)
 
 	// Insert events out of step order: 0, 2, 1.
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "first", Request: `{}`, Response: `{}`},
-		{Step: 2, EventType: host.EventTypeCall, Service: "svc", Op: "third", Request: `{}`, Response: `{}`},
-		{Step: 1, EventType: host.EventTypeCall, Service: "svc", Op: "second", Request: `{}`, Response: `{}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "first", Request: `{}`, Response: `{}`},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "svc", Op: "third", Request: `{}`, Response: `{}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "svc", Op: "second", Request: `{}`, Response: `{}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -224,7 +224,7 @@ func TestWalCorruption_PgSwitchWAL(t *testing.T) {
 
 	db.Exec(`ALTER TABLE event_history ADD COLUMN IF NOT EXISTS checksum TEXT`)
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	// Test pg_switch_wal() multiple times, inserting events between switches.
@@ -242,8 +242,8 @@ func TestWalCorruption_PgSwitchWAL(t *testing.T) {
 		})
 
 		// Insert some events.
-		events := []host.EventRecord{
-			{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: fmt.Sprintf("pre-switch-%d", i), Request: `{}`, Response: `{}`},
+		events := []engine.EventRecord{
+			{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: fmt.Sprintf("pre-switch-%d", i), Request: `{}`, Response: `{}`},
 		}
 		if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 			t.Fatalf("append events before WAL switch: %v", err)
@@ -263,8 +263,8 @@ func TestWalCorruption_PgSwitchWAL(t *testing.T) {
 		}
 
 		// Insert additional events after WAL switch.
-		postEvents := []host.EventRecord{
-			{Step: 1, EventType: host.EventTypeCall, Service: "svc", Op: fmt.Sprintf("post-switch-%d", i), Request: `{}`, Response: `{}`},
+		postEvents := []engine.EventRecord{
+			{Step: 1, EventType: engine.EventTypeCall, Service: "svc", Op: fmt.Sprintf("post-switch-%d", i), Request: `{}`, Response: `{}`},
 		}
 		if err := store.AppendEventHistoryBatch(ctx, runID, postEvents); err != nil {
 			t.Fatalf("append events after WAL switch: %v", err)
@@ -297,7 +297,7 @@ func TestWalCorruption_ReplayVerification(t *testing.T) {
 	// Use the minimal schema so we get the checksum column.
 	testutil.SetupMinimalSchema(t, db, testutil.DialectPostgres)
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 	runID := fmt.Sprintf("int-replay-%d", time.Now().UnixNano())
 
@@ -313,11 +313,11 @@ func TestWalCorruption_ReplayVerification(t *testing.T) {
 	})
 
 	// Insert a realistic sequence of events.
-	events := []host.EventRecord{
-		{Step: 0, EventType: host.EventTypeCall, Service: "math", Op: "add", Request: `{"x":1,"y":2}`, Response: `{"result":3}`},
-		{Step: 1, EventType: host.EventTypeCall, Service: "math", Op: "mul", Request: `{"x":3,"y":4}`, Response: `{"result":12}`},
-		{Step: 2, EventType: host.EventTypeCall, Service: "storage", Op: "save", Request: `{"key":"result","value":12}`, Response: `{"ok":true}`},
-		{Step: 3, EventType: host.EventTypeCall, Service: "notify", Op: "send", Request: `{"msg":"done"}`, Response: `{"sent":true}`},
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "math", Op: "add", Request: `{"x":1,"y":2}`, Response: `{"result":3}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "math", Op: "mul", Request: `{"x":3,"y":4}`, Response: `{"result":12}`},
+		{Step: 2, EventType: engine.EventTypeCall, Service: "storage", Op: "save", Request: `{"key":"result","value":12}`, Response: `{"ok":true}`},
+		{Step: 3, EventType: engine.EventTypeCall, Service: "notify", Op: "send", Request: `{"msg":"done"}`, Response: `{"sent":true}`},
 	}
 	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
 		t.Fatalf("append events: %v", err)
@@ -358,5 +358,55 @@ func TestWalCorruption_ReplayVerification(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "step 2") && !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Errorf("expected error to mention step 2 or checksum mismatch, got: %v", err)
+	}
+}
+
+// TestWalCorruption_DefaultOnReplayFailure verifies the default-on checksum
+// verification semantics: the exact verifier function wired via
+// WithWorkflowEventVerifier(store.VerifyWorkflowEvents, true) fails on corrupted
+// checksums, which causes engine replay to abort.
+func TestWalCorruption_DefaultOnReplayFailure(t *testing.T) {
+	db := testDB(t)
+	defer db.Close()
+
+	testutil.SetupMinimalSchema(t, db, testutil.DialectPostgres)
+	store := engine.NewPostgresStore(db)
+	ctx := context.Background()
+	runID := fmt.Sprintf("int-default-on-%d", time.Now().UnixNano())
+
+	_, err := db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue)
+		VALUES ($1, 'test', 1, 'ready', '{}', 'default') ON CONFLICT DO NOTHING`, runID)
+	if err != nil {
+		t.Fatalf("create workflow: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, runID)
+		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
+	})
+
+	events := []engine.EventRecord{
+		{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "op0", Request: `{"a":1}`, Response: `{"ok":true}`},
+		{Step: 1, EventType: engine.EventTypeCall, Service: "svc", Op: "op1", Request: `{"b":2}`, Response: `{"ok":true}`},
+	}
+	if err := store.AppendEventHistoryBatch(ctx, runID, events); err != nil {
+		t.Fatalf("append events: %v", err)
+	}
+
+	if err := store.VerifyWorkflowEvents(ctx, runID); err != nil {
+		t.Fatalf("expected no error before tampering, got: %v", err)
+	}
+
+	// Corrupt a checksum.
+	_, err = db.Exec(`UPDATE event_history SET checksum = 'corrupted' WHERE workflow_id = $1 AND step = 1`, runID)
+	if err != nil {
+		t.Fatalf("corrupt checksum: %v", err)
+	}
+
+	err = store.VerifyWorkflowEvents(ctx, runID)
+	if err == nil {
+		t.Fatal("VerifyWorkflowEvents must return error on checksum corruption (default-on replay would silently succeed)")
+	}
+	if !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Errorf("error message must contain 'checksum mismatch', got: %v", err)
 	}
 }

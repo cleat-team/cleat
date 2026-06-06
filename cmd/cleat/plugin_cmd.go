@@ -3,14 +3,15 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 	"golang.org/x/mod/semver"
 )
 
@@ -222,7 +223,7 @@ func runPluginInstall(args []string) {
 	}
 	defer db.Close()
 
-	loader := host.NewPluginLoader(db, nil)
+	loader := engine.NewPluginLoader(db, nil)
 	if err := loader.DeployPlugin(ctx, name, version.Version, wasmBytes, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "Error deploying plugin: %v\n", err)
 		os.Exit(1)
@@ -414,7 +415,7 @@ func checkSinglePluginUpdate(ctx context.Context, db *sql.DB, idx *plugin.Plugin
 	err := db.QueryRowContext(ctx,
 		`SELECT version FROM plugin_defs WHERE name = $1 AND NOT deprecated ORDER BY version DESC LIMIT 1`,
 		name).Scan(&currentVersion)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		fmt.Printf("%s: not installed\n", name)
 		return
 	}
@@ -475,7 +476,7 @@ func runPluginUninstall(args []string) {
 	}
 	defer db.Close()
 
-	loader := host.NewPluginLoader(db, nil)
+	loader := engine.NewPluginLoader(db, nil)
 	if err := loader.DeprecatePlugin(context.Background(), name, version); err != nil {
 		fmt.Fprintf(os.Stderr, "Error deprecating plugin: %v\n", err)
 		os.Exit(1)

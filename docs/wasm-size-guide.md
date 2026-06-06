@@ -15,17 +15,15 @@ Large WASM binaries affect cleat in three ways:
 2. **Module cache memory** — Each cached module occupies RAM in the worker
 3. **Storage** — `workflow_defs.wasm_bytes` stores each deployed version
 
-A "hello world" workflow compiled with standard Go (`GOOS=wasip1 GOARCH=wasm`)
-is approximately **4-6 MB**. The same workflow compiled with TinyGo is
-approximately **50-100 KB** — a 50-100x reduction.
+A "hello world" workflow compiled with TinyGo is approximately **50-100 KB**.
 
 ---
 
 ## Go Features That Cause Bloat
 
-The standard Go WASM binary bundles the Go runtime, garbage collector,
-scheduler, and all transitively-referenced packages. The following features
-add significant weight:
+TinyGo WASM binaries include the Go runtime, garbage collector,
+and all transitively-referenced packages. The following features
+can still add significant weight:
 
 | Feature / Package | Approx Size Increase | Reason |
 |-------------------|---------------------|--------|
@@ -116,26 +114,21 @@ Recommendations:
 
 ## Best Practices for Minimizing Binary Size
 
-### 1. Prefer TinyGo for Production
+### 1. Compilation Target
+
+The default target is `--target go` (standard Go toolchain). For smaller
+binaries, use `--target tinygo`:
 
 ```bash
+# Standard Go (full stdlib, larger binary)
+cleat build ./workflow/
+
+# TinyGo (smaller binary, limited stdlib)
 cleat build --target tinygo ./workflow/
 ```
 
-TinyGo produces dramatically smaller binaries. The trade-off is reduced standard
-library compatibility (see [Workflow Go Constraints](./workflow-go-constraints.md)).
-
-**When to use TinyGo:**
-- New workflow development (start here, switch if needed)
-- CPU-bound workflows (less garbage collection overhead)
-- Deployments with frequent cold starts
-- Memory-constrained worker environments
-
-**When to use Standard Go:**
-- Workflows that need `net/http` or `crypto/tls`
-- Workflows that use `reflect` or `encoding/json` heavily
-- Workflows with complex generic types (TinyGo generics support is limited)
-- Maximum standard library compatibility is required
+See [Workflow Go Constraints](./workflow-go-constraints.md) for library
+compatibility details for each target.
 
 ### 2. Audit Your Imports
 

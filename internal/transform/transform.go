@@ -38,10 +38,9 @@ type Config struct {
 	CallGraph *callgraph.Graph
 	Closure   *closure.Result
 
-	// Target is the compilation target ("go" or "tinygo").
-	// When "tinygo", the direct-call transform is skipped because
-	// TinyGo's asyncify scheduler needs function pointer indirection
-	// for goroutine switching.
+	// Target is the compilation target ("tinygo" for Go code).
+	// The direct-call transform is skipped because TinyGo's asyncify
+	// scheduler needs function pointer indirection for goroutine switching.
 	Target string
 }
 
@@ -395,6 +394,16 @@ func updateCallSites(file *ast.File, info *types.Info, modifiedFuncs map[string]
 		calleeFQName := resolveCalleeFQName(call, info)
 		if calleeFQName == "" || !modifiedFuncs[calleeFQName] {
 			return true
+		}
+		// Don't inject h for PluginCaller method calls -- they manage their own binding.
+		if info != nil {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if selInfo, ok := info.Selections[sel]; ok {
+					if analyzer.PluginCallerMethod(selInfo) {
+						return true // skip -- PluginCaller handles h internally
+					}
+				}
+			}
 		}
 		// Check if h is already the first argument.
 		if len(call.Args) > 0 {

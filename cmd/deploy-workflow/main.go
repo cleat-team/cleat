@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
@@ -55,7 +55,7 @@ func main() {
 	hash := sha256.Sum256(wasmBytes)
 
 	ctx := context.Background()
-	var store host.WorkflowStore
+	var store engine.WorkflowStore
 	var closer io.Closer
 
 	switch *driver {
@@ -66,7 +66,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer db.Close()
-		factory := host.NewPostgresStoreFactory(db, "public")
+		factory := engine.NewPostgresStoreFactory(db, "public")
 		store, closer, err = factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000", "default")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to open store: %v\n", err)
@@ -82,7 +82,7 @@ func main() {
 		}
 		defer db.Close()
 		baseDSN := mysqlBaseDSN(*dbURL)
-		factory := host.NewMySQLStoreFactory(db, baseDSN)
+		factory := engine.NewMySQLStoreFactory(db, baseDSN)
 		store, closer, err = factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000", "default")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to open store: %v\n", err)
@@ -91,7 +91,7 @@ func main() {
 		defer closer.Close()
 
 	case "mssql":
-		factory := host.NewMSSQLStoreFactory(*dbURL)
+		factory := engine.NewMSSQLStoreFactory(*dbURL)
 		store, closer, err = factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000", "default")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to open store: %v\n", err)
@@ -124,7 +124,7 @@ func main() {
 		minVersion = 1
 	}
 
-	def := &host.WorkflowDef{
+	def := &engine.WorkflowDef{
 		Name:       name,
 		Version:    nextVersion,
 		WASMBytes:  wasmBytes,

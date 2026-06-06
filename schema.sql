@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
+    priority INTEGER NOT NULL DEFAULT 0,
+    allowed_signals JSONB DEFAULT NULL,
     FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
 );
 

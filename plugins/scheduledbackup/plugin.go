@@ -12,7 +12,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func init() {
@@ -24,6 +24,11 @@ func init() {
 	}, func() plugin.Plugin {
 		return &Plugin{}
 	})
+}
+
+// New creates a new Plugin instance.
+func New() plugin.Plugin {
+	return &Plugin{}
 }
 
 // Plugin implements scheduled PostgreSQL backups with tenant isolation.

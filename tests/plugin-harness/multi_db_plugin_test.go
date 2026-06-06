@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/cleat/wasmtest"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // TestPluginCalls_MultiDB executes the Go workflow against each supported

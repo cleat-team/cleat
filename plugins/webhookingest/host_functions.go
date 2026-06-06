@@ -4,11 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -47,7 +48,7 @@ type awaitWebhookOutput struct {
 // engine will retry according to its retry policy.
 func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("webhook-ingest: no tenant context")
 	}
 
@@ -98,7 +99,7 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 	err := p.db.QueryRow(ctx, plugin.Rebind(query, p.dialect), args...).Scan(
 		&eventID, &eventType, &payloadRaw, &receivedAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		output := awaitWebhookOutput{Found: false}
 		outJSON, _ := json.Marshal(output)
 		return string(outJSON), nil

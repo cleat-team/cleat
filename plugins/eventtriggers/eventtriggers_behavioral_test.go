@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
-		"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
+		"github.com/cleat-team/cleat/engine"
 	)
 
 // ---------------------------------------------------------------------------
@@ -260,7 +260,7 @@ func TestAwaitEvent_InputValidation(t *testing.T) {
 	t.Run("invalid JSON", func(t *testing.T) {
 		p := &Plugin{}
 		ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-			TenantID: uuid.New(),
+			TenantID: uuid.New().String(),
 		})
 		_, err := p.awaitEvent(ctx, "{not valid json}")
 		if err == nil {
@@ -274,7 +274,7 @@ func TestAwaitEvent_InputValidation(t *testing.T) {
 	t.Run("missing event_type", func(t *testing.T) {
 		p := &Plugin{}
 		ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-			TenantID: uuid.New(),
+			TenantID: uuid.New().String(),
 		})
 		_, err := p.awaitEvent(ctx, `{"timeout_ms":5000}`)
 		if err == nil {
@@ -1884,7 +1884,7 @@ func TestRun_ContextCancellation(t *testing.T) {
 	// Use a non-nil *sql.DB (zero value) to exercise the ticker path in Run
 	// without needing a real database connection.
 	p := &Plugin{}
-	if err := p.Init(context.Background(), &plugin.Environment{DB: &host.SQLDBAdapter{DB: &sql.DB{}}}); err != nil {
+	if err := p.Init(context.Background(), &plugin.Environment{DB: &engine.SQLDBAdapter{DB: &sql.DB{}}}); err != nil {
 		t.Fatalf("Init() returned error: %v", err)
 	}
 
@@ -3063,7 +3063,7 @@ func setupETPlugin(t *testing.T) (*Plugin, http.Handler, *etDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -3072,7 +3072,7 @@ func setupETPlugin(t *testing.T) (*Plugin, http.Handler, *etDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 	return p, handler, store
 }
 
@@ -3383,12 +3383,12 @@ func TestRegisterAndUnregisterAwaiter(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// Register.
-	p.registerAwaiter(context.Background(), etTestTenantID, "wf-123", "order.created")
+	p.registerAwaiter(context.Background(), etTestTenantID.String(), "wf-123", "order.created")
 
 	store.mu.RLock()
 	n := len(store.awaiters)
@@ -3401,7 +3401,7 @@ func TestRegisterAndUnregisterAwaiter(t *testing.T) {
 	}
 
 	// Unregister.
-	unregisterAwaiter(context.Background(), &host.SQLDBAdapter{DB: db}, slog.New(slog.NewTextHandler(io.Discard, nil)), "wf-123", "order.created")
+	unregisterAwaiter(context.Background(), &engine.SQLDBAdapter{DB: db}, slog.New(slog.NewTextHandler(io.Discard, nil)), "wf-123", "order.created")
 
 	store.mu.RLock()
 	n = len(store.awaiters)
@@ -3428,12 +3428,12 @@ func TestAwaitEventFindsAndConsumesEvent(t *testing.T) {
 	})
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// Set up call context so awaitEvent can identify the tenant.
-	cc := &plugin.CallContext{TenantID: etTestTenantID, WorkflowID: "wf-consumer"}
+	cc := &plugin.CallContext{TenantID: etTestTenantID.String(), WorkflowID: "wf-consumer"}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	// Call awaitEvent with matching event type.
@@ -3476,12 +3476,12 @@ func TestAwaitEventNoEvent(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// Set up call context so awaitEvent can identify the tenant.
-	cc := &plugin.CallContext{TenantID: etTestTenantID}
+	cc := &plugin.CallContext{TenantID: etTestTenantID.String()}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	// When no event, awaitEvent should return Found=false.
@@ -3511,13 +3511,13 @@ func TestAwaitEventWithAwaiterRegistration(t *testing.T) {
 
 	// Create context with workflow ID so registerAwaiter is called.
 	cc := &plugin.CallContext{
-		TenantID:   etTestTenantID,
+		TenantID:   etTestTenantID.String(),
 		WorkflowID: "wf-await-test",
 	}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 

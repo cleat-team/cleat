@@ -336,4 +336,14 @@ public final class Memory {
     public static int decodePollCancelReasonLen(long result) {
         return (int) (result >>> 32);
     }
+
+    /**
+     * Decode the get_scope result.
+     * High 32 bits = objectType length, low 32 bits = instanceKey length.
+     */
+    public static int[] decodeGetScopeResult(long result) {
+        int objTypeLen = (int) (result >>> 32);
+        int instKeyLen = (int) (result & 0xFFFFFFFFL);
+        return new int[]{objTypeLen, instKeyLen};
+    }
 }

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 
 	_ "github.com/lib/pq"
 )
@@ -102,9 +102,9 @@ func TestMigrationNoDataLoss(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	store := host.NewPostgresStore(db)
-	err = store.AppendEventHistory(ctx, runID, host.EventRecord{
-		Step: 0, EventType: host.EventTypeCall,
+	store := engine.NewPostgresStore(db)
+	err = store.AppendEventHistory(ctx, runID, engine.EventRecord{
+		Step: 0, EventType: engine.EventTypeCall,
 		Service: "svc", Op: "op", Request: `{"original":"data"}`, Response: `{"ok":true}`,
 	})
 	if err != nil {
@@ -191,9 +191,9 @@ func TestMigrationRollback(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	store := host.NewPostgresStore(db)
-	err = store.AppendEventHistory(ctx, runID, host.EventRecord{
-		Step: 0, EventType: host.EventTypeCall,
+	store := engine.NewPostgresStore(db)
+	err = store.AppendEventHistory(ctx, runID, engine.EventRecord{
+		Step: 0, EventType: engine.EventTypeCall,
 		Service: "svc", Op: "op", Request: `{"preserved":true}`, Response: `{"ok":true}`,
 	})
 	if err != nil {
@@ -270,9 +270,9 @@ func TestMigrationIdempotent(t *testing.T) {
 		db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, runID)
 	}()
 
-	store := host.NewPostgresStore(db)
-	err = store.AppendEventHistory(ctx, runID, host.EventRecord{
-		Step: 0, EventType: host.EventTypeCall,
+	store := engine.NewPostgresStore(db)
+	err = store.AppendEventHistory(ctx, runID, engine.EventRecord{
+		Step: 0, EventType: engine.EventTypeCall,
 		Service: "svc", Op: "op", Request: `{"idempotent":true}`, Response: `{"ok":true}`,
 	})
 	if err != nil {

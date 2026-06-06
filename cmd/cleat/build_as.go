@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/cleat-team/cleat/wasm"
 )
 
 // runBuildAssemblyScript compiles an AssemblyScript project to WASM using asc.
@@ -95,6 +97,11 @@ func runBuildAssemblyScript(pattern, outDir string) {
 		fmt.Fprintf(os.Stderr, "Looked in: %s\n", wasmPath)
 		fmt.Fprintf(os.Stderr, "Check file permissions and disk space.\n")
 		os.Exit(1)
+	}
+
+	// Inject cleat.metadata so the engine can detect the source language.
+	if enriched, metaErr := wasm.WriteMetadata(input, &wasm.Metadata{Language: "assemblyscript"}); metaErr == nil {
+		input = enriched
 	}
 
 	// Use directory name as workflow name.

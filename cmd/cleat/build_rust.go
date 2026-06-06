@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/cleat-team/cleat/wasm"
 )
 
 // runBuildRust compiles a Rust workflow crate to WASM using cargo.
@@ -63,6 +65,11 @@ func runBuildRust(pattern, outDir string) {
 		fmt.Fprintf(os.Stderr, "Error: could not read WASM output: %v\n", err)
 		fmt.Fprintf(os.Stderr, "Looked in: %s\n", wasmBuildDir)
 		os.Exit(1)
+	}
+
+	// Inject cleat.metadata so the engine can detect the source language.
+	if enriched, metaErr := wasm.WriteMetadata(input, &wasm.Metadata{Language: "rust"}); metaErr == nil {
+		input = enriched
 	}
 
 	dstWasm := filepath.Join(outDir, crateName+".wasm")

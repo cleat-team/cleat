@@ -31,6 +31,10 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestASTransform(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping AS transform test in short mode")
+	}
+
 	hasNode := exec.Command("node", "--version").Run() == nil
 	hasNpx := exec.Command("npx", "--version").Run() == nil
 

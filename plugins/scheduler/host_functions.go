@@ -3,7 +3,7 @@ package scheduler
 import (
 	"fmt"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RegisterHostFunctions registers workflow-callable functions for the scheduler

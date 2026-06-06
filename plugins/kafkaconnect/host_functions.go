@@ -9,7 +9,7 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -59,7 +59,7 @@ type kafkaRestProxyRecord struct {
 // or logs the message if no REST proxy is configured.
 func (p *Plugin) produce(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("kafka-connect: no tenant context")
 	}
 

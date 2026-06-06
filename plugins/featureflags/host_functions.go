@@ -3,11 +3,12 @@ package featureflags
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -43,7 +44,7 @@ type evaluateFlagOutput struct {
 // the result. This function is idempotent and safe to re-invoke during replay.
 func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("feature-flags: no tenant context")
 	}
 
@@ -75,7 +76,7 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		&id, &tenantID, &key, &name, &description,
 		&enabled, &rulesJSON, &rolloutPercentage,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("feature-flags: flag not found: %s", input.Key)
 	}
 	if err != nil {

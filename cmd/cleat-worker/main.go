@@ -44,11 +44,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/migration"
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/wasm"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/migration"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/wasm"
 	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 
@@ -77,10 +77,10 @@ func main() {
 	driver := flag.String("driver", "postgres", "Database driver: postgres, mysql, or mssql")
 	concurrency := flag.Int("concurrency", 10, "Max concurrent workflow executions")
 	heartbeatInterval := flag.Duration("heartbeat", 5*time.Second, "Heartbeat interval")
-	pollInterval := flag.Duration("poll", 500*time.Millisecond, "Poll interval when no work")
+	pollInterval := flag.Duration("poll", 5*time.Second, "Poll interval when no work")
 	apiAddr := flag.String("api-addr", "", "HTTP API listen address (e.g., :8080)")
 	taskQueuesStr := flag.String("task-queue", "default", "Comma-separated task queues to poll (e.g. \"default,gpu,high-memory\")")
-	compactionThreshold := flag.Int("compaction-threshold", host.DefaultCompactionThreshold, "Number of events before history compaction triggers")
+	compactionThreshold := flag.Int("compaction-threshold", engine.DefaultCompactionThreshold, "Number of events before history compaction triggers")
 	compactionInterval := flag.Duration("compaction-interval", 5*time.Minute, "Interval between compaction checks")
 	shardsFile := flag.String("shards-file", "", "Path to shards JSON config for multi-shard operation")
 	pluginConfigFile := flag.String("plugin-config", "", "path to plugin config JSON file")
@@ -89,6 +89,7 @@ func main() {
 	memoryCheckInterval := flag.Duration("memory-check-interval", 2*time.Second, "Interval between memory readings")
 	memorySampleRetention := flag.Int("memory-sample-retention", 1000, "Max samples per workflow definition")
 	requireAuth := flag.Bool("require-auth", true, "Require API key authentication (default: true when --api-addr is set)")
+	requireSignalAuth := flag.Bool("require-signal-auth", true, "Require signal authorization: checks caller identity against target's allowed_signals (default: true)")
 	generateAPIKeyFor := flag.String("generate-api-key", "", "Generate a new API key for the given tenant UUID and exit")
 	maxBodySize := flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
 	httpReadTimeout := flag.Duration("http-read-timeout", 30*time.Second, "HTTP read timeout")
@@ -98,6 +99,8 @@ func main() {
 		"Tenant resolution mode: 'single-tenant' (default), 'header:<name>' (header-based), 'api-key' (from API key)")
 	rateLimit := flag.Float64("rate-limit", 100, "Requests/second/IP rate limit (only when --api-addr is set)")
 	rateLimitBurst := flag.Int("rate-limit-burst", 200, "Rate limit burst size")
+	rateLimitPerTenant := flag.Float64("rate-limit-per-tenant", 0, "Requests/second per tenant (0 = disabled; requires --require-auth)")
+	rateLimitPerTenantBurst := flag.Int("rate-limit-per-tenant-burst", 0, "Burst size for per-tenant rate limit")
 	maxRetries := flag.Int("max-retries", 100, "Maximum retry attempts for DurableCallWithRetry")
 	retentionDays := flag.Int("retention-days", 30, "Days to retain completed/failed workflow event history (0 disables)")
 	wasmCacheMaxEntries := flag.Int("wasm-cache-max-entries", 100, "Max WASM byte cache entries (LRU eviction)")
@@ -107,6 +110,8 @@ func main() {
 	disableChecksumVerification := flag.Bool("disable-checksum-verification", false, "Disable event history checksum verification on replay (default: enabled)")
 	wasmMemoryMaxMB := flag.Int("wasm-memory-max-mb", 32, "Max WASM linear memory per module in MB (default 32 MB = 512 pages; 0 = use default)")
 	wasmInstructionLimit := flag.Int("wasm-instruction-limit", 0, "Max WASM instructions per invocation (0 = no limit; monitored via wazero function listener)")
+	wasmOutputBufferSize := flag.Int("wasm-output-buffer-size", engine.DefaultOutBufSize, "WASM output buffer size in bytes (default 1 MiB)")
+	wasmMaxStringLen := flag.Int("wasm-max-string-len", engine.DefaultMaxWasmStringLen, "Maximum WASM string parameter length in bytes (default 1 MiB)")
 	wasmCacheDir := flag.String("wasm-cache-dir", "", "Directory for disk-backed compiled WASM module cache (empty disables)")
 	wasmDiskCacheMaxFiles := flag.Int("wasm-disk-cache-max-files", 100, "Max files in the disk-backed compiled WASM module cache (LRU eviction)")
 	redactPatternsFile := flag.String("redact-patterns-file", "", "Path to file with custom redaction patterns (one per line)")
@@ -122,37 +127,59 @@ func main() {
 	maxQuotaChildren := flag.Int("max-quota-children", 0, "Max child workflows per workflow (0 = unlimited)")
 	maxQuotaConcurrencyKeys := flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited)")
 
+	// Max wall-clock duration per workflow execution.
+	maxWorkflowDuration := flag.Duration("max-workflow-duration", 0, "Maximum wall-clock duration per workflow execution (0 = no limit). Workflows exceeding this are cancelled and fail with a timeout error.")
+
 	// Health check interval for watchdog.
 	healthCheckInterval := flag.Duration("health-check-interval", 30*time.Second, "Interval for background loop health checks (0 disables watchdog)")
 	maxPluginConnections := flag.Int("max-plugin-connections", 10, "Maximum database connections across all plugins (0 = no separate pool)")
 
+	otelEndpoint := flag.String("otel-endpoint", "", "OTLP HTTP endpoint for trace export (e.g., localhost:4318)")
+	otelDisabled := flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
+
 	flag.Parse()
 
+	// Set WASM output buffer size before any Runtime is created.
+	engine.OutBufSize = uint32(*wasmOutputBufferSize)
+	engine.MaxWasmStringLen = uint32(*wasmMaxStringLen)
+
 	workerID := generateWorkerID()
-	log.Printf("[worker %s] Starting with concurrency=%d", workerID, *concurrency)
+
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger.InfoContext(context.Background(), "starting worker", "worker_id", workerID, "concurrency", *concurrency)
+
+	if *disableChecksumVerification {
+		logger.InfoContext(context.Background(), "checksum verification disabled", "worker_id", workerID)
+	} else {
+		logger.InfoContext(context.Background(), "checksum verification enabled", "worker_id", workerID)
+	}
 
 	// Handle --generate-api-key (standalone mode: generate key and exit).
 	if *generateAPIKeyFor != "" {
 		tenantID, err := uuid.Parse(*generateAPIKeyFor)
 		if err != nil {
-			log.Fatalf("invalid tenant UUID for --generate-api-key: %v", err)
+			logger.ErrorContext(context.Background(), "invalid tenant UUID for --generate-api-key", "worker_id", workerID, "error", err)
+			os.Exit(1)
 		}
 		dbURL := *dbURL
 		if dbURL == "" {
 			dbURL = os.Getenv("DATABASE_URL")
 		}
 		if dbURL == "" {
-			log.Fatalf("--db or DATABASE_URL required for --generate-api-key")
+			logger.ErrorContext(context.Background(), "--db or DATABASE_URL required for --generate-api-key", "worker_id", workerID)
+			os.Exit(1)
 		}
 		gdb, err := sql.Open(sqlDriverName(*driver), dbURL)
 		if err != nil {
-			log.Fatalf("failed to connect to database: %v", err)
+			logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err)
+			os.Exit(1)
 		}
 		defer gdb.Close()
 		store := auth.NewTenantStore(gdb)
 		key := auth.GenerateAPIKey()
 		if err := store.CreateAPIKey(context.Background(), tenantID, "generated by --generate-api-key", key); err != nil {
-			log.Fatalf("failed to create API key: %v", err)
+			logger.ErrorContext(context.Background(), "failed to create API key", "worker_id", workerID, "error", err)
+			os.Exit(1)
 		}
 		fmt.Printf("\n")
 		fmt.Printf("=== CLEAT API KEY ===\n")
@@ -168,31 +195,35 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	shutdownTelemetry := setupTelemetry(ctx, *otelEndpoint, *otelDisabled, workerID)
+	defer shutdownTelemetry()
+
 	taskQueues := strings.Split(*taskQueuesStr, ",")
 
 	// Plugin state (populated in both sharded and non-sharded paths).
 	var (
-		pluginRegistry       = host.NewPluginRegistry()
-		pluginStreamRegistry = host.NewPluginStreamRegistry()
+		pluginRegistry       = engine.NewPluginRegistry()
+		pluginStreamRegistry = engine.NewPluginStreamRegistry()
 		plugList             []*plugin.LoadedPlugin
 		plugHandler          http.Handler
 		plugMux              *http.ServeMux
 		bgWg                 sync.WaitGroup
 		ratelim              *ipRateLimiter
+		tenantLim            *keyedRateLimiter
 	)
 
 	defaultTenantID := "00000000-0000-0000-0000-000000000000"
 
-	var store host.WorkflowStore
+	var store engine.WorkflowStore
 	var db *sql.DB
 	var pluginDB *sql.DB
 	var tenantPools *plugin.TenantPools
-	var factory host.StoreFactory
-	var payloadEncryption *host.PayloadEncryption
+	var factory engine.StoreFactory
+	var payloadEncryption *engine.PayloadEncryption
 	if *shardsFile != "" {
 		configs, err := loadShardConfigs(*shardsFile)
 		if err != nil {
-			log.Fatalf("[worker %s] Failed to load shards config: %v", workerID, err)
+			logger.ErrorContext(context.Background(), "failed to load shards config", "worker_id", workerID, "error", err); os.Exit(1)
 		}
 		// Apply --schema flag to shards without an explicit schema.
 		for i := range configs {
@@ -202,27 +233,27 @@ func main() {
 		}
 
 		// Load encryption key if configured (sharded path).
-		var payloadEncryption *host.PayloadEncryption
+		var payloadEncryption *engine.PayloadEncryption
 		if *encryptSensitivePayloads {
 			if *encryptionKeyFile == "" {
-				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
+				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --encryption-key-file", "worker_id", workerID); os.Exit(1)
 			}
 		}
 		if *encryptionKeyFile != "" {
 			keyData, kerr := os.ReadFile(*encryptionKeyFile)
 			if kerr != nil {
-				log.Fatalf("[worker %s] Failed to read encryption key file: %v", workerID, kerr)
+				logger.ErrorContext(context.Background(), "failed to read encryption key file", "worker_id", workerID, "error", kerr); os.Exit(1)
 			}
 			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := host.NewPayloadEncryption(keyStr)
+			pe, perr := engine.NewPayloadEncryption(keyStr)
 			if perr != nil {
-				log.Fatalf("[worker %s] Invalid encryption key: %v", workerID, perr)
+				logger.ErrorContext(context.Background(), "invalid encryption key", "worker_id", workerID, "error", perr); os.Exit(1)
 			}
 			payloadEncryption = pe
-			log.Printf("[worker %s] Encryption at rest enabled for sensitive payload fields", workerID)
+			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
 		}
 		// Build stores, DB connections, and closers for each shard.
-		stores := make([]host.WorkflowStore, len(configs))
+		stores := make([]engine.WorkflowStore, len(configs))
 		closers := make([]func() error, len(configs))
 		shardDBs := make([]*sql.DB, len(configs))
 		for i, cfg := range configs {
@@ -236,18 +267,18 @@ func main() {
 			}
 			sdb, err := sql.Open("postgres", dsn)
 			if err != nil {
-				log.Fatalf("[worker %s] shard %q open: %v", workerID, cfg.Name, err)
+				logger.ErrorContext(context.Background(), "shard open failed", "worker_id", workerID, "shard", cfg.Name, "error", err); os.Exit(1)
 			}
 			if err := sdb.PingContext(ctx); err != nil {
 				sdb.Close()
-				log.Fatalf("[worker %s] shard %q ping: %v", workerID, cfg.Name, err)
+				logger.ErrorContext(ctx, "shard ping failed", "worker_id", workerID, "shard", cfg.Name, "error", err); os.Exit(1)
 			}
 			sdb.SetMaxOpenConns(15)
 			sdb.SetMaxIdleConns(5)
 			sdb.SetConnMaxLifetime(5 * time.Minute)
 
 			shardDBs[i] = sdb
-			f := host.NewPostgresStoreFactory(sdb, cfg.Schema)
+			f := engine.NewPostgresStoreFactory(sdb, cfg.Schema)
 			if payloadEncryption != nil {
 				f.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 			}
@@ -257,15 +288,15 @@ func main() {
 			s, closer, err := f.OpenStore(ctx, defaultTenantID, taskQueues...)
 			if err != nil {
 				sdb.Close()
-				log.Fatalf("[worker %s] shard %q open store: %v", workerID, cfg.Name, err)
+				logger.ErrorContext(context.Background(), "shard open store failed", "worker_id", workerID, "shard", cfg.Name, "error", err); os.Exit(1)
 			}
 			stores[i] = s
 			closers[i] = closer.Close
 		}
 
-		shardedStore, err := host.NewShardedStore(configs, stores, closers)
+		shardedStore, err := engine.NewShardedStore(configs, stores, closers)
 		if err != nil {
-			log.Fatalf("[worker %s] Failed to create sharded store: %v", workerID, err)
+			logger.ErrorContext(context.Background(), "failed to create sharded store", "worker_id", workerID, "error", err); os.Exit(1)
 		}
 		store = shardedStore
 		defer shardedStore.Close()
@@ -280,7 +311,7 @@ func main() {
 		if *maxPluginConnections > 0 && len(configs) > 0 {
 			pdb, pErr := sql.Open("postgres", configs[0].ConnStr)
 			if pErr != nil {
-				log.Printf("[worker %s] Warning: failed to open plugin connection pool: %v", workerID, pErr)
+				logger.WarnContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", pErr)
 			} else {
 				pluginDB = pdb
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
@@ -288,7 +319,7 @@ func main() {
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
 				pluginConnectionsMax.Set(float64(*maxPluginConnections))
 				defer pluginDB.Close()
-				log.Printf("[worker %s] Plugin DB pool created: max_connections=%d", workerID, *maxPluginConnections)
+				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		}
 		// Start idempotency key cleanup on each shard.
@@ -297,13 +328,13 @@ func main() {
 		}
 	} else {
 		// Resolve DB connection string via the configured credential provider.
-		credProvider, credErr := host.NewDBCredentialProvider(*dbCredentialProvider, *dbURL, *dbCredentialPath)
+		credProvider, credErr := engine.NewDBCredentialProvider(*dbCredentialProvider, *dbURL, *dbCredentialPath)
 		if credErr != nil {
-			log.Fatalf("[worker %s] credential provider: %v", workerID, credErr)
+			logger.ErrorContext(context.Background(), "credential provider error", "worker_id", workerID, "error", credErr); os.Exit(1)
 		}
 		resolvedURL, credErr := credProvider.GetConnectionString(ctx)
 		if credErr != nil {
-			log.Fatalf("[worker %s] failed to resolve credentials: %v", workerID, credErr)
+			logger.ErrorContext(context.Background(), "failed to resolve credentials", "worker_id", workerID, "error", credErr); os.Exit(1)
 		}
 		*dbURL = resolvedURL
 		if *dbURL == "" {
@@ -322,13 +353,13 @@ func main() {
 			dbDSN := dsnWithSchema(*dbURL, *schemaName)
 			db, err = sql.Open(sqlDriver, dbDSN)
 			if err != nil {
-				log.Fatalf("[worker %s] Failed to connect to database: %v", workerID, err)
+				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err); os.Exit(1)
 			}
 			defer db.Close()
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = host.NewPostgresStoreFactory(db, *schemaName)
+			factory = engine.NewPostgresStoreFactory(db, *schemaName)
 
 			// Create per-tenant database connection pools for tenant-scoped plugin operations.
 			baseDSN := baseDSNFromURL(*dbURL)
@@ -340,45 +371,45 @@ func main() {
 			if *maxPluginConnections > 0 {
 				pluginDB, err = sql.Open(sqlDriver, dbDSN)
 				if err != nil {
-					log.Fatalf("[worker %s] Failed to open plugin connection pool: %v", workerID, err)
+					logger.ErrorContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", err); os.Exit(1)
 				}
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
 				pluginConnectionsMax.Set(float64(*maxPluginConnections))
 				defer pluginDB.Close()
-				log.Printf("[worker %s] Plugin DB pool: max_connections=%d", workerID, *maxPluginConnections)
+				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		case "mysql":
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
-				log.Fatalf("[worker %s] Failed to connect to database: %v", workerID, err)
+				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err); os.Exit(1)
 			}
 			defer db.Close()
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = host.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL))
+			factory = engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL))
 
 			// Create plugin-dedicated connection pool.
 			if *maxPluginConnections > 0 {
 				pluginDB, err = sql.Open(sqlDriver, *dbURL)
 				if err != nil {
-					log.Fatalf("[worker %s] Failed to open plugin connection pool: %v", workerID, err)
+					logger.ErrorContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", err); os.Exit(1)
 				}
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
 				pluginConnectionsMax.Set(float64(*maxPluginConnections))
 				defer pluginDB.Close()
-				log.Printf("[worker %s] Plugin DB pool: max_connections=%d", workerID, *maxPluginConnections)
+				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		case "mssql":
-			factory = host.NewMSSQLStoreFactory(*dbURL)
+			factory = engine.NewMSSQLStoreFactory(*dbURL)
 			// Open a connection to verify and for plugin/migration use.
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
-				log.Fatalf("[worker %s] Failed to connect to database: %v", workerID, err)
+				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err); os.Exit(1)
 			}
 			defer db.Close()
 			db.SetMaxOpenConns(*concurrency + 5)
@@ -389,17 +420,45 @@ func main() {
 			if *maxPluginConnections > 0 {
 				pluginDB, err = sql.Open(sqlDriver, *dbURL)
 				if err != nil {
-					log.Fatalf("[worker %s] Failed to open plugin connection pool: %v", workerID, err)
+					logger.ErrorContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", err); os.Exit(1)
 				}
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
 				pluginDB.SetConnMaxLifetime(5 * time.Minute)
 				pluginConnectionsMax.Set(float64(*maxPluginConnections))
 				defer pluginDB.Close()
-				log.Printf("[worker %s] Plugin DB pool: max_connections=%d", workerID, *maxPluginConnections)
+				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		default:
-			log.Fatalf("[worker %s] Invalid --driver %q; must be postgres, mysql, or mssql", workerID, *driver)
+			logger.ErrorContext(context.Background(), "invalid driver", "worker_id", workerID, "driver", *driver); os.Exit(1)
+		}
+
+		// Load encryption key if configured.
+		if *encryptSensitivePayloads {
+			if *driver != "postgres" {
+				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --driver=postgres", "worker_id", workerID); os.Exit(1)
+			}
+			if *encryptionKeyFile == "" {
+				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --encryption-key-file", "worker_id", workerID); os.Exit(1)
+			}
+		}
+		if *encryptionKeyFile != "" {
+			keyData, kerr := os.ReadFile(*encryptionKeyFile)
+			if kerr != nil {
+				logger.ErrorContext(context.Background(), "failed to read encryption key file", "worker_id", workerID, "error", kerr); os.Exit(1)
+			}
+			keyStr := strings.TrimSpace(string(keyData))
+			pe, perr := engine.NewPayloadEncryption(keyStr)
+			if perr != nil {
+				logger.ErrorContext(context.Background(), "invalid encryption key", "worker_id", workerID, "error", perr); os.Exit(1)
+			}
+			payloadEncryption = pe
+			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
+		}
+
+		// Propagate encryption to the store factory.
+		if pgFactory, ok := factory.(*engine.PostgresStoreFactory); ok && payloadEncryption != nil {
+			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 		}
 
 		// Load encryption key if configured.
@@ -417,7 +476,7 @@ func main() {
 				log.Fatalf("[worker %s] Failed to read encryption key file: %v", workerID, kerr)
 			}
 			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := host.NewPayloadEncryption(keyStr)
+			pe, perr := engine.NewPayloadEncryption(keyStr)
 			if perr != nil {
 				log.Fatalf("[worker %s] Invalid encryption key: %v", workerID, perr)
 			}
@@ -426,13 +485,13 @@ func main() {
 		}
 
 		// Propagate encryption to the store factory.
-		if pgFactory, ok := factory.(*host.PostgresStoreFactory); ok && payloadEncryption != nil {
+		if pgFactory, ok := factory.(*engine.PostgresStoreFactory); ok && payloadEncryption != nil {
 			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 		}
 
 		s, _, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
 		if err != nil {
-			log.Fatalf("[worker %s] Failed to open store: %v", workerID, err)
+			logger.ErrorContext(context.Background(), "failed to open store", "worker_id", workerID, "error", err); os.Exit(1)
 		}
 		store = s
 
@@ -452,13 +511,13 @@ func main() {
 	if *pluginConfigFile != "" {
 		data, ferr := os.ReadFile(*pluginConfigFile)
 		if ferr != nil {
-			log.Fatalf("[worker %s] plugin config: %v", workerID, ferr)
+			logger.ErrorContext(context.Background(), "plugin config error", "worker_id", workerID, "error", ferr); os.Exit(1)
 		}
 		data = []byte(os.ExpandEnv(string(data)))
 		if json.Valid(data) {
 			rawPluginConfig = data
 		} else {
-			log.Fatalf("[worker %s] plugin config: must be valid JSON", workerID)
+			logger.ErrorContext(context.Background(), "plugin config must be valid JSON", "worker_id", workerID); os.Exit(1)
 		}
 	}
 
@@ -477,7 +536,7 @@ func main() {
 			if len(versions) == 0 {
 				return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
 			}
-			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "")
+			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "", engine.DefaultTenantUUID, 0)
 			return runID, err
 		},
 
@@ -489,33 +548,33 @@ func main() {
 	var err error
 	plugList, err = plugin.Discover()
 	if err != nil {
-		log.Fatalf("[worker %s] plugin: %v", workerID, err)
+		logger.ErrorContext(context.Background(), "plugin initialization failed", "worker_id", workerID, "error", err); os.Exit(1)
 	}
 
 	// Run core schema migrations before plugin migrations.
 	migrator := migration.NewRunner(db, factory.Dialect(), "migrations")
 	if err := migrator.Run(ctx); err != nil {
-		log.Fatalf("[worker %s] core migrations: %v", workerID, err)
+		logger.ErrorContext(context.Background(), "core migrations failed", "worker_id", workerID, "error", err); os.Exit(1)
 	}
 
 	if err := plugin.RunMigrations(ctx, db, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
-		log.Fatalf("[worker %s] plugin migrations: %v", workerID, err)
+		logger.ErrorContext(context.Background(), "plugin migrations failed", "worker_id", workerID, "error", err); os.Exit(1)
 	}
 
 	// For MySQL, the factory creates a per-tenant database that needs its
 	// own copy of the schema. Run core and plugin migrations on it.
 	if *driver == "mysql" {
-		if mf, ok := factory.(*host.MySQLStoreFactory); ok {
+		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
 			tenantDB, terr := mf.TenantDB(ctx, defaultTenantID)
 			if terr != nil {
-				log.Fatalf("[worker %s] Failed to get tenant database: %v", workerID, terr)
+				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr); os.Exit(1)
 			}
 			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations")
 			if terr = tm.Run(ctx); terr != nil {
-				log.Fatalf("[worker %s] tenant core migrations: %v", workerID, terr)
+				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr); os.Exit(1)
 			}
 			if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList); terr != nil {
-				log.Fatalf("[worker %s] tenant plugin migrations: %v", workerID, terr)
+				logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr); os.Exit(1)
 			}
 		}
 	}
@@ -536,18 +595,33 @@ func main() {
 		default: // DatabaseAccessReadWrite or empty (backward compat)
 			envCopy.DB = getPluginDB(db, pluginDB)
 		}
+		// Wrap SignalWorkflow with signal authorization.
+		// The plugin name is the caller identity checked against allowed_signals.
+		if *requireSignalAuth {
+			pluginName := lp.Plugin.Info().Name
+			envCopy.SignalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+				callers, err := store.GetAllowedSignalCallers(ctx, workflowID)
+				if err != nil {
+					return err
+				}
+				if !signalCallerAllowed(callers, pluginName) {
+					return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
+				}
+				return store.DeliverSignal(ctx, workflowID, signalName, payload)
+			}
+		}
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					lp.Healthy = false
 					lp.Error = fmt.Errorf("panic during Init: %v", r)
-					log.Printf("[worker %s] plugin %s init panicked: %v", workerID, lp.Plugin.Info().Name, r)
+					logger.ErrorContext(context.Background(), "plugin init panicked", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", r)
 				}
 			}()
 			if err := lp.Plugin.Init(ctx, &envCopy); err != nil {
 				lp.Healthy = false
 				lp.Error = err
-				log.Printf("[worker %s] plugin %s init failed: %v", workerID, lp.Plugin.Info().Name, err)
+				logger.ErrorContext(context.Background(), "plugin init failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", err)
 			}
 		}()
 	}
@@ -558,8 +632,7 @@ func main() {
 		}
 		if p, ok := lp.Plugin.(plugin.HasRoutes); ok && plugMux != nil {
 			if rerr := p.RegisterRoutes(plugMux); rerr != nil {
-				log.Printf("[worker %s] plugin %s: route registration failed: %v",
-					workerID, lp.Plugin.Info().Name, rerr)
+				logger.ErrorContext(context.Background(), "plugin route registration failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
 			}
 		}
 	}
@@ -587,8 +660,7 @@ func main() {
 				pluginName:     lp.Plugin.Info().Name,
 			}
 			if rerr := p.RegisterHostFunctions(adapter); rerr != nil {
-				log.Printf("[worker %s] plugin %s: host functions failed: %v",
-					workerID, lp.Plugin.Info().Name, rerr)
+				logger.ErrorContext(context.Background(), "plugin host functions failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
 			}
 		}
 	}
@@ -602,8 +674,7 @@ func main() {
 			go func(bg plugin.HasBackground) {
 				defer bgWg.Done()
 				if berr := bg.Run(ctx); berr != nil {
-					log.Printf("[worker %s] plugin %s: background worker exited: %v",
-						workerID, bg.Info().Name, berr)
+					logger.ErrorContext(context.Background(), "plugin background worker exited", "worker_id", workerID, "plugin", bg.Info().Name, "error", berr)
 				}
 			}(p)
 		}
@@ -611,8 +682,8 @@ func main() {
 
 	// Load custom redaction patterns from file (if configured).
 	if *redactPatternsFile != "" {
-		if err := host.LoadRedactPatterns(*redactPatternsFile); err != nil {
-			log.Fatalf("[worker %s] redact patterns: %v", workerID, err)
+		if err := engine.LoadRedactPatterns(*redactPatternsFile); err != nil {
+			logger.ErrorContext(context.Background(), "redact patterns error", "worker_id", workerID, "error", err); os.Exit(1)
 		}
 	}
 
@@ -632,8 +703,7 @@ func main() {
 					pluginConnectionsInUse.Set(float64(stats.InUse))
 					openConns := stats.OpenConnections
 					if openConns > 0 && *maxPluginConnections > 0 && float64(openConns) > 0.8*float64(*maxPluginConnections) {
-						log.Printf("[worker %s] WARNING: plugin DB connections at %d/%d (%.0f%%), consider increasing --max-plugin-connections",
-							workerID, openConns, *maxPluginConnections, 100*float64(openConns)/float64(*maxPluginConnections))
+						logger.WarnContext(context.Background(), "plugin DB connections near limit", "worker_id", workerID, "used", openConns, "max", *maxPluginConnections, "pct", 100*float64(openConns)/float64(*maxPluginConnections))
 					}
 				}
 			}
@@ -641,13 +711,25 @@ func main() {
 	}
 
 	// Create disk-backed compiled WASM module cache.
-	wasmDiskCache := host.NewWasmDiskCache(*wasmCacheDir, *wasmDiskCacheMaxFiles)
+	wasmDiskCache := engine.NewWasmDiskCache(*wasmCacheDir, *wasmDiskCacheMaxFiles)
 	if wasmDiskCache != nil {
-		log.Printf("[worker %s] WASM disk cache: dir=%s max_files=%d", workerID, *wasmCacheDir, *wasmDiskCacheMaxFiles)
+		logger.InfoContext(context.Background(), "WASM disk cache configured", "worker_id", workerID, "dir", *wasmCacheDir, "max_files", *wasmDiskCacheMaxFiles)
+	}
+
+	// Register the wasmtime backend for Go WASM modules. If wasmtime is not
+	// available (e.g., libwasmtime.so not found), fall back to the legacy
+	// wazero runtime by leaving the backend as nil.
+	var wasmtimeBackend engine.WasmBackend
+	if wt, err := engine.NewWasmtimeBackend(ctx); err == nil {
+		wasmtimeBackend = wt
+		logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID)
+	} else {
+		logger.WarnContext(context.Background(), "wasmtime backend unavailable, using legacy wazero for Go WASM", "worker_id", workerID, "error", err)
 	}
 
 	w := &Worker{
 		id:                          workerID,
+		logger:                      logger,
 		store:                       store,
 		concurrency:                 *concurrency,
 		heartbeatInterval:           *heartbeatInterval,
@@ -666,24 +748,28 @@ func main() {
 		schemaName:                  *schemaName,
 		peerSchemas:                 parsePeerSchemas(*peerSchemas),
 		disableChecksumVerification: disableChecksumVerification,
+		requireSignalAuth:           requireSignalAuth,
 		maxRetries:                  *maxRetries,
 		wasmMemoryMaxMB:             wasmMemoryMaxMB,
 		wasmInstructionLimit:        wasmInstructionLimit,
 		wasmDiskCache:               wasmDiskCache,
+		wasmtimeBackend:              wasmtimeBackend,
 		maxQuotaEvents:              *maxQuotaEvents,
 		maxQuotaChildren:            *maxQuotaChildren,
 		maxQuotaConcurrencyKeys:     *maxQuotaConcurrencyKeys,
+		maxWorkflowDuration:         *maxWorkflowDuration,
 		healthCheckInterval:         *healthCheckInterval,
 		encryption:                  payloadEncryption,
 		encryptSensitivePayloads:    *encryptSensitivePayloads,
 		drainCh:                     make(chan struct{}),
+		parentWakeCh:                make(chan struct{}, 1),
 	}
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
 	mc := NewMemoryController(monitor, store, workerID, *concurrency, *memorySoftLimit, *memoryHardLimit)
 	if err := mc.LoadEstimates(ctx); err != nil {
-		log.Printf("[worker %s] Warning: failed to load memory estimates: %v", workerID, err)
+		logger.WarnContext(context.Background(), "failed to load memory estimates", "worker_id", workerID, "error", err)
 	}
 	w.memoryController = mc
 	atomic.StoreInt64(&metricsDesiredConcurrency, int64(*concurrency))
@@ -714,6 +800,9 @@ func main() {
 		mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
 		mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
 
+		// Version management endpoints.
+		engine.RegisterVersionHandler(mux, store)
+
 		// Plugin discovery endpoint.
 		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -739,7 +828,7 @@ func main() {
 		// Serve embedded SPA for non-API paths.
 		webFS, fsErr := fs.Sub(webDist, "web/dist")
 		if fsErr != nil {
-			log.Printf("[worker %s] WARNING: web/dist not found in embedded FS (build without SPA?): %v", workerID, fsErr)
+			logger.WarnContext(context.Background(), "web/dist not found in embedded FS", "worker_id", workerID, "error", fsErr)
 		} else {
 			fileServer := http.FileServer(http.FS(webFS))
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -766,13 +855,13 @@ func main() {
 			// If no API keys exist, auto-generate one for the default tenant.
 			var keyCount int
 			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenant_api_keys`).Scan(&keyCount); err != nil {
-				log.Printf("[worker %s] Warning: cannot check API key count: %v", workerID, err)
+				logger.WarnContext(context.Background(), "cannot check API key count", "worker_id", workerID, "error", err)
 			} else if keyCount == 0 {
 				key := auth.GenerateAPIKey()
 				defaultTenantID := uuid.MustParse("00000000-0000-0000-0000-000000000000")
 				ts := auth.NewTenantStore(db)
 				if err := ts.CreateAPIKey(ctx, defaultTenantID, "auto-generated startup key", key); err != nil {
-					log.Printf("[worker %s] Warning: failed to auto-generate API key: %v", workerID, err)
+					logger.WarnContext(context.Background(), "failed to auto-generate API key", "worker_id", workerID, "error", err)
 				} else {
 					fmt.Println()
 					fmt.Println("=== CLEAT API KEY (auto-generated — no keys were configured) ===")
@@ -784,6 +873,8 @@ func main() {
 					fmt.Println()
 				}
 			}
+		} else {
+			logger.WarnContext(context.Background(), "authentication disabled", "worker_id", workerID)
 		}
 
 		// Tenant resolver middleware.
@@ -801,9 +892,10 @@ func main() {
 			})
 		}
 
-		// Create rate limiter and wrap handler.
+		// Create rate limiters and wrap handler.
 		ratelim = newIPRateLimiter(rate.Limit(*rateLimit), *rateLimitBurst)
-		handler = rateLimitMiddleware(ratelim)(handler)
+		tenantLim = newKeyedRateLimiter()
+		handler = rateLimitMiddleware(ratelim, tenantLim, rate.Limit(*rateLimitPerTenant), *rateLimitPerTenantBurst)(handler)
 
 		srv := &http.Server{
 			Addr:         *apiAddr,
@@ -813,9 +905,9 @@ func main() {
 			IdleTimeout:  *httpIdleTimeout,
 		}
 		go func() {
-			log.Printf("[worker %s] HTTP API listening on %s", workerID, *apiAddr)
+			logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", workerID, "addr", *apiAddr)
 			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-				log.Printf("[worker %s] HTTP server error: %v", workerID, err)
+				logger.ErrorContext(context.Background(), "HTTP server error", "worker_id", workerID, "error", err)
 			}
 		}()
 		go func() {
@@ -829,12 +921,15 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Printf("[worker %s] Shutting down...", workerID)
+		logger.InfoContext(context.Background(), "shutting down", "worker_id", workerID)
 		cancel()
 		if ratelim != nil {
 			ratelim.stop()
 		}
-		log.Printf("[worker %s] waiting for background workers to stop...", workerID)
+		if tenantLim != nil {
+			tenantLim.stop()
+		}
+		logger.InfoContext(context.Background(), "waiting for background workers to stop", "worker_id", workerID)
 		done := make(chan struct{})
 		go func() {
 			bgWg.Wait()
@@ -842,16 +937,16 @@ func main() {
 		}()
 		select {
 		case <-done:
-			log.Printf("[worker %s] all background workers stopped", workerID)
+			logger.InfoContext(context.Background(), "all background workers stopped", "worker_id", workerID)
 		case <-time.After(30 * time.Second):
-			log.Printf("[worker %s] timed out waiting for background workers after 30s", workerID)
+			logger.WarnContext(context.Background(), "timed out waiting for background workers after 30s", "worker_id", workerID)
 		}
 	}()
 
 	workerCount.Set(1)
 	defer workerCount.Set(0)
 	w.Run()
-	log.Printf("[worker %s] Shutdown complete", workerID)
+	logger.InfoContext(context.Background(), "shutdown complete", "worker_id", workerID)
 }
 
 // wasmLRUEntry is stored in container/list for LRU ordering.
@@ -940,12 +1035,13 @@ type loopContext struct {
 
 type Worker struct {
 	id                   string
-	store                host.WorkflowStore
+	logger               *slog.Logger
+	store                engine.WorkflowStore
 	concurrency          int
 	heartbeatInterval    time.Duration
 	pollInterval         time.Duration
-	pluginRegistry       *host.PluginRegistry
-	pluginStreamRegistry *host.PluginStreamRegistry
+	pluginRegistry       *engine.PluginRegistry
+	pluginStreamRegistry *engine.PluginStreamRegistry
 	tenantPools          *plugin.TenantPools
 	plugList             []*plugin.LoadedPlugin
 
@@ -954,8 +1050,8 @@ type Worker struct {
 	draining atomic.Bool
 	wg       sync.WaitGroup
 
-	inflight    sync.Map // map[workflowID]*host.WorkflowInstance
-	execEngines sync.Map // map[workflowID]*host.Engine
+	inflight    sync.Map // map[workflowID]*engine.WorkflowInstance
+	execEngines sync.Map // map[workflowID]*engine.Engine
 	wasmCache   *wasmLRUCache
 
 	scheduleMu       sync.Mutex
@@ -977,21 +1073,31 @@ type Worker struct {
 	schemaName                  string
 	peerSchemas                 []string
 	disableChecksumVerification *bool
+	requireSignalAuth           *bool
 	wasmMemoryMaxMB             *int
 	wasmInstructionLimit        *int
-	wasmDiskCache               *host.WasmDiskCache
+	wasmDiskCache               *engine.WasmDiskCache
+	wasmtimeBackend              engine.WasmBackend
 
 	drainCh   chan struct{}
 	drainOnce sync.Once
 
 	// Encryption at rest for sensitive event payloads.
-	encryption               *host.PayloadEncryption
+	encryption               *engine.PayloadEncryption
 	encryptSensitivePayloads bool
 
 	// Per-workflow resource quotas.
 	maxQuotaEvents          int
 	maxQuotaChildren        int
 	maxQuotaConcurrencyKeys int
+
+	// Maximum wall-clock duration per workflow execution (0 = no limit).
+	maxWorkflowDuration time.Duration
+
+	// parentWakeCh is signaled when a workflow reaches a terminal status
+	// (done/failed). The dispatch loop selects on this channel to skip its
+	// idle sleep, waking immediately to claim the newly-ready parent.
+	parentWakeCh chan struct{}
 
 	// Health check interval for watchdog.
 	healthCheckInterval time.Duration
@@ -1005,6 +1111,8 @@ type Worker struct {
 
 	// loopCtxMap holds per-loop cancellation contexts for clean restart.
 	loopCtxMap map[string]*loopContext
+
+	loopMu sync.Mutex // protects loopFuncs and loopCtxMap from concurrent access
 }
 
 // DrainComplete returns a channel that is closed when the drain completes
@@ -1017,26 +1125,46 @@ func (w *Worker) DrainComplete() <-chan struct{} {
 // If no per-loop context has been set up yet (initial startup), it falls
 // back to the worker-level context so that shutdown still works.
 func (w *Worker) getLoopCtx(name string) context.Context {
-	if lc, ok := w.loopCtxMap[name]; ok {
+	w.loopMu.Lock()
+	lc, ok := w.loopCtxMap[name]
+	w.loopMu.Unlock()
+	if ok {
 		return lc.ctx
 	}
 	return w.ctx
 }
 
+// launchLoop starts a background loop goroutine and ensures the per-loop
+// done channel is closed when the goroutine exits. This makes the initial
+// launch consistent with the restart path (restartLoop), eliminating the
+// 5-second timeout on the first watchdog restart.
+// The done channel is captured at call time so that if restartLoop swaps
+// the loopCtxMap entry before this goroutine exits, we still close the
+// correct (original) channel.
+func (w *Worker) launchLoop(name string, fn func()) {
+	w.wg.Add(1)
+	w.loopMu.Lock()
+	done := w.loopCtxMap[name].done
+	w.loopMu.Unlock()
+	go func() {
+		defer close(done)
+		w.withPanicRecovery(name, fn)()
+	}()
+}
+
 func (w *Worker) Run() {
 	// Initialize the global time seed so the first workflow execution
 	// (before the dispatch loop updates it) sees a real wall clock.
-	host.UpdateNowMs()
+	engine.UpdateNowMs()
 
 	// Initialize health tracker and loop registry for watchdog.
 	w.healthTracker = newHealthTracker()
 	w.loopFuncs = make(map[string]func())
 	w.loopCtxMap = make(map[string]*loopContext)
 
-	// initLoopCtx creates a cancellable per-loop context derived from the
-	// worker context. The initial done channel is never closed (the initial
-	// goroutines are started inline, not via restartLoop); the 5s timeout in
-	// restartLoop guards the wait.
+	// initLoopCtx creates a cancellable per-loop context and registers the
+	// loop for watchdog monitoring. The done channel is closed by launchLoop
+	// when the goroutine exits.
 	initLoopCtx := func(name string) {
 		ctx, cancel := context.WithCancel(w.ctx)
 		w.loopCtxMap[name] = &loopContext{
@@ -1044,81 +1172,68 @@ func (w *Worker) Run() {
 			cancel: cancel,
 			done:   make(chan struct{}),
 		}
+		w.healthTracker.registerLoop(name)
 	}
 	initLoopCtx("heartbeat")
 	initLoopCtx("reaper")
 	initLoopCtx("concurrency_key_reaper")
 	initLoopCtx("dispatch")
 	initLoopCtx("schedule")
-	initLoopCtx("compaction")
 	initLoopCtx("memory_reload")
 	initLoopCtx("memory_cleanup")
 	initLoopCtx("retention")
+	initLoopCtx("compaction")
 	initLoopCtx("update_dispatch")
 
 	// Background heartbeat goroutine.
 	w.loopFuncs["heartbeat"] = w.heartbeatLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("heartbeat", w.heartbeatLoop)()
+	w.launchLoop("heartbeat", w.heartbeatLoop)
 
 	// Background zombie reaper goroutine.
 	w.loopFuncs["reaper"] = w.reaperLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("reaper", w.reaperLoop)()
+	w.launchLoop("reaper", w.reaperLoop)
 
 	// Background concurrency key reaper goroutine (Feature 5).
 	w.loopFuncs["concurrency_key_reaper"] = w.concurrencyKeyReaperLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("concurrency_key_reaper", w.concurrencyKeyReaperLoop)()
+	w.launchLoop("concurrency_key_reaper", w.concurrencyKeyReaperLoop)
 
 	// Dispatch loop.
 	w.loopFuncs["dispatch"] = w.dispatchLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("dispatch", w.dispatchLoop)()
+	w.launchLoop("dispatch", w.dispatchLoop)
 
 	// Cron schedule loop.
 	w.loopFuncs["schedule"] = w.scheduleLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("schedule", w.scheduleLoop)()
-
-	// Compaction loop.
-	w.loopFuncs["compaction"] = w.compactionLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("compaction", w.compactionLoop)()
+	w.launchLoop("schedule", w.scheduleLoop)
 
 	// Memory estimate reload loop.
 	w.loopFuncs["memory_reload"] = w.memoryReloadLoop
-	w.wg.Add(1)
-	go w.withPanicRecovery("memory_reload", w.memoryReloadLoop)()
+	w.launchLoop("memory_reload", w.memoryReloadLoop)
 
 	// Memory sample cleanup loop.
 	w.loopFuncs["memory_cleanup"] = func() { w.memoryCleanupLoop(w.memorySampleRetention) }
-	w.wg.Add(1)
-	go w.withPanicRecovery("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })()
+	w.launchLoop("memory_cleanup", func() { w.memoryCleanupLoop(w.memorySampleRetention) })
 
 	// Retention loop.
 	w.loopFuncs["retention"] = func() { w.retentionLoop(w.retentionDays) }
-	w.wg.Add(1)
-	go w.withPanicRecovery("retention", func() { w.retentionLoop(w.retentionDays) })()
+	w.launchLoop("retention", func() { w.retentionLoop(w.retentionDays) })
 
 	// Update dispatch loop (Feature 3: Update Handler).
 	w.loopFuncs["update_dispatch"] = func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) }
-	w.wg.Add(1)
-	go w.withPanicRecovery("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })()
+	w.launchLoop("update_dispatch", func() { w.updateDispatchLoop(w.getLoopCtx("update_dispatch")) })
 
 	// Watchdog loop for background loop health monitoring.
 	if w.healthCheckInterval > 0 {
+		initLoopCtx("watchdog")
 		w.loopFuncs["watchdog"] = w.watchdogLoop
-		w.wg.Add(1)
-		go w.withPanicRecovery("watchdog", w.watchdogLoop)()
+		w.launchLoop("watchdog", w.watchdogLoop)
 	}
 
-	log.Printf("[worker %s] Running", w.id)
+	w.logger.InfoContext(w.ctx, "running", "worker_id", w.id)
 
 	<-w.ctx.Done()
 
 	// Graceful shutdown: wait for in-flight workflows.
-	log.Printf("[worker %s] Waiting for in-flight workflows to complete...", w.id)
+	w.logger.InfoContext(w.ctx, "waiting for in-flight workflows to complete", "worker_id", w.id)
 	w.wg.Wait()
 }
 
@@ -1127,7 +1242,7 @@ func (w *Worker) dispatchLoop() {
 	w.healthTracker.setInterval("dispatch", w.pollInterval)
 
 	// Keep the global time seed fresh for workflow sessions.
-	host.UpdateNowMs()
+	engine.UpdateNowMs()
 
 	const maxBatchSize = 20 // cap claims per query to avoid oversized batches
 	idleTicks := 0
@@ -1139,6 +1254,11 @@ func (w *Worker) dispatchLoop() {
 			return
 		default:
 		}
+		// Re-check after the non-blocking select to narrow the
+		// TOCTOU window between the check and the DB claims below.
+		if w.ctx.Err() != nil {
+			return
+		}
 
 		w.healthTracker.recordRun("dispatch")
 
@@ -1147,8 +1267,7 @@ func (w *Worker) dispatchLoop() {
 			inflight := 0
 			w.inflight.Range(func(_, _ interface{}) bool { inflight++; return true })
 			if inflight == 0 {
-				log.Printf("[worker %s] drain complete, exiting", w.id)
-				w.cancel()
+				w.logger.InfoContext(w.ctx, "drain complete", "worker_id", w.id)
 				return
 			}
 			time.Sleep(w.pollInterval)
@@ -1158,6 +1277,8 @@ func (w *Worker) dispatchLoop() {
 		w.memoryController.Tick(w.ctx)
 		state := w.memoryController.State()
 		updateMemoryMetrics(state)
+		SetQueueDepth(state.QueueDepth)
+		updateThroughputGauges()
 
 		if !w.memoryController.CanClaim() {
 			time.Sleep(w.pollInterval)
@@ -1198,22 +1319,23 @@ func (w *Worker) dispatchLoop() {
 				if backoff > 30*time.Second {
 					backoff = 30 * time.Second
 				}
-				log.Printf("[worker %s] DB unreachable during sticky claim, backing off %v", w.id, backoff)
+				w.logger.WarnContext(w.ctx, "DB unreachable during sticky claim", "worker_id", w.id, "backoff", backoff)
 				select {
 				case <-w.ctx.Done():
 					return
+			case <-w.parentWakeCh:
 				case <-time.After(backoff):
 				}
 				continue
 			}
-			log.Printf("[worker %s] sticky claim error: %v", w.id, err)
+			w.logger.ErrorContext(w.ctx, "sticky claim error", "worker_id", w.id, "error", err)
 			time.Sleep(time.Second)
 			continue
 		}
 
 		// Improvement 1: Fill remaining capacity with general batch claim.
 		remaining := batchSize - len(stickyWfs)
-		var generalWfs []*host.WorkflowInstance
+		var generalWfs []*engine.WorkflowInstance
 		if remaining > 0 {
 			var err error
 			generalWfs, err = w.store.ClaimWorkflows(w.ctx, w.id, remaining)
@@ -1225,15 +1347,16 @@ func (w *Worker) dispatchLoop() {
 					if backoff > 30*time.Second {
 						backoff = 30 * time.Second
 					}
-					log.Printf("[worker %s] DB unreachable during claim, backing off %v", w.id, backoff)
+					w.logger.WarnContext(w.ctx, "DB unreachable during claim", "worker_id", w.id, "backoff", backoff)
 					select {
 					case <-w.ctx.Done():
 						return
+			case <-w.parentWakeCh:
 					case <-time.After(backoff):
 					}
 					continue
 				}
-				log.Printf("[worker %s] claim error: %v", w.id, err)
+				w.logger.ErrorContext(w.ctx, "claim error", "worker_id", w.id, "error", err)
 				time.Sleep(time.Second)
 				continue
 			}
@@ -1252,21 +1375,35 @@ func (w *Worker) dispatchLoop() {
 			select {
 			case <-w.ctx.Done():
 				return
+		case <-w.parentWakeCh:
+			idleTicks = 0 // reset backoff, poll immediately
 			case <-time.After(sleep):
 			}
 			continue
 		}
 
 		// Improvement 3: Found work — reset idle counter (coalesced polling).
-		// Don't sleep before the next poll; there may be more work ready.
+		// When the claim returned a full batch there is likely more work;
+		// add a brief pause to avoid a tight polling loop against the DB.
 		idleTicks = 0
+		if len(wfs) == batchSize {
+			time.Sleep(10 * time.Millisecond)
+		}
 		w.consecutiveDBErrors = 0 // reset circuit breaker on success
 
 		workflowsClaimed.Add(float64(len(wfs)))
 
+		// Re-check draining after claim to close the TOCTOU window between
+		// the drain check above and the DB claim calls.
+		if w.draining.Load() {
+			for _, wf := range wfs {
+				w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
+			}
+			continue
+		}
+
 		for _, wf := range wfs {
-			log.Printf("[worker %s] Claimed workflow %s (%s v%d)",
-				w.id, wf.ID, wf.DefName, wf.DefVersion)
+			w.logger.InfoContext(w.ctx, "claimed workflow", "worker_id", w.id, "workflow_id", wf.ID, "def_name", wf.DefName, "def_version", wf.DefVersion)
 			dispatchLatency.WithLabelValues("").Observe(time.Since(wf.CreatedAt).Seconds())
 
 			w.inflight.Store(wf.ID, wf)
@@ -1276,12 +1413,13 @@ func (w *Worker) dispatchLoop() {
 	}
 }
 
-func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
+func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	defer w.wg.Done()
+	defer w.execEngines.Delete(wf.ID)
 	defer w.inflight.Delete(wf.ID)
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[worker %s] PANIC in %s: %v — releasing", w.id, wf.ID, r)
+			w.logger.ErrorContext(context.Background(), "PANIC in workflow", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", r)
 			w.releaseOrFail(wf, fmt.Sprintf("panic: %v", r))
 		}
 	}()
@@ -1302,11 +1440,12 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}()
 
 	// ---- Assign trace ID ----
-	traceID := generateTraceID()
-	if true {
-		if err := w.store.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
-			log.Printf("[worker %s] %s: failed to set trace_id: %v", w.id, wf.ID, err)
-		}
+	traceID := wf.TraceID
+	if traceID == "" {
+		traceID = generateTraceID()
+	}
+	if err := w.store.TraceWorkflow(context.Background(), wf.ID, traceID); err != nil {
+		w.logger.WarnContext(context.Background(), "failed to set trace_id", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 	}
 
 	// ---- Load WASM ----
@@ -1314,11 +1453,11 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	wasmBytes, err := w.loadWASM(wf.DefName, wf.DefVersion)
 	wasmCompileDuration.WithLabelValues(wf.DefName).Observe(time.Since(wasmStart).Seconds())
 	if err != nil {
-		log.Printf("[worker %s] %s: failed to load WASM: %v", w.id, wf.ID, err)
+		w.logger.ErrorContext(context.Background(), "failed to load WASM", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		var ce *host.CleatError
-		errorCode := host.ErrUnknown.String()
+		var ce *engine.CleatError
+		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
 		if errors.As(err, &ce) {
 			errorCode = ce.Code.String()
@@ -1345,10 +1484,10 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 			requiredMB := float64(requiredPages) * 65536 / 1024 / 1024
 			errMsg := fmt.Sprintf("module requires %d pages (%.0f MB) but max is %d pages (%d MB); increase --wasm-memory-max-mb or reduce module memory usage",
 				requiredPages, requiredMB, allowedPages, *w.wasmMemoryMaxMB)
-			log.Printf("[worker %s] %s: %s", w.id, wf.ID, errMsg)
+			w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, host.ErrUnknown.String(), "", nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, errMsg, engine.ErrUnknown.String(), "", nil)
 			return
 		}
 	}
@@ -1357,26 +1496,34 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	history, err := w.store.LoadEventHistory(w.ctx, wf.ID)
 	if err != nil {
 		if isConnectionError(err) {
-			log.Printf("[worker %s] DB down loading history for %s — releasing", w.id, wf.ID)
+			w.logger.WarnContext(context.Background(), "DB down loading history", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 			return
 		}
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("history load: %v", err), host.ErrUnknown.String(), "", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: history load: %v", wf.ID, err), engine.ErrUnknown.String(), "", nil)
 		return
 	}
 
-	log.Printf("[worker %s] %s: loaded %d history events", w.id, wf.ID, len(history))
+	w.logger.InfoContext(context.Background(), "loaded history events", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "count", len(history))
 
 	// ---- Determine entry point ----
-	entryPoint := determineEntryPoint(wf.Input)
+	entryPoint := determineEntryPoint(wf.Input, wasmBytes)
+	if entryPoint == "" {
+		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation,
+			"cannot determine entry point: no __entry_point in input and no handle_* export in WASM binary",
+			engine.ErrPermanent.String(), "", nil)
+		return
+	}
 
 	// ---- Load compaction state if present ----
-	var compactionState *host.CompactionState
+	var compactionState *engine.CompactionState
 	compactionState, err = w.store.LoadCompactionState(w.ctx, wf.ID)
 	if err != nil {
-		log.Printf("[worker %s] %s: warning: failed to load compaction state: %v", w.id, wf.ID, err)
+		w.logger.WarnContext(context.Background(), "failed to load compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		compactionState = nil
 	}
 
@@ -1385,15 +1532,15 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
 		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
 		if memoryPages > 65536 {
-			log.Printf("[worker %s] %s: warning: wasm-memory-max-mb %d exceeds WASM max (65536 pages), capping to 65536", w.id, wf.ID, *w.wasmMemoryMaxMB)
+			w.logger.WarnContext(context.Background(), "wasm-memory-max-mb exceeded", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 			memoryPages = 65536
 		}
 	}
-	rt, err := host.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
+	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 	if err != nil {
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("create runtime: %v", err), host.ErrUnknown.String(), "", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("workflow %s: create runtime: %v", wf.ID, err), engine.ErrUnknown.String(), "", nil)
 		return
 	}
 	defer rt.Close(w.ctx)
@@ -1415,10 +1562,10 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		err := fmt.Errorf(
 			"version mismatch: workflow instance %s expects def_version %d but WASM binary metadata reports version %d (def=%s). The workflow_defs row and the deployed WASM binary are out of sync.",
 			wf.ID, wf.DefVersion, wfMeta.WorkflowVersion, wf.DefName)
-		log.Printf("[worker %s] %s: %v", w.id, wf.ID, err)
+		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "version_check", nil)
+		w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "version_check", nil)
 		return
 	}
 
@@ -1438,70 +1585,94 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 				err := fmt.Errorf(
 					"missing plugin: workflow requires plugin %q version %s but it is not installed in this worker. Available plugins: %v",
 					pluginName, requiredVersion, pluginNames(workerPlugins))
-				log.Printf("[worker %s] %s: %v", w.id, wf.ID, err)
+				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "plugin_check", nil)
 				return
 			}
 			if workerVersion != requiredVersion {
 				err := fmt.Errorf(
 					"plugin version mismatch: workflow requires plugin %q version %s but worker has version %s",
 					pluginName, requiredVersion, workerVersion)
-				log.Printf("[worker %s] %s: %v", w.id, wf.ID, err)
+				w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), host.ErrPermanent.String(), "plugin_check", nil)
+				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, err.Error(), engine.ErrPermanent.String(), "plugin_check", nil)
 				return
 			}
 		}
 	}
 
 	caller := &dbServiceCaller{store: w.store, workerID: w.id}
-	engineOpts := []host.EngineOption{
-		host.WithSignalStore(w.store.(host.SignalStore)),
-		host.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, childVersions: childVersions}),
-		host.WithWorkflowID(wf.ID),
-		host.WithTenantID(wf.TenantID),
-		host.WithWorkflowStore(w.store),
-		host.WithChildWorkflowStore(w.store),
-		host.WithPluginRegistry(w.pluginRegistry),
-		host.WithMaxRetryAttempts(w.maxRetries),
-		host.WithSchema(w.schemaName),
-		host.WithPeerSchemas(w.peerSchemas),
-		host.WithEncryption(w.encryption, w.encryptSensitivePayloads),
-		host.WithMaxQuotaEvents(w.maxQuotaEvents),
-		host.WithMaxQuotaChildren(w.maxQuotaChildren),
-		host.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
+	engineOpts := []engine.EngineOption{
+		engine.WithSignalStore(w.store.(engine.SignalStore)),
+		engine.WithWorkflowState(&dbWorkflowState{version: wf.DefVersion, minVersion: wf.MinVersion, priority: wf.Priority, childVersions: childVersions}),
+		engine.WithWorkflowID(wf.ID),
+		engine.WithTraceID(traceID),
+		engine.WithTenantID(wf.TenantID),
+		engine.WithBackend("go", w.wasmtimeBackend),
+		engine.WithWorkflowStore(w.store),
+		engine.WithChildWorkflowStore(w.store),
+		engine.WithPluginRegistry(w.pluginRegistry),
+		engine.WithMaxRetryAttempts(w.maxRetries),
+		engine.WithSchema(w.schemaName),
+		engine.WithPeerSchemas(w.peerSchemas),
+		engine.WithEncryption(w.encryption, w.encryptSensitivePayloads),
+		engine.WithMaxQuotaEvents(w.maxQuotaEvents),
+		engine.WithMaxQuotaChildren(w.maxQuotaChildren),
+		engine.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
+		engine.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
 	}
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
-	if cks, ok := w.store.(host.ConcurrencyKeyStore); ok {
-		engineOpts = append(engineOpts, host.WithConcurrencyKeyStore(cks))
+	if cks, ok := w.store.(engine.ConcurrencyKeyStore); ok {
+		engineOpts = append(engineOpts, engine.WithConcurrencyKeyStore(cks))
 	}
 	// Enable event history checksum verification on replay by default.
 	// Can be disabled with --disable-checksum-verification.
 	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
-		engineOpts = append(engineOpts, host.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
+		engineOpts = append(engineOpts, engine.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, false))
+	}
+	// Enable signal authorization if --require-signal-auth is set.
+	if w.requireSignalAuth != nil && *w.requireSignalAuth {
+		engineOpts = append(engineOpts,
+			engine.WithRequireSignalAuth(true),
+			engine.WithSignalAuthCheck(func(ctx context.Context, targetWorkflowID, callerDefName string) error {
+				callers, err := w.store.GetAllowedSignalCallers(ctx, targetWorkflowID)
+				if err != nil {
+					return err
+				}
+				if len(callers) == 0 {
+					return fmt.Errorf("signal auth denied: workflow %s has no allowed callers configured", targetWorkflowID)
+				}
+				if signalCallerAllowed(callers, callerDefName) {
+					return nil
+				}
+				return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", callerDefName, targetWorkflowID)
+			}),
+		)
+	}
+	// Enable event history checksum verification on replay by default.
+	// Can be disabled with --disable-checksum-verification.
+	if w.disableChecksumVerification != nil && !*w.disableChecksumVerification {
+		engineOpts = append(engineOpts, engine.WithWorkflowEventVerifier(w.store.VerifyWorkflowEvents, true))
 	}
 	// Use tenant-scoped database connection for plugin host functions.
 	if w.tenantPools != nil && wf.TenantID != "" {
-		tenantID, err := uuid.Parse(wf.TenantID)
-		if err == nil {
-			tenantDB, err := w.tenantPools.For(w.ctx, tenantID)
-			if err != nil {
-				log.Printf("[worker %s] %s: cannot get tenant pool for %s: %v", w.id, wf.ID, wf.TenantID, err)
-				workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
-				workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-				w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), host.ErrUnknown.String(), "", nil)
-				return
-			}
-			engineOpts = append(engineOpts, host.WithDB(tenantDB))
+		tenantDB, err := w.tenantPools.For(w.ctx, wf.TenantID)
+		if err != nil {
+			w.logger.ErrorContext(context.Background(), "cannot get tenant pool", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
+			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
+			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("tenant pool: %v", err), engine.ErrUnknown.String(), "", nil)
+			return
 		}
+		engineOpts = append(engineOpts, engine.WithDB(tenantDB))
 	}
 	if compactionState != nil {
-		engineOpts = append(engineOpts, host.WithCompactionState(compactionState))
-		log.Printf("[worker %s] %s: loaded compaction state (compacted_step=%d)", w.id, wf.ID, compactionState.CompactedStep)
+		engineOpts = append(engineOpts, engine.WithCompactionState(compactionState))
+		w.logger.InfoContext(context.Background(), "loaded compaction state", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "compacted_step", compactionState.CompactedStep)
 	}
 	// When replaying, validate version compatibility between the old
 	// workflow definition (from the instance) and the new definition
@@ -1509,42 +1680,52 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if len(history) > 0 {
 		oldDef, err := w.store.GetWorkflowDef(w.ctx, wf.DefName, wf.DefVersion)
 		if err == nil && oldDef != nil && wfMeta != nil {
-			newDef := &host.WorkflowDef{
+			newDef := &engine.WorkflowDef{
 				Name:       wfMeta.WorkflowName,
 				Version:    wfMeta.WorkflowVersion,
 				ABIVersion: wfMeta.ABIVersion,
 				MinVersion: wfMeta.MinCompatibleVersion,
 				PluginDeps: wfMeta.PluginDeps,
 			}
-			engineOpts = append(engineOpts, host.WithVersionValidation(func() error {
-				return host.ValidateVersionCompatibility(oldDef, newDef)
+			engineOpts = append(engineOpts, engine.WithVersionValidation(func() error {
+				return engine.ValidateVersionCompatibility(oldDef, newDef)
 			}))
 		}
 	}
 	// Load initial event count so the engine tracks events locally.
 	if w.maxQuotaEvents > 0 {
 		if count, err := w.store.GetEventCount(w.ctx, wf.ID); err == nil {
-			engineOpts = append(engineOpts, host.WithInitialEventCount(count))
+			engineOpts = append(engineOpts, engine.WithInitialEventCount(count))
 		}
 	}
-	engine := host.NewEngine(rt, caller, engineOpts...)
+	eng := engine.NewEngine(rt, caller, engineOpts...)
+	w.execEngines.Store(wf.ID, eng)
 
 	// ---- Execute/Resume ----
 	inputJSON := wf.Input
 	engineStart := time.Now()
-	result, resultHistory, suspended, deferrals, queryState, err := engine.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
+	result, resultHistory, suspended, deferrals, queryState, err := eng.Replay(w.ctx, wasmBytes, entryPoint, inputJSON, history)
 	engineElapsed := time.Since(engineStart)
 	if len(history) > 0 {
 		replayDuration.Observe(engineElapsed.Seconds())
 	} else {
 		freshDuration.WithLabelValues(wf.DefName).Observe(engineElapsed.Seconds())
 	}
+	// Update throughput gauges (events/sec).
+	if engineElapsed.Seconds() > 0 {
+		eventsPerSec := float64(len(resultHistory)) / engineElapsed.Seconds()
+		if len(history) > 0 {
+			SetReplayThroughput(eventsPerSec)
+		} else {
+			SetFreshThroughput(eventsPerSec)
+		}
+	}
 	if err != nil {
-		log.Printf("[worker %s] %s: execution error: %v", w.id, wf.ID, err)
+		w.logger.ErrorContext(context.Background(), "execution error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		var ce *host.CleatError
-		errorCode := host.ErrUnknown.String()
+		var ce *engine.CleatError
+		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
 		if errors.As(err, &ce) {
 			errorCode = ce.Code.String()
@@ -1565,29 +1746,29 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	// appropriate atomic method for each path.
 
 	// Collect new events (if any) so the same slice is available to all branches.
-	var newEvents []host.EventRecord
+	var newEvents []engine.EventRecord
 	if len(resultHistory) > len(history) {
 		newEvents = resultHistory[len(history):]
 		// Redact sensitive fields in new events before persisting.
 		for i := range newEvents {
-			newEvents[i].Request = host.Redact(newEvents[i].Request)
-			newEvents[i].Response = host.Redact(newEvents[i].Response)
+			newEvents[i].Request = engine.Redact(newEvents[i].Request)
+			newEvents[i].Response = engine.Redact(newEvents[i].Response)
 		}
 	}
 
 	if suspended != nil && suspended.Reason == "continue_as_new" {
 		// ContinueAsNew: atomically append events, create a new run, and
 		// complete the current one — all in a single database transaction.
-		log.Printf("[worker %s] %s: continue_as_new → starting new run", w.id, wf.ID)
-		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState)
+		w.logger.InfoContext(context.Background(), "continue_as_new: starting new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
+		newRunID, err := w.store.ContinueAsNew(w.ctx, wf.ID, w.id, wf.Generation, wf.DefName, wf.DefVersion, json.RawMessage(suspended.NewInput), newEvents, result, queryState, wf.Priority)
 		if err != nil {
-			log.Printf("[worker %s] %s: continue_as_new failed: %v", w.id, wf.ID, err)
+			w.logger.ErrorContext(context.Background(), "continue_as_new failed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 			workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 			workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("continue_as_new: %v", err), host.ErrUnknown.String(), "", nil)
+			w.store.FailWorkflow(context.Background(), wf.ID, w.id, wf.Generation, fmt.Sprintf("continue_as_new: %v", err), engine.ErrUnknown.String(), "", nil)
 			return
 		}
-		log.Printf("[worker %s] %s: continued as new run %s", w.id, wf.ID, newRunID)
+		w.logger.InfoContext(context.Background(), "continued as new run", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "new_run_id", newRunID)
 		workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(time.Since(workflowStartTime).Seconds())
 		return
@@ -1607,15 +1788,15 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	if err != nil {
 		dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
 		if isConnectionError(err) {
-			log.Printf("[worker %s] DB down finalizing %s — releasing", w.id, wf.ID)
+			w.logger.WarnContext(context.Background(), "DB down finalizing", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 			w.store.ReleaseWorkflow(context.Background(), wf.ID, w.id, wf.Generation, wf.NextWakeAt)
 			return
 		}
-		log.Printf("[worker %s] %s: finalize error: %v", w.id, wf.ID, err)
+		w.logger.ErrorContext(context.Background(), "finalize error", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 		workflowsFailed.WithLabelValues(wf.DefName, "").Inc()
 		workflowDuration.WithLabelValues(wf.DefName, "failed", "").Observe(time.Since(workflowStartTime).Seconds())
-		var ce *host.CleatError
-		errorCode := host.ErrUnknown.String()
+		var ce *engine.CleatError
+		errorCode := engine.ErrUnknown.String()
 		errorOp := ""
 		if errors.As(err, &ce) {
 			errorCode = ce.Code.String()
@@ -1632,6 +1813,15 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 	}
 	dbQueryDuration.WithLabelValues("finalize").Observe(time.Since(queryStart).Seconds())
 
+	// Signal the dispatch loop to poll immediately. The parent
+	// was woken atomically inside FinalizeWorkflowSegment.
+	if finalStatus == "done" || finalStatus == "failed" {
+		select {
+		case w.parentWakeCh <- struct{}{}:
+		default:
+		}
+	}
+
 	// Post-finalization: logging and non-DB side effects.
 	if finalStatus == "done" {
 		// Workflow completed. Run any registered defer callbacks in LIFO order.
@@ -1642,10 +1832,9 @@ func (w *Worker) executeWorkflow(wf *host.WorkflowInstance) {
 		duration := time.Since(workflowStartTime)
 		workflowDuration.WithLabelValues(wf.DefName, "done", "").Observe(duration.Seconds())
 		workflowsCompleted.WithLabelValues(wf.DefName, "").Inc()
-		log.Printf("[worker %s] %s: completed (duration=%v)", w.id, wf.ID, duration)
+		w.logger.InfoContext(context.Background(), "workflow completed", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "duration", duration)
 	} else {
-		log.Printf("[worker %s] %s: suspended (%s), waking at %s",
-			w.id, wf.ID, suspended.Reason, suspended.SuspendUntil)
+		w.logger.InfoContext(context.Background(), "workflow suspended", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "reason", suspended.Reason, "wake_at", suspended.SuspendUntil)
 	}
 }
 
@@ -1666,9 +1855,9 @@ func (w *Worker) heartbeatLoop() {
 			if err != nil {
 				backgroundLoopsTotal.WithLabelValues("heartbeat", "error").Inc()
 				if isConnectionError(err) {
-					log.Printf("[worker %s] BatchHeartbeat failed — DB appears down", w.id)
+					w.logger.WarnContext(w.ctx, "BatchHeartbeat failed: DB appears down", "worker_id", w.id)
 				} else {
-					log.Printf("[worker %s] BatchHeartbeat error: %v", w.id, err)
+					w.logger.ErrorContext(w.ctx, "BatchHeartbeat error", "worker_id", w.id, "error", err)
 				}
 			} else {
 				backgroundLoopsTotal.WithLabelValues("heartbeat", "ok").Inc()
@@ -1702,16 +1891,16 @@ func (w *Worker) reaperLoop() {
 			reaped, err := w.store.ReapStaleInstances(w.ctx, staleTimeout)
 			if err != nil {
 				if isConnectionError(err) {
-					log.Printf("[worker %s] Reaper: DB appears down", w.id)
+					w.logger.WarnContext(w.ctx, "Reaper: DB appears down", "worker_id", w.id)
 				} else {
-					log.Printf("[worker %s] Reaper: %v", w.id, err)
+					w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", err)
 				}
 				backgroundLoopsTotal.WithLabelValues("reaper", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("reaper").Set(time.Since(reaperStart).Seconds())
 				continue
 			}
 			if reaped > 0 {
-				log.Printf("[worker %s] Reaper: reclaimed %d stale instances", w.id, reaped)
+				w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
 				backgroundLoopItemsProcessed.WithLabelValues("reaper").Set(float64(reaped))
 			}
 			backgroundLoopsTotal.WithLabelValues("reaper", "ok").Inc()
@@ -1737,16 +1926,16 @@ func (w *Worker) concurrencyKeyReaperLoop() {
 			reaped, err := w.store.ReapExpiredConcurrencyKeys(w.ctx)
 			if err != nil {
 				if isConnectionError(err) {
-					log.Printf("[worker %s] Concurrency key reaper: DB appears down", w.id)
+					w.logger.WarnContext(w.ctx, "Concurrency key reaper: DB appears down", "worker_id", w.id)
 				} else {
-					log.Printf("[worker %s] Concurrency key reaper: %v", w.id, err)
+					w.logger.ErrorContext(w.ctx, "Concurrency key reaper error", "worker_id", w.id, "error", err)
 				}
 				backgroundLoopsTotal.WithLabelValues("concurrency_key_reaper", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("concurrency_key_reaper").Set(time.Since(ckStart).Seconds())
 				continue
 			}
 			if reaped > 0 {
-				log.Printf("[worker %s] Concurrency key reaper: removed %d expired keys", w.id, reaped)
+				w.logger.InfoContext(w.ctx, "Concurrency key reaper: removed expired keys", "worker_id", w.id, "count", reaped)
 				backgroundLoopItemsProcessed.WithLabelValues("concurrency_key_reaper").Set(float64(reaped))
 			}
 			backgroundLoopsTotal.WithLabelValues("concurrency_key_reaper", "ok").Inc()
@@ -1773,9 +1962,9 @@ func (w *Worker) scheduleLoop() {
 			if err != nil {
 				w.scheduleMu.Unlock()
 				if isConnectionError(err) {
-					log.Printf("[worker %s] Scheduler: DB appears down", w.id)
+					w.logger.WarnContext(w.ctx, "Scheduler: DB appears down", "worker_id", w.id)
 				} else {
-					log.Printf("[worker %s] Scheduler: %v", w.id, err)
+					w.logger.ErrorContext(w.ctx, "Scheduler error", "worker_id", w.id, "error", err)
 				}
 				backgroundLoopsTotal.WithLabelValues("schedule", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("schedule").Set(time.Since(schStart).Seconds())
@@ -1801,27 +1990,23 @@ func (w *Worker) scheduleLoop() {
 				// Find latest version.
 				versions, verr := w.store.ListVersions(w.ctx, sch.DefName)
 				if verr != nil || len(versions) == 0 {
-					log.Printf("[worker %s] Scheduler: definition %s not found for schedule %s",
-						w.id, sch.DefName, sch.Name)
+					w.logger.WarnContext(w.ctx, "Scheduler: definition not found", "worker_id", w.id, "schedule", sch.Name, "def_name", sch.DefName)
 					continue
 				}
 
-				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "")
+				runID, _, serr := w.store.StartNewRun(w.ctx, "", sch.DefName, versions[0], input, "", engine.DefaultTenantUUID, 0)
 				if serr != nil {
-					log.Printf("[worker %s] Scheduler: failed to start %s for schedule %s: %v",
-						w.id, sch.DefName, sch.Name, serr)
+					w.logger.ErrorContext(w.ctx, "Scheduler: failed to start workflow", "worker_id", w.id, "schedule", sch.Name, "error", serr)
 					continue
 				}
 
 				// Compute next run time and update.
-				nextRun := host.NextCronTime(sch.CronExpression, time.Now())
+				nextRun := engine.NextCronTime(sch.CronExpression, time.Now())
 				if uerr := w.store.UpdateScheduleNextRun(w.ctx, sch.Name, nextRun); uerr != nil {
-					log.Printf("[worker %s] Scheduler: failed to update next run for %s: %v",
-						w.id, sch.Name, uerr)
+					w.logger.ErrorContext(w.ctx, "Scheduler: failed to update next run", "worker_id", w.id, "schedule", sch.Name, "error", uerr)
 				}
 
-				log.Printf("[worker %s] Scheduler: fired %s → %s (next at %s)",
-					w.id, sch.Name, runID, nextRun.Format(time.RFC3339))
+				w.logger.InfoContext(w.ctx, "Scheduler: fired schedule", "worker_id", w.id, "schedule", sch.Name, "workflow_id", runID, "next_at", nextRun.Format(time.RFC3339))
 			}
 			w.scheduleMu.Unlock()
 			backgroundLoopsTotal.WithLabelValues("schedule", "ok").Inc()
@@ -1846,14 +2031,14 @@ func (w *Worker) compactionLoop() {
 			compStart := time.Now()
 			candidates, err := w.store.GetCompactionCandidates(w.ctx, w.compactionThreshold, 10)
 			if err != nil {
-				log.Printf("[worker %s] compaction: error finding candidates: %v", w.id, err)
+				w.logger.ErrorContext(w.ctx, "compaction: error finding candidates", "worker_id", w.id, "error", err)
 				backgroundLoopsTotal.WithLabelValues("compaction", "error").Inc()
 				backgroundLoopDuration.WithLabelValues("compaction").Set(time.Since(compStart).Seconds())
 				continue
 			}
 			for _, wfID := range candidates {
-				if err := host.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold); err != nil {
-					log.Printf("[worker %s] compaction: error compacting %s: %v", w.id, wfID, err)
+				if err := engine.CompactWorkflowHistory(w.ctx, w.store, wfID, w.compactionThreshold); err != nil {
+					w.logger.ErrorContext(w.ctx, "compaction error", "worker_id", w.id, "workflow_id", wfID, "error", err)
 				}
 			}
 			backgroundLoopsTotal.WithLabelValues("compaction", "ok").Inc()
@@ -1877,7 +2062,7 @@ func (w *Worker) memoryReloadLoop() {
 			w.healthTracker.recordRun("memory_reload")
 			mrStart := time.Now()
 			if err := w.memoryController.LoadEstimates(w.ctx); err != nil {
-				log.Printf("[worker %s] memory reload: %v", w.id, err)
+				w.logger.ErrorContext(w.ctx, "memory reload error", "worker_id", w.id, "error", err)
 				backgroundLoopsTotal.WithLabelValues("memory_reload", "error").Inc()
 			} else {
 				backgroundLoopsTotal.WithLabelValues("memory_reload", "ok").Inc()
@@ -1906,10 +2091,10 @@ func (w *Worker) retentionLoop(retentionDays int) {
 			cutoff := time.Now().Add(-time.Duration(retentionDays) * 24 * time.Hour)
 			deleted, err := w.store.DeleteExpiredEvents(w.ctx, cutoff)
 			if err != nil {
-				log.Printf("[worker %s] Retention: error deleting expired events: %v", w.id, err)
+				w.logger.ErrorContext(w.ctx, "retention: error deleting expired events", "worker_id", w.id, "error", err)
 			} else if deleted > 0 {
 				eventsDeletedTotal.Add(float64(deleted))
-				log.Printf("[worker %s] Retention: deleted %d expired event rows", w.id, deleted)
+				w.logger.InfoContext(w.ctx, "retention: deleted expired event rows", "worker_id", w.id, "count", deleted)
 			}
 			retentionLastRunTimestamp.Set(float64(time.Now().Unix()))
 		}
@@ -1931,10 +2116,10 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 			mcStart := time.Now()
 			deleted, err := w.store.CleanupMemorySamples(w.ctx, maxSamples)
 			if err != nil {
-				log.Printf("[worker %s] memory cleanup: %v", w.id, err)
+				w.logger.ErrorContext(w.ctx, "memory cleanup error", "worker_id", w.id, "error", err)
 				backgroundLoopsTotal.WithLabelValues("memory_cleanup", "error").Inc()
 			} else if deleted > 0 {
-				log.Printf("[worker %s] memory cleanup: removed %d old samples", w.id, deleted)
+				w.logger.InfoContext(w.ctx, "memory cleanup: removed old samples", "worker_id", w.id, "count", deleted)
 			}
 			if err == nil {
 				backgroundLoopsTotal.WithLabelValues("memory_cleanup", "ok").Inc()
@@ -1949,6 +2134,7 @@ func (w *Worker) memoryCleanupLoop(maxSamples int) {
 
 func (w *Worker) updateDispatchLoop(ctx context.Context) {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("update_dispatch", 5*time.Second)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -1957,6 +2143,7 @@ func (w *Worker) updateDispatchLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("update_dispatch")
 			w.dispatchPendingUpdates()
 		}
 	}
@@ -1972,7 +2159,7 @@ func (w *Worker) dispatchPendingUpdates() {
 		// Get pending update requests for this workflow.
 		updates, err := w.store.GetPendingUpdateRequests(ctx, wfID)
 		if err != nil {
-			log.Printf("[worker %s] %s: error fetching pending updates: %v", w.id, wfID, err)
+			w.logger.ErrorContext(w.ctx, "error fetching pending updates", "worker_id", w.id, "workflow_id", wfID, "error", err)
 			return true
 		}
 		if len(updates) == 0 {
@@ -1986,7 +2173,10 @@ func (w *Worker) dispatchPendingUpdates() {
 			// Leave the updates pending for the next claim cycle.
 			return true
 		}
-		env := envVal.(*host.Engine)
+		env, ok := envVal.(*engine.Engine)
+		if !ok {
+			return true
+		}
 
 		for _, upd := range updates {
 			// Dispatch the update via the engine.
@@ -1995,26 +2185,26 @@ func (w *Worker) dispatchPendingUpdates() {
 			var resultStr, errStr string
 			if dErr != nil {
 				errStr = dErr.Error()
-				log.Printf("[worker %s] %s: update %q failed: %v", w.id, wfID, upd.UpdateName, dErr)
+				w.logger.ErrorContext(w.ctx, "update failed", "worker_id", w.id, "workflow_id", wfID, "update_name", upd.UpdateName, "error", dErr)
 			} else {
 				resultStr = result
-				log.Printf("[worker %s] %s: update %q completed", w.id, wfID, upd.UpdateName)
+				w.logger.InfoContext(w.ctx, "update completed", "worker_id", w.id, "workflow_id", wfID, "update_name", upd.UpdateName)
 			}
 
 			// Store the result in the workflow_update_requests table.
 			if cErr := w.store.CompleteUpdateRequest(ctx, wfID, upd.UpdateName, resultStr, errStr); cErr != nil {
-				log.Printf("[worker %s] %s: error completing update %q: %v", w.id, wfID, upd.UpdateName, cErr)
+				w.logger.ErrorContext(w.ctx, "error completing update", "worker_id", w.id, "workflow_id", wfID, "update_name", upd.UpdateName, "error", cErr)
 			}
 
 			// If the update request has an associated promise, resolve or reject it.
 			if upd.PromiseID != "" {
 				if dErr != nil {
 					if rErr := w.store.RejectPromise(ctx, wfID, upd.PromiseID, errStr); rErr != nil {
-						log.Printf("[worker %s] %s: error rejecting promise %s: %v", w.id, wfID, upd.PromiseID, rErr)
+						w.logger.ErrorContext(w.ctx, "error rejecting promise", "worker_id", w.id, "workflow_id", wfID, "promise_id", upd.PromiseID, "error", rErr)
 					}
 				} else {
 					if rErr := w.store.ResolvePromise(ctx, wfID, upd.PromiseID, resultStr); rErr != nil {
-						log.Printf("[worker %s] %s: error resolving promise %s: %v", w.id, wfID, upd.PromiseID, rErr)
+						w.logger.ErrorContext(w.ctx, "error resolving promise", "worker_id", w.id, "workflow_id", wfID, "promise_id", upd.PromiseID, "error", rErr)
 					}
 				}
 			}
@@ -2028,8 +2218,18 @@ func (w *Worker) loadWASM(defName string, defVersion int) ([]byte, error) {
 
 	// Check in-memory cache first.
 	if cached, ok := w.wasmCache.get(key); ok {
-		wasmCacheHits.Inc()
-		return cached, nil
+		dbLen, err := w.store.GetWASMLength(w.ctx, defName, defVersion)
+		if err == nil {
+			if dbLen == int64(len(cached)) {
+				wasmCacheHits.Inc()
+				return cached, nil
+			}
+			w.logger.InfoContext(w.ctx, "WASM cache stale, reloading", "worker_id", w.id, "key", key)
+		} else {
+			wasmCacheHits.Inc()
+			return cached, nil
+		}
+		w.wasmCache.remove(key)
 	}
 
 	// Check disk cache before going to the database.
@@ -2065,21 +2265,23 @@ func (w *Worker) waitForDB() {
 			return
 		default:
 		}
-
-		if _, err := w.store.ClaimWorkflow(w.ctx, ""); err == nil || !isConnectionError(err) {
-			// DB is back (or claim returned no work, which means DB is reachable).
-			log.Printf("[worker %s] DB connection re-established", w.id)
+		if w.ctx.Err() != nil {
 			return
 		}
 
-		log.Printf("[worker %s] DB reconnect attempt %d/20 failed, retrying in %v",
-			w.id, i+1, backoff)
+		if _, err := w.store.ClaimWorkflow(w.ctx, ""); err == nil || !isConnectionError(err) {
+			// DB is back (or claim returned no work, which means DB is reachable).
+			w.logger.InfoContext(w.ctx, "DB connection re-established", "worker_id", w.id)
+			return
+		}
+
+		w.logger.WarnContext(w.ctx, "DB reconnect attempt failed", "worker_id", w.id, "attempt", i+1, "delay", backoff)
 		time.Sleep(backoff)
 		backoff = time.Duration(math.Min(float64(backoff*2), 10e9))
 	}
 }
 
-func (w *Worker) releaseOrFail(wf *host.WorkflowInstance, errMsg string) {
+func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
 	if errMsg != "" {
 		if strings.Contains(errMsg, "retries exhausted") {
 			w.store.MoveToDeadLetterQueue(context.Background(), wf.ID, w.id, wf.Generation, errMsg, "", "")
@@ -2092,9 +2294,9 @@ func (w *Worker) releaseOrFail(wf *host.WorkflowInstance, errMsg string) {
 	}
 }
 
-// dbServiceCaller implements host.ServiceCaller for the worker.
+// dbServiceCaller implements engine.ServiceCaller for the worker.
 type dbServiceCaller struct {
-	store    host.WorkflowStore
+	store    engine.WorkflowStore
 	workerID string
 }
 
@@ -2157,15 +2359,17 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 	return string(result), nil
 }
 
-// dbWorkflowState implements host.WorkflowState.
+// dbWorkflowState implements engine.WorkflowState.
 type dbWorkflowState struct {
 	version       int
 	minVersion    int
+	priority      int
 	childVersions map[string]int
 }
 
 func (s *dbWorkflowState) Version() int    { return s.version }
 func (s *dbWorkflowState) MinVersion() int { return s.minVersion }
+func (s *dbWorkflowState) Priority() int  { return s.priority }
 func (s *dbWorkflowState) ChildVersion(name string) (int, bool) {
 	if s.childVersions == nil {
 		return 0, false
@@ -2175,10 +2379,10 @@ func (s *dbWorkflowState) ChildVersion(name string) (int, bool) {
 }
 
 // hostPluginRegistryAdapter bridges plugin.FuncRegistry and plugin.StreamFuncRegistry
-// to host.PluginRegistry and host.PluginStreamRegistry.
+// to engine.PluginRegistry and engine.PluginStreamRegistry.
 type hostPluginRegistryAdapter struct {
-	registry       *host.PluginRegistry
-	streamRegistry *host.PluginStreamRegistry
+	registry       *engine.PluginRegistry
+	streamRegistry *engine.PluginStreamRegistry
 	pluginName     string
 }
 
@@ -2193,9 +2397,9 @@ func (a *hostPluginRegistryAdapter) Register(opts plugin.FuncOptions, fn plugin.
 		return fmt.Errorf("function %q already registered for plugin %q", opts.Name, a.pluginName)
 	}
 	if opts.Idempotent {
-		return a.registry.RegisterIdempotent(a.pluginName, opts.Name, host.PluginFunc(fn))
+		return a.registry.RegisterIdempotent(a.pluginName, opts.Name, fn)
 	}
-	return a.registry.Register(a.pluginName, opts.Name, host.PluginFunc(fn))
+	return a.registry.Register(a.pluginName, opts.Name, fn)
 }
 
 func (a *hostPluginRegistryAdapter) RegisterStream(opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
@@ -2226,16 +2430,72 @@ func pluginNames(m map[string]string) string {
 	return strings.Join(names, ", ")
 }
 
-// The default entry point is "handle_incident". This can be overridden by
-// including an "__entry_point" field in the input.
-func determineEntryPoint(input json.RawMessage) string {
+// determineEntryPoint extracts the entry point name from workflow input.
+// If the input has an "__entry_point" field, that value is used.
+// Otherwise it falls back to the first "handle_*" export in the WASM binary.
+// If no exports match, it returns an empty string and the caller should fail.
+func determineEntryPoint(input json.RawMessage, wasmBytes []byte) string {
 	var meta struct {
 		EntryPoint string `json:"__entry_point"`
 	}
 	if err := json.Unmarshal(input, &meta); err == nil && meta.EntryPoint != "" {
 		return meta.EntryPoint
 	}
-	return "handle_incident"
+	return firstHandleExport(wasmBytes)
+}
+
+// firstHandleExport scans a WASM binary's export section for the first
+// exported function whose name starts with "handle_".
+func firstHandleExport(wasmBytes []byte) string {
+	if len(wasmBytes) < 8 {
+		return ""
+	}
+	pos := 8 // skip magic + version
+	sectionEnd := 0
+	for pos < len(wasmBytes) {
+		sectionID := wasmBytes[pos]
+		pos++
+		sectionLen, n := decodeULEB128(wasmBytes, pos)
+		pos = n
+		sectionEnd = pos + int(sectionLen)
+		if sectionID == 7 { // export section
+			count, n := decodeULEB128(wasmBytes, pos)
+			pos = n
+			for i := uint32(0); i < count; i++ {
+				nameLen, n := decodeULEB128(wasmBytes, pos)
+				pos = n
+				name := string(wasmBytes[pos : pos+int(nameLen)])
+				pos += int(nameLen)
+				kind := wasmBytes[pos]
+				pos++                                // kind (0=func)
+				_, n = decodeULEB128(wasmBytes, pos) // index
+				pos = n
+				if kind == 0 && strings.HasPrefix(name, "handle_") {
+					return name
+				}
+			}
+			return ""
+		}
+		pos = sectionEnd
+	}
+	return ""
+}
+
+// decodeULEB128 reads an unsigned LEB128 value from buf at offset pos.
+// Returns the value and the new offset.
+func decodeULEB128(buf []byte, pos int) (uint32, int) {
+	var result uint32
+	var shift uint
+	for {
+		b := buf[pos]
+		pos++
+		result |= uint32(b&0x7F) << shift
+		if b&0x80 == 0 {
+			break
+		}
+		shift += 7
+	}
+	return result, pos
 }
 
 // runDefers executes registered defer callbacks in LIFO (reverse) order.
@@ -2247,18 +2507,18 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 	if w.wasmMemoryMaxMB != nil && *w.wasmMemoryMaxMB > 0 {
 		memoryPages = uint32(*w.wasmMemoryMaxMB * 1024 * 1024 / 65536)
 		if memoryPages > 65536 {
-			log.Printf("[worker %s] runDefers: warning: wasm-memory-max-mb %d exceeds WASM max (65536 pages), capping to 65536", w.id, *w.wasmMemoryMaxMB)
+			w.logger.WarnContext(context.Background(), "runDefers: wasm-memory-max-mb exceeded", "worker_id", w.id)
 			memoryPages = 65536
 		}
 	}
-	rt, err := host.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
+	rt, err := engine.NewRuntime(w.ctx, memoryPages, uint64(*w.wasmInstructionLimit))
 	if err != nil {
-		log.Printf("[worker %s] runDefers: create runtime: %v", w.id, err)
+		w.logger.ErrorContext(context.Background(), "runDefers: create runtime failed", "worker_id", w.id, "error", err)
 		return
 	}
 	defer rt.Close(w.ctx)
 
-	engine := host.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id})
+	eng := engine.NewEngine(rt, &dbServiceCaller{store: w.store, workerID: w.id})
 
 	// Collect defer IDs sorted by step number for LIFO ordering.
 	// Map iteration order is random in Go, so we always parse the step
@@ -2288,11 +2548,11 @@ func (w *Worker) runDefers(wasmBytes []byte, deferrals map[string]string) {
 
 	for _, entry := range entries {
 		deferName := "cleat_defer_" + entry.id
-		_, err := engine.RunDefer(w.ctx, wasmBytes, deferName, nil)
+		_, err := eng.RunDefer(w.ctx, wasmBytes, deferName, nil)
 		if err != nil {
-			log.Printf("[worker %s] defer %s (%s) failed: %v", w.id, entry.id, entry.desc, err)
+			w.logger.ErrorContext(context.Background(), "defer execution failed", "worker_id", w.id, "defer_id", entry.id, "description", entry.desc, "error", err)
 		} else {
-			log.Printf("[worker %s] defer %s (%s) completed", w.id, entry.id, entry.desc)
+			w.logger.InfoContext(context.Background(), "defer completed", "worker_id", w.id, "defer_id", entry.id, "description", entry.desc)
 		}
 	}
 }
@@ -2343,6 +2603,16 @@ func generateTraceID() string {
 	return hex.EncodeToString(b)
 }
 
+// extractTraceIDFromTraceParent extracts the trace-id from a W3C traceparent header.
+// Format: "00-{trace-id}-{parent-id}-{trace-flags}"
+func extractTraceIDFromTraceParent(tp string) string {
+	parts := strings.Split(tp, "-")
+	if len(parts) >= 2 && len(parts[1]) == 32 {
+		return parts[1]
+	}
+	return ""
+}
+
 func isConnectionError(err error) bool {
 	if err == nil {
 		return false
@@ -2372,19 +2642,21 @@ func isConnectionError(err error) bool {
 // healthTracker records the last run time and panic status of each background loop
 // for watchdog monitoring and auto-restart.
 type healthTracker struct {
-	mu        sync.Mutex
-	lastRun   map[string]time.Time     // loop_name -> last successful run time
-	panicked  map[string]bool          // loop_name -> has panicked
-	restarts  map[string]int           // loop_name -> restart count
-	intervals map[string]time.Duration // loop_name -> expected run interval
+	mu           sync.Mutex
+	lastRun      map[string]time.Time     // loop_name -> last successful run time
+	panicked     map[string]bool          // loop_name -> has panicked
+	restarts     map[string]int           // loop_name -> restart count
+	intervals    map[string]time.Duration // loop_name -> expected run interval
+	registeredAt map[string]time.Time     // loop_name -> when the loop was first registered
 }
 
 func newHealthTracker() healthTracker {
 	return healthTracker{
-		lastRun:   make(map[string]time.Time),
-		panicked:  make(map[string]bool),
-		restarts:  make(map[string]int),
-		intervals: make(map[string]time.Duration),
+		lastRun:      make(map[string]time.Time),
+		panicked:     make(map[string]bool),
+		restarts:     make(map[string]int),
+		intervals:    make(map[string]time.Duration),
+		registeredAt: make(map[string]time.Time),
 	}
 }
 
@@ -2412,19 +2684,59 @@ func (ht *healthTracker) setInterval(name string, interval time.Duration) {
 	ht.intervals[name] = interval
 }
 
+func (ht *healthTracker) registerLoop(name string) {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	ht.registeredAt[name] = time.Now()
+}
+
+// isStale re-checks a single loop atomically to prevent TOCTOU races where
+// a loop recovered between the snapshot in staleLoops() and restartLoop().
+func (ht *healthTracker) isStale(name string) bool {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	lastRun, ok := ht.lastRun[name]
+	if !ok {
+		regAt, regOk := ht.registeredAt[name]
+		if !regOk {
+			return false
+		}
+		maxAge := 120 * time.Second
+		if interval, iOk := ht.intervals[name]; iOk && interval > 0 {
+			maxAge = interval * 6
+		}
+		return time.Since(regAt) > maxAge
+	}
+	interval, iOk := ht.intervals[name]
+	maxAge := 120 * time.Second
+	if iOk && interval > 0 {
+		maxAge = interval * 6
+	}
+	return time.Since(lastRun) > maxAge
+}
+
+// registeredCount returns the total number of registered loops.
+func (ht *healthTracker) registeredCount() int {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	return len(ht.registeredAt)
+}
+
 // maxAge returns the maximum allowed time since the last run for a loop,
-// defined as 3x the expected interval, or 60s if no interval is set.
+// defined as 6x the expected interval, or 120s if no interval is set.
 func (ht *healthTracker) maxAge(name string) time.Duration {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
 	interval, ok := ht.intervals[name]
 	if ok && interval > 0 {
-		return interval * 3
+		return interval * 6
 	}
-	return 60 * time.Second
+	return 120 * time.Second
 }
 
 // staleLoops returns names of loops that haven't run within their maxAge.
+// It also catches loops that were registered but never recorded a run
+// (stuck during startup).
 func (ht *healthTracker) staleLoops() []string {
 	ht.mu.Lock()
 	defer ht.mu.Unlock()
@@ -2432,11 +2744,25 @@ func (ht *healthTracker) staleLoops() []string {
 	now := time.Now()
 	for name, lastRun := range ht.lastRun {
 		interval, ok := ht.intervals[name]
-		maxAge := 60 * time.Second
+		maxAge := 120 * time.Second
 		if ok && interval > 0 {
-			maxAge = interval * 3
+			maxAge = interval * 6
 		}
 		if now.Sub(lastRun) > maxAge {
+			stale = append(stale, name)
+		}
+	}
+	// Also check loops that were registered but never recorded a run.
+	for name, regAt := range ht.registeredAt {
+		if _, ok := ht.lastRun[name]; ok {
+			continue
+		}
+		interval, iOk := ht.intervals[name]
+		maxAge := 120 * time.Second
+		if iOk && interval > 0 {
+			maxAge = interval * 6
+		}
+		if now.Sub(regAt) > maxAge {
 			stale = append(stale, name)
 		}
 	}
@@ -2469,8 +2795,10 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 	return func() {
 		defer func() {
 			if r := recover(); r != nil {
+				_ = string(debug.Stack())
+				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r)
 				stack := string(debug.Stack())
-				log.Printf("[worker %s] PANIC in %s loop: %v\n%s", w.id, name, r, stack)
+				w.logger.ErrorContext(w.ctx, "PANIC in loop", "worker_id", w.id, "loop", name, "error", r, "stack", stack)
 				w.healthTracker.recordPanic(name)
 				backgroundLoopsTotal.WithLabelValues(name, "panic").Inc()
 			}
@@ -2484,6 +2812,7 @@ func (w *Worker) withPanicRecovery(name string, fn func()) func() {
 // stale and gets restarted.
 func (w *Worker) watchdogLoop() {
 	defer w.wg.Done()
+	w.healthTracker.setInterval("watchdog", w.healthCheckInterval)
 	ticker := time.NewTicker(w.healthCheckInterval)
 	defer ticker.Stop()
 
@@ -2492,11 +2821,31 @@ func (w *Worker) watchdogLoop() {
 		case <-w.ctx.Done():
 			return
 		case <-ticker.C:
+			w.healthTracker.recordRun("watchdog")
+
 			stale := w.healthTracker.staleLoops()
+
+			// Poison-pill: if the vast majority of loops are stale at once,
+			// the worker is likely hung (GC storm, OS stall, etc.). Exit
+			// cleanly and let external infrastructure restart the process.
+			total := w.healthTracker.registeredCount()
+			if len(stale) > 0 && total >= 3 && len(stale) >= (total*4/5) {
+				w.logger.ErrorContext(w.ctx, "CRITICAL: loops stale, exiting for external restart", "worker_id", w.id, "stale", len(stale), "total", total)
+				w.cancel()
+				return
+			}
+
 			for _, name := range stale {
-				log.Printf("[worker %s] watchdog: %s loop is stale, restarting", w.id, name)
+				if name == "watchdog" {
+					// The watchdog cannot restart itself. A stale watchdog
+					// entry indicates healthTracker state corruption.
+					w.logger.WarnContext(w.ctx, "watchdog self-reported as stale", "worker_id", w.id)
+					continue
+				}
+				w.logger.WarnContext(w.ctx, "watchdog: loop is stale, restarting", "worker_id", w.id, "loop", name)
 				w.restartLoop(name)
 			}
+
 			// Report health metrics.
 			lastRun, panicked, restarts := w.healthTracker.snapshot()
 			for name, t := range lastRun {
@@ -2518,29 +2867,46 @@ func (w *Worker) watchdogLoop() {
 // prevents goroutine leaks and double execution when the watchdog detects a
 // stale loop.
 func (w *Worker) restartLoop(name string) {
-	w.healthTracker.recordRestart(name)
+	w.loopMu.Lock()
 	fn, ok := w.loopFuncs[name]
+	var prev *loopContext
+	if p, pok := w.loopCtxMap[name]; pok {
+		prev = p
+	}
+	w.loopMu.Unlock()
+
 	if !ok {
-		log.Printf("[worker %s] watchdog: no restart function registered for %s", w.id, name)
+		w.logger.WarnContext(w.ctx, "watchdog: no restart function registered", "worker_id", w.id, "loop", name)
 		return
 	}
 
+	// Re-check staleness atomically to avoid killing a loop that recovered
+	// between the staleLoops() snapshot and this call (TOCTOU fix).
+	if !w.healthTracker.isStale(name) {
+		w.logger.InfoContext(w.ctx, "watchdog: loop recovered before restart", "worker_id", w.id, "loop", name)
+		return
+	}
+	w.healthTracker.recordRestart(name)
+
 	// Cancel the old loop context (if one exists) and wait for the old goroutine
-	// to acknowledge cancellation via its done channel.
-	if prev, ok := w.loopCtxMap[name]; ok {
+	// to acknowledge cancellation via its done channel. Do this outside the lock
+	// because the wait can take up to 5 seconds.
+	if prev != nil {
 		prev.cancel()
 		select {
 		case <-prev.done:
 			// old goroutine exited cleanly
 		case <-time.After(5 * time.Second):
-			log.Printf("[worker %s] WATCHDOG: loop %s did not exit within 5s of cancellation", w.id, name)
+			w.logger.WarnContext(w.ctx, "WATCHDOG: loop did not exit within 5s of cancellation", "worker_id", w.id, "loop", name)
 		}
 	}
 
 	// Create a fresh per-loop context and done channel.
 	ctx, cancel := context.WithCancel(w.ctx)
 	done := make(chan struct{})
+	w.loopMu.Lock()
 	w.loopCtxMap[name] = &loopContext{ctx: ctx, cancel: cancel, done: done}
+	w.loopMu.Unlock()
 
 	w.wg.Add(1)
 	go func() {
@@ -2548,7 +2914,18 @@ func (w *Worker) restartLoop(name string) {
 		defer cancel()
 		w.withPanicRecovery(name, fn)()
 	}()
-	log.Printf("[worker %s] watchdog: restarted %s loop", w.id, name)
+	w.logger.InfoContext(w.ctx, "watchdog: restarted loop", "worker_id", w.id, "loop", name)
+}
+
+// signalCallerAllowed checks whether a caller (by defName or "*" wildcard)
+// is permitted to signal a target workflow based on its allowed_signals list.
+func signalCallerAllowed(callers []string, callerDefName string) bool {
+	for _, c := range callers {
+		if c == "*" || c == callerDefName {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- HTTP API server ----
@@ -2560,12 +2937,12 @@ func (w *Worker) restartLoop(name string) {
 //	  {"name": "shard-0", "conn_str": "postgres://...", "tenants": ["tenant-a"]},
 //	  {"name": "shard-1", "conn_str": "postgres://...", "tenants": ["tenant-b"]}
 //	]
-func loadShardConfigs(path string) ([]host.ShardConfig, error) {
+func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read shards file: %w", err)
 	}
-	var configs []host.ShardConfig
+	var configs []engine.ShardConfig
 	if err := json.Unmarshal(data, &configs); err != nil {
 		return nil, fmt.Errorf("parse shards file: %w", err)
 	}
@@ -2664,22 +3041,92 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// keyedRateLimiter provides per-key token-bucket rate limiting. Each key
+// (tenant UUID, API key hash, etc.) gets its own rate.Limiter with the given
+// rate and burst. Includes periodic cleanup of stale entries.
+type keyedRateLimiter struct {
+	mu     sync.Mutex
+	limits map[string]*rateLimiterEntry
+	stopCh chan struct{}
+}
+
+func newKeyedRateLimiter() *keyedRateLimiter {
+	rl := &keyedRateLimiter{
+		limits: make(map[string]*rateLimiterEntry),
+		stopCh: make(chan struct{}),
+	}
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				rl.mu.Lock()
+				now := time.Now()
+				for key, entry := range rl.limits {
+					if now.Sub(entry.lastUsed) > time.Hour {
+						delete(rl.limits, key)
+					}
+				}
+				rl.mu.Unlock()
+			case <-rl.stopCh:
+				return
+			}
+		}
+	}()
+	return rl
+}
+
+func (rl *keyedRateLimiter) stop() {
+	close(rl.stopCh)
+}
+
+// allow checks whether the key has a token available. If the key has no
+// existing limiter, one is created with the given rate and burst.
+func (rl *keyedRateLimiter) allow(key string, r rate.Limit, burst int) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	entry, ok := rl.limits[key]
+	if !ok {
+		entry = &rateLimiterEntry{
+			limiter: rate.NewLimiter(r, burst),
+		}
+		rl.limits[key] = entry
+	}
+	entry.lastUsed = time.Now()
+	return entry.limiter.Allow()
+}
+
+// write429 sends a JSON 429 Too Many Requests response.
+func write429(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Retry-After", "1")
+	w.WriteHeader(http.StatusTooManyRequests)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error":          msg,
+		"retry_after_ms": 1000,
+	})
+}
+
 // rateLimitMiddleware returns an HTTP middleware that rate-limits requests
-// per client IP. On rate limit exceeded, it returns HTTP 429 with a JSON
-// error body and a Retry-After header.
-func rateLimitMiddleware(rl *ipRateLimiter) func(http.Handler) http.Handler {
+// per client IP, and optionally per tenant. On rate limit exceeded, it returns
+// HTTP 429 with a JSON error body and a Retry-After header.
+func rateLimitMiddleware(ipLim *ipRateLimiter, tenantLim *keyedRateLimiter, tenantRate rate.Limit, tenantBurst int) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := clientIP(r)
-			if !rl.allow(ip) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Retry-After", "1")
-				w.WriteHeader(http.StatusTooManyRequests)
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"error":          "rate limit exceeded",
-					"retry_after_ms": 1000,
-				})
+			// Tier 1: IP-based rate limit (always active).
+			if !ipLim.allow(clientIP(r)) {
+				write429(w, "rate limit exceeded")
 				return
+			}
+			// Tier 2: per-tenant rate limit (only when configured).
+			if tenantRate > 0 {
+				if tid, ok := auth.TenantIDFromContext(r.Context()); ok {
+					if !tenantLim.allow(tid.String(), tenantRate, tenantBurst) {
+						write429(w, "tenant rate limit exceeded")
+						return
+					}
+				}
 			}
 			next.ServeHTTP(w, r)
 		})
@@ -2689,7 +3136,7 @@ func rateLimitMiddleware(rl *ipRateLimiter) func(http.Handler) http.Handler {
 // ---- HTTP API server ----
 
 type apiServer struct {
-	store       host.WorkflowStore
+	store       engine.WorkflowStore
 	worker      *Worker
 	maxBodySize int64
 	db          *sql.DB
@@ -2773,6 +3220,7 @@ func (s *apiServer) handleDrainStatus(w http.ResponseWriter, r *http.Request) {
 	if draining && count == 0 {
 		s.worker.drainOnce.Do(func() {
 			close(s.worker.drainCh)
+			s.worker.cancel()
 		})
 		resp["complete"] = true
 	}
@@ -2787,7 +3235,7 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	q := r.URL.Query()
-	filter := host.WorkflowFilter{
+	filter := engine.WorkflowFilter{
 		Status:        q.Get("status"),
 		InputContains: q.Get("input_contains"),
 		ErrorContains: q.Get("error_contains"),
@@ -2800,7 +3248,7 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if workflows == nil {
-		workflows = []host.WorkflowInstance{}
+		workflows = []engine.WorkflowInstance{}
 	}
 	s.writeJSON(w, 200, workflows)
 }
@@ -2900,6 +3348,10 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 }
 
 func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, name string) {
+	if s.worker.draining.Load() {
+		s.writeError(w, 503, "worker is draining; cannot accept new workflows")
+		return
+	}
 	if s.worker.memoryController != nil && !s.worker.memoryController.CanAcceptAPIWorkflows() {
 		s.writeError(w, 503, "worker is under memory pressure; cannot accept new workflows")
 		return
@@ -2911,6 +3363,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		ConcurrencyKey string          `json:"concurrency_key"`
 		TenantID       string          `json:"tenant_id"`
 		Namespace      string          `json:"namespace"` // deprecated; use tenant_id
+		Priority       int             `json:"priority"`
 	}
 	if r.Body != nil {
 		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
@@ -2933,9 +3386,9 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if tenantID == "" {
 		tenantID = input.Namespace
 	}
-	// TODO: wire tenantID through the store (StartNewRun) for namespace-
-	// scoped workflow isolation. Currently parsed but not yet stored.
-	_ = tenantID
+	if tenantID == "" {
+		tenantID = engine.DefaultTenantUUID
+	}
 
 	// Find the latest version of this workflow.
 	versions, err := s.store.ListVersions(r.Context(), name)
@@ -2970,8 +3423,8 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// Support Idempotency-Key header for exactly-once semantics.
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	// Redact sensitive fields in the input before storing.
-	in = json.RawMessage(host.Redact(string(in)))
-	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey)
+	in = json.RawMessage(engine.Redact(string(in)))
+	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey, tenantID, input.Priority)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -2979,6 +3432,13 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	if alreadyExisted {
 		s.writeJSON(w, 200, map[string]string{"workflow_id": runID, "already_started": "true"})
 		return
+	}
+
+	// Propagate W3C trace context from incoming request.
+	if traceID := extractTraceIDFromTraceParent(r.Header.Get("traceparent")); traceID != "" {
+		if err := s.store.TraceWorkflow(r.Context(), runID, traceID); err != nil {
+			slog.Warn("failed to set trace_id", "run_id", runID, "error", err)
+		}
 	}
 
 	// If concurrency key is specified, try to acquire it for the new run.
@@ -3022,7 +3482,20 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	payload := req.Payload
-	payload = host.Redact(payload)
+	payload = engine.Redact(payload)
+	// Check signal authorization for HTTP API callers.
+	// External callers have no defName; they must be allowed via "*" wildcard.
+	if s.worker.requireSignalAuth != nil && *s.worker.requireSignalAuth {
+		callers, err := s.store.GetAllowedSignalCallers(r.Context(), id)
+		if err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		if !signalCallerAllowed(callers, "*") {
+			s.writeError(w, 403, "signal auth denied: external HTTP callers not in allowed_signals (add \"*\" to allow)")
+			return
+		}
+	}
 	if err := s.store.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -3078,7 +3551,7 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	if history == nil {
-		history = []host.EventRecord{}
+		history = []engine.EventRecord{}
 	}
 
 	w.Header().Set("X-Total-Count", strconv.Itoa(total))
@@ -3142,7 +3615,7 @@ func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	if promises == nil {
-		promises = []host.PromiseInfo{}
+		promises = []engine.PromiseInfo{}
 	}
 	s.writeJSON(w, 200, promises)
 }
@@ -3224,7 +3697,7 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 		payload = "{}"
 	}
 	// Redact sensitive fields from the payload before persisting.
-	payload = host.Redact(payload)
+	payload = engine.Redact(payload)
 
 	// Check if there's already a pending update with the same name.
 	pending, pErr := s.store.GetPendingUpdateRequests(r.Context(), id)
@@ -3253,9 +3726,9 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Create an associated promise record so the caller can poll for the result.
-	if ps, ok := s.store.(host.PromiseStore); ok {
+	if ps, ok := s.store.(engine.PromiseStore); ok {
 		if pErr := ps.CreatePromise(r.Context(), id, "update:"+updateName, promiseID); pErr != nil {
-			log.Printf("[api] %s: warning: failed to create promise for update %q: %v", id, updateName, pErr)
+			slog.Warn("failed to create promise for update", "worker_id", id, "update_name", updateName, "error", pErr)
 		}
 	}
 
@@ -3290,7 +3763,7 @@ func (s *apiServer) handleSchedulesList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if schedules == nil {
-		schedules = []host.Schedule{}
+		schedules = []engine.Schedule{}
 	}
 	s.writeJSON(w, 200, schedules)
 }
@@ -3360,7 +3833,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, 400, "name, cron, and def_name are required")
 		return
 	}
-	sch := host.Schedule{
+	sch := engine.Schedule{
 		Name:           req.Name,
 		DefName:        req.DefName,
 		EntryPoint:     req.EntryPoint,
@@ -3389,7 +3862,7 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Load memory stats for enrichment.
-	memoryStats := make(map[string]*host.WorkflowMemoryStats)
+	memoryStats := make(map[string]*engine.WorkflowMemoryStats)
 	if stats, err := s.store.LoadMemoryStats(r.Context()); err == nil {
 		for i := range stats {
 			memoryStats[stats[i].DefName] = &stats[i]
@@ -3404,7 +3877,7 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 		CreatedAt       time.Time                 `json:"created_at"`
 		Deprecated      bool                      `json:"deprecated"`
 		ActiveInstances int                       `json:"active_instances"`
-		Memory          *host.WorkflowMemoryStats `json:"memory,omitempty"`
+		Memory          *engine.WorkflowMemoryStats `json:"memory,omitempty"`
 	}
 
 	var response []defResponse
@@ -3490,7 +3963,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	def := &host.WorkflowDef{
+	def := &engine.WorkflowDef{
 		Name:       req.Name,
 		Version:    version,
 		WASMBytes:  wasmBytes,
@@ -3498,13 +3971,13 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err := s.store.DeployWorkflowDef(ctx, def); err != nil {
-		log.Printf("[api] deploy workflow def: %v", err)
+		slog.Error("deploy workflow def failed", "error", err)
 		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deploy: " + err.Error()})
 		return
 	}
 
 	// Invalidate WASM cache
-	s.worker.wasmCache.remove(def.Name)
+	s.worker.wasmCache.remove(fmt.Sprintf("%s:%d", def.Name, def.Version))
 
 	s.writeJSON(w, http.StatusCreated, map[string]interface{}{
 		"name":        def.Name,
@@ -3522,20 +3995,20 @@ func (s *apiServer) inflightCount() int {
 
 // getPluginDB returns the plugin DB adapter, using pluginDB if available
 // (separate pool), falling back to the main db otherwise.
-func getPluginDB(db, pluginDB *sql.DB) *host.SQLDBAdapter {
+func getPluginDB(db, pluginDB *sql.DB) *engine.SQLDBAdapter {
 	if pluginDB != nil {
-		return &host.SQLDBAdapter{DB: pluginDB}
+		return &engine.SQLDBAdapter{DB: pluginDB}
 	}
-	return &host.SQLDBAdapter{DB: db}
+	return &engine.SQLDBAdapter{DB: db}
 }
 
 // getPluginReadOnlyDB returns the read-only plugin DB adapter, using pluginDB
 // if available (separate pool), falling back to the main db otherwise.
-func getPluginReadOnlyDB(db, pluginDB *sql.DB) *host.ReadOnlyDB {
+func getPluginReadOnlyDB(db, pluginDB *sql.DB) *engine.ReadOnlyDB {
 	if pluginDB != nil {
-		return &host.ReadOnlyDB{Inner: pluginDB}
+		return &engine.ReadOnlyDB{Inner: pluginDB}
 	}
-	return &host.ReadOnlyDB{Inner: db}
+	return &engine.ReadOnlyDB{Inner: db}
 }
 
 // handleMetrics serves Prometheus-format metrics.
@@ -3549,7 +4022,7 @@ func idempotencyCleanupLoop(ctx context.Context, db *sql.DB, interval time.Durat
 		case <-ticker.C:
 			_, err := db.ExecContext(ctx, `DELETE FROM idempotency_keys WHERE expires_at < now()`)
 			if err != nil {
-				log.Printf("idempotency cleanup: %v", err)
+				slog.Warn("idempotency cleanup", "error", err)
 			}
 		}
 	}
@@ -3626,4 +4099,36 @@ func baseDSNFromDSN(dsn string) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+// Throughput gauge state — periodically updated from the dispatch loop.
+var (
+	lastReplayStepCount int64
+	lastFreshStepCount  int64
+	lastThroughputTime  time.Time
+)
+
+// updateThroughputGauges computes the current replay and fresh step throughput
+// from the atomic step counters in the host package and sets the gauges.
+func updateThroughputGauges() {
+	now := time.Now()
+	elapsed := now.Sub(lastThroughputTime).Seconds()
+	if elapsed < 5 {
+		return
+	}
+	replayCur := engine.ReplayStepCount()
+	freshCur := engine.FreshStepCount()
+	if lastThroughputTime.IsZero() {
+		lastReplayStepCount = replayCur
+		lastFreshStepCount = freshCur
+		lastThroughputTime = now
+		return
+	}
+	replayDelta := float64(replayCur - lastReplayStepCount)
+	freshDelta := float64(freshCur - lastFreshStepCount)
+	replayThroughput.Set(replayDelta / elapsed)
+	freshThroughput.Set(freshDelta / elapsed)
+	lastReplayStepCount = replayCur
+	lastFreshStepCount = freshCur
+	lastThroughputTime = now
 }

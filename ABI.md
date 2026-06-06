@@ -1391,7 +1391,149 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| 5 | 2026-05-15 | Added Section 6: Cross-Language Determinism specification covering IEEE 754 floats, map iteration order, JSON canonicalization, GC timing, and RNG. Added cross-language replay guarantee. |
 | 4 | 2026-05-13 | Added `cleat_json_parse` (2.51) and `cleat_json_stringify` (2.52) host functions for JSON validation and normalization via the host runtime. Bumped ABI_VERSION to 4. |
 | 3 | 2026-05-09 | Expanded from 22 to 50 documented host functions. Added all missing imports: `cleat_continue_as_new_versioned`, `cleat_child_workflow_with_options`, `cleat_child_workflow_in_schema`, `cleat_send_signal_and_wait`, `cleat_reply_to_signal`, `cleat_signal_workflow`, `cleat_set_scope`, `cleat_get_scope`, `cleat_uuid`, `cleat_acquire_lock`, `cleat_release_lock`, `cleat_side_effect`, `cleat_workflow_id`, `cleat_run_id`, `cleat_resolve_promise`, `cleat_reject_promise`, `cleat_send`, `cleat_schedule_invoke`, `cleat_register_query_handler`, `cleat_run_detached`, `cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`, `cleat_list_state`, `cleat_fetch`, `plugin_call_streaming`. Reorganized into logical groups. Updated documentation count from 18 to 50. |
 | 2 | 2026-05-06 | Added `cleat_call_retry`, `cleat_call_heartbeat`, `cleat_await_all_children`, and `plugin_call` host functions. Updated documentation count. |
 | 1 | 2026-05-05 | Initial ABI specification. 15 host function imports, export convention, memory layout. |
+
+---
+
+## 6. Cross-Language Determinism
+
+Cleat workflows must produce identical event histories and results when replayed, regardless of which language compiled the WASM module. This section defines the determinism contract that all language SDKs must satisfy.
+
+### 6.1 IEEE 754 Float Arithmetic
+
+All numeric operations MUST conform to IEEE 754-2019. The cleat host runtime does not canonicalize float values in linear memory — each SDK is responsible for ensuring deterministic float behavior.
+
+**NaN canonicalization**: All NaN values MUST be normalized to a single canonical representation when serialized to JSON or compared for equality. The canonical NaN for f64 is quiet NaN with positive sign (`0x7FF8000000000000`). SDKs SHOULD route floats through `cleat_json_stringify` (ABI 2.52) rather than language-native float-to-string conversions, as the host's `encoding/json` produces consistent float representations.
+
+**Minimum requirements**:
+
+| Requirement | Details |
+|---|---|
+| IEEE 754 conformance | Required. Implementations must follow IEEE 754 for all float operations. |
+| NaN type | Use quiet NaN (not signaling). The host interprets signaling NaN as quiet NaN when read from WASM linear memory. |
+| NaN canonical form | Canonicalize to `+qNaN` before any comparison or JSON output. |
+| Float→string | Route through host `cleat_json_stringify` for cross-language consistency. |
+
+### 6.2 Map Iteration Order
+
+When workflow behavior depends on map iteration order (e.g., iterating over a `HashMap` to produce a JSON request, or selecting the "first" entry), the iteration order MUST be deterministic.
+
+**Rule**: Map keys MUST be iterated in sorted order (lexicographic string comparison by Unicode codepoint, consistent across all languages).
+
+**Per-language guidance**:
+
+| Language | Deterministic map type | Non-deterministic (avoid) |
+|---|---|---|
+| Go | `map[key]value` + `sort.Strings(keys)` before iteration | Raw `for k, v := range m` iteration |
+| Rust | `BTreeMap<K, V>` (default for `serde_json::Map`) | `HashMap<K, V>` when used with non-default hasher or when order-dependent logic is applied |
+| Python | `dict` + `sorted(d.keys())` or `sort_keys=True` | Raw `for k in d` (insertion-order in 3.7+ but not guaranteed across implementations) |
+| AssemblyScript | Sort keys before iteration | Raw `Map.forEach` / `for (k in map)` |
+
+**When this matters**: Map iteration order only matters when the workflow logic depends on it. If a map is only used for lookups (get by key), iteration order is irrelevant. If iteration order affects which host call is made next or what JSON is produced, use sorted iteration.
+
+### 6.3 JSON Serialization
+
+All JSON output from workflows MUST be canonical to enable bit-identical cross-language comparison.
+
+**Canonical JSON requirements**:
+
+| Requirement | Spec |
+|---|---|
+| Key ordering | Sorted lexicographically by Unicode codepoint (Go `encoding/json` default) |
+| Whitespace | Compact: no trailing whitespace, no spaces after `:` or `,` |
+| Null handling | Explicit `null` for optional fields, not omitted |
+| Numeric precision | IEEE 754 double precision (f64). Minimal representation: `1.0` not `1.00`, `1e10` not `10000000000`. No leading zeros. |
+| String escaping | Minimal required: `"`, `\`, control chars (U+0000–U+001F) escaped as `\n`, `\t`, `\\`, `\"`, or `\u00XX`. Unicode safe characters left unescaped. |
+| Boolean | `true` / `false` (lowercase) |
+| Array | `[...]` with no trailing comma |
+
+**Implementation**: SDKs SHOULD route workflow result JSON through the host's `cleat_json_stringify` (ABI 2.52). The host normalizes JSON through Go's `encoding/json` (parse into `interface{}`, then `json.Marshal`), which produces sorted keys and canonical formatting.
+
+For intermediate JSON (e.g., request payloads for `cleat_call`), canonical JSON is not strictly required since the engine matches replay events by step index and service/operation, not by request content. However, canonical intermediate JSON improves debuggability and reduces the risk of non-deterministic workflow behavior.
+
+### 6.4 GC Timing
+
+Garbage collection timing is NOT deterministic across languages, WASM runtimes, or even across runs of the same language. Workflows MUST NOT rely on GC timing for correctness.
+
+**Rules**:
+
+- **No finalizer-based cleanup**: Do not use destructors, `Drop` impls, `__del__`, `finalize()`, or any finalization mechanism for workflow-semantic operations (e.g., releasing resources, sending notifications).
+- **Use `cleat_defer`**: The `cleat_defer` host function (ABI 2.10) records cleanup callbacks in event history. On replay, deferred callbacks are replayed deterministically.
+- **Memory pressure is non-deterministic**: The point at which GC runs depends on memory pressure, which varies across languages and runs. A workflow that behaves differently when GC runs at different points is non-deterministic.
+
+**Example — INCORRECT** (uses Drop for cleanup):
+```rust
+struct Reservation { id: String }
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        // WRONG: GC-timed — not replayable
+        release_reservation(&self.id);
+    }
+}
+```
+
+**Example — CORRECT** (uses cleat_defer):
+```rust
+fn place_order(h: &HostCalls, input: PlaceOrderInput) -> Result<String, String> {
+    h.cleat_defer("release_inventory", &serde_json::json!({"reservation_id": reservation_id}).to_string());
+    // ... payment, shipping ...
+    Ok(tracking_id)
+}
+```
+
+### 6.5 Random Number Generation
+
+All random values used in workflows MUST come from `cleat_random` (ABI 2.6). The host records the returned value in event history and replays the same value on subsequent replays.
+
+**DO NOT USE**:
+- Go: `math/rand`, `crypto/rand`
+- Rust: `rand::random()`, `rand::thread_rng()`
+- Python: `random.random()`, `secrets.*`
+- AssemblyScript: `Math.random()`
+
+These are non-deterministic and will cause replay divergence errors.
+
+**Example — INCORRECT**:
+```go
+import "math/rand"
+id := rand.Int63()  // WRONG: non-deterministic — replay will diverge
+```
+
+**Example — CORRECT**:
+```go
+id, _ := h.DurableRandom()  // Uses cleat_random — deterministic on replay
+```
+
+Use `cleat_uuid` (ABI 2.40) for deterministic UUID generation from a seed.
+
+### 6.6 SDK Compliance Matrix
+
+| Requirement | Go SDK | Rust SDK | Python SDK | AssemblyScript SDK |
+|---|---|---|---|---|
+| IEEE 754 floats | ✅ Go float64 | ✅ f64 | ✅ float | ✅ f64 |
+| NaN canonicalization | ⚠️ via host json_stringify | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify | ⚠️ verify |
+| Map iteration order | ⚠️ manual sort required | ✅ BTreeMap default for serde_json::Map | ⚠️ sort_keys=True required | ⚠️ manual sort required |
+| JSON canonical output | ✅ encoding/json | ⚠️ via host json_stringify (added in cleat-207) | ⚠️ verify componentize-py | ✅ via host json_stringify |
+| GC-timing independence | ✅ manual defer | ✅ manual defer | ✅ manual defer | ✅ manual defer |
+| RNG via cleat_random | ✅ | ✅ | ✅ | ✅ |
+| cleat_json_parse (2.51) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
+| cleat_json_stringify (2.52) | ✅ host import | ✅ added in cleat-207 | ✅ via WIT bindings | ✅ host import |
+
+✅ = compliant by default or already implemented  
+⚠️ = requires explicit use of the recommended pattern (manual or verified)
+
+### 6.7 Cross-Language Replay Guarantee
+
+When a workflow is compiled from two different languages (e.g., Go and Rust) using SDKs that comply with this section, and both implementations make the same sequence of host calls with the same service/operation pairs:
+
+1. **Execution**: Both produce the same event history (same events in same order)
+2. **Replay**: History from language A can be replayed against WASM from language B
+3. **Output**: Both produce bit-identical result JSON
+
+The cleat engine matches replay events by step index, checking `EventType`, `Service`, and `Op` for equality. Request JSON is not compared during replay matching.
+
+**Guarantee scope**: This guarantee applies to workflows that (a) use only the host functions listed in this ABI, (b) avoid language-specific non-deterministic features (raw map iteration, GC-based cleanup, language-native RNG), and (c) produce results serializable through the host's JSON normalization.

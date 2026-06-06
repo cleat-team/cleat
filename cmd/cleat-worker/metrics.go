@@ -114,6 +114,18 @@ var (
 		Name: "cleat_worker_count",
 		Help: "Number of cleat workers connected to this database",
 	})
+	queueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_queue_depth",
+		Help: "Ready workflows waiting in task queues",
+	})
+	replayThroughput = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_replay_throughput_steps_per_second",
+		Help: "Current replay step throughput rate",
+	})
+	freshThroughput = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "cleat_fresh_throughput_steps_per_second",
+		Help: "Current fresh step throughput rate",
+	})
 	eventsDeletedTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "cleat_events_deleted_total",
 		Help: "Number of expired event history rows deleted by the retention policy",
@@ -183,8 +195,19 @@ func init() {
 		reaperInstancesClaimedTotal,
 		concurrencyKeysTotal, concurrencyKeysExpiringSoon,
 		pluginConnectionsInUse, pluginConnectionsMax,
+		queueDepth,
+		replayThroughput, freshThroughput,
 	)
 }
+
+// SetQueueDepth sets the queue depth gauge from the memory controller state.
+func SetQueueDepth(d int64) { queueDepth.Set(float64(d)) }
+
+// SetReplayThroughput sets the replay throughput gauge (events/sec).
+func SetReplayThroughput(v float64) { replayThroughput.Set(v) }
+
+// SetFreshThroughput sets the fresh throughput gauge (events/sec).
+func SetFreshThroughput(v float64) { freshThroughput.Set(v) }
 
 // handleMetrics serves Prometheus-format metrics via the promhttp handler.
 func handleMetrics(w http.ResponseWriter, r *http.Request) {

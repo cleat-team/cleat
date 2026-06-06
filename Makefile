@@ -267,19 +267,58 @@ fmt-rust:
 	cd crates/cleat-macro && cargo fmt
 	cd crates/cleat-sdk && cargo fmt
 
+# ---- clew (Neon-backed durable dev) -----------------------------------------
+
+.PHONY: clew
+clew:
+	@go build -o cleat-worker ./cmd/cleat-worker
+	@if [ -z "$${CLEW_DATABASE_URL:-}" ]; then \
+		echo "ERROR: CLEW_DATABASE_URL is not set."; \
+		echo ""; \
+		echo "Create a .env file in the cleat repo root with:"; \
+		echo '  CLEW_DATABASE_URL="postgresql://user:pass@ep-xxx.us-east-1.aws.neon.tech/neondb?sslmode=require"'; \
+		echo ""; \
+		echo "Or export it directly:"; \
+		echo "  export CLEW_DATABASE_URL=\"...\""; \
+		exit 1; \
+	fi
+	@echo "Starting cleat-worker against Neon (migrations run automatically)..."
+	./cleat-worker --db "$${CLEW_DATABASE_URL}" --api-addr=:8080
+
 # ---- tools ------------------------------------------------------------------
 
+GO_MIN_VERSION := 1.25
+TINYGO_MIN_VERSION := 0.41
+
 .PHONY: tools
-tools: tools-tinygo tools-rust tools-python tools-java tools-as
-	@echo "=== All WASM toolchains checked ==="
+tools: tools-go tools-tinygo tools-rust tools-python tools-java tools-as
+	@echo "=== All toolchains checked ==="
+
+.PHONY: tools-go
+tools-go:
+	@if command -v go >/dev/null 2>&1; then \
+		VER=$$(go version | grep -oP 'go\K[0-9]+\.[0-9]+'); \
+		MAJOR=$$(echo $$VER | cut -d. -f1); \
+		MINOR=$$(echo $$VER | cut -d. -f2); \
+		MIN_MAJOR=$$(echo $(GO_MIN_VERSION) | cut -d. -f1); \
+		MIN_MINOR=$$(echo $(GO_MIN_VERSION) | cut -d. -f2); \
+		if [ "$$MAJOR" -gt "$$MIN_MAJOR" ] || ([ "$$MAJOR" -eq "$$MIN_MAJOR" ] && [ "$$MINOR" -ge "$$MIN_MINOR" ]); then \
+			echo "[OK] Go $$(go version | head -1)"; \
+		else \
+			echo "[OLD] Go $$(go version | head -1) — need $(GO_MIN_VERSION)+. Install from https://go.dev/dl/"; \
+		fi; \
+	else \
+		echo "[MISSING] Go $(GO_MIN_VERSION)+ — install from https://go.dev/dl/"; \
+		echo "  Linux:   wget https://go.dev/dl/go1.25.7.linux-amd64.tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.7.linux-amd64.tar.gz"; \
+	fi
 
 .PHONY: tools-tinygo
 tools-tinygo:
 	@if command -v tinygo >/dev/null 2>&1; then \
 		echo "[OK] TinyGo $$(tinygo version | head -1)"; \
 	else \
-		echo "[MISSING] TinyGo — install from https://tinygo.org/getting-started/install/"; \
-		echo "  Linux:   wget https://github.com/tinygo-org/tinygo/releases/latest/download/tinygo.linux-amd64.tar.gz && sudo tar -C /usr/local -xzf tinygo.linux-amd64.tar.gz && export PATH=\$$PATH:/usr/local/tinygo/bin"; \
+		echo "[MISSING] TinyGo $(TINYGO_MIN_VERSION)+ — install from https://tinygo.org/getting-started/install/"; \
+		echo "  Linux:   wget https://github.com/tinygo-org/tinygo/releases/download/v0.41.0/tinygo.linux-amd64.tar.gz && sudo tar -C /usr/local -xzf tinygo.linux-amd64.tar.gz && export PATH=\$$PATH:/usr/local/tinygo/bin"; \
 		echo "  macOS:   brew install tinygo"; \
 	fi
 

@@ -261,7 +261,7 @@ def main():
         "--runtime",
         default=None,
         help="Target WASM runtime: 'wasmtime' or 'wazero'. "
-             "When 'wasmtime', the output is a Component Model binary (skip decomposition). "
+             "When 'wasmtime', the output is decomposed core WASM with component backup. "
              "When 'wazero', the output is a decomposed core WASM module. "
              "When unset, both formats are produced (default).",
     )
@@ -338,11 +338,12 @@ def main():
         print("  This is expected for CPython-in-WASM but may affect load times.")
 
     # ---- Apply --runtime to control decomposition behavior ----
-    # --runtime wasmtime  -> skip decomposition (Component Model binary is the output)
+    # --runtime wasmtime  -> decompose, keep component backup (wasmtime backend uses core WASM)
     # --runtime wazero    -> decompose, keep only core WASM (no component)
     # No --runtime        -> produce both (keep component + core WASM)
     if args.runtime == "wasmtime":
-        args.skip_decompose = True
+        args.skip_decompose = False
+        args.keep_component = True
     elif args.runtime == "wazero":
         args.skip_decompose = False
         args.keep_component = False

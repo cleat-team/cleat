@@ -15,28 +15,29 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
-// mockStore — simulates host.WorkflowStore for cleatctl tests.
+// mockStore — simulates engine.WorkflowStore for cleatctl tests.
 // ---------------------------------------------------------------------------
 
 type mockStore struct {
-	listWorkflowDefsFn                 func(ctx context.Context, name string) ([]host.WorkflowDef, error)
+	listWorkflowDefsFn                 func(ctx context.Context, name string) ([]engine.WorkflowDef, error)
 	getActiveInstanceCountsByVersionFn func(ctx context.Context) (map[string]int, error)
 	countActiveInstancesFn             func(ctx context.Context, name string, version int) (int, error)
 	markVersionDeprecatedFn            func(ctx context.Context, name string, version int, deprecated bool) error
 	purgeWorkflowDefFn                 func(ctx context.Context, name string, version int) error
-	deployWorkflowDefFn                func(ctx context.Context, def *host.WorkflowDef) error
-	claimWorkflowFn                    func(ctx context.Context, workerID string) (*host.WorkflowInstance, error)
-	claimWorkflowsFn                   func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error)
-	claimStickyWorkflowsFn             func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error)
-	loadEventHistoryFn                 func(ctx context.Context, workflowID string) ([]host.EventRecord, error)
-	appendEventHistoryFn               func(ctx context.Context, workflowID string, rec host.EventRecord) error
-	appendEventHistoryBatchFn          func(ctx context.Context, workflowID string, recs []host.EventRecord) error
+	deployWorkflowDefFn                func(ctx context.Context, def *engine.WorkflowDef) error
+	claimWorkflowFn                    func(ctx context.Context, workerID string) (*engine.WorkflowInstance, error)
+	claimWorkflowsFn                   func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error)
+	claimStickyWorkflowsFn             func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error)
+	loadEventHistoryFn                 func(ctx context.Context, workflowID string) ([]engine.EventRecord, error)
+	appendEventHistoryFn               func(ctx context.Context, workflowID string, rec engine.EventRecord) error
+	appendEventHistoryBatchFn          func(ctx context.Context, workflowID string, recs []engine.EventRecord) error
 	loadWASMFn                         func(ctx context.Context, defName string, defVersion int) ([]byte, error)
+	getWASMLengthFn                    func(ctx context.Context, defName string, defVersion int) (int64, error)
 	listVersionsFn                     func(ctx context.Context, defName string) ([]int, error)
 	heartbeatFn                        func(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
 	batchHeartbeatFn                   func(ctx context.Context, workerID string) (int64, error)
@@ -47,32 +48,32 @@ type mockStore struct {
 	checkCancellationFn                func(ctx context.Context, workflowID string) (bool, string, error)
 	deliverSignalFn                    func(ctx context.Context, workflowID, signalName, payload string) error
 	pollAndClaimSignalFn               func(ctx context.Context, workflowID, signalName string) (string, bool, error)
-	startNewRunFn                      func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error)
-	startChildWorkflowFn               func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error)
+	startNewRunFn                      func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error)
+	startChildWorkflowFn               func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
 	getChildResultFn                   func(ctx context.Context, runID string) (string, bool, error)
 	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
 	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
-	listWorkflowsFn                    func(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error)
-	getWorkflowByIDFn                  func(ctx context.Context, id string) (*host.WorkflowInstance, error)
-	createScheduleFn                   func(ctx context.Context, s host.Schedule) error
-	listSchedulesFn                    func(ctx context.Context) ([]host.Schedule, error)
+	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
+	getWorkflowByIDFn                  func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
+	createScheduleFn                   func(ctx context.Context, s engine.Schedule) error
+	listSchedulesFn                    func(ctx context.Context) ([]engine.Schedule, error)
 	deleteScheduleFn                   func(ctx context.Context, name string) error
 	setScheduleEnabledFn               func(ctx context.Context, name string, enabled bool) error
-	getDueSchedulesFn                  func(ctx context.Context) ([]host.Schedule, error)
+	getDueSchedulesFn                  func(ctx context.Context) ([]engine.Schedule, error)
 	updateScheduleNextRunFn            func(ctx context.Context, name string, nextRun time.Time) error
 	loadWorkflowConfigFn               func(ctx context.Context, defName string, defVersion int) (int, error)
 	loadDAGSpecFn                      func(ctx context.Context, defName string, defVersion int) (json.RawMessage, error)
 	traceWorkflowFn                    func(ctx context.Context, workflowID, traceID string) error
 	getCompactionCandidatesFn          func(ctx context.Context, threshold int, limit int) ([]string, error)
-	loadCompactionStateFn              func(ctx context.Context, workflowID string) (*host.CompactionState, error)
+	loadCompactionStateFn              func(ctx context.Context, workflowID string) (*engine.CompactionState, error)
 	compactHistoryFn                   func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
 	createPromiseFn                    func(ctx context.Context, workflowID, promiseName, promiseID string) error
 	resolvePromiseFn                   func(ctx context.Context, workflowID, promiseID, result string) error
 	rejectPromiseFn                    func(ctx context.Context, workflowID, promiseID, errMsg string) error
 	getPromiseFn                       func(ctx context.Context, workflowID, promiseID string) (string, string, string, error)
-	listPromisesFn                     func(ctx context.Context, workflowID string) ([]host.PromiseInfo, error)
+	listPromisesFn                     func(ctx context.Context, workflowID string) ([]engine.PromiseInfo, error)
 	createUpdateRequestFn              func(ctx context.Context, workflowID, updateName, payload, promiseID string) error
-	getPendingUpdateRequestsFn         func(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error)
+	getPendingUpdateRequestsFn         func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error)
 	completeUpdateRequestFn            func(ctx context.Context, workflowID, updateName, result, errMsg string) error
 	acquireConcurrencyKeyFn            func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error)
 	releaseConcurrencyKeyFn            func(ctx context.Context, key string) error
@@ -80,50 +81,53 @@ type mockStore struct {
 	reapExpiredConcurrencyKeysFn       func(ctx context.Context) (int64, error)
 	updateStickyWorkerFn               func(ctx context.Context, workflowID, workerID string) error
 	clearStickyWorkerFn                func(ctx context.Context, workflowID string) error
-	getWorkflowDefFn                   func(ctx context.Context, name string, version int) (*host.WorkflowDef, error)
+	getWorkflowDefFn                   func(ctx context.Context, name string, version int) (*engine.WorkflowDef, error)
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
-	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string) (string, error)
-	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
+	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string, priority int) (string, error)
+	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
+	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
+	countEventHistoryFn                func(ctx context.Context, workflowID string) (int, error)
+	loadEventHistoryPaginatedFn        func(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error)
 }
 
 // ---- mockStore interface methods ----
 
-func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID string) (*host.WorkflowInstance, error) {
+func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID string) (*engine.WorkflowInstance, error) {
 	if m.claimWorkflowFn != nil {
 		return m.claimWorkflowFn(ctx, workerID)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
+func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 	if m.claimWorkflowsFn != nil {
 		return m.claimWorkflowsFn(ctx, workerID, limit)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
+func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 	if m.claimStickyWorkflowsFn != nil {
 		return m.claimStickyWorkflowsFn(ctx, workerID, limit)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) LoadEventHistory(ctx context.Context, workflowID string) ([]host.EventRecord, error) {
+func (m *mockStore) LoadEventHistory(ctx context.Context, workflowID string) ([]engine.EventRecord, error) {
 	if m.loadEventHistoryFn != nil {
 		return m.loadEventHistoryFn(ctx, workflowID)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) AppendEventHistory(ctx context.Context, workflowID string, rec host.EventRecord) error {
+func (m *mockStore) AppendEventHistory(ctx context.Context, workflowID string, rec engine.EventRecord) error {
 	if m.appendEventHistoryFn != nil {
 		return m.appendEventHistoryFn(ctx, workflowID, rec)
 	}
 	return nil
 }
 
-func (m *mockStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []host.EventRecord) error {
+func (m *mockStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []engine.EventRecord) error {
 	if m.appendEventHistoryBatchFn != nil {
 		return m.appendEventHistoryBatchFn(ctx, workflowID, recs)
 	}
@@ -135,6 +139,13 @@ func (m *mockStore) LoadWASM(ctx context.Context, defName string, defVersion int
 		return m.loadWASMFn(ctx, defName, defVersion)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
+	if m.getWASMLengthFn != nil {
+		return m.getWASMLengthFn(ctx, defName, defVersion)
+	}
+	return 0, nil
 }
 
 func (m *mockStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
@@ -208,22 +219,22 @@ func (m *mockStore) PollCancellation(ctx context.Context, workflowID string) (bo
 	return m.CheckCancellation(ctx, workflowID)
 }
 
-func (m *mockStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string) (string, bool, error) {
+func (m *mockStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
 	if m.startNewRunFn != nil {
-		return m.startNewRunFn(ctx, runID, defName, defVersion, input, idempotencyKey)
+		return m.startNewRunFn(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority)
 	}
 	return "test-run-id", false, nil
 }
 
-func (m *mockStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string) (string, error) {
+func (m *mockStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
 	if m.startChildWorkflowFn != nil {
-		return m.startChildWorkflowFn(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy)
+		return m.startChildWorkflowFn(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 	}
 	return "child-run-id", nil
 }
 
-func (m *mockStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event host.EventRecord) (string, error) {
-	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy)
+func (m *mockStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event engine.EventRecord, priority int) (string, error) {
+	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
 
 func (m *mockStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
@@ -247,28 +258,28 @@ func (m *mockStore) GetQueryState(ctx context.Context, workflowID, key string) (
 	return "", nil
 }
 
-func (m *mockStore) ListWorkflows(ctx context.Context, filter host.WorkflowFilter) ([]host.WorkflowInstance, error) {
+func (m *mockStore) ListWorkflows(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error) {
 	if m.listWorkflowsFn != nil {
 		return m.listWorkflowsFn(ctx, filter)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) GetWorkflowByID(ctx context.Context, id string) (*host.WorkflowInstance, error) {
+func (m *mockStore) GetWorkflowByID(ctx context.Context, id string) (*engine.WorkflowInstance, error) {
 	if m.getWorkflowByIDFn != nil {
 		return m.getWorkflowByIDFn(ctx, id)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) CreateSchedule(ctx context.Context, s host.Schedule) error {
+func (m *mockStore) CreateSchedule(ctx context.Context, s engine.Schedule) error {
 	if m.createScheduleFn != nil {
 		return m.createScheduleFn(ctx, s)
 	}
 	return nil
 }
 
-func (m *mockStore) ListSchedules(ctx context.Context) ([]host.Schedule, error) {
+func (m *mockStore) ListSchedules(ctx context.Context) ([]engine.Schedule, error) {
 	if m.listSchedulesFn != nil {
 		return m.listSchedulesFn(ctx)
 	}
@@ -289,7 +300,7 @@ func (m *mockStore) SetScheduleEnabled(ctx context.Context, name string, enabled
 	return nil
 }
 
-func (m *mockStore) GetDueSchedules(ctx context.Context) ([]host.Schedule, error) {
+func (m *mockStore) GetDueSchedules(ctx context.Context) ([]engine.Schedule, error) {
 	if m.getDueSchedulesFn != nil {
 		return m.getDueSchedulesFn(ctx)
 	}
@@ -331,7 +342,7 @@ func (m *mockStore) GetCompactionCandidates(ctx context.Context, threshold int, 
 	return nil, nil
 }
 
-func (m *mockStore) LoadCompactionState(ctx context.Context, workflowID string) (*host.CompactionState, error) {
+func (m *mockStore) LoadCompactionState(ctx context.Context, workflowID string) (*engine.CompactionState, error) {
 	if m.loadCompactionStateFn != nil {
 		return m.loadCompactionStateFn(ctx, workflowID)
 	}
@@ -373,7 +384,7 @@ func (m *mockStore) GetPromise(ctx context.Context, workflowID, promiseID string
 	return "pending", "", "", nil
 }
 
-func (m *mockStore) ListPromises(ctx context.Context, workflowID string) ([]host.PromiseInfo, error) {
+func (m *mockStore) ListPromises(ctx context.Context, workflowID string) ([]engine.PromiseInfo, error) {
 	if m.listPromisesFn != nil {
 		return m.listPromisesFn(ctx, workflowID)
 	}
@@ -387,7 +398,7 @@ func (m *mockStore) CreateUpdateRequest(ctx context.Context, workflowID, updateN
 	return nil
 }
 
-func (m *mockStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]host.UpdateRequestInfo, error) {
+func (m *mockStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
 	if m.getPendingUpdateRequestsFn != nil {
 		return m.getPendingUpdateRequestsFn(ctx, workflowID)
 	}
@@ -443,21 +454,21 @@ func (m *mockStore) ClearStickyWorker(ctx context.Context, workflowID string) er
 	return nil
 }
 
-func (m *mockStore) ListWorkflowDefs(ctx context.Context, name string) ([]host.WorkflowDef, error) {
+func (m *mockStore) ListWorkflowDefs(ctx context.Context, name string) ([]engine.WorkflowDef, error) {
 	if m.listWorkflowDefsFn != nil {
 		return m.listWorkflowDefsFn(ctx, name)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) GetWorkflowDef(ctx context.Context, name string, version int) (*host.WorkflowDef, error) {
+func (m *mockStore) GetWorkflowDef(ctx context.Context, name string, version int) (*engine.WorkflowDef, error) {
 	if m.getWorkflowDefFn != nil {
 		return m.getWorkflowDefFn(ctx, name, version)
 	}
 	return nil, nil
 }
 
-func (m *mockStore) DeployWorkflowDef(ctx context.Context, def *host.WorkflowDef) error {
+func (m *mockStore) DeployWorkflowDef(ctx context.Context, def *engine.WorkflowDef) error {
 	if m.deployWorkflowDefFn != nil {
 		return m.deployWorkflowDefFn(ctx, def)
 	}
@@ -504,7 +515,7 @@ func (m *mockStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64
 	return nil, nil
 }
 
-func (m *mockStore) LoadMemoryStats(ctx context.Context) ([]host.WorkflowMemoryStats, error) {
+func (m *mockStore) LoadMemoryStats(ctx context.Context) ([]engine.WorkflowMemoryStats, error) {
 	return nil, nil
 }
 
@@ -512,13 +523,13 @@ func (m *mockStore) QueueDepth(ctx context.Context) (int64, error) {
 	return 0, nil
 }
 
-func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []host.EventRecord, result string, queryState map[string]string) (string, error) {
+func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []engine.EventRecord, result string, queryState map[string]string, priority int) (string, error) {
 	if m.continueAsNewFn != nil {
-		return m.continueAsNewFn(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, result, queryState)
+		return m.continueAsNewFn(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, result, queryState, priority)
 	}
 	return "", nil
 }
-func (m *mockStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []host.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (m *mockStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	if m.finalizeWorkflowSegmentFn != nil {
 		return m.finalizeWorkflowSegmentFn(ctx, runID, workerID, generation, newEvents, finalStatus, result, errorCode, errorOp, queryState, nextWakeAt)
 	}
@@ -813,11 +824,11 @@ func TestRunVersions_UnknownSubcommand(t *testing.T) {
 
 func TestListVersions_All(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			if name != "" {
 				return nil, nil
 			}
-			return []host.WorkflowDef{
+			return []engine.WorkflowDef{
 				{Name: "wf-a", Version: 2, ABIVersion: 1, MinVersion: 1, Deprecated: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
 				{Name: "wf-a", Version: 1, ABIVersion: 1, MinVersion: 0, Deprecated: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
 			}, nil
@@ -848,8 +859,8 @@ func TestListVersions_All(t *testing.T) {
 
 func TestListVersions_WithName(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: name, Version: 2, ABIVersion: 1, MinVersion: 1, Deprecated: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
 				{Name: name, Version: 1, ABIVersion: 1, MinVersion: 0, Deprecated: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
 			}, nil
@@ -871,7 +882,7 @@ func TestListVersions_WithName(t *testing.T) {
 
 func TestListVersions_NoResults(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return nil, nil
 		},
 	}
@@ -885,7 +896,7 @@ func TestListVersions_NoResults(t *testing.T) {
 
 func TestListVersions_StoreError(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return nil, errors.New("connection refused")
 		},
 	}
@@ -899,8 +910,8 @@ func TestListVersions_StoreError(t *testing.T) {
 
 func TestListVersions_CollectMetricsError(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: "wf", Version: 1, CreatedAt: time.Now()},
 			}, nil
 		},
@@ -1102,8 +1113,8 @@ func TestActiveInstances_All(t *testing.T) {
 
 func TestActiveInstances_WithName(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: name, Version: 2, Deprecated: false, CreatedAt: time.Now()},
 				{Name: name, Version: 1, Deprecated: true, CreatedAt: time.Now()},
 			}, nil
@@ -1159,8 +1170,8 @@ func TestGCVersions_Success(t *testing.T) {
 	oldCreated := time.Now().Add(-60 * 24 * time.Hour)
 
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
 				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
 				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
@@ -1190,8 +1201,8 @@ func TestGCVersions_DryRun(t *testing.T) {
 	oldCreated := time.Now().Add(-60 * 24 * time.Hour)
 
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
 				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
 				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
@@ -1220,7 +1231,7 @@ func TestGCVersions_DryRun(t *testing.T) {
 
 func TestGCVersions_StoreError(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return nil, errors.New("no db connection")
 		},
 	}
@@ -1284,12 +1295,12 @@ func TestDeployWorkflow_Success(t *testing.T) {
 	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 	path := writeWASM(t, dir, wasmBytes)
 
-	var capturedDef *host.WorkflowDef
+	var capturedDef *engine.WorkflowDef
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return nil, nil
 		},
-		deployWorkflowDefFn: func(_ context.Context, def *host.WorkflowDef) error {
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
 			capturedDef = def
 			return nil
 		},
@@ -1319,8 +1330,8 @@ func TestDeployWorkflow_SameHash(t *testing.T) {
 	path := writeWASM(t, dir, wasmBytes)
 
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{
 					Name:      name,
 					Version:   1,
@@ -1329,7 +1340,7 @@ func TestDeployWorkflow_SameHash(t *testing.T) {
 				},
 			}, nil
 		},
-		deployWorkflowDefFn: func(_ context.Context, def *host.WorkflowDef) error {
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
 			t.Error("DeployWorkflowDef should not be called for unchanged WASM")
 			return nil
 		},
@@ -1353,13 +1364,13 @@ func TestDeployWorkflow_SameHashSecondIteration(t *testing.T) {
 	path := writeWASM(t, dir, wasmBytes)
 
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: name, Version: 2, WASMBytes: []byte{0, 1, 2}, CreatedAt: time.Now()},
 				{Name: name, Version: 1, WASMBytes: wasmBytes, CreatedAt: time.Now().Add(-24 * time.Hour)},
 			}, nil
 		},
-		deployWorkflowDefFn: func(_ context.Context, def *host.WorkflowDef) error {
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
 			t.Error("DeployWorkflowDef should not be called for unchanged WASM")
 			return nil
 		},
@@ -1378,10 +1389,10 @@ func TestDeployWorkflow_WithExistingVersions(t *testing.T) {
 	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 	path := writeWASM(t, dir, wasmBytes)
 
-	var capturedDef *host.WorkflowDef
+	var capturedDef *engine.WorkflowDef
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{
 					Name:       name,
 					Version:    2,
@@ -1392,7 +1403,7 @@ func TestDeployWorkflow_WithExistingVersions(t *testing.T) {
 				},
 			}, nil
 		},
-		deployWorkflowDefFn: func(_ context.Context, def *host.WorkflowDef) error {
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
 			capturedDef = def
 			return nil
 		},
@@ -1428,10 +1439,10 @@ func TestDeployWorkflow_StoreError(t *testing.T) {
 	path := writeWASM(t, dir, wasmBytes)
 
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return nil, nil
 		},
-		deployWorkflowDefFn: func(_ context.Context, def *host.WorkflowDef) error {
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
 			return errors.New("deploy rejected")
 		},
 	}
@@ -1551,12 +1562,12 @@ func TestDeployWorkflow_ListError(t *testing.T) {
 	dir := t.TempDir()
 	path := writeWASM(t, dir, []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00})
 
-	var capturedDef *host.WorkflowDef
+	var capturedDef *engine.WorkflowDef
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return nil, errors.New("list failed")
 		},
-		deployWorkflowDefFn: func(_ context.Context, def *host.WorkflowDef) error {
+		deployWorkflowDefFn: func(_ context.Context, def *engine.WorkflowDef) error {
 			capturedDef = def
 			return nil
 		},
@@ -1579,8 +1590,8 @@ func TestDeployWorkflow_ListError(t *testing.T) {
 
 func TestActiveInstances_WithNameCountError(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: name, Version: 1, Deprecated: false, CreatedAt: time.Now()},
 			}, nil
 		},
@@ -1604,8 +1615,8 @@ func TestGCVersions_WithErrors(t *testing.T) {
 	oldCreated := time.Now().Add(-60 * 24 * time.Hour)
 
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
 				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
 				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
@@ -1634,8 +1645,8 @@ func TestGCVersions_WithErrors(t *testing.T) {
 
 func TestListVersions_WithNameCountError(t *testing.T) {
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: name, Version: 1, CreatedAt: time.Now()},
 			}, nil
 		},
@@ -1672,8 +1683,8 @@ func TestGCVersions_ArgsNotDryRun(t *testing.T) {
 	oldCreated := time.Now().Add(-60 * 24 * time.Hour)
 
 	store := &mockStore{
-		listWorkflowDefsFn: func(_ context.Context, name string) ([]host.WorkflowDef, error) {
-			return []host.WorkflowDef{
+		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
+			return []engine.WorkflowDef{
 				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
 				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
 				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
@@ -1702,7 +1713,10 @@ func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64,
 	return 0, nil
 }
 
-func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]host.EventRecord, error) {
+func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error) {
+	if m.loadEventHistoryPaginatedFn != nil {
+		return m.loadEventHistoryPaginatedFn(ctx, workflowID, offset, limit)
+	}
 	return nil, nil
 }
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
@@ -1717,6 +1731,9 @@ func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVers
 	return true, nil
 }
 func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
+	if m.countEventHistoryFn != nil {
+		return m.countEventHistoryFn(ctx, workflowID)
+	}
 	return 0, nil
 }
 func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
@@ -1726,10 +1743,10 @@ func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error)
 func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
-func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]host.EventRecord, error) {
+func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []string) (map[string][]engine.EventRecord, error) {
 	return nil, nil
 }
-func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan host.EventRecord, <-chan error) {
+func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan engine.EventRecord, <-chan error) {
 	return nil, nil
 }
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
@@ -1743,4 +1760,10 @@ func (m *mockStore) GetConcurrencyKeyCount(ctx context.Context, workflowID strin
 }
 func (m *mockStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
+}
+func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	if m.getAllowedSignalCallersFn != nil {
+		return m.getAllowedSignalCallersFn(ctx, workflowID)
+	}
+	return nil, nil
 }

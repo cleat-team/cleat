@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -11,7 +12,7 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // Backend stores and retrieves blob bytes. Implementations must be safe for
@@ -53,7 +54,7 @@ func (b *memoryBackend) Get(ctx context.Context, sha256Str string) ([]byte, erro
 	}
 	var data []byte
 	err = b.db.QueryRow(ctx, plugin.Rebind(`SELECT data FROM blob_content WHERE sha256 = $1`, b.dialect), sha256Bytes).Scan(&data)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("blobstore: content not found: %s", sha256Str)
 	}
 	return data, err

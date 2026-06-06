@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // numConcurrentWorkflows returns the number of workflows to create for
@@ -24,7 +24,7 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	n := numConcurrentWorkflows()
@@ -77,9 +77,9 @@ func TestMaxConcurrentWorkflows(t *testing.T) {
 				}
 
 				// Append a few events.
-				events := []host.EventRecord{
-					{Step: 0, EventType: host.EventTypeCall, Service: "svc", Op: "start", Request: `{}`, Response: `{"ok":true}`},
-					{Step: 1, EventType: host.EventTypeCall, Service: "svc", Op: "process", Request: `{}`, Response: `{"ok":true}`},
+				events := []engine.EventRecord{
+					{Step: 0, EventType: engine.EventTypeCall, Service: "svc", Op: "start", Request: `{}`, Response: `{"ok":true}`},
+					{Step: 1, EventType: engine.EventTypeCall, Service: "svc", Op: "process", Request: `{}`, Response: `{"ok":true}`},
 				}
 				if err := store.AppendEventHistoryBatch(ctx, wfID, events); err != nil {
 					errCh <- fmt.Errorf("append events to %s: %w", wfID, err)
@@ -147,7 +147,7 @@ func TestConcurrentWorkflowMemory(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	n := numConcurrentWorkflows()
@@ -177,9 +177,9 @@ func TestConcurrentWorkflowMemory(t *testing.T) {
 
 	// Append events for each workflow.
 	for _, id := range wfIDs {
-		rec := host.EventRecord{
+		rec := engine.EventRecord{
 			Step:      0,
-			EventType: host.EventTypeCall,
+			EventType: engine.EventTypeCall,
 			Service:   "svc",
 			Op:        "op",
 			Request:   `{}`,

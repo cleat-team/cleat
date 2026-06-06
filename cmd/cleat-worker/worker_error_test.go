@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -23,13 +23,13 @@ func TestDispatchLoop_StickyEmptyGeneralStillCalled(t *testing.T) {
 	stickyCalls := 0
 	generalCalls := 0
 
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 		mu.Lock()
 		stickyCalls++
 		mu.Unlock()
 		return nil, nil
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 		mu.Lock()
 		generalCalls++
 		mu.Unlock()
@@ -74,13 +74,13 @@ func TestDispatchLoop_StickyErrorContinuesLoop(t *testing.T) {
 	stickyCalls := 0
 	generalCalls := 0
 
-	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 		mu.Lock()
 		stickyCalls++
 		mu.Unlock()
 		return nil, errors.New("sticky error (non-connection)")
 	}
-	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*host.WorkflowInstance, error) {
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 		mu.Lock()
 		generalCalls++
 		mu.Unlock()
@@ -136,7 +136,7 @@ func TestHeartbeatLoop_ConnectionErrorPreservesInflight(t *testing.T) {
 
 	w := newTestWorker(ms)
 	w.heartbeatInterval = 5 * time.Millisecond
-	w.inflight.Store("wf-1", &host.WorkflowInstance{ID: "wf-1"})
+	w.inflight.Store("wf-1", &engine.WorkflowInstance{ID: "wf-1"})
 
 	done := make(chan struct{})
 	w.wg.Add(1)
@@ -171,7 +171,7 @@ func TestHeartbeatLoop_NonConnectionErrorPreservesInflight(t *testing.T) {
 
 	w := newTestWorker(ms)
 	w.heartbeatInterval = 5 * time.Millisecond
-	w.inflight.Store("wf-1", &host.WorkflowInstance{ID: "wf-1"})
+	w.inflight.Store("wf-1", &engine.WorkflowInstance{ID: "wf-1"})
 
 	done := make(chan struct{})
 	w.wg.Add(1)

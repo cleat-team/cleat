@@ -10,11 +10,11 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // replayStoreDB is a test helper that returns both a *sql.DB and a PostgresStore.
-func replayStoreDB(t *testing.T) (*sql.DB, *host.PostgresStore) {
+func replayStoreDB(t *testing.T) (*sql.DB, *engine.PostgresStore) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("Skipping replay test in short mode")
@@ -31,7 +31,7 @@ func replayStoreDB(t *testing.T) (*sql.DB, *host.PostgresStore) {
 		t.Skipf("Skipping: cannot ping database: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return db, host.NewPostgresStore(db)
+	return db, engine.NewPostgresStore(db)
 }
 
 // cleanupReplayData removes test data left by replay tests.
@@ -69,7 +69,7 @@ func TestCrashMidWorkflowReplay(t *testing.T) {
 
 	// Append events in two batches to simulate a workflow that progressed,
 	// then crashed, and was replayed.
-	batch1 := []host.EventRecord{
+	batch1 := []engine.EventRecord{
 		{Step: 1, EventType: "call", Service: "svc", Op: "step1", Request: `{"a":1}`, Response: `{"ok":true}`},
 		{Step: 2, EventType: "call", Service: "svc", Op: "step2", Request: `{"b":2}`, Response: `{"ok":true}`},
 	}
@@ -141,7 +141,7 @@ func TestReplayProducesSameHistory(t *testing.T) {
 
 	// Append the same batch twice (idempotent) to simulate replay
 	// that re-appends already-persisted events.
-	batch := []host.EventRecord{
+	batch := []engine.EventRecord{
 		{Step: 1, EventType: "call", Service: "svc", Op: "op", Request: `{}`, Response: `{"ok":true}`},
 		{Step: 2, EventType: "call", Service: "svc2", Op: "op2", Request: `{"x":1}`, Response: `{"ok":true}`},
 		{Step: 3, EventType: "sleep", DurationMs: 5000},

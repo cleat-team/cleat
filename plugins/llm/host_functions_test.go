@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/llm/providers"
 )
 
@@ -101,7 +101,7 @@ func setupPlugin(t *testing.T, serverURL, provider string) *Plugin {
 
 func tenantCtx() context.Context {
 	return plugin.WithCallContext(context.Background(), &plugin.CallContext{
-		TenantID:   uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		TenantID:   uuid.MustParse("00000000-0000-0000-0000-000000000001").String(),
 		WorkflowID: "test-workflow",
 	})
 }

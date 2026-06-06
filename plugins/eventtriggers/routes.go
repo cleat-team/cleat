@@ -2,6 +2,7 @@ package eventtriggers
 
 import (
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RegisterRoutes registers HTTP handlers for the event-triggers plugin.
@@ -354,7 +355,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 		FROM ingested_events
 		WHERE id = $1 AND tenant_id = $2
 	`, eventID, tid).Scan(&currentStatus, &eventType, &eventDataRaw)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "event not found")
 		return
 	}

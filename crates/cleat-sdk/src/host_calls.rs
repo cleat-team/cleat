@@ -58,21 +58,23 @@ mod imports {
             run_id_ptr: *mut u8, run_id_max_len: u32,
         ) -> i64;
 
-        // cleat_child_workflow_with_options - two strings, i64 version, parentClosePolicy string, one string out
+        // cleat_child_workflow_with_options - two strings, i64 version, i64 priority, parentClosePolicy string, one string out
         pub fn cleat_child_workflow_with_options(
             name_ptr: *const u8, name_len: u32,
             input_ptr: *const u8, input_len: u32,
             version: i64,
+            priority: i64,
             policy_ptr: *const u8, policy_len: u32,
             run_id_ptr: *mut u8, run_id_max_len: u32,
         ) -> i64;
 
-        // cleat_child_workflow_in_schema - 4 strings in, i64 version, 1 string out
+        // cleat_child_workflow_in_schema - 4 strings in, i64 version, i64 priority, 1 string out
         pub fn cleat_child_workflow_in_schema(
             schema_ptr: *const u8, schema_len: u32,
             name_ptr: *const u8, name_len: u32,
             input_ptr: *const u8, input_len: u32,
             version: i64,
+            priority: i64,
             policy_ptr: *const u8, policy_len: u32,
             run_id_ptr: *mut u8, run_id_max_len: u32,
         ) -> i64;
@@ -218,6 +220,18 @@ mod imports {
         // cleat_await_all_children - ABI 2.43, one string in (JSON run_ids), one string out
         pub fn cleat_await_all_children(run_ids_ptr: *const u8, run_ids_len: u32, out_ptr: *mut u8, max_len: u32) -> i64;
 
+        // cleat_poll_child - ABI 2.44, one string in (run_id), one string out, non-blocking
+        pub fn cleat_poll_child(
+            run_id_ptr: *const u8, run_id_len: u32,
+            result_ptr: *mut u8, result_max_len: u32,
+        ) -> i64;
+
+        // cleat_await_any_child - ABI 2.45, one string in (JSON run_ids), one string out, blocking
+        pub fn cleat_await_any_child(
+            run_ids_ptr: *const u8, run_ids_len: u32,
+            result_ptr: *mut u8, result_max_len: u32,
+        ) -> i64;
+
         // cleat_call_retry - 3 string pairs, 4 i64, 1 string pair (nonRetryableErrorsJSON), 1 string out
         #[link_name = "cleat_call_retry"]
         pub fn cleat_call_with_retry(
@@ -276,6 +290,23 @@ mod imports {
             input_ptr: *const u8, input_len: u32,
             response_ptr: *mut u8, response_max_len: u32,
         ) -> i64;
+
+        // cleat_json_parse - (ptr,len, ptr,maxLen) -> i64 (ABI 2.51)
+        // Validates and canonicalizes JSON via the host's encoding/json.
+        #[cfg(target_arch = "wasm32")]
+        pub fn cleat_json_parse(
+            json_ptr: *const u8, json_len: u32,
+            out_ptr: *mut u8, out_max_len: u32,
+        ) -> i64;
+
+        // cleat_json_stringify - (ptr,len, ptr,maxLen) -> i64 (ABI 2.52)
+        // Validates and re-serializes JSON via the host's encoding/json.
+        // Identical behavior to cleat_json_parse; provided as a semantic alias.
+        #[cfg(target_arch = "wasm32")]
+        pub fn cleat_json_stringify(
+            ptr: *const u8, len: u32,
+            out_ptr: *mut u8, out_max_len: u32,
+        ) -> i64;
     }
 }
 
@@ -288,6 +319,8 @@ pub struct ChildWorkflowOptions {
     pub version: i64,
     /// Parent close policy for the child workflow (e.g. "abandon", "terminate", "request_cancel").
     pub parent_close_policy: String,
+    /// Priority for scheduling child workflow execution. 0 = highest priority; lower numbers are picked first.
+    pub priority: i32,
 }
 
 
@@ -475,6 +508,7 @@ impl HostCalls {
                 name.as_ptr(), name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
                 opts.version,
+                opts.priority as i64,
                 opts.parent_close_policy.as_ptr(), opts.parent_close_policy.len() as u32,
                 run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
@@ -491,7 +525,7 @@ impl HostCalls {
     /// Mirrors Go's ChildWorkflowInSchema.
     pub fn child_workflow_in_schema(
         &self, target_schema: &str, name: &str, input_json: &str,
-        version: i64, parent_close_policy: &str,
+        version: i64, priority: i64, parent_close_policy: &str,
     ) -> (String, Option<String>) {
         let mut run_id_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
         let result = unsafe {
@@ -500,6 +534,7 @@ impl HostCalls {
                 name.as_ptr(), name.len() as u32,
                 input_json.as_ptr(), input_json.len() as u32,
                 version,
+                priority,
                 parent_close_policy.as_ptr(), parent_close_policy.len() as u32,
                 run_id_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
             )
@@ -1103,6 +1138,44 @@ impl HostCalls {
         Ok(resp)
     }
 
+    /// Poll a single child workflow for completion without suspending. Returns (result, error).
+    pub fn poll_child(&self, run_id: &str) -> (String, Option<String>) {
+        let mut result_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let r = unsafe {
+            imports::cleat_poll_child(
+                run_id.as_ptr(), run_id.len() as u32,
+                result_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (result_len, err_code) = memory::decode_simple_result(r);
+        if err_code != 0 {
+            return (String::new(), Some(format!("poll_child(run_id=\"{}\") failed: host error code {}. Check that the run ID is valid.", run_id, err_code)));
+        }
+        let result = unsafe { memory::read_string(result_buf.as_ptr(), result_len) };
+        (result, None)
+    }
+
+    /// Await any of the given child workflows to complete. Returns the result JSON.
+    pub fn await_any_child(&self, run_ids: &[&str]) -> Result<String, String> {
+        let run_ids_json = serde_json::to_string(run_ids).map_err(|e| format!("serialize run_ids: {}", e))?;
+        let mut buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_await_any_child(
+                run_ids_json.as_ptr(), run_ids_json.len() as u32,
+                buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        if result == memory::SUSPEND_SENTINEL {
+            std::panic::panic_any(crate::SuspendSentinel);
+        }
+        let (result_len, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 {
+            return Err(format!("await_any_child(run_ids={}) failed: host error code {}. Check that the run IDs are valid.", run_ids_json, err_code));
+        }
+        let resp = unsafe { memory::read_string(buf.as_ptr(), result_len) };
+        Ok(resp)
+    }
+
     /// Typed version of child_workflow using serde for serialization.
     pub fn child_workflow_typed<T: serde::Serialize>(&self, name: &str, input: &T) -> Result<String, String> {
         let input_json = serde_json::to_string(input).map_err(|e| format!("serialize input: {}", e))?;
@@ -1352,6 +1425,65 @@ impl HostCalls {
             return Err(e);
         }
         serde_json::from_str(&resp_json).map_err(|e| format!("deserialize response: {}", e))
+    }
+
+    /// Validate and canonicalize a JSON string via the host's encoding/json.
+    ///
+    /// Parses the input JSON, then re-serializes it with sorted keys and
+    /// canonical formatting. Returns `Some(normalized_json)` on success,
+    /// `None` if the input is not valid JSON or exceeds the 65536-byte
+    /// output buffer.
+    #[cfg(target_arch = "wasm32")]
+    pub fn json_parse(&self, json: &str) -> Option<String> {
+        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_json_parse(
+                json.as_ptr(), json.len() as u32,
+                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (written, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 || written == 0 {
+            return None;
+        }
+        Some(unsafe { memory::read_string(out_buf.as_ptr(), written) })
+    }
+
+    /// Non-WASM stub for `json_parse`.
+    /// Returns the input unchanged (no host normalization available on native targets).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn json_parse(&self, json: &str) -> Option<String> {
+        Some(json.to_string())
+    }
+
+    /// Validate and re-serialize a JSON value via the host's encoding/json.
+    ///
+    /// Identical behavior to `json_parse` — both parse then re-serialize
+    /// through the host's `encoding/json`. Provided as a semantic alias for
+    /// SDK ergonomics. Returns `Some(normalized_json)` on success,
+    /// `None` if the input is not valid JSON or exceeds the 65536-byte
+    /// output buffer.
+    #[cfg(target_arch = "wasm32")]
+    pub fn json_stringify(&self, value: &str) -> Option<String> {
+        let mut out_buf = vec![0u8; memory::OUT_BUF_SIZE as usize];
+        let result = unsafe {
+            imports::cleat_json_stringify(
+                value.as_ptr(), value.len() as u32,
+                out_buf.as_mut_ptr(), memory::OUT_BUF_SIZE,
+            )
+        };
+        let (written, err_code) = memory::decode_simple_result(result);
+        if err_code != 0 || written == 0 {
+            return None;
+        }
+        Some(unsafe { memory::read_string(out_buf.as_ptr(), written) })
+    }
+
+    /// Non-WASM stub for `json_stringify`.
+    /// Returns the input unchanged (no host normalization available on native targets).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn json_stringify(&self, value: &str) -> Option<String> {
+        Some(value.to_string())
     }
 }
 

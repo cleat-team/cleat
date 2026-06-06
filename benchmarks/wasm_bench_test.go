@@ -1,7 +1,7 @@
 // Package benchmarks provides performance benchmarks for the cleat durable
 // workflow engine's WASM runtime. These benchmarks measure the cost of
 // compiling, instantiating, and executing WASM modules via the internal
-// host.Runtime and host.Engine, capturing realistic end-to-end overhead.
+// engine.Runtime and engine.Engine, capturing realistic end-to-end overhead.
 //
 // Tier 1 benchmarks are always runnable with no external tooling.
 // Tier 2 benchmarks require tinygo and will skip gracefully if unavailable.
@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ func BenchmarkCompilationInstantiation(b *testing.B) {
 	ctx := context.Background()
 	wasmBytes := minimalWasm()
 
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
@@ -68,7 +68,7 @@ func BenchmarkPayloadRoundTrip(b *testing.B) {
 	ctx := context.Background()
 	wasmBytes := minimalWasmWithMemory()
 
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
@@ -139,21 +139,21 @@ func BenchmarkEndToEndLatency(b *testing.B) {
 	wasmBytes := buildBenchWasm(b)
 	ctx := context.Background()
 
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
 	defer rt.Close(ctx)
 
 	caller := &benchCaller{}
-	engine := host.NewEngine(rt, caller)
+	eng := engine.NewEngine(rt, caller)
 
 	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		result, _, _, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+		result, _, _, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 		if err != nil {
 			b.Fatalf("Execute: %v", err)
 		}
@@ -168,14 +168,14 @@ func BenchmarkFreshThroughput(b *testing.B) {
 	wasmBytes := buildBenchWasm(b)
 	ctx := context.Background()
 
-	rt, err := host.NewRuntime(ctx, 0, 0)
+	rt, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
 	defer rt.Close(ctx)
 
 	caller := &benchCaller{}
-	engine := host.NewEngine(rt, caller)
+	eng := engine.NewEngine(rt, caller)
 
 	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
@@ -183,7 +183,7 @@ func BenchmarkFreshThroughput(b *testing.B) {
 	start := time.Now()
 
 	for i := 0; i < b.N; i++ {
-		result, _, _, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", input)
+		result, _, _, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", input)
 		if err != nil {
 			b.Fatalf("Execute: %v", err)
 		}
@@ -206,14 +206,14 @@ func BenchmarkReplayThroughput(b *testing.B) {
 	ctx := context.Background()
 
 	// Step 1: Execute once to capture full event history.
-	rtExecute, err := host.NewRuntime(ctx, 0, 0)
+	rtExecute, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
 	defer rtExecute.Close(ctx)
 
 	caller := &benchCaller{}
-	engineExecute := host.NewEngine(rtExecute, caller)
+	engineExecute := engine.NewEngine(rtExecute, caller)
 
 	input := json.RawMessage(`{"UserID":"test-user","Cart":[{"SKU":"ABC-123","Quantity":2}]}`)
 
@@ -227,13 +227,13 @@ func BenchmarkReplayThroughput(b *testing.B) {
 	_ = result
 
 	// Step 2: Create a fresh engine for replay and benchmark the replay loop.
-	rtReplay, err := host.NewRuntime(ctx, 0, 0)
+	rtReplay, err := engine.NewRuntime(ctx, 0, 0)
 	if err != nil {
 		b.Fatalf("NewRuntime: %v", err)
 	}
 	defer rtReplay.Close(ctx)
 
-	engineReplay := host.NewEngine(rtReplay, caller)
+	engineReplay := engine.NewEngine(rtReplay, caller)
 
 	b.ResetTimer()
 	start := time.Now()

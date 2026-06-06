@@ -1,6 +1,6 @@
 package blobstore
 
-import "github.com/cleat-team/cleat/internal/plugin"
+import "github.com/cleat-team/cleat/plugin"
 
 // Migrations returns the database schema for blob storage. Tables are
 // idempotent (IF NOT EXISTS) and safe to run multiple times.

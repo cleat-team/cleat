@@ -3,6 +3,7 @@ package blobstore
 import (
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,8 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
 
 )
 
@@ -190,7 +191,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 		JOIN blob_content c ON i.sha256 = c.sha256
 		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
 	`, p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "blob not found")
 		return
 	}
@@ -248,7 +249,7 @@ func (p *Plugin) handleHead(w http.ResponseWriter, r *http.Request) {
 		JOIN blob_content c ON i.sha256 = c.sha256
 		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
 	`, p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "blob not found")
 		return
 	}

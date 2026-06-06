@@ -3,6 +3,7 @@ package kvstore
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,8 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -68,7 +69,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 		FROM kv_store
 		WHERE tenant_id = $1 AND key = $2
 	`, p.dialect), tid, key).Scan(&value, &version, &createdAt, &updatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "key not found")
 		return
 	}
@@ -156,7 +157,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 			err = p.db.QueryRow(r.Context(), plugin.Rebind(updateKVReturning.For(p.dialect), p.dialect),
 				value, tid, key, expectedVersion).Scan(&newVersion)
 		}
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			p.writeError(w, 409, "conflict: version mismatch")
 			return
 		}

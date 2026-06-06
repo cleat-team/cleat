@@ -867,7 +867,7 @@ class LocalHostCalls:
     def child_workflow_with_options(
         self, name: str, input: Any, options: ChildWorkflowOptions = ChildWorkflowOptions()
     ) -> str:
-        """Start a child workflow instance with version options."""
+        """Start a child workflow instance with version and priority options."""
         if self._mode == "replay":
             return self._replay_next("child_workflow_with_options")
         run_id = self.child_workflow(name, input)

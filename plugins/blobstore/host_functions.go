@@ -4,13 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -68,7 +68,7 @@ type blobGetOutput struct {
 // index entry.
 func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("blobstore: no tenant context")
 	}
 
@@ -163,7 +163,7 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 // along with metadata. Returns an error if the blob is not found or has expired.
 func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("blobstore: no tenant context")
 	}
 
@@ -187,7 +187,7 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 		JOIN blob_content c ON i.sha256 = c.sha256
 		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
 	`, p.dialect), input.Key, cc.TenantID).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("blobstore: blob not found: %s", input.Key)
 	}
 	if err != nil {

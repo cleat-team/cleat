@@ -64,6 +64,20 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 		}
 	}
 
+	// Phase 1b: Methods on PluginCaller types are trusted boundaries -- auto-threaded.
+	for name := range durableSet {
+		if threaded[name] {
+			continue
+		}
+		fd := result.Funcs[name]
+		if fd == nil || fd.RecvType == nil {
+			continue
+		}
+		if analyzer.ImplementsPluginCaller(fd.RecvType) {
+			threaded[name] = true
+		}
+	}
+
 	// Phase 2: Functions called by threaded callers that pass their
 	// HostCalls as an argument become threaded transitively.
 	changed := true

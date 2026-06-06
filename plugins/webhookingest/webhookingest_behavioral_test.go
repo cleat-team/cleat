@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -841,7 +841,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -851,7 +851,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	}
 
 	// Auth middleware for management routes; ingest route works without auth.
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 	return p, handler, store
 }
 
@@ -1262,7 +1262,7 @@ func TestIngestDisabledSource(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -1271,7 +1271,7 @@ func TestIngestDisabledSource(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(`{"test":true}`)))
 	rec := httptest.NewRecorder()
@@ -1314,7 +1314,7 @@ func TestBackgroundRetryWorker(t *testing.T) {
 
 	signalChan := make(chan string, 1)
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
@@ -1380,12 +1380,12 @@ func TestAwaitWebhookHostFunction(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
 	// Call awaitWebhook with context containing tenant info.
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	input, _ := json.Marshal(map[string]interface{}{
@@ -1429,11 +1429,11 @@ func TestAwaitWebhookNoEvents(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	input, _ := json.Marshal(map[string]interface{}{
@@ -1732,7 +1732,7 @@ func TestIngestWithSignalDelivery(t *testing.T) {
 
 	signalChan := make(chan string, 1)
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
@@ -1746,7 +1746,7 @@ func TestIngestWithSignalDelivery(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	// Ingest a payload.
 	payload := `{"action":"triggered"}`
@@ -1898,7 +1898,7 @@ func TestMarkRetryFailed(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -1959,7 +1959,7 @@ func TestRetryEventNoSignalWorkflow(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -1997,7 +1997,7 @@ func TestRetryEventSignalDeliveryFailure(t *testing.T) {
 
 	signalCalled := false
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
@@ -2066,7 +2066,7 @@ func TestWH_Init_NilLogger(t *testing.T) {
 	p := &Plugin{}
 	ctx := context.Background()
 	env := &plugin.Environment{
-		DB:  &host.SQLDBAdapter{DB: sql.OpenDB(&fakeConnector{store: newFakeDBStore()})},
+		DB:  &engine.SQLDBAdapter{DB: sql.OpenDB(&fakeConnector{store: newFakeDBStore()})},
 		Mux: http.NewServeMux(),
 	}
 	err := p.Init(ctx, env)
@@ -2288,7 +2288,7 @@ func TestWH_ListSources_TenantIsolation(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -2296,7 +2296,7 @@ func TestWH_ListSources_TenantIsolation(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	// Tenant 1 lists sources.
 	req := httptest.NewRequest("GET", "/ingest/sources", nil)
@@ -2449,7 +2449,7 @@ func TestWH_Run_WithDB(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -2472,7 +2472,7 @@ func TestWH_ProcessBatch_QueryError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -2520,7 +2520,7 @@ func TestWH_ProcessBatch_ScanError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -2549,7 +2549,7 @@ func TestWH_AwaitWebhook_NoTenant(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -2576,11 +2576,11 @@ func TestWH_AwaitWebhook_InvalidSourceID(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	// Call with invalid source_id.
@@ -2606,11 +2606,11 @@ func TestWH_AwaitWebhook_InvalidJSON(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	// Call with invalid JSON input.
@@ -2666,7 +2666,7 @@ func TestWH_Ingest_BodyReadError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -2674,7 +2674,7 @@ func TestWH_Ingest_BodyReadError(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	// Send request with a body that fails on Read.
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), &errReadCloser{})
@@ -2725,7 +2725,7 @@ func TestWH_Ingest_SignalWorkflowError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
@@ -2738,7 +2738,7 @@ func TestWH_Ingest_SignalWorkflowError(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	// Ingest a payload.
 	payload := `{"action":"test"}`
@@ -2776,7 +2776,7 @@ func TestWH_Ingest_EmptySignalName(t *testing.T) {
 
 	signalNameCh := make(chan string, 1)
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
@@ -2790,7 +2790,7 @@ func TestWH_Ingest_EmptySignalName(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	// Ingest a payload.
 	payload := `{"action":"test"}`
@@ -2837,7 +2837,7 @@ func TestWH_Ingest_NonJSONBodyWithSignal(t *testing.T) {
 
 	signalPayloadCh := make(chan string, 1)
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
@@ -2851,7 +2851,7 @@ func TestWH_Ingest_NonJSONBodyWithSignal(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	// Ingest a non-JSON plain text body.
 	rawText := "plain text body"
@@ -2905,11 +2905,11 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	input, _ := json.Marshal(map[string]interface{}{
@@ -2952,11 +2952,11 @@ func TestWH_AwaitWebhook_ExecError(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-wf"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	input, _ := json.Marshal(map[string]interface{}{
@@ -3084,7 +3084,7 @@ func TestWH_ProcessBatch_RowsErr(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 
@@ -3130,7 +3130,7 @@ func TestWH_ProcessBatch_CorruptScan(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 

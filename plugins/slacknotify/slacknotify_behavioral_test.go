@@ -19,9 +19,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -493,7 +493,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -503,7 +503,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 	return p, handler, store
 }
 
@@ -762,7 +762,7 @@ func TestSendMessage(t *testing.T) {
 	defer ts.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -782,7 +782,7 @@ func TestSendMessage(t *testing.T) {
 	inputJSON, _ := json.Marshal(input)
 
 	// Call sendMessage with a context containing tenant context.
-	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	output, err := p.sendMessage(ctx, string(inputJSON))
@@ -850,7 +850,7 @@ func TestSN_RegisterHostFunctions_NilRegistry(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -865,7 +865,7 @@ func TestSN_RegisterHostFunctions_Valid(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1067,7 +1067,7 @@ func TestSN_ErrorPaths_DBError_Create(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1095,7 +1095,7 @@ func TestSN_ErrorPaths_DBError_List(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1123,7 +1123,7 @@ func TestSN_ErrorPaths_DBError_Get(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1151,7 +1151,7 @@ func TestSN_ErrorPaths_DBError_Update(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1179,7 +1179,7 @@ func TestSN_ErrorPaths_DBError_Delete(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1204,7 +1204,7 @@ func TestSN_SendMessage_MissingTenant(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -1222,12 +1222,12 @@ func TestSN_SendMessage_InvalidJSON(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	_, err := p.sendMessage(ctx, `not json`)
 	if err == nil || !strings.Contains(err.Error(), "invalid input") {
 		t.Fatalf("expected invalid input error, got: %v", err)
@@ -1240,12 +1240,12 @@ func TestSN_SendMessage_MissingConfigID(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	_, err := p.sendMessage(ctx, `{"text":"hello"}`)
 	if err == nil || !strings.Contains(err.Error(), "config_id is required") {
 		t.Fatalf("expected config_id required error, got: %v", err)
@@ -1258,12 +1258,12 @@ func TestSN_SendMessage_MissingText(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	_, err := p.sendMessage(ctx, `{"config_id":"00000000-0000-0000-0000-000000000001","text":""}`)
 	if err == nil || !strings.Contains(err.Error(), "text is required") {
 		t.Fatalf("expected text required error, got: %v", err)
@@ -1276,12 +1276,12 @@ func TestSN_SendMessage_ConfigNotFound(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	// No config seeded -> config not found.
 	_, err := p.sendMessage(ctx, `{"config_id":"00000000-0000-0000-0000-000000000001","text":"hello"}`)
 	if err == nil || !strings.Contains(err.Error(), "config not found") {
@@ -1313,12 +1313,12 @@ func TestSN_SendMessage_WebhookError(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	_, err := p.sendMessage(ctx, `{"config_id":"`+cfgID.String()+`","text":"hello"}`)
 	if err == nil || !strings.Contains(err.Error(), "webhook returned") {
 		t.Fatalf("expected webhook error, got: %v", err)
@@ -1349,12 +1349,12 @@ func TestSN_SendMessage_NonJSONResponse(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID.String()})
 	out, err := p.sendMessage(ctx, `{"config_id":"`+cfgID.String()+`","text":"hello"}`)
 	if err != nil {
 		t.Fatalf("sendMessage: %v", err)

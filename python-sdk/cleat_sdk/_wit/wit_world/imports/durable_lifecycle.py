@@ -6,18 +6,17 @@ Workflow lifecycle operations (defer, compaction, cancellation).
 
 
 
-
-def durable_defer(desc_ptr: int, desc_len: int, defer_id_ptr: int, defer_id_max_len: int) -> int:
+def durable_defer(desc: str) -> str:
     """
     Register a deferred cleanup action to run on workflow exit.
     """
     raise NotImplementedError
-def durable_continue_as_new(input_ptr: int, input_len: int) -> int:
+def durable_continue_as_new(input: str) -> int:
     """
     Replace workflow input and restart execution (history compaction).
     """
     raise NotImplementedError
-def durable_poll_cancellation(reason_ptr: int, reason_max_len: int) -> int:
+def durable_poll_cancellation() -> str:
     """
     Check if workflow cancellation has been requested.
     """

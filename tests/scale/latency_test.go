@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // TestLatencyP50 measures the median (P50) latency for a single event append
@@ -18,7 +18,7 @@ func TestLatencyP50(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	const numSamples = 100
@@ -35,9 +35,9 @@ func TestLatencyP50(t *testing.T) {
 		defer db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 		defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 
-		rec := host.EventRecord{
+		rec := engine.EventRecord{
 			Step:      0,
-			EventType: host.EventTypeCall,
+			EventType: engine.EventTypeCall,
 			Service:   "svc",
 			Op:        "op",
 			Request:   `{}`,
@@ -74,7 +74,7 @@ func TestLatencyP99(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	const numSamples = 200
@@ -101,9 +101,9 @@ func TestLatencyP99(t *testing.T) {
 			defer db.Exec(`DELETE FROM event_history WHERE workflow_id = $1`, id)
 			defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 
-			rec := host.EventRecord{
+			rec := engine.EventRecord{
 				Step:      0,
-				EventType: host.EventTypeCall,
+				EventType: engine.EventTypeCall,
 				Service:   "svc",
 				Op:        "op",
 				Request:   `{}`,
@@ -151,7 +151,7 @@ func TestLatencyUnderConcurrency(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	concurrencyLevels := []int{1, 5, 10, 25, 50}
@@ -179,9 +179,9 @@ func TestLatencyUnderConcurrency(t *testing.T) {
 					defer db.Exec(`DELETE FROM workflow_instances WHERE id = $1`, id)
 
 					for step := 0; step < eventsPerWF; step++ {
-						rec := host.EventRecord{
+						rec := engine.EventRecord{
 							Step:      step,
-							EventType: host.EventTypeCall,
+							EventType: engine.EventTypeCall,
 							Service:   "svc",
 							Op:        "op",
 							Request:   `{}`,

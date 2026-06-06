@@ -1,7 +1,7 @@
 package backendkit
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -58,18 +58,23 @@ func (rw *responseWriter) WriteHeader(code int) {
 	rw.ResponseWriter.WriteHeader(code)
 }
 
-// LoggingMiddleware logs each request with method, path, status code, and duration.
-func LoggingMiddleware() func(http.Handler) http.Handler {
+// LoggingMiddleware logs each request as structured key=value pairs via slog.
+// Pass nil for logger to use slog.Default().
+func LoggingMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			rw := newResponseWriter(w)
 			next.ServeHTTP(rw, r)
-			log.Printf("%s %s %d %s",
-				r.Method,
-				r.URL.Path,
-				rw.statusCode,
-				time.Since(start).Round(time.Microsecond),
+			logger.Info("request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", rw.statusCode,
+				"duration", time.Since(start).Round(time.Microsecond).String(),
+				"request_id", rw.Header().Get("X-Request-ID"),
 			)
 		})
 	}

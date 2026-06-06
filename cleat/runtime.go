@@ -25,7 +25,7 @@ import (
 // SuspendSentinel is a sentinel panic value used to suspend workflow execution.
 // When the host returns a suspend signal (e.g., from DurableSleep), the
 // WASM adapter panics with this value. The export wrapper catches it and
-// returns a suspend status code to the host.
+// returns a suspend status code to the engine.
 type SuspendSentinel struct{}
 
 func (SuspendSentinel) Error() string { return "durable: workflow suspended" }
@@ -76,7 +76,7 @@ type Caller interface {
 	DurableCallJSONWithOptions(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 
 	// DurableCallWithHeartbeat makes a long-running durable API call and
-	// invokes onProgress periodically with status updates from the host.
+	// invokes onProgress periodically with status updates from the engine.
 	// The heartbeatInterval controls how often the host sends progress
 	// events. onProgress receives a JSON string with implementation-specific
 	// progress details. Falls back to a regular DurableCall if the host
@@ -269,6 +269,14 @@ type Lifecycle interface {
 	// complete. Results are returned in the same order as runIDs. Unlike
 	// calling AwaitChild in a loop, all children are awaited concurrently.
 	AwaitAllChildren(runIDs []string) ([]ChildResult, error)
+
+	// AwaitAnyChild blocks until at least one child workflow from the set completes.
+	// Returns the runID, result, and any error. This is "wait for any child."
+	AwaitAnyChild(runIDs []string) (completedRunID string, result string, err error)
+
+	// PollChild checks a child's status without blocking.
+	// Returns status ("running", "completed", "failed"), result, and any error.
+	PollChild(runID string) (status string, result string, err error)
 
 	// ChildWorkflowTyped starts a child workflow with typed input.
 	// Marshals request to JSON internally. Use AwaitChildTyped to
@@ -699,12 +707,16 @@ const (
 	ParentClosePolicyRequestCancel ParentClosePolicy = "REQUEST_CANCEL" // Cancellation is requested on children
 )
 
-// ChildWorkflowOptions carries version resolution and parent close policy
-// configuration for spawning a child workflow.
+// ChildWorkflowOptions carries version resolution, parent close policy, and
+// priority configuration for spawning a child workflow.
 //
 // Version resolution priority:
 //  1. Version > 0: use that explicit version
 //  2. Version <= 0 (default): child uses the same version as the parent workflow
+//
+// Priority (0 = highest, lower numbers are picked first):
+//  Children do NOT inherit the parent's priority. An explicit priority must
+//  be set via the Priority field.
 type ChildWorkflowOptions struct {
 	Version int // 0 = use default resolution (parent's version)
 
@@ -712,6 +724,11 @@ type ChildWorkflowOptions struct {
 	// the parent workflow completes or fails.
 	// Default: ParentClosePolicyAbandon (current behavior, children continue running).
 	ParentClosePolicy ParentClosePolicy
+
+	// Priority controls scheduling order. 0 = highest priority;
+	// lower numbers are scheduled first. Children do NOT inherit
+	// the parent's priority.
+	Priority int
 }
 
 // ---- Call options ----
@@ -803,9 +820,11 @@ type HostCallsImpl struct {
 	continueAsNew             func(newInputJSON string) error
 	continueAsNewWithVersion func(newInputJSON string, newVersion int64) error
 	childWorkflow             func(name, inputJSON string) (string, error)
-	childWorkflowWithOptions  func(name, inputJSON string, version int, parentClosePolicy string) (string, error)
+	childWorkflowWithOptions  func(name, inputJSON string, version int, parentClosePolicy string, priority int) (string, error)
 	awaitChild                func(runID string) (string, error)
 	awaitAllChildren           func(runIDs []string) ([]ChildResult, error)
+	awaitAnyChild              func(runIDs []string) (completedRunID string, result string, err error)
+	pollChild                  func(runID string) (status string, result string, err error)
 	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
 	childWorkflowTyped        func(name string, request interface{}) (string, error)
 	awaitChildTyped           func(runID string, result interface{}) error
@@ -881,6 +900,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		childWorkflowWithOptions:  opts.ChildWorkflowWithOptions,
 		awaitChild:                opts.AwaitChild,
 		awaitAllChildren:           opts.AwaitAllChildren,
+		awaitAnyChild:              opts.AwaitAnyChild,
+		pollChild:                  opts.PollChild,
 		durableCallTypedWithHeartbeat: opts.DurableCallTypedWithHeartbeat,
 		childWorkflowTyped:        opts.ChildWorkflowTyped,
 		awaitChildTyped:           opts.AwaitChildTyped,
@@ -947,6 +968,7 @@ type HostCallsOptions struct {
 	DurableCallJSONWithOptions func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 	DurableCallWithHeartbeat   func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
 	DurableSleep              func(ms int64)
+		DurableSleepMs            func(ms int64)
 	DurableAwaitSignals       func(signalNames []string, timeoutMs int64) (string, string, bool, error)
 	CreatePromise func(name string) (promiseID string, err error)
 	AwaitPromise  func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
@@ -962,9 +984,11 @@ type HostCallsOptions struct {
 	ContinueAsNew                func(newInputJSON string) error
 	ContinueAsNewWithVersion     func(newInputJSON string, newVersion int64) error
 	ChildWorkflow                func(name, inputJSON string) (string, error)
-	ChildWorkflowWithOptions    func(name, inputJSON string, version int, parentClosePolicy string) (string, error)
+	ChildWorkflowWithOptions    func(name, inputJSON string, version int, parentClosePolicy string, priority int) (string, error)
 	AwaitChild                   func(runID string) (string, error)
 	AwaitAllChildren              func(runIDs []string) ([]ChildResult, error)
+	AwaitAnyChild                 func(runIDs []string) (completedRunID string, result string, err error)
+	PollChild                     func(runID string) (status string, result string, err error)
 	DurableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
 	DurableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
 	ChildWorkflowTyped           func(name string, request interface{}) (string, error)
@@ -1673,7 +1697,7 @@ func (h *HostCallsImpl) ChildWorkflow(name, inputJSON string) (string, error) {
 
 func (h *HostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts ChildWorkflowOptions) (string, error) {
 	if h.childWorkflowWithOptions != nil {
-		return h.childWorkflowWithOptions(name, inputJSON, opts.Version, string(opts.ParentClosePolicy))
+		return h.childWorkflowWithOptions(name, inputJSON, opts.Version, string(opts.ParentClosePolicy), opts.Priority)
 	}
 	// Fall back to plain ChildWorkflow if options handler is not available.
 	// ParentClosePolicy defaults to Abandon in this case (current behavior).
@@ -1692,6 +1716,20 @@ func (h *HostCallsImpl) AwaitAllChildren(runIDs []string) ([]ChildResult, error)
 		return nil, errors.New("durable: AwaitAllChildren can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
 	return h.awaitAllChildren(runIDs)
+}
+
+func (h *HostCallsImpl) AwaitAnyChild(runIDs []string) (string, string, error) {
+	if h.awaitAnyChild == nil {
+		return "", "", errors.New("durable: AwaitAnyChild can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	}
+	return h.awaitAnyChild(runIDs)
+}
+
+func (h *HostCallsImpl) PollChild(runID string) (string, string, error) {
+	if h.pollChild == nil {
+		return "", "", errors.New("durable: PollChild can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
+	}
+	return h.pollChild(runID)
 }
 
 func (h *HostCallsImpl) ChildWorkflowTyped(name string, request interface{}) (string, error) {

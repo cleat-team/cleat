@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -319,7 +319,7 @@ func newFFPlugin(t *testing.T) (*Plugin, *ffDB, *sql.DB) {
 	fdb := newFFDB()
 	rawDB := sql.OpenDB(&ffConnector{db: fdb})
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: rawDB},
+		db:     &engine.SQLDBAdapter{DB: rawDB},
 		mux:    http.NewServeMux(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -396,7 +396,7 @@ func TestFF_EvaluateFlag_MissingTenant(t *testing.T) {
 func TestFF_EvaluateFlag_InvalidJSON(t *testing.T) {
 	p, _, _ := newFFPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001").String(),
 	})
 	_, err := p.evaluateFlag(ctx, `not json`)
 	if err == nil || !strings.Contains(err.Error(), "invalid input") {
@@ -407,7 +407,7 @@ func TestFF_EvaluateFlag_InvalidJSON(t *testing.T) {
 func TestFF_EvaluateFlag_MissingKey(t *testing.T) {
 	p, _, _ := newFFPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001").String(),
 	})
 	_, err := p.evaluateFlag(ctx, `{"key":""}`)
 	if err == nil || !strings.Contains(err.Error(), "key is required") {
@@ -840,7 +840,7 @@ func TestFF_CreateFlag_NilRulesDefaultsToEmptyArray(t *testing.T) {
 func TestFF_Init_WithConfig(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: sql.OpenDB(&ffConnector{db: newFFDB()})},
+		DB:     &engine.SQLDBAdapter{DB: sql.OpenDB(&ffConnector{db: newFFDB()})},
 		Mux:    http.NewServeMux(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Config: json.RawMessage(`{"default_rollout":50}`),
@@ -856,7 +856,7 @@ func TestFF_Init_WithConfig(t *testing.T) {
 func TestFF_Init_InvalidConfig(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	env := &plugin.Environment{
-		DB:     &host.SQLDBAdapter{DB: sql.OpenDB(&ffConnector{db: newFFDB()})},
+		DB:     &engine.SQLDBAdapter{DB: sql.OpenDB(&ffConnector{db: newFFDB()})},
 		Mux:    http.NewServeMux(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Config: json.RawMessage(`not json`),
@@ -874,7 +874,7 @@ func TestFF_Init_InvalidConfig(t *testing.T) {
 func TestFF_EvaluateFlag_DBLookup_NotFound(t *testing.T) {
 	p, _, _ := newFFPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{
-		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+		TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001").String(),
 	})
 	_, err := p.evaluateFlag(ctx, `{"key":"missing_flag"}`)
 	if err == nil || !strings.Contains(err.Error(), "flag not found") {
@@ -892,7 +892,7 @@ func TestFF_EvaluateFlag_DBLookup_Disabled(t *testing.T) {
 	}
 	fdb.mu.Unlock()
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: tid})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{	TenantID: tid.String()})
 	out, err := p.evaluateFlag(ctx, `{"key":"disabled_flag"}`)
 	if err != nil {
 		t.Fatalf("evaluateFlag: %v", err)
@@ -914,7 +914,7 @@ func TestFF_EvaluateFlag_DBLookup_Enabled(t *testing.T) {
 	}
 	fdb.mu.Unlock()
 
-	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: tid})
+	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{	TenantID: tid.String()})
 	out, err := p.evaluateFlag(ctx, `{"key":"enabled_flag","context":{"user_id":"user1"}}`)
 	if err != nil {
 		t.Fatalf("evaluateFlag: %v", err)

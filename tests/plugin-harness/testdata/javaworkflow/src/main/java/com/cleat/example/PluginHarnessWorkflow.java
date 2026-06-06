@@ -104,6 +104,22 @@ public class PluginHarnessWorkflow {
         call(sb, "llm.list_models", h, "llm", "list_models",
              "{\"provider\":\"openai\"}");
 
+        // -- llm chat_stream (streaming) ----------------------------------------
+        sb.append(",");
+        sb.append("\"llm.chat_stream\":");
+        CleatResult<String> streamResult = h.pluginCallStreaming(
+            "llm", "chat_stream",
+            "{\"provider\":\"openai\",\"model\":\"mock-model\"," +
+            "\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}");
+        if (streamResult.isErr()) {
+            sb.append("{\"error\":\"")
+              .append(escapeJson(streamResult.getError()))
+              .append("\"}");
+        } else {
+            String val = streamResult.getValue();
+            sb.append(val != null && !val.isEmpty() ? val : "{}");
+        }
+
         sb.append("}");
         return sb.toString();
     }
@@ -125,7 +141,8 @@ public class PluginHarnessWorkflow {
         if (result.isErr()) {
             sb.append("{\"error\":\"").append(escapeJson(result.getError())).append("\"}");
         } else {
-            sb.append(result.getValue());
+            String val = result.getValue();
+            sb.append(val != null && !val.isEmpty() ? val : "{}");
         }
     }
 

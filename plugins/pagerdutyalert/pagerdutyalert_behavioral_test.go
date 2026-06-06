@@ -19,9 +19,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -432,7 +432,7 @@ func setupTestPlugin(t *testing.T, httpClient *http.Client) (*Plugin, http.Handl
 	}
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: client,
 	}
@@ -442,7 +442,7 @@ func setupTestPlugin(t *testing.T, httpClient *http.Client) (*Plugin, http.Handl
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 	return p, handler, store
 }
 
@@ -454,7 +454,7 @@ func authedRequest(method, target string, body io.Reader) *http.Request {
 
 func withCallContext(ctx context.Context) context.Context {
 	return plugin.WithCallContext(ctx, &plugin.CallContext{
-		TenantID: testTenantID,
+		TenantID: testTenantID.String(),
 	})
 }
 

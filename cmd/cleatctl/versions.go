@@ -8,10 +8,10 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
-func runVersions(ctx context.Context, store host.WorkflowStore, args []string) {
+func runVersions(ctx context.Context, store engine.WorkflowStore, args []string) {
 	if len(args) < 1 {
 		printVersionsUsage()
 		osExit(1)
@@ -52,7 +52,7 @@ Subcommands:
 `)
 }
 
-func listVersions(ctx context.Context, store host.WorkflowStore, args []string) {
+func listVersions(ctx context.Context, store engine.WorkflowStore, args []string) {
 	var name string
 	if len(args) > 0 {
 		name = args[0]
@@ -66,7 +66,7 @@ func listVersions(ctx context.Context, store host.WorkflowStore, args []string) 
 
 	if name == "" {
 		// Show summary across all workflows.
-		summary, err := host.CollectVersionMetrics(ctx, store)
+		summary, err := engine.CollectVersionMetrics(ctx, store)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			osExit(1)
@@ -115,7 +115,7 @@ func listVersions(ctx context.Context, store host.WorkflowStore, args []string) 
 	w.Flush()
 }
 
-func deprecateVersion(ctx context.Context, store host.WorkflowStore, args []string, deprecated bool) {
+func deprecateVersion(ctx context.Context, store engine.WorkflowStore, args []string, deprecated bool) {
 	if len(args) < 2 {
 		fmt.Fprintf(os.Stderr, "usage: cleatctl versions %s <name> <version>\n", map[bool]string{true: "deprecate", false: "restore"}[deprecated])
 		osExit(1)
@@ -139,7 +139,7 @@ func deprecateVersion(ctx context.Context, store host.WorkflowStore, args []stri
 	fmt.Printf("%s v%d %s\n", name, version, action)
 }
 
-func purgeVersion(ctx context.Context, store host.WorkflowStore, args []string) {
+func purgeVersion(ctx context.Context, store engine.WorkflowStore, args []string) {
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: cleatctl versions purge <name> <version>")
 		osExit(1)
@@ -167,7 +167,7 @@ func purgeVersion(ctx context.Context, store host.WorkflowStore, args []string) 
 	fmt.Printf("%s v%d purged\n", name, version)
 }
 
-func activeInstances(ctx context.Context, store host.WorkflowStore, args []string) {
+func activeInstances(ctx context.Context, store engine.WorkflowStore, args []string) {
 	var name string
 	if len(args) > 0 {
 		name = args[0]
@@ -223,7 +223,7 @@ func activeInstances(ctx context.Context, store host.WorkflowStore, args []strin
 	fmt.Printf("\nGrand total active instances: %d\n", grandTotal)
 }
 
-func gcVersions(ctx context.Context, store host.WorkflowStore, args []string) {
+func gcVersions(ctx context.Context, store engine.WorkflowStore, args []string) {
 	dryRun := false
 	for _, a := range args {
 		if a == "--dry-run" {
@@ -231,10 +231,10 @@ func gcVersions(ctx context.Context, store host.WorkflowStore, args []string) {
 		}
 	}
 
-	opts := host.DefaultGCOptions()
+	opts := engine.DefaultGCOptions()
 	opts.DryRun = dryRun
 
-	result, err := host.GarbageCollectVersions(ctx, store, opts)
+	result, err := engine.GarbageCollectVersions(ctx, store, opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)

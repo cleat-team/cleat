@@ -1503,7 +1503,7 @@ func TestHostCallsImpl_ChildWorkflowWithOptionsFallback(t *testing.T) {
 func TestHostCallsImpl_ChildWorkflowWithOptionsDirect(t *testing.T) {
 	var captured bool
 	h := NewHostCalls(HostCallsOptions{
-		ChildWorkflowWithOptions: func(name, input string, version int, parentClosePolicy string) (string, error) {
+		ChildWorkflowWithOptions: func(name, input string, version int, parentClosePolicy string, priority int) (string, error) {
 			captured = true
 			return "direct-run-id", nil
 		},

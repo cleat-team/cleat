@@ -132,6 +132,7 @@ CREATE TABLE dbo.workflow_instances (
     compaction_step INT             NULL,
     plugin_vers     NVARCHAR(MAX)   NOT NULL DEFAULT '{}',
     event_count     BIGINT          NOT NULL DEFAULT 0,
+    allowed_signals NVARCHAR(MAX)   NULL,
     CONSTRAINT pk_workflow_instances PRIMARY KEY (id),
     CONSTRAINT fk_instances_def FOREIGN KEY (def_name, def_version)
         REFERENCES dbo.workflow_defs(name, version),
@@ -209,6 +210,8 @@ CREATE TABLE dbo.workflow_promises (
     workflow_id     NVARCHAR(255)   NOT NULL,
     promise_id      NVARCHAR(64)    NOT NULL,
     promise_name    NVARCHAR(255)   NOT NULL,
+    tenant_id       NVARCHAR(255)   NOT NULL,
+    priority        INTEGER         NOT NULL DEFAULT 0,
     status          NVARCHAR(50)    NOT NULL DEFAULT 'pending',
     result          NVARCHAR(MAX)   NULL,
     error_msg       NVARCHAR(MAX)   NULL,
@@ -249,6 +252,7 @@ CREATE TABLE dbo.concurrency_keys (
     workflow_id     NVARCHAR(255)   NOT NULL,
     acquired_at     DATETIMEOFFSET  NOT NULL DEFAULT SYSUTCDATETIME(),
     expires_at      DATETIMEOFFSET  NOT NULL,
+    tenant_id       UNIQUEIDENTIFIER NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
     CONSTRAINT pk_concurrency_keys PRIMARY KEY (key_hash),
     CONSTRAINT fk_concurrency_keys_workflow FOREIGN KEY (workflow_id)
         REFERENCES dbo.workflow_instances(id)
@@ -276,6 +280,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.objects WHERE object_id = OBJECT_ID(N'dbo.workf
 CREATE TABLE dbo.workflow_update_requests (
     workflow_id     NVARCHAR(255)   NOT NULL,
     update_name     NVARCHAR(255)   NOT NULL,
+    priority        INTEGER         NOT NULL DEFAULT 0,
     payload         NVARCHAR(MAX)   NOT NULL DEFAULT '{}',
     promise_id      NVARCHAR(MAX)   NULL,
     status          NVARCHAR(50)    NOT NULL DEFAULT 'pending',

@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ---------------------------------------------------------------------------
@@ -439,7 +439,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -451,7 +451,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 	return p, handler, store
 }
 
@@ -464,7 +464,7 @@ func authedRequest(method, target string, body io.Reader) *http.Request {
 // withCallContext returns a context with the test tenant's CallContext injected.
 func withCallContext(ctx context.Context) context.Context {
 	return plugin.WithCallContext(ctx, &plugin.CallContext{
-		TenantID: testTenantID,
+		TenantID: testTenantID.String(),
 	})
 }
 
@@ -744,7 +744,7 @@ func TestProduceViaRestProxy(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
@@ -908,7 +908,7 @@ func TestKafkaConfigTenantIsolation(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
@@ -917,7 +917,7 @@ func TestKafkaConfigTenantIsolation(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(host.NewPostgresStore(db), false)(mux)
+	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
 
 	// Tenant A creates a config.
 	body := `{"name":"tenant-a-config","brokers":"a:9092","topic":"a-topic"}`
@@ -1190,7 +1190,7 @@ func TestKafkaConsumeViaRestProxy(t *testing.T) {
 
 	c := configRow{
 		ID:            uuid.New(),
-		TenantID:      testTenantID,
+		TenantID: testTenantID,
 		Name:          "test-config",
 		Brokers:       "broker:9092",
 		Topic:         "test-topic",
@@ -1245,7 +1245,7 @@ func TestKafkaProduceViaRestProxyNonSuccess(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 		config: Config{RestProxyURL: proxySrv.URL},
@@ -1328,7 +1328,7 @@ func TestKafkaPublishRecord(t *testing.T) {
 
 		cfg := configRow{
 			ID:            uuid.New(),
-			TenantID:      testTenantID,
+			TenantID: testTenantID,
 			Name:          "test-publish",
 			Brokers:       "broker:9092",
 			Topic:         "test-topic",

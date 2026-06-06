@@ -18,7 +18,9 @@ import (
 // configures the global tracer provider. The returned function should be deferred
 // to flush and shut down the tracer provider.
 func setupTelemetry(ctx context.Context, endpoint string, disabled bool, workerID string) func() {
-	if disabled {
+	// Guard on empty endpoint to prevent default export to localhost:4318.
+	// Keep in sync with InitTracing() in internal/telemetry/tracing.go.
+	if endpoint == "" || disabled {
 		otel.SetTracerProvider(trace.NewNoopTracerProvider())
 		return func() {}
 	}

@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func TestInfo(t *testing.T) {
@@ -690,7 +690,7 @@ func TestEvaluateFlagHostNoTenant(t *testing.T) {
 
 func TestEvaluateFlagHostInvalidJSON(t *testing.T) {
 	p := &Plugin{}
-	cc := &plugin.CallContext{TenantID: uuid.New(), WorkflowID: "wf-1"}
+	cc := &plugin.CallContext{TenantID: uuid.New().String(), WorkflowID: "wf-1"}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 	_, err := p.evaluateFlag(ctx, `not json`)
 	if err == nil {
@@ -700,7 +700,7 @@ func TestEvaluateFlagHostInvalidJSON(t *testing.T) {
 
 func TestEvaluateFlagHostMissingKey(t *testing.T) {
 	p := &Plugin{}
-	cc := &plugin.CallContext{TenantID: uuid.New(), WorkflowID: "wf-1"}
+	cc := &plugin.CallContext{TenantID: uuid.New().String(), WorkflowID: "wf-1"}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 	_, err := p.evaluateFlag(ctx, `{"context":{"user_id":"u1"}}`)
 	if err == nil {

@@ -14,8 +14,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/engine"
 )
 
 func TestInfo(t *testing.T) {
@@ -326,7 +326,7 @@ func TestExtractSessionValid(t *testing.T) {
 	db := sql.OpenDB(&fakeSessionConnector{store: store})
 	defer db.Close()
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	sessionID := uuid.New()
 	tenantID := uuid.New()
 	token := "valid-session-token-123"
@@ -383,7 +383,7 @@ func TestExtractSessionInvalidToken(t *testing.T) {
 	db := sql.OpenDB(&fakeSessionConnector{store: store})
 	defer db.Close()
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("Authorization", "Bearer nonexistent-token")
 
@@ -504,7 +504,7 @@ func TestHandleDeleteSessionInvalidID(t *testing.T) {
 	db := sql.OpenDB(&fakeSessionConnector{store: store})
 	defer db.Close()
 
-	p := &Plugin{db: &host.SQLDBAdapter{DB: db}}
+	p := &Plugin{db: &engine.SQLDBAdapter{DB: db}}
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
 

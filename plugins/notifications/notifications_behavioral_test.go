@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // ===========================================================================
@@ -265,7 +265,7 @@ func TestMarkRetrying(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: discardLogger(),
 	}
 
@@ -299,7 +299,7 @@ func TestMarkRetrying_ExecError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: discardLogger(),
 	}
 
@@ -322,7 +322,7 @@ func TestMarkFailed(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: discardLogger(),
 	}
 
@@ -356,7 +356,7 @@ func TestMarkFailed_ExecError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: discardLogger(),
 	}
 
@@ -378,7 +378,7 @@ func TestMarkDelivered_ExecError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: discardLogger(),
 	}
 
@@ -400,7 +400,7 @@ func TestProcessDeliveries_QueryError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: discardLogger(),
 	}
 
@@ -440,7 +440,7 @@ func TestRun_WithDB(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &host.SQLDBAdapter{DB: db},
+		db:     &engine.SQLDBAdapter{DB: db},
 		logger: discardLogger(),
 	}
 
@@ -478,9 +478,9 @@ func TestRegisterRoutes_NilMux(t *testing.T) {
 func TestRouteHandlers_NoAuth(t *testing.T) {
 	p := &Plugin{
 		logger: discardLogger(),
-		db:     &host.SQLDBAdapter{DB: sql.OpenDB(&recordingConnector{})},
+		db:     &engine.SQLDBAdapter{DB: sql.OpenDB(&recordingConnector{})},
 	}
-	t.Cleanup(func() { p.db.(*host.SQLDBAdapter).DB.Close() })
+	t.Cleanup(func() { p.db.(*engine.SQLDBAdapter).DB.Close() })
 
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
@@ -520,9 +520,9 @@ func TestRouteHandlers_NoAuth(t *testing.T) {
 func TestRouteHandlers_DBError(t *testing.T) {
 	p := &Plugin{
 		logger: discardLogger(),
-		db:     &host.SQLDBAdapter{DB: sql.OpenDB(&erroringConnector{})},
+		db:     &engine.SQLDBAdapter{DB: sql.OpenDB(&erroringConnector{})},
 	}
-	t.Cleanup(func() { p.db.(*host.SQLDBAdapter).DB.Close() })
+	t.Cleanup(func() { p.db.(*engine.SQLDBAdapter).DB.Close() })
 
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
@@ -603,8 +603,8 @@ func TestHandleCreateWebhook_InvalidID(t *testing.T) {
 	// without auth — they'd return 401 before reaching the ID parse check.
 	// But we can trigger the ID parse error by going through auth.
 	conn := &recordingConnector{}
-	p.db = &host.SQLDBAdapter{DB: sql.OpenDB(conn)}
-	t.Cleanup(func() { p.db.(*host.SQLDBAdapter).DB.Close() })
+	p.db = &engine.SQLDBAdapter{DB: sql.OpenDB(conn)}
+	t.Cleanup(func() { p.db.(*engine.SQLDBAdapter).DB.Close() })
 
 	t.Run("get webhook invalid id", func(t *testing.T) {
 		req := authedRequestForTest("GET", "/webhooks/not-a-uuid", nil)
@@ -647,9 +647,9 @@ func TestHandleCreateWebhook_InvalidID(t *testing.T) {
 func TestHandleCreateWebhook_NoFieldsToUpdate(t *testing.T) {
 	p := &Plugin{
 		logger: discardLogger(),
-		db:     &host.SQLDBAdapter{DB: sql.OpenDB(&recordingConnector{})},
+		db:     &engine.SQLDBAdapter{DB: sql.OpenDB(&recordingConnector{})},
 	}
-	t.Cleanup(func() { p.db.(*host.SQLDBAdapter).DB.Close() })
+	t.Cleanup(func() { p.db.(*engine.SQLDBAdapter).DB.Close() })
 
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
@@ -720,7 +720,7 @@ func TestSendWebhook_NoTenantContext(t *testing.T) {
 
 func TestSendWebhook_InvalidJSON(t *testing.T) {
 	p := &Plugin{}
-	cc := &plugin.CallContext{TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001")}
+	cc := &plugin.CallContext{TenantID: uuid.MustParse("00000000-0000-0000-0000-000000000001").String()}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 	_, err := p.sendWebhook(ctx, `not json`)
 	if err == nil {
@@ -1328,7 +1328,7 @@ func TestSendWebhook_NilPayloadDefaults(t *testing.T) {
 	})
 	store.mu.Unlock()
 
-	cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-nil-payload"}
+	cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-nil-payload"}
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	input := fmt.Sprintf(`{"webhook_id":"%s","event_type":"test.event"}`, webhookID.String())
@@ -1477,7 +1477,7 @@ func TestProcessDeliveries_ScanError(t *testing.T) {
 		defer db.Close()
 
 		p := &Plugin{
-			db:     &host.SQLDBAdapter{DB: db},
+			db:     &engine.SQLDBAdapter{DB: db},
 			logger: discardLogger(),
 			httpClient: &http.Client{Timeout: 5 * time.Second},
 		}
@@ -1507,11 +1507,11 @@ func TestSendWebhook_DBVerifyError(t *testing.T) {
 		defer db.Close()
 
 		p := &Plugin{
-			db:     &host.SQLDBAdapter{DB: db},
+			db:     &engine.SQLDBAdapter{DB: db},
 			logger: discardLogger(),
 		}
 
-		cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-verify-err"}
+		cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-verify-err"}
 		ctx := plugin.WithCallContext(context.Background(), cc)
 
 		_, err := p.sendWebhook(ctx, `{"webhook_id":"`+uuid.New().String()+`","event_type":"test"}`)
@@ -1554,7 +1554,7 @@ func TestSendWebhook_DBInsertError(t *testing.T) {
 		})
 		store.mu.Unlock()
 
-		cc := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "wf-insert-err"}
+		cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-insert-err"}
 		ctx := plugin.WithCallContext(context.Background(), cc)
 
 		// Set up a new erroring DB for the insert.

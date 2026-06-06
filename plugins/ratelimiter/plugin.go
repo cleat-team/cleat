@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func init() {
@@ -22,6 +22,11 @@ func init() {
 	}, func() plugin.Plugin {
 		return &Plugin{}
 	})
+}
+
+// New creates a new Plugin instance.
+func New() plugin.Plugin {
+	return &Plugin{}
 }
 
 // Config holds optional configuration for the rate-limiter plugin.
@@ -59,7 +64,7 @@ func (p *Plugin) Info() plugin.PluginInfo {
 
 // Init initializes the plugin with the given environment. It sets up the
 // in-memory token bucket cache and stores references to the database and
-// logger provided by the host.
+// logger provided by the engine.
 func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	if env.Logger != nil {
 		p.logger = env.Logger

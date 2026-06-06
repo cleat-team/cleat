@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/llm/providers"
 )
 
@@ -76,7 +76,7 @@ func normalizeOutput(out *providers.ChatOutput) {
 
 func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("llm: no tenant context")
 	}
 
@@ -141,7 +141,7 @@ func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 
 func (p *Plugin) embed(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("llm: no tenant context")
 	}
 
@@ -254,7 +254,7 @@ func (p *Plugin) listModels(ctx context.Context, inputJSON string) (string, erro
 
 func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return nil, fmt.Errorf("llm: no tenant context")
 	}
 

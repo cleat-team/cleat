@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
-	host "github.com/cleat-team/cleat/internal/host"
+	"encoding/json"
+
+	"github.com/cleat-team/cleat/engine"
 )
 
 // TestWASMVersionUpgrade verifies that registering multiple versions of a
@@ -15,7 +17,7 @@ func TestWASMVersionUpgrade(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	// Register a workflow def with version 1 (old) and version 2 (new).
@@ -69,7 +71,7 @@ func TestWASMVersionUpgrade(t *testing.T) {
 
 	// Create a new workflow instance explicitly with version 2 (new).
 	runID := fmt.Sprintf("upg-ver-new-%d", time.Now().UnixNano())
-	wfID, alreadyExisted, err := store.StartNewRun(ctx, "", defName, 2, []byte(`{"version":2}`), "")
+	wfID, alreadyExisted, err := store.StartNewRun(ctx, "", defName, 2, json.RawMessage(`{"version":2}`), "", engine.DefaultTenantUUID, 0)
 	if err != nil {
 		t.Fatalf("StartNewRun v2: %v", err)
 	}
@@ -93,7 +95,7 @@ func TestWASMVersionUpgrade(t *testing.T) {
 	}
 
 	// Create another workflow with version 1 (not the latest, but explicitly old).
-	oldID, _, err := store.StartNewRun(ctx, "", defName, 1, []byte(`{"version":1}`), "")
+	oldID, _, err := store.StartNewRun(ctx, "", defName, 1, json.RawMessage(`{"version":1}`), "", engine.DefaultTenantUUID, 0)
 	if err != nil {
 		t.Fatalf("StartNewRun v1: %v", err)
 	}
@@ -120,7 +122,7 @@ func TestInFlightUsesOldVersion(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	defName := fmt.Sprintf("upg-inflight-%d", time.Now().UnixNano())
@@ -136,7 +138,7 @@ func TestInFlightUsesOldVersion(t *testing.T) {
 	defer db.Exec(`DELETE FROM workflow_defs WHERE name = $1`, defName)
 
 	// Start a workflow with version 1.
-	runID, _, err := store.StartNewRun(ctx, "", defName, 1, []byte(`{"inflight":true}`), "")
+	runID, _, err := store.StartNewRun(ctx, "", defName, 1, json.RawMessage(`{"inflight":true}`), "", engine.DefaultTenantUUID, 0)
 	if err != nil {
 		t.Fatalf("StartNewRun: %v", err)
 	}
@@ -202,7 +204,7 @@ func TestVersionFallback(t *testing.T) {
 	db := testDB(t)
 	defer db.Close()
 
-	store := host.NewPostgresStore(db)
+	store := engine.NewPostgresStore(db)
 	ctx := context.Background()
 
 	defName := fmt.Sprintf("upg-fallback-%d", time.Now().UnixNano())
@@ -234,7 +236,7 @@ func TestVersionFallback(t *testing.T) {
 	}
 
 	// Try to start a workflow with a non-existent definition.
-	_, _, err = store.StartNewRun(ctx, "", "nonexistent-def", 1, []byte(`{}`), "")
+	_, _, err = store.StartNewRun(ctx, "", "nonexistent-def", 1, json.RawMessage(`{}`), "", engine.DefaultTenantUUID, 0)
 	if err == nil {
 		t.Error("expected error when starting run with non-existent def")
 	} else {

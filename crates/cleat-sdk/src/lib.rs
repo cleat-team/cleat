@@ -10,8 +10,32 @@ pub mod saga;
 pub mod test;
 pub mod version;
 
+// Native stubs for WASM host imports — provided so that crates depending on
+// cleat-sdk can compile and link their tests on non-WASM targets. The generated
+// #[cleat_entry] wrapper calls HostCalls::json_stringify (and json_parse) which
+// in turn call these extern "C" imports. On WASM they're supplied by the host;
+// here we provide no-op fallbacks.
+#[cfg(not(target_family = "wasm"))]
+mod native_stubs {
+    #[no_mangle]
+    pub extern "C" fn cleat_json_stringify(
+        _ptr: *const u8, _len: u32,
+        _out_ptr: *mut u8, _out_max_len: u32,
+    ) -> i64 {
+        0 // return zero bytes written / error
+    }
+
+    #[no_mangle]
+    pub extern "C" fn cleat_json_parse(
+        _json_ptr: *const u8, _json_len: u32,
+        _out_ptr: *mut u8, _out_max_len: u32,
+    ) -> i64 {
+        0 // return zero bytes written / error
+    }
+}
+
 pub use cleat_macro::cleat_test;
-pub use host_calls::{FetchResult, HostCalls, RetryPolicy, SignalResult};
+pub use host_calls::{ChildWorkflowOptions, FetchResult, HostCalls, RetryPolicy, SignalResult};
 pub use saga::{Saga, SagaStep};
 pub use plugins::{
     AwaitEventResult, AwaitWebhookResult, BlobGetResult, BlobPutResult,

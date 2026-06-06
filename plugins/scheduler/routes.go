@@ -3,13 +3,14 @@ package scheduler
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -210,7 +211,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 		&s.Input, &s.Enabled, &s.LastRunAt, &s.NextRunAt,
 		&s.CreatedAt, &s.UpdatedAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "schedule not found")
 		return
 	}
@@ -251,7 +252,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT cron, enabled FROM schedules WHERE id = $1 AND tenant_id = $2
 	`, p.dialect), id, tid).Scan(&currentCron, &currentEnabled)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "schedule not found")
 		return
 	}
@@ -388,7 +389,7 @@ func (p *Plugin) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
 		SELECT name, cron, workflow_name, input FROM schedules WHERE id = $1 AND tenant_id = $2
 	`, p.dialect), id, tid).Scan(&name, &cron, &workflowName, &inputBytes)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "schedule not found")
 		return
 	}

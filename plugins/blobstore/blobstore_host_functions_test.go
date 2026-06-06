@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // ---------------------------------------------------------------------------
@@ -34,7 +34,7 @@ func setupHostFuncTest(t *testing.T) (*Plugin, *fakeDBStore, *fakeClock) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:      &host.SQLDBAdapter{DB: db},
+		db:      &engine.SQLDBAdapter{DB: db},
 		backend: newTestMemBackend(),
 		logger:  slog.Default(),
 		config:  Config{Backend: "memory"},
@@ -46,7 +46,7 @@ func setupHostFuncTest(t *testing.T) (*Plugin, *fakeDBStore, *fakeClock) {
 // hostFuncContext wraps a context with a plugin.CallContext for testing host functions.
 func hostFuncContext(ctx context.Context, tenantID uuid.UUID, workflowID string) context.Context {
 	return plugin.WithCallContext(ctx, &plugin.CallContext{
-		TenantID:   tenantID,
+		TenantID:   tenantID.String(),
 		WorkflowID: workflowID,
 	})
 }

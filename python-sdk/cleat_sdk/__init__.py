@@ -15,7 +15,7 @@ Quick start:
         return resp
 """
 
-from .host_calls import HostCalls, SuspendSentinel, RetryPolicy
+from .host_calls import HostCalls, SuspendSentinel, RetryPolicy, ChildWorkflowOptions
 from .host_calls import SignalResult, ChildResult, PromiseResult
 from .host_calls import (
     CleatCallError,
@@ -59,6 +59,7 @@ __all__ = [
     "RetryPolicy",
     "SignalResult",
     "ChildResult",
+    "ChildWorkflowOptions",
     "PromiseResult",
     "CleatCallError",
     "CleatCallTransientError",

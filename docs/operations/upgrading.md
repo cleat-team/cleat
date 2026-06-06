@@ -149,6 +149,76 @@ Before applying a migration, the worker or migration tool runs sanity checks:
 If a migration fails, the worker logs the error and exits. Fix the migration
 and restart.
 
+### Migration 007: Foreign Key CASCADE
+
+Migration 007 adds `ON DELETE CASCADE` to all foreign keys referencing
+`workflow_instances(id)`. This affects five child tables: `event_history`,
+`workflow_signals`, `workflow_promises`, `concurrency_keys`, and
+`workflow_update_requests`.
+
+**What changes**: Each FK is dropped and re-added with `ON DELETE CASCADE`.
+In MySQL, `concurrency_keys` also receives its FK constraint for the first
+time (it was missing in the original schema).
+
+**Why**: Without CASCADE, deleting a workflow instance required manually
+deleting child rows first. The `DeleteDeadLetteredWorkflows` reaper did this,
+but other code paths that deleted workflow instances could leave orphaned
+rows in child tables.
+
+**Lock risk — HIGH**: Each `ALTER TABLE ... DROP CONSTRAINT ... ADD CONSTRAINT`
+takes an `ACCESS EXCLUSIVE` lock (Postgres) or equivalent on the child table.
+On large `event_history` tables (millions of rows), this blocks all writes for
+the duration of the constraint validation scan.
+
+**Mitigation**:
+- The Postgres migration itself uses `SET LOCAL lock_timeout = '30s'` within the
+  DO block, which overrides any session-level `lock_timeout` you may have set.
+  If you want a shorter timeout for the migration, you must edit the migration
+  SQL (the `SET LOCAL` inside the DO block takes precedence).
+- Set `lock_timeout` before running for the migration runner's other statements:
+  `SET lock_timeout = '5s';` (Postgres) or `SET SESSION lock_wait_timeout = 5;`
+  (MySQL)
+- Run during a maintenance window or off-peak hours
+- For Postgres, the entire DO block runs in a single transaction; no intermediate
+  states are visible to other sessions
+- For MySQL, ALTER TABLE implicitly commits, creating a brief no-FK window between
+  DROP and re-ADD on each table. Run during a quiet period
+- Pre-validate by checking for orphaned rows:
+  ```sql
+  SELECT COUNT(*) FROM event_history eh
+  LEFT JOIN workflow_instances wi ON eh.workflow_id = wi.id
+  WHERE wi.id IS NULL;
+  ```
+  This should return 0 on a healthy installation.
+- Estimated time: proportional to the largest child table. On a table with 10M
+  rows, expect 30-120 seconds per ALTER.
+
+**MySQL orphan check for concurrency_keys**: Before the migration, verify there
+are no orphaned `concurrency_keys` rows:
+```sql
+SELECT COUNT(*) FROM concurrency_keys ck
+LEFT JOIN workflow_instances wi ON ck.workflow_id = wi.id
+WHERE wi.id IS NULL;
+```
+If this returns > 0, clean up orphaned rows first:
+```sql
+DELETE ck FROM concurrency_keys ck
+LEFT JOIN workflow_instances wi ON ck.workflow_id = wi.id
+WHERE wi.id IS NULL;
+```
+
+**Re-running the migration**: The migration runner prevents re-execution via
+`schema_migrations` tracking. If manually re-applied: the Postgres DO block is
+idempotent (DROP + re-ADD arrives at the same state); MSSQL `IF EXISTS` guards
+make it idempotent; MySQL re-application would fail on the `ADD FOREIGN KEY`
+step for concurrency_keys (FK already exists). Do not re-apply migration 007
+manually.
+
+**Rollback**: Migration 007 has no automatic rollback. Once CASCADE is applied,
+deletes are silently destructive. To undo, re-apply the constraints without
+`ON DELETE CASCADE` (reverse of the migration DDL). Contact support for a
+rollback script if needed.
+
 ## Running old and new workers side by side
 
 Because workers are stateless and read workflow definitions from the database,
@@ -462,3 +532,52 @@ Before upgrading PostgreSQL, verify:
   restore, RPO/RTO, and cross-region failover
 - [Deploying to production](deploying-to-production.md) -- configuration,
   monitoring, scaling, and health checks
+
+## RLS Behavior Change: Fail-Open to Fail-Closed (v2.x)
+
+### What changed
+
+Row-level security (RLS) policies previously used a default-tenant fallback when
+no tenant context was set. A query without `cleat.tenant_id` would silently
+return data for the default tenant (`00000000-0000-0000-0000-000000000000`).
+
+As of this release, queries without tenant context **fail with an error**:
+- **PostgreSQL**: The RLS policy calls `cleat.assert_tenant_set()`, which throws
+  `cleat.tenant_id is not set — tenant context required for RLS-scoped query`.
+- **MSSQL**: The application layer returns an error (`tenant ID must be set
+  before setting session context for an RLS-scoped transaction`) before any
+  query reaches the database. The MSSQL RLS security policy was already
+  fail-closed (NULL SESSION_CONTEXT blocks all rows), but the error was silent.
+
+### Migration
+
+Run migration `008_rls_fail_closed.sql`. The migration is idempotent:
+- Creates or replaces the `cleat.assert_tenant_set()` function.
+- Recreates RLS policies to use the new assert function (Postgres).
+
+No application code changes are required for normal operation. The existing
+`WithTenant()` pattern in the dispatch loop already sets tenant context before
+every workflow operation.
+
+### Impact on direct database access
+
+Administrative queries that bypass the application (e.g., `psql` for debugging)
+will fail against RLS-protected tables unless tenant context is set:
+
+```sql
+-- Before running queries against RLS-protected tables:
+SELECT set_config('cleat.tenant_id', '<tenant-uuid>', false);
+```
+
+### Migration ordering
+
+Migrations must be applied in order. Do not re-run migration `002_constraints.sql`
+after migration `008_rls_fail_closed.sql` without first manually dropping the RLS
+policies, because `002_constraints.sql` uses bare `CREATE POLICY` without
+`DROP POLICY IF EXISTS` guards.
+
+### MSSQL limitation
+
+MSSQL security policies require inline table-valued functions for filter
+predicates, which cannot throw errors. The MSSQL RLS policy remains silently
+fail-closed. The application-layer error provides the explicit failure.

@@ -25,7 +25,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/microsoft/go-mssqldb"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 func main() {
@@ -64,7 +64,7 @@ func main() {
 	ctx := context.Background()
 	taskQueues := strings.Split(*taskQueueStr, ",")
 
-	var factory host.StoreFactory
+	var factory engine.StoreFactory
 	switch *driver {
 	case "postgres":
 		db, err := sql.Open(sqlDriver, *dbURL)
@@ -74,7 +74,7 @@ func main() {
 		defer db.Close()
 		db.SetMaxOpenConns(*concurrency + 10)
 		db.SetMaxIdleConns(10)
-		factory = host.NewPostgresStoreFactory(db, "public")
+		factory = engine.NewPostgresStoreFactory(db, "public")
 	case "mysql":
 		db, err := sql.Open(sqlDriver, *dbURL)
 		if err != nil {
@@ -83,9 +83,9 @@ func main() {
 		defer db.Close()
 		db.SetMaxOpenConns(*concurrency + 10)
 		db.SetMaxIdleConns(10)
-		factory = host.NewMySQLStoreFactory(db, *dbURL)
+		factory = engine.NewMySQLStoreFactory(db, *dbURL)
 	case "mssql":
-		factory = host.NewMSSQLStoreFactory(*dbURL)
+		factory = engine.NewMSSQLStoreFactory(*dbURL)
 	}
 	store, closer, err := factory.OpenStore(ctx, tenantID, taskQueues...)
 	if err != nil {
@@ -117,7 +117,7 @@ func main() {
 	reportStats("replay", replayLatencies)
 }
 
-func runBenchmark(ctx context.Context, store host.WorkflowStore, defName string, defVersion int, entryPoint string, count, concurrency int) []time.Duration {
+func runBenchmark(ctx context.Context, store engine.WorkflowStore, defName string, defVersion int, entryPoint string, count, concurrency int) []time.Duration {
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var latenciesMu sync.Mutex
@@ -136,26 +136,26 @@ func runBenchmark(ctx context.Context, store host.WorkflowStore, defName string,
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "")
+			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", engine.DefaultTenantUUID, 0)
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return
 			}
 
-			rt, err := host.NewRuntime(ctx, 0, 0)
+			rt, err := engine.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				log.Printf("NewRuntime error: %v", err)
 				return
 			}
 			defer rt.Close(ctx)
 
-			engine := host.NewEngine(rt, &benchCaller{},
-				host.WithSignalStore(store),
-				host.WithWorkflowState(&benchState{version: defVersion}),
-				host.WithWorkflowID(runID),
+			eng := engine.NewEngine(rt, &benchCaller{},
+				engine.WithSignalStore(store),
+				engine.WithWorkflowState(&benchState{version: defVersion}),
+				engine.WithWorkflowID(runID),
 			)
 
-			result, history, _, _, _, err := engine.Execute(ctx, wasmBytes, entryPoint, input)
+			result, history, _, _, _, err := eng.Execute(ctx, wasmBytes, entryPoint, input)
 			if err != nil {
 				log.Printf("Execute error for %s: %v", runID, err)
 				store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
@@ -182,7 +182,7 @@ func runBenchmark(ctx context.Context, store host.WorkflowStore, defName string,
 	return latencies
 }
 
-func runReplayBenchmark(ctx context.Context, store host.WorkflowStore, defName string, defVersion int, entryPoint string, count, concurrency int) []time.Duration {
+func runReplayBenchmark(ctx context.Context, store engine.WorkflowStore, defName string, defVersion int, entryPoint string, count, concurrency int) []time.Duration {
 	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 	var latenciesMu sync.Mutex
@@ -201,13 +201,13 @@ func runReplayBenchmark(ctx context.Context, store host.WorkflowStore, defName s
 
 			start := time.Now()
 
-			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "")
+			runID, _, err := store.StartNewRun(ctx, "", defName, defVersion, input, "", engine.DefaultTenantUUID, 0)
 			if err != nil {
 				log.Printf("StartNewRun error: %v", err)
 				return
 			}
 
-			rt, err := host.NewRuntime(ctx, 0, 0)
+			rt, err := engine.NewRuntime(ctx, 0, 0)
 			if err != nil {
 				log.Printf("NewRuntime error: %v", err)
 				return
@@ -215,14 +215,14 @@ func runReplayBenchmark(ctx context.Context, store host.WorkflowStore, defName s
 			defer rt.Close(ctx)
 
 			caller := &benchCaller{}
-			engine := host.NewEngine(rt, caller,
-				host.WithSignalStore(store),
-				host.WithWorkflowState(&benchState{version: defVersion}),
-				host.WithWorkflowID(runID),
+			eng := engine.NewEngine(rt, caller,
+				engine.WithSignalStore(store),
+				engine.WithWorkflowState(&benchState{version: defVersion}),
+				engine.WithWorkflowID(runID),
 			)
 
 			// First execution.
-			_, history, _, _, _, err := engine.Execute(ctx, wasmBytes, entryPoint, input)
+			_, history, _, _, _, err := eng.Execute(ctx, wasmBytes, entryPoint, input)
 			if err != nil {
 				log.Printf("First execute error: %v", err)
 				store.FailWorkflow(ctx, runID, "", 0, err.Error(), "", "", nil)
@@ -233,12 +233,12 @@ func runReplayBenchmark(ctx context.Context, store host.WorkflowStore, defName s
 			store.AppendEventHistoryBatch(ctx, runID, history)
 
 			// Replay from history.
-			rt2, _ := host.NewRuntime(ctx, 0, 0)
+			rt2, _ := engine.NewRuntime(ctx, 0, 0)
 			defer rt2.Close(ctx)
-			engine2 := host.NewEngine(rt2, caller,
-				host.WithSignalStore(store),
-				host.WithWorkflowState(&benchState{version: defVersion}),
-				host.WithWorkflowID(runID),
+			engine2 := engine.NewEngine(rt2, caller,
+				engine.WithSignalStore(store),
+				engine.WithWorkflowState(&benchState{version: defVersion}),
+				engine.WithWorkflowID(runID),
 			)
 
 			_, _, _, _, _, err = engine2.Replay(ctx, wasmBytes, entryPoint, input, history)
@@ -303,6 +303,7 @@ type benchState struct {
 
 func (s *benchState) Version() int                  { return s.version }
 func (s *benchState) MinVersion() int               { return s.minVersion }
+func (s *benchState) Priority() int                     { return 0 }
 func (s *benchState) ChildVersion(name string) (int, bool) { return 0, false }
 
 func init() {

@@ -307,3 +307,21 @@ def decode_poll_cancellation_result(result: int) -> Tuple[int, bool]:
     reason_len = (r >> 32) & 0xFFFFFFFF
     cancelled = (r & 0xFFFFFFFF) != 0
     return (reason_len, cancelled)
+
+
+def decode_dual_string_result(result: int) -> Tuple[int, int, int]:
+    """Decode a result from a host call that writes two output strings.
+
+    Bit layout:
+        bits  0-7  = errCode (8 bits)
+        bits  8-31 = string1Len (24 bits)
+        bits 32-63 = string2Len (32 bits)
+
+    Returns:
+        Tuple of ``(string1_len, string2_len, err_code)``.
+    """
+    r = _to_u64(result)
+    err_code = r & 0xFF
+    string1_len = (r >> 8) & 0xFFFFFF
+    string2_len = (r >> 32) & 0xFFFFFFFF
+    return (string1_len, string2_len, err_code)

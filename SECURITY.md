@@ -166,6 +166,16 @@ The PostgreSQL database is a critical trust component:
 - **Data integrity**: Event history, workflow definitions, and workflow state are
   stored in PostgreSQL. Corruption or unauthorized modification of this data
   could lead to incorrect workflow execution, replay divergence, or data leakage.
+- **Event history checksum verification** (enabled by default): Each event in the
+  history carries a SHA-256 checksum that chains to the previous event, forming a
+  tamper-evident hash chain. On every workflow replay, the worker verifies the
+  entire chain from the first event to the latest. If any checksum does not match
+  (indicating tampering, corruption, or a partial write), the replay is aborted
+  with an error. This protects against database-level tampering, storage corruption,
+  and WAL replay corruption. Verification can be disabled with
+  `--disable-checksum-verification` for bulk replay or performance-sensitive
+  environments, but this removes the ability to detect tampered event history
+  and could lead to silent replay divergence.
 - **Injection vectors**: Workflow inputs and signal payloads pass through
   PostgreSQL as JSONB. While JSONB is typed and parameterized queries are used,
   any SQL injection in event history processing would compromise the entire
@@ -212,9 +222,9 @@ If a `cleat-worker` process is compromised:
   update notifications.
 - **Wazero**: As the WASM runtime, wazero is a critical dependency. We track
   wazero security advisories and update promptly.
-- **WASM toolchains**: Go's `wasip1` target and TinyGo are compilation tools,
-  not runtime dependencies. WASM binaries are compiled by the workflow author,
-  not by the cleat project infrastructure.
+- **WASM toolchains**: TinyGo is the compilation tool for Go workflows, not a
+  runtime dependency. WASM binaries are compiled by the workflow author, not by
+  the cleat project infrastructure.
 - **Node.js dependencies**: The web UI build dependencies are development-only
   and not present in the worker runtime binary.
 

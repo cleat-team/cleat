@@ -21,7 +21,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install cleat
-        run: go install ./cmd/cleat
+        run: CGO_ENABLED=0 go install ./cmd/cleat
       - name: Test Python SDK
         working-directory: python-sdk
         run: |

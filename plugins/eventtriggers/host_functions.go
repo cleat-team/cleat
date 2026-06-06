@@ -3,12 +3,13 @@ package eventtriggers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -50,7 +51,7 @@ type awaitEventOutput struct {
 // woken up promptly instead of waiting for the next poll cycle.
 func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
-	if cc == nil || cc.TenantID == uuid.Nil {
+	if cc == nil || cc.TenantID == "" {
 		return "", fmt.Errorf("event-triggers: no tenant context")
 	}
 
@@ -80,7 +81,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		LIMIT 1
 	`, p.dialect), cc.TenantID, input.EventType).Scan(&eventID, &eventType, &eventData, &receivedAt)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		// No matching event found -- register as an awaiter so the publish
 		// handler can signal this workflow when a matching event arrives.
 		if cc.WorkflowID != "" {
@@ -130,7 +131,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 // registerAwaiter records that the given workflow is waiting for an event of
 // the specified type.  This allows the publish handler to deliver a signal
 // when a matching event arrives.
-func (p *Plugin) registerAwaiter(ctx context.Context, tenantID uuid.UUID, workflowID, eventType string) {
+func (p *Plugin) registerAwaiter(ctx context.Context, tenantID, workflowID, eventType string) {
 	_, err := p.db.Exec(ctx, plugin.Rebind(upsertAwaiter.For(p.dialect), p.dialect),
 		workflowID, tenantID, eventType)
 	if err != nil {

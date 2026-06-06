@@ -26,7 +26,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 // osExit is replaced in tests to intercept os.Exit calls.
@@ -62,7 +62,7 @@ func main() {
 	}
 
 	ctx := context.Background()
-	factory := host.NewPostgresStoreFactory(db, "public")
+	factory := engine.NewPostgresStoreFactory(db, "public")
 	store, closer, err := factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
 		log.Fatalf("failed to open store: %v", err)
@@ -79,6 +79,10 @@ func main() {
 		runCost(args[1:])
 	case "restore-workflow":
 		runRestoreWorkflow(ctx, store, db, args[1:])
+	case "replay":
+		runReplay(ctx, store, db, args[1:])
+	case "debug":
+		runDebug(ctx, store, db, args[1:])
 	case "check-db":
 		runCheckDB(ctx, db, args[1:])
 	default:
@@ -102,7 +106,9 @@ Commands:
   deploy plugin <name> <wasm>     deploy a plugin WASM binary
   cost [flags]                    estimate monthly operational costs
   restore-workflow <id> <file>    restore a single workflow from NDJSON backup
+  replay <id> --entry-point <n>   replay a workflow's event history for diagnostics
   check-db [--verbose]            verify database connectivity and schema health
+  debug <id> [--entry-point <n>] [--watch]  step-through workflow event replay
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)

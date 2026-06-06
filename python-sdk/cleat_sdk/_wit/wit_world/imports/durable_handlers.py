@@ -6,13 +6,12 @@ Update and query handler registration.
 
 
 
-
-def durable_register_update_handler(name_ptr: int, name_len: int) -> int:
+def durable_register_update_handler(name: str) -> int:
     """
     Register an update handler for external update calls.
     """
     raise NotImplementedError
-def durable_register_query_handler(name_ptr: int, name_len: int) -> int:
+def durable_register_query_handler(name: str) -> int:
     """
     Register a read-only query handler for external queries.
     """

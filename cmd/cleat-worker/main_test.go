@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/internal/host"
+	"github.com/cleat-team/cleat/engine"
 )
 
 func TestGenerateWorkerID(t *testing.T) {
@@ -44,6 +47,28 @@ func TestGenerateTraceID(t *testing.T) {
 		if !strings.ContainsRune("0123456789abcdef", c) {
 			t.Errorf("generateTraceID() = %q contains non-hex char %c", id, c)
 		}
+	}
+}
+
+func TestExtractTraceIDFromTraceParent(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{"valid", "00-abcdef0123456789abcdef0123456789-0123456789abcdef-01", "abcdef0123456789abcdef0123456789"},
+		{"empty header", "", ""},
+		{"single part", "00", ""},
+		{"short trace ID", "00-abc-123-01", ""},
+		{"long trace ID", "00-abcdef0123456789abcdef0123456789ff-123-01", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractTraceIDFromTraceParent(tt.header)
+			if got != tt.want {
+				t.Errorf("extractTraceIDFromTraceParent(%q) = %q, want %q", tt.header, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -94,17 +119,17 @@ func TestDetermineEntryPoint(t *testing.T) {
 		input json.RawMessage
 		want  string
 	}{
-		{"nil input", nil, "handle_incident"},
-		{"empty JSON", json.RawMessage(""), "handle_incident"},
-		{"empty object", json.RawMessage("{}"), "handle_incident"},
+		{"nil input", nil, ""},
+		{"empty JSON", json.RawMessage(""), ""},
+		{"empty object", json.RawMessage("{}"), ""},
 		{"with entry point", json.RawMessage(`{"__entry_point":"myfunc"}`), "myfunc"},
 		{"with entry point and other fields", json.RawMessage(`{"__entry_point":"handler","order_id":"abc"}`), "handler"},
 		{"case sensitivity", json.RawMessage(`{"__entry_point":"handle_incident"}`), "handle_incident"},
-		{"empty entry point value", json.RawMessage(`{"__entry_point":""}`), "handle_incident"},
+		{"empty entry point value", json.RawMessage(`{"__entry_point":""}`), ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := determineEntryPoint(tt.input)
+			got := determineEntryPoint(tt.input, nil)
 			if got != tt.want {
 				t.Errorf("determineEntryPoint(%s) = %q, want %q", string(tt.input), got, tt.want)
 			}
@@ -212,10 +237,11 @@ func TestWorkerFlags(t *testing.T) {
 	poll := fs.Duration("poll", 500*time.Millisecond, "")
 	apiAddr := fs.String("api-addr", "", "")
 	tq := fs.String("task-queue", "default", "")
-	ct := fs.Int("compaction-threshold", host.DefaultCompactionThreshold, "")
+	ct := fs.Int("compaction-threshold", engine.DefaultCompactionThreshold, "")
 	ci := fs.Duration("compaction-interval", 5*time.Minute, "")
 	sf := fs.String("shards-file", "", "")
 	pc := fs.String("plugin-config", "", "")
+	mwd := fs.Duration("max-workflow-duration", 0, "")
 	if err := fs.Parse([]string{
 		"--db", "postgres://localhost/cleat",
 		"--concurrency", "20",
@@ -225,6 +251,7 @@ func TestWorkerFlags(t *testing.T) {
 		"--task-queue", "gpu,high-memory",
 		"--compaction-threshold", "500",
 		"--compaction-interval", "10m",
+		"--max-workflow-duration", "2m",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -258,6 +285,9 @@ func TestWorkerFlags(t *testing.T) {
 	if *pc != "" {
 		t.Errorf("plugin-config = %q, want empty", *pc)
 	}
+	if *mwd != 2*time.Minute {
+		t.Errorf("max-workflow-duration = %v, want 2m", *mwd)
+	}
 }
 
 func TestWorkerFlag_Defaults(t *testing.T) {
@@ -265,7 +295,8 @@ func TestWorkerFlag_Defaults(t *testing.T) {
 	db := fs.String("db", "", "")
 	conc := fs.Int("concurrency", 10, "")
 	tq := fs.String("task-queue", "default", "")
-	ct := fs.Int("compaction-threshold", host.DefaultCompactionThreshold, "")
+	ct := fs.Int("compaction-threshold", engine.DefaultCompactionThreshold, "")
+	mwd := fs.Duration("max-workflow-duration", 0, "")
 	if err := fs.Parse(nil); err != nil {
 		t.Fatal(err)
 	}
@@ -278,8 +309,11 @@ func TestWorkerFlag_Defaults(t *testing.T) {
 	if *tq != "default" {
 		t.Errorf("default task-queue = %q", *tq)
 	}
-	if *ct != host.DefaultCompactionThreshold {
-		t.Errorf("default compaction-threshold = %d, want %d", *ct, host.DefaultCompactionThreshold)
+	if *mwd != 0 {
+		t.Errorf("default max-workflow-duration = %v, want 0", *mwd)
+	}
+	if *ct != engine.DefaultCompactionThreshold {
+		t.Errorf("default compaction-threshold = %d, want %d", *ct, engine.DefaultCompactionThreshold)
 	}
 }
 
@@ -306,5 +340,48 @@ func TestWorkerHelpDoesNotPanic(t *testing.T) {
 	fs.Int("concurrency", 10, "")
 	if err := fs.Parse([]string{"--help"}); err != flag.ErrHelp {
 		t.Errorf("expected flag.ErrHelp, got %v", err)
+	}
+}
+
+func TestJSONLogFormat(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger.InfoContext(context.Background(), "test message", "workflow_id", "wf-123", "tenant_id", "t-456")
+
+	var entry map[string]interface{}
+	if err := json.Unmarshal(buf.Bytes(), &entry); err != nil {
+		t.Fatalf("log output is not valid JSON: %v\nGot: %s", err, buf.String())
+	}
+	if entry["msg"] != "test message" {
+		t.Errorf("expected msg 'test message', got %v", entry["msg"])
+	}
+	if entry["workflow_id"] != "wf-123" {
+		t.Errorf("expected workflow_id 'wf-123', got %v", entry["workflow_id"])
+	}
+	if entry["tenant_id"] != "t-456" {
+		t.Errorf("expected tenant_id 't-456', got %v", entry["tenant_id"])
+	}
+}
+
+func TestOtelFlagsRegistered(t *testing.T) {
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	otelEndpoint := fs.String("otel-endpoint", "", "OTLP HTTP endpoint")
+	otelDisabled := fs.Bool("otel-disabled", false, "Disable OTel")
+
+	if *otelEndpoint != "" {
+		t.Errorf("expected default --otel-endpoint to be empty, got %q", *otelEndpoint)
+	}
+	if *otelDisabled != false {
+		t.Errorf("expected default --otel-disabled to be false")
+	}
+
+	if err := fs.Parse([]string{"--otel-endpoint", "localhost:4318", "--otel-disabled", "true"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+	if *otelEndpoint != "localhost:4318" {
+		t.Errorf("expected --otel-endpoint=localhost:4318, got %q", *otelEndpoint)
+	}
+	if *otelDisabled != true {
+		t.Errorf("expected --otel-disabled=true")
 	}
 }

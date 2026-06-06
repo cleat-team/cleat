@@ -18,8 +18,12 @@ import {
 
 function callBuilt(h: HostCalls, pluginName: string, funcName: string, inputJson: string): string {
   let r: PluginCallOutcome = h.pluginCall(pluginName, funcName, inputJson);
-  if (r.isError) {
-    return '{"error":"' + escapeJson(r.error) + '"}';
+  if (r.error !== null || r.response.length == 0 || r.response == "null") {
+    let msg: string = "empty response";
+    if (r.error !== null) {
+      msg = r.error!;
+    }
+    return '{"error":"' + escapeJson(msg) + '"}';
   }
   return r.response;
 }
@@ -97,6 +101,18 @@ export function call_all_plugins(h: HostCalls, _input: string): string {
 
   parts.push(',"llm.list_models":');
   parts.push(callBuilt(h, "llm", "list_models", '{"provider":"openai"}'));
+
+  // llm.chat_stream (streaming)
+  let streamResult: PluginCallOutcome = h.pluginCallStreaming(
+    "llm", "chat_stream",
+    '{"provider":"openai","model":"mock-model","messages":[{"role":"user","content":"hello"}]}'
+  );
+  parts.push(',"llm.chat_stream":');
+  if (streamResult.error !== null || streamResult.response.length == 0) {
+    parts.push('{"error":"' + escapeJson(streamResult.error !== null ? streamResult.error! : "empty response") + '"}');
+  } else {
+    parts.push(streamResult.response);
+  }
 
   let result: string = "{" + parts.join("") + "}";
   return result;

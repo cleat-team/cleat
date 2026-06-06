@@ -1,6 +1,7 @@
 -- cleat postgres tables
 
 CREATE SCHEMA IF NOT EXISTS admin;
+CREATE SCHEMA IF NOT EXISTS cleat;
 CREATE OR REPLACE FUNCTION admin.create_tenant_role(p_tenant_id UUID) RETURNS TEXT AS $$
 DECLARE
     v_role_name TEXT;
@@ -10,10 +11,15 @@ BEGIN
     v_password := encode(gen_random_bytes(32), 'hex');
 
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role_name) THEN
-        EXECUTE format(
-            'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 10',
-            v_role_name, v_password
-        );
+        BEGIN
+            EXECUTE format(
+                'CREATE ROLE %I WITH LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT CONNECTION LIMIT 10',
+                v_role_name, v_password
+            );
+        EXCEPTION WHEN OTHERS THEN
+            RAISE WARNING 'create_tenant_role: cannot create role % (SQLSTATE: %) — skipping (single-tenant mode)', v_role_name, SQLSTATE;
+            RETURN NULL;
+        END;
     END IF;
 
     EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I AUTHORIZATION %I',
@@ -123,6 +129,7 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     compaction_step INTEGER,
     plugin_vers JSONB NOT NULL DEFAULT '{}',
     event_count BIGINT NOT NULL DEFAULT 0,
+    allowed_signals JSONB DEFAULT NULL,
     FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
 );
 CREATE TABLE IF NOT EXISTS event_history (
@@ -176,6 +183,7 @@ CREATE TABLE IF NOT EXISTS workflow_promises (
     workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
     promise_id TEXT NOT NULL,
     promise_name TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     result JSONB,
     error_msg TEXT,
@@ -200,7 +208,8 @@ CREATE TABLE IF NOT EXISTS concurrency_keys (
     key_text TEXT NOT NULL,
     workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
     acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL,
+    tenant_id UUID
 );
 CREATE TABLE IF NOT EXISTS idempotency_keys (
     key_hash    BYTEA NOT NULL PRIMARY KEY,
@@ -213,6 +222,7 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
 CREATE TABLE IF NOT EXISTS workflow_update_requests (
     workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
     update_name TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
     payload JSONB NOT NULL DEFAULT '{}',
     promise_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',

@@ -1,0 +1,50 @@
+{
+  "name": "cleat-230-race-dag",
+  "description": "Decomposition of race condition audit findings into 4 implementation tasks. fix1 addresses the real stdout/stderr buffer race. fix2 completes the non-functional update dispatch system by wiring execEngines. fix3 fixes drain TOCTOU and notification races. fix4 is defensive hardening (dead code removal, lock hygiene, compaction guards). All 4 are independent — they touch different functions/sections even when sharing files.",
+  "tasks": [
+    {
+      "name": "cleat-230-race-fix1",
+      "fn": "clew-leaf-task",
+      "parents": [],
+      "priority": 2,
+      "description": "Fix the unprotected bytes.Buffer race on the shared Runtime struct. The wazero backend's PerExecution() shares the same *Runtime across concurrent executions, causing concurrent Reset()/Write()/Read() on stdout/stderr buffers. Fix: either make PerExecution() create independent buffers, or add a mutex. Also add a go test -race regression test.",
+      "contract": "Deliverables: (1) Protected stdout/stderr access on Runtime struct — either per-execution buffers via PerExecution() or a sync.Mutex. (2) A go test -race regression test that fails before the fix and passes after. Invariants: No concurrent buffer corruption under parallel WASM execution. API surface: No API changes. Runtime.Stdout()/Stderr() remain public but safe. Integration points: engine/backend_wazero.go PerExecution(), engine/runtime.go InstantiateModuleNamed(). Test: go test -race ./engine/ -run TestRuntimeStdoutStderrRace -count=10 must pass.",
+      "coupling": {
+        "cleat-230-race-fix4": "LOOSE"
+      }
+    },
+    {
+      "name": "cleat-230-race-fix2",
+      "fn": "clew-leaf-task",
+      "parents": [],
+      "priority": 2,
+      "description": "Wire execEngines sync.Map to enable the update dispatch system. Currently execEngines.Store is never called, so dispatchPendingUpdates always skips. Add execEngines.Store(workflowID, engine) after engine creation in executeWorkflow, and execEngines.Delete(workflowID) alongside inflight.Delete during cleanup. This completes the broken POST /api/workflows/:id/updates feature.",
+      "contract": "Deliverables: (1) execEngines.Store(wfID, eng) call after engine creation in executeWorkflow. (2) execEngines.Delete(wfID) call in cleanup path alongside inflight.Delete. (3) Verify update dispatch works end-to-end (POST update, dispatch loop picks it up). Invariants: execEngines must always track the same set of workflow IDs as inflight. Store before goroutine launch, Delete after goroutine exit. API surface: No API changes. Behavior change: Pending updates are now dispatched to running engines. Integration points: cmd/cleat-worker/main.go executeWorkflow (line ~1657), inflight cleanup (line ~1380), dispatchPendingUpdates (line ~2125). Test: Unit test that verifies Store/Load/Delete lifecycle, integration test that submits an update and verifies dispatch.",
+      "coupling": {
+        "cleat-230-race-fix3": "MEDIUM"
+      }
+    },
+    {
+      "name": "cleat-230-race-fix3",
+      "fn": "clew-leaf-task",
+      "parents": [],
+      "priority": 2,
+      "description": "Fix two drain TOCTOU races and the drain-complete notification ordering bug. (1) handleStartWorkflow bypasses drain — add draining check and return 503. (2) Dispatch loop checks draining before DB claim but not after — re-check after claim and abort. (3) dispatchLoop calls w.cancel() before handleDrainStatus closes drainCh — consolidate drain-complete signaling in handleDrainStatus.",
+      "contract": "Deliverables: (1) Add w.draining.Load() check in handleStartWorkflow, return 503 if draining. (2) Re-check draining after ClaimWorkflows in dispatch loop, abort execution if drain started. (3) Remove w.cancel() from dispatch loop drain path, let handleDrainStatus call w.cancel() after closing drainCh. Invariants: No new workflows accepted during drain (API or claim). drainCh is always closed before root context cancellation. API surface: handleStartWorkflow returns 503 during drain (new behavior). Integration points: cmd/cleat-worker/main.go handleStartWorkflow (line ~3301), dispatchLoop drain check (line ~1273), handleDrainStatus (line ~3172), dispatchLoop inflight==0 path (line ~1241). Test: Unit tests for each race scenario, integration test for drain lifecycle.",
+      "coupling": {
+        "cleat-230-race-fix2": "MEDIUM"
+      }
+    },
+    {
+      "name": "cleat-230-race-fix4",
+      "fn": "clew-leaf-task",
+      "parents": [],
+      "priority": 3,
+      "description": "Defensive hardening: add mu.RLock to ShardedStore.Close(), add retry logic for compaction deadlock, add generation guard to compaction UPDATE, and remove dead code (completeMu/completeResult/completeErr, signals map, QueryHandlers, executeViaDispatcher, loadAllEventsForCompaction, workEntryPoint/workInput on Runtime). Also add a watchdog generation counter to prevent double-launch of dispatch loops.",
+      "contract": "Deliverables: (1) mu.RLock/Unlock in ShardedStore.Close(). (2) Retry loop (3 attempts, exponential backoff) around CompactHistory for 40P01 deadlock. (3) generation = ? guard on compaction UPDATE. (4) Remove dead code: completeMu/completeResult/completeErr fields, signals map, QueryHandlers() method, executeViaDispatcher function, loadAllEventsForCompaction function, workEntryPoint/workInput fields. Invariants: No functional behavior change except retry on deadlock. Deleted code must have zero references (verified by compiler). API surface: QueryHandlers() removed from public API (was never called). Integration points: engine/sharded_store.go Close(), engine/compaction.go CompactHistory, engine/db.go CompactHistory, engine/runtime.go Runtime struct, engine/engine.go execSession. Test: Existing tests must pass. Verify deadlock retry with a unit test using a mock store.",
+      "coupling": {
+        "cleat-230-race-fix1": "LOOSE"
+      }
+    }
+  ]
+}

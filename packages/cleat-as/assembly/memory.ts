@@ -85,20 +85,13 @@ export function readString(ptr: usize, len: i32): string {
  */
 export function writeString(ptr: usize, maxLen: i32, s: string): i32 {
   if (maxLen <= 0) return 0;
-  if (s.length === 0) return 0;
-
-  let byteLen: i32 = String.UTF8.byteLength(s) as i32;
-  let writeLen: i32 = byteLen;
-
-  if (writeLen > maxLen) {
-    writeLen = maxLen;
+  let len: i32 = s.length as i32;  // code units, not byteLength (which includes null terminator)
+  if (len > maxLen) { len = maxLen; }
+  let written: i32 = 0;
+  if (len > 0) {
+    written = String.UTF8.encodeUnsafe(changetype<usize>(s), len, ptr) as i32;
   }
-
-  if (writeLen > 0) {
-    String.UTF8.encodeUnsafe(changetype<usize>(s), writeLen, ptr);
-  }
-
-  return writeLen as i32;
+  return written;
 }
 
 // ──────────────────────────────────────────────
@@ -490,4 +483,16 @@ export function escapeJson(s: string): string {
 function hexDigit(n: i32): string {
     if (n < 10) return String.fromCharCode(0x30 + n);
     return String.fromCharCode(0x61 + n - 10);
+}
+
+/**
+ * Decode cleat_get_scope result.
+ * bits 32-63 = objTypeLen, bits 0-31 = instKeyLen.
+ * Matches Rust SDK decode_get_scope_result.
+ */
+export function decodeGetScopeResult(result: i64): u32[] {
+  let r = result as u64;
+  let objTypeLen = <u32>((r >> 32) & 0xFFFFFFFF);
+  let instKeyLen = <u32>(r & 0xFFFFFFFF);
+  return [objTypeLen, instKeyLen];
 }

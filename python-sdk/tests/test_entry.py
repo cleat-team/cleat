@@ -42,23 +42,28 @@ def setup_memory():
 
 
 def _call_export(fn, input_dict):
-    """Write *input_dict* as JSON to the scratch region and invoke *fn*
-    (which is the ``export_wrapper`` returned by ``@cleat_entry``).
+    """Call *fn* (the ``export_wrapper`` returned by ``@cleat_entry``)
+    with the input dict serialized as JSON.
 
-    Returns the packed ``i64`` result from the wrapper.
+    Returns the result string from the wrapper (``str`` in the new
+    string-returning ABI).
     """
-    input_bytes = json.dumps(input_dict).encode("utf-8")
-    ptr = memory.SCRATCH_BASE
-    memory._memory[ptr : ptr + len(input_bytes)] = input_bytes
-    return fn(ptr, len(input_bytes), memory.OUTPUT_OFFSET, memory.OUT_BUF_SIZE)
+    input_json = json.dumps(input_dict)
+    return fn(input_json)
 
 
-def _decode_output(packed):
-    """Decode a packed export result and return ``(err_code, output_dict)``."""
-    err_code, actual_len = memory.decode_export_result(packed)
-    raw = memory.read_string(memory.OUTPUT_OFFSET, actual_len)
-    output = json.loads(raw) if raw.strip() else {}
-    return err_code, output
+def _decode_output(result):
+    """Decode the export wrapper's string result.
+
+    With the new ``string -> string`` ABI there is no separate error code
+    in the return value.  We simply parse the result as JSON and return
+    ``(0, parsed)``.  Callers that expect an error check the ``"error"``
+    key in the returned dict directly.
+    """
+    if not result:
+        return 0, {}
+    output = json.loads(result)
+    return 0, output
 
 
 # ---------------------------------------------------------------------------
@@ -127,9 +132,9 @@ class TestCleatEntry:
                 assert hasattr(h, attr), f"HostCalls missing {attr}"
             return {"ok": True}
 
-        packed = _call_export(my_func, {"data": "test"})
-        err_code, _actual_len = memory.decode_export_result(packed)
-        assert err_code == 0
+        result = _call_export(my_func, {"data": "test"})
+        parsed = json.loads(result)
+        assert isinstance(parsed, dict) and "error" not in parsed
 
     def test_cleat_entry_input_deserialization(self):
         """JSON input is correctly deserialized and passed as kwargs."""
@@ -157,16 +162,16 @@ class TestCleatEntry:
         assert output == {"status": "ok"}
 
     def test_cleat_entry_missing_param(self):
-        """A missing required parameter produces ``err_code=1`` with an
-        error message listing the missing keys."""
+        """A missing required parameter produces an ``{"error": ...}`` result
+        with a message listing the missing keys."""
 
         @cleat_entry
         def my_func(h: HostCalls, name: str, count: int):
             return {"ok": True}
 
         packed = _call_export(my_func, {"name": "Alice"})  # missing "count"
-        err_code, output = _decode_output(packed)
-        assert err_code == 1
+        _err_code, output = _decode_output(packed)
+        assert "error" in output
         assert "count" in output.get("error", "")
 
     def test_cleat_entry_extra_params(self):
@@ -195,18 +200,14 @@ class TestCleatEntry:
         assert output == {"result": "data", "nested": {"a": [1, 2, 3]}}
 
     def test_cleat_entry_none_result(self):
-        """Returning ``None`` produces the JSON literal ``null`` in the
-        output buffer and err_code=0."""
+        """Returning ``None`` produces the JSON literal ``null``."""
 
         @cleat_entry
         def my_func(h: HostCalls):
             return None
 
-        packed = _call_export(my_func, {})
-        err_code, actual_len = memory.decode_export_result(packed)
-        assert err_code == 0
-        raw = memory.read_string(memory.OUTPUT_OFFSET, actual_len)
-        assert raw == "null"
+        result = _call_export(my_func, {})
+        assert result == "null"
 
     def test_cleat_entry_string_result(self):
         """Returning a plain string produces a JSON quoted string."""
@@ -215,11 +216,8 @@ class TestCleatEntry:
         def my_func(h: HostCalls):
             return "plain string"
 
-        packed = _call_export(my_func, {})
-        err_code, actual_len = memory.decode_export_result(packed)
-        assert err_code == 0
-        raw = memory.read_string(memory.OUTPUT_OFFSET, actual_len)
-        assert json.loads(raw) == "plain string"
+        result = _call_export(my_func, {})
+        assert json.loads(result) == "plain string"
 
     def test_cleat_entry_list_result(self):
         """Returning a list produces a JSON array."""
@@ -235,31 +233,27 @@ class TestCleatEntry:
 
     def test_cleat_entry_error_handling(self):
         """When the wrapped function raises an exception the decorator
-        returns ``err_code=1`` and a ``{"error": "..."}`` JSON in the
-        output buffer."""
+        returns ``{"error": "..."}`` JSON."""
 
         @cleat_entry
         def my_func(h: HostCalls):
             raise RuntimeError("something went wrong")
 
         packed = _call_export(my_func, {})
-        err_code, output = _decode_output(packed)
-        assert err_code == 1
+        _err_code, output = _decode_output(packed)
+        assert isinstance(output, dict)
         assert "something went wrong" in output.get("error", "")
 
     def test_cleat_entry_type_error_handling(self):
         """A ``TypeError`` inside the wrapped function also yields
-        ``err_code=1``."""
+        an ``{"error": ...}`` result."""
 
         @cleat_entry
         def my_func(h: HostCalls, name: str):
             return name + 1  # type error if name is a string
 
-        packed = _call_export(my_func, {"name": "Alice"})
-        err_code, actual_len = memory.decode_export_result(packed)
-        assert err_code == 1
-        raw = memory.read_string(memory.OUTPUT_OFFSET, actual_len)
-        error_obj = json.loads(raw)
+        result = _call_export(my_func, {"name": "Alice"})
+        error_obj = json.loads(result)
         assert "error" in error_obj
 
     def test_cleat_entry_large_output(self):
@@ -272,9 +266,7 @@ class TestCleatEntry:
             return {"data": large_value}
 
         packed = _call_export(my_func, {})
-        err_code, actual_len = memory.decode_export_result(packed)
-        assert err_code == 0
-        output_str = memory.read_string(memory.OUTPUT_OFFSET, actual_len)
+        output_str = packed  # result is now a string directly
         parsed = json.loads(output_str)
         assert parsed["data"] == large_value
 

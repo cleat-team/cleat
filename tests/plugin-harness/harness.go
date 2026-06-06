@@ -5,8 +5,8 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/cleat-team/cleat/internal/host"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // TestPluginEnv is a complete plugin test environment. It holds all of the
@@ -21,8 +21,8 @@ type TestPluginEnv struct {
 	Cancel      context.CancelFunc
 	PluginDB    plugin.PluginDB
 	Dialect     plugin.Dialect
-	Registry    *host.PluginRegistry
-	StreamReg   *host.PluginStreamRegistry
+	Registry    *engine.PluginRegistry
+	StreamReg   *engine.PluginStreamRegistry
 	MockServers *MockServers
 	Plugins     []*plugin.LoadedPlugin
 
@@ -47,7 +47,7 @@ func NewTestPluginEnv(t *testing.T, ctx context.Context, db *sql.DB, dialect plu
 	t.Helper()
 
 	// Wrap the raw *sql.DB in a PluginDB adapter.
-	pluginDB := &host.SQLDBAdapter{DB: db}
+	pluginDB := &engine.SQLDBAdapter{DB: db}
 
 	// In-memory (no connection managed by us) — we just use the provided db.
 	env := &TestPluginEnv{
@@ -81,8 +81,8 @@ func NewTestPluginEnv(t *testing.T, ctx context.Context, db *sql.DB, dialect plu
 	SeedPluginConfig(t, db, dialect)
 
 	// Build host registries.
-	pr := host.NewPluginRegistry()
-	psr := host.NewPluginStreamRegistry()
+	pr := engine.NewPluginRegistry()
+	psr := engine.NewPluginStreamRegistry()
 
 	// Register host functions.
 	for _, lp := range loadedPlugins {
@@ -154,8 +154,8 @@ func NewTestPluginEnvInMemory(t *testing.T) *TestPluginEnv {
 	env.Plugins = loadedPlugins
 
 	// Build registries.
-	pr := host.NewPluginRegistry()
-	psr := host.NewPluginStreamRegistry()
+	pr := engine.NewPluginRegistry()
+	psr := engine.NewPluginStreamRegistry()
 
 	for _, lp := range loadedPlugins {
 		if !lp.Healthy {

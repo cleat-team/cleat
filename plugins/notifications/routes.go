@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"database/sql"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/internal/auth"
-	"github.com/cleat-team/cleat/internal/plugin"
+	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -219,7 +220,7 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 			FROM webhook_config
 			WHERE id = $1 AND tenant_id = $2
 		`, p.dialect), id, tid).Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "webhook not found")
 		return
 	}

@@ -8,7 +8,8 @@ DECLARE
 BEGIN
     SELECT role_name INTO v_role_name FROM admin.tenant_roles WHERE tenant_id = p_tenant_id;
     IF v_role_name IS NULL THEN
-        RAISE EXCEPTION 'no role for tenant %', p_tenant_id;
+        RAISE WARNING 'grant_plugin_to_tenant: no role for tenant % — skipping (single-tenant mode)', p_tenant_id;
+        RETURN;
     END IF;
 
     v_schema_name := 'tenant_' || replace(p_tenant_id::text, '-', '_');
@@ -29,7 +30,8 @@ DECLARE
 BEGIN
     SELECT role_name INTO v_role_name FROM admin.tenant_roles WHERE tenant_id = p_tenant_id;
     IF v_role_name IS NULL THEN
-        RAISE EXCEPTION 'no role for tenant %', p_tenant_id;
+        RAISE WARNING 'revoke_plugin_from_tenant: no role for tenant % — skipping (single-tenant mode)', p_tenant_id;
+        RETURN;
     END IF;
 
     v_schema_name := 'tenant_' || replace(p_tenant_id::text, '-', '_');
@@ -104,6 +106,7 @@ DROP INDEX IF EXISTS idx_instances_stale;
 ALTER TABLE workflow_defs DROP COLUMN IF EXISTS namespace;
 ALTER TABLE workflow_instances DROP COLUMN IF EXISTS namespace;
 ALTER TABLE workflow_defs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workflow_instances ADD COLUMN IF NOT EXISTS allowed_signals JSONB DEFAULT NULL;
 ALTER TABLE workflow_instances ENABLE ROW LEVEL SECURITY;
 ALTER TABLE event_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workflow_signals ENABLE ROW LEVEL SECURITY;

@@ -50,6 +50,7 @@ from .memory import (
     decode_await_promise_result,
     decode_await_signals_result,
     decode_cleat_call_result,
+    decode_dual_string_result,
     decode_poll_cancellation_result,
     decode_poll_signal_result,
     decode_simple_result,
@@ -65,67 +66,90 @@ from .memory import (
 # when not running in WASM ― the stubs are replaced by real WASM FFI
 # functions at runtime via the componentize-py host adaptor.
 try:
-    from ._wit.wit_world.imports.durable_sleep import (
+    from wit_world.imports.durable_sleep import (
         durable_sleep as _import_cleat_sleep,
         durable_now as _import_cleat_now,
         durable_random as _import_cleat_random,
         durable_log as _import_cleat_log,
     )
-    from ._wit.wit_world.imports.durable_call import (
+    from wit_world.imports.durable_call import (
         durable_call as _import_cleat_call,
         durable_call_retry as _import_cleat_call_retry,
         durable_call_heartbeat as _import_cleat_call_heartbeat,
     )
-    from ._wit.wit_world.imports.durable_signals import (
+    from wit_world.imports.durable_signals import (
         durable_await_signals as _import_cleat_await_signals,
         durable_poll_signal as _import_cleat_poll_signal,
         durable_send_signal_and_wait as _import_cleat_send_signal_and_wait,
         durable_reply_to_signal as _import_cleat_reply_to_signal,
         durable_signal_workflow as _import_cleat_signal_workflow,
     )
-    from ._wit.wit_world.imports.durable_promises import (
+    from wit_world.imports.durable_promises import (
         durable_create_promise as _import_cleat_create_promise,
         durable_await_promise as _import_cleat_await_promise,
         durable_resolve_promise as _import_cleat_resolve_promise,
         durable_reject_promise as _import_cleat_reject_promise,
     )
-    from ._wit.wit_world.imports.durable_children import (
+    from wit_world.imports.durable_children import (
         durable_child_workflow as _import_cleat_child_workflow,
         durable_await_child as _import_cleat_await_child,
         durable_await_all_children as _import_cleat_await_all_children,
         durable_child_workflow_with_options as _import_cleat_child_workflow_with_options,
     )
-    from ._wit.wit_world.imports.durable_lifecycle import (
+    from wit_world.imports.durable_lifecycle import (
         durable_defer as _import_cleat_defer,
         durable_continue_as_new as _import_cleat_continue_as_new,
         durable_poll_cancellation as _import_cleat_poll_cancellation,
     )
-    from ._wit.wit_world.imports.durable_lock import (
+    from wit_world.imports.durable_lock import (
         durable_acquire_lock as _import_cleat_acquire_lock,
         durable_release_lock as _import_cleat_release_lock,
     )
-    from ._wit.wit_world.imports.durable_handlers import (
+    from wit_world.imports.durable_handlers import (
         durable_register_update_handler as _import_cleat_register_update_handler,
         durable_register_query_handler as _import_cleat_register_query_handler,
     )
-    from ._wit.wit_world.imports.durable_state import (
+    from wit_world.imports.durable_state import (
         set_query_state as _import_set_query_state,
     )
-    from ._wit.wit_world.imports.durable_version import (
+    from wit_world.imports.durable_version import (
         durable_version as _import_cleat_version,
         durable_min_version as _import_cleat_min_version,
     )
-    from ._wit.wit_world.imports.durable_identity import (
+    from wit_world.imports.durable_identity import (
         durable_workflow_id as _import_cleat_workflow_id,
         durable_run_id as _import_cleat_run_id,
     )
-    from ._wit.wit_world.imports.durable_messaging import (
+    from wit_world.imports.durable_messaging import (
         durable_send as _import_cleat_send,
         durable_schedule_invoke as _import_cleat_schedule_invoke,
     )
-    from ._wit.wit_world.imports.plugin import (
+    from wit_world.imports.plugin import (
         plugin_call as _import_plugin_call,
         plugin_call_streaming as _import_plugin_call_streaming,
+    )
+    from wit_world.imports.durable_scope import (
+        set_scope as _import_set_scope,
+        get_scope as _import_get_scope,
+        uuid as _import_uuid,
+    )
+    from wit_world.imports.durable_stream_state import (
+        set_state as _import_stream_set_state,
+        get_state as _import_stream_get_state,
+        delete_state as _import_stream_delete_state,
+        incr_state as _import_stream_incr_state,
+        has_state as _import_stream_has_state,
+        list_state as _import_stream_list_state,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
+        continue_as_new_versioned as _import_continue_as_new_versioned,
+        side_effect as _import_side_effect,
+    )
+    from wit_world.imports.durable_extended_children import (
+        child_workflow_in_schema as _import_child_workflow_in_schema,
+    )
+    from wit_world.imports.durable_fetch import (
+        fetch as _import_fetch,
     )
 
     _USING_WASM = True
@@ -307,16 +331,19 @@ class ChildResult:
 
 @dataclass
 class ChildWorkflowOptions:
-    """Options for starting a child workflow with version control.
+    """Options for starting a child workflow with version and priority control.
 
     Parameters
     ----------
     version : int
         Explicit workflow definition version to use.
         0 = use default resolution (parent's version).
+    priority : int
+        Scheduling priority (0 = highest priority; lower number = picked first).
     """
 
     version: int = 0
+    priority: int = 0
 
 
 @dataclass
@@ -384,7 +411,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_log(msg_ptr: int, msg_len: int) -> int:
+    def _import_cleat_log(msg: str) -> int:
         """Stub for WASM import ``(import "env" "cleat_log") (param i32 i32) (result i64)``."""
         raise NotImplementedError("cleat_log can only be called within a cleat WASM runtime.")
 
@@ -416,12 +443,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_defer(
-        desc_ptr: int,
-        desc_len: int,
-        defer_id_ptr: int,
-        defer_id_max_len: int,
-    ) -> int:
+    def _import_cleat_defer(desc: str) -> str:
         """Stub for WASM import ``(import "env" "cleat_defer") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError("cleat_defer can only be called within a cleat WASM runtime.")
 
@@ -431,7 +453,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_poll_cancellation(reason_ptr: int, reason_max_len: int) -> int:
+    def _import_cleat_poll_cancellation() -> str:
         """Stub for WASM import ``(import "env" "cleat_poll_cancellation") (param i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_poll_cancellation can only be called within a cleat WASM runtime."
@@ -443,12 +465,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_poll_signal(
-        name_ptr: int,
-        name_len: int,
-        payload_ptr: int,
-        payload_max_len: int,
-    ) -> int:
+    def _import_cleat_poll_signal(name: str) -> str:
         """Stub for WASM import ``(import "env" "cleat_poll_signal") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_poll_signal can only be called within a cleat WASM runtime."
@@ -460,7 +477,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_continue_as_new(input_ptr: int, input_len: int) -> int:
+    def _import_cleat_continue_as_new(input: str) -> int:
         """Stub for WASM import ``(import "env" "cleat_continue_as_new") (param i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_continue_as_new can only be called within a cleat WASM runtime."
@@ -473,13 +490,9 @@ if not _USING_WASM:
 if not _USING_WASM:
 
     def _import_cleat_child_workflow(
-        name_ptr: int,
-        name_len: int,
-        input_ptr: int,
-        input_len: int,
-        run_id_ptr: int,
-        run_id_max_len: int,
-    ) -> int:
+        name: str,
+        input: str,
+    ) -> str:
         """Stub for WASM import ``(import "env" "cleat_child_workflow") (param i32 i32 i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_child_workflow can only be called within a cleat WASM runtime."
@@ -492,8 +505,10 @@ if not _USING_WASM:
         name: str,
         input: str,
         version: int,
+        priority: int,
+        parent_close_policy: str,
     ) -> str:
-        """Stub for WASM import `."""
+        """Stub for WASM import ``(import "env" "cleat_child_workflow_with_options")``."""
         raise NotImplementedError(
             "cleat_child_workflow_with_options can only be called within a cleat WASM runtime."
         )
@@ -504,12 +519,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_await_child(
-        run_id_ptr: int,
-        run_id_len: int,
-        result_ptr: int,
-        result_max_len: int,
-    ) -> int:
+    def _import_cleat_await_child(run_id: str) -> str:
         """Stub for WASM import ``(import "env" "cleat_await_child") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_await_child can only be called within a cleat WASM runtime."
@@ -522,8 +532,7 @@ if not _USING_WASM:
 if not _USING_WASM:
 
     def _import_cleat_await_signals(
-        names_ptr: int,
-        names_len: int,
+        names: str,
         timeout_ms: int,
         sig_name_ptr: int,
         sig_name_max_len: int,
@@ -541,12 +550,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_set_query_state(
-        key_ptr: int,
-        key_len: int,
-        val_ptr: int,
-        val_len: int,
-    ) -> int:
+    def _import_set_query_state(key: str, val: str) -> int:
         """Stub for WASM import ``(import "env" "set_query_state") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError("set_query_state can only be called within a cleat WASM runtime.")
 
@@ -556,16 +560,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_call(
-        svc_ptr: int,
-        svc_len: int,
-        op_ptr: int,
-        op_len: int,
-        req_ptr: int,
-        req_len: int,
-        resp_ptr: int,
-        resp_max_len: int,
-    ) -> int:
+    def _import_cleat_call(service: str, operation: str, request: str) -> str:
         """Stub for WASM import ``(import "env" "cleat_call") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError("cleat_call can only be called within a cleat WASM runtime.")
 
@@ -576,21 +571,15 @@ if not _USING_WASM:
 if not _USING_WASM:
 
     def _import_cleat_call_retry(
-        svc_ptr: int,
-        svc_len: int,
-        op_ptr: int,
-        op_len: int,
-        req_ptr: int,
-        req_len: int,
+        service: str,
+        operation: str,
+        request: str,
         max_attempts: int,
         initial_interval_ms: int,
         backoff_coefficient_100x: int,
         max_interval_ms: int,
-        non_retryable_errors_ptr: int,
-        non_retryable_errors_len: int,
-        resp_ptr: int,
-        resp_max_len: int,
-    ) -> int:
+        non_retryable_errors: str,
+    ) -> str:
         """Stub for WASM import ``(import "env" "cleat_call_retry") (param i32 i32 i32 i32 i32 i32 i64 i64 i64 i64 i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_call_retry can only be called within a cleat WASM runtime."
@@ -603,16 +592,11 @@ if not _USING_WASM:
 if not _USING_WASM:
 
     def _import_cleat_call_heartbeat(
-        svc_ptr: int,
-        svc_len: int,
-        op_ptr: int,
-        op_len: int,
-        req_ptr: int,
-        req_len: int,
+        service: str,
+        operation: str,
+        request: str,
         heartbeat_interval_ms: int,
-        resp_ptr: int,
-        resp_max_len: int,
-    ) -> int:
+    ) -> str:
         """Stub for WASM import ``(import "env" "cleat_call_heartbeat") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_call_heartbeat can only be called within a cleat WASM runtime."
@@ -624,12 +608,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_await_all_children(
-        run_ids_json_ptr: int,
-        run_ids_json_len: int,
-        results_ptr: int,
-        results_max_len: int,
-    ) -> int:
+    def _import_cleat_await_all_children(run_ids_json: str) -> str:
         """Stub for WASM import ``(import "env" "cleat_await_all_children") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_await_all_children can only be called within a cleat WASM runtime."
@@ -642,15 +621,10 @@ if not _USING_WASM:
 if not _USING_WASM:
 
     def _import_plugin_call(
-        plugin_name_ptr: int,
-        plugin_name_len: int,
-        function_name_ptr: int,
-        function_name_len: int,
-        input_ptr: int,
-        input_len: int,
-        response_ptr: int,
-        response_max_len: int,
-    ) -> int:
+        plugin_name: str,
+        function_name: str,
+        input: str,
+    ) -> str:
         """Stub for WASM import ``(import "env" "plugin_call") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError("plugin_call can only be called within a cleat WASM runtime.")
 
@@ -661,15 +635,10 @@ if not _USING_WASM:
 if not _USING_WASM:
 
     def _import_plugin_call_streaming(
-        plugin_name_ptr: int,
-        plugin_name_len: int,
-        function_name_ptr: int,
-        function_name_len: int,
-        input_ptr: int,
-        input_len: int,
-        event_ptr: int,
-        event_max_len: int,
-    ) -> int:
+        plugin_name: str,
+        function_name: str,
+        input: str,
+    ) -> str:
         """Stub for WASM import ``(import "env" "plugin_call_streaming") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "plugin_call_streaming can only be called within a cleat WASM runtime."
@@ -682,12 +651,9 @@ if not _USING_WASM:
 if not _USING_WASM:
 
     def _import_cleat_create_promise(
-        name_ptr: int,
-        name_len: int,
-        id_out_ptr: int,
-        id_out_max: int,
+        name: str,
         ttl_ms: int = 0,
-    ) -> int:
+    ) -> str:
         """Stub for WASM import ``(import "env" "cleat_create_promise") (param i32 i32 i32 i32 i64) (result i64)``."""
         raise NotImplementedError(
             "cleat_create_promise can only be called within a cleat WASM runtime."
@@ -700,12 +666,9 @@ if not _USING_WASM:
 if not _USING_WASM:
 
     def _import_cleat_await_promise(
-        id_ptr: int,
-        id_len: int,
+        id: str,
         timeout_ms: int,
-        result_out_ptr: int,
-        result_out_max: int,
-    ) -> int:
+    ) -> str:
         """Stub for WASM import ``(import "env" "cleat_await_promise") (param i32 i32 i64 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_await_promise can only be called within a cleat WASM runtime."
@@ -717,12 +680,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_resolve_promise(
-        id_ptr: int,
-        id_len: int,
-        value_ptr: int,
-        value_len: int,
-    ) -> int:
+    def _import_cleat_resolve_promise(id: str, value: str) -> int:
         """Stub for WASM import ``(import "env" "cleat_resolve_promise") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_resolve_promise can only be called within a cleat WASM runtime."
@@ -734,12 +692,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_reject_promise(
-        id_ptr: int,
-        id_len: int,
-        error_ptr: int,
-        error_len: int,
-    ) -> int:
+    def _import_cleat_reject_promise(id: str, error: str) -> int:
         """Stub for WASM import ``(import "env" "cleat_reject_promise") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_reject_promise can only be called within a cleat WASM runtime."
@@ -780,7 +733,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_register_update_handler(name_ptr: int, name_len: int) -> int:
+    def _import_cleat_register_update_handler(name: str) -> int:
         """Stub for WASM import ``(import "env" "cleat_register_update_handler") (param i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_register_update_handler can only be called within a cleat WASM runtime."
@@ -792,10 +745,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_workflow_id(
-        id_ptr: int,
-        id_max_len: int,
-    ) -> int:
+    def _import_cleat_workflow_id() -> str:
         """Stub for WASM import ``(import "env" "cleat_workflow_id") (param i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_workflow_id can only be called within a cleat WASM runtime."
@@ -807,10 +757,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_run_id(
-        id_ptr: int,
-        id_max_len: int,
-    ) -> int:
+    def _import_cleat_run_id() -> str:
         """Stub for WASM import ``(import "env" "cleat_run_id") (param i32 i32) (result i64)``."""
         raise NotImplementedError("cleat_run_id can only be called within a cleat WASM runtime.")
 
@@ -820,14 +767,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_send(
-        svc_ptr: int,
-        svc_len: int,
-        op_ptr: int,
-        op_len: int,
-        req_ptr: int,
-        req_len: int,
-    ) -> int:
+    def _import_cleat_send(service: str, operation: str, request: str) -> int:
         """Stub for WASM import ``(import "env" "cleat_send") (param i32 i32 i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError("cleat_send can only be called within a cleat WASM runtime.")
 
@@ -837,15 +777,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_schedule_invoke(
-        svc_ptr: int,
-        svc_len: int,
-        op_ptr: int,
-        op_len: int,
-        req_ptr: int,
-        req_len: int,
-        delay_ms: int,
-    ) -> int:
+    def _import_cleat_schedule_invoke(service: str, operation: str, request: str, delay_ms: int) -> int:
         """Stub for WASM import ``(import "env" "cleat_schedule_invoke") (param i32 i32 i32 i32 i32 i32 i64) (result i64)``."""
         raise NotImplementedError(
             "cleat_schedule_invoke can only be called within a cleat WASM runtime."
@@ -857,7 +789,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_register_query_handler(name_ptr: int, name_len: int) -> int:
+    def _import_cleat_register_query_handler(name: str) -> int:
         """Stub for WASM import ``(import "env" "cleat_register_query_handler") (param i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_register_query_handler can only be called within a cleat WASM runtime."
@@ -869,17 +801,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_send_signal_and_wait(
-        target_run_id_ptr: int,
-        target_run_id_len: int,
-        signal_name_ptr: int,
-        signal_name_len: int,
-        payload_ptr: int,
-        payload_len: int,
-        timeout_ms: int,
-        response_ptr: int,
-        response_max_len: int,
-    ) -> int:
+    def _import_cleat_send_signal_and_wait(target_run_id: str, signal_name: str, payload: str, timeout_ms: int) -> str:
         """Stub for WASM import ``(import "env" "cleat_send_signal_and_wait") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_send_signal_and_wait can only be called within a cleat WASM runtime."
@@ -891,12 +813,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_reply_to_signal(
-        correlation_id_ptr: int,
-        correlation_id_len: int,
-        response_ptr: int,
-        response_len: int,
-    ) -> int:
+    def _import_cleat_reply_to_signal(correlation_id: str, response: str) -> int:
         """Stub for WASM import ``(import "env" "cleat_reply_to_signal") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_reply_to_signal can only be called within a cleat WASM runtime."
@@ -908,14 +825,7 @@ if not _USING_WASM:
 
 if not _USING_WASM:
 
-    def _import_cleat_signal_workflow(
-        target_run_id_ptr: int,
-        target_run_id_len: int,
-        signal_name_ptr: int,
-        signal_name_len: int,
-        payload_ptr: int,
-        payload_len: int,
-    ) -> int:
+    def _import_cleat_signal_workflow(target_run_id: str, signal_name: str, payload: str) -> int:
         """Stub for WASM import ``(import "env" "cleat_signal_workflow") (param i32 i32 i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError(
             "cleat_signal_workflow can only be called within a cleat WASM runtime."
@@ -1005,11 +915,13 @@ class HostCalls:
         return key
 
     def set_scope(self, object_type: str, instance_key: str) -> str:
-        """Set the state key prefix for virtual object instances.
+        """Set the virtual object scope via the host ABI.
 
-        All subsequent ``set_state``/``get_state``/etc calls are
-        automatically prefixed with ``"vo:<object_type>:<instance_key>:"``.
-        Returns the previous scope prefix for stack-style save/restore.
+        Calls the host ``durable-scope.set-scope`` import to set the
+        virtual object scope and returns the previous scope as a JSON string.
+
+        Also updates the local scope prefix so that ``_scoped_key`` works
+        for service-call-based state operations.
 
         Parameters
         ----------
@@ -1021,16 +933,23 @@ class HostCalls:
         Returns
         -------
         str
-            The previous scope prefix (empty string if none was set).
+            The previous scope as a JSON string (empty string if none was
+            set).
         """
-        prev = self._scope_prefix
+        prev_scope = _import_set_scope(object_type, instance_key)
+
+        # Keep local scope in sync for _scoped_key compatibility.
         self._scope_prefix = (
             f"vo:{object_type}:{instance_key}:" if object_type and instance_key else ""
         )
-        return prev
+
+        return prev_scope
 
     def get_scope(self) -> tuple[str, str]:
-        """Get the current virtual object scope.
+        """Get the current virtual object scope via the host ABI.
+
+        Calls the host ``durable-scope.get-scope`` import to retrieve
+        the current object type and instance key from the runtime.
 
         Returns
         -------
@@ -1038,14 +957,25 @@ class HostCalls:
             ``(object_type, instance_key)`` or ``("", "")`` if no scope is
             active.
         """
-        if not self._scope_prefix:
-            return "", ""
-        # Parse "vo:<type>:<key>:" format
-        prefix = self._scope_prefix.rstrip(":")
-        parts = prefix.split(":", 2)
-        if len(parts) == 3 and parts[0] == "vo":
-            return parts[1], parts[2]
-        return "", ""
+        ot_buf_size = OUT_BUF_SIZE // 2
+        ik_buf_offset = OUTPUT_OFFSET + ot_buf_size
+        ik_buf_size = OUT_BUF_SIZE - ot_buf_size
+
+        result = _import_get_scope(
+            OUTPUT_OFFSET, ot_buf_size,
+            ik_buf_offset, ik_buf_size,
+        )
+
+        ot_len, ik_len, err_code = decode_dual_string_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"get_scope failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+
+        object_type = read_string(OUTPUT_OFFSET, ot_len) if ot_len > 0 else ""
+        instance_key = read_string(ik_buf_offset, ik_len) if ik_len > 0 else ""
+
+        return (object_type, instance_key)
 
     def clear_scope(self) -> str:
         """Remove the current scope and return the previous scope prefix.
@@ -1065,9 +995,10 @@ class HostCalls:
     # --------------------------------------------------------------------
 
     def uuid(self, seed: str) -> str:
-        """Return a deterministic UUID scoped to the current workflow
-        and the given *seed*. The same seed always produces the same UUID
-        for this workflow instance.
+        """Generate a deterministic UUID from a seed via the host ABI.
+
+        Calls the host ``durable-scope.uuid`` import.  The same seed
+        always produces the same UUID for this workflow instance.
 
         Useful for generating predictable entity IDs, correlation IDs, or
         other identifiers that must be stable across workflow replays.
@@ -1082,20 +1013,7 @@ class HostCalls:
         str
             A UUID-formatted string (e.g. ``"550e8400-e29b-... "``).
         """
-        wf_id = self.current_workflow_id()
-        data = (wf_id + ":" + seed).encode("utf-8")
-        h = hashlib.sha256(data).digest()[:16]
-        # Set UUIDv5 version and variant bits
-        h_bytes = bytearray(h)
-        h_bytes[6] = (h_bytes[6] & 0x0F) | 0x50  # Version 5
-        h_bytes[8] = (h_bytes[8] & 0x3F) | 0x80  # Variant 1
-        return (
-            f"{h_bytes[0:4].hex()}-"
-            f"{h_bytes[4:6].hex()}-"
-            f"{h_bytes[6:8].hex()}-"
-            f"{h_bytes[8:10].hex()}-"
-            f"{h_bytes[10:16].hex()}"
-        )
+        return _import_uuid(seed)
 
     # --------------------------------------------------------------------
     # 1. now — wall-clock time
@@ -1144,13 +1062,7 @@ class HostCalls:
         str
             The workflow ID string.
         """
-        result = _import_cleat_workflow_id(OUTPUT_OFFSET, OUT_BUF_SIZE)
-        id_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"current_workflow_id failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-        return read_string(OUTPUT_OFFSET, id_len)
+        return _import_cleat_workflow_id()
 
     # --------------------------------------------------------------------
     # 5. current_run_id — get current run identity
@@ -1164,13 +1076,7 @@ class HostCalls:
         str
             The run ID string.
         """
-        result = _import_cleat_run_id(OUTPUT_OFFSET, OUT_BUF_SIZE)
-        id_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"current_run_id failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-        return read_string(OUTPUT_OFFSET, id_len)
+        return _import_cleat_run_id()
 
     # --------------------------------------------------------------------
     # 6. version — workflow definition version
@@ -1216,8 +1122,7 @@ class HostCalls:
         message : str
             The log message to record.
         """
-        msg_len = write_string(SCRATCH_BASE, message, OUT_BUF_SIZE)
-        _import_cleat_log(SCRATCH_BASE, msg_len)
+        _import_cleat_log(message)
 
     # --------------------------------------------------------------------
     # 5b. log_kv — structured key-value log
@@ -1303,60 +1208,55 @@ class HostCalls:
         """
         req_str = self._marshal(request)
 
-        svc_len = write_string(SCRATCH_BASE, service, OUT_BUF_SIZE)
-        op_offset = SCRATCH_BASE + svc_len
-        remaining = OUT_BUF_SIZE - svc_len
-        op_len = write_string(op_offset, operation, remaining)
-        req_offset = op_offset + op_len
-        remaining -= op_len
-        req_len = write_string(req_offset, req_str, remaining)
-
         if timeout_ms is not None and _USING_WASM:
             # Use the retry import with a single attempt to convey the
-            # per-call timeout to the host.  When the host-side import
-            # supports timeout natively, this path passes it through.
+            # per-call timeout to the host.
             non_retryable_str = "[]"
             backoff_100x = 100  # 1.0 * 100
-            nre_offset = req_offset + req_len
-            remaining -= req_len
-            nre_len = write_string(nre_offset, non_retryable_str, remaining)
 
             result = _import_cleat_call_retry(
-                SCRATCH_BASE,
-                svc_len,
-                op_offset,
-                op_len,
-                req_offset,
-                req_len,
+                service,
+                operation,
+                req_str,
                 1,  # max_attempts: single attempt with timeout
                 timeout_ms,
                 backoff_100x,
                 timeout_ms,
-                nre_offset,
-                nre_len,
-                OUTPUT_OFFSET,
-                OUT_BUF_SIZE,
+                non_retryable_str,
             )
+            if isinstance(result, str):
+                if result.startswith("__CLEAT_ERROR__:"):
+                    err_msg = result[len("__CLEAT_ERROR__:"):]
+                    self._raise_for_call_error(service, operation, err_msg, 0)
+                return result
+            # Old packed-i64 ABI for the retry path.
+            response_len, call_error_code, err_code = decode_cleat_call_result(result)
+            if err_code != 0:
+                err_msg = read_string(OUTPUT_OFFSET, response_len)
+                if call_error_code != 0:
+                    self._raise_for_call_error(service, operation, err_msg, call_error_code)
+                raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
+            return read_string(OUTPUT_OFFSET, response_len)
         else:
+            # String ABI: durable-call returns response directly as a string.
             result = _import_cleat_call(
-                SCRATCH_BASE,
-                svc_len,
-                op_offset,
-                op_len,
-                req_offset,
-                req_len,
-                OUTPUT_OFFSET,
-                OUT_BUF_SIZE,
+                service,
+                operation,
+                req_str,
             )
-
-        response_len, call_error_code, err_code = decode_cleat_call_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
-            if call_error_code != 0:
-                self._raise_for_call_error(service, operation, err_msg, call_error_code)
-            raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
-
-        return read_string(OUTPUT_OFFSET, response_len)
+            if isinstance(result, str):
+                if result.startswith("__CLEAT_ERROR__:"):
+                    err_msg = result[len("__CLEAT_ERROR__:"):]
+                    raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
+                return result
+            # Fallback: old packed-i64 ABI for non-string result.
+            response_len, call_error_code, err_code = decode_cleat_call_result(result)
+            if err_code != 0:
+                err_msg = read_string(OUTPUT_OFFSET, response_len)
+                if call_error_code != 0:
+                    self._raise_for_call_error(service, operation, err_msg, call_error_code)
+                raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
+            return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
     # 7. call_typed — typed recorded API call
@@ -1434,33 +1334,22 @@ class HostCalls:
         non_retryable_str = json.dumps(retry.non_retryable_errors)
         backoff_100x = round(retry.backoff_coefficient * 100)
 
-        svc_len = write_string(SCRATCH_BASE, service, OUT_BUF_SIZE)
-        op_offset = SCRATCH_BASE + svc_len
-        remaining = OUT_BUF_SIZE - svc_len
-        op_len = write_string(op_offset, operation, remaining)
-        req_offset = op_offset + op_len
-        remaining -= op_len
-        req_len = write_string(req_offset, req_str, remaining)
-        nre_offset = req_offset + req_len
-        remaining -= req_len
-        nre_len = write_string(nre_offset, non_retryable_str, remaining)
-
         result = _import_cleat_call_retry(
-            SCRATCH_BASE,
-            svc_len,
-            op_offset,
-            op_len,
-            req_offset,
-            req_len,
+            service,
+            operation,
+            req_str,
             retry.max_attempts,
             retry.initial_interval_ms,
             backoff_100x,
             retry.max_interval_ms,
-            nre_offset,
-            nre_len,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
+            non_retryable_str,
         )
+
+        if isinstance(result, str):
+            if result.startswith("__CLEAT_ERROR__:"):
+                err_msg = result[len("__CLEAT_ERROR__:"):]
+                self._raise_for_call_error(service, operation, err_msg, 0)
+            return result
 
         response_len, call_error_code, err_code = decode_cleat_call_result(result)
         if err_code != 0:
@@ -1515,25 +1404,13 @@ class HostCalls:
         """
         req_str = self._marshal(request)
 
-        svc_len = write_string(SCRATCH_BASE, service, OUT_BUF_SIZE)
-        op_offset = SCRATCH_BASE + svc_len
-        remaining = OUT_BUF_SIZE - svc_len
-        op_len = write_string(op_offset, operation, remaining)
-        req_offset = op_offset + op_len
-        remaining -= op_len
-        req_len = write_string(req_offset, req_str, remaining)
+        result = _import_cleat_call_heartbeat(service, operation, req_str, heartbeat_interval_ms)
 
-        result = _import_cleat_call_heartbeat(
-            SCRATCH_BASE,
-            svc_len,
-            op_offset,
-            op_len,
-            req_offset,
-            req_len,
-            heartbeat_interval_ms,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
+        if isinstance(result, str):
+            if result.startswith("__CLEAT_ERROR__:"):
+                err_msg = result[len("__CLEAT_ERROR__:"):]
+                self._raise_for_call_error(service, operation, err_msg, 0)
+            return result
 
         response_len, call_error_code, err_code = decode_cleat_call_result(result)
         if err_code != 0:
@@ -1739,6 +1616,49 @@ class HostCalls:
         return self.fetch_json(url, "GET", result_type=result_type)
 
     # --------------------------------------------------------------------
+    # 11e. host_fetch — direct WASM import for HTTP fetch
+    # --------------------------------------------------------------------
+
+    def host_fetch(self, method: str, url: str, headers: str = "", body: str = "") -> str:
+        """Perform an HTTP fetch via the host ``durable-fetch.fetch`` import.
+
+        Unlike :meth:`fetch` which routes through ``call("http", "fetch", ...)``,
+        this method calls the direct WASM import for HTTP fetch (ABI 2.45).
+
+        Parameters
+        ----------
+        method : str
+            HTTP method (e.g. ``"GET"``, ``"POST"``).
+        url : str
+            The URL to fetch.
+        headers : str
+            HTTP headers as a JSON string (e.g. ``'{"Authorization": "Bearer x"}'``).
+        body : str
+            Request body for POST/PUT requests.
+
+        Returns
+        -------
+        str
+            The response as a JSON string containing ``body``, ``status``,
+            and ``headers`` fields.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error from the fetch.
+        """
+        result = _import_fetch(method, url, headers, body)
+        if isinstance(result, str):
+            return result
+        resp_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            err_msg = read_string(OUTPUT_OFFSET, resp_len) if resp_len > 0 else "unknown error"
+            raise RuntimeError(
+                f"host_fetch(url='{url}') failed: {err_msg} (code {err_code})"
+            )
+        return read_string(OUTPUT_OFFSET, resp_len)
+
+    # --------------------------------------------------------------------
     # 12. await_signals — wait for signals
     # --------------------------------------------------------------------
 
@@ -1813,15 +1733,12 @@ class HostCalls:
         if timeout_ms <= 0:
             effective_timeout = INFINITE_TIMEOUT_MS
 
-        # Lower half of scratch buffer: signal names JSON.
         # Upper half of scratch buffer: signal payload output.
-        names_len = write_string(SCRATCH_BASE, names_json, OUT_BUF_SIZE // 2)
         payload_offset = SCRATCH_BASE + OUT_BUF_SIZE // 2
         payload_max = OUT_BUF_SIZE // 2
 
         result = _import_cleat_await_signals(
-            SCRATCH_BASE,
-            names_len,
+            names_json,
             effective_timeout,
             OUTPUT_OFFSET,
             OUT_BUF_SIZE,
@@ -1874,24 +1791,8 @@ class HostCalls:
         RuntimeError
             If the host reports an internal error.
         """
-        name_len = write_string(SCRATCH_BASE, name, OUT_BUF_SIZE)
-
-        result = _import_cleat_poll_signal(
-            SCRATCH_BASE,
-            name_len,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
-
-        payload_len, found, err_code = decode_poll_signal_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"poll_signal(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-
-        payload = read_string(OUTPUT_OFFSET, payload_len) if found and payload_len > 0 else ""
-
-        return (payload, found)
+        payload = _import_cleat_poll_signal(name)
+        return (payload, bool(payload))
 
     # --------------------------------------------------------------------
     # 14. poll_cancellation — check for cancellation
@@ -1910,12 +1811,8 @@ class HostCalls:
             cancellation was requested and *reason* is the cancellation
             reason string (may be empty).
         """
-        result = _import_cleat_poll_cancellation(OUTPUT_OFFSET, OUT_BUF_SIZE)
-
-        reason_len, cancelled = decode_poll_cancellation_result(result)
-        reason = read_string(OUTPUT_OFFSET, reason_len) if cancelled and reason_len > 0 else ""
-
-        return (cancelled, reason)
+        reason = _import_cleat_poll_cancellation()
+        return (bool(reason), reason)
 
     # --------------------------------------------------------------------
     # 15. child_workflow — start a child workflow
@@ -1946,36 +1843,15 @@ class HostCalls:
             If the host reports an error starting the child.
         """
         input_str = self._marshal(input)
-
-        name_len = write_string(SCRATCH_BASE, name, OUT_BUF_SIZE)
-        input_offset = SCRATCH_BASE + name_len
-        remaining = OUT_BUF_SIZE - name_len
-        input_len = write_string(input_offset, input_str, remaining)
-
-        result = _import_cleat_child_workflow(
-            SCRATCH_BASE,
-            name_len,
-            input_offset,
-            input_len,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
-
-        run_id_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"child_workflow(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-
-        return read_string(OUTPUT_OFFSET, run_id_len)
+        return _import_cleat_child_workflow(name, input_str)
 
     def child_workflow_with_options(
         self, name: str, input: Any, options: ChildWorkflowOptions = ChildWorkflowOptions()
     ) -> str:
-        """Start a child workflow instance with version options.
+        """Start a child workflow instance with version and priority options.
 
         Like :meth:`child_workflow` but allows specifying the workflow
-        definition version explicitly.
+        definition version and scheduling priority explicitly.
 
         Parameters
         ----------
@@ -1984,7 +1860,7 @@ class HostCalls:
         input : Any
             Input for the child workflow.
         options : ChildWorkflowOptions
-            Version options for the child workflow (default: version=0).
+            Version and priority options for the child workflow.
 
         Returns
         -------
@@ -1992,29 +1868,56 @@ class HostCalls:
             The child workflow's run ID.
         """
         input_str = self._marshal(input)
+        return _import_cleat_child_workflow_with_options(name, input_str, options.version, options.priority, "")
 
-        name_len = write_string(SCRATCH_BASE, name, OUT_BUF_SIZE)
-        input_offset = SCRATCH_BASE + name_len
-        remaining = OUT_BUF_SIZE - name_len
-        input_len = write_string(input_offset, input_str, remaining)
+    # --------------------------------------------------------------------
+    # 15b. child_workflow_in_schema — cross-instance child workflow
+    # --------------------------------------------------------------------
 
-        result = _import_cleat_child_workflow_with_options(
-            SCRATCH_BASE,
-            name_len,
-            input_offset,
-            input_len,
-            options.version,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
+    def child_workflow_in_schema(
+        self,
+        schema: str,
+        name: str,
+        input: Any,
+        version: int = 0,
+        priority: int = 0,
+        policy: str = "",
+    ) -> str:
+        """Start a child workflow in a different schema (cross-instance).
 
-        run_id_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"child_workflow_with_options(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
+        Calls the host ``durable-extended-children.child-workflow-in-schema``
+        import.  The child runs in the specified schema namespace, enabling
+        cross-instance workflow cooperation.
 
-        return read_string(OUTPUT_OFFSET, run_id_len)
+        Parameters
+        ----------
+        schema : str
+            Target schema name for the child workflow.
+        name : str
+            Child workflow definition name.
+        input : Any
+            Input for the child workflow.  Dicts are JSON-serialised
+            automatically.
+        version : int
+            Explicit workflow definition version (0 = host default).
+        priority : int
+            Scheduling priority (0 = highest).
+        policy : str
+            Parent-close policy (e.g. ``"abandon"``, ``"terminate"``).
+            Empty string means host default.
+
+        Returns
+        -------
+        str
+            The child workflow's run ID.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error starting the child.
+        """
+        input_str = self._marshal(input)
+        return _import_child_workflow_in_schema(schema, name, input_str, version, priority, policy)
 
     # --------------------------------------------------------------------
     # 16. await_child — wait for a child workflow
@@ -2043,26 +1946,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        run_id_len = write_string(SCRATCH_BASE, run_id, OUT_BUF_SIZE)
-
-        result = _import_cleat_await_child(
-            SCRATCH_BASE,
-            run_id_len,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
-
-        # The host returns SUSPEND_SENTINEL when the child has not completed.
-        if result == SUSPEND_SENTINEL:
-            raise SuspendSentinel()
-
-        result_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"await_child(run_id='{run_id}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-
-        return read_string(OUTPUT_OFFSET, result_len)
+        return _import_cleat_await_child(run_id)
 
     # --------------------------------------------------------------------
     # 17. await_all_children — batch await for children
@@ -2087,22 +1971,7 @@ class HostCalls:
             If the host reports an error.
         """
         run_ids_json = json.dumps(run_ids)
-        run_ids_len = write_string(SCRATCH_BASE, run_ids_json, OUT_BUF_SIZE)
-
-        result = _import_cleat_await_all_children(
-            SCRATCH_BASE,
-            run_ids_len,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
-
-        result_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"await_all_children(run_ids={run_ids}) failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-
-        results_json = read_string(OUTPUT_OFFSET, result_len)
+        results_json = _import_cleat_await_all_children(run_ids_json)
         if not results_json:
             return []
 
@@ -2126,12 +1995,7 @@ class HostCalls:
         value : str
             Query state value (typically a JSON string).
         """
-        key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
-        val_offset = SCRATCH_BASE + key_len
-        remaining = OUT_BUF_SIZE - key_len
-        val_len = write_string(val_offset, value, remaining)
-
-        _import_set_query_state(SCRATCH_BASE, key_len, val_offset, val_len)
+        _import_set_query_state(key, value)
 
     # --------------------------------------------------------------------
     # 19. set_state — set typed cleat state
@@ -2273,6 +2137,130 @@ class HostCalls:
         return json.loads(result)
 
     # --------------------------------------------------------------------
+    # 24b-24g. Stream state operations (durable-stream-state ABI 2.37-2.44)
+    # --------------------------------------------------------------------
+
+    def stream_set_state(self, key: str, value: Any) -> None:
+        """Set a Stream R state key-value pair via the host ABI.
+
+        Calls the host ``durable-stream-state.set-state`` import.
+        Unlike :meth:`set_state` (which routes through the ``"state"``
+        service), this calls the direct WASM import for stream state.
+
+        Parameters
+        ----------
+        key : str
+            State key.
+        value : Any
+            State value.  Dicts are JSON-serialised automatically.
+        """
+        val_str = self._marshal(value)
+        _import_stream_set_state(key, val_str)
+
+    def stream_get_state(self, key: str) -> str:
+        """Get a Stream R state value via the host ABI.
+
+        Calls the host ``durable-stream-state.get-state`` import.
+
+        Parameters
+        ----------
+        key : str
+            State key to retrieve.
+
+        Returns
+        -------
+        str
+            The stored value as a JSON string, or empty string if the key
+            does not exist.
+        """
+        return _import_stream_get_state(key)
+
+    def stream_delete_state(self, key: str) -> None:
+        """Delete a Stream R state key via the host ABI.
+
+        Calls the host ``durable-stream-state.delete-state`` import.
+        """
+        _import_stream_delete_state(key)
+
+    def stream_incr_state(self, key: str, delta: int = 1) -> int:
+        """Atomically increment a Stream R numeric state value via the host ABI.
+
+        Calls the host ``durable-stream-state.incr-state`` import.
+
+        Parameters
+        ----------
+        key : str
+            State key to increment.
+        delta : int
+            Amount to increment by (default ``1``).
+
+        Returns
+        -------
+        int
+            The new value after incrementing.
+        """
+        result = _import_stream_incr_state(key, delta)
+        if isinstance(result, int):
+            return result
+        new_val, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"stream_incr_state(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        return new_val
+
+    def stream_has_state(self, key: str) -> bool:
+        """Check if a Stream R state key exists via the host ABI.
+
+        Calls the host ``durable-stream-state.has-state`` import.
+
+        Parameters
+        ----------
+        key : str
+            State key to check.
+
+        Returns
+        -------
+        bool
+            ``True`` if the key exists.
+        """
+        result = _import_stream_has_state(key)
+        if isinstance(result, int):
+            return bool(result)
+        found, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"stream_has_state(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        return bool(found)
+
+    def stream_list_state(self, prefix: str = "") -> list[str]:
+        """List Stream R state keys by prefix via the host ABI.
+
+        Calls the host ``durable-stream-state.list-state`` import.
+
+        Parameters
+        ----------
+        prefix : str
+            Optional prefix to filter keys by.
+
+        Returns
+        -------
+        list[str]
+            List of matching state keys.
+        """
+        result = _import_stream_list_state(prefix)
+        if isinstance(result, str):
+            return json.loads(result) if result else []
+        list_len, err_code = decode_simple_result(result)
+        if err_code != 0:
+            raise RuntimeError(
+                f"stream_list_state(prefix='{prefix}') failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        list_json = read_string(OUTPUT_OFFSET, list_len) if list_len > 0 else "[]"
+        return json.loads(list_json)
+
+    # --------------------------------------------------------------------
     # 25. create_promise — create a cleat promise
     # --------------------------------------------------------------------
 
@@ -2301,23 +2289,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        name_len = write_string(SCRATCH_BASE, name, OUT_BUF_SIZE)
-
-        result = _import_cleat_create_promise(
-            SCRATCH_BASE,
-            name_len,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-            ttl_ms or 0,
-        )
-
-        id_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"create_promise(name='{name}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-
-        return read_string(OUTPUT_OFFSET, id_len)
+        return _import_cleat_create_promise(name, ttl_ms or 0)
 
     # --------------------------------------------------------------------
     # 24. await_promise — await a cleat promise
@@ -2369,15 +2341,10 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        id_len = write_string(SCRATCH_BASE, promise_id, OUT_BUF_SIZE)
+        result = _import_cleat_await_promise(promise_id, timeout_ms)
 
-        result = _import_cleat_await_promise(
-            SCRATCH_BASE,
-            id_len,
-            timeout_ms,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
+        if isinstance(result, str):
+            return PromiseResult(result=result, timed_out=False, rejected=False)
 
         result_len, timed_out, rejected, err_code = decode_await_promise_result(result)
         if err_code != 0:
@@ -2414,23 +2381,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        id_len = write_string(SCRATCH_BASE, promise_id, OUT_BUF_SIZE)
-        val_offset = SCRATCH_BASE + id_len
-        remaining = OUT_BUF_SIZE - id_len
-        val_len = write_string(val_offset, value, remaining)
-
-        result = _import_cleat_resolve_promise(
-            SCRATCH_BASE,
-            id_len,
-            val_offset,
-            val_len,
-        )
-
-        _, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"resolve_promise(promise_id='{promise_id}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
+        _import_cleat_resolve_promise(promise_id, value)
 
     # --------------------------------------------------------------------
     # 26. reject_promise — reject a cleat promise
@@ -2455,23 +2406,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        id_len = write_string(SCRATCH_BASE, promise_id, OUT_BUF_SIZE)
-        err_offset = SCRATCH_BASE + id_len
-        remaining = OUT_BUF_SIZE - id_len
-        err_len = write_string(err_offset, error, remaining)
-
-        result = _import_cleat_reject_promise(
-            SCRATCH_BASE,
-            id_len,
-            err_offset,
-            err_len,
-        )
-
-        _, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"reject_promise(promise_id='{promise_id}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
+        _import_cleat_reject_promise(promise_id, error)
 
     # --------------------------------------------------------------------
     # 25. register_update_handler — register an update handler
@@ -2503,8 +2438,7 @@ class HostCalls:
             and returns True if the payload is valid.
         """
         self._update_handlers[name] = (handler, validator)
-        name_len = write_string(SCRATCH_BASE, name, OUT_BUF_SIZE)
-        _import_cleat_register_update_handler(SCRATCH_BASE, name_len)
+        _import_cleat_register_update_handler(name)
 
     def _handle_update(self, name: str, payload: str) -> str:
         """Internal: look up and invoke a registered update handler.
@@ -2580,8 +2514,7 @@ class HostCalls:
             a JSON result string.
         """
         self._query_handlers[name] = handler
-        name_len = write_string(SCRATCH_BASE, name, OUT_BUF_SIZE)
-        _import_cleat_register_query_handler(SCRATCH_BASE, name_len)
+        _import_cleat_register_query_handler(name)
 
     def _handle_query(self, name: str, payload: str) -> str:
         """Internal: look up and invoke a registered query handler.
@@ -2633,22 +2566,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        desc_len = write_string(SCRATCH_BASE, description, OUT_BUF_SIZE)
-
-        result = _import_cleat_defer(
-            SCRATCH_BASE,
-            desc_len,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
-
-        id_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"defer(description='{description}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-
-        return read_string(OUTPUT_OFFSET, id_len)
+        return _import_cleat_defer(description)
 
     # --------------------------------------------------------------------
     # 27. continue_as_new — history compaction
@@ -2673,15 +2591,7 @@ class HostCalls:
             If the host reports an error.
         """
         input_str = self._marshal(input)
-        input_len = write_string(SCRATCH_BASE, input_str, OUT_BUF_SIZE)
-
-        result = _import_cleat_continue_as_new(SCRATCH_BASE, input_len)
-
-        _, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"continue_as_new failed: {_error_code_name(err_code)} (code {err_code})"
-            )
+        _import_cleat_continue_as_new(input_str)
 
     # --------------------------------------------------------------------
     # 27b. extend_timeout — extend workflow execution timeout
@@ -2712,6 +2622,70 @@ class HostCalls:
             raise RuntimeError(
                 f"extend_timeout(additional_ms={additional_ms}) failed: {_error_code_name(err_code)} (code {err_code})"
             )
+
+    # --------------------------------------------------------------------
+    # 27c. continue_as_new_versioned — versioned history compaction
+    # --------------------------------------------------------------------
+
+    def continue_as_new_versioned(self, input: Any, new_version: int) -> None:
+        """Replace workflow input and restart execution with an explicit version.
+
+        Calls the host ``durable-extended-lifecycle.continue-as-new-versioned``
+        import.  Like :meth:`continue_as_new` but also sets the workflow
+        definition version for the restarted run.
+
+        Parameters
+        ----------
+        input : Any
+            New input for the restarted workflow.  Dicts are JSON-serialised
+            automatically.
+        new_version : int
+            Explicit workflow definition version for the restarted run.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        input_str = self._marshal(input)
+        _import_continue_as_new_versioned(input_str, new_version)
+
+    # --------------------------------------------------------------------
+    # 27d. side_effect — record non-deterministic computation result
+    # --------------------------------------------------------------------
+
+    def side_effect(self, result: str) -> str:
+        """Record a non-deterministic computation result in event history.
+
+        Calls the host ``durable-extended-lifecycle.side-effect`` import.
+        This allows the workflow to capture the result of a non-deterministic
+        operation (e.g. reading a random value, calling an external API
+        directly) so it can be replayed deterministically.
+
+        Parameters
+        ----------
+        result : str
+            The result of the non-deterministic computation (JSON string).
+
+        Returns
+        -------
+        str
+            The recorded side-effect identifier or value from the host.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        resp = _import_side_effect(result)
+        if isinstance(resp, str):
+            return resp
+        out_len, err_code = decode_simple_result(resp)
+        if err_code != 0:
+            raise RuntimeError(
+                f"side_effect failed: {_error_code_name(err_code)} (code {err_code})"
+            )
+        return read_string(OUTPUT_OFFSET, out_len)
 
     # --------------------------------------------------------------------
     # 28. run_detached — execute detached from cancellation
@@ -2753,23 +2727,7 @@ class HostCalls:
             Request payload.  Dicts are JSON-serialised automatically.
         """
         req_str = self._marshal(request)
-
-        svc_len = write_string(SCRATCH_BASE, service, OUT_BUF_SIZE)
-        op_offset = SCRATCH_BASE + svc_len
-        remaining = OUT_BUF_SIZE - svc_len
-        op_len = write_string(op_offset, operation, remaining)
-        req_offset = op_offset + op_len
-        remaining -= op_len
-        req_len = write_string(req_offset, req_str, remaining)
-
-        _import_cleat_send(
-            SCRATCH_BASE,
-            svc_len,
-            op_offset,
-            op_len,
-            req_offset,
-            req_len,
-        )
+        _import_cleat_send(service, operation, req_str)
 
     # --------------------------------------------------------------------
     # 30. schedule_invoke — delayed one-shot
@@ -2800,24 +2758,7 @@ class HostCalls:
             Delay in milliseconds before the invocation is sent.
         """
         req_str = self._marshal(request)
-
-        svc_len = write_string(SCRATCH_BASE, service, OUT_BUF_SIZE)
-        op_offset = SCRATCH_BASE + svc_len
-        remaining = OUT_BUF_SIZE - svc_len
-        op_len = write_string(op_offset, operation, remaining)
-        req_offset = op_offset + op_len
-        remaining -= op_len
-        req_len = write_string(req_offset, req_str, remaining)
-
-        _import_cleat_schedule_invoke(
-            SCRATCH_BASE,
-            svc_len,
-            op_offset,
-            op_len,
-            req_offset,
-            req_len,
-            delay_ms,
-        )
+        _import_cleat_schedule_invoke(service, operation, req_str, delay_ms)
 
     # --------------------------------------------------------------------
     # 31. plugin_call — plugin host function call
@@ -2854,24 +2795,13 @@ class HostCalls:
         """
         input_str = self._marshal(input)
 
-        pn_len = write_string(SCRATCH_BASE, plugin_name, OUT_BUF_SIZE)
-        fn_offset = SCRATCH_BASE + pn_len
-        remaining = OUT_BUF_SIZE - pn_len
-        fn_len = write_string(fn_offset, function_name, remaining)
-        inp_offset = fn_offset + fn_len
-        remaining -= fn_len
-        inp_len = write_string(inp_offset, input_str, remaining)
+        result = _import_plugin_call(plugin_name, function_name, input_str)
 
-        result = _import_plugin_call(
-            SCRATCH_BASE,
-            pn_len,
-            fn_offset,
-            fn_len,
-            inp_offset,
-            inp_len,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
+        if isinstance(result, str):
+            if result.startswith("__CLEAT_ERROR__:"):
+                err_msg = result[len("__CLEAT_ERROR__:"):]
+                self._raise_for_call_error(f"plugin:{plugin_name}", function_name, err_msg, 0)
+            return result
 
         response_len, call_error_code, err_code = decode_cleat_call_result(result)
         if err_code != 0:
@@ -2923,25 +2853,19 @@ class HostCalls:
 
         input_str = self._marshal(input)
 
-        pn_len = write_string(SCRATCH_BASE, plugin_name, OUT_BUF_SIZE)
-        fn_offset = SCRATCH_BASE + pn_len
-        remaining = OUT_BUF_SIZE - pn_len
-        fn_len = write_string(fn_offset, function_name, remaining)
-        inp_offset = fn_offset + fn_len
-        remaining -= fn_len
-        inp_len = write_string(inp_offset, input_str, remaining)
-
         while True:
-            result = _import_plugin_call_streaming(
-                SCRATCH_BASE,
-                pn_len,
-                fn_offset,
-                fn_len,
-                inp_offset,
-                inp_len,
-                OUTPUT_OFFSET,
-                OUT_BUF_SIZE,
-            )
+            result = _import_plugin_call_streaming(plugin_name, function_name, input_str)
+
+            if isinstance(result, str):
+                if result.startswith("__CLEAT_ERROR__:"):
+                    err_msg = result[len("__CLEAT_ERROR__:"):]
+                    self._raise_for_call_error(
+                        f"plugin:{plugin_name}", function_name, err_msg, 0
+                    )
+                if not result:
+                    break
+                yield _json.loads(result)
+                break
 
             response_len, call_error_code, err_code = decode_cleat_call_result(result)
             if err_code != 0:
@@ -3059,25 +2983,11 @@ class HostCalls:
         RuntimeError
             If the host reports an error or the timeout expires.
         """
-        target_len = write_string(SCRATCH_BASE, target_run_id, OUT_BUF_SIZE)
-        sig_offset = SCRATCH_BASE + target_len
-        remaining = OUT_BUF_SIZE - target_len
-        sig_len = write_string(sig_offset, signal_name, remaining)
-        payload_offset = sig_offset + sig_len
-        remaining -= sig_len
-        payload_len = write_string(payload_offset, self._marshal(payload), remaining)
+        payload_str = self._marshal(payload)
+        result = _import_cleat_send_signal_and_wait(target_run_id, signal_name, payload_str, timeout_ms)
 
-        result = _import_cleat_send_signal_and_wait(
-            SCRATCH_BASE,
-            target_len,
-            sig_offset,
-            sig_len,
-            payload_offset,
-            payload_len,
-            timeout_ms,
-            OUTPUT_OFFSET,
-            OUT_BUF_SIZE,
-        )
+        if isinstance(result, str):
+            return result
 
         response_len, err_code = decode_simple_result(result)
         if err_code != 0:
@@ -3111,23 +3021,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        cid_len = write_string(SCRATCH_BASE, correlation_id, OUT_BUF_SIZE)
-        resp_offset = SCRATCH_BASE + cid_len
-        remaining = OUT_BUF_SIZE - cid_len
-        resp_len = write_string(resp_offset, response, remaining)
-
-        result = _import_cleat_reply_to_signal(
-            SCRATCH_BASE,
-            cid_len,
-            resp_offset,
-            resp_len,
-        )
-
-        _, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"reply_to_signal(correlation_id='{correlation_id}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
+        _import_cleat_reply_to_signal(correlation_id, response)
 
     # --------------------------------------------------------------------
     # 34. await_signals_with_quorum — wait for quorum of signals
@@ -3223,29 +3117,7 @@ class HostCalls:
             The signal payload. Dicts are JSON-serialised automatically.
         """
         payload_str = self._marshal(payload)
-
-        target_len = write_string(SCRATCH_BASE, target_run_id, OUT_BUF_SIZE)
-        sig_offset = SCRATCH_BASE + target_len
-        remaining = OUT_BUF_SIZE - target_len
-        sig_len = write_string(sig_offset, signal_name, remaining)
-        payload_offset = sig_offset + sig_len
-        remaining -= sig_len
-        payload_len = write_string(payload_offset, payload_str, remaining)
-
-        result = _import_cleat_signal_workflow(
-            SCRATCH_BASE,
-            target_len,
-            sig_offset,
-            sig_len,
-            payload_offset,
-            payload_len,
-        )
-
-        _, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"signal_workflow(target_run_id='{target_run_id}', signal_name='{signal_name}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
+        _import_cleat_signal_workflow(target_run_id, signal_name, payload_str)
 
     # --------------------------------------------------------------------
     # 36b. schedule_cron — create a recurring cron-triggered workflow
@@ -3539,3 +3411,142 @@ def _import_cleat_extend_timeout(additional_ms: int) -> int:
     raise NotImplementedError(
         "cleat_extend_timeout can only be called within a cleat WASM runtime."
     )
+
+
+# ========================================================================
+# NEW: Module-level stubs for durable-scope, durable-stream-state,
+# durable-extended-lifecycle, durable-extended-children, and
+# durable-fetch imports.
+#
+# TODO: When WIT bindings are regenerated with componentize-py, add
+# corresponding import lines to the try block at the top of this file
+# (around line 67) so these functions resolve to the real WASM FFI
+# imports when running in a cleat WASM runtime.
+# ========================================================================
+
+
+# -- durable-scope.set-scope ---------------------------------------------------
+
+
+def _import_set_scope(obj_type: str, inst_key: str) -> str:
+    """Stub for WASM import ``(import "env" "cleat_set_scope")``."""
+    raise NotImplementedError("set_scope can only be called within a cleat WASM runtime.")
+
+
+# -- durable-scope.get-scope ---------------------------------------------------
+
+
+def _import_get_scope(
+    obj_type_ptr: int,
+    obj_type_max_len: int,
+    inst_key_ptr: int,
+    inst_key_max_len: int,
+) -> int:
+    """Stub for WASM import ``(import "env" "cleat_get_scope")``."""
+    raise NotImplementedError("get_scope can only be called within a cleat WASM runtime.")
+
+
+# -- durable-scope.uuid --------------------------------------------------------
+
+
+def _import_uuid(seed: str) -> str:
+    """Stub for WASM import ``(import "env" "cleat_uuid")``."""
+    raise NotImplementedError("uuid can only be called within a cleat WASM runtime.")
+
+
+# -- durable-stream-state.set-state --------------------------------------------
+
+
+def _import_stream_set_state(key: str, val: str) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_set_state")``."""
+    raise NotImplementedError(
+        "stream_set_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.get-state --------------------------------------------
+
+
+def _import_stream_get_state(key: str) -> str:
+    """Stub for WASM import ``(import "env" "cleat_stream_get_state")``."""
+    raise NotImplementedError(
+        "stream_get_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.delete-state -----------------------------------------
+
+
+def _import_stream_delete_state(key: str) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_delete_state")``."""
+    raise NotImplementedError(
+        "stream_delete_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.incr-state -------------------------------------------
+
+
+def _import_stream_incr_state(key: str, delta: int) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_incr_state")``."""
+    raise NotImplementedError(
+        "stream_incr_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.has-state --------------------------------------------
+
+
+def _import_stream_has_state(key: str) -> int:
+    """Stub for WASM import ``(import "env" "cleat_stream_has_state")``."""
+    raise NotImplementedError(
+        "stream_has_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-stream-state.list-state -------------------------------------------
+
+
+def _import_stream_list_state(prefix: str) -> str:
+    """Stub for WASM import ``(import "env" "cleat_stream_list_state")``."""
+    raise NotImplementedError(
+        "stream_list_state can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-extended-lifecycle.continue-as-new-versioned ----------------------
+
+
+def _import_continue_as_new_versioned(input: str, new_version: int) -> int:
+    """Stub for WASM import ``(import "env" "cleat_continue_as_new_versioned")``."""
+    raise NotImplementedError(
+        "continue_as_new_versioned can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-extended-lifecycle.side-effect ------------------------------------
+
+
+def _import_side_effect(result: str) -> str:
+    """Stub for WASM import ``(import "env" "cleat_side_effect")``."""
+    raise NotImplementedError(
+        "side_effect can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-extended-children.child-workflow-in-schema ------------------------
+
+
+def _import_child_workflow_in_schema(schema: str, name: str, input: str, version: int, priority: int, policy: str) -> str:
+    """Stub for WASM import ``(import "env" "cleat_child_workflow_in_schema")``."""
+    raise NotImplementedError(
+        "child_workflow_in_schema can only be called within a cleat WASM runtime."
+    )
+
+
+# -- durable-fetch.fetch -------------------------------------------------------
+
+
+def _import_fetch(method: str, url: str, headers: str, body: str) -> str:
+    """Stub for WASM import ``(import "env" "cleat_fetch")``."""
+    raise NotImplementedError("fetch can only be called within a cleat WASM runtime.")
