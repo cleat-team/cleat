@@ -15,7 +15,7 @@ import (
 
 // pendingSentinel is the sentinel value used by the engine to mark a DurableCall
 // whose external call was dispatched but whose outcome was not persisted before
-// a crash. Exported as engine.PendingSentinel from internal/host/engine.go.
+// a crash. Exported as engine.PendingSentinel from engine/engine.go.
 const pendingSentinel = engine.PendingSentinel
 
 // ---- Mock caller ----

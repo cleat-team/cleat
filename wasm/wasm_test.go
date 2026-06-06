@@ -467,10 +467,10 @@ func TestAdapterDefsCoverage(t *testing.T) {
 // ---- Bit-packing round-trip tests ----
 //
 // These tests verify that the bit-packing formats used by the host runtime
-// (internal/host/memory.go) and the extraction logic emitted by the code
+// (engine/memory.go) and the extraction logic emitted by the code
 // generator (adapter.go ResultStmts) are compatible. The packing logic is
 // inlined to keep tests self-contained since packDurableCallResult and
-// packSimpleResult are unexported in the host package.
+// packSimpleResult are unexported in the engine package.
 
 // TestBitPackingDurableCall verifies the durable_call result format:
 //
@@ -478,7 +478,7 @@ func TestAdapterDefsCoverage(t *testing.T) {
 //	bits 8-39  = callErrorCode (32 bits, though passed as byte)
 //	bits 0-7   = errCode (8 bits)
 //
-// See packDurableCallResult in internal/host/memory.go and the DurableCall
+// See packDurableCallResult in engine/memory.go and the DurableCall
 // ResultStmts in adapter.go.
 func TestBitPackingDurableCall(t *testing.T) {
 	tests := []struct {
@@ -606,7 +606,7 @@ func TestBitPackingSleep(t *testing.T) {
 
 // TestDecodeExportResult verifies the export result format used by
 // writeJSONOut/writeErrorOut in exports.go and decodeExportResult in
-// internal/host/memory.go:
+// engine/memory.go:
 //
 //	bits 0-31  = errCode (0 = success)
 //	bits 32-63 = actual output length
@@ -652,7 +652,7 @@ func TestDecodeExportResult(t *testing.T) {
 //	bits 32-63 = extra[0] (32 bits, optional)
 //	bits 0-31  = errCode (32 bits)
 //
-// See packSimpleResult in internal/host/memory.go.
+// See packSimpleResult in engine/memory.go.
 func TestSimpleResultPacking(t *testing.T) {
 	tests := []struct {
 		errCode byte

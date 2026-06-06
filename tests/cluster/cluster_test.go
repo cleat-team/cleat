@@ -13,7 +13,7 @@ import (
 )
 
 // testStore returns a *sql.DB and a PostgresStore for tests.
-// It follows the same pattern as internal/host/fault_test.go's testDB().
+// It follows the same pattern as engine/fault_test.go's testDB().
 func testStore(t *testing.T, taskQueues ...string) (*sql.DB, *engine.PostgresStore) {
 	t.Helper()
 	if testing.Short() {

@@ -1490,7 +1490,7 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	if err != nil { return nil, fmt.Errorf("component get func: %w", err) }
 
 	resultStr, callErr := componentCall(fn, store, string(input))
-	if callErr != nil { return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr) }
+	if callErr != nil { return nil, fmt.Errorf("engine: component export %q: %w", entryPoint, callErr) }
 
 	// Check for suspension sentinel from the Python wrapper.
 	if resultStr == "__CLEAT_SUSPEND__" {

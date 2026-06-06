@@ -104,7 +104,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		// Fall back to manual decomposition + instantiation.
 		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
 		if bundleErr != nil {
-			return nil, fmt.Errorf("host: parse component bundle: %w", bundleErr)
+			return nil, fmt.Errorf("engine: parse component bundle: %w", bundleErr)
 		}
 		return b.ExecuteComponent(ctx, wasmBytes, bundle, entryPoint, input, session)
 	}
@@ -112,7 +112,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Compile the WASM module.
 	module, err := wasmtime.NewModule(b.engine, wasmBytes)
 	if err != nil {
-		return nil, fmt.Errorf("host: compile: %w", err)
+		return nil, fmt.Errorf("engine: compile: %w", err)
 	}
 	defer module.Close()
 
@@ -125,23 +125,23 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// it even when the module subsequently traps (e.g. via proc_exit).
 	var completeResult, completeErr string
 	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi); err != nil {
-		return nil, fmt.Errorf("host: register imports: %w", err)
+		return nil, fmt.Errorf("engine: register imports: %w", err)
 	}
 
 	// Instantiate the module.
 	instance, err := linker.Instantiate(store, module)
 	if err != nil {
-		return nil, fmt.Errorf("host: instantiate: %w", err)
+		return nil, fmt.Errorf("engine: instantiate: %w", err)
 	}
 
 	// Get exported memory.
 	memory := instance.GetExport(store, "memory")
 	if memory == nil {
-		return nil, fmt.Errorf("host: module has no exported memory")
+		return nil, fmt.Errorf("engine: module has no exported memory")
 	}
 	mem := memory.Memory()
 	if mem == nil {
-		return nil, fmt.Errorf("host: memory export is not a memory")
+		return nil, fmt.Errorf("engine: memory export is not a memory")
 	}
 
 	lang := wasm.DetectLanguage(wasmBytes)
@@ -194,7 +194,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		// can be called. Call it synchronously and wait for return.
 		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
 			if _, err := startFn.Call(store); err != nil {
-				return nil, fmt.Errorf("host: teaVM _start failed: %w", err)
+				return nil, fmt.Errorf("engine: teaVM _start failed: %w", err)
 			}
 		}
 	}
@@ -215,7 +215,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if currentSize < needed {
 		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
 		if _, err := mem.Grow(store, pagesNeeded); err != nil {
-			return nil, fmt.Errorf("host: grow memory: %w", err)
+			return nil, fmt.Errorf("engine: grow memory: %w", err)
 		}
 	}
 
@@ -223,7 +223,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if len(inputBytes) > 0 {
 		data := mem.UnsafeData(store)
 		if uint64(inputOffset)+uint64(len(inputBytes)) > uint64(len(data)) {
-			return nil, fmt.Errorf("host: input exceeds memory bounds")
+			return nil, fmt.Errorf("engine: input exceeds memory bounds")
 		}
 		copy(data[inputOffset:], inputBytes)
 	}
@@ -231,7 +231,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Call the export directly (non-Go modules, or Go modules without _start).
 	fn := instance.GetFunc(store, entryPoint)
 	if fn == nil {
-		return nil, fmt.Errorf("host: export %q not found", entryPoint)
+		return nil, fmt.Errorf("engine: export %q not found", entryPoint)
 	}
 
 	// Call the entry point. The return value is a single i64 encoding
@@ -243,7 +243,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				callErr = fmt.Errorf("host: wasmtime panic in %q: %v", entryPoint, r)
+				callErr = fmt.Errorf("engine: wasmtime panic in %q: %v", entryPoint, r)
 			}
 		}()
 		results, callErr = fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
@@ -252,7 +252,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Check for a result delivered via cleat_complete before treating
 	// a trap/proc_exit as an error.
 	if completeErr != "" {
-		return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr)
+		return nil, fmt.Errorf("engine: export %q failed: %s", entryPoint, completeErr)
 	}
 				if completeResult == `"__cleat_suspended__"` {
 					return &ExecResult{Suspended: true}, nil
@@ -264,17 +264,17 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	}
 
 	if callErr != nil {
-		return nil, fmt.Errorf("host: export %q: %w", entryPoint, callErr)
+		return nil, fmt.Errorf("engine: export %q: %w", entryPoint, callErr)
 	}
 
 	if results == nil {
-		return nil, fmt.Errorf("host: export %q returned no results", entryPoint)
+		return nil, fmt.Errorf("engine: export %q returned no results", entryPoint)
 	}
 
 	// Decode the packed int64 result.
 	raw, ok := results.(int64)
 	if !ok {
-		return nil, fmt.Errorf("host: export %q returned non-int64 result", entryPoint)
+		return nil, fmt.Errorf("engine: export %q returned non-int64 result", entryPoint)
 	}
 
 	// Check for the suspend sentinel: (1 << 62).
@@ -287,12 +287,12 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Read output from linear memory.
 	data := mem.UnsafeData(store)
 	if actualLen > outBufSz {
-		return nil, fmt.Errorf("host: export %q: output overflow: wrote %d bytes, buffer is %d bytes", entryPoint, actualLen, outBufSz)
+		return nil, fmt.Errorf("engine: export %q: output overflow: wrote %d bytes, buffer is %d bytes", entryPoint, actualLen, outBufSz)
 	}
 	outputStr := string(data[outputOffset : outputOffset+actualLen])
 
 	if errCode != 0 {
-		return nil, fmt.Errorf("host: export %q: %s", entryPoint, outputStr)
+		return nil, fmt.Errorf("engine: export %q: %s", entryPoint, outputStr)
 	}
 
 	return &ExecResult{Result: outputStr, Suspended: false}, nil
@@ -507,11 +507,11 @@ func isDuplicateDefinition(err error) bool {
 func callerMemBuf(caller *wasmtime.Caller) ([]byte, *wasmtime.Memory, error) {
 	export := caller.GetExport("memory")
 	if export == nil {
-		return nil, nil, fmt.Errorf("host: module has no exported memory")
+		return nil, nil, fmt.Errorf("engine: module has no exported memory")
 	}
 	mem := export.Memory()
 	if mem == nil {
-		return nil, nil, fmt.Errorf("host: memory export is not a memory")
+		return nil, nil, fmt.Errorf("engine: memory export is not a memory")
 	}
 	buf := mem.UnsafeData(caller)
 	return buf, mem, nil
@@ -1732,7 +1732,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 		}
 		m, err := wasmtime.NewModule(b.engine, patched)
 		if err != nil {
-			return nil, fmt.Errorf("host: compile core module %d: %w", i, err)
+			return nil, fmt.Errorf("engine: compile core module %d: %w", i, err)
 		}
 		compiled[i] = m
 		defer m.Close()
@@ -1848,7 +1848,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 		// use the Go dispatcher cleat_complete protocol.
 		var completeResult, completeErr string
 		if err := b.registerAllImports(linker, &completeResult, &completeErr, true); err != nil {
-			return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
+			return nil, fmt.Errorf("engine: register imports for instance %d: %w", i, err)
 		}
 
 		// Per-export routing: resolve GOT / libpython imports
@@ -1872,7 +1872,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				// "defined twice" is OK — some exports (e.g. abort) are
 				// defined by both registerEnvStubs and the source instance.
 				if !strings.Contains(err.Error(), "defined twice") {
-					return nil, fmt.Errorf("host: define instance %d as %q for instance %d: %w", srcIdx, importName, i, err)
+					return nil, fmt.Errorf("engine: define instance %d as %q for instance %d: %w", srcIdx, importName, i, err)
 				}
 			}
 		}
@@ -2069,7 +2069,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 			for importName := range importNameToInstance {
 				importMods = append(importMods, importName)
 			}
-			return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args, imports: %v): %w", i, inst.ModuleIndex, len(inst.Args), importMods, instErr)
+			return nil, fmt.Errorf("engine: instantiate instance %d (module %d, %d args, imports: %v): %w", i, inst.ModuleIndex, len(inst.Args), importMods, instErr)
 		}
 		instances[i] = modInst
 		pending[i] = false
@@ -2085,7 +2085,7 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				pendingList = append(pendingList, idx)
 			}
 		}
-		return nil, fmt.Errorf("host: could not instantiate %d instances (stuck at pass %d): pending=%v", pendingCount, pass, pendingList)
+		return nil, fmt.Errorf("engine: could not instantiate %d instances (stuck at pass %d): pending=%v", pendingCount, pass, pendingList)
 	}
 }
 
@@ -2096,7 +2096,7 @@ if pendingCount > 0 {
 			pendingList = append(pendingList, idx)
 		}
 	}
-	return nil, fmt.Errorf("host: %d instances still pending after %d passes: %v", pendingCount, maxPasses, pendingList)
+	return nil, fmt.Errorf("engine:%d instances still pending after %d passes: %v", pendingCount, maxPasses, pendingList)
 }
 
 	// ---- Step 3b: Call constructors on all core instances ----
@@ -2109,12 +2109,12 @@ if pendingCount > 0 {
 		}
 		if f := inst.GetFunc(store, "__wasm_call_ctors"); f != nil {
 			if _, err := f.Call(store); err != nil {
-				return nil, fmt.Errorf("host: __wasm_call_ctors instance %d: %w", i, err)
+				return nil, fmt.Errorf("engine:__wasm_call_ctors instance %d: %w", i, err)
 			}
 		}
 		if f := inst.GetFunc(store, "__wasm_apply_data_relocs"); f != nil {
 			if _, err := f.Call(store); err != nil {
-				return nil, fmt.Errorf("host: __wasm_apply_data_relocs instance %d: %w", i, err)
+				return nil, fmt.Errorf("engine:__wasm_apply_data_relocs instance %d: %w", i, err)
 			}
 		}
 	}
@@ -2272,7 +2272,7 @@ if pendingCount > 0 {
 	// ---- Step 5: Resolve entry point ----
 	exp, ok := bundle.Exports[entryPoint]
 	if !ok {
-		return nil, fmt.Errorf("host: component export %q not found", entryPoint)
+		return nil, fmt.Errorf("engine: component export %q not found", entryPoint)
 	}
 
 	var entryInst *wasmtime.Instance
@@ -2308,12 +2308,12 @@ if pendingCount > 0 {
 	}
 
 	if entryInst == nil {
-		return nil, fmt.Errorf("host: cannot resolve component export %q (instance %d)", entryPoint, exp.InstanceIndex)
+		return nil, fmt.Errorf("engine: cannot resolve component export %q (instance %d)", entryPoint, exp.InstanceIndex)
 	}
 
 	fn := entryInst.GetFunc(store, entryExportName)
 	if fn == nil {
-		return nil, fmt.Errorf("host: component export %q func %q not found", entryPoint, entryExportName)
+		return nil, fmt.Errorf("engine: component export %q func %q not found", entryPoint, entryExportName)
 	}
 
 	// ---- Step 6: Find memory and set up scratch buffers ----
@@ -2331,11 +2331,11 @@ if pendingCount > 0 {
 		}
 	}
 	if memory == nil {
-		return nil, fmt.Errorf("host: no exported memory found in component instances")
+		return nil, fmt.Errorf("engine: no exported memory found in component instances")
 	}
 	mem := memory.Memory()
 	if mem == nil {
-		return nil, fmt.Errorf("host: memory export is not a memory")
+		return nil, fmt.Errorf("engine: memory export is not a memory")
 	}
 
 	outBufSz := OutBufSize
@@ -2351,7 +2351,7 @@ if pendingCount > 0 {
 	if currentSize < needed {
 		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
 		if _, err := mem.Grow(store, pagesNeeded); err != nil {
-			return nil, fmt.Errorf("host: grow memory: %w", err)
+			return nil, fmt.Errorf("engine: grow memory: %w", err)
 		}
 	}
 
@@ -2360,7 +2360,7 @@ if pendingCount > 0 {
 	if len(inputBytes) > 0 {
 		data := mem.UnsafeData(store)
 		if uint64(inputOffset)+uint64(len(inputBytes)) > uint64(len(data)) {
-			return nil, fmt.Errorf("host: input exceeds memory bounds")
+			return nil, fmt.Errorf("engine: input exceeds memory bounds")
 		}
 		copy(data[inputOffset:], inputBytes)
 	}
@@ -2371,7 +2371,7 @@ if pendingCount > 0 {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				callErr = fmt.Errorf("host: wasmtime panic in %q: %v", entryPoint, r)
+				callErr = fmt.Errorf("engine: wasmtime panic in %q: %v", entryPoint, r)
 			}
 		}()
 		results, callErr = fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
@@ -2381,12 +2381,12 @@ if pendingCount > 0 {
 		return nil, callErr
 	}
 	if results == nil {
-		return nil, fmt.Errorf("host: export %q returned no results", entryPoint)
+		return nil, fmt.Errorf("engine: export %q returned no results", entryPoint)
 	}
 
 	raw, ok := results.(int64)
 	if !ok {
-		return nil, fmt.Errorf("host: export %q returned non-int64 result", entryPoint)
+		return nil, fmt.Errorf("engine: export %q returned non-int64 result", entryPoint)
 	}
 
 	if raw == (1 << 62) {
@@ -2395,13 +2395,13 @@ if pendingCount > 0 {
 
 	errCode, actualLen := decodeExportResult(uint64(raw))
 	if actualLen > outBufSz {
-		return nil, fmt.Errorf("host: export %q: output overflow: wrote %d bytes, buffer is %d bytes", entryPoint, actualLen, outBufSz)
+		return nil, fmt.Errorf("engine: export %q: output overflow: wrote %d bytes, buffer is %d bytes", entryPoint, actualLen, outBufSz)
 	}
 
 	data := mem.UnsafeData(store)
 	outputStr := string(data[outputOffset : outputOffset+actualLen])
 	if errCode != 0 {
-		return nil, fmt.Errorf("host: export %q: %s", entryPoint, outputStr)
+		return nil, fmt.Errorf("engine: export %q: %s", entryPoint, outputStr)
 	}
 
 	return &ExecResult{Result: outputStr, Suspended: false}, nil

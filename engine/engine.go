@@ -961,7 +961,7 @@ func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint strin
 	if isComponentWasm(wasmBytes) {
 		bundle, parseErr := wasm.ParseComponentBundle(wasmBytes)
 		if parseErr != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: parse component bundle: %w", parseErr)
+			return "", nil, nil, nil, nil, fmt.Errorf("engine: parse component bundle: %w", parseErr)
 		}
 		return e.executeComponent(ctx, bundle, entryPoint, input)
 	}
@@ -969,7 +969,7 @@ func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint strin
 	// Legacy path: compile and execute via the wazero Runtime.
 	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("host: compile module: %w", err)
+		return "", nil, nil, nil, nil, fmt.Errorf("engine: compile module: %w", err)
 	}
 	defer compiled.Close(ctx)
 	return e.executeCompiled(ctx, compiled, entryPoint, input, nil, wasmBytes)
@@ -994,7 +994,7 @@ func (e *Engine) Replay(ctx context.Context, wasmBytes []byte, entryPoint string
 	// Legacy path: compile and replay via the wazero Runtime.
 	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("host: compile module: %w", err)
+		return "", nil, nil, nil, nil, fmt.Errorf("engine: compile module: %w", err)
 	}
 	defer compiled.Close(ctx)
 	return e.replayCompiled(ctx, compiled, entryPoint, input, history, wasmBytes)
@@ -1090,7 +1090,7 @@ func (e *Engine) executeWithBackend(
 				e.log().WarnContext(ctx, "checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", verr)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
-					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, verr)
+					return "", nil, nil, nil, nil, fmt.Errorf("engine: workflow %s: checksum verification failed: %w", e.workflowID, verr)
 				}
 				e.log().WarnContext(ctx, "checksum verification failed but proceeding (failOnChecksumMismatch=false)", "workflow_id", e.workflowID, "tenant_id", e.tenantID)
 			}
@@ -1099,7 +1099,7 @@ func (e *Engine) executeWithBackend(
 		// (b) Version validation (always-on unless allowVersionMismatch).
 		if e.versionValidateFn != nil && !e.allowVersionMismatch {
 			if verr := e.versionValidateFn(); verr != nil {
-				return "", nil, nil, nil, nil, fmt.Errorf("host: version validation failed: %w", verr)
+				return "", nil, nil, nil, nil, fmt.Errorf("engine: version validation failed: %w", verr)
 			}
 		}
 	}
@@ -1116,9 +1116,9 @@ func (e *Engine) executeWithBackend(
 			}
 			session.releaseHeldScopes(context.Background())
 			if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %s", enriched)
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("engine: workflow execution failed: %s", enriched)
 			}
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %w", callErr)
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("engine: workflow execution failed: %w", callErr)
 	}
 
 	if res.Suspended || session.suspendErr != nil {
@@ -1149,7 +1149,7 @@ func (e *Engine) executeWithBackend(
 			}
 			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, res.Result, session.queryState, priority)
 			if cnErr != nil {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("engine: continue_as_new handler failed: %w", cnErr)
 			}
 			susResult.ContinueAsNewHandled = true
 			susResult.NewRunID = newRunID
@@ -1168,12 +1168,12 @@ func (e *Engine) executeWithBackend(
 func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord, wasmBytes []byte) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
 	mod, err := e.rt.InstantiateModule(ctx, compiled)
 	if err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("host: instantiate module: %w", err)
+		return "", nil, nil, nil, nil, fmt.Errorf("engine: instantiate module: %w", err)
 	}
 	defer mod.Close(ctx)
 
 	if err := e.rt.InitModule(ctx, mod); err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("host: init module: %w", err)
+		return "", nil, nil, nil, nil, fmt.Errorf("engine: init module: %w", err)
 	}
 
 	// If compaction state is set, merge virtual compacted events with tail history
@@ -1237,7 +1237,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				e.log().WarnContext(ctx, "replay checksum verification failed", "workflow_id", e.workflowID, "tenant_id", e.tenantID, "error", err)
 				replayChecksumFailuresTotal.Inc()
 				if e.failOnChecksumMismatch {
-					return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: checksum verification failed: %w", e.workflowID, err)
+					return "", nil, nil, nil, nil, fmt.Errorf("engine: workflow %s: checksum verification failed: %w", e.workflowID, err)
 				}
 				e.log().WarnContext(ctx, "replay checksum verification failed but proceeding (failOnChecksumMismatch=false)", "workflow_id", e.workflowID, "tenant_id", e.tenantID)
 			}
@@ -1246,7 +1246,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// (b) Version validation (always-on unless allowVersionMismatch).
 		if e.versionValidateFn != nil && !e.allowVersionMismatch {
 			if err := e.versionValidateFn(); err != nil {
-				return "", nil, nil, nil, nil, fmt.Errorf("host: version validation failed: %w", err)
+				return "", nil, nil, nil, nil, fmt.Errorf("engine: version validation failed: %w", err)
 			}
 		}
 	}
@@ -1289,7 +1289,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				}
 				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
-					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("engine: continue_as_new handler failed: %w", cnErr)
 				}
 				susResult.ContinueAsNewHandled = true
 				susResult.NewRunID = newRunID
@@ -1314,9 +1314,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// consistent formatting and serves as a hook for future custom
 		// DWARF parsing from the raw wasm binary.
 		if enriched := resolveWasmTrap(wasmBytes, err.Error()); enriched != "" {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %s", enriched)
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("engine: workflow execution failed: %s", enriched)
 		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow execution failed: %w", err)
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("engine: workflow execution failed: %w", err)
 	}
 
 	// Workflow completed successfully. Release any held scopes.
@@ -1353,7 +1353,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		var err error
 		compiled[i], err = e.rt.CompileModule(ctx, w)
 		if err != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: compile core module %d: %w", i, err)
+			return "", nil, nil, nil, nil, fmt.Errorf("engine: compile core module %d: %w", i, err)
 		}
 		defer compiled[i].Close(ctx)
 	}
@@ -1461,7 +1461,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			execStderr.Reset()
 			mod, err := e.rt.instantiateModuleNamedWithWriters(instantiateCtx, cm, fmt.Sprintf("__core_%d__", i), &execStdout, &execStderr)
 		if err != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: instantiate instance %d (module %d): %w", i, inst.ModuleIndex, err)
+			return "", nil, nil, nil, nil, fmt.Errorf("engine: instantiate instance %d (module %d): %w", i, inst.ModuleIndex, err)
 		}
 		resolvedInstances[i] = mod
 		cleanupMods = append(cleanupMods, mod)
@@ -1515,7 +1515,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 	// ---- Step 5: Find the entry point and initialize the module ----
 	exp, ok := bundle.Exports[entryPoint]
 	if !ok {
-		return "", nil, nil, nil, nil, fmt.Errorf("host: component export %q not found", entryPoint)
+		return "", nil, nil, nil, nil, fmt.Errorf("engine: component export %q not found", entryPoint)
 	}
 
 	// Resolve the entry point through the export chain (handles FromExports).
@@ -1530,16 +1530,16 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		entryMod = resolvedInstances[exp.InstanceIndex]
 		entryExportName = exp.Name
 		if fn := entryMod.ExportedFunction(entryExportName); fn == nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: export %q not found on instance %d", entryExportName, exp.InstanceIndex)
+			return "", nil, nil, nil, nil, fmt.Errorf("engine: export %q not found on instance %d", entryExportName, exp.InstanceIndex)
 		}
 	} else {
-		return "", nil, nil, nil, nil, fmt.Errorf("host: cannot resolve component export %q (instance %d)", entryPoint, exp.InstanceIndex)
+		return "", nil, nil, nil, nil, fmt.Errorf("engine: cannot resolve component export %q (instance %d)", entryPoint, exp.InstanceIndex)
 	}
 
 	// Initialize the module (calls _start if present, e.g. for Go wasip1
 	// runtime initialization; no-op for modules without _start).
 	if err := e.rt.InitModule(execCtx, entryMod); err != nil {
-		return "", nil, nil, nil, nil, fmt.Errorf("host: init component entry module: %w", err)
+		return "", nil, nil, nil, nil, fmt.Errorf("engine: init component entry module: %w", err)
 	}
 
 	// ---- Step 6: Call the entry point ----
@@ -1573,7 +1573,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 				}
 				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
-					return "", session.history, nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+					return "", session.history, nil, nil, nil, fmt.Errorf("engine: continue_as_new handler failed: %w", cnErr)
 				}
 				susResult.ContinueAsNewHandled = true
 				susResult.NewRunID = newRunID
@@ -1605,7 +1605,7 @@ func (e *Engine) replayCompiled(ctx context.Context, compiled wazero.CompiledMod
 func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName string, input json.RawMessage) (string, error) {
 	compiled, err := e.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {
-		return "", fmt.Errorf("host: compile module for defer: %w", err)
+		return "", fmt.Errorf("engine: compile module for defer: %w", err)
 	}
 	defer compiled.Close(ctx)
 	return e.RunDeferCompiled(ctx, compiled, deferName, input)
@@ -1615,12 +1615,12 @@ func (e *Engine) RunDefer(ctx context.Context, wasmBytes []byte, deferName strin
 func (e *Engine) RunDeferCompiled(ctx context.Context, compiled wazero.CompiledModule, deferName string, input json.RawMessage) (string, error) {
 	mod, err := e.rt.InstantiateModule(ctx, compiled)
 	if err != nil {
-		return "", fmt.Errorf("host: instantiate module for defer: %w", err)
+		return "", fmt.Errorf("engine: instantiate module for defer: %w", err)
 	}
 	defer mod.Close(ctx)
 
 	if err := e.rt.InitModule(ctx, mod); err != nil {
-		return "", fmt.Errorf("host: init module for defer: %w", err)
+		return "", fmt.Errorf("engine: init module for defer: %w", err)
 	}
 
 	// Defer functions don't need history replay — they're always fresh.
@@ -1650,7 +1650,7 @@ func (e *Engine) invokeDefersOnTrap(ctx context.Context, mod api.Module, deferra
 // Returns an error if no update handler is configured on the engine.
 func (e *Engine) DispatchUpdate(ctx context.Context, name, payload string) (string, error) {
 	if e.updateHandler == nil {
-		return "", fmt.Errorf("host: no update handler configured for this engine. Call WithUpdateHandler before DispatchUpdate.")
+		return "", fmt.Errorf("engine: no update handler configured for this engine. Call WithUpdateHandler before DispatchUpdate.")
 	}
 	return e.updateHandler(name, payload)
 }

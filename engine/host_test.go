@@ -1099,11 +1099,7 @@ func buildTestWasm(t *testing.T) string {
 		t.Skip("skipping WASM compilation in short mode")
 	}
 
-	cwd, _ := os.Getwd()
-	projectRoot := cwd
-	if strings.HasSuffix(cwd, "internal/host") {
-		projectRoot = filepath.Dir(filepath.Dir(cwd))
-	}
+	projectRoot := findProjectRoot(t)
 
 	tmpDir := t.TempDir()
 	cmd := exec.Command("go", "run", filepath.Join(projectRoot, "cmd", "cleat"),

@@ -4109,7 +4109,7 @@ var (
 )
 
 // updateThroughputGauges computes the current replay and fresh step throughput
-// from the atomic step counters in the host package and sets the gauges.
+// from the atomic step counters in the engine package and sets the gauges.
 func updateThroughputGauges() {
 	now := time.Now()
 	elapsed := now.Sub(lastThroughputTime).Seconds()

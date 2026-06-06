@@ -110,7 +110,7 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 		func(ctx context.Context, m api.Module) {},
 	).Export("reset_adapter_state")
 	if _, err := wasiBuilder.Instantiate(ctx); err != nil {
-		return nil, fmt.Errorf("host: instantiating WASI module: %w", err)
+		return nil, fmt.Errorf("engine: instantiating WASI module: %w", err)
 	}
 
 	// TeaVM runtime stubs — required by TeaVM-compiled Java WASM modules.
@@ -133,7 +133,7 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 		Export("logOutOfMemory")
 	if _, err := teavmBuilder.Instantiate(ctx); err != nil {
 		rt.Close(ctx)
-		return nil, fmt.Errorf("host: instantiating teavm module: %w", err)
+		return nil, fmt.Errorf("engine: instantiating teavm module: %w", err)
 	}
 
 	// Build the "env" host module that provides cleat_* imports.
@@ -147,7 +147,7 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	registerHostFunctions(envBuilder, r)
 	if _, err := envBuilder.Instantiate(ctx); err != nil {
 		rt.Close(ctx)
-		return nil, fmt.Errorf("host: instantiating env module: %w", err)
+		return nil, fmt.Errorf("engine: instantiating env module: %w", err)
 	}
 
 	return r, nil
@@ -266,17 +266,17 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 func (r *Runtime) InstantiateAndInit(ctx context.Context, wasmBytes []byte) (api.Module, error) {
 	compiled, err := r.CompileModule(ctx, wasmBytes)
 	if err != nil {
-		return nil, fmt.Errorf("host: compile: %w", err)
+		return nil, fmt.Errorf("engine: compile: %w", err)
 	}
 	// Note: compiled.Close is deferred to the caller via mod.Close.
 	mod, err := r.InstantiateModule(ctx, compiled)
 	if err != nil {
 		compiled.Close(ctx)
-		return nil, fmt.Errorf("host: instantiate: %w", err)
+		return nil, fmt.Errorf("engine: instantiate: %w", err)
 	}
 	if err := r.InitModule(ctx, mod); err != nil {
 		mod.Close(ctx)
-		return nil, fmt.Errorf("host: init: %w", err)
+		return nil, fmt.Errorf("engine: init: %w", err)
 	}
 	return mod, nil
 }
@@ -402,18 +402,18 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// Recover from WASM panics/traps so the caller (Engine.run) can invoke registered defers.
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("host: export %q panicked: %v", exportName, r)
+			err = fmt.Errorf("engine: export %q panicked: %v", exportName, r)
 		}
 	}()
 
 	fn := mod.ExportedFunction(exportName)
 	if fn == nil {
-		return "", false, fmt.Errorf("host: export %q not found", exportName)
+		return "", false, fmt.Errorf("engine: export %q not found", exportName)
 	}
 
 	mem := mod.Memory()
 	if mem == nil {
-		return "", false, fmt.Errorf("host: module has no exported memory")
+		return "", false, fmt.Errorf("engine: module has no exported memory")
 	}
 
 	// Place scratch buffers at the end of current WASM memory to avoid
@@ -434,14 +434,14 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	if currentSize < needed {
 		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
 		if _, ok := mem.Grow(pagesNeeded); !ok {
-			return "", false, fmt.Errorf("host: memory grow failed: needed %d bytes (%d pages), current %d bytes, memory limit %d pages", needed, pagesNeeded, currentSize, r.MemoryLimitPages)
+			return "", false, fmt.Errorf("engine: memory grow failed: needed %d bytes (%d pages), current %d bytes, memory limit %d pages", needed, pagesNeeded, currentSize, r.MemoryLimitPages)
 		}
 	}
 
 	// Write input JSON into WASM memory.
 	if len(inputJSON) > 0 {
 		if ok := mem.Write(inputOffset, inputJSON); !ok {
-			return "", false, fmt.Errorf("host: write input JSON to WASM memory at offset %d failed", inputOffset)
+			return "", false, fmt.Errorf("engine: write input JSON to WASM memory at offset %d failed", inputOffset)
 		}
 	}
 
@@ -494,10 +494,10 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 			return *complete.Result, false, nil
 		}
 		if complete.Error != nil {
-			return "", false, fmt.Errorf("host: export %q failed: %s", exportName, *complete.Error)
+			return "", false, fmt.Errorf("engine: export %q failed: %s", exportName, *complete.Error)
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			return "", false, fmt.Errorf("host: export %q timed out after %v", exportName, r.callTimeout)
+			return "", false, fmt.Errorf("engine: export %q timed out after %v", exportName, r.callTimeout)
 		}
 		// Detect fuel exhaustion from module close within function listener.
 		if r.fuelLimit > 0 {
@@ -510,7 +510,7 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	}
 
 	if len(results) == 0 {
-		return "", false, fmt.Errorf("host: export %q returned no results. The WASM module may have panicked or returned void.", exportName)
+		return "", false, fmt.Errorf("engine: export %q returned no results. The WASM module may have panicked or returned void.", exportName)
 	}
 
 	// Check for suspend sentinel: (1 << 62).
@@ -523,12 +523,12 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 	// Detect output overflow: if WASM wrote more bytes than the buffer can hold,
 	// the output was silently truncated. Return an error instead of partial data.
 	if actualLen > OutBufSize {
-		return "", false, fmt.Errorf("host: %s: output overflow: wrote %d bytes, buffer is %d bytes", exportName, actualLen, OutBufSize)
+		return "", false, fmt.Errorf("engine:%s: output overflow: wrote %d bytes, buffer is %d bytes", exportName, actualLen, OutBufSize)
 	}
 
 	if errCode != 0 {
 		errMsg := readWasmString(mem, outputOffset, minU32(actualLen, OutBufSize))
-		return "", false, fmt.Errorf("host: %s: %s", exportName, errMsg)
+		return "", false, fmt.Errorf("engine:%s: %s", exportName, errMsg)
 	}
 
 	response := readWasmString(mem, outputOffset, minU32(actualLen, OutBufSize))

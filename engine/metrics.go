@@ -6,7 +6,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Engine-level Prometheus metrics. These are defined in the host package so the
+// Engine-level Prometheus metrics. These are defined in the engine package so the
 // engine (engine.go) can increment them without a circular import. The worker
 // package (cmd/cleat-worker) registers additional metrics in metrics.go.
 var (

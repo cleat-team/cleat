@@ -69,7 +69,7 @@ func (b *wazeroBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoin
 	// Step 1: Compile the WASM binary into a reusable compiled module.
 	compiled, err := b.rt.CompileModule(ctx, wasmBytes)
 	if err != nil {
-		return nil, fmt.Errorf("host: compile module: %w", err)
+		return nil, fmt.Errorf("engine: compile module: %w", err)
 	}
 	defer compiled.Close(ctx)
 
@@ -80,7 +80,7 @@ func (b *wazeroBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoin
 	b.stderr.Reset()
 	mod, err := b.rt.instantiateModuleNamedWithWriters(ctx, compiled, "", &b.stdout, &b.stderr)
 	if err != nil {
-		return nil, fmt.Errorf("host: instantiate module: %w", err)
+		return nil, fmt.Errorf("engine: instantiate module: %w", err)
 	}
 	defer mod.Close(ctx)
 
@@ -89,7 +89,7 @@ func (b *wazeroBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoin
 	// to initialise the Go runtime. For non-Go modules (Rust, AssemblyScript,
 	// etc.) that don't export _start, this is a no-op.
 	if err := b.rt.InitModule(ctx, mod); err != nil {
-		return nil, fmt.Errorf("host: init module: %w", err)
+		return nil, fmt.Errorf("engine: init module: %w", err)
 	}
 
 	// Step 4: Wrap the context with the session HostHandler so that host

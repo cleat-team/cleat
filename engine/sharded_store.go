@@ -1239,7 +1239,7 @@ func (s *ShardedStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderTha
 // metricsStore is a local interface for type-asserting whether a shard's
 // underlying store supports metrics collection methods. This mirrors the
 // MetricsStore interface in cmd/cleat-worker/metrics_store.go but lives
-// in the host package to avoid import cycles.
+// in the engine package to avoid import cycles.
 type metricsStore interface {
 	CountStalledWorkflows(ctx context.Context, threshold time.Duration) (int, error)
 	CountEventHistoryTotal(ctx context.Context) (int, error)
