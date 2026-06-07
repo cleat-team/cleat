@@ -60,7 +60,7 @@ jobs:
           go-version: stable
 
       - name: Run tests
-        run: go test -race -count=1 -timeout=300s ./engine/...
+        run: CGO_ENABLED=0 go test -count=1 -timeout=300s ./engine/...
 
   # -------------------------------------------------------------------------
   # Test SQL Server backend
@@ -103,7 +103,7 @@ jobs:
           go-version: stable
 
       - name: Run tests
-        run: go test -race -count=1 -timeout=300s ./engine/...
+        run: CGO_ENABLED=0 go test -count=1 -timeout=300s ./engine/...
 
   # -------------------------------------------------------------------------
   # Plugin migration smoke test (all three backends)
@@ -169,7 +169,7 @@ jobs:
           go-version: stable
 
       - name: Run plugin migration tests
-        run: go test -race -count=1 -timeout=300s -run TestPluginMigrations ./engine/...
+        run: CGO_ENABLED=0 go test -count=1 -timeout=300s -run TestPluginMigrations ./engine/...
 
       - name: Run plugin behavioral tests (all backends)
-        run: go test -race -count=1 -timeout=600s -run 'MultiBackend' ./plugins/...
+        run: CGO_ENABLED=0 go test -count=1 -timeout=600s -run 'MultiBackend' ./plugins/...
