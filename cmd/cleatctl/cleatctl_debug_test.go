@@ -939,3 +939,127 @@ func TestReplayStepActionConstants(t *testing.T) {
 		t.Error("ReplayNext should come before ReplayQuit (iota)")
 	}
 }
+
+// =========================================================================
+// DisplayStep edge cases — event types not previously covered
+// =========================================================================
+
+func TestDebugState_DisplayStep_StateOp(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "State", StateOp: "put", StateKey: "mykey"},
+	}
+	ds := &debugState{events: events}
+	info := debugStepInfo{step: 0, event: &events[0], qs: map[string]string{}}
+
+	stdout := captureStdout(t, func() {
+		ds.displayStep(info)
+	})
+
+	if !strings.Contains(stdout, "state_op=put") {
+		t.Errorf("expected 'state_op=put', got: %s", stdout)
+	}
+	if !strings.Contains(stdout, "key=mykey") {
+		t.Errorf("expected 'key=mykey', got: %s", stdout)
+	}
+}
+
+func TestDebugState_DisplayStep_DetachedName(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "Detached", DetachedName: "background-task"},
+	}
+	ds := &debugState{events: events}
+	info := debugStepInfo{step: 0, event: &events[0], qs: map[string]string{}}
+
+	stdout := captureStdout(t, func() {
+		ds.displayStep(info)
+	})
+
+	if !strings.Contains(stdout, "detached=background-task") {
+		t.Errorf("expected 'detached=background-task', got: %s", stdout)
+	}
+}
+
+func TestDebugState_DisplayStep_FetchURL(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "Fetch", FetchURL: "https://api.example.com", FetchMethod: "POST"},
+	}
+	ds := &debugState{events: events}
+	info := debugStepInfo{step: 0, event: &events[0], qs: map[string]string{}}
+
+	stdout := captureStdout(t, func() {
+		ds.displayStep(info)
+	})
+
+	if !strings.Contains(stdout, "fetch=POST https://api.example.com") {
+		t.Errorf("expected 'fetch=POST https://api.example.com', got: %s", stdout)
+	}
+}
+
+func TestDebugState_DisplayStep_PromiseID(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "Promise", PromiseID: "prom-abc-123"},
+	}
+	ds := &debugState{events: events}
+	info := debugStepInfo{step: 0, event: &events[0], qs: map[string]string{}}
+
+	stdout := captureStdout(t, func() {
+		ds.displayStep(info)
+	})
+
+	if !strings.Contains(stdout, "promise=prom-abc-123") {
+		t.Errorf("expected 'promise=prom-abc-123', got: %s", stdout)
+	}
+}
+
+func TestFormatRemainingEvents_StateOp(t *testing.T) {
+	events := []engine.EventRecord{
+		{Step: 0, EventType: "State", StateOp: "put", StateKey: "config"},
+	}
+	result := formatRemainingEvents(events, 0)
+	if !strings.Contains(result, "state_op=put") {
+		t.Errorf("expected 'state_op=put', got: %s", result)
+	}
+	if !strings.Contains(result, "key=config") {
+		t.Errorf("expected 'key=config', got: %s", result)
+	}
+}
+
+func TestFormatEvent_WithError(t *testing.T) {
+	ev := engine.EventRecord{
+		Step:      0,
+		EventType: "Activity",
+		Service:   "svc",
+		Op:        "fail",
+		Err:       "connection refused",
+	}
+	result := formatEvent(ev)
+	if !strings.Contains(result, "err=connection refused") {
+		t.Errorf("expected 'err=connection refused', got: %s", result)
+	}
+}
+
+func TestFormatEvent_Fetch(t *testing.T) {
+	ev := engine.EventRecord{
+		Step:        0,
+		EventType:   "Fetch",
+		FetchURL:    "https://api.example.com/data",
+		FetchMethod: "GET",
+	}
+	result := formatEvent(ev)
+	if !strings.Contains(result, "type=Fetch") {
+		t.Errorf("expected 'type=Fetch', got: %s", result)
+	}
+}
+
+func TestFormatEvent_StateOp(t *testing.T) {
+	ev := engine.EventRecord{
+		Step:     0,
+		EventType: "State",
+		StateOp:  "put",
+		StateKey: "myvar",
+	}
+	result := formatEvent(ev)
+	if !strings.Contains(result, "type=State") {
+		t.Errorf("expected 'type=State', got: %s", result)
+	}
+}
