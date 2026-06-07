@@ -430,8 +430,8 @@ func TestMySQLStore_CompleteWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query status: %v", err)
 	}
-	if storedStatus != "completed" {
-		t.Fatalf("status = %q, want completed", storedStatus)
+	if storedStatus != "done" {
+		t.Fatalf("status = %q, want done", storedStatus)
 	}
 }
 
