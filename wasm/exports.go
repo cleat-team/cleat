@@ -432,6 +432,8 @@ func generateDispatch(buf *bytes.Buffer, result *analyzer.AnalysisResult, qual t
 // It parses argsJSON into typed parameters, calls the entry point, and
 // returns the JSON-encoded result or error.
 func cleatDispatch(entryName string, argsJSON []byte) []byte {
+	// Unwrap DispatchWrapper envelope set by host: {"inputJSON":"<inner>"}.
+	argsJSON = []byte(extractJSONString(string(argsJSON), "inputJSON"))
 	h := makeHostCalls()
 	switch entryName {
 `)
