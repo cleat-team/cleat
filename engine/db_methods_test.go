@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -21,14 +23,17 @@ import (
 
 // mockRowsResult associates a SQL substring match with rows to return.
 type mockRowsResult struct {
-	match string
-	data  [][]driver.Value // each element is one row
+	match   string
+	data    [][]driver.Value // each element is one row
+	consume bool             // if true, this result is removed after first use (for sequential matching)
+	err     error            // if non-nil, return this error from Query
 }
 
 // mockExecResult associates a SQL substring match with a RowsAffected count.
 type mockExecResult struct {
 	match    string
 	affected int64
+	err      error // if non-nil, return this error from Exec
 }
 
 // mockConnector implements driver.Connector and returns mock connections
@@ -36,12 +41,16 @@ type mockExecResult struct {
 type mockConnector struct {
 	rowsResults []mockRowsResult
 	execResults []mockExecResult
+	beginErr    error // if set, Begin() returns this error
+	commitErr   error // if set, Commit() returns this error
 }
 
 func (c *mockConnector) Connect(_ context.Context) (driver.Conn, error) {
 	return &mockConn{
 		rowsResults: c.rowsResults,
 		execResults: c.execResults,
+		beginErr:    c.beginErr,
+		commitErr:   c.commitErr,
 	}, nil
 }
 
@@ -52,6 +61,8 @@ func (c *mockConnector) Driver() driver.Driver {
 type mockConn struct {
 	rowsResults []mockRowsResult
 	execResults []mockExecResult
+	beginErr    error
+	commitErr   error
 }
 
 func (c *mockConn) Prepare(query string) (driver.Stmt, error) {
@@ -65,13 +76,18 @@ func (c *mockConn) Prepare(query string) (driver.Stmt, error) {
 func (c *mockConn) Close() error { return nil }
 
 func (c *mockConn) Begin() (driver.Tx, error) {
-	return &mockTx{}, nil
+	if c.beginErr != nil {
+		return nil, c.beginErr
+	}
+	return &mockTx{commitErr: c.commitErr}, nil
 }
 
-// mockTx implements driver.Tx with no-op commit/rollback.
-type mockTx struct{}
+// mockTx implements driver.Tx with configurable commit error.
+type mockTx struct {
+	commitErr error
+}
 
-func (tx *mockTx) Commit() error   { return nil }
+func (tx *mockTx) Commit() error   { return tx.commitErr }
 func (tx *mockTx) Rollback() error { return nil }
 
 // mockStmt implements driver.Stmt with configurable results.
@@ -86,17 +102,33 @@ func (s *mockStmt) Close() error { return nil }
 func (s *mockStmt) NumInput() int { return -1 }
 
 func (s *mockStmt) Exec(_ []driver.Value) (driver.Result, error) {
-	for _, er := range s.execResults {
+	for i, er := range s.execResults {
+		if er.match == "" {
+			continue
+		}
 		if strings.Contains(s.query, er.match) {
+			if er.err != nil {
+				return nil, er.err
+			}
 			return &mockResult{affected: er.affected}, nil
 		}
+		_ = i // suppress unused variable warning when consume is not used on execResults
 	}
 	return &mockResult{}, nil
 }
 
 func (s *mockStmt) Query(_ []driver.Value) (driver.Rows, error) {
-	for _, rr := range s.rowsResults {
+	for i, rr := range s.rowsResults {
+		if rr.match == "" {
+			continue
+		}
 		if strings.Contains(s.query, rr.match) {
+			if rr.err != nil {
+				return nil, rr.err
+			}
+			if rr.consume {
+				s.rowsResults[i].match = "" // mark as consumed so subsequent queries fall through
+			}
 			return &mockRows{data: rr.data}, nil
 		}
 	}
@@ -143,6 +175,18 @@ func newMockDBForPostgres(t *testing.T, rows []mockRowsResult, execs []mockExecR
 	return sql.OpenDB(&mockConnector{
 		rowsResults: rows,
 		execResults: execs,
+	})
+}
+
+// newMockDBWithErrors creates a *sql.DB backed by a mock connector with
+// configurable transaction-level error injection for testing error paths.
+func newMockDBWithErrors(t *testing.T, rows []mockRowsResult, execs []mockExecResult, beginErr, commitErr error) *sql.DB {
+	t.Helper()
+	return sql.OpenDB(&mockConnector{
+		rowsResults: rows,
+		execResults: execs,
+		beginErr:    beginErr,
+		commitErr:   commitErr,
 	})
 }
 
@@ -1230,11 +1274,241 @@ func TestPostgresStore_ListWorkflowDefs_NilPluginDeps(t *testing.T) {
 }
 
 func TestPostgresStore_GetActiveInstanceCountsByVersion(t *testing.T) {
-	t.Skip("GetActiveInstanceCountsByVersion now uses beginTxWithRLS; covered by TestTenantIsolation_ActiveInstanceCounts")
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "FROM workflow_instances",
+			data: [][]driver.Value{
+				{"test-wf", int64(1), int64(5)},
+				{"other-wf", int64(2), int64(3)},
+				{"test-wf", int64(3), int64(1)},
+			},
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	counts, err := store.GetActiveInstanceCountsByVersion(testCtx)
+	if err != nil {
+		t.Fatalf("GetActiveInstanceCountsByVersion: %v", err)
+	}
+	if counts["test-wf:1"] != 5 {
+		t.Errorf("expected test-wf:1=5, got %d", counts["test-wf:1"])
+	}
+	if counts["other-wf:2"] != 3 {
+		t.Errorf("expected other-wf:2=3, got %d", counts["other-wf:2"])
+	}
+	if counts["test-wf:3"] != 1 {
+		t.Errorf("expected test-wf:3=1, got %d", counts["test-wf:3"])
+	}
 }
 
 func TestPostgresStore_GetActiveInstanceCountsByVersion_Empty(t *testing.T) {
-	t.Skip("GetActiveInstanceCountsByVersion now uses beginTxWithRLS; covered by TestTenantIsolation_ActiveInstanceCounts")
+	db := newNoopDB(t)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	counts, err := store.GetActiveInstanceCountsByVersion(testCtx)
+	if err != nil {
+		t.Fatalf("GetActiveInstanceCountsByVersion: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(counts))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Version Management — error path tests
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ListVersions_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT version FROM workflow_defs",
+			err:   fmt.Errorf("simulated query error"),
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ListVersions(testCtx, "test-wf")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "list versions") {
+		t.Errorf("expected error to contain 'list versions', got: %v", err)
+	}
+}
+
+func TestPostgresStore_DeployWorkflowDef_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{
+			match: "INSERT INTO workflow_defs",
+			err:   fmt.Errorf("simulated exec error"),
+		},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	def := &WorkflowDef{Name: "wf", Version: 1, WASMBytes: []byte("wasm"), ABIVersion: 1}
+	err := store.DeployWorkflowDef(testCtx, def)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "deploy workflow def") {
+		t.Errorf("expected error to contain 'deploy workflow def', got: %v", err)
+	}
+}
+
+func TestPostgresStore_ListWorkflowDefs_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT name, version, abi_version",
+			err:   fmt.Errorf("simulated query error"),
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ListWorkflowDefs(testCtx, "wf")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "list workflow defs") {
+		t.Errorf("expected error to contain 'list workflow defs', got: %v", err)
+	}
+}
+
+func TestPostgresStore_GetWorkflowDef_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT name, version, wasm_bytes",
+			err:   fmt.Errorf("simulated query error"),
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.GetWorkflowDef(testCtx, "wf", 1)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "get workflow def") {
+		t.Errorf("expected error to contain 'get workflow def', got: %v", err)
+	}
+}
+
+func TestPostgresStore_MarkVersionDeprecated_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{
+			match: "UPDATE workflow_defs SET deprecated",
+			err:   fmt.Errorf("simulated exec error"),
+		},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.MarkVersionDeprecated(testCtx, "wf", 1, true)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "mark version deprecated") {
+		t.Errorf("expected error to contain 'mark version deprecated', got: %v", err)
+	}
+}
+
+func TestPostgresStore_PurgeWorkflowDef_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{
+			match: "DELETE FROM workflow_defs",
+			err:   fmt.Errorf("simulated exec error"),
+		},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.PurgeWorkflowDef(testCtx, "wf", 1)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "purge workflow def") {
+		t.Errorf("expected error to contain 'purge workflow def', got: %v", err)
+	}
+}
+
+func TestPostgresStore_CountActiveInstances_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "FROM workflow_instances WHERE def_name",
+			err:   fmt.Errorf("simulated query error"),
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.CountActiveInstances(testCtx, "wf", 1)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "count active instances") {
+		t.Errorf("expected error to contain 'count active instances', got: %v", err)
+	}
+}
+
+func TestPostgresStore_GetActiveInstanceCountsByVersion_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "FROM workflow_instances",
+			err:   fmt.Errorf("simulated query error"),
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.GetActiveInstanceCountsByVersion(testCtx)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "get active instance counts") {
+		t.Errorf("expected error to contain 'get active instance counts', got: %v", err)
+	}
+}
+
+func TestPostgresStore_ResolveLatestVersion_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT COALESCE",
+			err:   fmt.Errorf("simulated query error"),
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ResolveLatestVersion(testCtx, "wf")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "resolve latest version") {
+		t.Errorf("expected error to contain 'resolve latest version', got: %v", err)
+	}
+}
+
+func TestPostgresStore_ValidateVersion_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT EXISTS",
+			err:   fmt.Errorf("simulated query error"),
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ValidateVersion(testCtx, "wf", 1)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "validate version") {
+		t.Errorf("expected error to contain 'validate version', got: %v", err)
+	}
 }
 
 func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
@@ -1935,6 +2209,56 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_AlreadyExists(t *testing.T
 	}
 }
 
+func TestPostgresStore_StartNewRun_WithIdempotencyKey_Collision(t *testing.T) {
+	// Tests the ON CONFLICT DO NOTHING path: first SELECT finds no active
+	// key, INSERT returns RowsAffected=0 (another request inserted
+	// simultaneously), then second SELECT returns the existing workflow ID.
+	collidedID := "collided-wf-id"
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			// First SELECT: no active key found (expired or missing).
+			match:   "SELECT workflow_id FROM idempotency_keys",
+			data:    nil,
+			consume: true,
+		},
+		{
+			// Second SELECT after collision: return the concurrently-inserted key.
+			match: "SELECT workflow_id FROM idempotency_keys",
+			data:  [][]driver.Value{{collidedID}},
+		},
+	}, []mockExecResult{
+		// INSERT ON CONFLICT DO NOTHING: RowsAffected=0 means collision.
+		{match: "INSERT INTO idempotency_keys", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	id, alreadyExisted, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-456", DefaultTenantUUID, 0)
+	if err != nil {
+		t.Fatalf("StartNewRun (collision): %v", err)
+	}
+	if id != collidedID {
+		t.Errorf("expected %q, got %q", collidedID, id)
+	}
+	if !alreadyExisted {
+		t.Error("expected alreadyExisted=true after collision")
+	}
+}
+
+func TestPostgresStore_StartNewRun_WithIdempotencyKey_InsertError(t *testing.T) {
+	// Tests the path where INSERT INTO idempotency_keys fails with an error.
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO idempotency_keys", err: sql.ErrConnDone},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, _, err := store.StartNewRun(testCtx, "", "test-wf", 1, json.RawMessage(`{}`), "idem-key-789", DefaultTenantUUID, 0)
+	if err == nil {
+		t.Fatal("expected error from INSERT idempotency_keys failure, got nil")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // PollAndClaimSignal
 // ---------------------------------------------------------------------------
@@ -2031,6 +2355,42 @@ func TestPostgresStore_FailWorkflow_NilQueryState(t *testing.T) {
 	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", 0, "error", "", "", nil)
 	if err != nil {
 		t.Fatalf("FailWorkflow (nil qs): %v", err)
+	}
+}
+
+func TestPostgresStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
+	// Idempotency UPDATE is best-effort. When it fails, the error is logged
+	// but CompleteWorkflow still succeeds.
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		// Main workflow status update succeeds.
+		{match: "UPDATE workflow_instances SET status = 'done'", affected: 1},
+		// Idempotency update fails — logged but non-fatal.
+		{match: "UPDATE idempotency_keys SET result =", err: sql.ErrConnDone},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", 0, `{"result":"ok"}`, map[string]string{"key": "val"})
+	if err != nil {
+		t.Fatalf("CompleteWorkflow should succeed even when idempotency update fails: %v", err)
+	}
+}
+
+func TestPostgresStore_FailWorkflow_IdempotencyUpdateFails(t *testing.T) {
+	// Idempotency error UPDATE is best-effort. When it fails, the error is
+	// logged but FailWorkflow still succeeds.
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		// Main workflow status update succeeds.
+		{match: "UPDATE workflow_instances SET status = 'failed'", affected: 1},
+		// Idempotency update fails — logged but non-fatal.
+		{match: "UPDATE idempotency_keys SET error_msg =", err: sql.ErrConnDone},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", 0, "something broke", "", "", map[string]string{"key": "val"})
+	if err != nil {
+		t.Fatalf("FailWorkflow should succeed even when idempotency update fails: %v", err)
 	}
 }
 
@@ -2192,5 +2552,247 @@ func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 	}
 	if wf.AssignedTo != "" {
 		t.Errorf("expected empty assigned_to, got %q", wf.AssignedTo)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetConcurrencyKeyCount
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_GetConcurrencyKeyCount_NonZero(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT COUNT(*) FROM concurrency_keys",
+			data:  [][]driver.Value{{int64(3)}},
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	count, err := store.GetConcurrencyKeyCount(testCtx, "wf-1")
+	if err != nil {
+		t.Fatalf("GetConcurrencyKeyCount: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected count=3, got %d", count)
+	}
+}
+
+func TestPostgresStore_GetConcurrencyKeyCount_Zero(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT COUNT(*) FROM concurrency_keys",
+			data:  [][]driver.Value{{int64(0)}},
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	count, err := store.GetConcurrencyKeyCount(testCtx, "wf-1")
+	if err != nil {
+		t.Fatalf("GetConcurrencyKeyCount: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected count=0, got %d", count)
+	}
+}
+
+func TestPostgresStore_GetConcurrencyKeyCount_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT COUNT(*) FROM concurrency_keys",
+			err:   errors.New("count query failed"),
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.GetConcurrencyKeyCount(testCtx, "wf-1")
+	if err == nil {
+		t.Fatal("expected error from query failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AcquireConcurrencyKey error paths
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_AcquireConcurrencyKey_DeleteExpiredError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{
+			match: "DELETE FROM concurrency_keys",
+			err:   errors.New("delete expired failed"),
+		},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-1", 30*time.Second)
+	if err == nil {
+		t.Fatal("expected error from delete expired failure")
+	}
+}
+
+func TestPostgresStore_AcquireConcurrencyKey_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "INSERT INTO concurrency_keys",
+			err:   errors.New("insert query failed"),
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-1", 30*time.Second)
+	if err == nil {
+		t.Fatal("expected error from insert query failure")
+	}
+}
+
+func TestPostgresStore_AcquireConcurrencyKey_CommitError(t *testing.T) {
+	db := newMockDBWithErrors(t, []mockRowsResult{
+		{
+			match: "INSERT INTO concurrency_keys",
+			data:  [][]driver.Value{{"wf-1"}},
+		},
+	}, nil, nil, errors.New("commit failed"))
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	acquired, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-1", 30*time.Second)
+	if err == nil {
+		t.Fatal("expected error from commit failure")
+	}
+	if !acquired {
+		t.Error("expected acquired=true before commit failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReleaseConcurrencyKey error paths
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ReleaseConcurrencyKey_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{
+			match: "DELETE FROM concurrency_keys",
+			err:   errors.New("delete concurrency key failed"),
+		},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ReleaseConcurrencyKey(testCtx, "my-key")
+	if err == nil {
+		t.Fatal("expected error from exec failure")
+	}
+}
+
+func TestPostgresStore_ReleaseConcurrencyKey_CommitError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, nil, errors.New("commit failed"))
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ReleaseConcurrencyKey(testCtx, "my-key")
+	if err == nil {
+		t.Fatal("expected error from commit failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReleaseWorkflowConcurrencyKeys error paths
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ReleaseWorkflowConcurrencyKeys_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{
+			match: "DELETE FROM concurrency_keys",
+			err:   errors.New("delete workflow keys failed"),
+		},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ReleaseWorkflowConcurrencyKeys(testCtx, "wf-1")
+	if err == nil {
+		t.Fatal("expected error from exec failure")
+	}
+}
+
+func TestPostgresStore_ReleaseWorkflowConcurrencyKeys_CommitError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, nil, errors.New("commit failed"))
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ReleaseWorkflowConcurrencyKeys(testCtx, "wf-1")
+	if err == nil {
+		t.Fatal("expected error from commit failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReapExpiredConcurrencyKeys error path
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ReapExpiredConcurrencyKeys_CommitError(t *testing.T) {
+	db := newMockDBWithErrors(t, []mockRowsResult{}, []mockExecResult{
+		{match: "DELETE FROM concurrency_keys", affected: 5},
+	}, nil, errors.New("commit failed"))
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	n, err := store.ReapExpiredConcurrencyKeys(testCtx)
+	if err == nil {
+		t.Fatal("expected error from commit failure")
+	}
+	if n != 5 {
+		t.Errorf("expected n=5 from RowsAffected, got %d", n)
+	}
+}
+
+func TestPostgresStore_ReapExpiredConcurrencyKeys_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{
+			match: "DELETE FROM concurrency_keys",
+			err:   errors.New("delete expired keys failed"),
+		},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ReapExpiredConcurrencyKeys(testCtx)
+	if err == nil {
+		t.Fatal("expected error from exec failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReleaseWorkflow error paths
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ReleaseWorkflow_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{
+			match: "UPDATE workflow_instances",
+			err:   errors.New("update workflow failed"),
+		},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ReleaseWorkflow(testCtx, "wf-1", "worker-1", 0, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected error from exec failure")
+	}
+}
+
+func TestPostgresStore_ReleaseWorkflow_CommitError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, nil, errors.New("commit failed"))
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ReleaseWorkflow(testCtx, "wf-1", "worker-1", 0, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("expected error from commit failure")
 	}
 }
