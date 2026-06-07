@@ -60,7 +60,7 @@ func listVersions(ctx context.Context, store engine.WorkflowStore, args []string
 
 	defs, err := store.ListWorkflowDefs(ctx, name)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error listing workflow versions %q: %v\n", name, err)
 		osExit(1)
 	}
 
@@ -68,7 +68,7 @@ func listVersions(ctx context.Context, store engine.WorkflowStore, args []string
 		// Show summary across all workflows.
 		summary, err := engine.CollectVersionMetrics(ctx, store)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "error collecting version metrics: %v\n", err)
 			osExit(1)
 		}
 
@@ -128,7 +128,11 @@ func deprecateVersion(ctx context.Context, store engine.WorkflowStore, args []st
 	}
 
 	if err := store.MarkVersionDeprecated(ctx, name, version, deprecated); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		op := "deprecating"
+		if !deprecated {
+			op = "restoring"
+		}
+		fmt.Fprintf(os.Stderr, "error %s %s v%d: %v\n", op, name, version, err)
 		osExit(1)
 	}
 
@@ -161,7 +165,7 @@ func purgeVersion(ctx context.Context, store engine.WorkflowStore, args []string
 	}
 
 	if err := store.PurgeWorkflowDef(ctx, name, version); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error purging %s v%d: %v\n", name, version, err)
 		osExit(1)
 	}
 	fmt.Printf("%s v%d purged\n", name, version)
@@ -177,7 +181,7 @@ func activeInstances(ctx context.Context, store engine.WorkflowStore, args []str
 		// Show for a specific workflow.
 		defs, err := store.ListWorkflowDefs(ctx, name)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "error listing workflow definitions for %q: %v\n", name, err)
 			osExit(1)
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
@@ -204,7 +208,7 @@ func activeInstances(ctx context.Context, store engine.WorkflowStore, args []str
 	// Show across all workflows.
 	counts, err := store.GetActiveInstanceCountsByVersion(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error getting active instance counts: %v\n", err)
 		osExit(1)
 	}
 	if len(counts) == 0 {
@@ -236,7 +240,7 @@ func gcVersions(ctx context.Context, store engine.WorkflowStore, args []string) 
 
 	result, err := engine.GarbageCollectVersions(ctx, store, opts)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error running garbage collection: %v\n", err)
 		osExit(1)
 	}
 

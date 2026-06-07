@@ -53,19 +53,19 @@ func main() {
 
 	db, err := sql.Open("postgres", *dsn)
 	if err != nil {
-		log.Fatalf("failed to connect: %v", err)
+		log.Fatalf("failed to connect to database: %v — check the --db flag or CLEAT_DB_URL environment variable", err)
 	}
 	defer db.Close()
 
 	if err := db.Ping(); err != nil {
-		log.Fatalf("failed to ping: %v", err)
+		log.Fatalf("failed to ping database: %v — check that the database is running and the connection string is correct", err)
 	}
 
 	ctx := context.Background()
 	factory := engine.NewPostgresStoreFactory(db, "public")
 	store, closer, err := factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000")
 	if err != nil {
-		log.Fatalf("failed to open store: %v", err)
+		log.Fatalf("failed to open database store: %v — check that the database is accessible and the public schema exists", err)
 	}
 	defer closer.Close()
 
