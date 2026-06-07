@@ -177,17 +177,56 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 	}
 
 	// Create go.mod with replace directive pointing to the project root.
-	// TinyGo caps the go version to its supported maximum.
-	goVersion := "1.23"
-	replaceRoot := cfg.ProjectRoot
-	// Create a minimal dependency tree with go 1.23 so TinyGo doesn't
-	// reject the project root's go 1.26 requirement.
-	depsDir := filepath.Join(cfg.OutDir, ".deps")
+	// TinyGo caps the go version to its supported maximum, so we use a
+	// vendored .deps/ with go 1.23 for tinygo builds.
+	var goVersion, replaceRoot string
+	if cfg.Target == "tinygo" {
+		goVersion = "1.23"
+		depsDir := filepath.Join(cfg.OutDir, ".deps")
+		if err := copyCleatSDKToDeps(cfg.ProjectRoot, cfg.ModulePath, depsDir); err != nil {
+			return err
+		}
+		absDeps, err := filepath.Abs(depsDir)
+		if err != nil {
+			return fmt.Errorf("resolving .deps path: %w", err)
+		}
+		replaceRoot = absDeps
+	} else {
+		goVersion = cfg.GoVersion
+		if goVersion == "" {
+			goVersion = "1.23"
+		}
+		replaceRoot = cfg.ProjectRoot
+	}
+
+	// Write a minimal go.mod for Go/TinyGo compilation.
+	// The cleat/cleat submodule is replaced directly (not via the root
+	// module), and go mod tidy is run by the caller to generate go.sum.
+	modContent := fmt.Sprintf(`module cleat-build
+
+go %s
+
+require %s v0.0.0
+
+replace %s => %s/cleat
+`, goVersion, cfg.ModulePath+"/cleat", cfg.ModulePath+"/cleat", replaceRoot)
+
+	modPath := filepath.Join(cfg.OutDir, "go.mod")
+	if err := os.WriteFile(modPath, []byte(modContent), 0644); err != nil {
+		return fmt.Errorf("writing go.mod: %w", err)
+	}
+
+	return nil
+}
+
+// copyCleatSDKToDeps copies the cleat SDK and go.mod/go.sum into a .deps/
+// vendored directory, creating a go 1.23-compatible dependency tree for
+// TinyGo compilation.
+func copyCleatSDKToDeps(projectRoot, modulePath, depsDir string) error {
+	srcCleat := filepath.Join(projectRoot, "cleat")
 	if err := os.MkdirAll(filepath.Join(depsDir, "cleat"), 0755); err != nil {
 		return fmt.Errorf("creating .deps/cleat: %w", err)
 	}
-	// Copy cleat SDK into .deps/
-	srcCleat := filepath.Join(cfg.ProjectRoot, "cleat")
 	goFiles, err := filepath.Glob(filepath.Join(srcCleat, "*.go"))
 	if err != nil {
 		return fmt.Errorf("globbing cleat source: %w", err)
@@ -205,17 +244,12 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 			return fmt.Errorf("writing %s: %w", base, err)
 		}
 	}
-
-	// Copy cleat/go.mod and go.sum into .deps/cleat/ so that
-	// github.com/cleat-team/cleat/cleat is a proper submodule
-	// resolvable via the replace directive.
 	for _, modFile := range []string{"go.mod", "go.sum"} {
 		srcMod := filepath.Join(srcCleat, modFile)
 		if data, err := os.ReadFile(srcMod); err == nil {
 			os.WriteFile(filepath.Join(depsDir, "cleat", modFile), data, 0644)
 		}
 	}
-	// Also copy cleattest if present.
 	srcCleattest := filepath.Join(srcCleat, "cleattest")
 	if st, err := os.Stat(srcCleattest); err == nil && st.IsDir() {
 		if err := os.MkdirAll(filepath.Join(depsDir, "cleattest"), 0755); err != nil {
@@ -231,38 +265,11 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 			os.WriteFile(filepath.Join(depsDir, "cleattest", base), content, 0644)
 		}
 	}
-	// Write .deps/go.mod with a compatible version.
 	depsMod := fmt.Sprintf(`module %s
 
 go 1.23
-`, cfg.ModulePath)
-	if err := os.WriteFile(filepath.Join(depsDir, "go.mod"), []byte(depsMod), 0644); err != nil {
-		return fmt.Errorf("writing .deps/go.mod: %w", err)
-	}
-	absDeps, err := filepath.Abs(depsDir)
-	if err != nil {
-		return fmt.Errorf("resolving .deps path: %w", err)
-	}
-	replaceRoot = absDeps
-
-	// Use a minimal go.mod for TinyGo. The cleat/cleat submodule is
-	// replaced directly (not via the root module), and go mod tidy is
-	// run by the caller to generate the go.sum.
-	modContent := fmt.Sprintf(`module cleat-build
-
-go %s
-
-require %s v0.0.0
-
-replace %s => %s/cleat
-`, goVersion, cfg.ModulePath+"/cleat", cfg.ModulePath+"/cleat", replaceRoot)
-
-	modPath := filepath.Join(cfg.OutDir, "go.mod")
-	if err := os.WriteFile(modPath, []byte(modContent), 0644); err != nil {
-		return fmt.Errorf("writing go.mod: %w", err)
-	}
-
-	return nil
+`, modulePath)
+	return os.WriteFile(filepath.Join(depsDir, "go.mod"), []byte(depsMod), 0644)
 }
 
 // FindRepoRoot walks up from the given directory looking for go.mod to
