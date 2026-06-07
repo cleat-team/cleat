@@ -612,7 +612,7 @@ jobs:
           go-version: stable
 
       - name: Build cleat-worker binary
-        run: go build -o cleat-worker ./cmd/cleat-worker
+        run: CGO_ENABLED=0 go build -o cleat-worker ./cmd/cleat-worker
 
       - name: Build Docker image
         run: docker build -t cleat-worker:latest .
