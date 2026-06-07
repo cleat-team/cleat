@@ -2692,7 +2692,7 @@ func (c *etConn) QueryContext(_ context.Context, query string, args []driver.Nam
 
 	q := strings.Join(strings.Fields(query), " ")
 	switch {
-	case strings.Contains(q, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(q, "tenant_api_keys") && strings.Contains(q, "SELECT tenant_id"):
 		return c.queryTenantLookup(args)
 	case strings.Contains(q, "INSERT INTO event_subscriptions"):
 		return c.queryInsertSubscription(args)
