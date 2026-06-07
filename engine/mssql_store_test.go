@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/google/uuid"
@@ -94,6 +95,139 @@ func TestMSSQLStoreWithTenant(t *testing.T) {
 	}
 	if store.tenantID != "00000000-0000-0000-0000-000000000000" {
 		t.Fatal("WithTenant mutated original store")
+	}
+}
+
+// TestMSSQLStore_NewStoreDefaults verifies default field values of a
+// newly-constructed MSSQLStore (no database required).
+func TestMSSQLStore_NewStoreDefaults(t *testing.T) {
+	store := NewMSSQLStore(nil)
+	if store.tenantID != "00000000-0000-0000-0000-000000000000" {
+		t.Fatalf("default tenantID = %q, want zero UUID", store.tenantID)
+	}
+	if store.dialect != DialectMSSQL {
+		t.Fatalf("dialect = %q, want mssql", store.dialect)
+	}
+	if len(store.taskQueues) != 1 || store.taskQueues[0] != "default" {
+		t.Fatalf("taskQueues = %v, want [default]", store.taskQueues)
+	}
+	if store.idempotencyKeyTTL != 720*time.Hour {
+		t.Fatalf("idempotencyKeyTTL = %v, want 720h", store.idempotencyKeyTTL)
+	}
+	if store.encryptSensitivePayloads {
+		t.Fatal("encryptSensitivePayloads should default to false")
+	}
+	if store.disableReadRedaction {
+		t.Fatal("disableReadRedaction should default to false")
+	}
+}
+
+// TestMSSQLStore_NewStoreTaskQueues verifies custom task queue handling.
+func TestMSSQLStore_NewStoreTaskQueues(t *testing.T) {
+	store := NewMSSQLStore(nil, "gpu", "high-memory")
+	if len(store.taskQueues) != 2 {
+		t.Fatalf("taskQueues len = %d, want 2", len(store.taskQueues))
+	}
+	if store.taskQueues[0] != "gpu" || store.taskQueues[1] != "high-memory" {
+		t.Fatalf("taskQueues = %v, want [gpu high-memory]", store.taskQueues)
+	}
+}
+
+// TestMSSQLStore_WithTenant verifies WithTenant returns a copy with updated
+// tenantID and does not mutate the original.
+func TestMSSQLStore_WithTenant(t *testing.T) {
+	store := NewMSSQLStore(nil, "default")
+
+	scoped := store.WithTenant("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+	if scoped.tenantID != "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" {
+		t.Fatalf("scoped tenantID = %q", scoped.tenantID)
+	}
+	if store.tenantID != "00000000-0000-0000-0000-000000000000" {
+		t.Fatal("WithTenant mutated original store")
+	}
+	if scoped.taskQueues[0] != store.taskQueues[0] {
+		t.Fatal("WithTenant changed taskQueues")
+	}
+}
+
+// TestMSSQLStore_WithIdempotencyKeyTTL verifies TTL override behaviour.
+func TestMSSQLStore_WithIdempotencyKeyTTL(t *testing.T) {
+	store := NewMSSQLStore(nil)
+	updated := store.WithIdempotencyKeyTTL(24 * time.Hour)
+
+	if store.idempotencyKeyTTL != 720*time.Hour {
+		t.Fatal("original store was mutated")
+	}
+	if updated.idempotencyKeyTTL != 24*time.Hour {
+		t.Fatalf("idempotencyKeyTTL = %v, want 24h", updated.idempotencyKeyTTL)
+	}
+}
+
+// TestMSSQLStore_WithReadRedactionDisabled verifies the redaction toggle.
+func TestMSSQLStore_WithReadRedactionDisabled(t *testing.T) {
+	store := NewMSSQLStore(nil)
+
+	disabled := store.WithReadRedactionDisabled(true)
+	if !disabled.disableReadRedaction {
+		t.Fatal("disableReadRedaction should be true")
+	}
+	if store.disableReadRedaction {
+		t.Fatal("original store was mutated")
+	}
+
+	reEnabled := disabled.WithReadRedactionDisabled(false)
+	if reEnabled.disableReadRedaction {
+		t.Fatal("disableReadRedaction should be false after re-enabling")
+	}
+}
+
+// TestMSSQLStore_WithEncryption verifies the encryption fields behave correctly.
+func TestMSSQLStore_WithEncryption(t *testing.T) {
+	store := NewMSSQLStore(nil)
+
+	enc := &PayloadEncryption{key: make([]byte, 32)}
+	encrypted := store.WithEncryption(enc, true)
+
+	if encrypted.encryption != enc {
+		t.Fatal("encryption reference not stored")
+	}
+	if !encrypted.encryptSensitivePayloads {
+		t.Fatal("encryptSensitivePayloads should be true")
+	}
+	if store.encryptSensitivePayloads {
+		t.Fatal("original store was mutated")
+	}
+	if store.encryption != nil {
+		t.Fatal("original store encryption should be nil")
+	}
+
+	// Verify disabling works.
+	disabled := encrypted.WithEncryption(enc, false)
+	if disabled.encryptSensitivePayloads {
+		t.Fatal("encryptSensitivePayloads should be false after disabling")
+	}
+}
+
+// TestMSSQLStore_BuildTaskQueueParam verifies the queue parameter builder.
+func TestMSSQLStore_BuildTaskQueueParam(t *testing.T) {
+	tests := []struct {
+		name       string
+		taskQueues []string
+		want       string
+	}{
+		{"empty falls back to default", nil, "default"},
+		{"default only", []string{"default"}, "default"},
+		{"single queue", []string{"gpu"}, "gpu"},
+		{"multiple queues", []string{"default", "gpu", "high-memory"}, "default,gpu,high-memory"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &MSSQLStore{taskQueues: tt.taskQueues}
+			got := store.buildTaskQueueParam()
+			if got != tt.want {
+				t.Errorf("buildTaskQueueParam() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
