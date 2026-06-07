@@ -1101,7 +1101,9 @@ func buildTestWasm(t *testing.T) string {
 
 	cwd, _ := os.Getwd()
 	projectRoot := cwd
-	if strings.HasSuffix(cwd, "internal/host") {
+	if strings.HasSuffix(cwd, "/engine") {
+		projectRoot = filepath.Dir(cwd)
+	} else if strings.HasSuffix(cwd, "internal/host") {
 		projectRoot = filepath.Dir(filepath.Dir(cwd))
 	}
 
