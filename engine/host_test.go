@@ -2398,3 +2398,259 @@ func TestContinueAsNewWithVersionFreshZero(t *testing.T) {
 		t.Errorf("expected NewVersion=0 in event, got %d", last.NewVersion)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// AwaitAnyChild tests.
+// ---------------------------------------------------------------------------
+
+func TestAwaitAnyChildReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type — should be EventTypeAwaitAnyChild
+	}}
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected error code 1 (divergence), got %d", errCode)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true (divergence should not call exitReplay)")
+	}
+	if s.stepCount != 0 {
+		t.Errorf("expected stepCount=0 (step not advanced), got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Errorf("expected history unchanged (len=1), got len=%d", len(s.history))
+	}
+}
+
+func TestAwaitAnyChildReplayCachedResult(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitAnyChild,
+		Response:  `{"run_id":"run-1","result":"done"}`,
+	}}
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1","run-2"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected error code 0, got %d", errCode)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true (cached result)")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+}
+
+func TestAwaitAnyChildReplaySuspendThenCompleted(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypeAwaitAnyChild},
+		{Step: 1, EventType: EventTypeAwaitAnyChild, Response: `{"run_id":"run-1","result":"done"}`},
+	}
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1","run-2"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected error code 0, got %d", errCode)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true after consuming both events")
+	}
+	if s.stepCount != 2 {
+		t.Errorf("expected stepCount=2 (both events consumed), got %d", s.stepCount)
+	}
+}
+
+func TestAwaitAnyChildReplaySuspendNoReexec(t *testing.T) {
+	mock := &mockChildWorkflowStore{completed: false}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitAnyChild,
+	}}
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("expected suspend sentinel, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_any_child") {
+		t.Errorf("expected Reason containing 'await_any_child', got %q", s.suspendErr.Reason)
+	}
+}
+
+func TestAwaitAnyChildReplayPastEnd(t *testing.T) {
+	mock := &mockChildWorkflowStore{completed: false}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	s.isReplay = true
+	// empty history — stepCount >= len(history) triggers exitReplay
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("expected suspend sentinel, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+}
+
+func TestAwaitAnyChildFreshCompleted(t *testing.T) {
+	mock := &mockChildWorkflowStore{
+		result:    "done",
+		completed: true,
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected error code 0, got %d", errCode)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	lastEvent := s.history[len(s.history)-1]
+	if lastEvent.EventType != EventTypeAwaitAnyChild {
+		t.Errorf("expected EventTypeAwaitAnyChild, got %s", lastEvent.EventType)
+	}
+	if lastEvent.Request != `["run-1"]` {
+		t.Errorf("expected Request=%q, got %q", `["run-1"]`, lastEvent.Request)
+	}
+	if !strings.Contains(lastEvent.Response, `"run_id":"run-1"`) {
+		t.Errorf("expected Response with run_id, got %q", lastEvent.Response)
+	}
+	if !strings.Contains(lastEvent.Response, `"result":"done"`) {
+		t.Errorf("expected Response with result, got %q", lastEvent.Response)
+	}
+}
+
+func TestAwaitAnyChildFreshStoreError(t *testing.T) {
+	mock := &mockChildWorkflowStore{
+		err: fmt.Errorf("db down"),
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected error code 0 (error is in JSON response), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	lastEvent := s.history[len(s.history)-1]
+	if lastEvent.EventType != EventTypeAwaitAnyChild {
+		t.Errorf("expected EventTypeAwaitAnyChild, got %s", lastEvent.EventType)
+	}
+	if !strings.Contains(lastEvent.Response, `"error":"db down"`) {
+		t.Errorf("expected Response to contain error, got %q", lastEvent.Response)
+	}
+	if !strings.Contains(lastEvent.Response, `"run_id":"run-1"`) {
+		t.Errorf("expected Response with run_id, got %q", lastEvent.Response)
+	}
+}
+
+func TestAwaitAnyChildFreshNoChildCompleted(t *testing.T) {
+	mock := &mockChildWorkflowStore{completed: false}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("expected suspend sentinel, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_any_child") {
+		t.Errorf("expected Reason containing 'await_any_child', got %q", s.suspendErr.Reason)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 (empty event recorded), got %d", s.stepCount)
+	}
+}
+
+func TestAwaitAnyChildFreshNilStore(t *testing.T) {
+	s := newTestExecSession()
+	// s.engine.childWfStore is nil — verify no panic, graceful suspend
+
+	result := s.AwaitAnyChild(context.Background(), nil, `["run-1"]`, 0, 0)
+
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("expected suspend sentinel, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+}
+
+func TestAwaitAnyChildFreshInvalidJSON(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.AwaitAnyChild(context.Background(), nil, "not valid json", 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected error code 1, got %d", errCode)
+	}
+}
+
+func TestAwaitAnyChildFreshDeterministicOrdering(t *testing.T) {
+	mock := &mockChildWorkflowStore{
+		result:    "ok",
+		completed: true,
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+
+	s.AwaitAnyChild(context.Background(), nil, `["c","a","b"]`, 0, 0)
+
+	// "a" sorted first, so it should be polled first and returned immediately.
+	if mock.gotRunID != "a" {
+		t.Errorf("expected first polled runID='a' (sorted order), got %q", mock.gotRunID)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	lastEvent := s.history[len(s.history)-1]
+	if lastEvent.EventType != EventTypeAwaitAnyChild {
+		t.Errorf("expected EventTypeAwaitAnyChild, got %s", lastEvent.EventType)
+	}
+	// Request should preserve original (unsorted) order.
+	if lastEvent.Request != `["c","a","b"]` {
+		t.Errorf("expected Request to preserve original order, got %q", lastEvent.Request)
+	}
+}
