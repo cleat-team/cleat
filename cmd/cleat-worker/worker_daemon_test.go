@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -587,6 +588,7 @@ func newTestWorker(ms *mockStore) *Worker {
 		compactionInterval:  10 * time.Millisecond,
 		ctx:                 ctx,
 		cancel:              cancel,
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 		wasmCache:           newWasmLRUCache(100, 500),
 		healthTracker:       newHealthTracker(),
 		loopCtxMap:          make(map[string]*loopContext),
@@ -611,6 +613,7 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 		compactionInterval:  10 * time.Millisecond,
 		ctx:                 ctx,
 		cancel:              cancel,
+		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 		wasmCache:           newWasmLRUCache(100, 500),
 		healthTracker:       newHealthTracker(),
 		loopCtxMap:          make(map[string]*loopContext),
@@ -2138,6 +2141,113 @@ func TestDispatchPendingUpdates_NoEngine(t *testing.T) {
 	w.dispatchPendingUpdates()
 }
 
+// mockServiceCaller implements engine.ServiceCaller for tests.
+type mockServiceCaller struct{}
+
+func (m *mockServiceCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
+	return "", nil
+}
+
+func TestExecEngines_MapLifecycle(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+
+	wfID := "wf-store-delete-test"
+	w.inflight.Store(wfID, &engine.WorkflowInstance{ID: wfID})
+
+	// Create a minimal engine with an update handler.
+	caller := &mockServiceCaller{}
+	eng := engine.NewEngine(nil, caller, engine.WithUpdateHandler(func(name, payload string) (string, error) {
+		return "ok", nil
+	}))
+
+	// Store the engine.
+	w.execEngines.Store(wfID, eng)
+
+	// Load and verify it's found.
+	loaded, ok := w.execEngines.Load(wfID)
+	if !ok {
+		t.Fatal("expected engine to be found after Store")
+	}
+	if loaded != eng {
+		t.Errorf("loaded engine = %v, want %v", loaded, eng)
+	}
+
+	// Verify DispatchUpdate works through the loaded engine.
+	result, err := loaded.(*engine.Engine).DispatchUpdate(context.Background(), "test-update", "{}")
+	if err != nil {
+		t.Fatalf("DispatchUpdate failed: %v", err)
+	}
+	if result != "ok" {
+		t.Errorf("DispatchUpdate = %q, want %q", result, "ok")
+	}
+
+	// Delete the engine.
+	w.execEngines.Delete(wfID)
+
+	// Verify it's gone.
+	_, ok = w.execEngines.Load(wfID)
+	if ok {
+		t.Fatal("expected engine to be gone after Delete")
+	}
+}
+
+func TestDispatchPendingUpdates_WithEngine(t *testing.T) {
+	ms := &mockStore{}
+
+	var dispatchedName, dispatchedPayload string
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
+		return []engine.UpdateRequestInfo{
+			{UpdateName: "status-update", Payload: `{"status":"running"}`},
+		}, nil
+	}
+	completed := false
+	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+		completed = true
+		if updateName != "status-update" {
+			t.Errorf("updateName = %q, want %q", updateName, "status-update")
+		}
+		if result != `{"status":"ok"}` {
+			t.Errorf("result = %q, want %q", result, `{"status":"ok"}`)
+		}
+		if errMsg != "" {
+			t.Errorf("errMsg = %q, want empty", errMsg)
+		}
+		return nil
+	}
+
+	w := newTestWorker(ms)
+	wfID := "wf-dispatch-test"
+	w.inflight.Store(wfID, &engine.WorkflowInstance{ID: wfID})
+
+	// Create an engine that captures the dispatched update.
+	caller := &mockServiceCaller{}
+	eng := engine.NewEngine(nil, caller, engine.WithUpdateHandler(func(name, payload string) (string, error) {
+		dispatchedName = name
+		dispatchedPayload = payload
+		return `{"status":"ok"}`, nil
+	}))
+	w.execEngines.Store(wfID, eng)
+
+	w.dispatchPendingUpdates()
+
+	if dispatchedName != "status-update" {
+		t.Errorf("dispatched name = %q, want %q", dispatchedName, "status-update")
+	}
+	if dispatchedPayload != `{"status":"running"}` {
+		t.Errorf("dispatched payload = %q, want %q", dispatchedPayload, `{"status":"running"}`)
+	}
+	if !completed {
+		t.Error("expected CompleteUpdateRequest to be called")
+	}
+
+	// Verify cleanup: Delete removes engine, Load returns !ok.
+	w.execEngines.Delete(wfID)
+	if _, ok := w.execEngines.Load(wfID); ok {
+		t.Error("expected engine to be gone after Delete")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // releaseOrFail tests
 // ---------------------------------------------------------------------------
@@ -3250,4 +3360,199 @@ func TestWatchdog_PoisonPillCondition(t *testing.T) {
 
 	w.cancel()
 	w.wg.Wait()
+}
+
+// ---------------------------------------------------------------------------
+// Drain race fix tests (cleat-230-race-fix3)
+// ---------------------------------------------------------------------------
+
+// TestAPIStartWorkflow_Draining verifies that handleStartWorkflow returns
+// 503 when the worker is draining (Fix 1).
+func TestAPIStartWorkflow_Draining(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.drainCh = make(chan struct{})
+	w.draining.Store(true)
+	api := &apiServer{store: ms, worker: w, maxBodySize: 1 << 20}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(`{"input":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	api.handleStartWorkflow(resp, req, "my-wf")
+
+	if resp.Code != 503 {
+		t.Errorf("expected 503 during drain, got %d", resp.Code)
+	}
+}
+
+// TestDispatchLoop_DrainAfterClaim verifies that the dispatch loop's
+// post-claim drain check releases claimed workflows instead of executing
+// them (Fix 2). The claim function sets draining=true to simulate drain
+// starting during the DB claim.
+func TestDispatchLoop_DrainAfterClaim(t *testing.T) {
+	ms := &mockStore{}
+
+	releasedCh := make(chan string, 1)
+
+	w := newTestWorker(ms)
+	w.drainCh = make(chan struct{})
+
+	ms.claimStickyWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
+		return nil, nil
+	}
+	ms.claimWorkflowsFn = func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
+		// Simulate drain starting during the DB claim (TOCTOU window).
+		w.draining.Store(true)
+		return []*engine.WorkflowInstance{
+			{ID: "wf-1", DefName: "test", DefVersion: 1, Status: "ready"},
+		}, nil
+	}
+	ms.releaseWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
+		select {
+		case releasedCh <- workflowID:
+		default:
+		}
+		return nil
+	}
+	ms.loadWASMFn = func(ctx context.Context, defName string, defVersion int) ([]byte, error) {
+		t.Error("executeWorkflow should not be called during drain")
+		return nil, nil
+	}
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+		return nil
+	}
+
+	// Launch dispatch loop. dispatchLoop has its own defer w.wg.Done(),
+	// so we just Add and launch directly (the same pattern as launchLoop).
+	w.wg.Add(1)
+	go w.dispatchLoop()
+
+	// Wait for the claimed workflow to be released.
+	select {
+	case id := <-releasedCh:
+		if id != "wf-1" {
+			t.Errorf("expected wf-1 to be released, got %s", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ReleaseWorkflow call")
+	}
+
+	// Verify workflow never entered inflight.
+	if _, loaded := w.inflight.Load("wf-1"); loaded {
+		t.Error("workflow should not be in inflight after drain release")
+	}
+
+	w.cancel()
+	w.wg.Wait()
+}
+
+// TestDrainStatus_ClosesChannelBeforeCancel verifies that handleDrainStatus
+// closes the drainCh and cancels the root context in the correct order
+// (Fix 3). The drainCh is closed first, then cancel is called, ensuring
+// that external callers waiting on DrainComplete() always unblock.
+func TestDrainStatus_ClosesChannelBeforeCancel(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.drainCh = make(chan struct{})
+	w.draining.Store(true)
+	// inflight is empty (zero-value sync.Map)
+
+	api := &apiServer{store: ms, worker: w, maxBodySize: 1 << 20}
+
+	// Call handleDrainStatus. With draining=true and inflight=0, it should
+	// close drainCh and cancel the context.
+	req := httptest.NewRequest(http.MethodGet, "/api/drain", nil)
+	resp := httptest.NewRecorder()
+	api.handleDrainStatus(resp, req)
+
+	if resp.Code != 200 {
+		t.Fatalf("expected 200, got %d", resp.Code)
+	}
+
+	// drainCh must be closed.
+	select {
+	case <-w.drainCh:
+		// drainCh closed — correct.
+	default:
+		t.Error("drainCh should be closed by handleDrainStatus when inflight is empty")
+	}
+
+	// Context must be cancelled AFTER drainCh is closed.
+	if w.ctx.Err() == nil {
+		t.Error("context should be cancelled by handleDrainStatus")
+	}
+
+	// Calling DrainComplete() must not block — it returns the already-closed channel.
+	select {
+	case <-w.DrainComplete():
+		// Not blocking — correct.
+	default:
+		t.Error("DrainComplete() should not block after handleDrainStatus completes")
+	}
+}
+
+// TestDrainStatus_DoesNotCloseChannelWhenInflight verifies that
+// handleDrainStatus does NOT close drainCh when there are workflows
+// still in flight.
+func TestDrainStatus_DoesNotCloseChannelWhenInflight(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.drainCh = make(chan struct{})
+	w.draining.Store(true)
+	w.inflight.Store("wf-1", &engine.WorkflowInstance{ID: "wf-1"})
+
+	api := &apiServer{store: ms, worker: w, maxBodySize: 1 << 20}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/drain", nil)
+	resp := httptest.NewRecorder()
+	api.handleDrainStatus(resp, req)
+
+	if resp.Code != 200 {
+		t.Fatalf("expected 200, got %d", resp.Code)
+	}
+
+	// drainCh must NOT be closed when inflight is non-zero.
+	select {
+	case <-w.drainCh:
+		t.Error("drainCh should NOT be closed while workflows are in flight")
+	default:
+		// Not closed — correct.
+	}
+
+	// Context must NOT be cancelled.
+	if w.ctx.Err() != nil {
+		t.Error("context should NOT be cancelled while workflows are in flight")
+	}
+}
+
+// TestDrainComplete_DoesNotBlock verifies that DrainComplete() returns
+// an open channel initially and then unblocks after drain completes.
+func TestDrainComplete_DoesNotBlock(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.drainCh = make(chan struct{})
+
+	// Before drain: DrainComplete() should not block but should not
+	// succeed either (channel is open).
+	select {
+	case <-w.DrainComplete():
+		t.Error("DrainComplete() should not be closed before drain")
+	default:
+		// Open — correct.
+	}
+
+	// Complete drain.
+	w.draining.Store(true)
+	w.drainOnce.Do(func() {
+		close(w.drainCh)
+		w.cancel()
+	})
+
+	// After drain: DrainComplete() must not block.
+	select {
+	case <-w.DrainComplete():
+		// Not blocking — correct.
+	default:
+		t.Error("DrainComplete() should not block after drain completes")
+	}
 }

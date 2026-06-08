@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -1097,7 +1098,7 @@ func (e *Engine) executeWithBackend(
 		// (b) Version validation (always-on unless allowVersionMismatch).
 		if e.versionValidateFn != nil && !e.allowVersionMismatch {
 			if verr := e.versionValidateFn(); verr != nil {
-				return "", nil, nil, nil, nil, fmt.Errorf("host: version validation failed: %w", verr)
+				return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: version validation failed: %w", e.workflowID, verr)
 			}
 		}
 	}
@@ -1114,9 +1115,9 @@ func (e *Engine) executeWithBackend(
 			}
 			session.releaseHeldScopes(context.Background())
 			if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("%s", enriched)
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
 			}
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, callErr
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr)
 	}
 
 	if res.Suspended || session.suspendErr != nil {
@@ -1147,7 +1148,7 @@ func (e *Engine) executeWithBackend(
 			}
 			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, res.Result, session.queryState, priority)
 			if cnErr != nil {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 			}
 			susResult.ContinueAsNewHandled = true
 			susResult.NewRunID = newRunID
@@ -1244,7 +1245,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// (b) Version validation (always-on unless allowVersionMismatch).
 		if e.versionValidateFn != nil && !e.allowVersionMismatch {
 			if err := e.versionValidateFn(); err != nil {
-				return "", nil, nil, nil, nil, fmt.Errorf("host: version validation failed: %w", err)
+				return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: version validation failed: %w", e.workflowID, err)
 			}
 		}
 	}
@@ -1287,7 +1288,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				}
 				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
-					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 				}
 				susResult.ContinueAsNewHandled = true
 				susResult.NewRunID = newRunID
@@ -1312,9 +1313,9 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		// consistent formatting and serves as a hook for future custom
 		// DWARF parsing from the raw wasm binary.
 		if enriched := resolveWasmTrap(wasmBytes, err.Error()); enriched != "" {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("%s", enriched)
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
 		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, err
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, err)
 	}
 
 	// Workflow completed successfully. Release any held scopes.
@@ -1339,13 +1340,19 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 
 	// ---- Step 1: Compile all core modules ----
 	const componentAdapterModule = "__component_adapter__"
+
+	// Per-execution stdout/stderr buffers to avoid racing on Runtime's
+	// shared buffers when multiple component-model workflows execute
+	// concurrently on the same Runtime.
+	var execStdout, execStderr bytes.Buffer
+
 	compiled := make([]wazero.CompiledModule, len(bundle.Modules))
 	for i, w := range bundle.Modules {
 		w = wasm.PatchEmptyImportModuleName(w, componentAdapterModule)
 		var err error
 		compiled[i], err = e.rt.CompileModule(ctx, w)
 		if err != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: compile core module %d: %w", i, err)
+			return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: compile core module %d: %w", e.workflowID, i, err)
 		}
 		defer compiled[i].Close(ctx)
 	}
@@ -1449,9 +1456,11 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			return nil
 		})
 
-		mod, err := e.rt.InstantiateModuleNamed(instantiateCtx, cm, fmt.Sprintf("__core_%d__", i))
+		execStdout.Reset()
+			execStderr.Reset()
+			mod, err := e.rt.instantiateModuleNamedWithWriters(instantiateCtx, cm, fmt.Sprintf("__core_%d__", i), &execStdout, &execStderr)
 		if err != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: instantiate instance %d (module %d): %w", i, inst.ModuleIndex, err)
+			return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: instantiate instance %d (module %d): %w", e.workflowID, i, inst.ModuleIndex, err)
 		}
 		resolvedInstances[i] = mod
 		cleanupMods = append(cleanupMods, mod)
@@ -1563,7 +1572,7 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 				}
 				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
-					return "", session.history, nil, nil, nil, fmt.Errorf("host: continue_as_new handler failed: %w", cnErr)
+					return "", session.history, nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 				}
 				susResult.ContinueAsNewHandled = true
 				susResult.NewRunID = newRunID
@@ -1667,8 +1676,7 @@ type execSession struct {
 	nowMs            int64
 	randomSeq        int64 // monotonic counter for deterministic Random()
 	suspendErr       *SuspendError
-	signals          map[string]string // pending signals delivered during this session
-	deferrals        map[string]string // registered defer callbacks (deferID -> description)
+deferrals        map[string]string // registered defer callbacks (deferID -> description)
 	workflowID       string            // parent workflow instance ID (for child workflows)
 	defName          string            // workflow definition name (for metrics labels)
 	execRunID        string            // current execution run ID
@@ -1697,7 +1705,7 @@ type execSession struct {
 	// auto-ContinueAsNew without querying the database.
 	eventCount int
 
-	// mu protects maps (queryState, stateStore, signals, deferrals) from
+	// mu protects maps (queryState, stateStore, deferrals) from
 	// concurrent access when wasmtime host functions race with Go dispatch.
 	mu sync.Mutex
 
@@ -2433,7 +2441,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 			}
 			if rec.EventType == EventTypeAwaitSignals {
 				if !s.advanceReplayStep(ctx, &rec) { return 0 }
-				// Check if there's a following signal_received event.
+				// Check if there is a following signal_received event.
 				if s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
 					if nextRec.EventType == EventTypeSignalReceived {
@@ -2443,9 +2451,36 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 						return packAwaitSignalsResult(uint32(written), uint32(len(nextRec.SignalPayload)), false, 0)
 					}
 				}
-				// No signal yet — this is a replay of a wait that hasn't resolved.
-				// Should not happen in practice (we only wake when signal arrives),
-				// but handle gracefully.
+				// No signal_received in history. The signal may have
+				// arrived after suspend (stored in workflow_signals,
+				// not event_history). Check the signal store.
+				if s.engine.signalStore != nil {
+					// SignalNames is a JSON array like ["agent_result"].
+					var names []string
+					if err := json.Unmarshal([]byte(rec.SignalNames), &names); err != nil {
+						names = splitSignalNames(rec.SignalNames)
+					}
+					for _, name := range names {
+						payload, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
+						if err == nil && found {
+							// Record the signal_received event so
+							// subsequent replays find it in history.
+							sigRec := EventRecord{
+								Step:          s.stepCount,
+								EventType:     EventTypeSignalReceived,
+								SignalName:    name,
+								SignalPayload: payload,
+							}
+							s.recordEvent(sigRec)
+							written, _ := s.writeResult(ctx, m, sigNamePtr, name, sigNameMaxLen)
+							_, _ = s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
+							return packAwaitSignalsResult(uint32(written), uint32(len(payload)), false, 0)
+						}
+					}
+				}
+				// No signal found. This is a replay of a wait that has not
+				// resolved. Should not happen (we only wake when signal
+				// arrives), but handle gracefully.
 				return packAwaitSignalsResult(0, 0, true, 0)
 			}
 		}
@@ -2456,7 +2491,7 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 	if s.engine.signalStore != nil {
 		names := splitSignalNames(signalNames)
 		for _, name := range names {
-			payload, found, err := s.engine.signalStore.PollSignal(ctx, "", name)
+			payload, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, name)
 			if err == nil && found {
 				rec := EventRecord{
 					Step:          s.stepCount,
@@ -2545,7 +2580,7 @@ func (s *execSession) PollCancellation(ctx context.Context, m api.Module, reason
 
 func (s *execSession) PollSignal(ctx context.Context, m api.Module, signalName string, payloadPtr, payloadMaxLen uint32) int64 {
 	if s.engine.signalStore != nil {
-		payload, found, err := s.engine.signalStore.PollSignal(ctx, "", signalName)
+		payload, found, err := s.engine.signalStore.PollSignal(ctx, s.engine.workflowID, signalName)
 		if err == nil && found {
 
 			written, _ := s.writeResult(ctx, m, payloadPtr, payload, payloadMaxLen)
@@ -2699,6 +2734,11 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		parentID = fmt.Sprintf("unknown-%s-%d", name, s.stepCount)
 	}
 
+	s.engine.log().InfoContext(ctx, "childWorkflowWithVersion",
+		"name", name, "version", version, "child_version", childVersion,
+		"parent_id", parentID, "is_replay", s.isReplay, "step_count", s.stepCount,
+		"child_wf_store_nil", s.engine.childWfStore == nil)
+
 	if s.engine.childWfStore != nil {
 		// Check child workflow quota before creating the child.
 		if s.engine.maxQuotaChildren > 0 && s.engine.workflowStore != nil {
@@ -2742,9 +2782,13 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			}
 			runID, err = css.StartChildWorkflowInSchema(context.Background(), ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
 		} else {
+			s.engine.log().InfoContext(ctx, "calling StartChildWorkflowAtomic",
+				"name", name, "parent_id", parentID, "child_version", childVersion)
 			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(context.Background(), "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
 		}
 		if err != nil {
+			s.engine.log().ErrorContext(ctx, "StartChildWorkflowAtomic failed",
+				"error", err, "name", name, "parent_id", parentID, "child_version", childVersion)
 			errMsg := fmt.Sprintf("child workflow %q: start failed: %v", name, err)
 			s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
@@ -4050,9 +4094,6 @@ func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, na
 	return 0
 }
 
-// QueryHandlers returns the list of registered query handler names.
-func (s *execSession) QueryHandlers() []string { return s.queryHandlers }
-
 // ---- Stream R host functions ----
 
 func (s *execSession) SetState(ctx context.Context, m api.Module, key, value string) int64 {
@@ -4356,7 +4397,7 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 	if s.engine.fetcher != nil {
 		response, fetchErr = s.engine.fetcher.Fetch(ctx, method, url, headersJSON, body)
 	} else {
-		fetchErr = errors.New("no fetcher configured")
+		fetchErr = fmt.Errorf("no fetcher configured: workflow %s attempted %s %s", s.engine.workflowID, method, url)
 	}
 
 	rec := EventRecord{

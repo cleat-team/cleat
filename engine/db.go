@@ -540,83 +540,45 @@ func (s *PostgresStore) WithReadRedactionDisabled(disabled bool) *PostgresStore 
 // encryption is enabled) and applies retroactive redaction. Decryption errors
 // are logged and the field is set to "[DECRYPTION_FAILED]" so it is clear the
 // data is unreadable rather than silently keeping ciphertext.
+// decryptField decrypts an encrypted field value, logging on failure.
+// When useBytesDecrypt is true, the value is treated as raw ciphertext
+// (Decrypt); otherwise it is treated as a base64-encoded ciphertext
+// (DecryptString).
+func (s *PostgresStore) decryptField(encrypted, fieldName, workflowID string, step int, useBytesDecrypt bool) string {
+	var decrypted string
+	var err error
+	if useBytesDecrypt {
+		var b []byte
+		b, err = s.encryption.Decrypt([]byte(encrypted))
+		decrypted = string(b)
+	} else {
+		decrypted, err = s.encryption.DecryptString(encrypted)
+	}
+	if err != nil {
+		log.Printf("[store] decrypt %s failed for workflow %s step %d: %v", fieldName, workflowID, step, err)
+		decryptionErrorsTotal.Inc()
+		return "[DECRYPTION_FAILED]"
+	}
+	return decrypted
+}
+
 func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID string) {
 	if s.encryption != nil && s.encryptSensitivePayloads {
 		// Request and Response are base64-decoded by tryDecodeBase64,
 		// so they hold raw ciphertext bytes and must be decrypted via Decrypt.
-		if decrypted, err := s.encryption.Decrypt([]byte(rec.Request)); err == nil {
-			rec.Request = string(decrypted)
-		} else {
-			log.Printf("[store] decrypt Request failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.Request = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.Decrypt([]byte(rec.Response)); err == nil {
-			rec.Response = string(decrypted)
-		} else {
-			log.Printf("[store] decrypt Response failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.Response = "[DECRYPTION_FAILED]"
-		}
+		rec.Request = s.decryptField(string(rec.Request), "Request", workflowID, rec.Step, true)
+		rec.Response = s.decryptField(string(rec.Response), "Response", workflowID, rec.Step, true)
 		// Err, SignalPayload, ChildInput, NewInput, PluginInput, PluginOutput,
 		// PromiseResult, PromiseError are stored as base64-encoded ciphertexts
 		// (no extra base64 layer), so DecryptString is correct.
-		if decrypted, err := s.encryption.DecryptString(rec.Err); err == nil {
-			rec.Err = decrypted
-		} else {
-			log.Printf("[store] decrypt Err failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.Err = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.SignalPayload); err == nil {
-			rec.SignalPayload = decrypted
-		} else {
-			log.Printf("[store] decrypt SignalPayload failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.SignalPayload = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.ChildInput); err == nil {
-			rec.ChildInput = decrypted
-		} else {
-			log.Printf("[store] decrypt ChildInput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.ChildInput = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.NewInput); err == nil {
-			rec.NewInput = decrypted
-		} else {
-			log.Printf("[store] decrypt NewInput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.NewInput = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.PluginInput); err == nil {
-			rec.PluginInput = decrypted
-		} else {
-			log.Printf("[store] decrypt PluginInput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.PluginInput = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.PluginOutput); err == nil {
-			rec.PluginOutput = decrypted
-		} else {
-			log.Printf("[store] decrypt PluginOutput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.PluginOutput = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.PromiseResult); err == nil {
-			rec.PromiseResult = decrypted
-		} else {
-			log.Printf("[store] decrypt PromiseResult failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.PromiseResult = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.PromiseError); err == nil {
-			rec.PromiseError = decrypted
-		} else {
-			log.Printf("[store] decrypt PromiseError failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.PromiseError = "[DECRYPTION_FAILED]"
-		}
+		rec.Err = s.decryptField(rec.Err, "Err", workflowID, rec.Step, false)
+		rec.SignalPayload = s.decryptField(rec.SignalPayload, "SignalPayload", workflowID, rec.Step, false)
+		rec.ChildInput = s.decryptField(rec.ChildInput, "ChildInput", workflowID, rec.Step, false)
+		rec.NewInput = s.decryptField(rec.NewInput, "NewInput", workflowID, rec.Step, false)
+		rec.PluginInput = s.decryptField(rec.PluginInput, "PluginInput", workflowID, rec.Step, false)
+		rec.PluginOutput = s.decryptField(rec.PluginOutput, "PluginOutput", workflowID, rec.Step, false)
+		rec.PromiseResult = s.decryptField(rec.PromiseResult, "PromiseResult", workflowID, rec.Step, false)
+		rec.PromiseError = s.decryptField(rec.PromiseError, "PromiseError", workflowID, rec.Step, false)
 	}
 
 	// Retroactive redaction on read path.
@@ -1393,11 +1355,16 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 		if qsJSON == nil {
 			qsJSON = []byte("{}")
 		}
+		// Ensure result is valid JSON for the JSONB column. Empty strings
+		// and non-JSON values cause "invalid input syntax for type json".
+		if result == "" || !json.Valid([]byte(result)) {
+			result = "{}"
+		}
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
-			SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
+			SET status = 'done', result = $3::jsonb, completed_at = now(), assigned_to = NULL, query_state = $4
 			WHERE id = $1 AND assigned_to = $2 AND generation = $5
-		`, runID, workerID, result, qsJSON, generation)
+		`, runID, workerID, result, string(qsJSON), generation)
 	case "failed":
 		qsJSON, _ := json.Marshal(queryState)
 		if qsJSON == nil {
@@ -1413,7 +1380,7 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 			    assigned_to = NULL,
 			    query_state = $6
 			WHERE id = $1 AND assigned_to = $2 AND generation = $7
-		`, runID, workerID, result, errorCode, errorOp, qsJSON, generation)
+		`, runID, workerID, result, errorCode, errorOp, string(qsJSON), generation)
 	case "ready":
 		_, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
@@ -1543,7 +1510,7 @@ func (s *PostgresStore) TraceWorkflow(ctx context.Context, workflowID, traceID s
 func (s *PostgresStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	var tenantID uuid.UUID
 	err := s.db.QueryRowContext(ctx,
-		`SELECT tenant_id FROM tenant_api_keys
+		`SELECT tenant_id FROM admin.tenant_api_keys
 		 WHERE key_hash = $1 AND revoked_at IS NULL`, keyHash).Scan(&tenantID)
 	if err != nil {
 		return uuid.Nil, err
@@ -1979,7 +1946,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		    assigned_to = NULL,
 		    query_state = $6
 		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsJSON, generation)
+	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
 	if err != nil {
 		return err
 	}
@@ -2847,6 +2814,16 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 	}
 	defer tx.Rollback()
 
+	// Read current generation for optimistic locking.
+	var gen int64
+	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = $1`, workflowID).Scan(&gen)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return tx.Commit() // Workflow no longer exists.
+		}
+		return fmt.Errorf("compact history: get generation: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history WHERE workflow_id = $1 AND step < $2
 	`, workflowID, keepStep)
@@ -2857,8 +2834,8 @@ func (s *PostgresStore) CompactHistory(ctx context.Context, workflowID string, c
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET compaction_state = $1, compacted_at = now(), compaction_step = $2
-		WHERE id = $3
-	`, compactionState, compactionStep, workflowID)
+		WHERE id = $3 AND generation = $4
+	`, compactionState, compactionStep, workflowID, gen)
 	if err != nil {
 		return fmt.Errorf("compact history: update: %w", err)
 	}
@@ -3187,6 +3164,7 @@ func (s *PostgresStore) GetEventCount(ctx context.Context, workflowID string) (i
 	}
 	return count, tx.Commit()
 }
+
 
 // ---- Sticky Session implementations (Feature 10) ----
 

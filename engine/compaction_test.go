@@ -1505,3 +1505,76 @@ func (m *mockCompactStore) GetChildCount(ctx context.Context, parentWorkflowID s
 func (m *mockCompactStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockCompactStore) GetEventCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
 func (m *mockCompactStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) { return nil, nil }
+
+// retryMockStore wraps mockCompactStore and fails CompactHistory a specified
+// number of times before succeeding. The error returned is a deadlock error
+// to trigger the retry logic.
+type retryMockStore struct {
+	mockCompactStore
+	failCount int
+	callCount int
+}
+
+func (m *retryMockStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
+	m.callCount++
+	if m.callCount <= m.failCount {
+		return fmt.Errorf("ERROR: deadlock detected (SQLSTATE 40P01)")
+	}
+	return m.mockCompactStore.CompactHistory(ctx, workflowID, compactionState, compactionStep, keepStep)
+}
+
+// nonRetryMockStore always fails CompactHistory with a non-deadlock error.
+type nonRetryMockStore struct {
+	mockCompactStore
+	callCount int
+}
+
+func (m *nonRetryMockStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
+	m.callCount++
+	return fmt.Errorf("connection refused")
+}
+
+func makeCompactionEvents(n int) []EventRecord {
+	events := make([]EventRecord, n)
+	for i := range events {
+		events[i] = EventRecord{
+			Step:      i,
+			EventType: EventTypeCall,
+			Service:   "test",
+			Op:        "noop",
+		}
+	}
+	return events
+}
+
+func TestCompactWorkflowHistory_RetryOnDeadlock(t *testing.T) {
+	events := makeCompactionEvents(DefaultCompactionThreshold + 10)
+	store := &retryMockStore{
+		mockCompactStore: mockCompactStore{events: events},
+		failCount:        2, // Fail twice, succeed on third attempt.
+	}
+
+	err := CompactWorkflowHistory(context.Background(), store, "wf-001", DefaultCompactionThreshold)
+	if err != nil {
+		t.Fatalf("CompactWorkflowHistory: %v", err)
+	}
+	if store.callCount != 3 {
+		t.Errorf("expected 3 compact calls (2 retries + 1 success), got %d", store.callCount)
+	}
+}
+
+func TestCompactWorkflowHistory_NoRetryOnNonDeadlock(t *testing.T) {
+	events := makeCompactionEvents(DefaultCompactionThreshold + 10)
+	store := &nonRetryMockStore{
+		mockCompactStore: mockCompactStore{events: events},
+	}
+
+	err := CompactWorkflowHistory(context.Background(), store, "wf-001", DefaultCompactionThreshold)
+	if err == nil {
+		t.Fatal("expected error for non-deadlock failure")
+	}
+	// Should only try once (no retries for non-deadlock errors).
+	if store.callCount != 1 {
+		t.Errorf("expected 1 compact call (no retries for non-deadlock), got %d", store.callCount)
+	}
+}

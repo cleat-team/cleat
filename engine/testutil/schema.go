@@ -92,7 +92,7 @@ func SetupMinimalSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				id VARCHAR(255) PRIMARY KEY, def_name VARCHAR(255) NOT NULL,
 				def_version INTEGER NOT NULL DEFAULT 1,
 				status VARCHAR(255) NOT NULL DEFAULT 'ready', input JSON NOT NULL DEFAULT ('{}'),
-				assigned_to TEXT, heartbeat_at TIMESTAMP(6),
+				assigned_to VARCHAR(255), heartbeat_at TIMESTAMP(6),
 				next_wake_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6), completed_at TIMESTAMP(6),
 				result JSON, error_msg TEXT, error_code VARCHAR(255), error_op VARCHAR(255),
@@ -356,6 +356,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				result JSON, error_msg TEXT,
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 				resolved_at TIMESTAMP(6),
+				tenant_id VARCHAR(255) NOT NULL,
 				PRIMARY KEY (workflow_id, promise_id))`,
 			`CREATE TABLE IF NOT EXISTS idempotency_keys (
 				key_hash VARBINARY(32) NOT NULL PRIMARY KEY,

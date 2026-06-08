@@ -261,8 +261,8 @@ func TestRustWorkflow_DivergenceDetection(t *testing.T) {
 	inputJSON := json.RawMessage(`{"user_id":"test-user","cart":[{"sku":"SKU-001","quantity":2}]}`)
 
 	caller := &callRecorder{}
-	engine := engine.NewEngine(rt, caller)
-	result, history, _, _, _, err := engine.Execute(ctx, wasmBytes, "place_order", inputJSON)
+	eng := engine.NewEngine(rt, caller)
+	result, history, _, _, _, err := eng.Execute(ctx, wasmBytes, "place_order", inputJSON)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestRustWorkflow_DivergenceDetection(t *testing.T) {
 		}
 	}
 
-	_, _, _, _, _, replayErr := engine.Replay(ctx, wasmBytes, "place_order", inputJSON, corrupted)
+	_, _, _, _, _, replayErr := eng.Replay(ctx, wasmBytes, "place_order", inputJSON, corrupted)
 	if replayErr == nil {
 		t.Error("expected replay divergence error, got nil")
 	} else {

@@ -98,8 +98,6 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		// Try native component model via CGo first.
 		if result, err := b.ExecuteComponentCGo(wasmBytes, entryPoint, []byte(input), OutBufSize); err == nil {
 			return result, nil
-		} else {
-			fmt.Printf("[CGO_COMPONENT] CGo path failed (falling back): %v\n", err)
 		}
 		// Fall back to manual decomposition + instantiation.
 		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
@@ -153,7 +151,10 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if lang == "go" {
 		if startFn := instance.GetFunc(store, "_start"); startFn != nil {
 			b.workEntryPoint = entryPoint
-			b.workInput = []byte(input)
+			// Wrap in DispatchWrapper format that gen_wasm_exports.go expects:
+			// {"inputJSON":"<escaped inner JSON>"}
+			escaped, _ := json.Marshal(string(input))
+			b.workInput = []byte(fmt.Sprintf(`{"inputJSON":%s}`, string(escaped)))
 
 			// Write work data to a fixed WASM memory location (offset 1024)
 			// so main() can read it without calling cleat_poll_work.
@@ -325,91 +326,6 @@ const (
 	_dispatcherTimeout    = 30 * time.Second
 )
 
-// executeViaDispatcher communicates with main()'s dispatch loop via shared
-// memory. The _start function is already running in a background goroutine
-// and main() is polling the command byte. We write work, wait for the
-// result, and return.
-func (b *wasmtimeBackend) executeViaDispatcher(
-	store wasmtime.Storelike,
-	mem *wasmtime.Memory,
-	entryPoint string,
-	input json.RawMessage,
-	completeResult, completeErr string,
-) (*ExecResult, error) {
-	data := mem.UnsafeData(store)
-
-	// Grow memory to cover the dispatcher region if needed.
-	needed := _dispatcherOutputBuf + _dispatcherOutputMax
-	if uint64(len(data)) < uint64(needed) {
-		pagesNeeded := (needed - len(data) + wasmPageSize - 1) / wasmPageSize
-		if _, err := mem.Grow(store, uint64(pagesNeeded)); err != nil {
-			return nil, fmt.Errorf("host: grow memory for dispatcher: %w", err)
-		}
-		data = mem.UnsafeData(store)
-	}
-
-	// Zero the command byte.
-	data[_dispatcherCmd] = 0
-
-	// Write entry point name (without NUL terminator, main reads length).
-	entryBytes := []byte(entryPoint)
-	if len(entryBytes) > _dispatcherNameMax {
-		entryBytes = entryBytes[:_dispatcherNameMax]
-	}
-	putUint32LE(data[_dispatcherNameLen:], uint32(len(entryBytes)))
-	copy(data[_dispatcherNameBuf:], entryBytes)
-
-	// Write input JSON.
-	inputBytes := []byte(input)
-	if len(inputBytes) > _dispatcherInputMax {
-		inputBytes = inputBytes[:_dispatcherInputMax]
-	}
-	putUint32LE(data[_dispatcherInputLen:], uint32(len(inputBytes)))
-	copy(data[_dispatcherInputBuf:], inputBytes)
-
-	// Signal work: set command byte to 1 (execute).
-	data[_dispatcherCmd] = 1
-
-	// Poll for completion.
-	deadline := time.Now().Add(_dispatcherTimeout)
-	for {
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("host: dispatcher timeout waiting for %q", entryPoint)
-		}
-		cmd := data[_dispatcherCmd]
-		if cmd == 2 {
-			// Done: read the result.
-			outLen := getUint32LE(data[_dispatcherOutputLen:])
-			if outLen > _dispatcherOutputMax {
-				outLen = _dispatcherOutputMax
-			}
-			result := string(data[_dispatcherOutputBuf : _dispatcherOutputBuf+outLen])
-			return &ExecResult{Result: result, Suspended: false}, nil
-		}
-		if cmd == 3 {
-			// Error: read the error message from output buffer.
-			outLen := getUint32LE(data[_dispatcherOutputLen:])
-			if outLen > _dispatcherOutputMax {
-				outLen = _dispatcherOutputMax
-			}
-			errMsg := string(data[_dispatcherOutputBuf : _dispatcherOutputBuf+outLen])
-			return nil, fmt.Errorf("host: %q: %s", entryPoint, errMsg)
-		}
-		// Also check cleat_complete for suspend/results.
-		if completeErr != "" {
-			return nil, fmt.Errorf("host: %q failed: %s", entryPoint, completeErr)
-		}
-				if completeResult == `"__cleat_suspended__"` {
-					return &ExecResult{Suspended: true}, nil
-				}
-
-
-		if completeResult != "" {
-			return &ExecResult{Result: completeResult, Suspended: false}, nil
-		}
-		time.Sleep(_dispatcherInterval)
-	}
-}
 
 func putUint32LE(b []byte, v uint32) {
 	b[0] = byte(v)
@@ -983,7 +899,7 @@ func (b *wasmtimeBackend) registerCleatAwaitSignals(linker *wasmtime.Linker) err
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.DurableAwaitSignals(context.Background(), nil, names, timeoutMs,
+		return h.DurableAwaitSignals(ctxWithMem(context.Background(), buf), nil, names, timeoutMs,
 			uint32(sigNamePtr), uint32(sigNameMaxLen), uint32(payloadPtr), uint32(payloadMaxLen))
 	})
 }
@@ -2221,78 +2137,6 @@ if pendingCount > 0 {
 			if len(data) < 256 {
 				continue
 			}
-			// Dump first 256 bytes as u32 for diagnostics.
-			var u32s []uint32
-			for j := 0; j < 64 && j*4+4 <= len(data); j++ {
-				u32s = append(u32s, binary.LittleEndian.Uint32(data[j*4:]))
-			}
-			fmt.Printf("[WIT_SCAN] first 64 u32s at offset 0: %v\n", u32s)
-
-			// Search for the string "run" near the metadata to understand entry layout.
-			const dumpBase = 988128
-			// Dump around offset 596 (where the string table likely starts).
-			strBase := dumpBase + 596
-			if strBase+256 <= len(data) {
-				fmt.Printf("[WIT_DUMP] string table at metadata+596:\n")
-				for row := 0; row < 16; row++ {
-					off := strBase + row*16
-					vals := make([]uint32, 4)
-					for j := 0; j < 4; j++ { vals[j] = binary.LittleEndian.Uint32(data[off+j*4:]) }
-					ascii := ""
-					for j := 0; j < 16; j++ {
-						b := data[off+j]
-						if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
-					}
-					fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
-						row*16, vals[0], vals[1], vals[2], vals[3], ascii)
-				}
-			}
-			for scan := dumpBase; scan < dumpBase+65536 && scan < len(data)-4; scan++ {
-				if data[scan] == 'r' && data[scan+1] == 'u' && data[scan+2] == 'n' {
-					// Found "run" - dump surrounding u32 values
-					base := (scan - 40) & ^3 // align to 4 bytes, 40 bytes before
-					if base < 0 { base = 0 }
-					fmt.Printf("[WIT_DUMP] found 'run' at offset %d (metadata+%d):\n", scan, scan-dumpBase)
-					for row := 0; row < 12; row++ {
-						off := base + row*16
-						vals := make([]uint32, 4)
-						for j := 0; j < 4; j++ {
-							if off+j*4+4 <= len(data) {
-								vals[j] = binary.LittleEndian.Uint32(data[off+j*4:])
-							}
-						}
-						ascii := ""
-						for j := 0; j < 16; j++ {
-							if off+j < len(data) {
-								b := data[off+j]
-								if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
-							}
-						}
-						fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
-							row*16, vals[0], vals[1], vals[2], vals[3], ascii)
-					}
-					break
-				}
-			}
-			if len(data) > dumpBase+512 {
-				fmt.Printf("[WIT_SCAN] hex dump at %d:\n", dumpBase)
-				for row := 0; row < 32; row++ {
-					off := dumpBase + row*16
-					vals := make([]uint32, 4)
-					for j := 0; j < 4; j++ {
-						vals[j] = binary.LittleEndian.Uint32(data[off+j*4:])
-					}
-					// Also show ASCII
-					ascii := ""
-					for j := 0; j < 16; j++ {
-						b := data[off+j]
-						if b >= 32 && b < 127 { ascii += string(rune(b)) } else { ascii += "." }
-					}
-					fmt.Printf("[WIT_DUMP] +%d: %6d %6d %6d %6d  |%s|\n",
-						row*16, vals[0], vals[1], vals[2], vals[3], ascii)
-				}
-			}
-
 			// Scan for the metadata signature: 16 small u32 counts
 			// followed by type arrays. The counts[14] is export_funcs.
 			for ptr := 0; ptr < len(data)-64; ptr += 4 {
@@ -2307,9 +2151,7 @@ if pendingCount > 0 {
 					}
 				}
 				if allSmall && nExportFuncs >= 1 && nExportFuncs <= 20 {
-					fmt.Printf("[WIT_SCAN] potential metadata at ptr=%d, export_funcs=%d\n", ptr, nExportFuncs)
 					if err := b.witDylib.initialize(m, store, int32(ptr)); err == nil {
-						fmt.Printf("[WIT_SCAN] initialized OK, %d export funcs\n", len(b.witDylib.exportFuncs))
 						break
 					}
 				}
@@ -2850,9 +2692,6 @@ func (b *wasmtimeBackend) perExportRoute(store wasmtime.Storelike, cm *wasmtime.
 // read/write operations needed by componentize-py generated modules.
 func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime.Linker, impTy *wasmtime.ImportType) {
 	name := *impTy.Name()
-	if strings.HasPrefix(name, "wit_dylib_") || name == "cabi_realloc" {
-		fmt.Printf("[DEFINE] %s\n", name)
-	}
 	functype := impTy.Type().FuncType()
 	makeNoop := func() *wasmtime.Func {
 		return wasmtime.NewFunc(store, functype,
@@ -3044,7 +2883,6 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 			fn := wasmtime.NewFunc(store, functype,
 				func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
 					if len(args) < 2 || b.witDylib == nil {
-						fmt.Printf("[DISPATCH] early exit: len=%d witDylib=%v\n", len(args), b.witDylib != nil)
 						return nil, nil
 					}
 					elemIdx := b.witDylib.getExportElemIndex(args[1].I32())
@@ -3057,11 +2895,9 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 					}
 					table := tableExp.Table()
 					if table == nil {
-						fmt.Printf("[DISPATCH] table is nil\n")
 						return nil, nil
 					}
 					elem, err := table.Get(caller, uint64(elemIdx))
-					fmt.Printf("[DISPATCH] table.Get(elemIdx=%d) err=%v\n", elemIdx, err)
 					if err != nil {
 						return nil, nil
 					}

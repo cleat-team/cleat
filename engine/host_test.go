@@ -1101,7 +1101,9 @@ func buildTestWasm(t *testing.T) string {
 
 	cwd, _ := os.Getwd()
 	projectRoot := cwd
-	if strings.HasSuffix(cwd, "internal/host") {
+	if strings.HasSuffix(cwd, "/engine") {
+		projectRoot = filepath.Dir(cwd)
+	} else if strings.HasSuffix(cwd, "internal/host") {
 		projectRoot = filepath.Dir(filepath.Dir(cwd))
 	}
 
@@ -1266,7 +1268,6 @@ func newTestExecSession() *execSession {
 		engine:     NewEngine(nil, nil),
 		nowMs:      1000000,
 		deferrals:  make(map[string]string),
-		signals:    make(map[string]string),
 		stateStore: make(map[string]string),
 		queryState: make(map[string]string),
 	}

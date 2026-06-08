@@ -26,7 +26,7 @@ func NewTenantStore(db *sql.DB) *TenantStore {
 func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string) (uuid.UUID, error) {
 	var tid uuid.UUID
 	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO tenants (name, display_name) VALUES ($1, $2) RETURNING tenant_id`,
+		`INSERT INTO admin.tenants (name, display_name) VALUES ($1, $2) RETURNING tenant_id`,
 		name, displayName).Scan(&tid)
 	return tid, err
 }
@@ -36,7 +36,7 @@ func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string
 func (s *TenantStore) CreateAPIKey(ctx context.Context, tenantID uuid.UUID, description, rawKey string) error {
 	keyHash := sha256.Sum256([]byte(rawKey))
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO tenant_api_keys (tenant_id, key_hash, description) VALUES ($1, $2, $3)`,
+		`INSERT INTO admin.tenant_api_keys (tenant_id, key_hash, description) VALUES ($1, $2, $3)`,
 		tenantID, keyHash[:], description)
 	return err
 }
@@ -44,7 +44,7 @@ func (s *TenantStore) CreateAPIKey(ctx context.Context, tenantID uuid.UUID, desc
 // RevokeAPIKey revokes an API key.
 func (s *TenantStore) RevokeAPIKey(ctx context.Context, keyID uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE tenant_api_keys SET revoked_at = now() WHERE key_id = $1 AND revoked_at IS NULL`, keyID)
+		`UPDATE admin.tenant_api_keys SET revoked_at = now() WHERE key_id = $1 AND revoked_at IS NULL`, keyID)
 	return err
 }
 

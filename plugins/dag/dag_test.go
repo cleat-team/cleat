@@ -305,6 +305,20 @@ func dagTestHost(d *DAG) cleat.HostCalls {
 			}
 			return results, nil
 		},
+		AwaitAnyChild: func(runIDs []string) (string, string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			for _, runID := range runIDs {
+				cr, ok := childResults[runID]
+				if ok {
+					if cr.Error != "" {
+						return cr.RunID, cr.Error, nil
+					}
+					return cr.RunID, cr.Result, nil
+				}
+			}
+			return "", "", fmt.Errorf("no completed child found")
+		},
 		DurableLog: func(msg string) {},
 		Now:        func() int64 { return 1000 },
 		Random:     func() int64 { return 42 },

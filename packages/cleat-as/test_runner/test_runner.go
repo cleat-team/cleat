@@ -150,29 +150,29 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	host := r.NewHostModuleBuilder("env")
 
 	// cleat_sleep (param i64) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, durationMs int64) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, durationMs int64) int64 {
 		return env.durableSleep(durationMs)
 	}).Export("cleat_sleep")
 
 	// cleat_now (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
 		return env.durableNow()
 	}).Export("cleat_now")
 
 	// cleat_log (param i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, msgPtr, msgLen int32) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, msgPtr, msgLen int32) int64 {
 		env.durableLog(msgPtr, msgLen)
 		return 0
 	}).Export("cleat_log")
 
 	// cleat_call (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen int32) int64 {
 		return env.durableCall(m, svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen)
 	}).Export("cleat_call")
 
 	// cleat_await_signals (param i32 i32 i64 i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		namesPtr, namesLen int32, timeoutMs int64,
 		sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen int32) int64 {
 		return env.durableAwaitSignals(m, namesPtr, namesLen, timeoutMs,
@@ -180,28 +180,28 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	}).Export("cleat_await_signals")
 
 	// set_query_state (param i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		keyPtr, keyLen, valPtr, valLen int32) int64 {
 		return 0 // no-op for testing
 	}).Export("set_query_state")
 
 	// cleat_random (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
 		return 42
 	}).Export("cleat_random")
 
 	// cleat_version (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
 		return 1
 	}).Export("cleat_version")
 
 	// cleat_min_version (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module) int64 {
 		return 1
 	}).Export("cleat_min_version")
 
 	// cleat_defer (param i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		descPtr, descLen, deferIdPtr, deferIdMaxLen int32) int64 {
 		// Write a defer ID to output buffer
 		deferID := "test-defer-1"
@@ -210,23 +210,23 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	}).Export("cleat_defer")
 
 	// cleat_poll_cancellation (param i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, reasonPtr, reasonMaxLen int32) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, reasonPtr, reasonMaxLen int32) int64 {
 		return 0 // not cancelled
 	}).Export("cleat_poll_cancellation")
 
 	// cleat_poll_signal (param i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		namePtr, nameLen, payloadPtr, payloadMaxLen int32) int64 {
 		return 0 // signal not found
 	}).Export("cleat_poll_signal")
 
 	// cleat_continue_as_new (param i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, inputPtr, inputLen int32) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, inputPtr, inputLen int32) int64 {
 		return 0 // no-op for testing
 	}).Export("cleat_continue_as_new")
 
 	// cleat_child_workflow (param i32 i32 i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		namePtr, nameLen, inputPtr, inputLen, runIdPtr, runIdMaxLen int32) int64 {
 		name := env.readString(uint32(namePtr), uint32(nameLen))
 		runID := fmt.Sprintf("test-child-%s", name)
@@ -235,7 +235,7 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	}).Export("cleat_child_workflow")
 
 	// cleat_await_child (param i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		runIdPtr, runIdLen, resultPtr, resultMaxLen int32) int64 {
 		result := `{"status":"completed"}`
 		env.writeString(uint32(resultPtr), result)
@@ -243,7 +243,7 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	}).Export("cleat_await_child")
 
 	// cleat_create_promise (param i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		namePtr, nameLen, idOutPtr, idOutMax int32) int64 {
 		promiseID := "test-promise-1"
 		env.writeString(uint32(idOutPtr), promiseID)
@@ -251,55 +251,55 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	}).Export("cleat_create_promise")
 
 	// cleat_await_promise (param i32 i32 i64 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		idPtr, idLen int32, timeoutMs int64, resultOutPtr, resultOutMax int32) int64 {
 		return 0 // timed out
 	}).Export("cleat_await_promise")
 
 	// cleat_register_update_handler (param i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, namePtr, nameLen int32) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, namePtr, nameLen int32) int64 {
 		return 0
 	}).Export("cleat_register_update_handler")
 
 	// plugin_call (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		pnPtr, pnLen, fnPtr, fnLen, inpPtr, inpLen, respPtr, respMaxLen int32) int64 {
 		return encodeCallResult(0, 0, 1) // error — no plugin stubs
 	}).Export("plugin_call")
 
 	// cleat_workflow_id (param i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, idPtr, idMaxLen int32) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, idPtr, idMaxLen int32) int64 {
 		wfID := "test-workflow"
 		env.writeString(uint32(idPtr), wfID)
 		return encodeSimpleResult(int64(len(wfID)), 0)
 	}).Export("cleat_workflow_id")
 
 	// cleat_run_id (param i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, idPtr, idMaxLen int32) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, idPtr, idMaxLen int32) int64 {
 		runID := "test-run"
 		env.writeString(uint32(idPtr), runID)
 		return encodeSimpleResult(int64(len(runID)), 0)
 	}).Export("cleat_run_id")
 
 	// cleat_send (param i32 i32 i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32) int64 {
 		return 0
 	}).Export("cleat_send")
 
 	// cleat_schedule_invoke (param i32 i32 i32 i32 i32 i32 i64) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32, delayMs int64) int64 {
 		return 0
 	}).Export("cleat_schedule_invoke")
 
 	// cleat_register_query_handler (param i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, namePtr, nameLen int32) int64 {
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module, namePtr, nameLen int32) int64 {
 		return 0
 	}).Export("cleat_register_query_handler")
 
 	// cleat_call_retry (param ...) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		maxAttempts, initialIntervalMs, backoff100x, maxIntervalMs int64,
 		nrePtr, nreLen, respPtr, respMaxLen int32) int64 {
@@ -307,14 +307,14 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	}).Export("cleat_call_retry")
 
 	// cleat_call_heartbeat (param ...) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		heartbeatIntervalMs int64, respPtr, respMaxLen int32) int64 {
 		return env.durableCall(m, svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen)
 	}).Export("cleat_call_heartbeat")
 
 	// cleat_await_all_children (param i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		runIdsPtr, runIdsLen, resultsPtr, resultsMaxLen int32) int64 {
 		result := `[]`
 		env.writeString(uint32(resultsPtr), result)
@@ -322,19 +322,19 @@ func NewWASMTestEnv(t TestingT, wasmPath string) *WASMTestEnv {
 	}).Export("cleat_await_all_children")
 
 	// cleat_resolve_promise (param i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		idPtr, idLen, valPtr, valLen int32) int64 {
 		return 0
 	}).Export("cleat_resolve_promise")
 
 	// cleat_reject_promise (param i32 i32 i32 i32) (result i64)
-	engine.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
+	host.NewFunctionBuilder().WithFunc(func(_ context.Context, m api.Module,
 		idPtr, idLen, errPtr, errLen int32) int64 {
 		return 0
 	}).Export("cleat_reject_promise")
 
 	// Instantiate the host module.
-	if _, err := engine.Instantiate(ctx); err != nil {
+	if _, err := host.Instantiate(ctx); err != nil {
 		t.Fatalf("test_runner: instantiating host module: %v", err)
 		return nil
 	}

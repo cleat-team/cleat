@@ -72,6 +72,8 @@ func NewShardedStore(configs []ShardConfig, stores []WorkflowStore, closers []fu
 
 // Close closes all shard stores.
 func (s *ShardedStore) Close() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, shard := range s.shards {
 		if shard.Close != nil {
 			shard.Close()
@@ -283,6 +285,7 @@ func (s *ShardedStore) AppendEventHistoryBatch(ctx context.Context, workflowID s
 	}
 	return shard.Store.AppendEventHistoryBatch(ctx, workflowID, recs)
 }
+
 
 // LoadWASM tries each shard (WASM definitions are replicated across all shards).
 func (s *ShardedStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {

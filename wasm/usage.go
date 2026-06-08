@@ -106,6 +106,9 @@ var hostFunctions = []HostFunction{
 	{"cleat_release_lock", "ReleaseLock"},
 	// SideEffect
 	{"cleat_side_effect", "SideEffect"},
+	// Identity
+	{"cleat_workflow_id", "WorkflowID"},
+	{"cleat_run_id", "RunID"},
 }
 
 // UsageInfo records which host functions are actually called by the

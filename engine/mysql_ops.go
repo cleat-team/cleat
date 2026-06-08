@@ -428,6 +428,16 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 	}
 	defer tx.Rollback()
 
+	// Read current generation for optimistic locking.
+	var gen int64
+	err = tx.QueryRowContext(ctx, `SELECT generation FROM workflow_instances WHERE id = ? AND tenant_id = ?`, workflowID, s.tenantID).Scan(&gen)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return tx.Commit() // Workflow no longer exists.
+		}
+		return fmt.Errorf("CompactHistory: get generation: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM event_history WHERE workflow_id = ? AND step < ? AND tenant_id = ?
 	`, workflowID, keepStep, s.tenantID)
@@ -438,8 +448,8 @@ func (s *MySQLStore) CompactHistory(ctx context.Context, workflowID string, comp
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET compaction_state = ?, compacted_at = NOW(6), compaction_step = ?
-		WHERE id = ? AND tenant_id = ?
-	`, compactionState, compactionStep, workflowID, s.tenantID)
+		WHERE id = ? AND tenant_id = ? AND generation = ?
+	`, compactionState, compactionStep, workflowID, s.tenantID, gen)
 	if err != nil {
 		return fmt.Errorf("CompactHistory: update: %w", err)
 	}

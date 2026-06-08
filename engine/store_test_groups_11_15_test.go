@@ -533,6 +533,59 @@ func TestStoreReapExpiredConcurrencyKeys(t *testing.T) {
 	}
 }
 
+func TestGetConcurrencyKeyCount(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			t.Parallel()
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			ctx := context.Background()
+
+			// Acquire multiple keys for workflow "wf-count".
+			for _, key := range []string{"ck-1", "ck-2"} {
+				acquired, err := store.AcquireConcurrencyKey(ctx, key, "wf-count", 60*time.Second)
+				if err != nil {
+					t.Fatalf("AcquireConcurrencyKey %s: %v", key, err)
+				}
+				if !acquired {
+					t.Fatalf("expected acquire of %s to succeed", key)
+				}
+			}
+
+			// Verify count = 2 for wf-count.
+			count, err := store.GetConcurrencyKeyCount(ctx, "wf-count")
+			if err != nil {
+				t.Fatalf("GetConcurrencyKeyCount: %v", err)
+			}
+			if count != 2 {
+				t.Errorf("expected count=2, got %d", count)
+			}
+
+			// Verify count = 0 for an unrelated workflow.
+			count, err = store.GetConcurrencyKeyCount(ctx, "wf-other")
+			if err != nil {
+				t.Fatalf("GetConcurrencyKeyCount (wf-other): %v", err)
+			}
+			if count != 0 {
+				t.Errorf("expected count=0 for unrelated workflow, got %d", count)
+			}
+
+			// Release all keys for wf-count and verify count drops to 0.
+			if err := store.ReleaseWorkflowConcurrencyKeys(ctx, "wf-count"); err != nil {
+				t.Fatalf("ReleaseWorkflowConcurrencyKeys: %v", err)
+			}
+			count, err = store.GetConcurrencyKeyCount(ctx, "wf-count")
+			if err != nil {
+				t.Fatalf("GetConcurrencyKeyCount after release: %v", err)
+			}
+			if count != 0 {
+				t.Errorf("expected count=0 after release, got %d", count)
+			}
+		})
+	}
+}
+
 // =============================================================================
 // Group 14 — Compaction
 // =============================================================================

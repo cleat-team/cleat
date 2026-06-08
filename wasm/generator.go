@@ -257,6 +257,18 @@ var importDefs = map[string]importDef{
 			{"key", kindInString},
 		},
 	},
+	"cleat_workflow_id": {
+		ImportName: "cleat_workflow_id",
+		Params: []paramSpec{
+			{"id", kindOutString},
+		},
+	},
+	"cleat_run_id": {
+		ImportName: "cleat_run_id",
+		Params: []paramSpec{
+			{"id", kindOutString},
+		},
+	},
 	"cleat_json_parse": {
 		ImportName: "cleat_json_parse",
 		Params: []paramSpec{

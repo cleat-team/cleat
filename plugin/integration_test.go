@@ -8,7 +8,7 @@ import (
 // structurally valid output for all languages.
 func TestManifestRoundTrip(t *testing.T) {
 	// Load the LLM plugin manifest.
-	m, err := plugin.LoadManifest("../../plugins/llm/plugin.json")
+	m, err := plugin.LoadManifest("../plugins/llm/plugin.json")
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestManifestRoundTrip(t *testing.T) {
 // TestManifestRoundTrip_HelloWorld is the same test but for the example
 // third-party plugin manifest to ensure community plugins work too.
 func TestManifestRoundTrip_HelloWorld(t *testing.T) {
-	m, err := plugin.LoadManifest("../../examples/third-party-plugin/plugin.json")
+	m, err := plugin.LoadManifest("../examples/third-party-plugin/plugin.json")
 	if err != nil {
 		t.Fatalf("load manifest: %v", err)
 	}
