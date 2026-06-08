@@ -554,3 +554,45 @@ func TestMSSQLEnforceParentClosePolicy(t *testing.T) {
 		t.Errorf("parent status = %q, want running", parentStatus)
 	}
 }
+
+func TestMSSQLBeginTxWithContextError(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+
+	db := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLMinimalSchema(t, db)
+	testutil.CleanupMSSQLTestData(t, db)
+
+	store := NewMSSQLStore(db, "default")
+	store.tenantID = "11111111-1111-1111-1111-111111111111"
+	db.Close()
+
+	_, err := store.beginTxWithContext(context.Background())
+	if err == nil {
+		t.Error("beginTxWithContext should return error after DB is closed")
+	}
+}
+
+func TestMSSQLAppendEventsInTxEmpty(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+
+	db := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLMinimalSchema(t, db)
+	defer testutil.CleanupMSSQLTestData(t, db)
+
+	store := NewMSSQLStore(db, "default")
+	store.tenantID = "11111111-1111-1111-1111-111111111111"
+
+	tx, err := store.beginTxWithContext(context.Background())
+	if err != nil {
+		t.Fatalf("beginTxWithContext: %v", err)
+	}
+	defer tx.Rollback()
+
+	if err := store.appendEventsInTx(context.Background(), tx, "test-id", []EventRecord{}); err != nil {
+		t.Errorf("appendEventsInTx with empty recs: %v", err)
+	}
+}

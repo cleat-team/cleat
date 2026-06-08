@@ -374,6 +374,60 @@ func TestMySQLStoreConfigOptionsExtended(t *testing.T) {
 	}
 }
 
+func TestCompactJSONString(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"empty", "", ""},
+		{"compact json", `{"a":1}`, `{"a":1}`},
+		{"whitespace", `{"a": 1, "b": 2}`, `{"a":1,"b":2}`},
+		{"invalid json fallback", `{not json`, `{not json`},
+		{"nested whitespace", `{"a": {"b": 2}}`, `{"a":{"b":2}}`},
+		{"array whitespace", `[1, 2, 3]`, `[1,2,3]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := compactJSONString(tt.input)
+			if got != tt.want {
+				t.Errorf("compactJSONString(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPercentile(t *testing.T) {
+	tests := []struct {
+		name   string
+		sorted []int64
+		p      float64
+		want   int64
+	}{
+		{"empty slice", []int64{}, 0.50, 0},
+		{"single p50", []int64{10}, 0.50, 10},
+		{"single p0", []int64{10}, 0.0, 10},
+		{"single p100", []int64{10}, 1.0, 10},
+		{"two elems p50", []int64{10, 20}, 0.50, 10},
+		{"two elems p100", []int64{10, 20}, 1.0, 20},
+		{"five elems p50 median", []int64{1, 2, 3, 4, 5}, 0.50, 3},
+		{"five elems p10", []int64{1, 2, 3, 4, 5}, 0.10, 1},
+		{"five elems p90", []int64{1, 2, 3, 4, 5}, 0.90, 5},
+		{"five elems p25", []int64{1, 2, 3, 4, 5}, 0.25, 2},
+		{"five elems p75", []int64{1, 2, 3, 4, 5}, 0.75, 4},
+		{"p beyond 1", []int64{10}, 2.0, 10},
+		{"negative p", []int64{10}, -1.0, 10},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := percentile(tt.sorted, tt.p)
+			if got != tt.want {
+				t.Errorf("percentile(%v, %v) = %d, want %d", tt.sorted, tt.p, got, tt.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // DB-backed tests (require CLEAT_TEST_MYSQL)
 // ---------------------------------------------------------------------------
@@ -474,5 +528,40 @@ func TestMySQLEnforceParentClosePolicy(t *testing.T) {
 	}
 	if parentStatus != "running" {
 		t.Errorf("parent status = %q, want running", parentStatus)
+	}
+}
+
+func TestMySQLBeginTxError(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MYSQL") == "" {
+		t.Skip("CLEAT_TEST_MYSQL not set")
+	}
+
+	db := openMySQLTestDB(t)
+	s := NewMySQLStore(db)
+	db.Close()
+
+	_, err := s.beginTx(context.Background())
+	if err == nil {
+		t.Error("beginTx should return error after DB is closed")
+	}
+}
+
+func TestMySQLAppendEventsInTxEmpty(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MYSQL") == "" {
+		t.Skip("CLEAT_TEST_MYSQL not set")
+	}
+
+	db := openMySQLTestDB(t)
+	defer db.Close()
+
+	s := NewMySQLStore(db)
+	tx, err := s.beginTx(context.Background())
+	if err != nil {
+		t.Fatalf("beginTx: %v", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.appendEventsInTx(context.Background(), tx, "test-id", []EventRecord{}); err != nil {
+		t.Errorf("appendEventsInTx with empty recs: %v", err)
 	}
 }
