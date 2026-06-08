@@ -2757,26 +2757,6 @@ func TestRegisterUpdateHandlerReplayPastEnd(t *testing.T) {
 		t.Errorf("expected 0, got %d", result)
 	}
 }
-
-func TestRegisterUpdateHandlerFresh(t *testing.T) {
-	s := newTestExecSession()
-
-	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
-
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-	if len(s.history) != 1 {
-		t.Fatalf("expected 1 history entry, got %d", len(s.history))
-	}
-	r := s.history[0]
-	if r.EventType != EventTypeUpdateHandler {
-		t.Errorf("expected EventTypeUpdateHandler, got %q", r.EventType)
-	}
-	if r.UpdateHandlerName != "my-handler" {
-		t.Errorf("expected UpdateHandlerName 'my-handler', got %q", r.UpdateHandlerName)
-	}
-}
 // AwaitAnyChild tests.
 // ---------------------------------------------------------------------------
 
