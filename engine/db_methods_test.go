@@ -2806,3 +2806,239 @@ func TestPostgresStore_ReleaseWorkflow_CommitError(t *testing.T) {
 		t.Fatal("expected error from commit failure")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// CompactHistory — edge cases and error paths
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_CompactHistory_WorkflowGone(t *testing.T) {
+	// When the workflow no longer exists, CompactHistory should commit
+	// and return nil (it is a no-op).
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", err: sql.ErrNoRows},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompactHistory(testCtx, "nonexistent", []byte(`{"version":1}`), 100, 50)
+	if err != nil {
+		t.Fatalf("CompactHistory (workflow gone) should succeed: %v", err)
+	}
+}
+
+func TestPostgresStore_CompactHistory_GenerationError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", err: errors.New("connection lost")},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompactHistory(testCtx, "wf-1", []byte(`{"version":1}`), 100, 50)
+	if err == nil {
+		t.Fatal("expected error from generation query failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "compact history: get generation") {
+		t.Errorf("expected error to contain 'compact history: get generation', got: %v", err)
+	}
+}
+
+func TestPostgresStore_CompactHistory_DeleteError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+	}, []mockExecResult{
+		{match: "DELETE FROM event_history", err: errors.New("delete failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompactHistory(testCtx, "wf-1", []byte(`{"version":1}`), 100, 50)
+	if err == nil {
+		t.Fatal("expected error from DELETE failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "compact history: delete") {
+		t.Errorf("expected error to contain 'compact history: delete', got: %v", err)
+	}
+}
+
+func TestPostgresStore_CompactHistory_UpdateError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+	}, []mockExecResult{
+		{match: "DELETE FROM event_history", affected: 10},
+		{match: "SET compaction_state", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompactHistory(testCtx, "wf-1", []byte(`{"version":1}`), 100, 50)
+	if err == nil {
+		t.Fatal("expected error from compaction_state UPDATE failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "compact history: update") {
+		t.Errorf("expected error to contain 'compact history: update', got: %v", err)
+	}
+}
+
+func TestPostgresStore_CompactHistory_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+	}, []mockExecResult{
+		{match: "DELETE FROM event_history", affected: 10},
+		{match: "SET compaction_state", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompactHistory(testCtx, "wf-1", []byte(`{"version":1,"compacted_step":100}`), 100, 50)
+	if err != nil {
+		t.Fatalf("CompactHistory: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetEventCount
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_GetEventCount_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT event_count", data: [][]driver.Value{{int64(42)}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	count, err := store.GetEventCount(testCtx, "wf-1")
+	if err != nil {
+		t.Fatalf("GetEventCount: %v", err)
+	}
+	if count != 42 {
+		t.Errorf("expected 42, got %d", count)
+	}
+}
+
+func TestPostgresStore_GetEventCount_Zero(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT event_count", data: [][]driver.Value{{int64(0)}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	count, err := store.GetEventCount(testCtx, "wf-1")
+	if err != nil {
+		t.Fatalf("GetEventCount: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0, got %d", count)
+	}
+}
+
+func TestPostgresStore_GetEventCount_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT event_count", err: errors.New("query failed")},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.GetEventCount(testCtx, "wf-1")
+	if err == nil {
+		t.Fatal("expected error from query failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "get event count for wf-1") {
+		t.Errorf("expected error to contain 'get event count for wf-1', got: %v", err)
+	}
+}
+
+func TestPostgresStore_GetEventCount_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.GetEventCount(testCtx, "wf-1")
+	if err == nil {
+		t.Fatal("expected error from begin tx failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "get event count for wf-1: begin") {
+		t.Errorf("expected error to contain 'get event count for wf-1: begin', got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AcquireConcurrencyKey — additional edge cases
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_AcquireConcurrencyKey_DoubleAcquireDifferentWorkflow(t *testing.T) {
+	// When the key is held by a different workflow, AcquireConcurrencyKey
+	// returns false (the INSERT ON CONFLICT DO NOTHING returns no rows).
+	db := newNoopDB(t)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	acquired, err := store.AcquireConcurrencyKey(testCtx, "shared-key", "other-wf", 30*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireConcurrencyKey: %v", err)
+	}
+	if acquired {
+		t.Error("expected acquired=false when key is held by another workflow")
+	}
+}
+
+func TestPostgresStore_AcquireConcurrencyKey_ZeroTTL(t *testing.T) {
+	// TTL of 0 should still work — the interval becomes "0 seconds".
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "INSERT INTO concurrency_keys", data: [][]driver.Value{{"wf-1"}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	acquired, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-1", 0)
+	if err != nil {
+		t.Fatalf("AcquireConcurrencyKey (zero TTL): %v", err)
+	}
+	if !acquired {
+		t.Error("expected acquired=true")
+	}
+}
+
+func TestPostgresStore_ReleaseConcurrencyKey_NonExistent(t *testing.T) {
+	// Releasing a key that does not exist should succeed (DELETE matches 0 rows).
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "DELETE FROM concurrency_keys", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ReleaseConcurrencyKey(testCtx, "nonexistent-key")
+	if err != nil {
+		t.Fatalf("ReleaseConcurrencyKey (non-existent): %v", err)
+	}
+}
+
+func TestPostgresStore_ReleaseWorkflowConcurrencyKeys_NonExistent(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "DELETE FROM concurrency_keys", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ReleaseWorkflowConcurrencyKeys(testCtx, "nonexistent-wf")
+	if err != nil {
+		t.Fatalf("ReleaseWorkflowConcurrencyKeys (non-existent): %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReapExpiredConcurrencyKeys — begin error path
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ReapExpiredConcurrencyKeys_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ReapExpiredConcurrencyKeys(testCtx)
+	if err == nil {
+		t.Fatal("expected error from begin tx failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "reap expired concurrency keys: begin") {
+		t.Errorf("expected error to contain 'reap expired concurrency keys: begin', got: %v", err)
+	}
+}
