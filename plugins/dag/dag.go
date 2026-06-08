@@ -321,7 +321,7 @@ func (d *DAG) taskInput(task *Task, defaultInput interface{}, perTaskInputs map[
 			if raw, ok := defaultInput.(RawMessage); ok {
 				return raw, nil
 			}
-			return marshalToJSON(defaultInput), nil
+			return marshalToJSON(defaultInput)
 		}
 		return []byte("{}"), nil
 	}
@@ -340,7 +340,7 @@ func (d *DAG) buildTaskInput(task *Task, input interface{}) ([]byte, error) {
 		"input":          input,
 		"parent_outputs": d.buildParentOutputs(task, d.outputs),
 	}
-	return marshalToJSON(wrapped), nil
+	return marshalToJSON(wrapped)
 }
 
 func (d *DAG) buildParentOutputs(task *Task, outputs map[string]string) map[string]string {
@@ -353,22 +353,62 @@ func (d *DAG) buildParentOutputs(task *Task, outputs map[string]string) map[stri
 	return result
 }
 
+// hex is a lookup table for JSON \u00XX hex escapes.
+const hex = "0123456789abcdef"
+
+// appendJSONEscaped appends a JSON-escaped copy of s to dst.
+// It escapes ", \, and control characters (< 0x20).
+func appendJSONEscaped(dst []byte, s string) []byte {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '"':
+			dst = append(dst, '\\', '"')
+		case '\\':
+			dst = append(dst, '\\', '\\')
+		case '\n':
+			dst = append(dst, '\\', 'n')
+		case '\r':
+			dst = append(dst, '\\', 'r')
+		case '\t':
+			dst = append(dst, '\\', 't')
+		default:
+			if c < 0x20 {
+				dst = append(dst, '\\', 'u', '0', '0', hex[(c>>4)&0xf], hex[c&0xf])
+			} else {
+				dst = append(dst, c)
+			}
+		}
+	}
+	return dst
+}
+
+// appendQuotedJSON appends a JSON-quoted and escaped string to dst.
+func appendQuotedJSON(dst []byte, s string) []byte {
+	dst = append(dst, '"')
+	dst = appendJSONEscaped(dst, s)
+	dst = append(dst, '"')
+	return dst
+}
+
 // marshalToJSON encodes common types to JSON without encoding/json.
-func marshalToJSON(v interface{}) []byte {
+func marshalToJSON(v interface{}) ([]byte, error) {
 	switch val := v.(type) {
 	case RawMessage:
 		if len(val) == 0 {
-			return []byte("{}")
+			return []byte("{}"), nil
 		}
-		return val
+		return val, nil
 	case string:
-		return []byte(`"` + val + `"`)
+		return appendQuotedJSON(nil, val), nil
 	case map[string]string:
-		return buildStringMapJSON(val)
+		return buildStringMapJSON(val), nil
 	case map[string]interface{}:
 		return buildInterfaceMapJSON(val)
+	case nil:
+		return []byte("{}"), nil
 	default:
-		return []byte("{}")
+		return nil, fmt.Errorf("dag: cannot marshal %T to JSON", v)
 	}
 }
 
@@ -384,24 +424,17 @@ func buildStringMapJSON(m map[string]string) []byte {
 			b = append(b, ',')
 		}
 		first = false
-		b = append(b, '"')
-		b = append(b, k...)
-		b = append(b, '"', ':')
-		if v == "" {
-			b = append(b, '"', '"')
-		} else {
-			b = append(b, '"')
-			b = append(b, v...)
-			b = append(b, '"')
-		}
+		b = appendQuotedJSON(b, k)
+		b = append(b, ':')
+		b = appendQuotedJSON(b, v)
 	}
 	b = append(b, '}')
 	return b
 }
 
-func buildInterfaceMapJSON(m map[string]interface{}) []byte {
+func buildInterfaceMapJSON(m map[string]interface{}) ([]byte, error) {
 	if len(m) == 0 {
-		return []byte("{}")
+		return []byte("{}"), nil
 	}
 	var b []byte
 	b = append(b, '{')
@@ -411,24 +444,23 @@ func buildInterfaceMapJSON(m map[string]interface{}) []byte {
 			b = append(b, ',')
 		}
 		first = false
-		b = append(b, '"')
-		b = append(b, k...)
-		b = append(b, '"', ':')
+		b = appendQuotedJSON(b, k)
+		b = append(b, ':')
 		switch val := v.(type) {
 		case string:
-			b = append(b, '"')
-			b = append(b, val...)
-			b = append(b, '"')
+			b = appendQuotedJSON(b, val)
 		case RawMessage:
 			b = append(b, val...)
 		case map[string]string:
 			b = append(b, buildStringMapJSON(val)...)
+		case nil:
+			b = append(b, 'n', 'u', 'l', 'l')
 		default:
-			b = append(b, '"', '"')
+			return nil, fmt.Errorf("dag: cannot marshal value of type %T in task input", v)
 		}
 	}
 	b = append(b, '}')
-	return b
+	return b, nil
 }
 
 // validate checks that all parent references exist and there are no cycles.

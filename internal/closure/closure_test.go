@@ -38,6 +38,7 @@ func TestComputeBasicIdentifiesDurableLeaves(t *testing.T) {
 		basicFQ("releaseReservation"):      true,
 		basicFQ("refundPayment"):           true,
 		basicFQ("notifyCustomer"):          true,
+		basicFQ("LongRunning"):            true,
 	}
 
 	for name := range expectedLeaves {
@@ -112,13 +113,13 @@ func TestComputeBasicCorrectlyTagsPureFunctions(t *testing.T) {
 
 	cr := Compute(result, cg)
 
-	// Total functions = 12 (8 leaves + 4 closure), so pure should be empty.
+	// Total functions = 13 (9 leaves + 4 closure), so pure should be empty.
 	totalFuncs := len(result.Funcs)
 	durableCount := len(cr.DurableLeaves) + len(cr.DurableClosure)
 	pureCount := len(cr.Pure)
 
-	if totalFuncs != 12 {
-		t.Errorf("expected 12 functions, got %d", totalFuncs)
+	if totalFuncs != 13 {
+		t.Errorf("expected 13 functions, got %d", totalFuncs)
 	}
 
 	if durableCount+pureCount != totalFuncs {
