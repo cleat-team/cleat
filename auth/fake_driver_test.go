@@ -91,11 +91,13 @@ func (*fakeTx) Rollback() error { return nil }
 // (they mutate the store).
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	switch {
-	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(query, "SELECT tenant_id FROM admin.tenant_api_keys") ||
+			strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-	case strings.Contains(query, "INSERT INTO tenants"):
+	case strings.Contains(query, "INSERT INTO admin.tenants") ||
+			strings.Contains(query, "INSERT INTO tenants"):
 		c.store.mu.Lock()
 		defer c.store.mu.Unlock()
 		return c.execInsertTenant(args)
@@ -110,9 +112,11 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	defer c.store.mu.Unlock()
 
 	switch {
-	case strings.Contains(query, "INSERT INTO tenant_api_keys"):
+	case strings.Contains(query, "INSERT INTO admin.tenant_api_keys") ||
+			strings.Contains(query, "INSERT INTO tenant_api_keys"):
 		return c.execInsertAPIKey(args)
-	case strings.Contains(query, "UPDATE tenant_api_keys SET revoked_at"):
+	case strings.Contains(query, "UPDATE admin.tenant_api_keys SET revoked_at") ||
+			strings.Contains(query, "UPDATE tenant_api_keys SET revoked_at"):
 		return c.execRevokeAPIKey(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec: %s", query)
