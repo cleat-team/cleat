@@ -43,11 +43,21 @@ func buildRustWasm(t *testing.T) string {
 
 func findProjectRoot(t *testing.T) string {
 	t.Helper()
-	cwd, _ := os.Getwd()
-	if strings.HasSuffix(cwd, "internal/host") {
-		return filepath.Dir(filepath.Dir(cwd))
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
 	}
-	return cwd
+	dir := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find project root from %s", cwd)
+		}
+		dir = parent
+	}
 }
 
 // TestRustWorkflowExecute runs the Rust place_order workflow through the
