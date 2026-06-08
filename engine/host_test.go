@@ -1087,6 +1087,24 @@ func TestEventFieldsMatch_AllEventTypes(t *testing.T) {
 		})
 	}
 }
+// withWasmtimeBackend creates a wasmtime backend and returns an EngineOption
+// that registers it for the "go" language. When wasmtime is not available
+// (CGO disabled or libwasmtime.so not found), the test is skipped.
+//
+// This is used by integration tests that need the wasmtime backend to properly
+// execute Go wasip1 modules, avoiding the wazero Runtime's stub cleat_poll_work
+// which always returns 0 (causing "wasm trap: exit(code=0)").
+func withWasmtimeBackend(t *testing.T) EngineOption {
+	t.Helper()
+	ctx := context.Background()
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	t.Cleanup(func() { wt.Close(ctx) })
+	return WithBackend("go", wt)
+}
+
 func minimalWasm() []byte {
 	// A minimal WASM module: magic + version, plus an empty code section.
 	return []byte{
@@ -1103,6 +1121,10 @@ func buildTestWasm(t *testing.T) string {
 	}
 
 	cwd, _ := os.Getwd()
+	// Resolve symlinks so Go toolchain module resolution works correctly.
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
 	projectRoot := cwd
 	if strings.HasSuffix(cwd, "/engine") {
 		projectRoot = filepath.Dir(cwd)

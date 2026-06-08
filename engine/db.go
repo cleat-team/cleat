@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -811,9 +812,9 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms,
 		       created_at
 		FROM event_history
-		WHERE workflow_id = $1
+		WHERE workflow_id = $1 AND tenant_id = $2
 		ORDER BY step
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("load history: %w", err)
 	}
@@ -929,10 +930,10 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		       promise_name, promise_id, promise_result, promise_error,
 		       created_at
 		FROM event_history
-		WHERE workflow_id = $1
+		WHERE workflow_id = $1 AND tenant_id = $2
 		ORDER BY step
-		OFFSET $2 LIMIT $3
-	`, workflowID, offset, limit)
+		OFFSET $3 LIMIT $4
+	`, workflowID, s.tenantID, offset, limit)
 	if err != nil {
 		return nil, fmt.Errorf("load history paginated: %w", err)
 	}
@@ -1173,7 +1174,7 @@ func (s *PostgresStore) CountEventHistory(ctx context.Context, workflowID string
 	defer tx.Rollback()
 
 	var count int
-	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = $1`, workflowID).Scan(&count)
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = $1 AND tenant_id = $2`, workflowID, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, err
 	}
@@ -1285,7 +1286,7 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	// Use the store's tenant scope to preserve tenant isolation.
 	var newRunID string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
 			$4, $5)
@@ -2220,10 +2221,10 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
 			VALUES ($1, $2, $3, 'ready', $4,
 			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
-			$5, $6)
+			$5, $6, now() - INTERVAL '1 millisecond')
 		`, runID, defName, defVersion, input, tenantID, priority)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
@@ -2240,10 +2241,10 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
 		VALUES ($1, $2, $3, 'ready', $4,
 		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
-			$5, $6)
+			$5, $6, now() - INTERVAL '1 millisecond')
 	`, runID, defName, defVersion, input, tenantID, priority)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
@@ -2460,6 +2461,10 @@ func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalNam
 	}
 	defer tx.Rollback()
 
+	// Ensure payload is valid JSON for JSONB column
+	if !json.Valid([]byte(payload)) {
+		payload = `"` + payload + `"`
+	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_signals (workflow_id, signal_name, payload)
 		VALUES ($1, $2, $3)
@@ -2643,7 +2648,7 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 
 	err = tx.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, result::text, error_msg, error_code, error_op,
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, result #>> '{}', error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, '')
 		FROM workflow_instances WHERE id = $1
@@ -2659,6 +2664,12 @@ func (s *PostgresStore) GetWorkflowByID(ctx context.Context, id string) (*Workfl
 	}
 	wf.Input = inputRaw
 	wf.AssignedTo = assignedTo.String
+	if result.Valid {
+		compacted := bytes.NewBuffer(nil)
+		if err := json.Compact(compacted, []byte(result.String)); err == nil {
+			result.String = compacted.String()
+		}
+	}
 	wf.Result = result.String
 	wf.Error = errorMsg.String
 	wf.ErrorCode = errorCode.String
@@ -2997,14 +3008,20 @@ func (s *PostgresStore) GetPromise(ctx context.Context, workflowID, promiseID st
 
 	var resultStr, errStr sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT status, result::text, error_msg FROM workflow_promises
-		WHERE workflow_id = $1 AND promise_id = $2
-	`, workflowID, promiseID).Scan(&status, &resultStr, &errStr)
+		SELECT status, result #>> '{}', error_msg FROM workflow_promises
+		WHERE workflow_id = $1 AND promise_id = $2 AND tenant_id = $3
+	`, workflowID, promiseID, s.tenantID).Scan(&status, &resultStr, &errStr)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "pending", "", "", tx.Commit()
 	}
 	if err != nil {
 		return "", "", "", err
+	}
+	if resultStr.Valid {
+		compacted := bytes.NewBuffer(nil)
+		if err := json.Compact(compacted, []byte(resultStr.String)); err == nil {
+			resultStr.String = compacted.String()
+		}
 	}
 	return status, resultStr.String, errStr.String, tx.Commit()
 }
@@ -3018,11 +3035,11 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT promise_id, promise_name, status, COALESCE(result::text, ''), COALESCE(error_msg, ''), created_at, resolved_at
+		SELECT promise_id, promise_name, status, COALESCE(result #>> '{}', ''), COALESCE(error_msg, ''), created_at, resolved_at
 		FROM workflow_promises
-		WHERE workflow_id = $1
+		WHERE workflow_id = $1 AND tenant_id = $2
 		ORDER BY priority ASC, created_at
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -3034,6 +3051,12 @@ func (s *PostgresStore) ListPromises(ctx context.Context, workflowID string) ([]
 		var resolvedAt sql.NullTime
 		if err := rows.Scan(&pi.PromiseID, &pi.PromiseName, &pi.Status, &pi.Result, &pi.ErrorMsg, &pi.CreatedAt, &resolvedAt); err != nil {
 			return nil, err
+		}
+		if len(pi.Result) > 0 {
+			compacted := bytes.NewBuffer(nil)
+			if err := json.Compact(compacted, []byte(pi.Result)); err == nil {
+				pi.Result = compacted.String()
+			}
 		}
 		if resolvedAt.Valid {
 			pi.ResolvedAt = &resolvedAt.Time
@@ -3214,10 +3237,14 @@ func (s *PostgresStore) CreateUpdateRequest(ctx context.Context, workflowID, upd
 	}
 	defer tx.Rollback()
 
+	// Ensure payload is valid JSON for JSONB column
+	if !json.Valid([]byte(payload)) {
+		payload = `"` + payload + `"`
+	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status)
-		VALUES ($1, $2, $3, $4, 'pending')
-	`, workflowID, updateName, payload, promiseID)
+		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
+		VALUES ($1, $2, $3, $4, 'pending', $5)
+	`, workflowID, updateName, payload, promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}
@@ -3233,12 +3260,12 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 	defer tx.Rollback()
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT workflow_id, update_name, payload::text, COALESCE(promise_id, ''), status,
-		       COALESCE(result::text, ''), COALESCE(error_msg, ''), created_at
+		SELECT workflow_id, update_name, payload #>> '{}', COALESCE(promise_id, ''), status,
+		       COALESCE(result #>> '{}', ''), COALESCE(error_msg, ''), created_at
 		FROM workflow_update_requests
-		WHERE workflow_id = $1 AND status = 'pending'
+		WHERE workflow_id = $1 AND tenant_id = $2 AND status = 'pending'
 		ORDER BY priority ASC, created_at
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -3250,6 +3277,18 @@ func (s *PostgresStore) GetPendingUpdateRequests(ctx context.Context, workflowID
 		if err := rows.Scan(&r.WorkflowID, &r.UpdateName, &r.Payload, &r.PromiseID,
 			&r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
 			return nil, err
+		}
+		if len(r.Payload) > 0 {
+			compacted := bytes.NewBuffer(nil)
+			if err := json.Compact(compacted, []byte(r.Payload)); err == nil {
+				r.Payload = compacted.String()
+			}
+		}
+		if len(r.Result) > 0 {
+			compacted := bytes.NewBuffer(nil)
+			if err := json.Compact(compacted, []byte(r.Result)); err == nil {
+				r.Result = compacted.String()
+			}
 		}
 		requests = append(requests, r)
 	}
@@ -3270,8 +3309,8 @@ func (s *PostgresStore) CompleteUpdateRequest(ctx context.Context, workflowID, u
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = $3, error_msg = $4, completed_at = now()
-		WHERE workflow_id = $1 AND update_name = $2 AND status = 'pending'
-	`, workflowID, updateName, result, errMsg)
+		WHERE workflow_id = $1 AND update_name = $2 AND tenant_id = $5 AND status = 'pending'
+	`, workflowID, updateName, result, errMsg, s.tenantID)
 	if err != nil {
 		return err
 	}

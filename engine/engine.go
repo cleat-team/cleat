@@ -1107,6 +1107,15 @@ func (e *Engine) executeWithBackend(
 		// the handler/work-data fields when Execute is called concurrently.
 		execBackend := backend.PerExecution()
 		res, callErr := execBackend.Execute(execCtx, wasmBytes, entryPoint, input, session)
+		// wasmtime does not propagate Go context cancellation during
+		// fn.Call, so check for deadline exceeded post-execution.
+		if callErr == nil && execCtx.Err() == context.DeadlineExceeded {
+			if len(session.deferrals) > 0 {
+				e.runDefers(context.Background(), wasmBytes, session.deferrals)
+			}
+			session.releaseHeldScopes(context.Background())
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution timed out", e.workflowID)
+		}
 		if callErr != nil && session.suspendErr == nil {
 			// Non-suspend error (trap, panic, timeout, or cancellation).
 			// Try running defers on a fresh module.

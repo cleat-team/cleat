@@ -3,8 +3,38 @@ package testutil
 import (
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
 )
+
+// execIgnoreDupKey executes a SQL statement, ignoring MySQL error 1061
+// (Duplicate key name) and 1060 (Duplicate column name). Other errors are
+// passed through. This allows idempotent CREATE INDEX / ALTER TABLE ADD
+// COLUMN in MySQL which does not support IF NOT EXISTS for those operations.
+func execIgnoreDupKey(t *testing.T, db *sql.DB, stmt string) {
+	t.Helper()
+	if _, err := db.Exec(stmt); err != nil {
+		msg := err.Error()
+		if !strings.Contains(msg, "Error 1061") && !strings.Contains(msg, "Error 1060") {
+			t.Fatalf("setup schema: %v", err)
+		}
+	}
+}
+
+// execMSSQLBestEffort executes a SQL statement, ignoring errors that are
+// expected in test schemas (e.g., index creation on NVARCHAR(MAX) columns).
+func execMSSQLBestEffort(t *testing.T, db *sql.DB, stmt string) {
+	t.Helper()
+	if _, err := db.Exec(stmt); err != nil {
+		msg := err.Error()
+		// NVARCHAR(MAX) columns cannot be index keys; this is expected in
+		// test schemas that use NVARCHAR(MAX) for flexibility.
+		if strings.Contains(msg, "invalid for use as a key column") {
+			return
+		}
+		t.Fatalf("setup schema: %v", err)
+	}
+}
 
 // SetupMinimalSchema creates the minimal tables needed by all DB tests:
 // workflow_defs, workflow_instances, event_history, workflow_signals.
@@ -376,25 +406,12 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 				created_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 				completed_at TIMESTAMP(6),
 				PRIMARY KEY (workflow_id, update_name))`,
-			// workflow_instances indexes
-			`CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at)`,
-			`CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at)`,
-			`CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at)`,
-			`CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id)`,
-			// priority-aware queue index (migration 004)
-			`DROP INDEX idx_instances_tenant_queue_ready ON workflow_instances`,
-			`CREATE INDEX idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority, next_wake_at)`,
-			// concurrency_keys index
-			`CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,
-			// idempotency_keys index
-			`CREATE INDEX idx_idempotency_keys_expires ON idempotency_keys(expires_at)`,
 			// Memory statistics tables
 			`CREATE TABLE IF NOT EXISTS workflow_memory_samples (
 				id BIGINT AUTO_INCREMENT PRIMARY KEY,
 				def_name VARCHAR(255) NOT NULL,
 				sample_bytes BIGINT NOT NULL,
 				recorded_at TIMESTAMP(6) NOT NULL DEFAULT NOW(6))`,
-			`CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`,
 			`CREATE TABLE IF NOT EXISTS workflow_memory_stats (
 				def_name VARCHAR(255) PRIMARY KEY,
 				mean_bytes DOUBLE NOT NULL DEFAULT 0,
@@ -453,22 +470,6 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					created_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
 					completed_at DATETIMEOFFSET,
 					PRIMARY KEY (workflow_id, update_name))`,
-			// workflow_instances indexes
-			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_ready' AND object_id = OBJECT_ID('workflow_instances'))
-				CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at) WHERE status = 'ready'`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_heartbeat' AND object_id = OBJECT_ID('workflow_instances'))
-				CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running'`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_stale' AND object_id = OBJECT_ID('workflow_instances'))
-				CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_sticky' AND object_id = OBJECT_ID('workflow_instances'))
-				CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`,
-			// priority-aware queue index (migration 004)
-			`DROP INDEX IF EXISTS idx_instances_tenant_queue_ready ON dbo.workflow_instances`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_tenant_queue_ready' AND object_id = OBJECT_ID('workflow_instances'))
-				CREATE INDEX idx_instances_tenant_queue_ready ON dbo.workflow_instances(tenant_id, task_queue, status, priority ASC, next_wake_at) WHERE status = 'ready'`,
-			// concurrency_keys index
-			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_concurrency_keys_workflow' AND object_id = OBJECT_ID('concurrency_keys'))
-				CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`,
 			// ADD COLUMN for migrated columns
 			`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('workflow_instances') AND name = 'error_code')
 				ALTER TABLE workflow_instances ADD error_code NVARCHAR(MAX) NULL`,
@@ -483,9 +484,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					def_name NVARCHAR(MAX) NOT NULL,
 					sample_bytes BIGINT NOT NULL,
 					recorded_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME())`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_mem_samples_def' AND object_id = OBJECT_ID('workflow_memory_samples'))
-				CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`,
-			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_stats')
+		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_stats')
 				CREATE TABLE workflow_memory_stats (
 					def_name NVARCHAR(255) NOT NULL PRIMARY KEY,
 					mean_bytes FLOAT(53) NOT NULL DEFAULT 0,
@@ -499,6 +498,62 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
 			t.Fatalf("setup schema: %v", err)
+		}
+	}
+	// MySQL does not support IF NOT EXISTS for indexes, so create them
+	// idempotently by ignoring "Duplicate key name" errors.
+	if dialect == DialectMySQL {
+		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at)`)
+		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at)`)
+		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at)`)
+		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id)`)
+		db.Exec(`DROP INDEX idx_instances_tenant_queue_ready ON workflow_instances`)
+		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority, next_wake_at)`)
+		execIgnoreDupKey(t, db, `CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
+		execIgnoreDupKey(t, db, `CREATE INDEX idx_idempotency_keys_expires ON idempotency_keys(expires_at)`)
+		execIgnoreDupKey(t, db, `CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
+	}
+	// MSSQL test schemas use NVARCHAR(MAX) for status and other columns,
+	// which cannot be index keys. These indexes are best-effort.
+	if dialect == DialectMSSQL {
+		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_ready' AND object_id = OBJECT_ID('workflow_instances'))
+			CREATE INDEX idx_instances_ready ON workflow_instances(status, next_wake_at) WHERE status = 'ready'`)
+		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_heartbeat' AND object_id = OBJECT_ID('workflow_instances'))
+			CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at) WHERE status = 'running'`)
+		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_stale' AND object_id = OBJECT_ID('workflow_instances'))
+			CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`)
+		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_sticky' AND object_id = OBJECT_ID('workflow_instances'))
+			CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`)
+		db.Exec(`DROP INDEX IF EXISTS idx_instances_tenant_queue_ready ON dbo.workflow_instances`)
+		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_tenant_queue_ready' AND object_id = OBJECT_ID('workflow_instances'))
+			CREATE INDEX idx_instances_tenant_queue_ready ON dbo.workflow_instances(tenant_id, task_queue, status, priority ASC, next_wake_at) WHERE status = 'ready'`)
+		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_concurrency_keys_workflow' AND object_id = OBJECT_ID('concurrency_keys'))
+			CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
+		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_mem_samples_def' AND object_id = OBJECT_ID('workflow_memory_samples'))
+			CREATE INDEX idx_mem_samples_def ON workflow_memory_samples(def_name, recorded_at DESC)`)
+	}
+}
+
+// CleanupPostgresTestData deletes all rows from the cleat test tables.
+// Call before and after tests to ensure isolation from parallel tests.
+func CleanupPostgresTestData(t *testing.T, db *sql.DB) {
+	t.Helper()
+	tables := []string{
+		"workflow_update_requests",
+		"workflow_promises",
+		"workflow_signals",
+		"concurrency_keys",
+		"idempotency_keys",
+		"event_history",
+		"workflow_memory_samples",
+		"workflow_memory_stats",
+		"workflow_schedules",
+		"workflow_instances",
+		"workflow_defs",
+	}
+	for _, table := range tables {
+		if _, err := db.Exec("DELETE FROM " + table); err != nil {
+			t.Logf("cleanup: delete from %s: %v", table, err)
 		}
 	}
 }

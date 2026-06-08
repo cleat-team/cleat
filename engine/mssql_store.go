@@ -376,9 +376,9 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		       promise_name, promise_id, promise_result, promise_error,
 		       created_at
 		FROM event_history
-		WHERE workflow_id = @p1
+		WHERE workflow_id = @p1 AND tenant_id = @p2
 		ORDER BY step
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("load history: %w", err)
 	}
@@ -490,10 +490,10 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				       promise_name, promise_id, promise_result, promise_error,
 				       created_at
 				FROM event_history
-				WHERE workflow_id = @p1
+				WHERE workflow_id = @p1 AND tenant_id = @p2
 				ORDER BY step
-				OFFSET @p2 ROWS FETCH NEXT @p3 ROWS ONLY
-			`, workflowID, offset, pageSize)
+				OFFSET @p3 ROWS FETCH NEXT @p4 ROWS ONLY
+			`, workflowID, s.tenantID, offset, pageSize)
 			if err != nil {
 				errCh <- err
 				return
@@ -656,10 +656,10 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		       payload,
 		       promise_name, promise_id, promise_result, promise_error
 		FROM event_history
-		WHERE workflow_id = @p1
+		WHERE workflow_id = @p1 AND tenant_id = @p2
 		ORDER BY step
-		OFFSET @p2 ROWS FETCH NEXT @p3 ROWS ONLY
-	`, workflowID, offset, limit)
+		OFFSET @p3 ROWS FETCH NEXT @p4 ROWS ONLY
+	`, workflowID, s.tenantID, offset, limit)
 	if err != nil {
 		return nil, fmt.Errorf("load history paginated: %w", err)
 	}
@@ -739,7 +739,7 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 // CountEventHistory returns the total number of events for a workflow.
 func (s *MSSQLStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = @p1`, workflowID).Scan(&count)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = @p1 AND tenant_id = @p2`, workflowID, s.tenantID).Scan(&count)
 	return count, err
 }
 
@@ -2291,9 +2291,9 @@ func (s *MSSQLStore) ListPromises(ctx context.Context, workflowID string) ([]Pro
 // CreateUpdateRequest registers an incoming update request.
 func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status)
-		VALUES (@p1, @p2, @p3, @p4, 'pending')
-	`, workflowID, updateName, payload, promiseID)
+		INSERT INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status, tenant_id)
+		VALUES (@p1, @p2, @p3, @p4, 'pending', @p5)
+	`, workflowID, updateName, payload, promiseID, s.tenantID)
 	return err
 }
 
@@ -2303,9 +2303,9 @@ func (s *MSSQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 		SELECT workflow_id, update_name, payload, ISNULL(promise_id, ''), status,
 		       ISNULL(result, ''), ISNULL(error_msg, ''), created_at
 		FROM workflow_update_requests
-		WHERE workflow_id = @p1 AND status = 'pending'
+		WHERE workflow_id = @p1 AND tenant_id = @p2 AND status = 'pending'
 		ORDER BY created_at
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2328,8 +2328,8 @@ func (s *MSSQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, upda
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = @p3, error_msg = @p4, completed_at = SYSUTCDATETIME()
-		WHERE workflow_id = @p1 AND update_name = @p2 AND status = 'pending'
-	`, workflowID, updateName, result, errMsg)
+		WHERE workflow_id = @p1 AND update_name = @p2 AND tenant_id = @p5 AND status = 'pending'
+	`, workflowID, updateName, result, errMsg, s.tenantID)
 	return err
 }
 

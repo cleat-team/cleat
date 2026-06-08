@@ -17,13 +17,8 @@ import (
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db := testutil.TestDB(t, testutil.DialectPostgres)
-
-	// Clean up any leftover test data from previous runs.
-	db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE 'test-%' OR workflow_id LIKE 'wf-%' OR workflow_id LIKE 'int-%'`)
-	db.Exec(`DELETE FROM workflow_signals WHERE workflow_id LIKE 'test-%' OR workflow_id LIKE 'wf-%' OR workflow_id LIKE 'int-%'`)
-	db.Exec(`DELETE FROM workflow_promises WHERE workflow_id LIKE 'test-%' OR workflow_id LIKE 'wf-%' OR workflow_id LIKE 'int-%'`)
-	db.Exec(`DELETE FROM concurrency_keys WHERE workflow_id LIKE 'test-%' OR workflow_id LIKE 'wf-%' OR workflow_id LIKE 'int-%'`)
-	db.Exec(`DELETE FROM workflow_instances WHERE id LIKE 'test-%' OR id LIKE 'wf-%' OR id LIKE 'int-%'`)
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	testutil.CleanupPostgresTestData(t, db)
 	return db
 }
 
@@ -35,9 +30,6 @@ func TestFaultConcurrentClaim(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	ctx := context.Background()
-
-
-
 
 	// Create a test instance.
 	runID := fmt.Sprintf("test-concurrent-%d", time.Now().UnixNano())
@@ -118,9 +110,6 @@ func TestFaultReapStaleInstances(t *testing.T) {
 	store := NewPostgresStore(db)
 	ctx := context.Background()
 
-
-
-
 	runID := fmt.Sprintf("test-reap-%d", time.Now().UnixNano())
 	// Insert directly with an old heartbeat.
 	db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input, assigned_to, heartbeat_at)
@@ -154,9 +143,6 @@ func TestFaultHeartbeatOwnership(t *testing.T) {
 	store := NewPostgresStore(db)
 	ctx := context.Background()
 
-
-
-
 	runID := fmt.Sprintf("test-heartbeat-%d", time.Now().UnixNano())
 	db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, input)
 		VALUES ($1, 'test', 1, 'ready', '{}') ON CONFLICT DO NOTHING`, runID)
@@ -189,4 +175,3 @@ func TestFaultHeartbeatOwnership(t *testing.T) {
 		t.Error("Worker B heartbeat should fail (not owner)")
 	}
 }
-

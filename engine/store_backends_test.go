@@ -49,16 +49,10 @@ func (b *PostgresBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	t.Helper()
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	testutil.CleanupPostgresTestData(t, db)
 	store := NewPostgresStore(db)
 	teardown := func() {
-		// Clean up all test data in the right order (child tables first).
-		db.Exec(`DELETE FROM workflow_schedules`)
-		db.Exec(`DELETE FROM workflow_promises`)
-		db.Exec(`DELETE FROM concurrency_keys`)
-		db.Exec(`DELETE FROM event_history`)
-		db.Exec(`DELETE FROM workflow_signals`)
-		db.Exec(`DELETE FROM workflow_instances`)
-		db.Exec(`DELETE FROM workflow_defs`)
+		testutil.CleanupPostgresTestData(t, db)
 		db.Close()
 	}
 	return store, teardown
@@ -68,16 +62,11 @@ func (b *PostgresBackend) SetupForTenant(t *testing.T, tenantID string) (Workflo
 	t.Helper()
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	testutil.CleanupPostgresTestData(t, db)
 	store := NewPostgresStore(db)
 	store.tenantID = tenantID
 	teardown := func() {
-		db.Exec(`DELETE FROM workflow_schedules`)
-		db.Exec(`DELETE FROM workflow_promises`)
-		db.Exec(`DELETE FROM concurrency_keys`)
-		db.Exec(`DELETE FROM event_history`)
-		db.Exec(`DELETE FROM workflow_signals`)
-		db.Exec(`DELETE FROM workflow_instances`)
-		db.Exec(`DELETE FROM workflow_defs`)
+		testutil.CleanupPostgresTestData(t, db)
 		db.Close()
 	}
 	return store, teardown
@@ -101,6 +90,7 @@ func (b *MySQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	}
 	db := testutil.MySQLTestDB(t)
 	testutil.SetupMySQLFullSchema(t, db)
+	testutil.CleanupMySQLTestData(t, db)
 	store := NewMySQLStore(db)
 	teardown := func() {
 		testutil.CleanupMySQLTestData(t, db)
@@ -116,6 +106,7 @@ func (b *MySQLBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowSt
 	}
 	db := testutil.MySQLTestDB(t)
 	testutil.SetupMySQLFullSchema(t, db)
+	testutil.CleanupMySQLTestData(t, db)
 	store := NewMySQLStore(db)
 	store.tenantID = tenantID
 	teardown := func() {
@@ -143,6 +134,7 @@ func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	}
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
+	testutil.CleanupMSSQLTestData(t, db)
 	store := NewMSSQLStore(db)
 	teardown := func() {
 		testutil.CleanupMSSQLTestData(t, db)
@@ -158,6 +150,7 @@ func (b *MSSQLBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowSt
 	}
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
+	testutil.CleanupMSSQLTestData(t, db)
 	store := NewMSSQLStore(db)
 	store.tenantID = tenantID
 	teardown := func() {
@@ -309,16 +302,21 @@ func TestCascadeDelete(t *testing.T) {
 
 			db := testutil.TestDB(t, d.dialect)
 			testutil.SetupFullSchema(t, db, d.dialect)
+			// Clean any data left from previous test runs.
+			testutil.CleanupPostgresTestData(t, db)
 
 			addCascadeFKs(t, db, d.dialect)
 
 			// Insert a workflow def so workflow_instances FK is satisfied.
 			db.Exec(`DELETE FROM workflow_defs WHERE name = 'cascade-test-def'`)
-			_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES ('cascade-test-def', 1, '')`)
-			if err != nil {
-				// Retry with dialect-specific empty blob.
-				_, err = db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES ('cascade-test-def', 1, '\x')`)
+			var emptyBlob string
+			switch d.dialect {
+			case testutil.DialectMSSQL:
+				emptyBlob = "0x00" // MSSQL requires hex literal for varbinary
+			default:
+				emptyBlob = "'\\x'" // Postgres/MySQL accept hex string
 			}
+			_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES ('cascade-test-def', 1, ` + emptyBlob + `)`)
 			if err != nil {
 				t.Fatalf("insert workflow_defs: %v", err)
 			}
@@ -403,9 +401,11 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 		exec(`ALTER TABLE workflow_update_requests ADD CONSTRAINT fk_test_cascade_wu FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
 
 	case testutil.DialectMySQL:
-		// event_history
+		// The inline FK in CREATE TABLE already has ON DELETE CASCADE for
+		// event_history, workflow_signals, workflow_promises, and
+		// workflow_update_requests. Drop and re-add them idempotently.
 		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'event_history' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = CONCAT('ALTER TABLE event_history DROP FOREIGN KEY ', @cname)`)
+		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE event_history DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
 		exec(`PREPARE stmt FROM @sql`)
 		exec(`EXECUTE stmt`)
 		exec(`DEALLOCATE PREPARE stmt`)
@@ -413,7 +413,7 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 
 		// workflow_signals
 		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'workflow_signals' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = CONCAT('ALTER TABLE workflow_signals DROP FOREIGN KEY ', @cname)`)
+		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE workflow_signals DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
 		exec(`PREPARE stmt FROM @sql`)
 		exec(`EXECUTE stmt`)
 		exec(`DEALLOCATE PREPARE stmt`)
@@ -421,7 +421,7 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 
 		// workflow_promises
 		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'workflow_promises' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = CONCAT('ALTER TABLE workflow_promises DROP FOREIGN KEY ', @cname)`)
+		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE workflow_promises DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
 		exec(`PREPARE stmt FROM @sql`)
 		exec(`EXECUTE stmt`)
 		exec(`DEALLOCATE PREPARE stmt`)
@@ -429,14 +429,14 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 
 		// workflow_update_requests
 		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'workflow_update_requests' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = CONCAT('ALTER TABLE workflow_update_requests DROP FOREIGN KEY ', @cname)`)
+		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE workflow_update_requests DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
 		exec(`PREPARE stmt FROM @sql`)
 		exec(`EXECUTE stmt`)
 		exec(`DEALLOCATE PREPARE stmt`)
 		exec(`ALTER TABLE workflow_update_requests ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
 
-		// concurrency_keys: add FK for the first time
-		exec(`ALTER TABLE concurrency_keys ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
+		// concurrency_keys: add FK (skips if already exists with a different name)
+		db.Exec(`ALTER TABLE concurrency_keys ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
 
 	case testutil.DialectMSSQL:
 		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_event_history_workflow') ALTER TABLE dbo.event_history DROP CONSTRAINT fk_event_history_workflow`)
@@ -511,12 +511,12 @@ func insertChildRows(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID st
 			t.Fatalf("insert workflow_signals (postgres): %v", err)
 		}
 	case testutil.DialectMySQL:
-		_, err := db.Exec(`INSERT INTO workflow_signals (workflow_id, signal_name) VALUES (?, 'test-signal')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_signals (workflow_id, signal_name, payload) VALUES (?, 'test-signal', '{}')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_signals (mysql): %v", err)
 		}
 	case testutil.DialectMSSQL:
-		_, err := db.Exec(`INSERT INTO workflow_signals (workflow_id, signal_name) VALUES (@p1, 'test-signal')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_signals (workflow_id, signal_name, payload) VALUES (@p1, 'test-signal', '{}')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_signals (mssql): %v", err)
 		}
@@ -568,12 +568,12 @@ func insertChildRows(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID st
 			t.Fatalf("insert workflow_update_requests (postgres): %v", err)
 		}
 	case testutil.DialectMySQL:
-		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name) VALUES (?, 'test-update')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name, payload) VALUES (?, 'test-update', '{}')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_update_requests (mysql): %v", err)
 		}
 	case testutil.DialectMSSQL:
-		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name) VALUES (@p1, 'test-update')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name, payload) VALUES (@p1, 'test-update', '{}')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_update_requests (mssql): %v", err)
 		}
