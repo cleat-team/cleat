@@ -82,6 +82,13 @@ func (c *mockConn) Begin() (driver.Tx, error) {
 	return &mockTx{commitErr: c.commitErr}, nil
 }
 
+func (c *mockConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if c.beginErr != nil {
+		return nil, c.beginErr
+	}
+	return &mockTx{commitErr: c.commitErr}, nil
+}
+
 // mockTx implements driver.Tx with configurable commit error.
 type mockTx struct {
 	commitErr error
