@@ -372,3 +372,185 @@ func TestMSSQLStoreConfigOptions(t *testing.T) {
 		t.Error("WithEncryption returned nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Pure-logic tests (no database required)
+// ---------------------------------------------------------------------------
+
+func TestMSSQLNopCloser(t *testing.T) {
+	var c mssqlNopCloser
+	if err := c.Close(); err != nil {
+		t.Errorf("nopCloser.Close() returned error: %v", err)
+	}
+}
+
+func TestMSSQLStoreConfigOptionsExtended(t *testing.T) {
+	store := NewMSSQLStore(nil)
+
+	// WithIdempotencyKeyTTL with zero duration.
+	zeroTTL := store.WithIdempotencyKeyTTL(0)
+	if zeroTTL.idempotencyKeyTTL != 0 {
+		t.Errorf("idempotencyKeyTTL = %v, want 0", zeroTTL.idempotencyKeyTTL)
+	}
+	if store.idempotencyKeyTTL == 0 {
+		t.Error("original store should not be mutated by WithIdempotencyKeyTTL")
+	}
+
+	// WithReadRedactionDisabled round-trip.
+	disabled := store.WithReadRedactionDisabled(true)
+	if !disabled.disableReadRedaction {
+		t.Error("disableReadRedaction should be true")
+	}
+	reEnabled := disabled.WithReadRedactionDisabled(false)
+	if reEnabled.disableReadRedaction {
+		t.Error("disableReadRedaction should be false after toggling back")
+	}
+
+	// WithEncryption with nil key, enabled=true.
+	encEnabled := store.WithEncryption(nil, true)
+	if !encEnabled.encryptSensitivePayloads {
+		t.Error("encryptSensitivePayloads should be true")
+	}
+	if encEnabled.encryption != nil {
+		t.Error("encryption should be nil when nil key passed")
+	}
+}
+
+func TestMSSQLSetSessionContext_EmptyTenant(t *testing.T) {
+	store := NewMSSQLStore(nil)
+	store.tenantID = ""
+	err := store.setSessionContext(nil)
+	if err == nil {
+		t.Error("setSessionContext with empty tenant should return error")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DB-backed tests (require CLEAT_TEST_MSSQL)
+// ---------------------------------------------------------------------------
+
+func TestMSSQLSetSessionContext(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+
+	db := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLMinimalSchema(t, db)
+	defer testutil.CleanupMSSQLTestData(t, db)
+
+	store := NewMSSQLStore(db, "default")
+	store.tenantID = "11111111-1111-1111-1111-111111111111"
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+
+	if err := store.setSessionContext(tx); err != nil {
+		t.Errorf("setSessionContext: %v", err)
+	}
+}
+
+func TestMSSQLBeginTxWithContext(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+
+	db := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLMinimalSchema(t, db)
+	defer testutil.CleanupMSSQLTestData(t, db)
+
+	store := NewMSSQLStore(db, "default")
+	store.tenantID = "11111111-1111-1111-1111-111111111111"
+
+	tx, err := store.beginTxWithContext(context.Background())
+	if err != nil {
+		t.Fatalf("beginTxWithContext: %v", err)
+	}
+	if tx == nil {
+		t.Fatal("beginTxWithContext returned nil tx")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Errorf("rollback: %v", err)
+	}
+}
+
+func TestMSSQLEnforceParentClosePolicy(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+
+	db := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLFullSchema(t, db)
+	defer testutil.CleanupMSSQLTestData(t, db)
+
+	// Insert a workflow_defs row to satisfy FK constraints.
+	_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES (@p1, @p2, @p3)`,
+		"test-parent-close-policy", 1, []byte{})
+	if err != nil {
+		t.Fatalf("insert workflow_defs: %v", err)
+	}
+
+	parentID := uuid.New().String()
+	childTerminateID := uuid.New().String()
+	childCancelID := uuid.New().String()
+
+	// Insert parent workflow.
+	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status) VALUES (@p1, @p2, @p3, @p4)`,
+		parentID, "test-parent-close-policy", 1, "running")
+	if err != nil {
+		t.Fatalf("insert parent workflow: %v", err)
+	}
+
+	// Insert TERMINATE child.
+	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, parent_workflow_id, parent_close_policy) VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
+		childTerminateID, "test-parent-close-policy", 1, "running", parentID, "TERMINATE")
+	if err != nil {
+		t.Fatalf("insert terminate child: %v", err)
+	}
+
+	// Insert REQUEST_CANCEL child.
+	_, err = db.Exec(`INSERT INTO workflow_instances (id, def_name, def_version, status, parent_workflow_id, parent_close_policy) VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
+		childCancelID, "test-parent-close-policy", 1, "running", parentID, "REQUEST_CANCEL")
+	if err != nil {
+		t.Fatalf("insert cancel child: %v", err)
+	}
+
+	store := NewMSSQLStore(db, "default")
+	store.tenantID = "00000000-0000-0000-0000-000000000000"
+	store.enforceParentClosePolicy(context.Background(), parentID)
+
+	// Verify TERMINATE child is now failed.
+	var status, errorMsg string
+	err = db.QueryRow(`SELECT status, error_msg FROM workflow_instances WHERE id = @p1`, childTerminateID).Scan(&status, &errorMsg)
+	if err != nil {
+		t.Fatalf("query terminate child: %v", err)
+	}
+	if status != "failed" {
+		t.Errorf("terminate child status = %q, want failed", status)
+	}
+	if errorMsg != "parent workflow terminated" {
+		t.Errorf("terminate child error_msg = %q, want 'parent workflow terminated'", errorMsg)
+	}
+
+	// Verify REQUEST_CANCEL child has cancellation_requested = 1.
+	var cancelled bool
+	err = db.QueryRow(`SELECT cancellation_requested FROM workflow_instances WHERE id = @p1`, childCancelID).Scan(&cancelled)
+	if err != nil {
+		t.Fatalf("query cancel child: %v", err)
+	}
+	if !cancelled {
+		t.Error("cancel child should have cancellation_requested = 1")
+	}
+
+	// Verify parent is unchanged.
+	var parentStatus string
+	err = db.QueryRow(`SELECT status FROM workflow_instances WHERE id = @p1`, parentID).Scan(&parentStatus)
+	if err != nil {
+		t.Fatalf("query parent: %v", err)
+	}
+	if parentStatus != "running" {
+		t.Errorf("parent status = %q, want running", parentStatus)
+	}
+}
