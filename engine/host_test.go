@@ -2402,6 +2402,363 @@ func TestContinueAsNewWithVersionFreshZero(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// SignalWorkflow tests.
+// ---------------------------------------------------------------------------
+
+type mockSignalStore struct {
+	deliverErr       error
+	lastDeliverWFID  string
+	lastDeliverName  string
+	lastDeliverPayload string
+}
+
+func (m *mockSignalStore) DeliverSignal(_ context.Context, workflowID, signalName, payload string) error {
+	m.lastDeliverWFID = workflowID
+	m.lastDeliverName = signalName
+	m.lastDeliverPayload = payload
+	return m.deliverErr
+}
+
+func (m *mockSignalStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
+	return "", false, nil
+}
+
+func (m *mockSignalStore) PollCancellation(_ context.Context, _ string) (bool, string, error) {
+	return false, "", nil
+}
+
+func TestSignalWorkflowReplayMatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeSignalReceived,
+		RunID:     "target-run-123",
+		SignalName: "my-signal",
+		SignalPayload: `{"x":1}`,
+	}}
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+func TestSignalWorkflowReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	// Fresh path records EventTypeSignalReceived.
+	if len(s.history) < 2 {
+		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
+	}
+	if s.history[1].EventType != EventTypeSignalReceived {
+		t.Errorf("expected EventTypeSignalReceived, got %q", s.history[1].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestSignalWorkflowReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // stepCount(0) >= len(0) → past end
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeSignalReceived {
+		t.Errorf("expected EventTypeSignalReceived, got %q", s.history[0].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestSignalWorkflowFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	r := s.history[0]
+	if r.EventType != EventTypeSignalReceived {
+		t.Errorf("expected EventTypeSignalReceived, got %q", r.EventType)
+	}
+	if r.RunID != "target-run-123" {
+		t.Errorf("expected RunID 'target-run-123', got %q", r.RunID)
+	}
+	if r.SignalName != "my-signal" {
+		t.Errorf("expected SignalName 'my-signal', got %q", r.SignalName)
+	}
+	if r.SignalPayload != `{"x":1}` {
+		t.Errorf("expected SignalPayload '{\"x\":1}', got %q", r.SignalPayload)
+	}
+}
+
+func TestSignalWorkflowFreshWithStore(t *testing.T) {
+	mock := &mockSignalStore{}
+	s := newTestExecSession()
+	s.engine.signalStore = mock
+
+	s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if mock.lastDeliverWFID != "target-run-123" {
+		t.Errorf("expected DeliverSignal WFID 'target-run-123', got %q", mock.lastDeliverWFID)
+	}
+	if mock.lastDeliverName != "my-signal" {
+		t.Errorf("expected signal name 'my-signal', got %q", mock.lastDeliverName)
+	}
+	if mock.lastDeliverPayload != `{"x":1}` {
+		t.Errorf("expected payload '{\"x\":1}', got %q", mock.lastDeliverPayload)
+	}
+}
+
+func TestSignalWorkflowStoreError(t *testing.T) {
+	mock := &mockSignalStore{deliverErr: fmt.Errorf("db down")}
+	s := newTestExecSession()
+	s.engine.signalStore = mock
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	// Store error is logged, not surfaced.
+	if result != 0 {
+		t.Errorf("expected 0 (error logged, not surfaced), got %d", result)
+	}
+	// Event still recorded.
+	if len(s.history) != 1 || s.history[0].EventType != EventTypeSignalReceived {
+		t.Error("expected event recorded despite store error")
+	}
+}
+
+func TestSignalWorkflowAuthDenied(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.requireSignalAuth = true
+	s.engine.signalAuthCheck = func(_ context.Context, targetWorkflowID, callerDefName string) error {
+		return fmt.Errorf("not authorized")
+	}
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if result != errSignalAuthRequiredInt {
+		t.Errorf("expected errSignalAuthRequiredInt (%d), got %d", errSignalAuthRequiredInt, result)
+	}
+	// No event should be recorded on auth failure.
+	if len(s.history) != 0 {
+		t.Errorf("expected 0 history entries on auth failure, got %d", len(s.history))
+	}
+}
+
+func TestSignalWorkflowAuthAllowed(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.requireSignalAuth = true
+	s.engine.signalAuthCheck = func(_ context.Context, targetWorkflowID, callerDefName string) error {
+		return nil
+	}
+
+	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 || s.history[0].EventType != EventTypeSignalReceived {
+		t.Error("expected event recorded when auth allowed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DurableScheduleInvoke tests.
+// ---------------------------------------------------------------------------
+
+func TestScheduleInvokeReplayMatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeDurableScheduleInvoke,
+		Service:   "my-svc",
+		Op:        "my-op",
+		Request:   `{}`,
+		DurationMs: 5000,
+	}}
+	result := s.DurableScheduleInvoke(context.Background(), nil, "my-svc", "my-op", `{}`, 5000)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+func TestScheduleInvokeReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // stepCount >= len → past end
+
+	result := s.DurableScheduleInvoke(context.Background(), nil, "my-svc", "my-op", `{}`, 5000)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true (ScheduleInvoke does not exitReplay on past-end)")
+	}
+}
+
+func TestScheduleInvokeFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.DurableScheduleInvoke(context.Background(), nil, "my-svc", "my-op", `{"k":"v"}`, 10000)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	r := s.history[0]
+	if r.EventType != EventTypeDurableScheduleInvoke {
+		t.Errorf("expected EventTypeDurableScheduleInvoke, got %q", r.EventType)
+	}
+	if r.Service != "my-svc" {
+		t.Errorf("expected Service 'my-svc', got %q", r.Service)
+	}
+	if r.Op != "my-op" {
+		t.Errorf("expected Op 'my-op', got %q", r.Op)
+	}
+	if r.Request != `{"k":"v"}` {
+		t.Errorf("expected Request '{\"k\":\"v\"}', got %q", r.Request)
+	}
+	if r.DurationMs != 10000 {
+		t.Errorf("expected DurationMs=10000, got %d", r.DurationMs)
+	}
+}
+
+func TestScheduleInvokeFreshNoCaller(t *testing.T) {
+	// caller is nil → event recorded, no goroutine spawned.
+	s := newTestExecSession()
+	s.engine.caller = nil // already nil from newTestExecSession
+
+	result := s.DurableScheduleInvoke(context.Background(), nil, "svc", "op", `{}`, 0)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Errorf("expected 1 history entry, got %d", len(s.history))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RegisterUpdateHandler tests.
+// ---------------------------------------------------------------------------
+
+func TestRegisterUpdateHandlerReplayMatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:              0,
+		EventType:         EventTypeUpdateHandler,
+		UpdateHandlerName: "my-handler",
+	}}
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+func TestRegisterUpdateHandlerReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if len(s.history) < 2 {
+		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
+	}
+	if s.history[1].EventType != EventTypeUpdateHandler {
+		t.Errorf("expected EventTypeUpdateHandler, got %q", s.history[1].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestRegisterUpdateHandlerReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // past end
+
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeUpdateHandler {
+		t.Errorf("expected EventTypeUpdateHandler, got %q", s.history[0].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
 // AwaitAnyChild tests.
 // ---------------------------------------------------------------------------
 
