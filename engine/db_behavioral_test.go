@@ -39,6 +39,9 @@ func (c *noopConn) Close() error { return nil }
 func (c *noopConn) Begin() (driver.Tx, error) {
 	return &noopTx{}, nil
 }
+func (c *noopConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	return &noopTx{}, nil
+}
 
 type noopTx struct {
 	driver.Tx

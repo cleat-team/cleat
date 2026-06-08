@@ -316,6 +316,9 @@ func TestNewWazeroBackend(t *testing.T) {
 	if backend.Name() != "wazero" {
 		t.Errorf("expected name 'wazero', got %q", backend.Name())
 	}
+	if backend.Runtime() == nil {
+		t.Error("expected non-nil Runtime")
+	}
 }
 
 // TestEngineWithWazeroBackend verifies that an Engine can be created with a

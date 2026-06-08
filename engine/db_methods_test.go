@@ -34,6 +34,7 @@ type mockExecResult struct {
 	match    string
 	affected int64
 	err      error // if non-nil, return this error from Exec
+	consume  bool  // if true, this result is removed after first use
 }
 
 // mockConnector implements driver.Connector and returns mock connections
@@ -82,6 +83,13 @@ func (c *mockConn) Begin() (driver.Tx, error) {
 	return &mockTx{commitErr: c.commitErr}, nil
 }
 
+func (c *mockConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if c.beginErr != nil {
+		return nil, c.beginErr
+	}
+	return &mockTx{commitErr: c.commitErr}, nil
+}
+
 // mockTx implements driver.Tx with configurable commit error.
 type mockTx struct {
 	commitErr error
@@ -107,12 +115,14 @@ func (s *mockStmt) Exec(_ []driver.Value) (driver.Result, error) {
 			continue
 		}
 		if strings.Contains(s.query, er.match) {
+			if er.consume {
+				s.execResults[i].match = ""
+			}
 			if er.err != nil {
 				return nil, er.err
 			}
 			return &mockResult{affected: er.affected}, nil
 		}
-		_ = i // suppress unused variable warning when consume is not used on execResults
 	}
 	return &mockResult{}, nil
 }
