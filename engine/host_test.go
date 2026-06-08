@@ -1521,3 +1521,106 @@ func TestPollChildJSONFormat(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// PollCancellation host function tests
+// ---------------------------------------------------------------------------
+
+// mockCancellationStore implements SignalStore with configurable
+// PollCancellation return values.
+type mockCancellationStore struct {
+	cancelled bool
+	reason    string
+	err       error
+}
+
+func (m *mockCancellationStore) PollCancellation(_ context.Context, _ string) (bool, string, error) {
+	return m.cancelled, m.reason, m.err
+}
+
+func (m *mockCancellationStore) DeliverSignal(_ context.Context, _, _, _ string) error {
+	return nil
+}
+
+func (m *mockCancellationStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
+	return "", false, nil
+}
+
+func TestPollCancellationReplay(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+	if result != 0 {
+		t.Errorf("expected 0 in replay mode, got %d", result)
+	}
+}
+
+func TestPollCancellationNoStore(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+	if result != 0 {
+		t.Errorf("expected 0 with no store, got %d", result)
+	}
+}
+
+func TestPollCancellationNotCancelled(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.signalStore = &mockCancellationStore{cancelled: false}
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+	if result != 0 {
+		t.Errorf("expected 0 when not cancelled, got %d", result)
+	}
+}
+
+func TestPollCancellationWithReason(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.signalStore = &mockCancellationStore{
+		cancelled: true,
+		reason:    "testing",
+	}
+
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+
+	result := s.PollCancellation(ctx, nil, 0, 100)
+
+	expected := int64(uint64(7)<<32 | 1) // len("testing")=7, cancelled=1
+	if result != expected {
+		t.Errorf("expected %d, got %d", expected, result)
+	}
+
+	written := string(buf[:7])
+	if written != "testing" {
+		t.Errorf("expected 'testing' in buffer, got %q", written)
+	}
+}
+
+func TestPollCancellationEmptyReason(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.signalStore = &mockCancellationStore{
+		cancelled: true,
+		reason:    "",
+	}
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+
+	expected := int64(1) // 0<<32 | 1
+	if result != expected {
+		t.Errorf("expected %d, got %d", expected, result)
+	}
+}
+
+func TestPollCancellationStoreError(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.signalStore = &mockCancellationStore{
+		err: fmt.Errorf("db down"),
+	}
+
+	result := s.PollCancellation(context.Background(), nil, 0, 0)
+	if result != 0 {
+		t.Errorf("expected 0 on store error, got %d", result)
+	}
+}
