@@ -219,7 +219,13 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 	}
 
 	started := make(chan struct{})
+	errCh := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				errCh <- fmt.Errorf("host: _start panicked: %v", r)
+			}
+		}()
 		close(started)
 		start.Call(ctx)
 	}()
@@ -241,6 +247,8 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case err := <-errCh:
+			return err
 		case <-time.After(delay):
 		}
 
@@ -252,6 +260,12 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 			// table after _start launches. Prevents call_indirect traps
 			// in child workflows where timing is tighter.
 			time.Sleep(50 * time.Millisecond)
+			// Check for a late panic before returning success.
+			select {
+			case err := <-errCh:
+				return err
+			default:
+			}
 			return nil
 		}
 		delay *= 2
