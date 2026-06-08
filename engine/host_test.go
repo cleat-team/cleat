@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockCaller records all service calls for test assertions.
@@ -1263,6 +1264,48 @@ func (m *mockChildWorkflowStore) GetChildResult(ctx context.Context, runID strin
 	return m.result, m.completed, m.err
 }
 
+// ---------------------------------------------------------------------------
+// Mock promise store for CreatePromise and AwaitPromise tests.
+// ---------------------------------------------------------------------------
+
+type mockPromiseStore struct {
+	createErr error  // error to return from CreatePromise
+	status    string // "resolved", "rejected", or "" (pending)
+	result    string // promise result (for resolved)
+	errMsg    string // error message (for rejected)
+	getErr    error  // error to return from GetPromise
+	// tracking
+	lastCreatedWorkflowID  string
+	lastCreatedPromiseName string
+	lastCreatedPromiseID   string
+	lastGetWorkflowID      string
+	lastGetPromiseID       string
+}
+
+func (m *mockPromiseStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
+	m.lastCreatedWorkflowID = workflowID
+	m.lastCreatedPromiseName = promiseName
+	m.lastCreatedPromiseID = promiseID
+	return m.createErr
+}
+
+func (m *mockPromiseStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+	return nil
+}
+
+func (m *mockPromiseStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+	return nil
+}
+
+func (m *mockPromiseStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
+	m.lastGetWorkflowID = workflowID
+	m.lastGetPromiseID = promiseID
+	if m.getErr != nil {
+		return "", "", "", m.getErr
+	}
+	return m.status, m.result, m.errMsg, nil
+}
+
 func newTestExecSession() *execSession {
 	return &execSession{
 		engine:     NewEngine(nil, nil),
@@ -1521,6 +1564,411 @@ func TestPollChildJSONFormat(t *testing.T) {
 		}
 	})
 }
+// ---------------------------------------------------------------------------
+// CreatePromise tests.
+// ---------------------------------------------------------------------------
+
+func TestCreatePromiseReplayMatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeCreatePromise,
+		PromiseID: "abc-123",
+	}}
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	// packSimpleResult(0, 0) = 0
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after advanceReplayStep, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true after replay match")
+	}
+}
+
+func TestCreatePromiseReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	// Fresh path runs after exitReplay, recording a create_promise event.
+	if len(s.history) < 2 {
+		t.Fatalf("expected at least 2 history entries (original + fresh event), got %d", len(s.history))
+	}
+	if s.history[1].EventType != EventTypeCreatePromise {
+		t.Errorf("expected fresh event type create_promise, got %q", s.history[1].EventType)
+	}
+	if s.history[1].PromiseID == "" {
+		t.Error("expected non-empty PromiseID in fresh event")
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestCreatePromiseReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // stepCount(0) >= len(history)(0) -> past end of history
+
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay (past end of history)")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	// Fresh path runs, recording a create_promise event.
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry (fresh event), got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeCreatePromise {
+		t.Errorf("expected EventTypeCreatePromise, got %q", s.history[0].EventType)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestCreatePromiseFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeCreatePromise {
+		t.Errorf("expected EventTypeCreatePromise, got %q", s.history[0].EventType)
+	}
+	if s.history[0].PromiseName != "my-promise" {
+		t.Errorf("expected PromiseName 'my-promise', got %q", s.history[0].PromiseName)
+	}
+	if s.history[0].PromiseID == "" {
+		t.Error("expected non-empty PromiseID (UUID generated)")
+	}
+}
+
+func TestCreatePromiseFreshWithStore(t *testing.T) {
+	mock := &mockPromiseStore{}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	if mock.lastCreatedPromiseName != "my-promise" {
+		t.Errorf("expected CreatePromise called with name 'my-promise', got %q", mock.lastCreatedPromiseName)
+	}
+	if mock.lastCreatedPromiseID == "" {
+		t.Error("expected non-empty promiseID passed to CreatePromise")
+	}
+}
+
+func TestCreatePromiseFreshStoreError(t *testing.T) {
+	mock := &mockPromiseStore{createErr: fmt.Errorf("db down")}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
+
+	// Store error is logged, not surfaced. Function should still succeed.
+	if result != 0 {
+		t.Errorf("expected 0 (error is logged, not surfaced), got %d", result)
+	}
+	if mock.lastCreatedPromiseName != "my-promise" {
+		t.Error("expected CreatePromise called despite previous errors")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AwaitPromise tests.
+// ---------------------------------------------------------------------------
+
+func TestAwaitPromiseReplayResolved(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:          0,
+		EventType:     EventTypePromiseResolved,
+		PromiseID:     "abc-123",
+		PromiseResult: `{"status":"ok"}`,
+	}}
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// packAwaitPromiseResult(resultLen=0, timedOut=false, errCode=0)
+	expected := packAwaitPromiseResult(0, false, 0)
+	if result != expected {
+		t.Errorf("expected %d, got %d", expected, result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+func TestAwaitPromiseReplayRejected(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:         0,
+		EventType:    EventTypePromiseRejected,
+		PromiseID:    "abc-123",
+		PromiseError: "bad request",
+	}}
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// packAwaitPromiseResult(resultLen=0, timedOut=false, errCode=1)
+	expected := packAwaitPromiseResult(0, false, 1)
+	if result != expected {
+		t.Errorf("expected %d, got %d", expected, result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+}
+
+func TestAwaitPromiseReplayAwaitThenFreshNoStore(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.promiseStore = nil
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitPromise,
+		PromiseID: "abc-123",
+	}}
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay from await_promise event")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	// Fresh path with no promiseStore -> suspend.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
+		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	}
+}
+
+func TestAwaitPromiseReplayAwaitThenFreshResolved(t *testing.T) {
+	mock := &mockPromiseStore{
+		status: "resolved",
+		result: `{"status":"ok"}`,
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitPromise,
+		PromiseID: "abc-123",
+	}}
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	// Fresh path finds resolved promise.
+	expected := packAwaitPromiseResult(0, false, 0)
+	if result != expected {
+		t.Errorf("expected %d (resolved), got %d", expected, result)
+	}
+	if mock.lastGetPromiseID != "abc-123" {
+		t.Errorf("expected GetPromise called with 'abc-123', got %q", mock.lastGetPromiseID)
+	}
+}
+
+func TestAwaitPromiseReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type - not a promise event
+	}}
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// Divergence: exitReplay is NOT called (unlike CreatePromise).
+	// isReplay stays true, fresh path runs which records await_promise and suspends.
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true (exitReplay not called on mismatch)")
+	}
+	// Fresh path suspends since promiseStore is nil.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
+		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	}
+}
+
+func TestAwaitPromiseReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = nil // stepCount(0) >= len(history)(0)
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay (past end of history)")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	// Fresh path suspends (no store).
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+}
+
+func TestAwaitPromiseFreshResolved(t *testing.T) {
+	mock := &mockPromiseStore{
+		status: "resolved",
+		result: `{"status":"ok"}`,
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	expected := packAwaitPromiseResult(0, false, 0)
+	if result != expected {
+		t.Errorf("expected %d (resolved), got %d", expected, result)
+	}
+	if mock.lastGetPromiseID != "abc-123" {
+		t.Errorf("expected GetPromise called with 'abc-123', got %q", mock.lastGetPromiseID)
+	}
+	// Should have recorded a promise_resolved event.
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypePromiseResolved {
+		t.Errorf("expected EventTypePromiseResolved, got %q", s.history[0].EventType)
+	}
+}
+
+func TestAwaitPromiseFreshRejected(t *testing.T) {
+	mock := &mockPromiseStore{
+		status: "rejected",
+		errMsg: "bad request",
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	expected := packAwaitPromiseResult(0, false, 1)
+	if result != expected {
+		t.Errorf("expected %d (rejected), got %d", expected, result)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypePromiseRejected {
+		t.Errorf("expected EventTypePromiseRejected, got %q", s.history[0].EventType)
+	}
+}
+
+func TestAwaitPromiseFreshPending(t *testing.T) {
+	mock := &mockPromiseStore{
+		status: "", // pending - status not "resolved" and not "rejected"
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// Pending -> suspends.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
+		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	}
+	// Should have recorded an await_promise event.
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeAwaitPromise {
+		t.Errorf("expected EventTypeAwaitPromise, got %q", s.history[0].EventType)
+	}
+}
+
+func TestAwaitPromiseFreshStoreError(t *testing.T) {
+	mock := &mockPromiseStore{
+		getErr: fmt.Errorf("db down"),
+	}
+	s := newTestExecSession()
+	s.engine.promiseStore = mock
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// Store error -> treated as pending, suspends.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+}
+
+func TestAwaitPromiseFreshNilStore(t *testing.T) {
+	s := newTestExecSession()
+	s.engine.promiseStore = nil
+
+	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
+
+	// Nil store -> suspends immediately.
+	expected := packAwaitPromiseResult(0, true, 0)
+	if result != expected {
+		t.Errorf("expected %d (suspend), got %d", expected, result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	// Verify timeout encoding: nowMs + timeoutMs
+	expectedUntil := time.UnixMilli(s.nowMs).Add(time.Duration(5000) * time.Millisecond)
+	if !s.suspendErr.Until.Equal(expectedUntil) {
+		t.Errorf("expected Until=%v, got %v", expectedUntil, s.suspendErr.Until)
+		}
+	}
 
 // ---------------------------------------------------------------------------
 // PollCancellation host function tests
