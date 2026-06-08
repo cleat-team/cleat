@@ -540,83 +540,45 @@ func (s *PostgresStore) WithReadRedactionDisabled(disabled bool) *PostgresStore 
 // encryption is enabled) and applies retroactive redaction. Decryption errors
 // are logged and the field is set to "[DECRYPTION_FAILED]" so it is clear the
 // data is unreadable rather than silently keeping ciphertext.
+// decryptField decrypts an encrypted field value, logging on failure.
+// When useBytesDecrypt is true, the value is treated as raw ciphertext
+// (Decrypt); otherwise it is treated as a base64-encoded ciphertext
+// (DecryptString).
+func (s *PostgresStore) decryptField(encrypted, fieldName, workflowID string, step int, useBytesDecrypt bool) string {
+	var decrypted string
+	var err error
+	if useBytesDecrypt {
+		var b []byte
+		b, err = s.encryption.Decrypt([]byte(encrypted))
+		decrypted = string(b)
+	} else {
+		decrypted, err = s.encryption.DecryptString(encrypted)
+	}
+	if err != nil {
+		log.Printf("[store] decrypt %s failed for workflow %s step %d: %v", fieldName, workflowID, step, err)
+		decryptionErrorsTotal.Inc()
+		return "[DECRYPTION_FAILED]"
+	}
+	return decrypted
+}
+
 func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID string) {
 	if s.encryption != nil && s.encryptSensitivePayloads {
 		// Request and Response are base64-decoded by tryDecodeBase64,
 		// so they hold raw ciphertext bytes and must be decrypted via Decrypt.
-		if decrypted, err := s.encryption.Decrypt([]byte(rec.Request)); err == nil {
-			rec.Request = string(decrypted)
-		} else {
-			log.Printf("[store] decrypt Request failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.Request = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.Decrypt([]byte(rec.Response)); err == nil {
-			rec.Response = string(decrypted)
-		} else {
-			log.Printf("[store] decrypt Response failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.Response = "[DECRYPTION_FAILED]"
-		}
+		rec.Request = s.decryptField(string(rec.Request), "Request", workflowID, rec.Step, true)
+		rec.Response = s.decryptField(string(rec.Response), "Response", workflowID, rec.Step, true)
 		// Err, SignalPayload, ChildInput, NewInput, PluginInput, PluginOutput,
 		// PromiseResult, PromiseError are stored as base64-encoded ciphertexts
 		// (no extra base64 layer), so DecryptString is correct.
-		if decrypted, err := s.encryption.DecryptString(rec.Err); err == nil {
-			rec.Err = decrypted
-		} else {
-			log.Printf("[store] decrypt Err failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.Err = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.SignalPayload); err == nil {
-			rec.SignalPayload = decrypted
-		} else {
-			log.Printf("[store] decrypt SignalPayload failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.SignalPayload = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.ChildInput); err == nil {
-			rec.ChildInput = decrypted
-		} else {
-			log.Printf("[store] decrypt ChildInput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.ChildInput = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.NewInput); err == nil {
-			rec.NewInput = decrypted
-		} else {
-			log.Printf("[store] decrypt NewInput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.NewInput = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.PluginInput); err == nil {
-			rec.PluginInput = decrypted
-		} else {
-			log.Printf("[store] decrypt PluginInput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.PluginInput = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.PluginOutput); err == nil {
-			rec.PluginOutput = decrypted
-		} else {
-			log.Printf("[store] decrypt PluginOutput failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.PluginOutput = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.PromiseResult); err == nil {
-			rec.PromiseResult = decrypted
-		} else {
-			log.Printf("[store] decrypt PromiseResult failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.PromiseResult = "[DECRYPTION_FAILED]"
-		}
-		if decrypted, err := s.encryption.DecryptString(rec.PromiseError); err == nil {
-			rec.PromiseError = decrypted
-		} else {
-			log.Printf("[store] decrypt PromiseError failed for workflow %s step %d: %v", workflowID, rec.Step, err)
-			decryptionErrorsTotal.Inc()
-			rec.PromiseError = "[DECRYPTION_FAILED]"
-		}
+		rec.Err = s.decryptField(rec.Err, "Err", workflowID, rec.Step, false)
+		rec.SignalPayload = s.decryptField(rec.SignalPayload, "SignalPayload", workflowID, rec.Step, false)
+		rec.ChildInput = s.decryptField(rec.ChildInput, "ChildInput", workflowID, rec.Step, false)
+		rec.NewInput = s.decryptField(rec.NewInput, "NewInput", workflowID, rec.Step, false)
+		rec.PluginInput = s.decryptField(rec.PluginInput, "PluginInput", workflowID, rec.Step, false)
+		rec.PluginOutput = s.decryptField(rec.PluginOutput, "PluginOutput", workflowID, rec.Step, false)
+		rec.PromiseResult = s.decryptField(rec.PromiseResult, "PromiseResult", workflowID, rec.Step, false)
+		rec.PromiseError = s.decryptField(rec.PromiseError, "PromiseError", workflowID, rec.Step, false)
 	}
 
 	// Retroactive redaction on read path.

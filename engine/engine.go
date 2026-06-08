@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"math"
 	"sort"
@@ -2735,8 +2734,10 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		parentID = fmt.Sprintf("unknown-%s-%d", name, s.stepCount)
 	}
 
-	log.Printf("[engine] childWorkflowWithVersion: name=%q version=%d childVersion=%d parentID=%s isReplay=%v stepCount=%d childWfStoreNil=%v",
-		name, version, childVersion, parentID, s.isReplay, s.stepCount, s.engine.childWfStore == nil)
+	s.engine.log().InfoContext(ctx, "childWorkflowWithVersion",
+		"name", name, "version", version, "child_version", childVersion,
+		"parent_id", parentID, "is_replay", s.isReplay, "step_count", s.stepCount,
+		"child_wf_store_nil", s.engine.childWfStore == nil)
 
 	if s.engine.childWfStore != nil {
 		// Check child workflow quota before creating the child.
@@ -2781,11 +2782,13 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			}
 			runID, err = css.StartChildWorkflowInSchema(context.Background(), ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
 		} else {
-			log.Printf("[engine] calling StartChildWorkflowAtomic: name=%q parentID=%s childVersion=%d", name, parentID, childVersion)
+			s.engine.log().InfoContext(ctx, "calling StartChildWorkflowAtomic",
+				"name", name, "parent_id", parentID, "child_version", childVersion)
 			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(context.Background(), "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
 		}
 		if err != nil {
-			log.Printf("[engine] StartChildWorkflowAtomic FAILED: %v", err)
+			s.engine.log().ErrorContext(ctx, "StartChildWorkflowAtomic failed",
+				"error", err, "name", name, "parent_id", parentID, "child_version", childVersion)
 			errMsg := fmt.Sprintf("child workflow %q: start failed: %v", name, err)
 			s.engine.log().ErrorContext(ctx, errMsg, "workflow_id", s.workflowID, "tenant_id", s.tenantID)
 			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
@@ -4394,7 +4397,7 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 	if s.engine.fetcher != nil {
 		response, fetchErr = s.engine.fetcher.Fetch(ctx, method, url, headersJSON, body)
 	} else {
-		fetchErr = errors.New("no fetcher configured")
+		fetchErr = fmt.Errorf("no fetcher configured: workflow %s attempted %s %s", s.engine.workflowID, method, url)
 	}
 
 	rec := EventRecord{
