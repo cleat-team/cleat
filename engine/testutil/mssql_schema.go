@@ -238,6 +238,19 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 			t.Fatalf("setup MSSQL full schema: statement %d: %v", i, err)
 		}
 	}
+
+	// Migration: add columns that may be missing from older test databases.
+	migrations := []string{
+		`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE name = 'event_count' AND object_id = OBJECT_ID('workflow_instances'))
+		 ALTER TABLE workflow_instances ADD event_count BIGINT NOT NULL DEFAULT 0`,
+		`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE name = 'allowed_signals' AND object_id = OBJECT_ID('workflow_instances'))
+		 ALTER TABLE workflow_instances ADD allowed_signals NVARCHAR(MAX) NULL`,
+	}
+	for _, m := range migrations {
+		if _, err := db.Exec(m); err != nil {
+			t.Logf("setup MSSQL full schema: migration warning: %v", err)
+		}
+	}
 }
 
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.

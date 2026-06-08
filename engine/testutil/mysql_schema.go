@@ -223,6 +223,16 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 			t.Fatalf("setup MySQL full schema: statement %d: %v", i, err)
 		}
 	}
+
+	// Migration: add columns that may be missing from older test databases.
+	// Errors are ignored — if the column already exists, that's fine.
+	migrations := []string{
+		"ALTER TABLE workflow_instances ADD COLUMN event_count BIGINT NOT NULL DEFAULT 0",
+		"ALTER TABLE workflow_instances ADD COLUMN allowed_signals JSON DEFAULT NULL",
+	}
+	for _, m := range migrations {
+		db.Exec(m) // best-effort, ignore errors
+	}
 }
 
 // CleanupMySQLTestData removes all test data from MySQL tables.

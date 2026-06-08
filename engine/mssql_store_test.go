@@ -307,3 +307,68 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 		t.Fatalf("StartNewRun (idemkey): tenant_id = %q, want %q", storedTenant.String, nonDefaultTenant)
 	}
 }
+
+// TestMSSQLFactoryAttributes verifies factory DriverName and Dialect methods.
+func TestMSSQLFactoryAttributes(t *testing.T) {
+	factory := NewMSSQLStoreFactory("sqlserver://localhost")
+	if factory == nil {
+		t.Fatal("NewMSSQLStoreFactory returned nil")
+	}
+
+	if factory.DriverName() != "mssql" {
+		t.Errorf("DriverName = %q, want %q", factory.DriverName(), "mssql")
+	}
+
+	if factory.Dialect() != DialectMSSQL {
+		t.Errorf("Dialect() = %v, want %v", factory.Dialect(), DialectMSSQL)
+	}
+}
+
+// TestMSSQLFactoryClose tests that Close cleans up tenant pools.
+func TestMSSQLFactoryClose(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+	if testing.Short() {
+		t.Skip("Skipping MSSQL database test in short mode")
+	}
+
+	connStr := os.Getenv("CLEAT_TEST_MSSQL")
+	if connStr == "" {
+		connStr = "sqlserver://sa:CleatTest123!@localhost:1433?database=cleat"
+	}
+
+	factory := NewMSSQLStoreFactory(connStr)
+	if factory == nil {
+		t.Fatal("NewMSSQLStoreFactory returned nil")
+	}
+
+	// Closing an empty factory should not error.
+	if err := factory.Close(); err != nil {
+		t.Errorf("Close on empty factory: %v", err)
+	}
+}
+
+// TestMSSQLStoreConfigOptions verifies the With* config methods return
+// correctly configured copies without mutating the original.
+func TestMSSQLStoreConfigOptions(t *testing.T) {
+	store := NewMSSQLStore(nil, "default")
+	if store == nil {
+		t.Fatal("NewMSSQLStore returned nil")
+	}
+
+	// WithReadRedactionDisabled
+	s2 := store.WithReadRedactionDisabled(true)
+	if !s2.disableReadRedaction {
+		t.Error("disableReadRedaction should be true")
+	}
+	if store.disableReadRedaction {
+		t.Error("original store should not be mutated by WithReadRedactionDisabled")
+	}
+
+	// WithEncryption
+	s3 := store.WithEncryption(nil, false)
+	if s3 == nil {
+		t.Error("WithEncryption returned nil")
+	}
+}
