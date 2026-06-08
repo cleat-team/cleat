@@ -778,8 +778,8 @@ func TestMSSQLStore_GetWorkflowDef_Success(t *testing.T) {
 	if string(def.WASMBytes) != string(wasmBytes) {
 		t.Errorf("wasm bytes: %q, want %q", def.WASMBytes, wasmBytes)
 	}
-	if def.ABIVersion != "abi-v2" {
-		t.Errorf("abi: %q", def.ABIVersion)
+	if def.ABIVersion != 2 {
+		t.Errorf("abi: %d", def.ABIVersion)
 	}
 	if def.MinVersion != 1 {
 		t.Errorf("min_version: %d", def.MinVersion)
