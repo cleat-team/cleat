@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // mockCaller records all service calls for test assertions.
@@ -2652,5 +2654,530 @@ func TestAwaitAnyChildFreshDeterministicOrdering(t *testing.T) {
 	// Request should preserve original (unsorted) order.
 	if lastEvent.Request != `["c","a","b"]` {
 		t.Errorf("expected Request to preserve original order, got %q", lastEvent.Request)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RegisterUpdateHandler tests.
+// ---------------------------------------------------------------------------
+
+func TestRegisterUpdateHandlerReplay_Match(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:              0,
+		EventType:         EventTypeUpdateHandler,
+		UpdateHandlerName: "my-handler",
+	}}
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after advanceReplayStep, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true after replay match")
+	}
+}
+
+func TestRegisterUpdateHandlerReplay_Mismatch(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	if len(s.history) < 2 {
+		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
+	}
+	if s.history[1].EventType != EventTypeUpdateHandler {
+		t.Errorf("expected fresh event type update_handler, got %q", s.history[1].EventType)
+	}
+	if s.history[1].UpdateHandlerName != "my-handler" {
+		t.Errorf("expected UpdateHandlerName='my-handler', got %q", s.history[1].UpdateHandlerName)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestRegisterUpdateHandlerReplay_PastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	// empty history triggers exitReplay
+
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true after exitReplay")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeUpdateHandler {
+		t.Errorf("expected fresh event type update_handler, got %q", s.history[0].EventType)
+	}
+	if s.history[0].UpdateHandlerName != "my-handler" {
+		t.Errorf("expected UpdateHandlerName='my-handler', got %q", s.history[0].UpdateHandlerName)
+	}
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+}
+
+func TestRegisterUpdateHandlerFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.RegisterUpdateHandler(context.Background(), nil, "my-handler")
+
+	if result != 0 {
+		t.Errorf("expected 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	rec := s.history[0]
+	if rec.EventType != EventTypeUpdateHandler {
+		t.Errorf("expected EventTypeUpdateHandler, got %s", rec.EventType)
+	}
+	if rec.UpdateHandlerName != "my-handler" {
+		t.Errorf("expected UpdateHandlerName='my-handler', got %q", rec.UpdateHandlerName)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PluginCallStreaming tests.
+// ---------------------------------------------------------------------------
+
+func TestPluginCallStreamingReplay_MultipleChunks(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{
+		{Step: 0, EventType: EventTypePluginCallStreamChunk,
+			PluginOutput: "chunk1", StreamChunkIndex: 0},
+		{Step: 1, EventType: EventTypePluginCallStreamChunk,
+			PluginOutput: "chunk2", StreamChunkIndex: 1, StreamFinish: true},
+	}
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected errCode=0, got %d", errCode)
+	}
+	if s.stepCount != 2 {
+		t.Errorf("expected stepCount=2, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true")
+	}
+}
+
+func TestPluginCallStreamingReplay_StreamError(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:             0,
+		EventType:        EventTypePluginCallStreamChunk,
+		PluginOutput:     "plugin_call_streaming: boom",
+		StreamChunkIndex: 0,
+		StreamFinish:     true,
+	}}
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (stream error), got %d", errCode)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true")
+	}
+}
+
+func TestPluginCallStreamingReplay_EmptyHistory(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	// empty history — no chunks to replay
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected errCode=0 (empty result), got %d", errCode)
+	}
+	if s.stepCount != 0 {
+		t.Errorf("expected stepCount=0 (no events consumed), got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay=true")
+	}
+}
+
+func TestPluginCallStreamingFresh_Success(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	psr.Register("test-plugin", "Echo", func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		ch := make(chan plugin.StreamEvent, 2)
+		ch <- plugin.StreamEvent{Index: 0, Content: "hello"}
+		ch <- plugin.StreamEvent{Index: 1, Content: "world", Finish: true}
+		close(ch)
+		return ch, nil
+	})
+
+	s := newTestExecSession()
+	s.engine.pluginStreamRegistry = psr
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected errCode=0, got %d", errCode)
+	}
+	if s.stepCount != 2 {
+		t.Errorf("expected stepCount=2 (two chunks), got %d", s.stepCount)
+	}
+	if len(s.history) != 2 {
+		t.Fatalf("expected 2 history entries, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypePluginCallStreamChunk {
+		t.Errorf("expected EventTypePluginCallStreamChunk in history[0], got %s", s.history[0].EventType)
+	}
+	if s.history[1].EventType != EventTypePluginCallStreamChunk {
+		t.Errorf("expected EventTypePluginCallStreamChunk in history[1], got %s", s.history[1].EventType)
+	}
+	if !s.history[1].StreamFinish {
+		t.Error("expected second chunk to have StreamFinish=true")
+	}
+}
+
+func TestPluginCallStreamingFresh_NoRegistry(t *testing.T) {
+	s := newTestExecSession()
+	// s.engine.pluginStreamRegistry is nil
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (no registry), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].StreamFinish != true {
+		t.Error("expected StreamFinish=true on error event")
+	}
+	if s.history[0].StreamChunkIndex != 0 {
+		t.Errorf("expected StreamChunkIndex=0, got %d", s.history[0].StreamChunkIndex)
+	}
+}
+
+func TestPluginCallStreamingFresh_FuncNotFound(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	// "Echo" is not registered
+
+	s := newTestExecSession()
+	s.engine.pluginStreamRegistry = psr
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (not found), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].StreamFinish != true {
+		t.Error("expected StreamFinish=true on error event")
+	}
+}
+
+func TestPluginCallStreamingFresh_FuncError(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	psr.Register("test-plugin", "Echo", func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		return nil, fmt.Errorf("plugin init failure")
+	})
+
+	s := newTestExecSession()
+	s.engine.pluginStreamRegistry = psr
+
+	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (func error), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].StreamFinish != true {
+		t.Error("expected StreamFinish=true on error event")
+	}
+}
+
+// ---- SuspendError.Error() ----
+
+func TestSuspendError_Error_WithoutUntil(t *testing.T) {
+	e := &SuspendError{Reason: "timeout"}
+	got := e.Error()
+	if want := "cleat: suspend: timeout"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestSuspendError_Error_WithUntil(t *testing.T) {
+	tm := time.Date(2026, 6, 8, 12, 0, 0, 0, time.UTC)
+	e := &SuspendError{Reason: "sleep", Until: tm}
+	got := e.Error()
+	if !strings.Contains(got, "cleat: suspend until") || !strings.Contains(got, "sleep") {
+		t.Errorf("got %q, expected 'suspend until' and 'sleep'", got)
+	}
+}
+
+// ---- DeferralsFromHistory ----
+
+func TestDeferralsFromHistory_Empty(t *testing.T) {
+	defs := DeferralsFromHistory(nil)
+	if len(defs) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(defs))
+	}
+	defs = DeferralsFromHistory([]EventRecord{})
+	if len(defs) != 0 {
+		t.Errorf("expected empty map, got %d entries", len(defs))
+	}
+}
+
+func TestDeferralsFromHistory_DefersOnly(t *testing.T) {
+	history := []EventRecord{
+		{EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup temp files"},
+		{EventType: EventTypeDefer, DeferID: "d2", DeferDescription: "release lock"},
+	}
+	defs := DeferralsFromHistory(history)
+	if len(defs) != 2 {
+		t.Fatalf("expected 2 defers, got %d", len(defs))
+	}
+	if defs["d1"] != "cleanup temp files" {
+		t.Errorf("d1: got %q, want %q", defs["d1"], "cleanup temp files")
+	}
+	if defs["d2"] != "release lock" {
+		t.Errorf("d2: got %q, want %q", defs["d2"], "release lock")
+	}
+}
+
+func TestDeferralsFromHistory_MixedEvents(t *testing.T) {
+	history := []EventRecord{
+		{EventType: "call", Service: "svc"},
+		{EventType: EventTypeDefer, DeferID: "d1", DeferDescription: "cleanup"},
+		{EventType: "sleep"},
+		{EventType: EventTypeDefer, DeferID: "d2", DeferDescription: "notify"},
+	}
+	defs := DeferralsFromHistory(history)
+	if len(defs) != 2 {
+		t.Fatalf("expected 2 defers, got %d", len(defs))
+	}
+	if defs["d1"] != "cleanup" {
+		t.Errorf("d1: got %q, want 'cleanup'", defs["d1"])
+	}
+	if defs["d2"] != "notify" {
+		t.Errorf("d2: got %q, want 'notify'", defs["d2"])
+	}
+}
+
+// ---- DispatchUpdate ----
+
+func TestDispatchUpdate_NilHandler(t *testing.T) {
+	engine := NewEngine(nil, nil)
+	_, err := engine.DispatchUpdate(context.Background(), "update1", `{"key":"val"}`)
+	if err == nil {
+		t.Fatal("expected error for nil handler")
+	}
+	if !strings.Contains(err.Error(), "no update handler configured") {
+		t.Errorf("error should mention missing handler: %v", err)
+	}
+}
+
+func TestDispatchUpdate_ValidHandler(t *testing.T) {
+	handler := func(name, payload string) (string, error) {
+		return `{"result":"` + name + `"}`, nil
+	}
+	engine := NewEngine(nil, nil, WithUpdateHandler(handler))
+	result, err := engine.DispatchUpdate(context.Background(), "myUpdate", `{"x":1}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if want := `{"result":"myUpdate"}`; result != want {
+		t.Errorf("got %q, want %q", result, want)
+	}
+}
+
+// ---- invokeStepCallback ----
+
+func TestInvokeStepCallback_NilCallback(t *testing.T) {
+	s := newTestExecSession()
+	s.stepCount = 5
+	ok := s.invokeStepCallback(context.Background(), nil)
+	if !ok {
+		t.Error("expected true with nil callback")
+	}
+	if s.stepCount != 5 {
+		t.Errorf("stepCount should not change: got %d", s.stepCount)
+	}
+}
+
+func TestInvokeStepCallback_ReplayNext(t *testing.T) {
+	var calledStep int
+	var calledRec *EventRecord
+	var calledQS map[string]string
+	cb := WithReplayStepCallback(func(step int, rec *EventRecord, qs map[string]string) ReplayStepAction {
+		calledStep = step
+		calledRec = rec
+		calledQS = qs
+		return ReplayNext
+	})
+	s := newTestExecSession()
+	s.engine.stepCallback = nil // clear, then apply
+	cb(s.engine)
+	s.stepCallback = s.engine.stepCallback
+	s.stepCount = 7
+	s.queryState["key"] = "val"
+	rec := &EventRecord{Service: "test-svc"}
+
+	ok := s.invokeStepCallback(context.Background(), rec)
+	if !ok {
+		t.Error("expected true for ReplayNext")
+	}
+	if calledStep != 6 { // stepCount-1
+		t.Errorf("expected step 6, got %d", calledStep)
+	}
+	if calledRec != rec {
+		t.Error("callback should receive the EventRecord")
+	}
+	if calledQS["key"] != "val" {
+		t.Error("queryState snapshot missing entries")
+	}
+	// Verify snapshot is a copy — modifying returned qs doesn't affect session.
+	if len(calledQS) > 0 {
+		calledQS["key"] = "modified"
+		if s.queryState["key"] == "modified" {
+			t.Error("modifying snapshot should not mutate session queryState")
+		}
+	}
+}
+
+func TestInvokeStepCallback_ReplayQuit(t *testing.T) {
+	cancelCalled := false
+	cb := WithReplayStepCallback(func(step int, rec *EventRecord, qs map[string]string) ReplayStepAction {
+		return ReplayQuit
+	})
+	s := newTestExecSession()
+	s.engine.stepCallback = nil
+	cb(s.engine)
+	s.stepCallback = s.engine.stepCallback
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.stepCancel = func() { cancelCalled = true }
+	s.stepCount = 3
+
+	ok := s.invokeStepCallback(ctx, nil)
+	if ok {
+		t.Error("expected false for ReplayQuit")
+	}
+	if !cancelCalled {
+		t.Error("expected stepCancel to be called on ReplayQuit")
+	}
+}
+
+// ---- DurableDefer ----
+
+func TestDurableDefer_Fresh(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = false
+	s.DurableDefer(context.Background(), nil, "cleanup temp files", 0, 0)
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 event recorded, got %d", len(s.history))
+	}
+	rec := s.history[0]
+	if rec.EventType != EventTypeDefer {
+		t.Errorf("expected EventTypeDefer, got %s", rec.EventType)
+	}
+	if rec.DeferDescription != "cleanup temp files" {
+		t.Errorf("got description %q, want %q", rec.DeferDescription, "cleanup temp files")
+	}
+	if len(s.deferrals) != 1 {
+		t.Fatalf("expected 1 deferral in map, got %d", len(s.deferrals))
+	}
+	if s.deferrals[rec.DeferID] != "cleanup temp files" {
+		t.Errorf("deferral map has wrong description: %q", s.deferrals[rec.DeferID])
+	}
+}
+
+func TestDurableDefer_Replay(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:             0,
+		EventType:        EventTypeDefer,
+		DeferID:          "defer-99",
+		DeferDescription: "release lock",
+	}}
+	s.DurableDefer(context.Background(), nil, "ignored", 0, 0)
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+}
+
+// ---- FreshPluginCallStreaming — call guard rejection ----
+
+func TestPluginCallStreamingFresh_CallGuardRejection(t *testing.T) {
+	psr := NewPluginStreamRegistry()
+	psr.Register("secure-plugin", "GetSecrets", func(ctx context.Context, inputJSON string) (<-chan plugin.StreamEvent, error) {
+		ch := make(chan plugin.StreamEvent, 1)
+		ch <- plugin.StreamEvent{Index: 0, Content: "secret", Finish: true}
+		close(ch)
+		return ch, nil
+	})
+
+	guard := NewPluginCallGuard()
+	guard.Allow("caller-plugin", []string{"other-plugin"}) // NOT allowed to call secure-plugin
+
+	s := newTestExecSession()
+	s.engine.pluginStreamRegistry = psr
+	s.engine.pluginCallGuard = guard
+	s.callerPluginName = "caller-plugin"
+
+	result := s.PluginCallStreaming(context.Background(), nil, "secure-plugin", "GetSecrets", `{}`, 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 1 {
+		t.Errorf("expected errCode=1 (call guard rejection), got %d", errCode)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry (error event), got %d", len(s.history))
+	}
+	if s.history[0].StreamFinish != true {
+		t.Error("expected StreamFinish=true on guard rejection event")
+	}
+	if s.history[0].EventType != EventTypePluginCallStreamChunk {
+		t.Errorf("expected EventTypePluginCallStreamChunk, got %s", s.history[0].EventType)
 	}
 }
