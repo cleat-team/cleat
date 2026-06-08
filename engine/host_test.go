@@ -1624,3 +1624,329 @@ func TestPollCancellationStoreError(t *testing.T) {
 		t.Errorf("expected 0 on store error, got %d", result)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ContinueAsNew / ContinueAsNewWithVersion tests.
+// ---------------------------------------------------------------------------
+
+func TestContinueAsNewReplayCachedResult(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeContinueAsNew,
+		NewInput:  `{"v":1}`,
+	}}
+
+	result := s.ContinueAsNew(context.Background(), nil, `{"v":2}`)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput from cached event '{\"v\":1}', got %q", s.suspendErr.NewInput)
+	}
+}
+
+func TestContinueAsNewReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type — should be EventTypeContinueAsNew
+	}}
+
+	result := s.ContinueAsNew(context.Background(), nil, `{"v":1}`)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
+	}
+	if len(s.history) != 2 {
+		t.Fatalf("expected history len=2 (original + new ContinueAsNew), got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	}
+}
+
+func TestContinueAsNewReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	// history empty — stepCount=0 >= len(history)=0
+
+	result := s.ContinueAsNew(context.Background(), nil, `{"v":1}`)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	}
+}
+
+func TestContinueAsNewFresh(t *testing.T) {
+	s := newTestExecSession()
+	// isReplay=false by default
+
+	result := s.ContinueAsNew(context.Background(), nil, `{"v":1}`)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay to remain false")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", s.suspendErr.NewInput)
+	}
+}
+
+func TestContinueAsNewFreshEmptyInput(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.ContinueAsNew(context.Background(), nil, "")
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != "" {
+		t.Errorf("expected empty NewInput, got %q", s.suspendErr.NewInput)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.NewInput != "" {
+		t.Errorf("expected empty NewInput in event, got %q", last.NewInput)
+	}
+}
+
+func TestContinueAsNewWithVersionReplayCachedResult(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:       0,
+		EventType:  EventTypeContinueAsNew,
+		NewInput:   `{"v":1}`,
+		NewVersion: 3,
+	}}
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":2}`, 5)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput from cached event '{\"v\":1}', got %q", s.suspendErr.NewInput)
+	}
+	if s.suspendErr.NewVersion != 3 {
+		t.Errorf("expected NewVersion=3 from cached event, got %d", s.suspendErr.NewVersion)
+	}
+}
+
+func TestContinueAsNewWithVersionReplayDivergence(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: "call", // wrong type
+	}}
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 2)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
+	}
+	if len(s.history) != 2 {
+		t.Fatalf("expected history len=2 (original + new ContinueAsNew), got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewVersion != 2 {
+		t.Errorf("expected NewVersion=2 in event, got %d", last.NewVersion)
+	}
+}
+
+func TestContinueAsNewWithVersionReplayPastEnd(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	// history empty
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 2)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.isReplay {
+		t.Error("expected isReplay=false after exitReplay")
+	}
+	if !s.replayJustEnded {
+		t.Error("expected replayJustEnded=true")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewVersion != 2 {
+		t.Errorf("expected NewVersion=2 in event, got %d", last.NewVersion)
+	}
+}
+
+func TestContinueAsNewWithVersionFresh(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 2)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.EventType != EventTypeContinueAsNew {
+		t.Errorf("expected EventTypeContinueAsNew, got %s", last.EventType)
+	}
+	if last.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", last.NewInput)
+	}
+	if last.NewVersion != 2 {
+		t.Errorf("expected NewVersion=2, got %d", last.NewVersion)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewInput != `{"v":1}` {
+		t.Errorf("expected NewInput='{\"v\":1}', got %q", s.suspendErr.NewInput)
+	}
+	if s.suspendErr.NewVersion != 2 {
+		t.Errorf("expected NewVersion=2, got %d", s.suspendErr.NewVersion)
+	}
+}
+
+func TestContinueAsNewWithVersionFreshZero(t *testing.T) {
+	s := newTestExecSession()
+
+	result := s.ContinueAsNewWithVersion(context.Background(), nil, `{"v":1}`, 0)
+
+	if result != 0 {
+		t.Errorf("expected result 0, got %d", result)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr to be set")
+	}
+	if s.suspendErr.Reason != "continue_as_new" {
+		t.Errorf("expected reason 'continue_as_new', got %q", s.suspendErr.Reason)
+	}
+	if s.suspendErr.NewVersion != 0 {
+		t.Errorf("expected NewVersion=0, got %d", s.suspendErr.NewVersion)
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected history len=1, got %d", len(s.history))
+	}
+	last := s.history[len(s.history)-1]
+	if last.NewVersion != 0 {
+		t.Errorf("expected NewVersion=0 in event, got %d", last.NewVersion)
+	}
+}
