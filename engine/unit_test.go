@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -2713,3 +2714,273 @@ func (m *mockPurgeStore) QueueDepth(ctx context.Context) (int64, error) { return
 func (m *mockPurgeStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
 func (m *mockPurgeStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
 func (m *mockPurgeStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
+
+// ---------------------------------------------------------------------------
+// Error-injection mocks for version-management error-path tests
+// ---------------------------------------------------------------------------
+
+type errorMockGCStore struct {
+	*stubWorkflowStore
+
+	defs         []WorkflowDef
+	listErr      error
+	activeCounts map[string]int
+	countsErr    error
+	activeCount  int
+	countErr     error
+	purgeErr     error
+	purgeCalled  []string
+}
+
+func (m *errorMockGCStore) ListWorkflowDefs(_ context.Context, name string) ([]WorkflowDef, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	if name == "" {
+		return m.defs, nil
+	}
+	var filtered []WorkflowDef
+	for _, d := range m.defs {
+		if d.Name == name {
+			filtered = append(filtered, d)
+		}
+	}
+	return filtered, nil
+}
+
+func (m *errorMockGCStore) GetActiveInstanceCountsByVersion(_ context.Context) (map[string]int, error) {
+	if m.countsErr != nil {
+		return nil, m.countsErr
+	}
+	return m.activeCounts, nil
+}
+
+func (m *errorMockGCStore) CountActiveInstances(_ context.Context, name string, version int) (int, error) {
+	return m.activeCount, m.countErr
+}
+
+func (m *errorMockGCStore) PurgeWorkflowDef(_ context.Context, name string, version int) error {
+	m.purgeCalled = append(m.purgeCalled, fmt.Sprintf("%s:%d", name, version))
+	return m.purgeErr
+}
+
+type errorMockMetricsStore struct {
+	*stubWorkflowStore
+
+	defs      []WorkflowDef
+	listErr   error
+	counts    map[string]int
+	countsErr error
+}
+
+func (m *errorMockMetricsStore) ListWorkflowDefs(_ context.Context, name string) ([]WorkflowDef, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	if name == "" {
+		return m.defs, nil
+	}
+	var filtered []WorkflowDef
+	for _, d := range m.defs {
+		if d.Name == name {
+			filtered = append(filtered, d)
+		}
+	}
+	return filtered, nil
+}
+
+func (m *errorMockMetricsStore) GetActiveInstanceCountsByVersion(_ context.Context) (map[string]int, error) {
+	if m.countsErr != nil {
+		return nil, m.countsErr
+	}
+	return m.counts, nil
+}
+
+// ---------------------------------------------------------------------------
+// GarbageCollectVersions error paths
+// ---------------------------------------------------------------------------
+
+func TestGarbageCollectVersions_ListWorkflowDefsError(t *testing.T) {
+	store := &errorMockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		listErr:           errors.New("db unavailable"),
+	}
+	result, err := GarbageCollectVersions(context.Background(), store, DefaultGCOptions())
+	if err == nil {
+		t.Error("expected error from ListWorkflowDefs, got nil")
+	}
+	if result != nil {
+		t.Errorf("expected nil result on error, got %+v", result)
+	}
+}
+
+func TestGarbageCollectVersions_GetActiveCountsError(t *testing.T) {
+	store := &errorMockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 1, CreatedAt: time.Now()},
+		},
+		countsErr: errors.New("count query failed"),
+	}
+	result, err := GarbageCollectVersions(context.Background(), store, DefaultGCOptions())
+	if err == nil {
+		t.Error("expected error from GetActiveInstanceCountsByVersion, got nil")
+	}
+	if result != nil {
+		t.Errorf("expected nil result on error, got %+v", result)
+	}
+}
+
+func TestGarbageCollectVersions_PurgeErrorInErrors(t *testing.T) {
+	now := time.Now()
+	store := &errorMockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 3, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+		},
+		activeCounts: map[string]int{},
+		purgeErr:     errors.New("purge failed"),
+	}
+	opts := GCOptions{
+		MinVersionsToKeep: 2,
+		MaxVersionAge:     30 * 24 * time.Hour,
+		Now:               now,
+	}
+	result, err := GarbageCollectVersions(context.Background(), store, opts)
+	if err != nil {
+		t.Fatalf("unexpected top-level error: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error in result.Errors, got %d", len(result.Errors))
+	}
+	if result.VersionsRemoved != 0 {
+		t.Errorf("VersionsRemoved = %d, want 0 (purge failed)", result.VersionsRemoved)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// PurgeVersions error paths
+// ---------------------------------------------------------------------------
+
+func TestPurgeVersions_ListWorkflowDefsError(t *testing.T) {
+	store := &errorMockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		listErr:           errors.New("db unavailable"),
+	}
+	result, err := PurgeVersions(context.Background(), store, "wf", 7*24*time.Hour)
+	if err == nil {
+		t.Error("expected error from ListWorkflowDefs, got nil")
+	}
+	if result != nil {
+		t.Errorf("expected nil result on error, got %+v", result)
+	}
+}
+
+func TestPurgeVersions_CountActiveInstancesError(t *testing.T) {
+	store := &errorMockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-30 * 24 * time.Hour)},
+		},
+		countErr: errors.New("count query failed"),
+	}
+	result, err := PurgeVersions(context.Background(), store, "wf", 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("unexpected top-level error: %v", err)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error in result.Errors, got %d", len(result.Errors))
+	}
+}
+
+func TestPurgeVersions_PurgeErrorInErrors(t *testing.T) {
+	store := &errorMockGCStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-30 * 24 * time.Hour)},
+		},
+		purgeErr: errors.New("purge failed"),
+	}
+	result, err := PurgeVersions(context.Background(), store, "wf", 7*24*time.Hour)
+	if err != nil {
+		t.Fatalf("unexpected top-level error: %v", err)
+	}
+	if result.VersionsRemoved != 0 {
+		t.Errorf("VersionsRemoved = %d, want 0 (purge failed)", result.VersionsRemoved)
+	}
+	if len(result.Errors) != 1 {
+		t.Fatalf("expected 1 error in result.Errors, got %d", len(result.Errors))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CollectVersionMetrics error paths
+// ---------------------------------------------------------------------------
+
+func TestCollectVersionMetrics_ListError(t *testing.T) {
+	store := &errorMockMetricsStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		listErr:           errors.New("db unavailable"),
+	}
+	summary, err := CollectVersionMetrics(context.Background(), store)
+	if err == nil {
+		t.Error("expected error from ListWorkflowDefs, got nil")
+	}
+	if summary != nil {
+		t.Errorf("expected nil result on error, got %+v", summary)
+	}
+}
+
+func TestCollectVersionMetrics_CountsError(t *testing.T) {
+	store := &errorMockMetricsStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 1},
+		},
+		countsErr: errors.New("count query failed"),
+	}
+	summary, err := CollectVersionMetrics(context.Background(), store)
+	if err == nil {
+		t.Error("expected error from GetActiveInstanceCountsByVersion, got nil")
+	}
+	if summary != nil {
+		t.Errorf("expected nil result on error, got %+v", summary)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CheckStaleVersions error paths
+// ---------------------------------------------------------------------------
+
+func TestCheckStaleVersions_ListError(t *testing.T) {
+	store := &errorMockMetricsStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		listErr:           errors.New("db unavailable"),
+	}
+	alerts, err := CheckStaleVersions(context.Background(), store, 30*24*time.Hour, 7*24*time.Hour)
+	if err == nil {
+		t.Error("expected error from ListWorkflowDefs, got nil")
+	}
+	if alerts != nil {
+		t.Errorf("expected nil result on error, got %+v", alerts)
+	}
+}
+
+func TestCheckStaleVersions_CountsError(t *testing.T) {
+	store := &errorMockMetricsStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs: []WorkflowDef{
+			{Name: "wf", Version: 1},
+		},
+		countsErr: errors.New("count query failed"),
+	}
+	alerts, err := CheckStaleVersions(context.Background(), store, 30*24*time.Hour, 7*24*time.Hour)
+	if err == nil {
+		t.Error("expected error from GetActiveInstanceCountsByVersion, got nil")
+	}
+	if alerts != nil {
+		t.Errorf("expected nil result on error, got %+v", alerts)
+	}
+}
