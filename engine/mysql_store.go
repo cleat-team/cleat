@@ -38,6 +38,14 @@ func isLockWaitTimeout(err error) bool {
 	return false
 }
 
+func isDeadlockError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1213
+	}
+	return false
+}
+
 // ---------------------------------------------------------------------------
 // MySQLStore
 // ---------------------------------------------------------------------------
