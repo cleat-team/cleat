@@ -273,7 +273,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 
 	q := strings.ReplaceAll(query, "\n", " ")
 	switch {
-	case strings.Contains(q, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(q, "tenant_api_keys"):
 		return c.queryTenantByKeyHash(args)
 	case strings.Contains(q, "SELECT routing_key FROM pd_config") || (strings.Contains(q, "routing_key") && strings.Contains(q, "FROM pd_config") && strings.Contains(q, "enabled = true")):
 		return c.queryRoutingKey(args)

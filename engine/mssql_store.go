@@ -1073,13 +1073,20 @@ func (s *MSSQLStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID s
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'ready', assigned_to = NULL, next_wake_at = @p3
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p4
 	`, workflowID, workerID, nextWakeAt, generation)
 	if err != nil {
 		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("release workflow: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("release workflow: no rows affected for %s", workflowID)
 	}
 
 	return tx.Commit()
@@ -2461,6 +2468,9 @@ func (s *MSSQLStore) GetEventCount(ctx context.Context, workflowID string) (int,
 	var count int
 	err = tx.QueryRowContext(ctx, `SELECT event_count FROM workflow_instances WHERE id = @p1`, workflowID).Scan(&count)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
 		return 0, fmt.Errorf("get event count for %s: %w", workflowID, err)
 	}
 	return count, tx.Commit()
@@ -2645,6 +2655,9 @@ func (s *MSSQLStore) ResolveLatestVersion(ctx context.Context, defName string) (
 	if err != nil {
 		return 0, fmt.Errorf("resolve latest version: %w", err)
 	}
+	if version == 0 {
+		return 0, fmt.Errorf("resolve latest version: no non-deprecated version found for %s", defName)
+	}
 	return version, nil
 }
 
@@ -2675,8 +2688,9 @@ func (s *MSSQLStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
 		WHERE status IN ('ready', 'running')
+		  AND (tenant_id = @p1 OR tenant_id IS NULL)
 		GROUP BY def_name, def_version
-	`)
+	`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("get active instance counts: %w", err)
 	}
