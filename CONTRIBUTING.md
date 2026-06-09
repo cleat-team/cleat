@@ -54,17 +54,24 @@ that's what the CLA is for.
 
 To build and test cleat you will need:
 
+**Minimum (write and run Go workflows):**
 | Tool | Version | Required | Notes |
 |------|---------|----------|-------|
-| **Go** | 1.26+ | Yes | See `go.mod` |
-| **PostgreSQL** | 14+ (16 recommended) | Yes | For worker daemon and workflow storage |
-| **TinyGo** | Latest | No | Required only for `--target tinygo`. The default `--target go` uses the standard Go toolchain (`GOOS=wasip1 GOARCH=wasm`). |
-| **Rust toolchain** | Stable | No | For `cleat-macro` / `cleat-sdk` crates and Rust workflows |
-| **Node.js** | 20+ | No | For Svelte web UI and AssemblyScript SDK |
-| **Java** | 17+ | No | For Java SDK |
-| **MySQL** | 8.0+ (Docker) | No | Required only for MySQL backend integration tests (`CLEAT_TEST_MYSQL`) |
-| **SQL Server** | 2017+ (Docker) | No | Required only for MSSQL backend integration tests (`CLEAT_TEST_MSSQL`) |
-| **Docker** | Latest | No | For cluster integration tests |
+| Go | 1.25+ | Yes | Standard Go toolchain |
+| PostgreSQL | 14+ (16 recommended) | Yes | Or MySQL 8.0+, or SQL Server 2017+ |
+| Docker | Latest | No | Only if using Docker for the database |
+
+**Full (develop cleat itself):**
+| Tool | Version | Required | Notes |
+|------|---------|----------|-------|
+| Everything above | | Yes | |
+| Rust toolchain | Stable | No | For `cleat-macro` / `cleat-sdk` crates and Rust workflows |
+| Python 3 | 3.10+ | No | For Python SDK |
+| Java | 17+ | No | For Java SDK |
+| Node.js | 20+ | No | For Svelte web UI and AssemblyScript SDK |
+| MySQL | 8.0+ (Docker) | No | For MySQL backend integration tests |
+| SQL Server | 2017+ (Docker) | No | For MSSQL backend integration tests |
+| Docker | Latest | No | For cluster integration tests |
 
 ## Branch naming
 
@@ -124,6 +131,17 @@ dependabot or with the `bot` label are exempt.
 6. **CI must pass.** All tests, linters, and checks must pass before a PR can
    be merged. This includes DCO, semantic PR title, branch naming, CLA check
    (for first-time contributors), and the AI review gates.
+
+## Quick setup
+
+For a one-command toolchain check:
+
+```bash
+make setup        # minimum: Go + PostgreSQL (for workflow authors)
+make setup-full   # everything: all languages + databases (for engine contributors)
+```
+
+Or open this repo in VS Code with the [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) extension — the `.devcontainer/` configuration provisions a complete environment automatically.
 
 ## Build from source
 
