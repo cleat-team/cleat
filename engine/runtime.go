@@ -193,8 +193,6 @@ func (r *Runtime) InstantiateModuleNamed(ctx context.Context, compiled wazero.Co
 		WithName(name).
 		WithStdout(&r.stdout).
 		WithStderr(&r.stderr).
-		WithSysWalltime().
-		WithSysNanotime().
 		WithStartFunctions()
 	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
 }
@@ -208,8 +206,6 @@ func (r *Runtime) instantiateModuleNamedWithWriters(ctx context.Context, compile
 		WithName(name).
 		WithStdout(stdout).
 		WithStderr(stderr).
-		WithSysWalltime().
-		WithSysNanotime().
 		WithStartFunctions()
 	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
 }
