@@ -325,13 +325,6 @@ func (pr *PluginRegistry) SetHealthTracker(t *plugin.PluginHealthTracker) {
 	pr.healthTracker = t
 }
 
-// lookupKey returns a unique key for a plugin function. The \x00 separator
-// prevents collisions between names like "a/b" and "a/b" (which would collide
-// with "/") and is guaranteed not to appear in valid plugin or function names.
-func lookupKey(pluginName, funcName string) string {
-	return pluginName + "\x00" + funcName
-}
-
 // Register adds a plugin function. Returns an error if the function name
 // is already registered for this plugin. The function is wrapped with
 // panic recovery so a plugin crash does not take down the worker.
