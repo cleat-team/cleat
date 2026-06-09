@@ -2389,7 +2389,7 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	}
 
 	// Try to insert with a unique constraint.
-	_, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
 		SELECT @p1, @p2, @p3, DATEADD(SECOND, @p4, SYSUTCDATETIME()), @p5
 		WHERE NOT EXISTS (
@@ -2399,19 +2399,8 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	if err != nil {
 		return false, fmt.Errorf("acquire concurrency key: %w", err)
 	}
-
-	// Check if our insert succeeded (tenant-scoped).
-	var wkID string
-	err = tx.QueryRowContext(ctx, `
-		SELECT workflow_id FROM concurrency_keys WHERE key_hash = @p1 AND tenant_id = @p2
-	`, keyHash[:], s.tenantID).Scan(&wkID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, tx.Commit()
-	}
-	if err != nil {
-		return false, fmt.Errorf("acquire concurrency key: verify: %w", err)
-	}
-	return wkID == workflowID, tx.Commit()
+	n, _ := result.RowsAffected()
+	return n > 0, tx.Commit()
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
