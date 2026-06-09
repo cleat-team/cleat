@@ -322,6 +322,7 @@ tools-go:
 	else \
 		echo "[MISSING] Go $(GO_MIN_VERSION)+ — install from https://go.dev/dl/"; \
 		echo "  Linux:   wget https://go.dev/dl/go1.25.7.linux-amd64.tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.7.linux-amd64.tar.gz"; \
+		echo "  macOS:   brew install go@1.25"; \
 	fi
 
 
