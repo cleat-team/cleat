@@ -12,6 +12,7 @@ linters:
     - unconvert
     - gocyclo
     - gofmt
+    - gosec
 issues:
   exclude-files:
     - ".*_test\\.go$"

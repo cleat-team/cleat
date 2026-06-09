@@ -1,0 +1,184 @@
+package engine
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/tetratelabs/wazero/api"
+)
+
+func (s *execSession) SetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
+	if s.isReplay {
+		return s.replaySetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
+	}
+	return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
+}
+
+func (s *execSession) ClearScope(ctx context.Context) {
+	if s.scopeSet && s.scopePrefix != "" {
+		scopeKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
+		if s.engine.concurrencyKeyStore != nil {
+			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
+				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			}
+		}
+		for i, held := range s.heldScopes {
+			if held == scopeKey {
+				s.heldScopes = append(s.heldScopes[:i], s.heldScopes[i+1:]...)
+				break
+			}
+		}
+	}
+	s.scopeSet = false
+	s.scopePrefix = ""
+	s.scopeObjType = ""
+	s.scopeInstKey = ""
+}
+
+func (s *execSession) freshSetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
+
+	// Save previous scope prefix to output buffer.
+	prevScope := ""
+	if s.scopeSet && s.scopePrefix != "" {
+		prevScope = s.scopePrefix
+		_, _ = s.writeResult(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
+	}
+
+	if objectType == "" && instanceKey == "" {
+		s.ClearScope(ctx)
+		return 0
+	}
+
+	// If switching from an existing scope, release the old key first.
+	if s.scopeSet && s.scopePrefix != "" {
+		oldKey := "vo:" + s.scopeObjType + ":" + s.scopeInstKey
+		if s.engine.concurrencyKeyStore != nil {
+			if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, oldKey); err != nil {
+				s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+			}
+		}
+		for i, held := range s.heldScopes {
+			if held == oldKey {
+				s.heldScopes = append(s.heldScopes[:i], s.heldScopes[i+1:]...)
+				break
+			}
+		}
+	}
+
+	// Acquire new scope key.
+	scopeKey := "vo:" + objectType + ":" + instanceKey
+	if s.engine.concurrencyKeyStore != nil {
+		acquired, err := s.engine.concurrencyKeyStore.AcquireConcurrencyKey(ctx, scopeKey, s.workflowID, 24*time.Hour)
+		if err != nil {
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeScopeAcquired,
+				ScopeKey:  scopeKey,
+				Err:       err.Error(),
+			}
+			s.recordEvent(rec)
+			return packSimpleResult(1, 0)
+		}
+		if !acquired {
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeScopeAcquired,
+				ScopeKey:  scopeKey,
+				Err:       "scope held by another workflow",
+			}
+			s.recordEvent(rec)
+			s.suspendErr = &SuspendError{
+				Reason: fmt.Sprintf("virtual object scope %s held by another workflow", scopeKey),
+				Until:  time.UnixMilli(s.nowMs).Add(5 * time.Second),
+			}
+			return 0
+		}
+		s.heldScopes = append(s.heldScopes, scopeKey)
+	}
+
+	// Record successful acquisition.
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeScopeAcquired,
+		ScopeKey:  scopeKey,
+	}
+	s.recordEvent(rec)
+
+	s.scopeSet = true
+	s.scopeObjType = objectType
+	s.scopeInstKey = instanceKey
+	s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
+	return 0
+}
+
+func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectType, instanceKey string, prevScopePtr, prevScopeMaxLen uint32) int64 {
+
+	// Save previous scope prefix to output buffer (reconstructed from replayed scope state).
+	prevScope := ""
+	if s.scopeSet && s.scopePrefix != "" {
+		prevScope = s.scopePrefix
+		_, _ = s.writeResult(ctx, m, prevScopePtr, prevScope, prevScopeMaxLen)
+	}
+
+	if objectType == "" && instanceKey == "" {
+		s.scopeSet = false
+		s.scopePrefix = ""
+		s.scopeObjType = ""
+		s.scopeInstKey = ""
+		return 0
+	}
+
+	if s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
+
+		if rec.EventType != EventTypeScopeAcquired {
+			return packSimpleResult(1, 0)
+		}
+
+		if rec.Err != "" {
+			// Previous attempt failed.
+			// Do not set scope fields; switch to fresh to retry acquisition.
+			s.exitReplay()
+			return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
+		}
+
+		// Acquisition was successful.
+		s.scopeSet = true
+		s.scopeObjType = objectType
+		s.scopeInstKey = instanceKey
+		s.scopePrefix = "vo:" + objectType + ":" + instanceKey + ":"
+		s.heldScopes = append(s.heldScopes, "vo:"+objectType+":"+instanceKey)
+		return 0
+	}
+
+	// Past recorded history -- switch to fresh execution.
+	s.exitReplay()
+	return s.freshSetScope(ctx, m, objectType, instanceKey, prevScopePtr, prevScopeMaxLen)
+}
+
+func (s *execSession) releaseHeldScopes(ctx context.Context) {
+	if s.engine.concurrencyKeyStore == nil {
+		return
+	}
+	for _, scopeKey := range s.heldScopes {
+		if err := s.engine.concurrencyKeyStore.ReleaseConcurrencyKey(ctx, scopeKey); err != nil {
+			s.engine.log().ErrorContext(ctx, "release_concurrency_key failed", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "error", err)
+		}
+	}
+	s.heldScopes = nil
+}
+
+func (s *execSession) GetScope(ctx context.Context, m api.Module, objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen uint32) int64 {
+
+	var objTypeLen, instKeyLen uint32
+	if s.scopeSet {
+		objTypeLen, _ = s.writeResult(ctx, m, objTypePtr, s.scopeObjType, objTypeMaxLen)
+		instKeyLen, _ = s.writeResult(ctx, m, instKeyPtr, s.scopeInstKey, instKeyMaxLen)
+	}
+
+	return int64(uint64(objTypeLen)<<32 | uint64(instKeyLen))
+}

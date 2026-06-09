@@ -1,0 +1,396 @@
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"sync/atomic"
+	"time"
+
+	"github.com/tetratelabs/wazero/api"
+
+	"github.com/cleat-team/cleat/internal/telemetry"
+)
+
+func (s *execSession) DurableCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
+	if s.isReplay {
+		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+	}
+	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+}
+
+func (s *execSession) freshCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
+
+	durableCallsTotal.Inc()
+	freshStepsTotal.Inc()
+	atomic.AddInt64(&freshStepCount, 1)
+
+	// Check cancellation before making the call.
+	callCtx := ctx
+	if s.engine.signalStore != nil {
+		cancelled, _, err := s.engine.signalStore.PollCancellation(ctx, "")
+		if err == nil && cancelled {
+			written, _ := s.writeResult(ctx, m, responsePtr, "workflow cancelled", responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+	}
+
+	// Check event cap: if the number of events has reached the limit, auto-trigger
+	// ContinueAsNew to start a fresh run with reset event_count. Events are
+	// tracked locally in the session (no DB query per call).
+	if s.engine.maxEventsPerWorkflow > 0 && s.eventCount >= s.engine.maxEventsPerWorkflow && !s.autoContinueAsNewTriggered {
+		s.autoContinueAsNewTriggered = true
+		continueAsNewTotal.WithLabelValues("event_cap").Inc()
+		s.engine.log().InfoContext(ctx, "auto-ContinueAsNew triggered", "workflow_id", s.workflowID, "tenant_id", s.tenantID, "event_count", s.eventCount, "max", s.engine.maxEventsPerWorkflow)
+		s.ContinueAsNew(ctx, m, s.originalInput)
+		m.CloseWithExitCode(ctx, 0)
+		written, _ := s.writeResult(ctx, m, responsePtr, "", responseMaxLen)
+		return packDurableCallResult(int(written), 0, 0)
+	}
+	s.eventCount++
+
+	step := s.stepCount
+	callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "call", service, operation)
+	defer eventSpan.End()
+	resp, err := s.engine.caller.Call(callCtx, service, operation, requestJSON)
+
+	var callErr string
+	if err != nil {
+		callErr = err.Error()
+	}
+
+	rec := EventRecord{
+		Step:      step,
+		EventType: EventTypeCall,
+		Service:   service,
+		Op:        operation,
+		Request:   requestJSON,
+		Response:  resp,
+		Err:       callErr,
+	}
+	s.recordEvent(rec)
+
+	// Flush the event immediately to guarantee at-least-once: if the worker
+	// crashes before the workflow completes, replay will find this event
+	// and return the cached response.  (Use DurableCallIdempotent for
+	// exactly-once with write-ahead logging and ambiguity detection.)
+	if s.engine.db != nil {
+		if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec); flushErr != nil {
+			s.engine.log().ErrorContext(ctx, "freshCall flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "error", flushErr)
+		}
+	}
+
+	if err != nil {
+		written, _ := s.writeResult(ctx, m, responsePtr, err.Error(), responseMaxLen)
+		return packDurableCallResult(int(written), 1, 1)
+	}
+
+	written, _ := s.writeResult(ctx, m, responsePtr, resp, responseMaxLen)
+	return packDurableCallResult(int(written), 0, 0)
+}
+
+func (s *execSession) replayCall(ctx context.Context, m api.Module, service, operation, requestJSON string, responsePtr, responseMaxLen uint32) int64 {
+
+	replayStepsTotal.WithLabelValues(s.defName).Inc()
+	atomic.AddInt64(&replayStepCount, 1)
+
+	if s.stepCount < len(s.history) {
+		rec := s.history[s.stepCount]
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
+
+		if rec.EventType != EventTypeCall {
+			replayFailuresTotal.Inc()
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected call event, got %s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
+			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		if rec.Service != service || rec.Op != operation {
+			replayFailuresTotal.Inc()
+			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s.%s but history has %s.%s.\n  actual request: %s\n  expected request: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, service, operation, rec.Service, rec.Op,
+				truncateWithHash(requestJSON, maxPayloadLen),
+				truncateWithHash(rec.Request, maxPayloadLen))
+			written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		// Detect a pending call intent: the external call was dispatched
+		// but the outcome was never persisted.  Return ErrAmbiguous so
+		// the caller can check the external service before retrying.
+		if rec.Err == pendingSentinel {
+			ambiguousCallsTotal.Inc()
+			ambiguousErr := fmt.Sprintf(
+				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
+				rec.Step, rec.Service, rec.Op)
+			written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		if rec.Err != "" {
+			written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
+			return packDurableCallResult(int(written), 1, 1)
+		}
+
+		written, _ := s.writeResult(ctx, m, responsePtr, rec.Response, responseMaxLen)
+		return packDurableCallResult(int(written), 0, 0)
+	}
+
+	// Past recorded history — switch to fresh execution.
+	s.exitReplay()
+	return s.freshCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+}
+
+func (s *execSession) DurableCallWithRetry(ctx context.Context, m api.Module,
+	service, operation, requestJSON string,
+	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
+	nonRetryableErrorsJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+
+	// Worker-enforced ceiling on retry attempts to prevent runaway retries
+	// from misconfigured WASM modules.  Use the engine-configured limit if
+	// set (it comes from --max-retries on the command line), otherwise the
+	// package-level constant.
+	ceiling := MaxRetryAttempts
+	if s.engine.maxRetries > 0 && s.engine.maxRetries < ceiling {
+		ceiling = s.engine.maxRetries
+	}
+	if maxAttempts > int64(ceiling) {
+		maxAttempts = int64(ceiling)
+	}
+	if s.isReplay {
+		return s.replayCall(ctx, m, service, operation, requestJSON, responsePtr, responseMaxLen)
+	}
+	return s.freshCallWithRetry(ctx, m, service, operation, requestJSON,
+		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs,
+		nonRetryableErrorsJSON, responsePtr, responseMaxLen)
+}
+
+func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
+	service, operation, requestJSON string,
+	maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
+	nonRetryableErrorsJSON string,
+	responsePtr, responseMaxLen uint32) int64 {
+
+	// Parse non-retryable error patterns.
+	var nonRetryableErrors []string
+	if nonRetryableErrorsJSON != "" {
+		json.Unmarshal([]byte(nonRetryableErrorsJSON), &nonRetryableErrors)
+	}
+
+	var lastErr error
+	exhausted := true
+
+	for attempt := int64(1); attempt <= maxAttempts; attempt++ {
+		resp, callErr := s.engine.caller.Call(ctx, service, operation, requestJSON)
+
+		if callErr == nil {
+			// Success — record one event and return.
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeCall,
+				Service:   service,
+				Op:        operation,
+				Request:   requestJSON,
+				Response:  resp,
+			}
+			s.recordEvent(rec)
+
+			written, _ := s.writeResult(ctx, m, responsePtr, resp, responseMaxLen)
+			return packDurableCallResult(int(written), 0, 0)
+		}
+
+		lastErr = callErr
+
+		// Check if error is definitively non-retryable.
+		if isDefinitelyNonRetryable(callErr, nonRetryableErrors) {
+			exhausted = false
+			break
+		}
+
+		if attempt < maxAttempts {
+			// Exponential backoff using host time (not DurableSleep).
+			backoffMs := initialIntervalMs * int64(math.Pow(float64(backoffCoefficient100x)/100.0, float64(attempt-1)))
+			if backoffMs > maxIntervalMs {
+				backoffMs = maxIntervalMs
+			}
+			if backoffMs < 1 {
+				backoffMs = 1 // minimum backoff to prevent a tight retry loop
+			}
+			select {
+			case <-ctx.Done():
+				return packDurableCallResult(0, 0, 0)
+			case <-time.After(time.Duration(backoffMs) * time.Millisecond):
+			}
+		}
+	}
+
+	// All retries exhausted or non-retryable error — record failure event.
+	errMsg := lastErr.Error()
+	if exhausted {
+		errMsg = "retries exhausted: " + errMsg
+	}
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeCall,
+		Service:   service,
+		Op:        operation,
+		Request:   requestJSON,
+		Err:       errMsg,
+	}
+	s.recordEvent(rec)
+
+	written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
+	return packDurableCallResult(int(written), 1, 1)
+}
+
+func (s *execSession) DurableSleep(ctx context.Context, m api.Module, durationMs int64) int64 {
+	// Sleep is local (not recorded in event history).
+	// It advances virtual time by the duration and either suspends
+	// (forward execution) or completes immediately (first sleep
+	// after replay, which is the resume-from-sleep case).
+	//
+	// Local model rationale: if the worker crashes during a sequence
+	// of sleeps before the next durable event, replay re-executes
+	// them from scratch — which is correct because they had no
+	// external side effects.
+	s.nowMs += durationMs
+
+	if s.replayJustEnded {
+		// This is the sleep that originally suspended the workflow.
+		// The real wait already happened (the timer fired).
+		// Just advance virtual time and continue.
+		s.replayJustEnded = false
+		return packSleepResult(sleepStatusCompleted, 0)
+	}
+
+	// Forward execution: suspend until the sleep duration elapses.
+	s.suspendErr = &SuspendError{
+		Reason: fmt.Sprintf("cleat_sleep(%dms)", durationMs),
+		Until:  time.UnixMilli(s.nowMs),
+	}
+
+	return packSleepResult(sleepStatusSuspend, durationMs)
+}
+
+func (s *execSession) DurableDefer(ctx context.Context, m api.Module, description string, deferIDPtr, deferIDMaxLen uint32) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if rec.EventType == EventTypeDefer {
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
+
+				written, _ := s.writeResult(ctx, m, deferIDPtr, rec.DeferID, deferIDMaxLen)
+				return int64(uint64(written)<<32 | 0)
+			}
+		}
+		s.exitReplay()
+	}
+
+	deferID := fmt.Sprintf("defer-%d", s.stepCount)
+
+	rec := EventRecord{
+		Step:             s.stepCount,
+		EventType:        EventTypeDefer,
+		DeferDescription: description,
+		DeferID:          deferID,
+	}
+	s.recordEvent(rec)
+
+	s.mu.Lock()
+	s.deferrals[deferID] = description
+	s.mu.Unlock()
+
+	written, _ := s.writeResult(ctx, m, deferIDPtr, deferID, deferIDMaxLen)
+	return int64(uint64(written)<<32 | 0)
+}
+
+func (s *execSession) DurableLog(ctx context.Context, m api.Module, message string) int64 {
+	// Non-durable: no event recorded, no replay matching.
+	// Log output goes via the worker's stdout/stderr capture.
+	return 0
+}
+
+func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, operation, requestJSON string) int64 {
+	if s.isReplay {
+		// On replay, skip (fire-and-forget is recorded but not re-executed).
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
+		}
+		return 0
+	}
+
+	rec := EventRecord{
+		Step:      s.stepCount,
+		EventType: EventTypeDurableSend,
+		Service:   service,
+		Op:        operation,
+		Request:   requestJSON,
+	}
+	s.recordEvent(rec)
+
+	// Execute the fire-and-forget call through the caller.
+	// Wrap in a timeout context to bound goroutine lifetime in case
+	// the external Call blocks indefinitely.
+	if s.engine.caller != nil {
+		go func() {
+			if ctx.Err() != nil {
+				return
+			}
+			callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer cancel()
+			_, _ = s.engine.caller.Call(callCtx, service, operation, requestJSON)
+		}()
+	}
+	return 0
+}
+
+func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, service, operation, requestJSON string, delayMs int64) int64 {
+	if s.isReplay {
+		if s.stepCount < len(s.history) {
+			rec := s.history[s.stepCount]
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
+		}
+		return 0
+	}
+
+	rec := EventRecord{
+		Step:       s.stepCount,
+		EventType:  EventTypeDurableScheduleInvoke,
+		Service:    service,
+		Op:         operation,
+		Request:    requestJSON,
+		DurationMs: delayMs,
+	}
+	s.recordEvent(rec)
+
+	// Schedule the call. For now, run in a goroutine after the delay.
+	// Wrap the call in a timeout context to bound goroutine lifetime
+	// in case the external Call blocks indefinitely.
+	if s.engine.caller != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(delayMs) * time.Millisecond):
+				callCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+				defer cancel()
+				_, _ = s.engine.caller.Call(callCtx, service, operation, requestJSON)
+			}
+		}()
+	}
+	return 0
+}

@@ -165,18 +165,6 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
-      - name: Install TinyGo (WASM compilation)
-        if: matrix.package.name == 'internal' && matrix.go-version == '1.26'
-        run: |
-          TINYGO_VER=$(curl -sSfL https://api.github.com/repos/tinygo-org/tinygo/releases/latest | jq -r .tag_name)
-          if [ -z "$TINYGO_VER" ] || [ "$TINYGO_VER" = "null" ]; then
-            TINYGO_VER="v0.41.1"
-          fi
-          TINYGO_SHORT="${TINYGO_VER#v}"
-          curl -sSfL "https://github.com/tinygo-org/tinygo/releases/download/${TINYGO_VER}/tinygo${TINYGO_SHORT}.linux-amd64.tar.gz" -o /tmp/tinygo.tar.gz && \
-            sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz && \
-            echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
-
       - name: Setup Rust + wasm32-wasip1 (Rust WASM tests)
         if: matrix.package.name == 'internal'
         uses: dtolnay/rust-toolchain@stable
@@ -192,10 +180,9 @@ jobs:
           if [ -f test-report.json ]; then
             SKIP_COUNT=$(grep -c '"Action":"skip"' test-report.json || echo 0)
             if [ "$SKIP_COUNT" -gt 0 ]; then
-              echo "::warning title=Skipped Tests (${{ matrix.package.name }})::${SKIP_COUNT} test(s) were skipped. Verify that all test dependencies (PostgreSQL, TinyGo, Rust/cargo) are available."
+              echo "::warning title=Skipped Tests (${{ matrix.package.name }})::${SKIP_COUNT} test(s) were skipped. Verify that all test dependencies (PostgreSQL, Rust/cargo) are available."
             fi
           fi
-
 
   # -------------------------------------------------------------------------
   # Test Python (matrix: 3.10 / 3.11 / 3.12)
