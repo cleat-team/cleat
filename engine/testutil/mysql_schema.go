@@ -231,7 +231,7 @@ func SetupMySQLFullSchema(t *testing.T, db *sql.DB) {
 		"ALTER TABLE workflow_instances ADD COLUMN allowed_signals JSON DEFAULT NULL",
 	}
 	for _, m := range migrations {
-		db.Exec(m) // best-effort, ignore errors
+		_, _ = db.Exec(m) // best-effort, ignore errors
 	}
 }
 

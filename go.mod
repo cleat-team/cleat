@@ -1,6 +1,6 @@
 module github.com/cleat-team/cleat
 
-go 1.25.7
+go 1.25.11
 
 require (
 	github.com/cleat-team/cleat/cleat v0.0.0

@@ -1103,8 +1103,8 @@ func TestMSSQLIntegration_ReapExpiredConcurrencyKeys(t *testing.T) {
 
 	wfID := uuid.New().String()
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue)
-		VALUES (@p1, 'reap-wf', 1, 'running', SYSUTCDATETIME(), '{}', 'default')
+		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
+		VALUES (@p1, 'reap-wf', 1, 'running', SYSUTCDATETIME(), '{}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, wfID)
 	if err != nil {
 		t.Fatalf("insert workflow_instance: %v", err)
@@ -1113,8 +1113,8 @@ func TestMSSQLIntegration_ReapExpiredConcurrencyKeys(t *testing.T) {
 	// Insert an already-expired concurrency key via SQL (negative TTL).
 	hash := sha256Of("expired-key")
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at)
-		VALUES (@p1, 'expired-key', @p2, DATEADD(HOUR, -1, SYSUTCDATETIME()))
+		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+		VALUES (@p1, 'expired-key', @p2, DATEADD(HOUR, -1, SYSUTCDATETIME()), '00000000-0000-0000-0000-000000000000')
 	`, hash, wfID)
 	if err != nil {
 		t.Fatalf("insert expired concurrency key: %v", err)
@@ -1300,7 +1300,7 @@ func TestMSSQLIntegration_StickyWorker(t *testing.T) {
 	}
 
 	err = db.QueryRowContext(ctx,
-		`SELECT sticky_worker_id FROM workflow_instances WHERE id = @p1`, wfID).Scan(&workerID)
+		`SELECT ISNULL(sticky_worker_id, '') FROM workflow_instances WHERE id = @p1`, wfID).Scan(&workerID)
 	if err != nil {
 		t.Fatalf("query cleared sticky_worker_id: %v", err)
 	}
@@ -1321,8 +1321,8 @@ func TestMSSQLIntegration_ListAndGetWorkflows(t *testing.T) {
 	// Insert two workflow instances in different states.
 	wfID1 := uuid.New().String()
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, priority)
-		VALUES (@p1, 'list-wf', 1, 'ready', SYSUTCDATETIME(), '{"k":"v1"}', 'default', 1)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, priority, tenant_id)
+		VALUES (@p1, 'list-wf', 1, 'ready', SYSUTCDATETIME(), '{"k":"v1"}', 'default', 1, '00000000-0000-0000-0000-000000000000')
 	`, wfID1)
 	if err != nil {
 		t.Fatalf("insert wf1: %v", err)
@@ -1330,8 +1330,8 @@ func TestMSSQLIntegration_ListAndGetWorkflows(t *testing.T) {
 
 	wfID2 := uuid.New().String()
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, priority)
-		VALUES (@p1, 'list-wf', 1, 'running', SYSUTCDATETIME(), '{"k":"v2"}', 'default', 0)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, priority, tenant_id)
+		VALUES (@p1, 'list-wf', 1, 'running', SYSUTCDATETIME(), '{"k":"v2"}', 'default', 0, '00000000-0000-0000-0000-000000000000')
 	`, wfID2)
 	if err != nil {
 		t.Fatalf("insert wf2: %v", err)
@@ -1763,8 +1763,8 @@ func TestMSSQLIntegration_ReapStaleInstances(t *testing.T) {
 	// Insert a stale running workflow (heartbeat in the past).
 	staleID := uuid.New().String()
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, heartbeat_at, next_wake_at, input, assigned_to, task_queue)
-		VALUES (@p1, 'reap-wf', 1, 'running', DATEADD(HOUR, -2, SYSUTCDATETIME()), SYSUTCDATETIME(), '{}', 'stale-worker', 'default')
+		INSERT INTO workflow_instances (id, def_name, def_version, status, heartbeat_at, next_wake_at, input, assigned_to, task_queue, tenant_id)
+		VALUES (@p1, 'reap-wf', 1, 'running', DATEADD(HOUR, -2, SYSUTCDATETIME()), SYSUTCDATETIME(), '{}', 'stale-worker', 'default', '00000000-0000-0000-0000-000000000000')
 	`, staleID)
 	if err != nil {
 		t.Fatalf("insert stale instance: %v", err)
@@ -1773,8 +1773,8 @@ func TestMSSQLIntegration_ReapStaleInstances(t *testing.T) {
 	// Insert a non-stale running workflow (recent heartbeat).
 	freshID := uuid.New().String()
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, heartbeat_at, next_wake_at, input, assigned_to, task_queue)
-		VALUES (@p1, 'reap-wf', 1, 'running', SYSUTCDATETIME(), SYSUTCDATETIME(), '{}', 'fresh-worker', 'default')
+		INSERT INTO workflow_instances (id, def_name, def_version, status, heartbeat_at, next_wake_at, input, assigned_to, task_queue, tenant_id)
+		VALUES (@p1, 'reap-wf', 1, 'running', SYSUTCDATETIME(), SYSUTCDATETIME(), '{}', 'fresh-worker', 'default', '00000000-0000-0000-0000-000000000000')
 	`, freshID)
 	if err != nil {
 		t.Fatalf("insert fresh instance: %v", err)
@@ -1799,7 +1799,7 @@ func TestMSSQLIntegration_DeleteExpiredEvents(t *testing.T) {
 	doneID := uuid.New().String()
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, completed_at, next_wake_at, input, task_queue, tenant_id)
-		VALUES (@p1, 'exp-wf', 1, 'done', DATEADD(DAY, -10, SYSUTCDATETIME()), SYSUTCDATETIME(), '{}', 'default')
+		VALUES (@p1, 'exp-wf', 1, 'done', DATEADD(DAY, -10, SYSUTCDATETIME()), SYSUTCDATETIME(), '{}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, doneID)
 	if err != nil {
 		t.Fatalf("insert done instance: %v", err)
@@ -2180,7 +2180,7 @@ func TestMSSQLIntegration_ContinueAsNew(t *testing.T) {
 	// New workflow should exist with the continued input.
 	var newInputStr string
 	err = db.QueryRowContext(ctx,
-		`SELECT ISNULL(input, '') FROM workflow_instances WHERE id = @p1`, newRunID).Scan(&newInputStr)
+		`SELECT CAST(ISNULL(input, '') AS VARCHAR(MAX)) FROM workflow_instances WHERE id = @p1`, newRunID).Scan(&newInputStr)
 	if err != nil {
 		t.Fatalf("query new input: %v", err)
 	}
@@ -2353,7 +2353,7 @@ func TestMSSQLIntegration_GetActiveInstanceCountsByVersion(t *testing.T) {
 	// Insert one done instance (should not be counted).
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, completed_at, next_wake_at, input, task_queue, tenant_id)
-		VALUES (@p1, 'counts-wf', 1, 'done', SYSUTCDATETIME(), SYSUTCDATETIME(), '{}', 'default')
+		VALUES (@p1, 'counts-wf', 1, 'done', SYSUTCDATETIME(), SYSUTCDATETIME(), '{}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, uuid.New().String())
 	if err != nil {
 		t.Fatalf("insert done instance: %v", err)
@@ -2614,14 +2614,15 @@ func TestMSSQLIntegration_GetWorkflowByID_TenantScoped(t *testing.T) {
 		t.Fatalf("insert wfB: %v", err)
 	}
 
-	// With default store (no tenant), GetWorkflowByID should find wfA.
+	// With default store (no tenant), GetWorkflowByID should NOT find wfA
+	// since wfA belongs to tenantA (tenant-scoped filtering).
 	storeDefault := store.WithTenant(DefaultTenantUUID)
 	wfResult, err := storeDefault.GetWorkflowByID(ctx, wfA)
 	if err != nil {
 		t.Fatalf("GetWorkflowByID default tenant: %v", err)
 	}
-	if wfResult == nil {
-		t.Fatal("expected to find wfA with default tenant")
+	if wfResult != nil {
+		t.Fatal("expected default tenant NOT to see tenantA's workflow")
 	}
 
 	// With tenant A tenant, GetWorkflowByID should find wfA.

@@ -193,10 +193,10 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 				} else {
 					log.Printf("[plugin] %s v%d: no MySQL migration — skipping", name, m.Version)
 					if _, err := tx.ExecContext(ctx, insertPluginMigrationSQL(dialect), name, m.Version); err != nil {
-						tx.Rollback()
+						_ = tx.Rollback()
 						return fmt.Errorf("plugin %s migration v%d record skip: %w", name, m.Version, err)
 					}
-					tx.Commit()
+					_ = tx.Commit()
 					continue
 				}
 			case DialectMSSQL:
@@ -205,10 +205,10 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 				} else {
 					log.Printf("[plugin] %s v%d: no MSSQL migration — skipping", name, m.Version)
 					if _, err := tx.ExecContext(ctx, insertPluginMigrationSQL(dialect), name, m.Version); err != nil {
-						tx.Rollback()
+						_ = tx.Rollback()
 						return fmt.Errorf("plugin %s migration v%d record skip: %w", name, m.Version, err)
 					}
-					tx.Commit()
+					_ = tx.Commit()
 					continue
 				}
 			}

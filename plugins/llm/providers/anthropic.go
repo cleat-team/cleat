@@ -215,7 +215,7 @@ func AnthropicChatStream(ctx context.Context, client *http.Client, apiKey, baseU
 	// Build the streaming request body.
 	bodyMap := map[string]any{}
 	data, _ := json.Marshal(input)
-	json.Unmarshal(data, &bodyMap)
+	_ = json.Unmarshal(data, &bodyMap)
 	bodyMap["stream"] = true
 
 	bodyJSON, err := json.Marshal(bodyMap)

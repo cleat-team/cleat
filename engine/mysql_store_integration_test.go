@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -30,6 +31,12 @@ import (
 // and returns a configured MySQLStore plus a teardown function.
 func mysqlIntegrationStore(t *testing.T) (*MySQLStore, func()) {
 	t.Helper()
+	if os.Getenv("CLEAT_TEST_MYSQL") == "" {
+		t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL integration test")
+	}
+	if testing.Short() {
+		t.Skip("Skipping MySQL integration test in short mode")
+	}
 	db := openMySQLTestDB(t)
 	testutil.SetupMySQLFullSchema(t, db)
 	testutil.CleanupMySQLTestData(t, db)

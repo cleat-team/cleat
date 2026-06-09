@@ -98,6 +98,8 @@ jobs:
   # -------------------------------------------------------------------------
   lint-go:
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -123,6 +125,8 @@ jobs:
           go-version: stable
 
       - name: govulncheck
+        env:
+          CGO_ENABLED: "0"
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   # -------------------------------------------------------------------------

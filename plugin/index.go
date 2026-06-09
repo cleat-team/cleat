@@ -326,13 +326,13 @@ func splitSemver(v string) (major, minor, patch int) {
 	}
 	parts := strings.Split(s, ".")
 	if len(parts) > 0 {
-		fmt.Sscanf(parts[0], "%d", &major)
+		_, _ = fmt.Sscanf(parts[0], "%d", &major)
 	}
 	if len(parts) > 1 {
-		fmt.Sscanf(parts[1], "%d", &minor)
+		_, _ = fmt.Sscanf(parts[1], "%d", &minor)
 	}
 	if len(parts) > 2 {
-		fmt.Sscanf(parts[2], "%d", &patch)
+		_, _ = fmt.Sscanf(parts[2], "%d", &patch)
 	}
 	return
 }

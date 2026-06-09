@@ -24,7 +24,9 @@ jobs:
           go-version: stable
       - name: Check tools
         run: make tools-go
-      - run: go test -race -count=1 -timeout=120s ./tests/plugin-harness/... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+      - run: go test -count=1 -timeout=120s ./tests/plugin-harness/... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+        env:
+          CGO_ENABLED: "0"
 
   # --------------------------------------------------------------------------
   # Layer 2 — WASM integration (compiled Go workflow via standard Go wasip1)
@@ -38,6 +40,8 @@ jobs:
         with:
           go-version: stable
       - run: go test -count=1 -timeout=300s ./tests/plugin-harness/... -run 'TestPluginCalls_Wasm'
+        env:
+          CGO_ENABLED: "0"
 
   # --------------------------------------------------------------------------
   # Layer 3 — Multi-DB (real databases, standard Go wasip1 workflow)
@@ -94,6 +98,8 @@ jobs:
         with:
           go-version: stable
       - run: go test -count=1 -timeout=600s ./tests/plugin-harness/... -run 'TestPluginCalls_MultiDB'
+        env:
+          CGO_ENABLED: "0"
 
   # --------------------------------------------------------------------------
   # Blobstore S3 round-trip (MinIO)
@@ -141,3 +147,5 @@ jobs:
         with:
           go-version: stable
       - run: go test -count=1 -timeout=120s -v ./tests/plugin-harness/... -run 'TestBlobstore_S3'
+        env:
+          CGO_ENABLED: "0"

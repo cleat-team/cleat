@@ -507,7 +507,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_heartbeat ON workflow_instances(assigned_to, heartbeat_at)`)
 		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at)`)
 		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id)`)
-		db.Exec(`DROP INDEX idx_instances_tenant_queue_ready ON workflow_instances`)
+		_, _ = db.Exec(`DROP INDEX idx_instances_tenant_queue_ready ON workflow_instances`)
 		execIgnoreDupKey(t, db, `CREATE INDEX idx_instances_tenant_queue_ready ON workflow_instances(tenant_id, task_queue, status, priority, next_wake_at)`)
 		execIgnoreDupKey(t, db, `CREATE INDEX idx_concurrency_keys_workflow ON concurrency_keys(workflow_id)`)
 		execIgnoreDupKey(t, db, `CREATE INDEX idx_idempotency_keys_expires ON idempotency_keys(expires_at)`)
@@ -524,7 +524,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 			CREATE INDEX idx_instances_stale ON workflow_instances(status, heartbeat_at) WHERE status = 'running'`)
 		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_sticky' AND object_id = OBJECT_ID('workflow_instances'))
 			CREATE INDEX idx_instances_sticky ON workflow_instances(sticky_worker_id) WHERE sticky_worker_id IS NOT NULL`)
-		db.Exec(`DROP INDEX IF EXISTS idx_instances_tenant_queue_ready ON dbo.workflow_instances`)
+		_, _ = db.Exec(`DROP INDEX IF EXISTS idx_instances_tenant_queue_ready ON dbo.workflow_instances`)
 		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_instances_tenant_queue_ready' AND object_id = OBJECT_ID('workflow_instances'))
 			CREATE INDEX idx_instances_tenant_queue_ready ON dbo.workflow_instances(tenant_id, task_queue, status, priority ASC, next_wake_at) WHERE status = 'ready'`)
 		execMSSQLBestEffort(t, db, `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_concurrency_keys_workflow' AND object_id = OBJECT_ID('concurrency_keys'))
@@ -574,13 +574,13 @@ func CleanupTestData(t *testing.T, db *sql.DB, dialect Dialect, runID string) {
 	default:
 		t.Fatalf("cleanup test data: unknown dialect: %s", dialect)
 	}
-	db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM workflow_signals WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM workflow_promises WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM concurrency_keys WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM idempotency_keys WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM workflow_update_requests WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM workflow_instances WHERE id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM workflow_signals WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM workflow_promises WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM concurrency_keys WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM idempotency_keys WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM workflow_update_requests WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id LIKE `+p, runID)
 }
 
 // TestDB opens a database connection for the given dialect using environment

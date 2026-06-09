@@ -229,7 +229,7 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 			WHERE status = 'ready'
 			  AND next_wake_at <= SYSUTCDATETIME()
 			  AND task_queue IN (SELECT value FROM STRING_SPLIT(@p2, ','))
-			ORDER BY CASE WHEN sticky_worker_id = @p1 THEN 0 ELSE 1 END, priority ASC, created_at
+			ORDER BY CASE WHEN sticky_worker_id = @p1 THEN 0 ELSE 1 END, priority DESC, created_at
 			OFFSET 0 ROWS FETCH NEXT @p3 ROWS ONLY
 		)
 	`, workerID, tqParam, limit)
@@ -817,7 +817,13 @@ func (s *MSSQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
 	}
-	// NOTE: event_count increment skipped on MSSQL; column not yet available in CI databases.
+	// Increment event_count on workflow_instances so GetEventCount and quota
+	// enforcement work correctly on MSSQL.
+	if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances SET event_count = event_count + @p1 WHERE id = @p2
+		`, len(recs), workflowID); err != nil {
+		return fmt.Errorf("append events in tx: increment event_count: %w", err)
+	}
 	return nil
 }
 
@@ -1111,7 +1117,7 @@ func (s *MSSQLStore) ContinueAsNew(ctx context.Context, currentRunID, workerID s
 	newRunID := uuid.New().String()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority)
-		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS NVARCHAR(MAX)),
+		VALUES (@p1, @p2, @p3, 'ready', CAST(@p4 AS VARCHAR(MAX)),
 		        ISNULL((SELECT task_queue FROM workflow_defs WHERE name = @p2 AND version = @p3), 'default'),
 		        @p5, @p6)
 	`, newRunID, defName, defVersion, newInput, s.tenantID, priority)
@@ -1228,7 +1234,7 @@ func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 			UPDATE workflow_instances
 			SET next_wake_at = SYSUTCDATETIME()
 			WHERE id = (
-				SELECT parent_workflow_id FROM workflow_instances WHERE id = @p1
+				SELECT parent_workflow_id FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 			)
 			AND status IN ('ready', 'suspended')
 		`, runID); err != nil {
@@ -1630,13 +1636,19 @@ func (s *MSSQLStore) TraceWorkflow(ctx context.Context, workflowID, traceID stri
 }
 
 // ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.
+// Uses CONVERT(NVARCHAR(36), tenant_id) to avoid byte-swapping issues with
+// MSSQL UNIQUEIDENTIFIER mixed-endian storage.
 func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
-	var tenantID uuid.UUID
+	var tenantIDStr string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT tenant_id FROM tenant_api_keys
-		 WHERE key_hash = @p1 AND revoked_at IS NULL`, keyHash).Scan(&tenantID)
+		`SELECT CONVERT(NVARCHAR(36), tenant_id) FROM tenant_api_keys
+		 WHERE key_hash = @p1 AND revoked_at IS NULL`, keyHash).Scan(&tenantIDStr)
 	if err != nil {
 		return uuid.Nil, err
+	}
+	tenantID, err := uuid.Parse(tenantIDStr)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("resolve tenant: parse uuid: %w", err)
 	}
 	return tenantID, nil
 }
@@ -1729,16 +1741,25 @@ func (s *MSSQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 	}
 
 	var payload string
+	// First SELECT the payload with a row lock to prevent races.
 	err = tx.QueryRowContext(ctx, `
-		DELETE FROM workflow_signals
-		OUTPUT DELETED.payload
+		SELECT payload FROM workflow_signals WITH (UPDLOCK, ROWLOCK, READPAST)
 		WHERE workflow_id = @p1 AND signal_name = @p2
 	`, workflowID, signalName).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, tx.Rollback()
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("poll signal: %w", err)
+		return "", false, fmt.Errorf("poll and claim signal: select: %w", err)
+	}
+
+	// Mark the signal as delivered so PollSignal can still find it.
+	_, err = tx.ExecContext(ctx, `
+		UPDATE workflow_signals SET delivered_at = SYSUTCDATETIME()
+		WHERE workflow_id = @p1 AND signal_name = @p2
+	`, workflowID, signalName)
+	if err != nil {
+		return "", false, fmt.Errorf("poll and claim signal: update: %w", err)
 	}
 	return payload, true, tx.Commit()
 }
@@ -1868,7 +1889,8 @@ func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL
 		WHERE status = 'running'
 		  AND heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME())
-	`, -int(timeout.Seconds()))
+		  AND tenant_id = @p2
+	`, -int(timeout.Seconds()), s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
@@ -1995,8 +2017,8 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
 		       COALESCE(trace_id, '')
-		FROM workflow_instances WHERE id = @p1
-	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
+		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
+	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
 		&wf.TraceID)
@@ -2033,8 +2055,8 @@ func (s *MSSQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
 func (s *MSSQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at
-		FROM workflow_schedules ORDER BY name
-	`)
+		FROM workflow_schedules WHERE tenant_id = @p1 ORDER BY name
+	`, s.tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -2367,29 +2389,18 @@ func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 	}
 
 	// Try to insert with a unique constraint.
-	_, err = tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
 		SELECT @p1, @p2, @p3, DATEADD(SECOND, @p4, SYSUTCDATETIME()), @p5
 		WHERE NOT EXISTS (
-			SELECT 1 FROM concurrency_keys WHERE key_hash = @p1
+			SELECT 1 FROM concurrency_keys WHERE key_hash = @p1 AND tenant_id = @p5 AND expires_at > SYSUTCDATETIME()
 		)
 	`, keyHash[:], key, workflowID, int(ttl.Seconds()), s.tenantID)
 	if err != nil {
 		return false, fmt.Errorf("acquire concurrency key: %w", err)
 	}
-
-	// Check if our insert succeeded (tenant-scoped).
-	var wkID string
-	err = tx.QueryRowContext(ctx, `
-		SELECT workflow_id FROM concurrency_keys WHERE key_hash = @p1 AND tenant_id = @p2
-	`, keyHash[:], s.tenantID).Scan(&wkID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, tx.Commit()
-	}
-	if err != nil {
-		return false, fmt.Errorf("acquire concurrency key: verify: %w", err)
-	}
-	return wkID == workflowID, tx.Commit()
+	n, _ := result.RowsAffected()
+	return n > 0, tx.Commit()
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
@@ -2432,7 +2443,7 @@ func (s *MSSQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 	}
 	defer tx.Rollback()
 
-	result, err := tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE expires_at < SYSUTCDATETIME() AND tenant_id = @p1`, s.tenantID)
+	result, err := tx.ExecContext(ctx, `DELETE FROM concurrency_keys WHERE expires_at <= SYSUTCDATETIME() AND tenant_id = @p1`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("reap expired concurrency keys: %w", err)
 	}
@@ -2777,12 +2788,12 @@ func (s *MSSQLStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats
 			MIN(sample_bytes) OVER (PARTITION BY def_name),
 			AVG(CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name),
 			MAX(sample_bytes) OVER (PARTITION BY def_name),
-			PERCENTILE_CONT(0.10) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name),
-			PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name),
-			PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name),
-			PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name),
-			PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name),
-			PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name),
+			CAST(PERCENTILE_CONT(0.10) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name) AS BIGINT),
+			CAST(PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name) AS BIGINT),
+			CAST(PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name) AS BIGINT),
+			CAST(PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name) AS BIGINT),
+			CAST(PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name) AS BIGINT),
+			CAST(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY CAST(sample_bytes AS FLOAT)) OVER (PARTITION BY def_name) AS BIGINT),
 			COUNT(*) OVER (PARTITION BY def_name)
 		FROM workflow_memory_samples
 		ORDER BY def_name
