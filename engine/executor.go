@@ -612,11 +612,6 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 	return result, session.history, nil, session.deferrals, session.queryState, nil
 }
 
-// replayCompiled runs a replay using a pre-compiled module.
-func (e *Engine) replayCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord, wasmBytes []byte) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
-	return e.executeCompiled(ctx, compiled, entryPoint, input, history, wasmBytes)
-}
-
 // RunDefer invokes a defer cleanup function in the WASM module.
 // This is called by the worker on workflow exit (after the main entry point
 // returns) to run registered defer callbacks in LIFO order.

@@ -158,7 +158,7 @@ func redactSliceDepth(arr []any, depth int) []any {
 	return result
 }
 
-// RedactMap is like Redact but operates on a map[string]interface{} in-place,
+// RedactMap is like Redact but operates on a map[string]any in-place,
 // returning the same map. This is useful when the input is already parsed.
 func RedactMap(m map[string]any) {
 	for k, v := range m {

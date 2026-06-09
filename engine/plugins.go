@@ -12,6 +12,167 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
+
+// pluginFuncEntry stores a registered plugin function along with its
+// idempotent flag. Idempotent functions are safe to re-invoke during replay.
+type pluginFuncEntry struct {
+	fn         plugin.PluginFunc
+	idempotent bool
+}
+
+// PluginRegistry maps plugin function names to implementations.
+// It also tracks plugin health: if a plugin function panics, the
+// entire plugin is marked unhealthy and all its functions return
+// an error without being invoked.
+type PluginRegistry struct {
+	funcs         map[string]pluginFuncEntry
+	healthTracker *plugin.PluginHealthTracker
+}
+
+func NewPluginRegistry() *PluginRegistry {
+	return &PluginRegistry{
+		funcs:         make(map[string]pluginFuncEntry),
+		healthTracker: plugin.NewPluginHealthTracker(),
+	}
+}
+
+// SetHealthTracker replaces the default health tracker with a shared one.
+// Used to share a single tracker between PluginRegistry and
+// PluginStreamRegistry so a panic in any function marks the plugin
+// unhealthy across both registries.
+func (pr *PluginRegistry) SetHealthTracker(t *plugin.PluginHealthTracker) {
+	pr.healthTracker = t
+}
+
+// Register adds a plugin function. Returns an error if the function name
+// is already registered for this plugin. The function is wrapped with
+// panic recovery so a plugin crash does not take down the worker.
+func (pr *PluginRegistry) Register(pluginName, funcName string, fn plugin.PluginFunc) error {
+	key := lookupKey(pluginName, funcName)
+	if _, exists := pr.funcs[key]; exists {
+		return fmt.Errorf("plugin function %q already registered", key)
+	}
+	wrapped := plugin.RecoverPluginFunc(pluginName, pr.healthTracker, fn)
+	pr.funcs[key] = pluginFuncEntry{fn: wrapped, idempotent: false}
+	return nil
+}
+
+// RegisterIdempotent registers a plugin function that is safe to re-invoke
+// during replay (e.g., read-only S3 GET operations). The function is wrapped
+// with panic recovery.
+func (pr *PluginRegistry) RegisterIdempotent(pluginName, funcName string, fn plugin.PluginFunc) error {
+	key := lookupKey(pluginName, funcName)
+	if _, exists := pr.funcs[key]; exists {
+		return fmt.Errorf("plugin function %q already registered", key)
+	}
+	wrapped := plugin.RecoverPluginFunc(pluginName, pr.healthTracker, fn)
+	pr.funcs[key] = pluginFuncEntry{fn: wrapped, idempotent: true}
+	return nil
+}
+
+// Has reports whether a plugin function is registered.
+func (pr *PluginRegistry) Has(pluginName, funcName string) bool {
+	_, ok := pr.funcs[lookupKey(pluginName, funcName)]
+	return ok
+}
+
+func (pr *PluginRegistry) Lookup(pluginName, funcName string) (plugin.PluginFunc, bool, bool) {
+	entry, ok := pr.funcs[lookupKey(pluginName, funcName)]
+	return entry.fn, entry.idempotent, ok
+}
+
+// IsPluginHealthy reports whether the given plugin has not panicked.
+func (pr *PluginRegistry) IsPluginHealthy(pluginName string) bool {
+	return pr.healthTracker.IsHealthy(pluginName)
+}
+
+// MarkPluginUnhealthy marks a plugin as unhealthy with the given error.
+// All future invocations of the plugin's host functions are blocked.
+func (pr *PluginRegistry) MarkPluginUnhealthy(pluginName string, err error) {
+	pr.healthTracker.MarkUnhealthy(pluginName, err)
+}
+
+// PluginHealthStatus returns the current health status of all plugins
+// that have been marked unhealthy. Healthy plugins are not included.
+func (pr *PluginRegistry) PluginHealthStatus() []plugin.HealthStatus {
+	return pr.healthTracker.UnhealthyStatus()
+}
+
+// UnhealthyError returns the error that caused the plugin to be marked
+// unhealthy, or nil if the plugin is healthy.
+func (pr *PluginRegistry) UnhealthyError(pluginName string) error {
+	return pr.healthTracker.UnhealthyError(pluginName)
+}
+
+// PluginStreamRegistry maps plugin function names to streaming implementations.
+type PluginStreamRegistry struct {
+	funcs         map[string]plugin.PluginStreamFunc
+	healthTracker *plugin.PluginHealthTracker
+}
+
+func NewPluginStreamRegistry() *PluginStreamRegistry {
+	return &PluginStreamRegistry{
+		funcs:         make(map[string]plugin.PluginStreamFunc),
+		healthTracker: plugin.NewPluginHealthTracker(),
+	}
+}
+
+// SetHealthTracker replaces the default health tracker with a shared one.
+// Used to share a single tracker between PluginRegistry and
+// PluginStreamRegistry.
+func (psr *PluginStreamRegistry) SetHealthTracker(t *plugin.PluginHealthTracker) {
+	psr.healthTracker = t
+}
+
+func (psr *PluginStreamRegistry) Register(pluginName, funcName string, fn plugin.PluginStreamFunc) error {
+	key := lookupKey(pluginName, funcName)
+	if _, exists := psr.funcs[key]; exists {
+		return fmt.Errorf("plugin stream function %q already registered", key)
+	}
+	wrapped := plugin.RecoverPluginStreamFunc(pluginName, psr.healthTracker, fn)
+	psr.funcs[key] = wrapped
+	return nil
+}
+
+func (psr *PluginStreamRegistry) Lookup(pluginName, funcName string) (plugin.PluginStreamFunc, bool) {
+	fn, ok := psr.funcs[lookupKey(pluginName, funcName)]
+	return fn, ok
+}
+
+// Has reports whether a streaming plugin function is registered.
+func (psr *PluginStreamRegistry) Has(pluginName, funcName string) bool {
+	_, ok := psr.funcs[lookupKey(pluginName, funcName)]
+	return ok
+}
+
+// RegisterStream implements plugin.StreamFuncRegistry.
+func (psr *PluginStreamRegistry) RegisterStream(pluginName string, opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
+	return psr.Register(pluginName, opts.Name, fn)
+}
+
+// IsPluginHealthy reports whether the given streaming plugin has not panicked.
+func (psr *PluginStreamRegistry) IsPluginHealthy(pluginName string) bool {
+	return psr.healthTracker.IsHealthy(pluginName)
+}
+
+// MarkPluginUnhealthy marks a streaming plugin as unhealthy with the given error.
+func (psr *PluginStreamRegistry) MarkPluginUnhealthy(pluginName string, err error) {
+	psr.healthTracker.MarkUnhealthy(pluginName, err)
+}
+
+// PluginHealthStatus returns the current health status of all streaming plugins
+// that have been marked unhealthy. Healthy plugins are not included.
+func (psr *PluginStreamRegistry) PluginHealthStatus() []plugin.HealthStatus {
+	return psr.healthTracker.UnhealthyStatus()
+}
+
+// UnhealthyError returns the error that caused the streaming plugin to be
+// marked unhealthy, or nil if the plugin is healthy.
+func (psr *PluginStreamRegistry) UnhealthyError(pluginName string) error {
+	return psr.healthTracker.UnhealthyError(pluginName)
+}
+
+
 func (s *execSession) PluginCall(ctx context.Context, m api.Module,
 	pluginName, functionName, inputJSON string,
 	responsePtr, responseMaxLen uint32) int64 {

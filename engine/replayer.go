@@ -33,6 +33,11 @@ func (e *Engine) ReplayCompiled(ctx context.Context, compiled wazero.CompiledMod
 	return e.replayCompiled(ctx, compiled, entryPoint, input, history, nil)
 }
 
+// replayCompiled runs a replay using a pre-compiled module.
+func (e *Engine) replayCompiled(ctx context.Context, compiled wazero.CompiledModule, entryPoint string, input json.RawMessage, history []EventRecord, wasmBytes []byte) (string, []EventRecord, *SuspendResult, map[string]string, map[string]string, error) {
+	return e.executeCompiled(ctx, compiled, entryPoint, input, history, wasmBytes)
+}
+
 // advanceReplayStep increments stepCount and invokes the step callback if set.
 // rec may be nil for inline replay paths without a full EventRecord.
 // Returns false if the callback returned ReplayQuit (caller should abort).
