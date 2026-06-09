@@ -627,17 +627,20 @@ func (s *MySQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 
 // LoadDAGSpec returns the dag_spec JSON for a workflow definition, or nil if none.
 func (s *MySQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
-	var spec json.RawMessage
+	var raw *[]byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT dag_spec FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
-	`, defName, defVersion, s.tenantID).Scan(&spec)
+	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("LoadDAGSpec: %w", err)
 	}
-	return spec, nil
+	if raw == nil {
+		return nil, nil
+	}
+	return json.RawMessage(*raw), nil
 }
 
 // TraceWorkflow sets the W3C trace_id on a workflow instance.
@@ -1066,19 +1069,17 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 	// Also batch cleanup compaction states for those workflows.
 	for {
 		result, err := s.db.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
-			WHERE id IN (
-				SELECT id FROM (
-					SELECT id FROM workflow_instances
-					WHERE status IN ('done', 'failed')
-					  AND completed_at IS NOT NULL
-					  AND completed_at < ?
-					  AND compaction_state IS NOT NULL
-					ORDER BY completed_at
-					LIMIT 10000
-				) AS subq
-			)
+			UPDATE workflow_instances w
+			INNER JOIN (
+				SELECT id FROM workflow_instances
+				WHERE status IN ('done', 'failed')
+				  AND completed_at IS NOT NULL
+				  AND completed_at < ?
+				  AND compaction_state IS NOT NULL
+				ORDER BY completed_at
+				LIMIT 10000
+			) AS subq ON w.id = subq.id
+			SET w.compaction_state = NULL, w.compaction_step = NULL, w.compacted_at = NULL
 		`, olderThan)
 		if err != nil {
 			break
@@ -1117,8 +1118,8 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 	var totalDeleted int64
 	for {
 		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_instances
-			WHERE id IN (
+			DELETE w FROM workflow_instances w
+			INNER JOIN (
 				SELECT id FROM workflow_instances
 				WHERE status = 'dead_lettered'
 				  AND completed_at IS NOT NULL
@@ -1126,7 +1127,7 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 				  AND tenant_id = ?
 				ORDER BY id
 				LIMIT 10000
-			)
+			) d ON w.id = d.id
 		`, olderThan, s.tenantID)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)
