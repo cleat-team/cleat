@@ -731,7 +731,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	if err != nil {
 		return nil, fmt.Errorf("claim sticky workflows: begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, `
 		UPDATE workflow_instances
@@ -788,7 +788,7 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 	}
 
 	if len(wfs) == 0 {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return nil, nil
 	}
 	return wfs, tx.Commit()
@@ -800,7 +800,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 	if err != nil {
 		return nil, fmt.Errorf("load history: begin: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT step, event_type, service, operation, request, response, error,
@@ -1917,7 +1917,7 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	// Best-effort: clear sticky worker assignment (Feature 10).
 	_ = s.ClearStickyWorker(context.Background(), workflowID)
 	// Best-effort: release all concurrency keys (Feature 5).
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
 
 	// Enforce ParentClosePolicy on children.
 	s.enforceParentClosePolicy(context.Background(), workflowID)
