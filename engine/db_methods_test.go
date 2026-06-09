@@ -1060,7 +1060,7 @@ func TestPostgresStore_GetPromise_NotFound(t *testing.T) {
 func TestPostgresStore_GetPromise_Resolved(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT status, result::text",
+			match: "SELECT status, result #>> '{}'",
 			data:  [][]driver.Value{{"resolved", `{"ok":true}`, ""}},
 		},
 	}, nil)
