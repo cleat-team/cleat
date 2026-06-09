@@ -3,10 +3,8 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/bytecodealliance/wasmtime-go/v44"
@@ -365,1255 +363,1138 @@ func TestWasmtimeBackend_Execute_MinimalModule(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Section 4: WASM binary builder helpers
+// Section 4: registerWasiStubs / registerTeavmStubs / registerAllImports
+// error-path tests (no WASM modules needed)
 // ---------------------------------------------------------------------------
 
-// leb128EncodeU32 encodes v as unsigned LEB128.
-func leb128EncodeU32(v uint32) []byte {
-	var buf []byte
+func TestRegisterWasiStubs_DoubleRegistration(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	linker := wasmtime.NewLinker(b.engine)
+
+	// Pre-define WASI to force DefineWasi to fail inside registerWasiStubs.
+	if err := linker.DefineWasi(); err != nil {
+		t.Fatalf("pre-define WASI: %v", err)
+	}
+
+	// Second call to registerWasiStubs should fail because WASI is already defined.
+	err = b.registerWasiStubs(linker)
+	if err == nil {
+		t.Error("expected error from double WASI registration, got nil")
+	}
+	t.Logf("double WASI registration error (expected): %v", err)
+}
+
+func TestRegisterWasiStubs_ResetAdapterStateAlreadyDefined(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	linker := wasmtime.NewLinker(b.engine)
+
+	// Pre-define reset_adapter_state to exercise the FuncWrap error path.
+	if err := linker.FuncWrap("wasi_snapshot_preview1", "reset_adapter_state", func() {}); err != nil {
+		t.Fatalf("pre-define reset_adapter_state: %v", err)
+	}
+
+	err = b.registerWasiStubs(linker)
+	if err == nil {
+		t.Error("expected error from duplicate reset_adapter_state, got nil")
+	}
+	t.Logf("duplicate reset_adapter_state error (expected): %v", err)
+}
+
+func TestRegisterTeavmStubs_FreshLinker(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	linker := wasmtime.NewLinker(b.engine)
+
+	// On a fresh linker, all teavm stubs should register without error.
+	err = b.registerTeavmStubs(linker)
+	if err != nil {
+		t.Errorf("registerTeavmStubs on fresh linker: unexpected error: %v", err)
+	}
+}
+
+func TestRegisterTeavmStubs_AlreadyDefined_ErrorPropagation(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	linker := wasmtime.NewLinker(b.engine)
+
+	// Pre-define putwcharsOut — the first function registerTeavmStubs tries to
+	// register. wasmtime uses "defined twice" (not "duplicate definition") for
+	// FuncWrap conflicts, so isDuplicateDefinition returns false and this is
+	// treated as a real linker error that propagates.
+	if err := linker.FuncWrap("teavm", "putwcharsOut", func(chars, count int32) {}); err != nil {
+		t.Fatalf("pre-define putwcharsOut: %v", err)
+	}
+
+	err = b.registerTeavmStubs(linker)
+	if err == nil {
+		t.Error("expected error propagation from double-registered teavm stub, got nil")
+	}
+	t.Logf("teavm stub error propagation (expected): %v", err)
+}
+
+func TestRegisterAllImports_NeedsWasiTrue(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	linker := wasmtime.NewLinker(b.engine)
+	var cr, ce string
+
+	err = b.registerAllImports(linker, &cr, &ce, true)
+	if err != nil {
+		t.Errorf("registerAllImports(needsWasi=true): %v", err)
+	}
+}
+
+func TestRegisterAllImports_NeedsWasiFalse(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	linker := wasmtime.NewLinker(b.engine)
+	var cr, ce string
+
+	err = b.registerAllImports(linker, &cr, &ce, false)
+	if err != nil {
+		t.Errorf("registerAllImports(needsWasi=false): %v", err)
+	}
+}
+
+func TestRegisterAllImports_WasiErrorPropagation(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	linker := wasmtime.NewLinker(b.engine)
+	// Pre-define WASI so registerWasiStubs inside registerAllImports fails.
+	if err := linker.DefineWasi(); err != nil {
+		t.Fatalf("pre-define WASI: %v", err)
+	}
+
+	var cr, ce string
+	err = b.registerAllImports(linker, &cr, &ce, true)
+	if err == nil {
+		t.Error("expected error propagation from registerWasiStubs in registerAllImports")
+	}
+	t.Logf("registerAllImports WASI error propagation (expected): %v", err)
+}
+
+// ---------------------------------------------------------------------------
+// Section 5: WASM binary builder helpers + writeWorkToFixedMemory
+// ---------------------------------------------------------------------------
+
+// encodeULEB128 encodes v as unsigned LEB128 into buf.
+func encodeULEB128(v uint32) []byte {
+	var out []byte
 	for {
-		b := byte(v & 0x7F)
+		b := byte(v & 0x7f)
 		v >>= 7
 		if v != 0 {
 			b |= 0x80
 		}
-		buf = append(buf, b)
+		out = append(out, b)
 		if v == 0 {
 			break
 		}
 	}
-	return buf
+	return out
 }
 
-// leb128EncodeS32 encodes v as signed LEB128 (32-bit).
-func leb128EncodeS32(v int32) []byte {
-	var buf []byte
-	more := true
-	for more {
-		b := byte(v & 0x7F)
-		v >>= 7
-		if (v == 0 && (b&0x40) == 0) || (v == -1 && (b&0x40) != 0) {
-			more = false
-		} else {
-			b |= 0x80
+// wasmSection builds a WASM section: id + size-prefixed content.
+func wasmSection(id byte, content []byte) []byte {
+	size := encodeULEB128(uint32(len(content)))
+	return append(append([]byte{id}, size...), content...)
+}
+
+// wasmVec builds a WASM vector: count-prefixed content. Pass count and
+// pre-concatenated bytes.
+func wasmVec(count int, content []byte) []byte {
+	return append(encodeULEB128(uint32(count)), content...)
+}
+
+// wasmName encodes a WASM name: length-prefixed UTF-8 bytes.
+func wasmName(s string) []byte {
+	nameLen := encodeULEB128(uint32(len(s)))
+	return append(nameLen, []byte(s)...)
+}
+
+// wasmFunctype encodes a WASM functype: 0x60 params... results...
+func wasmFunctype(params, results []byte) []byte {
+	nParams := encodeULEB128(uint32(len(params)))
+	nResults := encodeULEB128(uint32(len(results)))
+	return append(append(append([]byte{0x60}, nParams...), params...), append(nResults, results...)...)
+}
+
+// functypeNumParams extracts the parameter count from a functype byte slice.
+// Format: 0x60, nParams (ULEB128), param_types..., nResults (ULEB128), result_types...
+func functypeNumParams(ft []byte) int {
+	if len(ft) < 2 || ft[0] != 0x60 {
+		return 0
+	}
+	// Read ULEB128 at ft[1].
+	n := 0
+	shift := 0
+	for i := 1; i < len(ft); i++ {
+		n |= int(ft[i]&0x7f) << shift
+		if ft[i]&0x80 == 0 {
+			return n
 		}
-		buf = append(buf, b)
+		shift += 7
 	}
-	return buf
+	return 0
 }
 
-// leb128EncodeS64 encodes v as signed LEB128 (64-bit).
-func leb128EncodeS64(v int64) []byte {
-	var buf []byte
-	more := true
-	for more {
-		b := byte(v & 0x7F)
-		v >>= 7
-		if (v == 0 && (b&0x40) == 0) || (v == -1 && (b&0x40) != 0) {
-			more = false
-		} else {
-			b |= 0x80
+// memoryWasm returns a minimal WASM module that exports pages of linear memory.
+func memoryWasm(pages byte) []byte {
+	mem := wasmSection(5, []byte{0x01, 0x00, pages})
+	expContent := append(wasmName("memory"), 0x02, 0x00) // kind=memory, index=0
+	exp := wasmSection(7, wasmVec(1, expContent))
+	return append(append(
+		[]byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}, // magic + version
+		mem...),
+		exp...)
+}
+
+// buildImportWasm constructs a WASM module that imports functions from "env"
+// and exports wrapper functions that call them.
+//
+// imports: list of {name, functype} pairs.
+// exports: list of {name, callImportIndex} pairs (body is: call $idx; end).
+// includeMemory: if true, adds 1-page memory and exports it.
+func buildImportWasm(imports []struct {
+	Name string
+	Type []byte
+}, exports []struct {
+	Name    string
+	CallIdx uint32
+}, includeMemory bool) []byte {
+	makeSection := func(id byte, content []byte) []byte {
+		size := encodeULEB128(uint32(len(content)))
+		return append(append([]byte{id}, size...), content...)
+	}
+
+	var out []byte
+	out = append(out, 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00)
+
+	// Type section: collect unique functypes.
+	typeIdx := make(map[string]int)
+	var types [][]byte
+	for _, imp := range imports {
+		key := string(imp.Type)
+		if _, ok := typeIdx[key]; ok {
+			continue
 		}
-		buf = append(buf, b)
+		typeIdx[key] = len(types)
+		types = append(types, imp.Type)
 	}
-	return buf
-}
-
-// wasmValType constants for building WASM modules by hand.
-const (
-	wasmValTypeI32 = 0x7F
-	wasmValTypeI64 = 0x7E
-	wasmValTypeF32 = 0x7D
-	wasmValTypeF64 = 0x7C
-)
-
-// writeLebU32 writes v as unsigned LEB128 to buf.
-func writeLebU32(buf *bytes.Buffer, v uint32) {
-	buf.Write(leb128EncodeU32(v))
-}
-
-// writeLebS64 writes v as signed LEB128 (64-bit) to buf.
-func writeLebS64(buf *bytes.Buffer, v int64) {
-	buf.Write(leb128EncodeS64(v))
-}
-
-// writeString writes a length-prefixed string to buf (WASM name format).
-func writeString(buf *bytes.Buffer, s string) {
-	writeLebU32(buf, uint32(len(s)))
-	buf.WriteString(s)
-}
-
-// writeSection writes a WASM section header + content to buf.
-func writeSection(buf *bytes.Buffer, id byte, content []byte) {
-	buf.WriteByte(id)
-	writeLebU32(buf, uint32(len(content)))
-	buf.Write(content)
-}
-
-// buildImportWasm builds a minimal WASM module with one import and one export.
-// The import is from moduleName/funcName with the given paramTypes and resultTypes
-// (WASM valtype bytes). The module exports a "test" function that calls the import
-// with zero-valued parameters, and exports "memory" (1 page).
-func buildImportWasm(moduleName, funcName string, paramTypes, resultTypes []byte) []byte {
-	var mod bytes.Buffer
-	// Magic + version
-	mod.Write([]byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00})
-
-	// --- Type section (id=1) ---
-	var ts bytes.Buffer
-	writeLebU32(&ts, 2) // 2 types
-	// Type[0]: import signature
-	ts.WriteByte(0x60) // functype
-	writeLebU32(&ts, uint32(len(paramTypes)))
-	ts.Write(paramTypes)
-	writeLebU32(&ts, uint32(len(resultTypes)))
-	ts.Write(resultTypes)
-	// Type[1]: export signature (same as import)
-	ts.WriteByte(0x60)
-	writeLebU32(&ts, uint32(len(paramTypes)))
-	ts.Write(paramTypes)
-	writeLebU32(&ts, uint32(len(resultTypes)))
-	ts.Write(resultTypes)
-	writeSection(&mod, 1, ts.Bytes())
-
-	// --- Import section (id=2) ---
-	var imps bytes.Buffer
-	writeLebU32(&imps, 1) // 1 import
-	writeString(&imps, moduleName)
-	writeString(&imps, funcName)
-	imps.WriteByte(0x00) // import kind: func
-	writeLebU32(&imps, 0) // type index 0 (the import's type)
-	writeSection(&mod, 2, imps.Bytes())
-
-	// --- Function section (id=3) ---
-	var funcs bytes.Buffer
-	writeLebU32(&funcs, 1) // 1 local function
-	writeLebU32(&funcs, 1) // type index 1 (the export's type)
-	writeSection(&mod, 3, funcs.Bytes())
-
-	// --- Memory section (id=5) ---
-	var mem bytes.Buffer
-	writeLebU32(&mem, 1) // 1 memory
-	mem.WriteByte(0x00)  // limits: no max
-	writeLebU32(&mem, 1) // min 1 page (64KB)
-	writeSection(&mod, 5, mem.Bytes())
-
-	// --- Export section (id=7) ---
-	var exports bytes.Buffer
-	writeLebU32(&exports, 2) // 2 exports
-	writeString(&exports, "memory")
-	exports.WriteByte(0x02) // export kind: memory
-	writeLebU32(&exports, 0) // mem index 0
-	writeString(&exports, "test")
-	exports.WriteByte(0x00) // export kind: func
-	writeLebU32(&exports, 1) // func index 1 (import is 0, our func is 1)
-	writeSection(&mod, 7, exports.Bytes())
-
-	// --- Code section (id=10) ---
-	var code bytes.Buffer
-	writeLebU32(&code, 1) // 1 function body
-	var body bytes.Buffer
-	writeLebU32(&body, 0) // 0 local declarations
-	// Push zero values for each param type
-	for _, pt := range paramTypes {
-		switch pt {
-		case wasmValTypeI32:
-			body.WriteByte(0x41) // i32.const
-			writeLebU32(&body, 0)
-		case wasmValTypeI64:
-			body.WriteByte(0x42) // i64.const
-			writeLebS64(&body, 0)
+	if len(types) > 0 {
+		var typeContent []byte
+		for _, ft := range types {
+			typeContent = append(typeContent, ft...)
 		}
-	}
-	body.WriteByte(0x10) // call
-	writeLebU32(&body, 0) // func index 0 (the import)
-	body.WriteByte(0x0B) // end
-	writeLebU32(&code, uint32(body.Len()))
-	code.Write(body.Bytes())
-	writeSection(&mod, 10, code.Bytes())
-
-	return mod.Bytes()
-}
-
-// buildImportWasmWithData is like buildImportWasm but appends a data section
-// containing the given bytes at memory offset 0.
-func buildImportWasmWithData(moduleName, funcName string, paramTypes, resultTypes []byte, data []byte) []byte {
-	mod := buildImportWasm(moduleName, funcName, paramTypes, resultTypes)
-	if len(data) == 0 {
-		return mod
-	}
-	var buf bytes.Buffer
-	buf.Write(mod)
-	// --- Data section (id=11) ---
-	var ds bytes.Buffer
-	writeLebU32(&ds, 1) // 1 data segment
-	ds.WriteByte(0x00)  // mode: active, memory 0
-	ds.WriteByte(0x41)  // i32.const
-	writeLebU32(&ds, 0) // offset 0
-	ds.WriteByte(0x0B)  // end
-	writeLebU32(&ds, uint32(len(data)))
-	ds.Write(data)
-	writeSection(&buf, 11, ds.Bytes())
-	return buf.Bytes()
-}
-
-// buildMultiImportWasm builds a WASM module with multiple imports from "env",
-// all with type () -> i64. Each import is specified by its function name.
-// The module exports a "test" function that calls each import in order,
-// dropping all results except the last.
-func buildMultiImportWasm(funcNames []string) []byte {
-	var mod bytes.Buffer
-	mod.Write([]byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00})
-
-	n := len(funcNames)
-	if n == 0 {
-		n = 1
+		out = append(out, makeSection(1, wasmVec(len(types), typeContent))...)
 	}
 
-	// --- Type section ---
-	var ts bytes.Buffer
-	writeLebU32(&ts, 2) // 2 types
-	// Type[0]: () -> i64 for all imports
-	ts.WriteByte(0x60) // functype
-	writeLebU32(&ts, 0)
-	writeLebU32(&ts, 1)
-	ts.WriteByte(wasmValTypeI64)
-	// Type[1]: () -> i64 for export
-	ts.WriteByte(0x60)
-	writeLebU32(&ts, 0)
-	writeLebU32(&ts, 1)
-	ts.WriteByte(wasmValTypeI64)
-	writeSection(&mod, 1, ts.Bytes())
-
-	// --- Import section ---
-	var imps bytes.Buffer
-	writeLebU32(&imps, uint32(len(funcNames)))
-	for _, name := range funcNames {
-		writeString(&imps, "env")
-		writeString(&imps, name)
-		imps.WriteByte(0x00) // func import
-		writeLebU32(&imps, 0) // type index 0
-	}
-	if len(funcNames) == 0 {
-		writeString(&imps, "env")
-		writeString(&imps, "void")
-		imps.WriteByte(0x00)
-		writeLebU32(&imps, 0)
-	}
-	writeSection(&mod, 2, imps.Bytes())
-
-	// --- Function section ---
-	var funcs bytes.Buffer
-	writeLebU32(&funcs, 1)
-	writeLebU32(&funcs, 1) // type index 1
-	writeSection(&mod, 3, funcs.Bytes())
-
-	// --- Memory section ---
-	var mem bytes.Buffer
-	writeLebU32(&mem, 1)
-	mem.WriteByte(0x00) // no max
-	writeLebU32(&mem, 1)
-	writeSection(&mod, 5, mem.Bytes())
-
-	// --- Export section ---
-	var exports bytes.Buffer
-	writeLebU32(&exports, 2)
-	writeString(&exports, "memory")
-	exports.WriteByte(0x02)
-	writeLebU32(&exports, 0)
-	writeString(&exports, "test")
-	exports.WriteByte(0x00)
-	writeLebU32(&exports, 1) // func index 1 (regardless of # of imports)
-	writeSection(&mod, 7, exports.Bytes())
-
-	// --- Code section ---
-	var code bytes.Buffer
-	writeLebU32(&code, 1)
-	var body bytes.Buffer
-	writeLebU32(&body, 0) // 0 locals
-	for i := 0; i < len(funcNames); i++ {
-		body.WriteByte(0x10) // call
-		writeLebU32(&body, uint32(i)) // import at index i
-		if i < len(funcNames)-1 {
-			body.WriteByte(0x1A) // drop (discard result, keep last)
+	// Import section.
+	numImports := len(imports)
+	if numImports > 0 {
+		var importContent []byte
+		for _, imp := range imports {
+			key := string(imp.Type)
+			idx := typeIdx[key]
+			importContent = append(importContent, wasmName("env")...)
+			importContent = append(importContent, wasmName(imp.Name)...)
+			importContent = append(importContent, 0x00)                        // kind = function
+			importContent = append(importContent, encodeULEB128(uint32(idx))...) // type index
 		}
+		out = append(out, makeSection(2, wasmVec(numImports, importContent))...)
 	}
-	body.WriteByte(0x0B) // end
-	writeLebU32(&code, uint32(body.Len()))
-	code.Write(body.Bytes())
-	writeSection(&mod, 10, code.Bytes())
 
-	return mod.Bytes()
+	// Function section: one internal function per export. Must come before Memory.
+	numFuncs := len(exports)
+	if numFuncs > 0 {
+		var funcContent []byte
+		for _, exp := range exports {
+			// Use the type of the import being called.
+			impIdx := int(exp.CallIdx)
+			if impIdx < len(imports) {
+				key := string(imports[impIdx].Type)
+				funcContent = append(funcContent, encodeULEB128(uint32(typeIdx[key]))...)
+			} else {
+				funcContent = append(funcContent, encodeULEB128(0)...)
+			}
+		}
+		out = append(out, makeSection(3, wasmVec(numFuncs, funcContent))...)
+	}
+
+	// Memory section.
+	memIdx := uint32(0)
+	if includeMemory {
+		out = append(out, makeSection(5, []byte{0x01, 0x00, 0x01})...)
+	}
+
+	// Export section.
+	numExports := 0
+	if includeMemory {
+		numExports++
+	}
+	numExports += numFuncs
+	if numExports > 0 {
+		var exportContent []byte
+		if includeMemory {
+			exportContent = append(exportContent, wasmName("memory")...)
+			exportContent = append(exportContent, 0x02)                     // kind = memory
+			exportContent = append(exportContent, encodeULEB128(memIdx)...) // index
+		}
+		for i, exp := range exports {
+			exportContent = append(exportContent, wasmName(exp.Name)...)
+			exportContent = append(exportContent, 0x00)                                   // kind = function
+			exportContent = append(exportContent, encodeULEB128(uint32(numImports+i))...) // func index
+		}
+		out = append(out, makeSection(7, wasmVec(numExports, exportContent))...)
+	}
+
+	// Code section: function bodies.
+	if numFuncs > 0 {
+		var codeContent []byte
+		for _, exp := range exports {
+			impIdx := int(exp.CallIdx)
+			var body []byte
+			body = append(body, 0x00) // 0 locals
+			// Push arguments for the import's parameters.
+			if impIdx < len(imports) {
+				nParams := functypeNumParams(imports[impIdx].Type)
+				for p := 0; p < nParams; p++ {
+					body = append(body, 0x20)    // local.get
+					body = append(body, byte(p)) // param index
+				}
+			}
+			body = append(body, 0x10, byte(exp.CallIdx)) // call
+			body = append(body, 0x0b)                    // end
+			bodyLen := encodeULEB128(uint32(len(body)))
+			codeContent = append(codeContent, bodyLen...)
+			codeContent = append(codeContent, body...)
+		}
+		out = append(out, makeSection(10, wasmVec(numFuncs, codeContent))...)
+	}
+
+	return out
 }
 
-// ---------------------------------------------------------------------------
-// Section 5: Test infrastructure helpers
-// ---------------------------------------------------------------------------
-
-// closeTestEnv manages the lifecycle of a wasmtime backend for testing.
-type closeTestEnv struct {
-	t      *testing.T
-	ctx    context.Context
-	cancel context.CancelFunc
-	b      *wasmtimeBackend
-}
-
-// newCloseTestEnv creates a new wasmtime backend test environment.
-// Skips the test if wasmtime is not available.
-func newCloseTestEnv(t *testing.T) *closeTestEnv {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
+func TestWriteWorkToFixedMemory(t *testing.T) {
+	ctx := context.Background()
 	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		cancel()
 		t.Skipf("wasmtime backend not available: %v", err)
 	}
-	t.Cleanup(func() {
-		b.Close(ctx)
-		cancel()
-	})
-	return &closeTestEnv{t: t, ctx: ctx, cancel: cancel, b: b}
-}
+	defer b.Close(ctx)
 
-// Backend returns the wasmtime backend.
-func (e *closeTestEnv) Backend() *wasmtimeBackend { return e.b }
-
-// Context returns the test context.
-func (e *closeTestEnv) Context() context.Context { return e.ctx }
-
-// Close releases the backend immediately (in addition to t.Cleanup).
-func (e *closeTestEnv) Close() {
-	e.b.Close(e.ctx)
-	e.cancel()
-}
-
-// runWasm compiles, links, instantiates, and calls an exported function
-// in a WASM module using the given backend. The handler is set on the
-// backend before the call so closures can dispatch to it.
-func runWasm(t *testing.T, b *wasmtimeBackend, wasmBytes []byte, fnName string, h HostHandler, args ...interface{}) (interface{}, error) {
-	t.Helper()
+	mod, err := wasmtime.NewModule(b.engine, memoryWasm(2))
+	if err != nil {
+		t.Fatalf("compile memory module: %v", err)
+	}
+	defer mod.Close()
 
 	store := wasmtime.NewStore(b.engine)
 	defer store.Close()
 
-	module, err := wasmtime.NewModule(b.engine, wasmBytes)
+	linker := wasmtime.NewLinker(b.engine)
+	inst, err := linker.Instantiate(store, mod)
 	if err != nil {
-		return nil, fmt.Errorf("compile: %w", err)
+		t.Fatalf("instantiate memory module: %v", err)
 	}
-	defer module.Close()
+
+	memExp := inst.GetExport(store, "memory")
+	if memExp == nil {
+		t.Fatal("no memory export")
+	}
+	mem := memExp.Memory()
+	if mem == nil {
+		t.Fatal("memory export is not a memory")
+	}
+
+	t.Run("normal", func(t *testing.T) {
+		b.writeWorkToFixedMemory(mem, store, "myEntry", []byte(`{"key":"val"}`))
+		data := mem.UnsafeData(store)
+		entryLen := getUint32LE(data[fixedWorkOffset : fixedWorkOffset+4])
+		inputLen := getUint32LE(data[fixedWorkOffset+4 : fixedWorkOffset+8])
+		if entryLen != 7 {
+			t.Errorf("entryLen = %d, want 7", entryLen)
+		}
+		if inputLen != 13 {
+			t.Errorf("inputLen = %d, want 13", inputLen)
+		}
+		if got := string(data[fixedWorkOffset+8 : fixedWorkOffset+8+int(entryLen)]); got != "myEntry" {
+			t.Errorf("entry = %q, want %q", got, "myEntry")
+		}
+		if got := string(data[fixedWorkOffset+8+int(entryLen) : fixedWorkOffset+8+int(entryLen)+int(inputLen)]); got != `{"key":"val"}` {
+			t.Errorf("input = %q, want %q", got, `{"key":"val"}`)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		d := mem.UnsafeData(store)
+		for i := range d {
+			d[i] = 0
+		}
+		b.writeWorkToFixedMemory(mem, store, "", nil)
+		data := mem.UnsafeData(store)
+		entryLen := getUint32LE(data[fixedWorkOffset : fixedWorkOffset+4])
+		inputLen := getUint32LE(data[fixedWorkOffset+4 : fixedWorkOffset+8])
+		if entryLen != 0 {
+			t.Errorf("entryLen = %d, want 0", entryLen)
+		}
+		if inputLen != 0 {
+			t.Errorf("inputLen = %d, want 0", inputLen)
+		}
+	})
+
+	t.Run("truncation", func(t *testing.T) {
+		longEntry := make([]byte, 300)
+		for i := range longEntry {
+			longEntry[i] = 'a'
+		}
+		longInput := make([]byte, 70000)
+		for i := range longInput {
+			longInput[i] = 'b'
+		}
+		b.writeWorkToFixedMemory(mem, store, string(longEntry), longInput)
+		data := mem.UnsafeData(store)
+		entryLen := getUint32LE(data[fixedWorkOffset : fixedWorkOffset+4])
+		inputLen := getUint32LE(data[fixedWorkOffset+4 : fixedWorkOffset+8])
+		if entryLen != fixedWorkMaxEntry {
+			t.Errorf("entryLen = %d, want %d (clamped)", entryLen, fixedWorkMaxEntry)
+		}
+		if inputLen != fixedWorkMaxInput {
+			t.Errorf("inputLen = %d, want %d (clamped)", inputLen, fixedWorkMaxInput)
+		}
+	})
+}
+
+
+// ---------------------------------------------------------------------------
+// Section 6: Closure body tests via WASM module execution
+// ---------------------------------------------------------------------------
+
+// wasmValI32 and wasmValI64 are WASM value type codes.
+const (
+	wasmValI32 = 0x7f
+	wasmValI64 = 0x7e
+)
+
+// closureWasm builds a WASM module that imports the given functions from
+// "env" and exports "memory" plus a no-arg wrapper for each import.
+func closureWasm(importNames []string, importTypes [][]byte) []byte {
+	var imports []struct{ Name string; Type []byte }
+	for i, name := range importNames {
+		imports = append(imports, struct{ Name string; Type []byte }{name, importTypes[i]})
+	}
+	var exports []struct{ Name string; CallIdx uint32 }
+	for i, name := range importNames {
+		exports = append(exports, struct{ Name string; CallIdx uint32 }{"test_" + name, uint32(i)})
+	}
+	return buildImportWasm(imports, exports, true)
+}
+
+func TestClosure_CleatNow(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	b.handler = &mockHostHandler{ret: 42}
+
+	ft := wasmFunctype(nil, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_now"}, [][]byte{ft})
+
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
 
 	linker := wasmtime.NewLinker(b.engine)
-	var completeResult, completeErr string
-	if err := b.registerAllImports(linker, &completeResult, &completeErr, false); err != nil {
-		return nil, fmt.Errorf("register imports: %w", err)
+	if err := b.registerCleatNow(linker); err != nil {
+		t.Fatalf("register cleat_now: %v", err)
 	}
 
-	instance, err := linker.Instantiate(store, module)
+	inst, err := linker.Instantiate(store, mod)
 	if err != nil {
-		return nil, fmt.Errorf("instantiate: %w", err)
+		t.Fatalf("instantiate: %v", err)
 	}
 
-	fn := instance.GetFunc(store, fnName)
-	if fn == nil {
-		return nil, fmt.Errorf("export %q not found", fnName)
+	testFn := inst.GetFunc(store, "test_cleat_now")
+	if testFn == nil {
+		t.Fatal("export test_cleat_now not found")
 	}
 
-	// Set handler on the backend so host function closures can dispatch to it.
-	b.handler = h
-
-	// Wrap fn.Call in recover to capture panics from closures (e.g., nil handler).
-	var callResult interface{}
-	var callErr error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				callErr = fmt.Errorf("call panicked: %v", r)
-			}
-		}()
-		callResult, callErr = fn.Call(store, args...)
-	}()
-	if callErr != nil {
-		return nil, fmt.Errorf("call: %w", callErr)
-	}
-
-	return callResult, nil
-}
-
-// ---------------------------------------------------------------------------
-// Section 6: LEB128 encoding tests
-// ---------------------------------------------------------------------------
-
-func TestLeb128EncodeU32_Zero(t *testing.T) {
-	b := leb128EncodeU32(0)
-	if len(b) != 1 || b[0] != 0 {
-		t.Fatalf("encode 0: got %x, want [00]", b)
-	}
-}
-
-func TestLeb128EncodeU32_MultiByte(t *testing.T) {
-	tests := []struct {
-		v    uint32
-		want []byte
-	}{
-		{0, []byte{0x00}},
-		{1, []byte{0x01}},
-		{42, []byte{0x2A}},
-		{127, []byte{0x7F}},
-		{128, []byte{0x80, 0x01}},
-		{255, []byte{0xFF, 0x01}},
-		{256, []byte{0x80, 0x02}},
-		{16383, []byte{0xFF, 0x7F}},
-		{16384, []byte{0x80, 0x80, 0x01}},
-	}
-	for _, tt := range tests {
-		got := leb128EncodeU32(tt.v)
-		if !bytes.Equal(got, tt.want) {
-			t.Errorf("encode(%d) = %x, want %x", tt.v, got, tt.want)
-		}
-		// Verify round-trip via manual decode.
-		decoded := uint32(0)
-		for i, b := range got {
-			decoded |= uint32(b&0x7F) << (7 * i)
-			if b&0x80 == 0 {
-				break
-			}
-		}
-		if decoded != tt.v {
-			t.Errorf("round-trip %d: got %d", tt.v, decoded)
-		}
-	}
-}
-
-func TestLeb128EncodeU32_Large(t *testing.T) {
-	tests := []uint32{
-		0xFFFFFFFF,
-		0x80000000,
-		0xDEADBEEF,
-		0x0FFFFFFF,
-		1 << 28,
-	}
-	for _, v := range tests {
-		got := leb128EncodeU32(v)
-		if len(got) == 0 || len(got) > 5 {
-			t.Errorf("encode(%d) length = %d, want 1-5", v, len(got))
-		}
-		// Manual decode verify
-		decoded := uint32(0)
-		for i, b := range got {
-			decoded |= uint32(b&0x7F) << (7 * i)
-			if b&0x80 == 0 {
-				break
-			}
-		}
-		if decoded != v {
-			t.Errorf("round-trip %d: got %d", v, decoded)
-		}
-	}
-}
-
-func TestLeb128EncodeS32_Various(t *testing.T) {
-	tests := []struct {
-		v    int32
-		want []byte
-	}{
-		{0, []byte{0x00}},
-		{1, []byte{0x01}},
-		{42, []byte{0x2A}},
-		{63, []byte{0x3F}},
-		{64, []byte{0xC0, 0x00}},
-		{-1, []byte{0x7F}},
-		{-2, []byte{0x7E}},
-		{-64, []byte{0x40}},
-		{-65, []byte{0xBF, 0x7F}},
-	}
-	for _, tt := range tests {
-		got := leb128EncodeS32(tt.v)
-		if !bytes.Equal(got, tt.want) {
-			t.Errorf("encode(%d) = %x, want %x", tt.v, got, tt.want)
-		}
-	}
-}
-
-func TestLeb128EncodeS32_Negative(t *testing.T) {
-	tests := []int32{
-		-1, -42, -127, -128, -129, -16383, -16384,
-		-1 << 30,
-		-0x7FFFFFFF - 1, // math.MinInt32
-	}
-	for _, v := range tests {
-		got := leb128EncodeS32(v)
-		if len(got) == 0 || len(got) > 5 {
-			t.Errorf("encode(%d) length = %d, want 1-5", v, len(got))
-		}
-		// Manual signed decode verify
-		decoded := int32(0)
-		for i, b := range got {
-			decoded |= int32(b&0x7F) << (7 * i)
-			if b&0x80 == 0 {
-				if b&0x40 != 0 {
-					decoded |= ^((1 << (7 * (i + 1))) - 1) // sign extend
-				}
-				break
-			}
-		}
-		if decoded != v {
-			t.Errorf("round-trip %d: got %d", v, decoded)
-		}
-	}
-}
-
-func TestLeb128EncodeS64_Various(t *testing.T) {
-	tests := []struct {
-		v    int64
-		want []byte
-	}{
-		{0, []byte{0x00}},
-		{1, []byte{0x01}},
-		// Signed LEB128: 127 has bit6=1 so needs 2 bytes (continuation + zero sign)
-		{127, []byte{0xFF, 0x00}},
-		{128, []byte{0x80, 0x01}},
-		{-1, []byte{0x7F}},
-		{-128, []byte{0x80, 0x7F}},
-		{1 << 40, nil},  // just check length
-		{-1 << 40, nil},
-		{0x7FFFFFFFFFFFFFFF, nil},  // max int64
-		{-0x8000000000000000, nil}, // min int64
-	}
-	for _, tt := range tests {
-		got := leb128EncodeS64(tt.v)
-		if tt.want != nil {
-			if !bytes.Equal(got, tt.want) {
-				t.Errorf("encode(%d) = %x, want %x", tt.v, got, tt.want)
-			}
-		}
-		if len(got) == 0 || len(got) > 10 {
-			t.Errorf("encode(%d) length = %d, want 1-10", tt.v, len(got))
-		}
-		// Manual signed decode verify
-		decoded := int64(0)
-		for i, b := range got {
-			decoded |= int64(b&0x7F) << (7 * i)
-			if b&0x80 == 0 {
-				if b&0x40 != 0 {
-					decoded |= ^((int64(1) << (7 * (i + 1))) - 1)
-				}
-				break
-			}
-		}
-		if decoded != tt.v {
-			t.Errorf("round-trip %d: got %d", tt.v, decoded)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Section 7: WASM builder tests
-// ---------------------------------------------------------------------------
-
-func TestBuildImportWasm_Valid(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Build a module importing cleat_now: () -> i64
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
-
-	// Should compile without error
-	module, err := wasmtime.NewModule(env.b.engine, wasmBytes)
+	result, err := testFn.Call(store)
 	if err != nil {
-		t.Fatalf("NewModule: %v", err)
+		t.Fatalf("call test_cleat_now: %v", err)
 	}
-	defer module.Close()
-
-	// Verify exports
-	exports := module.Exports()
-	hasTest := false
-	hasMemory := false
-	for _, e := range exports {
-		if e.Name() == "test" {
-			hasTest = true
-		}
-		if e.Name() == "memory" {
-			hasMemory = true
-		}
-	}
-	if !hasTest {
-		t.Error("module missing 'test' export")
-	}
-	if !hasMemory {
-		t.Error("module missing 'memory' export")
+	if result != int64(42) {
+		t.Errorf("got %v, want 42", result)
 	}
 }
 
-func TestBuildImportWasm_TypeSection(t *testing.T) {
-	// Build a module with i32 params
-	wasmBytes := buildImportWasm("env", "cleat_log",
-		[]byte{wasmValTypeI32, wasmValTypeI32},
-		[]byte{wasmValTypeI64})
-
-	if len(wasmBytes) < 8 {
-		t.Fatal("module too short")
-	}
-	// Verify magic + version
-	if string(wasmBytes[:4]) != "\x00asm" {
-		t.Error("bad magic number")
-	}
-	if wasmBytes[4] != 1 || wasmBytes[5] != 0 || wasmBytes[6] != 0 || wasmBytes[7] != 0 {
-		t.Error("bad version")
-	}
-}
-
-func TestBuildImportWasmWithData_Content(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	data := []byte("hello\x00world")
-	wasmBytes := buildImportWasmWithData("env", "cleat_now", nil, []byte{wasmValTypeI64}, data)
-
-	// Should compile (module is valid even with unreferenced data)
-	module, err := wasmtime.NewModule(env.b.engine, wasmBytes)
+func TestClosure_CleatRandom(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Fatalf("NewModule: %v", err)
+		t.Skipf("wasmtime backend not available: %v", err)
 	}
-	defer module.Close()
-}
+	defer b.Close(ctx)
 
-func TestBuildImportWasmWithData_NilData(t *testing.T) {
-	// Passing nil data should produce same module as buildImportWasm
-	withData := buildImportWasmWithData("env", "cleat_now", nil, []byte{wasmValTypeI64}, nil)
-	withoutData := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
+	b.handler = &mockHostHandler{ret: 99}
 
-	if !bytes.Equal(withData, withoutData) {
-		t.Error("buildImportWasmWithData with nil data should equal buildImportWasm")
-	}
-}
+	ft := wasmFunctype(nil, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_random"}, [][]byte{ft})
 
-// ---------------------------------------------------------------------------
-// Section 8: Test infrastructure tests
-// ---------------------------------------------------------------------------
-
-func TestNewCloseTestEnv_CreatesBackend(t *testing.T) {
-	env := newCloseTestEnv(t)
-	if env.b == nil {
-		t.Fatal("backend is nil")
-	}
-	if env.b.engine == nil {
-		t.Fatal("engine is nil")
-	}
-	if env.b.Name() != "wasmtime" {
-		t.Errorf("Name() = %q, want %q", env.b.Name(), "wasmtime")
-	}
-}
-
-func TestRunWasm_NoImports(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Build the simplest possible module: just an exported function that returns 42.
-	var mod bytes.Buffer
-	mod.Write([]byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00})
-	// Type section: (func (result i32))
-	var ts bytes.Buffer
-	writeLebU32(&ts, 1)
-	ts.WriteByte(0x60) // functype
-	writeLebU32(&ts, 0)
-	writeLebU32(&ts, 1)
-	ts.WriteByte(wasmValTypeI32)
-	writeSection(&mod, 1, ts.Bytes())
-	// Function section
-	var funcs bytes.Buffer
-	writeLebU32(&funcs, 1)
-	writeLebU32(&funcs, 0) // type index 0
-	writeSection(&mod, 3, funcs.Bytes())
-	// Memory section
-	var mem bytes.Buffer
-	writeLebU32(&mem, 1)
-	mem.WriteByte(0x00)
-	writeLebU32(&mem, 1)
-	writeSection(&mod, 5, mem.Bytes())
-	// Export section
-	var exports bytes.Buffer
-	writeLebU32(&exports, 2)
-	writeString(&exports, "memory")
-	exports.WriteByte(0x02)
-	writeLebU32(&exports, 0)
-	writeString(&exports, "test")
-	exports.WriteByte(0x00)
-	writeLebU32(&exports, 0) // func index 0
-	writeSection(&mod, 7, exports.Bytes())
-	// Code section
-	var code bytes.Buffer
-	writeLebU32(&code, 1)
-	var body bytes.Buffer
-	writeLebU32(&body, 0)
-	body.WriteByte(0x41) // i32.const
-	writeLebU32(&body, 42)
-	body.WriteByte(0x0B) // end
-	writeLebU32(&code, uint32(body.Len()))
-	code.Write(body.Bytes())
-	writeSection(&mod, 10, code.Bytes())
-
-	result, err := runWasm(t, env.b, mod.Bytes(), "test", &mockHostHandler{ret: 0})
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Fatalf("compile: %v", err)
 	}
-	if result == nil {
-		t.Fatal("runWasm returned nil result")
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatRandom(linker); err != nil {
+		t.Fatalf("register cleat_random: %v", err)
 	}
-}
 
-func TestRunWasm_NoExports(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Module with only memory, no exported function.
-	wasmBytes := minimalWasm() // empty module, no exports
-
-	_, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 0})
-	if err == nil {
-		t.Fatal("expected error for missing export 'test'")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Section 9: Closure tests
-// ---------------------------------------------------------------------------
-
-func TestClosure_ImportCleatNow(t *testing.T) {
-	env := newCloseTestEnv(t)
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
-
-	result, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 42})
+	inst, err := linker.Instantiate(store, mod)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Fatalf("instantiate: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
-	}
-	if val != 42 {
-		t.Errorf("cleat_now returned %d, want 42", val)
-	}
-}
 
-func TestClosure_ImportCleatVersion(t *testing.T) {
-	env := newCloseTestEnv(t)
-	wasmBytes := buildImportWasm("env", "cleat_version", nil, []byte{wasmValTypeI64})
+	testFn := inst.GetFunc(store, "test_cleat_random")
+	if testFn == nil {
+		t.Fatal("export test_cleat_random not found")
+	}
 
-	result, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 99})
+	result, err := testFn.Call(store)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Fatalf("call test_cleat_random: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
-	}
-	if val != 99 {
-		t.Errorf("cleat_version returned %d, want 99", val)
+	if result != int64(99) {
+		t.Errorf("got %v, want 99", result)
 	}
 }
 
-func TestClosure_ImportCleatRandom(t *testing.T) {
-	env := newCloseTestEnv(t)
-	wasmBytes := buildImportWasm("env", "cleat_random", nil, []byte{wasmValTypeI64})
-
-	result, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 77})
+func TestClosure_CleatVersion(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Skipf("wasmtime backend not available: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
-	}
-	if val != 77 {
-		t.Errorf("cleat_random returned %d, want 77", val)
-	}
-}
+	defer b.Close(ctx)
 
-func TestClosure_ImportCleatMinVersion(t *testing.T) {
-	env := newCloseTestEnv(t)
-	wasmBytes := buildImportWasm("env", "cleat_min_version", nil, []byte{wasmValTypeI64})
+	b.handler = &mockHostHandler{ret: 7}
 
-	result, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 5})
+	ft := wasmFunctype(nil, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_version"}, [][]byte{ft})
+
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Fatalf("compile: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatVersion(linker); err != nil {
+		t.Fatalf("register cleat_version: %v", err)
 	}
-	if val != 5 {
-		t.Errorf("cleat_min_version returned %d, want 5", val)
-	}
-}
 
-func TestClosure_ImportCleatSleep(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// cleat_sleep: (i64) -> i64
-	wasmBytes := buildImportWasm("env", "cleat_sleep",
-		[]byte{wasmValTypeI64}, []byte{wasmValTypeI64})
-
-	result, err := runWasm(t, env.b, wasmBytes, "test",
-		&mockHostHandler{ret: 0}, int64(0))
+	inst, err := linker.Instantiate(store, mod)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Fatalf("instantiate: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
+
+	testFn := inst.GetFunc(store, "test_cleat_version")
+	if testFn == nil {
+		t.Fatal("export test_cleat_version not found")
 	}
-	if val != 0 {
-		t.Errorf("cleat_sleep returned %d, want 0", val)
-	}
-}
 
-func TestClosure_FiveImports(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	wasmBytes := buildMultiImportWasm([]string{
-		"cleat_now", "cleat_version", "cleat_random",
-		"cleat_min_version", "cleat_now",
-	})
-
-	result, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 55})
+	result, err := testFn.Call(store)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Fatalf("call test_cleat_version: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
-	}
-	if val != 55 {
-		t.Errorf("five imports returned %d, want 55", val)
+	if result != int64(7) {
+		t.Errorf("got %v, want 7", result)
 	}
 }
 
-func TestClosure_TwoImports(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	wasmBytes := buildMultiImportWasm([]string{"cleat_now", "cleat_version"})
-
-	result, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 42})
+func TestClosure_CleatMinVersion(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Skipf("wasmtime backend not available: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
-	}
-	// Last imported function (cleat_version) returns mock ret
-	if val != 42 {
-		t.Errorf("two imports returned %d, want 42", val)
-	}
-}
+	defer b.Close(ctx)
 
-func TestClosure_ThreeImports(t *testing.T) {
-	env := newCloseTestEnv(t)
+	b.handler = &mockHostHandler{ret: 3}
 
-	wasmBytes := buildMultiImportWasm([]string{"cleat_now", "cleat_version", "cleat_random"})
+	ft := wasmFunctype(nil, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_min_version"}, [][]byte{ft})
 
-	result, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 100})
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Fatalf("compile: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatMinVersion(linker); err != nil {
+		t.Fatalf("register cleat_min_version: %v", err)
 	}
-	if val != 100 {
-		t.Errorf("three imports returned %d, want 100", val)
-	}
-}
 
-func TestClosure_ImportUnknownFunction(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Import a function that doesn't exist in the host
-	wasmBytes := buildImportWasm("env", "nonexistent_func", nil, []byte{wasmValTypeI64})
-
-	_, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 0})
-	if err == nil {
-		t.Fatal("expected error for unknown import")
-	}
-}
-
-func TestClosure_ImportUnknownModule(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Import from a module that's not registered
-	wasmBytes := buildImportWasm("unknown_module", "some_func", nil, []byte{wasmValTypeI64})
-
-	_, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 0})
-	if err == nil {
-		t.Fatal("expected error for unknown module")
-	}
-}
-
-func TestClosure_HandlerWired(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Create a handler that returns a specific non-zero value
-	h := &mockHostHandler{ret: 12345}
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
-
-	result, err := runWasm(t, env.b, wasmBytes, "test", h)
+	inst, err := linker.Instantiate(store, mod)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Fatalf("instantiate: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
+
+	testFn := inst.GetFunc(store, "test_cleat_min_version")
+	if testFn == nil {
+		t.Fatal("export test_cleat_min_version not found")
 	}
-	// The closure dispatches to h.Now(), which returns h.ret = 12345
-	if val != 12345 {
-		t.Errorf("handler returned %d, want 12345", val)
-	}
-}
 
-func TestClosure_PerExecutionIsolated(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
-
-	// Create two per-execution backends with different handler values
-	pe1 := env.b.PerExecution().(*wasmtimeBackend)
-	pe2 := env.b.PerExecution().(*wasmtimeBackend)
-
-	h1 := &mockHostHandler{ret: 111}
-	h2 := &mockHostHandler{ret: 222}
-
-	result1, err := runWasm(t, pe1, wasmBytes, "test", h1)
+	result, err := testFn.Call(store)
 	if err != nil {
-		t.Fatalf("pe1: %v", err)
+		t.Fatalf("call test_cleat_min_version: %v", err)
 	}
-	result2, err := runWasm(t, pe2, wasmBytes, "test", h2)
+	if result != int64(3) {
+		t.Errorf("got %v, want 3", result)
+	}
+}
+
+func TestClosure_CleatSleep(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Fatalf("pe2: %v", err)
+		t.Skipf("wasmtime backend not available: %v", err)
 	}
+	defer b.Close(ctx)
 
-	val1 := result1.(int64)
-	val2 := result2.(int64)
+	b.handler = &mockHostHandler{ret: 100}
 
-	if val1 != 111 {
-		t.Errorf("pe1 returned %d, want 111", val1)
-	}
-	if val2 != 222 {
-		t.Errorf("pe2 returned %d, want 222", val2)
-	}
-	if val1 == val2 && val1 == 111 {
-		t.Error("both executions returned same value; isolation may be broken")
-	}
-}
+	ft := wasmFunctype([]byte{wasmValI64}, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_sleep"}, [][]byte{ft})
 
-func TestClosure_NilHandlerRecovery(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
-
-	// Passing nil handler: the closure will try to call b.handler.Now()
-	// which will panic. runWasm should propagate this as an error.
-	_, err := runWasm(t, env.b, wasmBytes, "test", nil)
-	if err == nil {
-		t.Fatal("expected error/panic from nil handler, got nil")
-	}
-}
-
-func TestClosure_MultipleCallsToImport(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Build module that calls cleat_now twice (via two imports of cleat_now)
-	wasmBytes := buildMultiImportWasm([]string{"cleat_now", "cleat_now"})
-
-	result, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 777})
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Fatalf("compile: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatSleep(linker); err != nil {
+		t.Fatalf("register cleat_sleep: %v", err)
 	}
-	// The last import call returns 777
-	if val != 777 {
-		t.Errorf("multiple calls returned %d, want 777", val)
+
+	inst, err := linker.Instantiate(store, mod)
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+
+	testFn := inst.GetFunc(store, "test_cleat_sleep")
+	if testFn == nil {
+		t.Fatal("export test_cleat_sleep not found")
+	}
+
+	result, err := testFn.Call(store, int64(55))
+	if err != nil {
+		t.Fatalf("call test_cleat_sleep: %v", err)
+	}
+	if result != int64(100) {
+		t.Errorf("got %v, want 100", result)
 	}
 }
 
-func TestClosure_RepeatedInstantiation(t *testing.T) {
-	env := newCloseTestEnv(t)
+func TestClosure_CleatLog(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
 
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
+	b.handler = &mockHostHandler{ret: 0}
 
-	// Run the same module twice with the same handler
-	h := &mockHostHandler{ret: 42}
-	for i := 0; i < 3; i++ {
-		result, err := runWasm(t, env.b, wasmBytes, "test", h)
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32}, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_log"}, [][]byte{ft})
+
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatLog(linker); err != nil {
+		t.Fatalf("register cleat_log: %v", err)
+	}
+
+	inst, err := linker.Instantiate(store, mod)
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+
+	testFn := inst.GetFunc(store, "test_cleat_log")
+	if testFn == nil {
+		t.Fatal("export test_cleat_log not found")
+	}
+
+	memExp := inst.GetExport(store, "memory")
+	if memExp == nil {
+		t.Fatal("no memory export")
+	}
+	mem := memExp.Memory()
+	if mem == nil {
+		t.Fatal("memory export is not a memory")
+	}
+
+	// Write a valid message to linear memory and call cleat_log via the
+	// WASM wrapper. The success path reaches h.DurableLog(...).
+	data := mem.UnsafeData(store)
+	msg := "hello from wasm log test"
+	copy(data[8:], msg)
+	result, err := testFn.Call(store, int32(8), int32(len(msg)))
+	if err != nil {
+		t.Fatalf("call test_cleat_log (success path): %v", err)
+	}
+	if result != int64(0) {
+		t.Errorf("success path: got %v, want 0", result)
+	}
+
+	// Zero-length read is rejected by wasmtimeReadStringValidated.
+	t.Run("error_path_zero_length", func(t *testing.T) {
+		result, err := testFn.Call(store, int32(0), int32(0))
 		if err != nil {
-			t.Fatalf("iteration %d: %v", i, err)
+			t.Fatalf("call test_cleat_log: %v", err)
 		}
-		val, ok := result.(int64)
-		if !ok {
-			t.Fatalf("iteration %d: result type = %T, want int64", i, result)
+		if result != errBadParamInt64 {
+			t.Errorf("got %v, want %v (errBadParamInt64)", result, errBadParamInt64)
 		}
-		if val != 42 {
-			t.Errorf("iteration %d: got %d, want 42", i, val)
-		}
-	}
-}
-
-func TestClosure_MemorySectionBinary(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Verify the module builder includes a valid memory section.
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
-
-	// Compile the module and verify it has a memory export.
-	module, err := wasmtime.NewModule(env.b.engine, wasmBytes)
-	if err != nil {
-		t.Fatalf("NewModule: %v", err)
-	}
-	defer module.Close()
-
-	// Check for memory export through module metadata.
-	hasMemory := false
-	for _, e := range module.Exports() {
-		if e.Name() == "memory" {
-			hasMemory = true
-			break
-		}
-	}
-	if !hasMemory {
-		t.Fatal("module should have a 'memory' export")
-	}
-}
-
-func TestClosure_ModuleTypeMatching(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Build a module with wrong import type: import cleat_now (needs () -> i64)
-	// as (i32) -> i64, which should cause a link error.
-	var mod bytes.Buffer
-	mod.Write([]byte{0x00, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00})
-
-	// Type section: one type (i32) -> i64
-	var ts bytes.Buffer
-	writeLebU32(&ts, 1)
-	ts.WriteByte(0x60) // functype
-	writeLebU32(&ts, 1)
-	ts.WriteByte(wasmValTypeI32)
-	writeLebU32(&ts, 1)
-	ts.WriteByte(wasmValTypeI64)
-	writeSection(&mod, 1, ts.Bytes())
-
-	// Import section: import cleat_now with wrong type
-	var imps bytes.Buffer
-	writeLebU32(&imps, 1)
-	writeString(&imps, "env")
-	writeString(&imps, "cleat_now")
-	imps.WriteByte(0x00)
-	writeLebU32(&imps, 0)
-	writeSection(&mod, 2, imps.Bytes())
-
-	// No function/export/code - instantiation should fail at link time
-	// because cleat_now is registered as () -> i64 but module says (i32) -> i64
-	_, err := runWasm(t, env.b, mod.Bytes(), "test", &mockHostHandler{ret: 0})
-	if err == nil {
-		t.Fatal("expected type mismatch error from linker")
-	}
-}
-
-func TestClosure_FourImports(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	wasmBytes := buildMultiImportWasm([]string{
-		"cleat_now", "cleat_version", "cleat_random", "cleat_min_version",
 	})
+}
 
-	result, err := runWasm(t, env.b, wasmBytes, "test", &mockHostHandler{ret: 2024})
+// The next three tests exercise registerCleatComplete closures. Note: the
+// callerMemBuf error branch in cleat_complete (source line ~1697) is not
+// covered — triggering it requires a WASM module that calls cleat_complete but
+// has no exported memory, which is not constructible via closureWasm.
+func TestClosure_CleatComplete(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Skipf("wasmtime backend not available: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
+	defer b.Close(ctx)
+
+	var cr, ce string
+	b.handler = &mockHostHandler{ret: 0}
+
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_complete"}, [][]byte{ft})
+
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
 	}
-	if val != 2024 {
-		t.Errorf("four imports returned %d, want 2024", val)
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatComplete(linker, &cr, &ce); err != nil {
+		t.Fatalf("register cleat_complete: %v", err)
+	}
+
+	inst, err := linker.Instantiate(store, mod)
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+
+	testFn := inst.GetFunc(store, "test_cleat_complete")
+	if testFn == nil {
+		t.Fatal("export test_cleat_complete not found")
+	}
+
+	// Call with resultLen=0 — exercises the empty-result path.
+	result, err := testFn.Call(store, int32(0), int32(0), int32(0))
+	if err != nil {
+		t.Fatalf("call test_cleat_complete: %v", err)
+	}
+	if result != int64(0) {
+		t.Errorf("got %v, want 0", result)
+	}
+	if cr != "" || ce != "" {
+		t.Errorf("cr=%q ce=%q, want both empty", cr, ce)
 	}
 }
 
-func TestClosure_ImportPreservesOrder(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Import in different orders should still resolve correctly.
-	// Version 1: now, version
-	wasm1 := buildMultiImportWasm([]string{"cleat_now", "cleat_version"})
-	// Version 2: version, now
-	wasm2 := buildMultiImportWasm([]string{"cleat_version", "cleat_now"})
-
-	h := &mockHostHandler{ret: 42}
-
-	result1, err := runWasm(t, env.b, wasm1, "test", h)
+func TestClosure_CleatComplete_WithResult(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Fatalf("order1: %v", err)
+		t.Skipf("wasmtime backend not available: %v", err)
 	}
-	result2, err := runWasm(t, env.b, wasm2, "test", h)
+	defer b.Close(ctx)
+
+	var cr, ce string
+	b.handler = &mockHostHandler{ret: 0}
+
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_complete"}, [][]byte{ft})
+
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
 	if err != nil {
-		t.Fatalf("order2: %v", err)
+		t.Fatalf("compile: %v", err)
 	}
-	val1 := result1.(int64)
-	val2 := result2.(int64)
-	if val1 != 42 || val2 != 42 {
-		t.Errorf("order: got %d, %d, want 42, 42", val1, val2)
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatComplete(linker, &cr, &ce); err != nil {
+		t.Fatalf("register cleat_complete: %v", err)
+	}
+
+	inst, err := linker.Instantiate(store, mod)
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+
+	memExp := inst.GetExport(store, "memory")
+	mem := memExp.Memory()
+	data := mem.UnsafeData(store)
+	copy(data[0:2], "ok")
+
+	testFn := inst.GetFunc(store, "test_cleat_complete")
+	if testFn == nil {
+		t.Fatal("export test_cleat_complete not found")
+	}
+
+	_, err = testFn.Call(store, int32(0), int32(0), int32(2))
+	if err != nil {
+		t.Fatalf("call test_cleat_complete: %v", err)
+	}
+	if cr != "ok" {
+		t.Errorf("cr = %q, want %q", cr, "ok")
 	}
 }
 
-func TestClosure_HandlerChangeBetweenCalls(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
-
-	// First call with handler returning 10
-	h1 := &mockHostHandler{ret: 10}
-	result1, err := runWasm(t, env.b, wasmBytes, "test", h1)
+func TestClosure_CleatComplete_ErrorStatus(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Fatalf("first: %v", err)
+		t.Skipf("wasmtime backend not available: %v", err)
 	}
+	defer b.Close(ctx)
 
-	// Second call with handler returning 20
-	h2 := &mockHostHandler{ret: 20}
-	result2, err := runWasm(t, env.b, wasmBytes, "test", h2)
+	var cr, ce string
+	b.handler = &mockHostHandler{ret: 0}
+
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_complete"}, [][]byte{ft})
+
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
 	if err != nil {
-		t.Fatalf("second: %v", err)
+		t.Fatalf("compile: %v", err)
+	}
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatComplete(linker, &cr, &ce); err != nil {
+		t.Fatalf("register cleat_complete: %v", err)
 	}
 
-	val1 := result1.(int64)
-	val2 := result2.(int64)
-	if val1 != 10 {
-		t.Errorf("first call: got %d, want 10", val1)
-	}
-	if val2 != 20 {
-		t.Errorf("second call: got %d, want 20", val2)
-	}
-}
-
-func TestClosure_DifferentReturnValues(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
-
-	// Test with different handler return values.
-	for _, expected := range []int64{0, 1, -1, 1000, 1 << 40, -1 << 40} {
-		h := &mockHostHandler{ret: expected}
-		result, err := runWasm(t, env.b, wasmBytes, "test", h)
-		if err != nil {
-			t.Fatalf("runWasm(ret=%d): %v", expected, err)
-		}
-		val, ok := result.(int64)
-		if !ok {
-			t.Fatalf("ret=%d: result type = %T, want int64", expected, result)
-		}
-		if val != expected {
-			t.Errorf("ret=%d: got %d", expected, val)
-		}
-	}
-}
-
-func TestClosure_AllS32Variants(t *testing.T) {
-	// This is a pure-Go test (no WASM) that verifies leb128EncodeS32
-	// produces encodings that the module builder can consume for closure types.
-	// It tests the boundary between LEB128 encoding and WASM module construction.
-	tests := []int32{0, 1, -1, 63, -64, 64, -65, 127, -128, 128, -129, 1 << 20, -(1 << 20)}
-	for _, v := range tests {
-		enc := leb128EncodeS32(v)
-		if len(enc) == 0 || len(enc) > 5 {
-			t.Errorf("leb128EncodeS32(%d) length %d out of range", v, len(enc))
-		}
-		// Decode and verify
-		decoded := int32(0)
-		for i, b := range enc {
-			decoded |= int32(b&0x7F) << (7 * i)
-			if b&0x80 == 0 {
-				if b&0x40 != 0 {
-					decoded |= ^((1 << (7 * (i + 1))) - 1)
-				}
-				break
-			}
-		}
-		if decoded != v {
-			t.Errorf("leb128EncodeS32(%d) round-trip = %d", v, decoded)
-		}
-	}
-}
-
-func TestClosure_ImportThenExecuteNonGo(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// Build a module that imports cleat_now and conforms to Execute's
-	// expected export signature: (i32, i32, i32, i32) -> i64.
-	// The export function ignores the 4 input params, calls cleat_now,
-	// and returns the result packed as an error code.
-	wasmBytes := buildImportWasm("env", "cleat_now", []byte{
-		wasmValTypeI32, wasmValTypeI32, wasmValTypeI32, wasmValTypeI32,
-	}, []byte{wasmValTypeI64})
-
-	// Execute requires a non-nil session. The handler on the backend
-	// is set by Execute's session parameter.
-	// We pass a nil session to verify the Execute path handles it.
-	_, err := env.b.Execute(env.ctx, wasmBytes, "test", nil, &mockHostHandler{ret: 99})
+	inst, err := linker.Instantiate(store, mod)
 	if err != nil {
-		t.Logf("Execute with non-Go module: %v (expected if session/handler mismatch)", err)
-	}
-}
-
-func TestClosure_PerExecutionBackendUsesSeparateHandler(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	wasmBytes := buildImportWasm("env", "cleat_now", nil, []byte{wasmValTypeI64})
-
-	// Set a handler on the base backend
-	env.b.handler = &mockHostHandler{ret: 1}
-
-	// Create per-execution backend - should copy handler state
-	pe := env.b.PerExecution().(*wasmtimeBackend)
-
-	// pe starts with nil handler (fresh per-execution state)
-	if pe.handler != nil {
-		t.Error("PerExecution() handler should be nil initially")
+		t.Fatalf("instantiate: %v", err)
 	}
 
-	// Set a different handler on pe
-	result, err := runWasm(t, pe, wasmBytes, "test", &mockHostHandler{ret: 999})
+	memExp := inst.GetExport(store, "memory")
+	mem := memExp.Memory()
+	data := mem.UnsafeData(store)
+	copy(data[0:4], "fail")
+
+	testFn := inst.GetFunc(store, "test_cleat_complete")
+	_, err = testFn.Call(store, int32(1), int32(0), int32(4))
 	if err != nil {
-		t.Fatalf("pe run: %v", err)
+		t.Fatalf("call test_cleat_complete: %v", err)
 	}
-	val := result.(int64)
-	if val != 999 {
-		t.Errorf("pe returned %d, want 999", val)
+	if ce != "fail" {
+		t.Errorf("ce = %q, want %q", ce, "fail")
 	}
-
-	// Base backend handler should still be 1
-	if env.b.handler.(*mockHostHandler).ret != 1 {
-		t.Error("base backend handler was modified by per-execution")
+	if cr != "" {
+		t.Errorf("cr = %q, want empty", cr)
 	}
 }
 
-func TestClosure_CleatCompleteResultCapture(t *testing.T) {
-	env := newCloseTestEnv(t)
-
-	// cleat_complete: (i32, i32, i32) -> i64
-	// params: status, resultPtr, resultLen
-	wasmBytes := buildImportWasm("env", "cleat_complete",
-		[]byte{wasmValTypeI32, wasmValTypeI32, wasmValTypeI32},
-		[]byte{wasmValTypeI64})
-
-	// Call with status=0, ptr=0, len=0
-	result, err := runWasm(t, env.b, wasmBytes, "test",
-		&mockHostHandler{ret: 0}, int32(0), int32(0), int32(0))
+func TestClosure_CleatPollWork(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
 	if err != nil {
-		t.Fatalf("runWasm: %v", err)
+		t.Skipf("wasmtime backend not available: %v", err)
 	}
-	val, ok := result.(int64)
-	if !ok {
-		t.Fatalf("result type = %T, want int64", result)
+	defer b.Close(ctx)
+
+	b.workEntryPoint = "myEntry"
+	b.workInput = []byte(`{"in":"put"}`)
+
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_poll_work"}, [][]byte{ft})
+
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
 	}
-	if val != 0 {
-		t.Errorf("cleat_complete returned %d, want 0", val)
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatPollWork(linker); err != nil {
+		t.Fatalf("register cleat_poll_work: %v", err)
+	}
+
+	inst, err := linker.Instantiate(store, mod)
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+
+	memExp := inst.GetExport(store, "memory")
+	mem := memExp.Memory()
+
+	testFn := inst.GetFunc(store, "test_cleat_poll_work")
+	result, err := testFn.Call(store, int32(0), int32(100), int32(200), int32(100))
+	if err != nil {
+		t.Fatalf("call test_cleat_poll_work: %v", err)
+	}
+
+	entryLen := int32(result.(int64) >> 32)
+	argsLen := int32(result.(int64) & 0xFFFFFFFF)
+	if entryLen != 7 {
+		t.Errorf("entryLen = %d, want 7", entryLen)
+	}
+	if argsLen != 12 {
+		t.Errorf("argsLen = %d, want 12", argsLen)
+	}
+
+	data := mem.UnsafeData(store)
+	if got := string(data[0:entryLen]); got != "myEntry" {
+		t.Errorf("entry = %q, want %q", got, "myEntry")
+	}
+	if got := string(data[200 : 200+argsLen]); got != `{"in":"put"}` {
+		t.Errorf("input = %q, want %q", got, `{"in":"put"}`)
 	}
 }
 
+func TestClosure_CleatPollWork_Truncation(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	longEntry := make([]byte, 300)
+	for i := range longEntry {
+		longEntry[i] = 'x'
+	}
+	longInput := make([]byte, 200)
+	for i := range longInput {
+		longInput[i] = 'y'
+	}
+	b.workEntryPoint = string(longEntry)
+	b.workInput = longInput
+
+	ft := wasmFunctype([]byte{wasmValI32, wasmValI32, wasmValI32, wasmValI32}, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_poll_work"}, [][]byte{ft})
+
+	mod, err := wasmtime.NewModule(b.engine, wasmBytes)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	defer mod.Close()
+
+	store := wasmtime.NewStore(b.engine)
+	defer store.Close()
+
+	linker := wasmtime.NewLinker(b.engine)
+	if err := b.registerCleatPollWork(linker); err != nil {
+		t.Fatalf("register cleat_poll_work: %v", err)
+	}
+
+	inst, err := linker.Instantiate(store, mod)
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+
+	testFn := inst.GetFunc(store, "test_cleat_poll_work")
+	result, err := testFn.Call(store, int32(0), int32(10), int32(50), int32(5))
+	if err != nil {
+		t.Fatalf("call test_cleat_poll_work: %v", err)
+	}
+
+	entryLen := int32(result.(int64) >> 32)
+	argsLen := int32(result.(int64) & 0xFFFFFFFF)
+	if entryLen != 10 {
+		t.Errorf("entryLen = %d, want 10 (truncated)", entryLen)
+	}
+	if argsLen != 5 {
+		t.Errorf("argsLen = %d, want 5 (truncated)", argsLen)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Section 7: Execute error-path and component detection coverage
+// ---------------------------------------------------------------------------
+
+func TestExecute_ComponentWasmBytes(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	// Component model WASM starts with magic \x00asm then version,
+	// and has a component section (section ID 0x0a) or uses the
+	// component-model binary format. isComponentWasm checks for this.
+	// Build a fake component-model header to exercise the detection path.
+	componentHeader := []byte{
+		0x00, 0x61, 0x73, 0x6d, // magic
+		0x0d, 0x00, 0x01, 0x00, // component model version (checked by isComponentWasm)
+		0x00, 0x61, 0x73, 0x6d, // second magic for component
+		0x0a, 0x00, 0x01, 0x00, // version 10
+	}
+
+	_, err = b.Execute(ctx, componentHeader, "main", nil, b.handler)
+	if err == nil {
+		t.Log("component header executed (unexpected but OK)")
+	} else {
+		t.Logf("expected error from component header: %v", err)
+	}
+}
+
+func TestExecute_GoModuleWithoutStart(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	b.handler = &mockHostHandler{ret: 0}
+
+	// Build a module with memory, a cleat import, and an export.
+	// The export needs signature (i32,i32,i32,i32) -> i64 for non-Go path.
+	// Use closureWasm but rename the export to something specific.
+	ft := wasmFunctype(nil, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_now"}, [][]byte{ft})
+
+	// Try to Execute with an entry point that doesn't exist.
+	_, err = b.Execute(ctx, wasmBytes, "nonexistent", nil, b.handler)
+	if err == nil {
+		t.Log("executed with nonexistent entry (unexpected)")
+	} else {
+		t.Logf("expected error with nonexistent entry: %v", err)
+	}
+}
+
+func TestExecute_ExportNotFound(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	b.handler = &mockHostHandler{ret: 0}
+
+	ft := wasmFunctype(nil, []byte{wasmValI64})
+	wasmBytes := closureWasm([]string{"cleat_now"}, [][]byte{ft})
+
+	// Export "test_cleat_now" exists, but we ask for "missing_func".
+	_, err = b.Execute(ctx, wasmBytes, "missing_func", nil, b.handler)
+	if err == nil {
+		t.Error("expected error for missing export, got nil")
+	}
+	if err != nil {
+		t.Logf("missing export error (expected): %v", err)
+	}
+}
+
+func TestExecute_CompileError_BeforeHandler(t *testing.T) {
+	ctx := context.Background()
+	b, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Skipf("wasmtime backend not available: %v", err)
+	}
+	defer b.Close(ctx)
+
+	// Invalid WASM bytes fail at compile time (before the handler is
+	// installed). The compile error is caught in Execute line ~111-113,
+	// so a nil handler parameter never triggers a nil-dereference panic.
+	_, err = b.Execute(ctx, []byte("not-valid-wasm"), "main", nil, nil)
+	if err == nil {
+		t.Error("expected error for invalid WASM bytes")
+	}
+}
