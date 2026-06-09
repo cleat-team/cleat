@@ -94,22 +94,19 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
   # -------------------------------------------------------------------------
-  # Lint Go (golangci-lint — disabled: action doesn't support Go 1.26 yet)
+  # Lint Go (golangci-lint)
   # -------------------------------------------------------------------------
-  # lint-go:
-  #   name: Go Lint (golangci-lint)
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Setup Go
-  #       uses: actions/setup-go@v5
-  #       with:
-  #         go-version: "1.26"
-  #     - name: golangci-lint
-  #       uses: golangci/golangci-lint-action@v6
-  #       with:
-  #         version: latest
-  #         args: --timeout=5m ./...
+  lint-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+          golangci-lint run ./...
 
   # -------------------------------------------------------------------------
   # Vulnerability check (govulncheck)
@@ -199,64 +196,6 @@ jobs:
             fi
           fi
 
-  # -------------------------------------------------------------------------
-  # Test Go with TinyGo (dedicated job)
-  #
-  # Installs TinyGo and runs the full WASM test suite, including the
-  # TinyGo compilation integration test in engine/. The job fails
-  # if TinyGo is unavailable or the TinyGo build path breaks — tests that
-  # would otherwise silently t.Skip() are forced to run.
-  # -------------------------------------------------------------------------
-  test-tinygo:
-    if: false  # Temporarily skipped; Go version issues being explored on another branch
-    name: Test Go with TinyGo
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: cleat
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      CLEAT_TEST_DB: postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-
-      - name: Install TinyGo
-        run: |
-          TINYGO_VER=$(curl -sSfL https://api.github.com/repos/tinygo-org/tinygo/releases/latest | jq -r .tag_name)
-          if [ -z "$TINYGO_VER" ] || [ "$TINYGO_VER" = "null" ]; then
-            TINYGO_VER="v0.41.1"
-          fi
-          TINYGO_SHORT="${TINYGO_VER#v}"
-          curl -sSfL "https://github.com/tinygo-org/tinygo/releases/download/${TINYGO_VER}/tinygo${TINYGO_SHORT}.linux-amd64.tar.gz" -o /tmp/tinygo.tar.gz && \
-            sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz && \
-            echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
-
-      - name: Verify TinyGo
-        run: tinygo version
-
-      - name: Test WASM build pipeline (wasm)
-        run: go test -race -count=1 ./wasm/...
-
-      - name: Test WASM runtime + TinyGo compilation (engine)
-        run: go test -race -count=1 -timeout=180s ./engine/...
-
-      - name: Test closure validator (internal/closure)
-        run: go test -race -count=1 ./internal/closure/...
-
-      - name: Test analyzer (internal/analyzer)
-        run: go test -race -count=1 ./internal/analyzer/...
 
   # -------------------------------------------------------------------------
   # Test Python (matrix: 3.10 / 3.11 / 3.12)
