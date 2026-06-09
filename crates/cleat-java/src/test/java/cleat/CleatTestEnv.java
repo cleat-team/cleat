@@ -868,5 +868,12 @@ public class CleatTestEnv {
         public CleatResult<Void> releaseLock(String key) {
             return CleatResult.ok(null);
         }
+
+        // ---- UUID ----
+
+        @Override
+        public String uuid(String seed) {
+            return "00000000-0000-0000-0000-" + String.format("%012d", seed.hashCode() & 0xFFFFFFFFFFFFL);
+        }
     }
 }

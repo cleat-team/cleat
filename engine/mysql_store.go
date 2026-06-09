@@ -206,7 +206,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		  AND next_wake_at <= NOW(6)
 		  AND task_queue IN (%s)
 		  AND tenant_id = ?
-		ORDER BY CASE WHEN sticky_worker_id = ? THEN 0 ELSE 1 END, COALESCE(priority, 0) DESC, created_at
+		ORDER BY CASE WHEN sticky_worker_id = ? THEN 0 ELSE 1 END, ISNULL(priority), priority DESC, created_at
 		LIMIT ?
 		FOR UPDATE SKIP LOCKED
 	`, tqClause), selArgs...)
