@@ -279,7 +279,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	defer c.store.mu.RUnlock()
 
 	switch {
-	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(query, "tenant_api_keys"):
 		return c.queryTenantByKeyHash(args)
 	case strings.Contains(query, "COALESCE(event_type"):
 		return c.queryPollConfigs()
