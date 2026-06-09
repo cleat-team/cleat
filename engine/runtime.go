@@ -104,12 +104,14 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	// Override clock_time_get and random_get with stubs so Go WASM modules
 	// don't crash on nil sys context. Workflows must use h.Now()/h.Random().
 	wasiBuilder.NewFunctionBuilder().
-		WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			_ = mod
 			stack[0] = 0 // errno::success
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
 		Export("clock_time_get")
 	wasiBuilder.NewFunctionBuilder().
-		WithGoFunction(api.GoFunc(func(ctx context.Context, stack []uint64) {
+		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+			_ = mod
 			stack[0] = 0 // errno::success
 		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
 		Export("random_get")
