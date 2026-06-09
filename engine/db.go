@@ -2203,7 +2203,7 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		n, _ := res.RowsAffected()
 		if n == 0 {
 			// Key was inserted concurrently — rollback and return the existing one.
-			tx.Rollback()
+			_ = tx.Rollback()
 			err := s.db.QueryRowContext(ctx,
 				`SELECT workflow_id FROM idempotency_keys
 				 WHERE key_hash = $1 AND expires_at > now()`,
@@ -4156,7 +4156,7 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 			)
 		`, olderThan)
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -4189,7 +4189,7 @@ func (s *PostgresStore) DeleteExpiredEvents(ctx context.Context, olderThan time.
 			)
 		`, olderThan)
 		if err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			break
 		}
 		if err := tx.Commit(); err != nil {
