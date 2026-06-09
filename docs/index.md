@@ -11,6 +11,7 @@
 - **Understand the architecture** -- [Architecture Overview](explanation/architecture.md)
 - **See the full CLI reference** -- [CLI Reference](reference/cli.md)
 - **Migrate from Temporal/DBOS/Restate** -- [Migration Guides](migration/)
+- **Troubleshoot common issues** -- [Troubleshooting Guide](troubleshooting.md)
 - **Contribute to Cleat** -- [Contributor Guide](../CONTRIBUTING.md)
 
 ## Documentation Structure
