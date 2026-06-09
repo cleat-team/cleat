@@ -121,7 +121,7 @@ func OllamaChatStream(ctx context.Context, client *http.Client, baseURL string, 
 
 	bodyMap := map[string]any{}
 	data, _ := json.Marshal(input)
-	json.Unmarshal(data, &bodyMap)
+	_ = json.Unmarshal(data, &bodyMap)
 	bodyMap["stream"] = true
 
 	bodyJSON, err := json.Marshal(bodyMap)

@@ -21,7 +21,7 @@ var workflowTemplates embed.FS
 func runInit(args []string) {
 	flags := flag.NewFlagSet("init", flag.ExitOnError)
 	templateName := flags.String("template", "basic", "project template (basic, agent, agent-python, workflow)")
-	flags.Parse(args)
+	_ = flags.Parse(args)
 
 	if flags.NArg() < 1 {
 		fmt.Fprintf(os.Stderr, "Usage: cleat init [--template agent|basic|agent-python|workflow] <project-name>\n")

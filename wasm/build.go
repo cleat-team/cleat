@@ -247,7 +247,7 @@ func copyCleatSDKToDeps(projectRoot, modulePath, depsDir string) error {
 	for _, modFile := range []string{"go.mod", "go.sum"} {
 		srcMod := filepath.Join(srcCleat, modFile)
 		if data, err := os.ReadFile(srcMod); err == nil {
-			os.WriteFile(filepath.Join(depsDir, "cleat", modFile), data, 0644)
+			_ = os.WriteFile(filepath.Join(depsDir, "cleat", modFile), data, 0644)
 		}
 	}
 	srcCleattest := filepath.Join(srcCleat, "cleattest")
@@ -262,7 +262,7 @@ func copyCleatSDKToDeps(projectRoot, modulePath, depsDir string) error {
 			if err != nil {
 				continue
 			}
-			os.WriteFile(filepath.Join(depsDir, "cleattest", base), content, 0644)
+			_ = os.WriteFile(filepath.Join(depsDir, "cleattest", base), content, 0644)
 		}
 	}
 	depsMod := fmt.Sprintf(`module %s
