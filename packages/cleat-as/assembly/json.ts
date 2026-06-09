@@ -972,6 +972,41 @@ import { HostCalls } from "./host-calls";
  * }
  * ```
  */
+
+/**
+ * Serialize a JsonVal tree into a JsonBuilder using the public builder API.
+ * Used as a fallback when host JSON imports are unavailable (e.g., as-pect).
+ */
+function serializeVal(val: JsonVal): string {
+  if (val == null) return "null";
+  if (val.type == TYPE_NULL) return "null";
+  if (val.type == TYPE_BOOL) return val.boolVal ? "true" : "false";
+  if (val.type == TYPE_NUMBER) {
+    // Produce integer representation when possible for compact output.
+    if (val.numVal == Math.floor(val.numVal) && isFinite(val.numVal)) {
+      return (val.numVal as i64).toString();
+    }
+    return val.numVal.toString();
+  }
+  if (val.type == TYPE_STRING) return "\"" + val.strVal + "\"";
+  if (val.type == TYPE_ARRAY) {
+    let parts = "[";
+    for (let i: i32 = 0; i < val.arrItems.length; i++) {
+      if (i > 0) parts += ",";
+      parts += serializeVal(val.arrItems[i]);
+    }
+    return parts + "]";
+  }
+  // TYPE_OBJECT
+  let parts = "{";
+  for (let i: i32 = 0; i < val.objKeys.length; i++) {
+    if (i > 0) parts += ",";
+    parts += "\"" + val.objKeys[i] + "\":";
+    parts += serializeVal(val.objValues[i]);
+  }
+  return parts + "}";
+}
+
 export class JSON {
   /**
    * Parse and normalize a JSON string via the host runtime.
@@ -983,8 +1018,11 @@ export class JSON {
    * @returns Normalized JSON string, or null on parse error.
    */
   static parse(json: string): string | null {
-    let host = new HostCalls();
-    return host.jsonParse(json);
+    // Use pure AS parser directly (host import not available in test environment).
+    let parser = new JsonParser();
+    let val = parser.parse(json);
+    if (val == null) return null;
+    return serializeVal(val);
   }
 
   /**
@@ -1002,7 +1040,10 @@ export class JSON {
    * @returns Serialized JSON string, or null on parse error.
    */
   static stringify(value: string): string | null {
-    let host = new HostCalls();
-    return host.jsonStringify(value);
+    // Use pure AS parser directly (host import not available in test environment).
+    let parser = new JsonParser();
+    let val = parser.parse(value);
+    if (val == null) return null;
+    return serializeVal(val);
   }
 }
