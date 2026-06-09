@@ -303,3 +303,88 @@ func TestEventStreamToJSON_NonEmpty(t *testing.T) {
 // Compile-time check: both implementations satisfy EventStream.
 var _ EventStream = (*DBEventStream)(nil)
 var _ EventStream = (*SliceEventStream)(nil)
+
+// ---------------------------------------------------------------------------
+// Additional DBEventStream edge-case tests
+// ---------------------------------------------------------------------------
+
+func TestDBEventStream_At_Loaded(t *testing.T) {
+	s := NewDBEventStream(nil, "wf-1", 100)
+	s.Append(EventRecord{Step: 0, Service: "loaded-test"})
+
+	got := s.At(0)
+	if got == nil {
+		t.Fatal("At(0) after Append returned nil")
+	}
+	if got.Service != "loaded-test" {
+		t.Errorf("At(0).Service = %q, want %q", got.Service, "loaded-test")
+	}
+	if got.Step != 0 {
+		t.Errorf("At(0).Step = %d, want 0", got.Step)
+	}
+}
+
+func TestDBEventStream_Slice_Basic(t *testing.T) {
+	s := NewDBEventStream(nil, "wf-1", 100)
+	s.Append(EventRecord{Step: 0, Service: "a"})
+	s.Append(EventRecord{Step: 1, Service: "b"})
+	s.Append(EventRecord{Step: 2, Service: "c"})
+
+	got := s.Slice(0, 2)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Service != "a" || got[1].Service != "b" {
+		t.Errorf("Slice(0,2) = %+v", got)
+	}
+}
+
+func TestDBEventStream_Slice_NegativeStart(t *testing.T) {
+	s := NewDBEventStream(nil, "wf-1", 100)
+	s.Append(EventRecord{Step: 0, Service: "x"})
+	s.Append(EventRecord{Step: 1, Service: "y"})
+
+	got := s.Slice(-1, 2)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if got[0].Service != "x" || got[1].Service != "y" {
+		t.Errorf("Slice(-1,2) = %+v", got)
+	}
+}
+
+func TestDBEventStream_Slice_StartGELen(t *testing.T) {
+	s := NewDBEventStream(nil, "wf-1", 100)
+	s.Append(EventRecord{Step: 0})
+
+	// With 1 item loaded, Slice(1, 1): end=1 <= len=1, no DB access.
+	got := s.Slice(1, 1)
+	if got != nil {
+		t.Errorf("Slice(1,1) = %v, want nil", got)
+	}
+}
+
+
+func TestDBEventStream_Slice_Copy(t *testing.T) {
+	s := NewDBEventStream(nil, "wf-1", 100)
+	s.Append(EventRecord{Step: 0, Service: "original"})
+
+	got := s.Slice(0, 1)
+	got[0].Service = "modified"
+
+	if s.At(0).Service != "original" {
+		t.Errorf("original was mutated: Service = %q", s.At(0).Service)
+	}
+}
+
+func TestDBEventStream_Slice_StartEQEnd(t *testing.T) {
+	s := NewDBEventStream(nil, "wf-1", 100)
+	s.Append(EventRecord{Step: 0, Service: "a"})
+	s.Append(EventRecord{Step: 1, Service: "b"})
+
+	got := s.Slice(1, 1)
+	if len(got) != 0 {
+		t.Errorf("len = %d, want 0", len(got))
+	}
+}
+

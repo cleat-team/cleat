@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -551,5 +552,191 @@ func TestRegisterVersionHandler_GetOnGC(t *testing.T) {
 	// Expect 200.
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Error-path tests: mock store that returns errors from all version methods
+// ---------------------------------------------------------------------------
+
+type versionHandlerErrorStore struct {
+	*stubWorkflowStore
+}
+
+func (m *versionHandlerErrorStore) ListWorkflowDefs(_ context.Context, name string) ([]WorkflowDef, error) {
+	return nil, errors.New("store error")
+}
+
+func (m *versionHandlerErrorStore) GetActiveInstanceCountsByVersion(_ context.Context) (map[string]int, error) {
+	return nil, errors.New("store error")
+}
+
+func (m *versionHandlerErrorStore) MarkVersionDeprecated(_ context.Context, name string, version int, deprecated bool) error {
+	return errors.New("store error")
+}
+
+func (m *versionHandlerErrorStore) PurgeWorkflowDef(_ context.Context, name string, version int) error {
+	return errors.New("store error")
+}
+
+func TestRegisterVersionHandler_ListAllStoreError(t *testing.T) {
+	store := &versionHandlerErrorStore{stubWorkflowStore: &stubWorkflowStore{}}
+	mux := http.NewServeMux()
+	RegisterVersionHandler(mux, store)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/versions")
+	if err != nil {
+		t.Fatalf("GET /api/versions: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterVersionHandler_ListByNameStoreError(t *testing.T) {
+	store := &versionHandlerErrorStore{stubWorkflowStore: &stubWorkflowStore{}}
+	mux := http.NewServeMux()
+	RegisterVersionHandler(mux, store)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/versions/wf-test")
+	if err != nil {
+		t.Fatalf("GET /api/versions/wf-test: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterVersionHandler_StaleStoreError(t *testing.T) {
+	store := &versionHandlerErrorStore{stubWorkflowStore: &stubWorkflowStore{}}
+	mux := http.NewServeMux()
+	RegisterVersionHandler(mux, store)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/api/versions/stale")
+	if err != nil {
+		t.Fatalf("GET /api/versions/stale: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterVersionHandler_DeprecateStoreError(t *testing.T) {
+	store := &versionHandlerErrorStore{stubWorkflowStore: &stubWorkflowStore{}}
+	mux := http.NewServeMux()
+	RegisterVersionHandler(mux, store)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/api/versions/wf-test/1/deprecate", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /api/versions/wf-test/1/deprecate: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterVersionHandler_PurgeStoreError(t *testing.T) {
+	store := &versionHandlerErrorStore{stubWorkflowStore: &stubWorkflowStore{}}
+	mux := http.NewServeMux()
+	RegisterVersionHandler(mux, store)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/api/versions/wf-test/1/purge", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /api/versions/wf-test/1/purge: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterVersionHandler_GCStoreError(t *testing.T) {
+	store := &versionHandlerErrorStore{stubWorkflowStore: &stubWorkflowStore{}}
+	mux := http.NewServeMux()
+	RegisterVersionHandler(mux, store)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/api/versions/gc", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /api/versions/gc: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterVersionHandler_ListByNameMethodNotAllowed(t *testing.T) {
+	store := &versionHandlerMockStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs:              []WorkflowDef{},
+		counts:            map[string]int{},
+	}
+	mux := http.NewServeMux()
+	RegisterVersionHandler(mux, store)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// POST to /api/versions/wf-alpha should hit listWorkflowVersions → 405.
+	resp, err := http.Post(server.URL+"/api/versions/wf-alpha", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /api/versions/wf-alpha: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterVersionHandler_StaleMethodNotAllowed(t *testing.T) {
+	store := &versionHandlerMockStore{
+		stubWorkflowStore: &stubWorkflowStore{},
+		defs:              []WorkflowDef{},
+		counts:            map[string]int{},
+	}
+	mux := http.NewServeMux()
+	RegisterVersionHandler(mux, store)
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	// POST to /api/versions/stale should hit listStaleAlerts → 405.
+	resp, err := http.Post(server.URL+"/api/versions/stale", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /api/versions/stale: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405, got %d", resp.StatusCode)
 	}
 }

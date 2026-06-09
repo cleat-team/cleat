@@ -727,7 +727,9 @@ func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerI
 			UPDATE workflow_instances
 			SET next_wake_at = NOW(6)
 			WHERE id = (
-				SELECT parent_workflow_id FROM workflow_instances WHERE id = ? AND tenant_id = ?
+				SELECT parent_id FROM (
+					SELECT parent_workflow_id AS parent_id FROM workflow_instances WHERE id = ? AND tenant_id = ?
+				) AS tmp
 			)
 			AND status IN ('ready', 'suspended')
 			AND tenant_id = ?
