@@ -179,5 +179,5 @@ func scaffoldWorkflow(projectName string) {
 
 func writeYAML(dir, projectName string) {
 	yamlContent := fmt.Sprintf("project: %q\nlanguage: go\nentry_points:\n  - name: agent\n    function: AgentLoop\n", projectName)
-	os.WriteFile(filepath.Join(dir, "cleat.yaml"), []byte(yamlContent), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "cleat.yaml"), []byte(yamlContent), 0644)
 }
