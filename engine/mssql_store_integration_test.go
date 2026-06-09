@@ -737,16 +737,13 @@ func TestMSSQLIntegration_Signals(t *testing.T) {
 		t.Errorf("PollAndClaimSignal payload = %s", payload2)
 	}
 
-	// Second Poll should still find it (DeliverSignal stores, PollAndClaim doesn't delete).
-	payload3, found3, err := store.PollSignal(ctx, wfID, "my-signal")
+	// Second Poll should NOT find it (PollAndClaimSignal deletes the signal).
+	_, found3, err := store.PollSignal(ctx, wfID, "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal 2nd: %v", err)
 	}
-	if !found3 {
-		t.Fatal("PollSignal 2nd: signal not found")
-	}
-	if payload3 != `{"hello":"world"}` {
-		t.Errorf("PollSignal 2nd payload = %s", payload3)
+	if found3 {
+		t.Fatal("PollSignal 2nd: expected signal not found after PollAndClaim")
 	}
 
 	// Poll for non-existent signal.
@@ -2483,8 +2480,8 @@ func TestMSSQLIntegration_ListWorkflows_Filters(t *testing.T) {
 	// Insert workflows with various inputs.
 	wfID1 := uuid.New().String()
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue)
-		VALUES (@p1, 'filter-wf', 1, 'failed', SYSUTCDATETIME(), '{"data":"important"}', 'default')
+		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
+		VALUES (@p1, 'filter-wf', 1, 'failed', SYSUTCDATETIME(), '{"data":"important"}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, wfID1)
 	if err != nil {
 		t.Fatalf("insert wf1: %v", err)
@@ -2499,8 +2496,8 @@ func TestMSSQLIntegration_ListWorkflows_Filters(t *testing.T) {
 
 	wfID2 := uuid.New().String()
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue)
-		VALUES (@p1, 'filter-wf', 1, 'done', SYSUTCDATETIME(), '{"data":"normal"}', 'default')
+		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
+		VALUES (@p1, 'filter-wf', 1, 'done', SYSUTCDATETIME(), '{"data":"normal"}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, wfID2)
 	if err != nil {
 		t.Fatalf("insert wf2: %v", err)
