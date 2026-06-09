@@ -4,14 +4,8 @@
 --       ALTER TABLE event_history ADD CONSTRAINT fk_event_history_workflow
 --         FOREIGN KEY (workflow_id) REFERENCES dbo.workflow_instances(id);
 
-IF EXISTS (
-    SELECT 1 FROM sys.foreign_keys
-    WHERE name = 'fk_event_history_workflow'
-      AND parent_object_id = OBJECT_ID('dbo.event_history')
-)
-BEGIN
+IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'fk_event_history_workflow' AND parent_object_id = OBJECT_ID('dbo.event_history'))
     ALTER TABLE dbo.event_history DROP CONSTRAINT fk_event_history_workflow;
-END
 
 ALTER TABLE dbo.event_history
     ADD CONSTRAINT fk_event_history_workflow
