@@ -2383,7 +2383,7 @@ func TestMSSQLIntegration_ResolveTenantFromAPIKey(t *testing.T) {
 	tenantUUID := uuid.New()
 	keyHash := sha256Of("my-api-key")
 	_, err := db.ExecContext(ctx, `
-		INSERT INTO admin.tenant_api_keys (key_hash, tenant_id, description)
+		INSERT INTO tenant_api_keys (key_hash, tenant_id, description)
 		VALUES (@p1, @p2, 'test-key')
 	`, keyHash, tenantUUID.String())
 	if err != nil {

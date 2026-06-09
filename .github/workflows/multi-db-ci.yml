@@ -68,34 +68,27 @@ jobs:
   test-mssql:
     name: Test SQL Server
     runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
     env:
-      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=master
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
     steps:
       - uses: actions/checkout@v4
 
-      - name: Start SQL Server
+      - name: Create cleat database
         run: |
-          docker run -d --name mssql \
-            -e 'ACCEPT_EULA=Y' \
-            -e 'MSSQL_SA_PASSWORD=CleatTest123!' \
-            -p 1433:1433 \
-            mcr.microsoft.com/mssql/server:2022-latest \
-            || docker run -d --name mssql \
-              -e 'ACCEPT_EULA=Y' \
-              -e 'MSSQL_SA_PASSWORD=CleatTest123!' \
-              -p 1433:1433 \
-              mcr.microsoft.com/mssql/server:2022-latest
-          for i in $(seq 1 30); do
-            if docker exec mssql /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C >/dev/null 2>&1; then
-              echo "SQL Server ready"
-              exit 0
-            fi
-            echo "Waiting for SQL Server... ($i/30)"
-            sleep 2
-          done
-          echo "SQL Server failed to start"
-          docker logs mssql
-          exit 1
+          docker exec $(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server:2022-latest") /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -159,7 +152,7 @@ jobs:
     env:
       CLEAT_TEST_POSTGRES: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
       CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
-      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=master
+      CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=cleat
     steps:
       - uses: actions/checkout@v4
 
@@ -167,6 +160,10 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: stable
+
+      - name: Create cleat database on MSSQL
+        run: |
+          docker exec $(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server:2022-latest" -q) /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Run plugin migration tests
         run: CGO_ENABLED=0 go test -count=1 -timeout=300s -run TestPluginMigrations ./engine/...

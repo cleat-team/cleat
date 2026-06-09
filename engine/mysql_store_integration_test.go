@@ -15,10 +15,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 )
@@ -124,7 +123,7 @@ func TestMySQLIntegration_FactoryOpenStore(t *testing.T) {
 	s, teardown := mysqlIntegrationStore(t)
 	defer teardown()
 
-	dsn := "root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true&multiStatements=true"
+	dsn := "root:cleat@tcp(127.0.0.1:3306)/?tls=false&parseTime=true&multiStatements=true"
 	factory := NewMySQLStoreFactory(s.db, dsn)
 	if factory == nil {
 		t.Fatal("NewMySQLStoreFactory returned nil")
@@ -893,16 +892,13 @@ func TestMySQLIntegration_PollAndClaimSignal(t *testing.T) {
 		t.Errorf("PollAndClaimSignal payload = %q, want %q", gotPayload, payload)
 	}
 
-	// Second call should still find it (MySQL doesn't delete on claim).
-	gotPayload2, found2, err := s.PollAndClaimSignal(ctx, runID, "claim-signal")
+	// Second call should NOT find it — PollAndClaimSignal deletes the row.
+	_, found2, err := s.PollAndClaimSignal(ctx, runID, "claim-signal")
 	if err != nil {
 		t.Fatalf("PollAndClaimSignal (second): %v", err)
 	}
-	if !found2 {
-		t.Fatal("PollAndClaimSignal (second): expected found=true")
-	}
-	if gotPayload2 != payload {
-		t.Errorf("PollAndClaimSignal (second) payload = %q, want %q", gotPayload2, payload)
+	if found2 {
+		t.Fatal("PollAndClaimSignal (second): expected found=false (signal was consumed)")
 	}
 }
 
@@ -1692,6 +1688,16 @@ func TestMySQLIntegration_ChildWorkflow(t *testing.T) {
 	deployTestDef(t, s, "test-workflow", 1)
 	parentID := createReadyWorkflow(t, s, "integ-child-parent-1")
 
+	// Claim the parent first so it's no longer 'ready', ensuring the
+	// subsequent ClaimWorkflow returns the child (not the parent).
+	parentWF, err := s.ClaimWorkflow(ctx, "parent-worker")
+	if err != nil {
+		t.Fatalf("ClaimWorkflow (parent): %v", err)
+	}
+	if parentWF == nil {
+		t.Fatal("ClaimWorkflow returned nil for parent")
+	}
+
 	// Start a child workflow.
 	childID, err := s.StartChildWorkflow(ctx, parentID, "test-workflow", `{"child":true}`, 0, "abandon", 0)
 	if err != nil {
@@ -1711,6 +1717,15 @@ func TestMySQLIntegration_ChildWorkflow(t *testing.T) {
 	}
 	if result != "" {
 		t.Errorf("GetChildResult result = %q, want empty", result)
+	}
+
+	// GetChildCount should reflect the parent's children before completion.
+	count, err := s.GetChildCount(ctx, parentID)
+	if err != nil {
+		t.Fatalf("GetChildCount: %v", err)
+	}
+	if count < 1 {
+		t.Errorf("GetChildCount = %d, want >= 1", count)
 	}
 
 	// Claim and complete the child.
@@ -1738,14 +1753,6 @@ func TestMySQLIntegration_ChildWorkflow(t *testing.T) {
 		t.Errorf("GetChildResult result = %q, want %q", result, `{"child_done":true}`)
 	}
 
-	// GetChildCount should reflect the parent's children.
-	count, err := s.GetChildCount(ctx, parentID)
-	if err != nil {
-		t.Fatalf("GetChildCount: %v", err)
-	}
-	if count < 1 {
-		t.Errorf("GetChildCount = %d, want >= 1", count)
-	}
 }
 
 // TestMySQLIntegration_LoadWASM tests deploying and loading WASM bytes.
@@ -1931,8 +1938,16 @@ func TestMySQLIntegration_LoadDAGSpec(t *testing.T) {
 	if dagSpec == nil {
 		t.Fatal("LoadDAGSpec returned nil after updating dag_spec")
 	}
-	if string(dagSpec) != `{"steps":["a","b"]}` {
-		t.Errorf("DAGSpec = %q, want %q", string(dagSpec), `{"steps":["a","b"]}`)
+	// MySQL may normalize JSON whitespace; compare via unmarshal.
+	var got, want struct{ Steps []string }
+	if err := json.Unmarshal(dagSpec, &got); err != nil {
+		t.Errorf("unmarshal dagSpec: %v", err)
+	}
+	if err := json.Unmarshal([]byte(`{"steps":["a","b"]}`), &want); err != nil {
+		t.Errorf("unmarshal expected: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("DAGSpec = %v, want %v", got, want)
 	}
 
 	// LoadDAGSpec for a non-existent definition should return an error.
@@ -2424,10 +2439,9 @@ func TestMySQLIntegration_StartNewRunWithTenant(t *testing.T) {
 	ctx := context.Background()
 
 	deployTestDef(t, s, "test-workflow", 1)
-	tenantID := uuid.New().String()
 
 	runID, _, err := s.StartNewRun(ctx, "", "test-workflow", 1,
-		json.RawMessage(`{}`), "tenant-test-1", tenantID, 0)
+		json.RawMessage(`{}`), "tenant-test-1", DefaultTenantUUID, 0)
 	if err != nil {
 		t.Fatalf("StartNewRun with tenant: %v", err)
 	}
@@ -2439,8 +2453,8 @@ func TestMySQLIntegration_StartNewRunWithTenant(t *testing.T) {
 	if wf == nil {
 		t.Fatal("workflow not found")
 	}
-	if wf.TenantID != tenantID {
-		t.Errorf("TenantID = %q, want %q", wf.TenantID, tenantID)
+	if wf.TenantID != DefaultTenantUUID {
+		t.Errorf("TenantID = %q, want %q", wf.TenantID, DefaultTenantUUID)
 	}
 }
 

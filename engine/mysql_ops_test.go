@@ -555,7 +555,7 @@ func TestMySQLStore_GetCompactionCandidates_WithRows(t *testing.T) {
 func TestMySQLStore_LoadCompactionState_Found(t *testing.T) {
 	csJSON := []byte(`{"version":1,"compacted_step":50}`)
 	store := newMySQLStoreForTest(t, []mockRowsResult{
-		queryRowOk("SELECT compaction_state FROM workflow_instances", csJSON),
+		queryRowOk("SELECT compaction_state, compaction_step FROM workflow_instances", csJSON, int64(50)),
 	}, nil)
 	cs, err := store.LoadCompactionState(testCtx, "wf-1")
 	if err != nil {
@@ -579,7 +579,7 @@ func TestMySQLStore_LoadCompactionState_NotFound(t *testing.T) {
 
 func TestMySQLStore_LoadCompactionState_NullState(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
-		queryRowOk("SELECT compaction_state FROM workflow_instances", nil),
+		queryRowOk("SELECT compaction_state, compaction_step FROM workflow_instances", nil, nil),
 	}, nil)
 	cs, err := store.LoadCompactionState(testCtx, "wf-1")
 	if err != nil {
@@ -592,7 +592,7 @@ func TestMySQLStore_LoadCompactionState_NullState(t *testing.T) {
 
 func TestMySQLStore_LoadCompactionState_InvalidJSON(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
-		queryRowOk("SELECT compaction_state FROM workflow_instances", []byte("invalid")),
+		queryRowOk("SELECT compaction_state, compaction_step FROM workflow_instances", []byte("invalid"), int64(0)),
 	}, nil)
 	_, err := store.LoadCompactionState(testCtx, "wf-1")
 	if err == nil {
@@ -602,7 +602,7 @@ func TestMySQLStore_LoadCompactionState_InvalidJSON(t *testing.T) {
 
 func TestMySQLStore_LoadCompactionState_QueryError(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
-		{match: "SELECT compaction_state FROM workflow_instances", err: sql.ErrConnDone},
+		{match: "SELECT compaction_state, compaction_step FROM workflow_instances", err: sql.ErrConnDone},
 	}, nil)
 	_, err := store.LoadCompactionState(testCtx, "wf-1")
 	if err == nil {
@@ -792,7 +792,7 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 			"worker-1", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC),
-			`{"result":"ok"}`, "", nil, nil, int64(0), int64(0), "",
+			`{"result":"ok"}`, "", nil, nil, int64(0), int64(0), "", "tenant-1",
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")
@@ -1377,7 +1377,7 @@ func TestMySQLStore_DeleteExpiredEvents_FirstBatch(t *testing.T) {
 
 func TestMySQLStore_DeleteDeadLetteredWorkflows_FirstBatch(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "DELETE FROM workflow_instances", affected: 0},
+		{match: "DELETE w FROM workflow_instances", affected: 0},
 	})
 	n, err := store.DeleteDeadLetteredWorkflows(testCtx, time.Now().Add(-30*24*time.Hour))
 	if err != nil {
@@ -1390,7 +1390,7 @@ func TestMySQLStore_DeleteDeadLetteredWorkflows_FirstBatch(t *testing.T) {
 
 func TestMySQLStore_DeleteDeadLetteredWorkflows_Error(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "DELETE FROM workflow_instances", err: sql.ErrConnDone},
+		{match: "DELETE w FROM workflow_instances", err: sql.ErrConnDone},
 	})
 	_, err := store.DeleteDeadLetteredWorkflows(testCtx, time.Now().Add(-30*24*time.Hour))
 	if err == nil {
@@ -1408,7 +1408,7 @@ func TestMySQLStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 			"wf-1", "test-wf", int64(1), "running", []byte(`{}`),
 			nil, nil, nil, nil,
 			nil, nil, nil, nil,
-			int64(0), int64(0), "",
+			int64(0), int64(0), "", "tenant-1",
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")

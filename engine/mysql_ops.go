@@ -398,10 +398,11 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 // if the workflow has not been compacted.
 func (s *MySQLStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) {
 	var rawJSON []byte
+	var compactedStep sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT compaction_state FROM workflow_instances
+		SELECT compaction_state, compaction_step FROM workflow_instances
 		WHERE id = ? AND tenant_id = ?
-	`, workflowID, s.tenantID).Scan(&rawJSON)
+	`, workflowID, s.tenantID).Scan(&rawJSON, &compactedStep)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -414,6 +415,9 @@ func (s *MySQLStore) LoadCompactionState(ctx context.Context, workflowID string)
 	var cs CompactionState
 	if err := json.Unmarshal(rawJSON, &cs); err != nil {
 		return nil, fmt.Errorf("LoadCompactionState: unmarshal: %w", err)
+	}
+	if compactedStep.Valid {
+		cs.CompactedStep = int(compactedStep.Int64)
 	}
 	return &cs, nil
 }
@@ -532,6 +536,7 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
+	var tenantID sql.NullString
 
 	var errorCode, errorOp sql.NullString
 
@@ -540,11 +545,11 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       assigned_to, heartbeat_at, next_wake_at, completed_at,
 		       CAST(result AS CHAR), error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
-		       COALESCE(trace_id, '')
+		       COALESCE(trace_id, ''), tenant_id
 		FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg,
-		&errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID)
+		&errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID, &tenantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -557,6 +562,7 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	wf.Error = errorMsg.String
 	wf.ErrorCode = errorCode.String
 	wf.ErrorOp = errorOp.String
+	wf.TenantID = tenantID.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}
@@ -627,17 +633,20 @@ func (s *MySQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 
 // LoadDAGSpec returns the dag_spec JSON for a workflow definition, or nil if none.
 func (s *MySQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
-	var spec json.RawMessage
+	var raw *[]byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT dag_spec FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
-	`, defName, defVersion, s.tenantID).Scan(&spec)
+	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("LoadDAGSpec: %w", err)
 	}
-	return spec, nil
+	if raw == nil {
+		return nil, nil
+	}
+	return json.RawMessage(*raw), nil
 }
 
 // TraceWorkflow sets the W3C trace_id on a workflow instance.
@@ -1066,19 +1075,17 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 	// Also batch cleanup compaction states for those workflows.
 	for {
 		result, err := s.db.ExecContext(ctx, `
-			UPDATE workflow_instances
-			SET compaction_state = NULL, compaction_step = NULL, compacted_at = NULL
-			WHERE id IN (
-				SELECT id FROM (
-					SELECT id FROM workflow_instances
-					WHERE status IN ('done', 'failed')
-					  AND completed_at IS NOT NULL
-					  AND completed_at < ?
-					  AND compaction_state IS NOT NULL
-					ORDER BY completed_at
-					LIMIT 10000
-				) AS subq
-			)
+			UPDATE workflow_instances w
+			INNER JOIN (
+				SELECT id FROM workflow_instances
+				WHERE status IN ('done', 'failed')
+				  AND completed_at IS NOT NULL
+				  AND completed_at < ?
+				  AND compaction_state IS NOT NULL
+				ORDER BY completed_at
+				LIMIT 10000
+			) AS subq ON w.id = subq.id
+			SET w.compaction_state = NULL, w.compaction_step = NULL, w.compacted_at = NULL
 		`, olderThan)
 		if err != nil {
 			break
@@ -1117,8 +1124,8 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 	var totalDeleted int64
 	for {
 		result, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_instances
-			WHERE id IN (
+			DELETE w FROM workflow_instances w
+			INNER JOIN (
 				SELECT id FROM workflow_instances
 				WHERE status = 'dead_lettered'
 				  AND completed_at IS NOT NULL
@@ -1126,7 +1133,7 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 				  AND tenant_id = ?
 				ORDER BY id
 				LIMIT 10000
-			)
+			) d ON w.id = d.id
 		`, olderThan, s.tenantID)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: %w", err)

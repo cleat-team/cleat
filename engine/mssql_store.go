@@ -1605,17 +1605,20 @@ func (s *MSSQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 
 // LoadDAGSpec returns the dag_spec JSON for a workflow definition, or nil if none.
 func (s *MSSQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
-	var spec json.RawMessage
+	var raw *[]byte
 	err := s.db.QueryRowContext(ctx, `
 		SELECT dag_spec FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, defName, defVersion).Scan(&spec)
+	`, defName, defVersion).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load dag_spec: %w", err)
 	}
-	return spec, nil
+	if raw == nil {
+		return nil, nil
+	}
+	return json.RawMessage(*raw), nil
 }
 
 // TraceWorkflow sets the W3C trace_id on a workflow instance.

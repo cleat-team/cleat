@@ -206,7 +206,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 		  AND next_wake_at <= NOW(6)
 		  AND task_queue IN (%s)
 		  AND tenant_id = ?
-		ORDER BY CASE WHEN sticky_worker_id = ? THEN 0 ELSE 1 END, priority ASC, created_at
+		ORDER BY CASE WHEN sticky_worker_id = ? THEN 0 ELSE 1 END, priority DESC, created_at
 		LIMIT ?
 		FOR UPDATE SKIP LOCKED
 	`, tqClause), selArgs...)
@@ -827,7 +827,14 @@ func (s *MySQLStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workflowI
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
 	}
-	// NOTE: event_count increment skipped on MySQL; column not yet available in CI databases.
+	// Increment event_count on workflow_instances so GetEventCount and quota
+	// enforcement have an up-to-date count.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances SET event_count = event_count + ? WHERE id = ? AND tenant_id = ?
+	`, len(recs), workflowID, s.tenantID); err != nil {
+		return fmt.Errorf("append events in tx: increment event_count: %w", err)
+	}
+
 	return nil
 }
 
