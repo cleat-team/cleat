@@ -19,8 +19,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
@@ -2441,10 +2439,9 @@ func TestMySQLIntegration_StartNewRunWithTenant(t *testing.T) {
 	ctx := context.Background()
 
 	deployTestDef(t, s, "test-workflow", 1)
-	tenantID := uuid.New().String()
 
 	runID, _, err := s.StartNewRun(ctx, "", "test-workflow", 1,
-		json.RawMessage(`{}`), "tenant-test-1", tenantID, 0)
+		json.RawMessage(`{}`), "tenant-test-1", DefaultTenantUUID, 0)
 	if err != nil {
 		t.Fatalf("StartNewRun with tenant: %v", err)
 	}
@@ -2456,8 +2453,8 @@ func TestMySQLIntegration_StartNewRunWithTenant(t *testing.T) {
 	if wf == nil {
 		t.Fatal("workflow not found")
 	}
-	if wf.TenantID != tenantID {
-		t.Errorf("TenantID = %q, want %q", wf.TenantID, tenantID)
+	if wf.TenantID != DefaultTenantUUID {
+		t.Errorf("TenantID = %q, want %q", wf.TenantID, DefaultTenantUUID)
 	}
 }
 
