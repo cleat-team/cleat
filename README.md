@@ -1,7 +1,7 @@
 # cleat
 
 [![CI](https://github.com/cleat-team/cleat/actions/workflows/ci.yml/badge.svg)](https://github.com/cleat-team/cleat/actions/workflows/ci.yml)
-[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/doc/devel/release)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](https://go.dev/doc/devel/release)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/cleat-team/cleat/blob/main/LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cleat-team/cleat)](https://goreportcard.com/report/github.com/cleat-team/cleat)
 [![Discord](https://img.shields.io/badge/Discord-join%20chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/cleat)
@@ -31,6 +31,9 @@ database.
 ## Quick Start
 
 ```bash
+# 0. Verify your toolchain (one command)
+make setup
+
 # 1. Install the CLI
 go install github.com/cleat-team/cleat/cmd/cleat@latest
 
