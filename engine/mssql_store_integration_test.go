@@ -1300,7 +1300,7 @@ func TestMSSQLIntegration_StickyWorker(t *testing.T) {
 	}
 
 	err = db.QueryRowContext(ctx,
-		`SELECT sticky_worker_id FROM workflow_instances WHERE id = @p1`, wfID).Scan(&workerID)
+		`SELECT ISNULL(sticky_worker_id, '') FROM workflow_instances WHERE id = @p1`, wfID).Scan(&workerID)
 	if err != nil {
 		t.Fatalf("query cleared sticky_worker_id: %v", err)
 	}
@@ -1799,7 +1799,7 @@ func TestMSSQLIntegration_DeleteExpiredEvents(t *testing.T) {
 	doneID := uuid.New().String()
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, completed_at, next_wake_at, input, task_queue, tenant_id)
-		VALUES (@p1, 'exp-wf', 1, 'done', DATEADD(DAY, -10, SYSUTCDATETIME()), SYSUTCDATETIME(), '{}', 'default')
+		VALUES (@p1, 'exp-wf', 1, 'done', DATEADD(DAY, -10, SYSUTCDATETIME()), SYSUTCDATETIME(), '{}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, doneID)
 	if err != nil {
 		t.Fatalf("insert done instance: %v", err)
@@ -2180,7 +2180,7 @@ func TestMSSQLIntegration_ContinueAsNew(t *testing.T) {
 	// New workflow should exist with the continued input.
 	var newInputStr string
 	err = db.QueryRowContext(ctx,
-		`SELECT ISNULL(input, '') FROM workflow_instances WHERE id = @p1`, newRunID).Scan(&newInputStr)
+		`SELECT CAST(ISNULL(input, '') AS VARCHAR(MAX)) FROM workflow_instances WHERE id = @p1`, newRunID).Scan(&newInputStr)
 	if err != nil {
 		t.Fatalf("query new input: %v", err)
 	}
@@ -2353,7 +2353,7 @@ func TestMSSQLIntegration_GetActiveInstanceCountsByVersion(t *testing.T) {
 	// Insert one done instance (should not be counted).
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, completed_at, next_wake_at, input, task_queue, tenant_id)
-		VALUES (@p1, 'counts-wf', 1, 'done', SYSUTCDATETIME(), SYSUTCDATETIME(), '{}', 'default')
+		VALUES (@p1, 'counts-wf', 1, 'done', SYSUTCDATETIME(), SYSUTCDATETIME(), '{}', 'default', '00000000-0000-0000-0000-000000000000')
 	`, uuid.New().String())
 	if err != nil {
 		t.Fatalf("insert done instance: %v", err)
