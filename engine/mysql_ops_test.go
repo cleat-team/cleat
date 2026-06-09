@@ -1377,7 +1377,7 @@ func TestMySQLStore_DeleteExpiredEvents_FirstBatch(t *testing.T) {
 
 func TestMySQLStore_DeleteDeadLetteredWorkflows_FirstBatch(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "DELETE FROM workflow_instances", affected: 0},
+		{match: "DELETE w FROM workflow_instances", affected: 0},
 	})
 	n, err := store.DeleteDeadLetteredWorkflows(testCtx, time.Now().Add(-30*24*time.Hour))
 	if err != nil {
@@ -1390,7 +1390,7 @@ func TestMySQLStore_DeleteDeadLetteredWorkflows_FirstBatch(t *testing.T) {
 
 func TestMySQLStore_DeleteDeadLetteredWorkflows_Error(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "DELETE FROM workflow_instances", err: sql.ErrConnDone},
+		{match: "DELETE w FROM workflow_instances", err: sql.ErrConnDone},
 	})
 	_, err := store.DeleteDeadLetteredWorkflows(testCtx, time.Now().Add(-30*24*time.Hour))
 	if err == nil {
