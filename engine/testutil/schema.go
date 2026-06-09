@@ -574,13 +574,13 @@ func CleanupTestData(t *testing.T, db *sql.DB, dialect Dialect, runID string) {
 	default:
 		t.Fatalf("cleanup test data: unknown dialect: %s", dialect)
 	}
-	db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM workflow_signals WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM workflow_promises WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM concurrency_keys WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM idempotency_keys WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM workflow_update_requests WHERE workflow_id LIKE `+p, runID)
-	db.Exec(`DELETE FROM workflow_instances WHERE id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM workflow_signals WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM workflow_promises WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM concurrency_keys WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM idempotency_keys WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM workflow_update_requests WHERE workflow_id LIKE `+p, runID)
+	_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id LIKE `+p, runID)
 }
 
 // TestDB opens a database connection for the given dialect using environment
