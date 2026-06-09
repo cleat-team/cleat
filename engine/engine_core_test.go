@@ -24,8 +24,8 @@ type stubWorkflowState struct {
 	priority   int
 }
 
-func (s *stubWorkflowState) Version() int                { return s.version }
-func (s *stubWorkflowState) MinVersion() int             { return s.minVersion }
+func (s *stubWorkflowState) Version() int    { return s.version }
+func (s *stubWorkflowState) MinVersion() int { return s.minVersion }
 func (s *stubWorkflowState) ChildVersion(name string) (int, bool) {
 	if s.childVer == nil {
 		return 0, false
@@ -47,8 +47,8 @@ func (b *stubWasmBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	return nil, nil
 }
 func (b *stubWasmBackend) Close(ctx context.Context) error { return nil }
-func (b *stubWasmBackend) Name() string                   { return "stub" }
-func (b *stubWasmBackend) PerExecution() WasmBackend      { return &stubWasmBackend{} }
+func (b *stubWasmBackend) Name() string                    { return "stub" }
+func (b *stubWasmBackend) PerExecution() WasmBackend       { return &stubWasmBackend{} }
 
 func TestWithWorkflowState(t *testing.T) {
 	ws := &stubWorkflowState{version: 3}

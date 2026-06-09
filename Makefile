@@ -113,7 +113,8 @@ test-plugin-harness-check:
 
 .PHONY: coverage-go
 coverage-go:
-	-go test -coverprofile=coverage.out -covermode=atomic ./cleat/... ./internal/... ./plugins/... ./cmd/...
+	-go test -coverprofile=coverage.out -covermode=atomic ./internal/... ./plugins/... ./cmd/... ./engine/... ./plugin/... ./wasm/... ./auth/...
+	cd cleat && go test -coverprofile=../coverage_cleat.out -covermode=atomic ./...
 
 .PHONY: coverage-python
 coverage-python:
@@ -127,35 +128,48 @@ coverage: coverage-go coverage-python
 coverage-report:
 	go tool cover -func=coverage.out
 
-# Thresholds (enforced via prefix matching):
-#   cleat/            15%     (lowest: localdev  15.4%)
-#   internal/         50%     (lowest: wasm      77.3%)
-#   internal/host/    15%     (lowest: host      22.5%)
-#   internal/plugin/  50%     (current: plugin   56.3%)
-#   plugins/          20%     (lowest: kafkaconnect  24.2%)
-#   cmd/               0%     (entry points, no gating)
+# Thresholds (enforced via prefix matching; measured 2026-06-09):
+#   engine/testutil    0%     (test helper)
+#   engine/           50%     (actual  57.5% stmt, 77.2% func)
+#   internal/         70%     (lowest: telemetry  65.7% stmt, 77.5% func)
+#   plugin/           55%     (actual  65.5% stmt, 54.6% func)
+#   cleat/wasmtest    55%     (actual  62.6% stmt)
+#   cleat/            60%     (lowest: wasmtest  62.6% stmt)
+#   plugins/          65%     (lowest: kvstore  69.7% stmt, 61.4% func)
+#   cmd/cleat-plugin-verify   0%  (utility, no tests)
+#   cmd/deploy-workflow       0%  (utility, no tests)
+#   cmd/wit-rewrite           0%  (utility, no tests)
+#   cmd/              40%     (lowest non-zero: cleatctl  47.3% func)
+#   wasm/             55%     (actual  59.6% stmt, 71.8% func)
+#   auth/             85%     (actual  90.9% stmt, 98.2% func)
 .PHONY: coverage-check
 coverage-check: coverage-go
-	@go tool cover -func=coverage.out 2>/dev/null | awk 'BEGIN { \
+	@cat coverage_cleat.out 2>/dev/null | grep -v "^mode:" >> coverage.out 2>/dev/null; \
+	go tool cover -func=coverage.out 2>/dev/null | awk 'BEGIN { \
 	    fail = 0; \
 	    printf "=== Coverage by Package ===\n"; \
 	    printf "%-40s %8s\n\n", "Package", "Coverage"; \
-	    n = split("internal/host/testutil internal/host internal/plugin internal/migration internal cleat plugins cmd", prefixes, " "); \
-	    thresh["internal/host"] = 15; \
-	    thresh["internal/host/testutil"] = 0; \
-	    thresh["internal/plugin"] = 50; \
-	    thresh["internal/migration"] = 0; \
-	    thresh["internal"] = 50; \
-	    thresh["cleat"] = 15; \
-	    thresh["plugins"] = 20; \
-	    thresh["cmd"] = 0; \
+	    n = split("engine/testutil engine internal plugin cleat/wasmtest cleat plugins cmd/cleat-plugin-verify cmd/deploy-workflow cmd/wit-rewrite cmd wasm auth", prefixes, " "); \
+	    thresh["engine/testutil"] = 0; \
+	    thresh["engine"] = 50; \
+	    thresh["internal"] = 70; \
+	    thresh["plugin"] = 55; \
+	    thresh["cleat/wasmtest"] = 55; \
+	    thresh["cleat"] = 60; \
+	    thresh["plugins"] = 65; \
+	    thresh["cmd/cleat-plugin-verify"] = 0; \
+	    thresh["cmd/deploy-workflow"] = 0; \
+	    thresh["cmd/wit-rewrite"] = 0; \
+	    thresh["cmd"] = 40; \
+	    thresh["wasm"] = 55; \
+	    thresh["auth"] = 85; \
 	} \
 	/^total:/ { next } \
 	{ \
 	    path = $$1; \
 	    sub(/:[0-9]+:$$/, "", path); \
 	    sub(/\/[^/]+\.go$$/, "", path); \
-	    sub(/^github\.com\/rcownie\/cleat\//, "", path); \
+	    sub(/^github\.com\/cleat-team\/cleat\//, "", path); \
 	    gsub(/%$$/, "", $$NF); \
 	    cov[path] += $$NF; \
 	    cnt[path]++; \
@@ -288,10 +302,8 @@ clew:
 # ---- tools ------------------------------------------------------------------
 
 GO_MIN_VERSION := 1.25
-TINYGO_MIN_VERSION := 0.41
-
 .PHONY: tools
-tools: tools-go tools-tinygo tools-rust tools-python tools-java tools-as
+tools: tools-go tools-rust tools-python tools-java tools-as
 	@echo "=== All toolchains checked ==="
 
 .PHONY: tools-go
@@ -312,15 +324,6 @@ tools-go:
 		echo "  Linux:   wget https://go.dev/dl/go1.25.7.linux-amd64.tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.7.linux-amd64.tar.gz"; \
 	fi
 
-.PHONY: tools-tinygo
-tools-tinygo:
-	@if command -v tinygo >/dev/null 2>&1; then \
-		echo "[OK] TinyGo $$(tinygo version | head -1)"; \
-	else \
-		echo "[MISSING] TinyGo $(TINYGO_MIN_VERSION)+ — install from https://tinygo.org/getting-started/install/"; \
-		echo "  Linux:   wget https://github.com/tinygo-org/tinygo/releases/download/v0.41.0/tinygo.linux-amd64.tar.gz && sudo tar -C /usr/local -xzf tinygo.linux-amd64.tar.gz && export PATH=\$$PATH:/usr/local/tinygo/bin"; \
-		echo "  macOS:   brew install tinygo"; \
-	fi
 
 .PHONY: tools-rust
 tools-rust:
@@ -379,8 +382,6 @@ tools-as:
 .PHONY: tools-check
 tools-check:
 	@echo "=== WASM Compilation Toolchains ==="
-	@echo ""
-	@$(MAKE) --no-print-directory tools-tinygo
 	@echo ""
 	@$(MAKE) --no-print-directory tools-rust
 	@echo ""

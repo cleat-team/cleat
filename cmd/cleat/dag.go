@@ -226,7 +226,7 @@ func validateSpec(spec *dagplugin.DAGSpec) (*dagplugin.DAG, error) {
 }
 
 // mustMarshalJSON marshals v to JSON.
-func mustMarshalJSON(v interface{}) (string, error) {
+func mustMarshalJSON(v any) (string, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return "", fmt.Errorf("dag: unexpected type: %w", err)

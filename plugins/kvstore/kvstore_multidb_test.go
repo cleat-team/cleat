@@ -166,7 +166,7 @@ func beReq(method, target string, body []byte) *http.Request {
 // ---------------------------------------------------------------------------
 
 // stringify is a convenience for formatting map assertions.
-func stringify(v interface{}) string {
+func stringify(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
@@ -192,7 +192,7 @@ func backendPutGetDelete(t *testing.T, mux *http.ServeMux) {
 		)
 	}
 
-	var putResp map[string]interface{}
+	var putResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &putResp); err != nil {
 		t.Fatalf("decode PUT response: %v", err)
 	}
@@ -215,7 +215,7 @@ func backendPutGetDelete(t *testing.T, mux *http.ServeMux) {
 		)
 	}
 
-	var getResp map[string]interface{}
+	var getResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &getResp); err != nil {
 		t.Fatalf("decode GET response: %v", err)
 	}
@@ -270,7 +270,7 @@ func backendVersionIncrement(t *testing.T, mux *http.ServeMux) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT 1: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp1 map[string]interface{}
+	var resp1 map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp1)
 	v1 := int(resp1["version"].(float64))
 
@@ -281,7 +281,7 @@ func backendVersionIncrement(t *testing.T, mux *http.ServeMux) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT 2: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp2 map[string]interface{}
+	var resp2 map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp2)
 	v2 := int(resp2["version"].(float64))
 
@@ -318,7 +318,7 @@ func backendListAll(t *testing.T, mux *http.ServeMux) {
 		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST decode: %v", err)
 	}
@@ -366,7 +366,7 @@ func backendListWithPrefix(t *testing.T, mux *http.ServeMux) {
 		t.Fatalf("LIST with prefix: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST decode: %v", err)
 	}

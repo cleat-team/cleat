@@ -37,7 +37,7 @@ type migrationTestResult struct {
 }
 
 func (r *migrationTestResult) LastInsertId() (int64, error) { return 0, nil }
-func (r *migrationTestResult) RowsAffected() (int64, error)  { return r.rowsAffected, nil }
+func (r *migrationTestResult) RowsAffected() (int64, error) { return r.rowsAffected, nil }
 
 type execCall struct {
 	query string
@@ -118,7 +118,7 @@ type singleBoolRow struct {
 }
 
 func (r *singleBoolRow) Columns() []string { return []string{"exists"} }
-func (r *singleBoolRow) Close() error       { return nil }
+func (r *singleBoolRow) Close() error      { return nil }
 func (r *singleBoolRow) Next(dest []driver.Value) error {
 	if r.done {
 		return io.EOF
@@ -1027,6 +1027,6 @@ type testMigrationPlugin struct {
 	migrations []Migration
 }
 
-func (p *testMigrationPlugin) Info() PluginInfo                                    { return p.info }
-func (p *testMigrationPlugin) Init(ctx context.Context, env *Environment) error     { return nil }
-func (p *testMigrationPlugin) Migrations() []Migration                             { return p.migrations }
+func (p *testMigrationPlugin) Info() PluginInfo                                 { return p.info }
+func (p *testMigrationPlugin) Init(ctx context.Context, env *Environment) error { return nil }
+func (p *testMigrationPlugin) Migrations() []Migration                          { return p.migrations }

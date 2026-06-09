@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -37,9 +37,9 @@ type behRow struct {
 }
 
 type behStore struct {
-	mu         sync.RWMutex
-	apiKeys    map[string]string
-	rateLimits map[string]behRow
+	mu            sync.RWMutex
+	apiKeys       map[string]string
+	rateLimits    map[string]behRow
 	failNextQuery bool
 	failNextExec  bool
 }
@@ -744,7 +744,7 @@ func TestPutAndGetRateLimit(t *testing.T) {
 		t.Fatalf("PUT: expected 200, got %d: %s", putRec.Code, putRec.Body.String())
 	}
 
-	var putResp map[string]interface{}
+	var putResp map[string]any
 	if err := json.Unmarshal(putRec.Body.Bytes(), &putResp); err != nil {
 		t.Fatalf("unmarshal PUT response: %v", err)
 	}

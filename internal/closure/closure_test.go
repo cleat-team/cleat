@@ -38,7 +38,7 @@ func TestComputeBasicIdentifiesDurableLeaves(t *testing.T) {
 		basicFQ("releaseReservation"):      true,
 		basicFQ("refundPayment"):           true,
 		basicFQ("notifyCustomer"):          true,
-		basicFQ("LongRunning"):            true,
+		basicFQ("LongRunning"):             true,
 	}
 
 	for name := range expectedLeaves {
@@ -75,10 +75,10 @@ func TestComputeBasicIdentifiesDurableClosure(t *testing.T) {
 
 	// Functions that transitively reach a cleat leaf.
 	expectedClosure := map[string]bool{
-		basicFQ("PlaceOrder"):          true,
-		basicFQ("CancelOrder"):         true,
-		basicFQ("validateAndReserve"):  true,
-		basicFQ("processPayment"):      true,
+		basicFQ("PlaceOrder"):         true,
+		basicFQ("CancelOrder"):        true,
+		basicFQ("validateAndReserve"): true,
+		basicFQ("processPayment"):     true,
 	}
 
 	for name := range expectedClosure {
@@ -234,11 +234,11 @@ func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 	cr := Compute(result, cg)
 
 	expectedLeaves := map[string]bool{
-		"github.com/cleat-team/cleat/testdata/errors.leafFunc":                   true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithGoroutine":           true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithInterfaceDispatch":   true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithFuncValue":           true,
-		"github.com/cleat-team/cleat/testdata/errors.BadWithFloatCondition":      true,
+		"github.com/cleat-team/cleat/testdata/errors.leafFunc":                 true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithGoroutine":         true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithInterfaceDispatch": true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithFuncValue":         true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithFloatCondition":    true,
 	}
 
 	for name := range expectedLeaves {

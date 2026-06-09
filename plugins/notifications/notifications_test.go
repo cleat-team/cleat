@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -116,7 +116,7 @@ func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
 
-func (*fakeConn) Close() error { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
@@ -767,7 +767,7 @@ func createTestWebhook(t *testing.T, handler http.Handler, url, secret string) u
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("createTestWebhook: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("createTestWebhook: failed to decode: %v", err)
 	}
@@ -892,7 +892,7 @@ func TestCreateAndGetWebhook(t *testing.T) {
 		t.Fatalf("GET webhook: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("GET webhook: failed to decode: %v", err)
 	}
@@ -922,7 +922,7 @@ func TestListWebhooks(t *testing.T) {
 		t.Fatalf("LIST webhooks: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var list []interface{}
+	var list []any
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("LIST: failed to decode: %v", err)
 	}
@@ -960,7 +960,7 @@ func TestUpdateWebhook(t *testing.T) {
 		t.Fatalf("UPDATE webhook: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp["url"] != "https://updated.example.com" {
 		t.Errorf("expected updated url %q, got %q", "https://updated.example.com", resp["url"])
@@ -1025,7 +1025,7 @@ func TestHostFunctionSendWebhook(t *testing.T) {
 		t.Fatalf("sendWebhook: %v", err)
 	}
 
-	var out map[string]interface{}
+	var out map[string]any
 	if err := json.Unmarshal([]byte(output), &out); err != nil {
 		t.Fatalf("sendWebhook output: failed to decode: %v", err)
 	}
@@ -1154,14 +1154,14 @@ func TestWebhookDelivery(t *testing.T) {
 	past := now.Add(-1 * time.Hour)
 	deliveryID := uuid.New()
 	store.deliveries = append(store.deliveries, &testDelivery{
-		id:           deliveryID,
-		webhookID:    webhookID,
-		eventType:    "test.event",
-		payload:      []byte(`{"msg":"hello"}`),
-		status:       "pending",
-		attemptCount: 0,
+		id:            deliveryID,
+		webhookID:     webhookID,
+		eventType:     "test.event",
+		payload:       []byte(`{"msg":"hello"}`),
+		status:        "pending",
+		attemptCount:  0,
 		nextAttemptAt: &past,
-		createdAt:    past,
+		createdAt:     past,
 	})
 	store.mu.Unlock()
 
@@ -1243,7 +1243,7 @@ func TestListDeliveries(t *testing.T) {
 		t.Fatalf("LIST deliveries: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var deliveries []interface{}
+	var deliveries []any
 	if err := json.Unmarshal(rec.Body.Bytes(), &deliveries); err != nil {
 		t.Fatalf("LIST deliveries: failed to decode: %v", err)
 	}
@@ -1328,7 +1328,6 @@ func (r *testFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFun
 	r.funcs[opts.Name] = opts
 	return nil
 }
-
 
 // ---- joinSetClauses tests ----
 

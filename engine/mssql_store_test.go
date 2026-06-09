@@ -3,11 +3,11 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
-	"database/sql/driver"
-	"errors"
 	"testing"
 	"time"
 

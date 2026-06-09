@@ -113,7 +113,6 @@ func TestCallExportNotFound(t *testing.T) {
 	}
 }
 
-
 // ---- Engine execution tests with standard Go WASM + wasmtime ----
 
 func TestEngineExecute(t *testing.T) {
@@ -1087,6 +1086,7 @@ func TestEventFieldsMatch_AllEventTypes(t *testing.T) {
 		})
 	}
 }
+
 // withWasmtimeBackend creates a wasmtime backend and returns an EngineOption
 // that registers it for the "go" language. When wasmtime is not available
 // (CGO disabled or libwasmtime.so not found), the test is skipped.
@@ -1588,6 +1588,7 @@ func TestPollChildJSONFormat(t *testing.T) {
 		}
 	})
 }
+
 // ---------------------------------------------------------------------------
 // CreatePromise tests.
 // ---------------------------------------------------------------------------
@@ -1991,8 +1992,8 @@ func TestAwaitPromiseFreshNilStore(t *testing.T) {
 	expectedUntil := time.UnixMilli(s.nowMs).Add(time.Duration(5000) * time.Millisecond)
 	if !s.suspendErr.Until.Equal(expectedUntil) {
 		t.Errorf("expected Until=%v, got %v", expectedUntil, s.suspendErr.Until)
-		}
 	}
+}
 
 // ---------------------------------------------------------------------------
 // PollCancellation host function tests
@@ -2429,9 +2430,9 @@ func TestContinueAsNewWithVersionFreshZero(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type mockSignalStore struct {
-	deliverErr       error
-	lastDeliverWFID  string
-	lastDeliverName  string
+	deliverErr         error
+	lastDeliverWFID    string
+	lastDeliverName    string
 	lastDeliverPayload string
 }
 
@@ -2454,10 +2455,10 @@ func TestSignalWorkflowReplayMatch(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
-		Step:      0,
-		EventType: EventTypeSignalReceived,
-		RunID:     "target-run-123",
-		SignalName: "my-signal",
+		Step:          0,
+		EventType:     EventTypeSignalReceived,
+		RunID:         "target-run-123",
+		SignalName:    "my-signal",
 		SignalPayload: `{"x":1}`,
 	}}
 	result := s.SignalWorkflow(context.Background(), nil, "target-run-123", "my-signal", `{"x":1}`)
@@ -2628,11 +2629,11 @@ func TestScheduleInvokeReplayMatch(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
-		Step:      0,
-		EventType: EventTypeDurableScheduleInvoke,
-		Service:   "my-svc",
-		Op:        "my-op",
-		Request:   `{}`,
+		Step:       0,
+		EventType:  EventTypeDurableScheduleInvoke,
+		Service:    "my-svc",
+		Op:         "my-op",
+		Request:    `{}`,
 		DurationMs: 5000,
 	}}
 	result := s.DurableScheduleInvoke(context.Background(), nil, "my-svc", "my-op", `{}`, 5000)
@@ -2781,6 +2782,7 @@ func TestRegisterUpdateHandlerReplayPastEnd(t *testing.T) {
 		t.Errorf("expected 0, got %d", result)
 	}
 }
+
 // AwaitAnyChild tests.
 // ---------------------------------------------------------------------------
 

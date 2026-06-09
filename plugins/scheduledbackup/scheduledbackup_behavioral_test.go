@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // =========================================================================
@@ -271,7 +271,10 @@ func TestSB_RouteErrorPaths_MissingTenant(t *testing.T) {
 	}
 	p.RegisterRoutes(p.mux)
 
-	tests := []struct{ method, path string; body []byte }{
+	tests := []struct {
+		method, path string
+		body         []byte
+	}{
 		{"POST", "/backups/configs", []byte(`{"name":"test","cron":"0 0 * * *"}`)},
 		{"GET", "/backups/configs", nil},
 		{"GET", "/backups/configs/00000000-0000-0000-0000-000000000001", nil},
@@ -556,7 +559,7 @@ func newSBDB() *sbDB {
 type sbConnector struct{ db *sbDB }
 
 func (c *sbConnector) Connect(_ context.Context) (driver.Conn, error) { return &sbConn{db: c.db}, nil }
-func (c *sbConnector) Driver() driver.Driver                           { return &sbDrv{} }
+func (c *sbConnector) Driver() driver.Driver                          { return &sbDrv{} }
 
 type sbDrv struct{}
 
@@ -578,7 +581,7 @@ func (*sbTx) Rollback() error { return nil }
 type sbResult struct{ n int64 }
 
 func (r *sbResult) LastInsertId() (int64, error) { return 0, nil }
-func (r *sbResult) RowsAffected() (int64, error)  { return r.n, nil }
+func (r *sbResult) RowsAffected() (int64, error) { return r.n, nil }
 
 type sbRows struct {
 	columns []string
@@ -587,7 +590,7 @@ type sbRows struct {
 }
 
 func (r *sbRows) Columns() []string { return r.columns }
-func (r *sbRows) Close() error       { return nil }
+func (r *sbRows) Close() error      { return nil }
 func (r *sbRows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.data) {
 		return io.EOF
@@ -928,7 +931,8 @@ func (c *sbConn) QueryContext(_ context.Context, query string, args []driver.Nam
 }
 
 // Columns: id, name, cron, s3_bucket, s3_prefix, retention_days, enabled,
-//          last_run_at, next_run_at, created_at, updated_at
+//
+//	last_run_at, next_run_at, created_at, updated_at
 var sbConfigColumns = []string{
 	"id", "name", "cron", "s3_bucket", "s3_prefix",
 	"retention_days", "enabled", "last_run_at", "next_run_at",
@@ -1039,7 +1043,8 @@ func (c *sbConn) queryDueBackups(args []driver.NamedValue) (driver.Rows, error) 
 }
 
 // Columns for history: id, config_id, filename, size_bytes, status,
-//                      started_at, completed_at, error_message, created_at
+//
+//	started_at, completed_at, error_message, created_at
 var sbHistoryColumns = []string{
 	"id", "config_id", "filename", "size_bytes", "status",
 	"started_at", "completed_at", "error_message", "created_at",
@@ -1116,7 +1121,7 @@ func sbRequest(t *testing.T, method, path string, body io.Reader) *http.Request 
 	)
 }
 
-func sbReadJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
+func sbReadJSON(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	t.Helper()
 	if err := json.NewDecoder(rec.Body).Decode(v); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -1139,7 +1144,7 @@ func TestSB_CreateConfig_Success(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	sbReadJSON(t, rec, &result)
 	if result["name"] != "daily-backup" {
 		t.Errorf("want name daily-backup, got %v", result["name"])
@@ -1268,7 +1273,7 @@ func TestSB_CreateConfig_ExplicitDisabled(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	sbReadJSON(t, rec, &result)
 	if result["enabled"] != false {
 		t.Errorf("want enabled false, got %v", result["enabled"])
@@ -1757,7 +1762,7 @@ func TestSB_RunBackup_Success(t *testing.T) {
 	if rec.Code != 202 {
 		t.Fatalf("run backup: want 202, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	sbReadJSON(t, rec, &result)
 	if result["status"] != "running" {
 		t.Errorf("want status 'running', got %v", result["status"])
@@ -1816,7 +1821,7 @@ func TestSB_CRUD_FullLifecycle(t *testing.T) {
 	if rec.Code != 201 {
 		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	sbReadJSON(t, rec, &created)
 	cfgID, ok := created["id"].(string)
 	if !ok || cfgID == "" {
@@ -1919,7 +1924,10 @@ func TestSB_ErrorPaths_MissingTenantWithDB(t *testing.T) {
 	p, _, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
 
-	tests := []struct{ method, path string; body []byte }{
+	tests := []struct {
+		method, path string
+		body         []byte
+	}{
 		{"POST", "/backups/configs", []byte(`{"name":"test","cron":"0 0 * * *"}`)},
 		{"GET", "/backups/configs", nil},
 		{"GET", "/backups/configs/00000000-0000-0000-0000-000000000001", nil},
@@ -2621,7 +2629,7 @@ func TestSB_ListHistory_WithNullableFields(t *testing.T) {
 		t.Fatalf("list history: want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var result []map[string]interface{}
+	var result []map[string]any
 	sbReadJSON(t, rec, &result)
 	if len(result) != 3 {
 		t.Fatalf("expected 3 history entries, got %d", len(result))

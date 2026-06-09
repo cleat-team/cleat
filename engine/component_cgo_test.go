@@ -71,8 +71,8 @@ func (h *mockHostHandler) DurableCallWithRetry(ctx context.Context, m api.Module
 func (h *mockHostHandler) DurableCallWithHeartbeat(ctx context.Context, m api.Module, service, operation, requestJSON string, heartbeatIntervalMs int64, responsePtr, responseMaxLen uint32) int64 {
 	return h.ret
 }
-func (h *mockHostHandler) Version(ctx context.Context) int64        { return h.ret }
-func (h *mockHostHandler) MinVersion(ctx context.Context) int64      { return h.ret }
+func (h *mockHostHandler) Version(ctx context.Context) int64    { return h.ret }
+func (h *mockHostHandler) MinVersion(ctx context.Context) int64 { return h.ret }
 func (h *mockHostHandler) SetQueryState(ctx context.Context, m api.Module, key, value string) int64 {
 	return h.ret
 }
@@ -208,7 +208,9 @@ func TestRegisterCBLookupCB(t *testing.T) {
 	t.Run("sequential IDs", func(t *testing.T) {
 		id1 := registerCB(b1, cbTypeDurableSleep)
 		id2 := registerCB(b2, cbTypeNow)
-		if id1 != 1 || id2 != 2 { t.Errorf("registerCB ids = %d, %d; want 1, 2", id1, id2) }
+		if id1 != 1 || id2 != 2 {
+			t.Errorf("registerCB ids = %d, %d; want 1, 2", id1, id2)
+		}
 	})
 	t.Run("lookup returns correct entry", func(t *testing.T) {
 		id := registerCB(b1, cbTypeDurableLog)
@@ -226,7 +228,9 @@ func TestRegisterCBLookupCB(t *testing.T) {
 }
 
 func TestRegisterCBConcurrent(t *testing.T) {
-	cbRegistry.Lock(); cbRegistry.entries = make(map[uintptr]cbEntry); cbRegistry.Unlock()
+	cbRegistry.Lock()
+	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.Unlock()
 	b := &wasmtimeBackend{}
 	var wg sync.WaitGroup
 	n := 100
@@ -235,12 +239,18 @@ func TestRegisterCBConcurrent(t *testing.T) {
 		go func() { defer wg.Done(); registerCB(b, cbTypeDurableSleep) }()
 	}
 	wg.Wait()
-	cbRegistry.Lock(); count := len(cbRegistry.entries); cbRegistry.Unlock()
-	if count != n { t.Errorf("after %d concurrent registrations, got %d entries", n, count) }
+	cbRegistry.Lock()
+	count := len(cbRegistry.entries)
+	cbRegistry.Unlock()
+	if count != n {
+		t.Errorf("after %d concurrent registrations, got %d entries", n, count)
+	}
 }
 
 func TestCbTypeConstants(t *testing.T) {
-	if cbTypeDefault != 0 { t.Errorf("cbTypeDefault = %d, want 0", cbTypeDefault) }
+	if cbTypeDefault != 0 {
+		t.Errorf("cbTypeDefault = %d, want 0", cbTypeDefault)
+	}
 	seen := make(map[cbType]bool)
 	allTypes := []cbType{
 		cbTypeDurableCallString, cbTypeDurableCallRetry, cbTypeDurableCallHeartbeat,
@@ -260,7 +270,9 @@ func TestCbTypeConstants(t *testing.T) {
 		cbTypeContinueAsNewVersioned, cbTypeSideEffect, cbTypeFetch,
 	}
 	for _, typ := range allTypes {
-		if seen[typ] { t.Errorf("duplicate cbType value: %d", typ) }
+		if seen[typ] {
+			t.Errorf("duplicate cbType value: %d", typ)
+		}
 		seen[typ] = true
 	}
 }
@@ -268,7 +280,9 @@ func TestCbTypeConstants(t *testing.T) {
 func TestWitTypeMapNoDefaults(t *testing.T) {
 	for module, funcs := range witTypeMap {
 		for fn, typ := range funcs {
-			if typ == cbTypeDefault { t.Errorf("witTypeMap[%s][%s] = cbTypeDefault (deprecated)", module, fn) }
+			if typ == cbTypeDefault {
+				t.Errorf("witTypeMap[%s][%s] = cbTypeDefault (deprecated)", module, fn)
+			}
 		}
 	}
 }
@@ -354,7 +368,9 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 			} else {
 				err = b.cgotestDispatchU64(tt.method, tt.ptr, tt.nargs, resultPtr)
 			}
-			if err != nil { t.Errorf("got error, want nil (nil handler should be safe)") }
+			if err != nil {
+				t.Errorf("got error, want nil (nil handler should be safe)")
+			}
 		})
 	}
 }
@@ -423,7 +439,9 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 			} else {
 				err = b.cgotestDispatchU64(tt.method, nil, 0, resultPtr)
 			}
-			if err != nil { t.Errorf("got error, want nil (insufficient args should be safe)") }
+			if err != nil {
+				t.Errorf("got error, want nil (insufficient args should be safe)")
+			}
 		})
 	}
 }
@@ -437,36 +455,56 @@ func TestDispatchDurableSleep(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeU64Args(1000)
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(0, argsPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 42 { t.Errorf("result = %d, want 42", got) }
+	if err := b.cgotestDispatchU64(0, argsPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 42 {
+		t.Errorf("result = %d, want 42", got)
+	}
 }
 
 func TestDispatchNow(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 99}}
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(1, nil, 0, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 99 { t.Errorf("result = %d, want 99", got) }
+	if err := b.cgotestDispatchU64(1, nil, 0, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 99 {
+		t.Errorf("result = %d, want 99", got)
+	}
 }
 
 func TestDispatchRandom(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 7}}
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(2, nil, 0, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 7 { t.Errorf("result = %d, want 7", got) }
+	if err := b.cgotestDispatchU64(2, nil, 0, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 7 {
+		t.Errorf("result = %d, want 7", got)
+	}
 }
 
 func TestDispatchVersion(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 3}}
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(3, nil, 0, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 3 { t.Errorf("result = %d, want 3", got) }
+	if err := b.cgotestDispatchU64(3, nil, 0, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 3 {
+		t.Errorf("result = %d, want 3", got)
+	}
 }
 
 func TestDispatchMinVersion(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 2}}
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(4, nil, 0, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 2 { t.Errorf("result = %d, want 2", got) }
+	if err := b.cgotestDispatchU64(4, nil, 0, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 2 {
+		t.Errorf("result = %d, want 2", got)
+	}
 }
 
 func TestDispatchDurableLog(t *testing.T) {
@@ -474,8 +512,12 @@ func TestDispatchDurableLog(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("log msg")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(5, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(5, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchContinueAsNew(t *testing.T) {
@@ -483,8 +525,12 @@ func TestDispatchContinueAsNew(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("new input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(6, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(6, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchResolvePromise(t *testing.T) {
@@ -492,8 +538,12 @@ func TestDispatchResolvePromise(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("promise-id", "value")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(7, strPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(7, strPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchRejectPromise(t *testing.T) {
@@ -501,8 +551,12 @@ func TestDispatchRejectPromise(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("promise-id", "error msg")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(8, strPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 2 { t.Errorf("result = %d, want 2", got) }
+	if err := b.cgotestDispatchU64(8, strPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 2 {
+		t.Errorf("result = %d, want 2", got)
+	}
 }
 
 func TestDispatchSetQueryState(t *testing.T) {
@@ -510,8 +564,12 @@ func TestDispatchSetQueryState(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("key", "value")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(9, strPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(9, strPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchDurableSend(t *testing.T) {
@@ -519,8 +577,12 @@ func TestDispatchDurableSend(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("svc", "op", "req")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(10, strPtr, 3, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(10, strPtr, 3, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchSetState(t *testing.T) {
@@ -528,8 +590,12 @@ func TestDispatchSetState(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("key", "value")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(11, strPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(11, strPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchIncrState(t *testing.T) {
@@ -537,8 +603,12 @@ func TestDispatchIncrState(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("counter-key", uint64(10))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(12, argsPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 5 { t.Errorf("result = %d, want 5", got) }
+	if err := b.cgotestDispatchU64(12, argsPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 5 {
+		t.Errorf("result = %d, want 5", got)
+	}
 }
 
 func TestDispatchHasState(t *testing.T) {
@@ -546,8 +616,12 @@ func TestDispatchHasState(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("key")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(13, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(13, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchDeleteState(t *testing.T) {
@@ -555,8 +629,12 @@ func TestDispatchDeleteState(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("key")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(14, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(14, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchAcquireLock(t *testing.T) {
@@ -564,8 +642,12 @@ func TestDispatchAcquireLock(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("lock-key", uint64(5000))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(15, argsPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(15, argsPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchReleaseLock(t *testing.T) {
@@ -573,8 +655,12 @@ func TestDispatchReleaseLock(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("lock-key")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(16, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(16, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchSignalWorkflow(t *testing.T) {
@@ -582,8 +668,12 @@ func TestDispatchSignalWorkflow(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("target", "signal", "payload")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(17, strPtr, 3, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(17, strPtr, 3, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchReplyToSignal(t *testing.T) {
@@ -591,8 +681,12 @@ func TestDispatchReplyToSignal(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("corr-id", "response")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(18, strPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(18, strPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchScheduleInvoke(t *testing.T) {
@@ -600,8 +694,12 @@ func TestDispatchScheduleInvoke(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("svc", "op", "req", uint64(5000))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(19, argsPtr, 4, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(19, argsPtr, 4, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchRegisterUpdateHandler(t *testing.T) {
@@ -609,8 +707,12 @@ func TestDispatchRegisterUpdateHandler(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("handler-name")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(20, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(20, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchRegisterQueryHandler(t *testing.T) {
@@ -618,8 +720,12 @@ func TestDispatchRegisterQueryHandler(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("handler-name")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(21, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(21, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchContinueAsNewVersioned(t *testing.T) {
@@ -627,8 +733,12 @@ func TestDispatchContinueAsNewVersioned(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("new-input", uint32(2))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(22, argsPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(22, argsPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchGetScope(t *testing.T) {
@@ -636,8 +746,12 @@ func TestDispatchGetScope(t *testing.T) {
 	u64Ptr, _, freeU64 := cgotestMakeU64Args(0, 0, 0, 0)
 	defer freeU64()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(23, u64Ptr, 4, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 1 { t.Errorf("result = %d, want 1", got) }
+	if err := b.cgotestDispatchU64(23, u64Ptr, 4, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 1 {
+		t.Errorf("result = %d, want 1", got)
+	}
 }
 
 func TestDispatchAwaitSignals(t *testing.T) {
@@ -645,8 +759,12 @@ func TestDispatchAwaitSignals(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("sig1,sig2", uint64(0), uint64(0), uint64(0), uint64(0), uint64(0))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(24, argsPtr, 6, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 42 { t.Errorf("result = %d, want 42", got) }
+	if err := b.cgotestDispatchU64(24, argsPtr, 6, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 42 {
+		t.Errorf("result = %d, want 42", got)
+	}
 }
 
 // =============================================================================
@@ -658,8 +776,12 @@ func TestDispatchDurableCallString(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("svc", "op", "req")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(0, strPtr, 3, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(0, strPtr, 3, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchDurableCallRetry(t *testing.T) {
@@ -667,8 +789,12 @@ func TestDispatchDurableCallRetry(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("svc", "op", "req", uint64(0), uint64(0), uint64(0), uint64(0), "none")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(1, argsPtr, 8, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(1, argsPtr, 8, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchDurableCallHeartbeat(t *testing.T) {
@@ -676,8 +802,12 @@ func TestDispatchDurableCallHeartbeat(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("svc", "op", "req", uint64(5000))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(2, argsPtr, 4, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(2, argsPtr, 4, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchDurableDefer(t *testing.T) {
@@ -685,8 +815,12 @@ func TestDispatchDurableDefer(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("desc")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(3, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(3, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchChildWorkflow(t *testing.T) {
@@ -694,8 +828,12 @@ func TestDispatchChildWorkflow(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("wf-name", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(4, strPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(4, strPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchCreatePromise(t *testing.T) {
@@ -703,8 +841,12 @@ func TestDispatchCreatePromise(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("promise")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(5, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(5, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchPluginCall(t *testing.T) {
@@ -712,8 +854,12 @@ func TestDispatchPluginCall(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("plugin", "func", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(6, strPtr, 3, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(6, strPtr, 3, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchSetScope(t *testing.T) {
@@ -721,8 +867,12 @@ func TestDispatchSetScope(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("type", "key")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(7, strPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(7, strPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchGetState(t *testing.T) {
@@ -730,8 +880,12 @@ func TestDispatchGetState(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("key")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(8, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(8, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchListState(t *testing.T) {
@@ -739,29 +893,45 @@ func TestDispatchListState(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("prefix")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(9, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(9, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchPollCancellation(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(5)}}
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(10, nil, 0, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(10, nil, 0, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchWorkflowID(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(11, nil, 0, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(11, nil, 0, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchRunID(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(12, nil, 0, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(12, nil, 0, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchUUID(t *testing.T) {
@@ -769,8 +939,12 @@ func TestDispatchUUID(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("seed")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(13, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(13, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchSideEffect(t *testing.T) {
@@ -778,8 +952,12 @@ func TestDispatchSideEffect(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("result")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(14, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(14, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchFetch(t *testing.T) {
@@ -787,8 +965,12 @@ func TestDispatchFetch(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("GET", "http://x", "{}", "")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(15, strPtr, 4, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(15, strPtr, 4, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchChildWorkflowInSchema(t *testing.T) {
@@ -796,8 +978,12 @@ func TestDispatchChildWorkflowInSchema(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("schema", "name", "input", uint64(0), uint64(0), "policy")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(16, argsPtr, 6, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(16, argsPtr, 6, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchAwaitChild(t *testing.T) {
@@ -805,8 +991,12 @@ func TestDispatchAwaitChild(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("run-id")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(17, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(17, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchAwaitAllChildren(t *testing.T) {
@@ -814,8 +1004,12 @@ func TestDispatchAwaitAllChildren(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs(`["id1","id2"]`)
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(18, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(18, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchPluginCallStreaming(t *testing.T) {
@@ -823,8 +1017,12 @@ func TestDispatchPluginCallStreaming(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("plugin", "func", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(19, strPtr, 3, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(19, strPtr, 3, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchChildWorkflowWithOptions(t *testing.T) {
@@ -832,8 +1030,12 @@ func TestDispatchChildWorkflowWithOptions(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("wf-name", "input", uint64(0), uint64(0), "policy")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(20, argsPtr, 5, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(20, argsPtr, 5, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchSendSignalAndWait(t *testing.T) {
@@ -841,8 +1043,12 @@ func TestDispatchSendSignalAndWait(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("target", "signal", "payload", uint64(5000))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(21, argsPtr, 4, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(21, argsPtr, 4, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchAwaitPromise(t *testing.T) {
@@ -850,8 +1056,12 @@ func TestDispatchAwaitPromise(t *testing.T) {
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("promise-id", uint64(1000))
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(22, argsPtr, 2, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(22, argsPtr, 2, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 func TestDispatchPollSignal(t *testing.T) {
@@ -859,8 +1069,12 @@ func TestDispatchPollSignal(t *testing.T) {
 	strPtr, _, freeArgs := cgotestMakeStrArgs("signal")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(23, strPtr, 1, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if !cgotestHasResultString(resultPtr) { t.Error("expected non-nil string result") }
+	if err := b.cgotestDispatchStr(23, strPtr, 1, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cgotestHasResultString(resultPtr) {
+		t.Error("expected non-nil string result")
+	}
 }
 
 // =============================================================================
@@ -870,8 +1084,12 @@ func TestDispatchPollSignal(t *testing.T) {
 func TestDispatchComponentDefault(t *testing.T) {
 	b := &wasmtimeBackend{}
 	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(25, nil, 0, resultPtr); err != nil { t.Fatalf("unexpected error: %v", err) }
-	if got := cgotestReadResultU64(resultPtr); got != 0 { t.Errorf("result = %d, want 0", got) }
+	if err := b.cgotestDispatchU64(25, nil, 0, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 0 {
+		t.Errorf("result = %d, want 0", got)
+	}
 }
 
 // =============================================================================
@@ -882,14 +1100,18 @@ func TestGoComponentCallbackNilHandler(t *testing.T) {
 	b := &wasmtimeBackend{}
 	id := registerCB(b, cbTypeNow)
 	err := cgotestGoComponentCallback(unsafe.Pointer(id), nil, 0, nil)
-	if err != nil { t.Errorf("goComponentCallback with nil handler returned error") }
+	if err != nil {
+		t.Errorf("goComponentCallback with nil handler returned error")
+	}
 }
 
 func TestGoComponentCallbackNilBackend(t *testing.T) {
 	entry := cbEntry{backend: nil, typ: cbTypeDurableSleep}
 	id := registerCB(entry.backend, entry.typ)
 	err := cgotestGoComponentCallback(unsafe.Pointer(id), nil, 0, nil)
-	if err != nil { t.Errorf("goComponentCallback with nil backend returned error") }
+	if err != nil {
+		t.Errorf("goComponentCallback with nil backend returned error")
+	}
 }
 
 func TestGoComponentCallbackDispatchDefault(t *testing.T) {
@@ -897,13 +1119,19 @@ func TestGoComponentCallbackDispatchDefault(t *testing.T) {
 	id := registerCB(b, cbTypeDefault)
 	resultPtr := cgotestAllocResult()
 	err := cgotestGoComponentCallback(unsafe.Pointer(id), nil, 0, resultPtr)
-	if err != nil { t.Errorf("goComponentCallback with default type returned error") }
-	if got := cgotestReadResultU64(resultPtr); got != 0 { t.Errorf("result = %d, want 0", got) }
+	if err != nil {
+		t.Errorf("goComponentCallback with default type returned error")
+	}
+	if got := cgotestReadResultU64(resultPtr); got != 0 {
+		t.Errorf("result = %d, want 0", got)
+	}
 }
 
 func TestGoComponentCallbackMissingFromRegistry(t *testing.T) {
 	err := cgotestGoComponentCallback(unsafe.Pointer(uintptr(999999)), nil, 0, nil)
-	if err != nil { t.Errorf("goComponentCallback with missing ID returned error") }
+	if err != nil {
+		t.Errorf("goComponentCallback with missing ID returned error")
+	}
 }
 
 // =============================================================================
@@ -912,23 +1140,35 @@ func TestGoComponentCallbackMissingFromRegistry(t *testing.T) {
 
 func BenchmarkExtractStringFromPacked(b *testing.B) {
 	buf := make([]byte, 65536)
-	for i := range buf { buf[i] = 'x' }
+	for i := range buf {
+		buf[i] = 'x'
+	}
 	packed := int64(100) << 40
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ { extractStringFromPacked(packed, buf) }
+	for i := 0; i < b.N; i++ {
+		extractStringFromPacked(packed, buf)
+	}
 }
 
 func BenchmarkRegisterCB(b *testing.B) {
-	cbRegistry.Lock(); cbRegistry.entries = make(map[uintptr]cbEntry); cbRegistry.Unlock()
+	cbRegistry.Lock()
+	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.Unlock()
 	backend := &wasmtimeBackend{}
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ { registerCB(backend, cbTypeDurableSleep) }
+	for i := 0; i < b.N; i++ {
+		registerCB(backend, cbTypeDurableSleep)
+	}
 }
 
 func BenchmarkLookupCB(b *testing.B) {
-	cbRegistry.Lock(); cbRegistry.entries = make(map[uintptr]cbEntry); cbRegistry.Unlock()
+	cbRegistry.Lock()
+	cbRegistry.entries = make(map[uintptr]cbEntry)
+	cbRegistry.Unlock()
 	backend := &wasmtimeBackend{}
 	id := registerCB(backend, cbTypeDurableSleep)
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ { lookupCB(id) }
+	for i := 0; i < b.N; i++ {
+		lookupCB(id)
+	}
 }

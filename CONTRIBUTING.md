@@ -447,6 +447,44 @@ uses these labels:
 Check the [Discussions](https://github.com/cleat-team/cleat/discussions) page for
 RFCs and design proposals that need implementation.
 
+## Documentation Standards
+
+### SDK README template
+
+All SDK READMEs should follow the template at
+`docs/contributor/SDK_README_TEMPLATE.md`. The template covers:
+
+1. Installation
+2. Quick Start (minimal example)
+3. HostCall API Reference (table format)
+4. WASM Compilation
+5. Constraints / Known Limitations
+6. Testing Guide
+7. Troubleshooting
+
+See `python-sdk/README.md` for a complete worked example that follows the
+template. When creating a new SDK or updating an existing one, use the template
+as a starting point and fill in language-specific details.
+
+### Diataxis documentation framework
+
+The project follows the
+[Diataxis](https://diataxis.fr/) framework for documentation:
+
+- **Tutorials** — Learning-oriented, step-by-step guides (in `docs/tutorials/`)
+- **How-to guides** — Goal-oriented recipes (in `docs/how-to/`)
+- **Explanation** — Understanding-oriented background (in `docs/explanation/`)
+- **Reference** — Information-oriented technical descriptions (in `docs/reference/`)
+
+New documentation should be placed in the appropriate directory. If you are
+unsure which category fits, ask in the PR review or open an issue for guidance.
+
+### New SDKs must follow the template
+
+Any new SDK added to the repository must include a README that follows the SDK
+README template. The review gate for new SDK PRs includes a check that the
+README covers all seven sections.
+
 ## Questions?
 
 Open a GitHub issue or reach out on Discord (link coming soon).

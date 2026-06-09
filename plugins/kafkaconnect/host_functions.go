@@ -8,8 +8,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -28,10 +28,10 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 // ---- Input/output types ----
 
 type produceInput struct {
-	ConfigID uuid.UUID          `json:"config_id"`
-	Key      string             `json:"key,omitempty"`
-	Value    string             `json:"value"`
-	Headers  map[string]string  `json:"headers,omitempty"`
+	ConfigID uuid.UUID         `json:"config_id"`
+	Key      string            `json:"key,omitempty"`
+	Value    string            `json:"value"`
+	Headers  map[string]string `json:"headers,omitempty"`
 }
 
 type produceOutput struct {
@@ -46,8 +46,8 @@ type kafkaRestProxyPayload struct {
 }
 
 type kafkaRestProxyRecord struct {
-	Key       interface{}       `json:"key,omitempty"`
-	Value     interface{}       `json:"value"`
+	Key       any               `json:"key,omitempty"`
+	Value     any               `json:"value"`
 	Headers   map[string]string `json:"headers,omitempty"`
 	Partition int               `json:"partition,omitempty"`
 }

@@ -362,13 +362,13 @@ func TestSplitSemver(t *testing.T) {
 
 func TestVersionInRange(t *testing.T) {
 	tests := []struct {
-		v     string
-		r     constraintRange
-		in    bool
+		v  string
+		r  constraintRange
+		in bool
 	}{
 		{v: "v1.0.0", r: constraintRange{min: "v1.0.0", max: "v2.0.0"}, in: true},
 		{v: "v1.5.0", r: constraintRange{min: "v1.0.0", max: "v2.0.0"}, in: true},
-		{v: "v2.0.0", r: constraintRange{min: "v1.0.0", max: "v2.0.0"}, in: false},  // max exclusive
+		{v: "v2.0.0", r: constraintRange{min: "v1.0.0", max: "v2.0.0"}, in: false}, // max exclusive
 		{v: "v0.9.0", r: constraintRange{min: "v1.0.0", max: "v2.0.0"}, in: false},
 		{v: "v1.0.0", r: constraintRange{exact: "v1.0.0"}, in: true},
 		{v: "v1.1.0", r: constraintRange{exact: "v1.0.0"}, in: false},
@@ -393,9 +393,9 @@ func TestIsOfficialEdgeCases(t *testing.T) {
 		name     string
 		official bool
 	}{
-		{"", true},            // no slash, empty string — technically official
-		{"cleat/", true},      // cleat/ prefix
-		{"/name", false},      // starts with slash — contains slash but not cleat/
+		{"", true},       // no slash, empty string — technically official
+		{"cleat/", true}, // cleat/ prefix
+		{"/name", false}, // starts with slash — contains slash but not cleat/
 	}
 	for _, tc := range tests {
 		e := &IndexEntry{Name: tc.name}

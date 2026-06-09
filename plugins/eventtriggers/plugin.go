@@ -32,10 +32,10 @@ func New() plugin.Plugin {
 // Plugin implements event-driven workflow triggers with tenant-isolated
 // event subscriptions, idempotent event ingestion, and filter expressions.
 type Plugin struct {
-db     plugin.PluginDB
-	mux    *http.ServeMux
-	logger *slog.Logger
-	env    *plugin.Environment
+	db      plugin.PluginDB
+	mux     *http.ServeMux
+	logger  *slog.Logger
+	env     *plugin.Environment
 	dialect plugin.Dialect
 
 	// Background retry metrics.

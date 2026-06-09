@@ -23,34 +23,24 @@ jobs:
         with:
           go-version: stable
       - name: Check tools
-        run: make tools-tinygo
+        run: make tools-go
       - run: go test -race -count=1 -timeout=120s ./tests/plugin-harness/... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
 
   # --------------------------------------------------------------------------
-  # Layer 2 — WASM integration (compiled Go workflow via TinyGo)
+  # Layer 2 — WASM integration (compiled Go workflow via standard Go wasip1)
   # --------------------------------------------------------------------------
   test-layer2:
-    name: Layer 2 — WASM Integration (TinyGo)
+    name: Layer 2 — WASM Integration
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: Install TinyGo (latest)
-        run: |
-          TINYGO_VER=$(curl -sSfL https://api.github.com/repos/tinygo-org/tinygo/releases/latest | jq -r .tag_name)
-          if [ -z "$TINYGO_VER" ] || [ "$TINYGO_VER" = "null" ]; then
-            TINYGO_VER="v0.41.1"
-          fi
-          TINYGO_SHORT="${TINYGO_VER#v}"
-          curl -sSfL "https://github.com/tinygo-org/tinygo/releases/download/${TINYGO_VER}/tinygo${TINYGO_SHORT}.linux-amd64.tar.gz" -o /tmp/tinygo.tar.gz
-          sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz
-          echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
       - run: go test -count=1 -timeout=300s ./tests/plugin-harness/... -run 'TestPluginCalls_Wasm'
 
   # --------------------------------------------------------------------------
-  # Layer 3 — Multi-DB (real databases, TinyGo-compiled workflow)
+  # Layer 3 — Multi-DB (real databases, standard Go wasip1 workflow)
   # --------------------------------------------------------------------------
   test-multi-db:
     name: Layer 3 — Multi-DB
@@ -103,16 +93,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: Install TinyGo (latest)
-        run: |
-          TINYGO_VER=$(curl -sSfL https://api.github.com/repos/tinygo-org/tinygo/releases/latest | jq -r .tag_name)
-          if [ -z "$TINYGO_VER" ] || [ "$TINYGO_VER" = "null" ]; then
-            TINYGO_VER="v0.41.1"
-          fi
-          TINYGO_SHORT="${TINYGO_VER#v}"
-          curl -sSfL "https://github.com/tinygo-org/tinygo/releases/download/${TINYGO_VER}/tinygo${TINYGO_SHORT}.linux-amd64.tar.gz" -o /tmp/tinygo.tar.gz
-          sudo tar -C /usr/local -xzf /tmp/tinygo.tar.gz
-          echo "/usr/local/tinygo/bin" >> $GITHUB_PATH
       - run: go test -count=1 -timeout=600s ./tests/plugin-harness/... -run 'TestPluginCalls_MultiDB'
 
   # --------------------------------------------------------------------------

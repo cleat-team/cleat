@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -79,10 +79,11 @@ type fakeConn struct {
 func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
-func (*fakeConn) Close() error      { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
+
 func (*fakeTx) Commit() error   { return nil }
 func (*fakeTx) Rollback() error { return nil }
 
@@ -493,8 +494,8 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -530,7 +531,7 @@ func TestConfigCreateAndGet(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("failed to decode create response: %v", err)
 	}
@@ -560,7 +561,7 @@ func TestConfigCreateAndGet(t *testing.T) {
 		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var fetched map[string]interface{}
+	var fetched map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &fetched); err != nil {
 		t.Fatalf("failed to decode get response: %v", err)
 	}
@@ -595,7 +596,7 @@ func TestConfigList(t *testing.T) {
 		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var configs []map[string]interface{}
+	var configs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &configs); err != nil {
 		t.Fatalf("failed to decode list: %v", err)
 	}
@@ -617,7 +618,7 @@ func TestConfigUpdate(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	id := created["id"].(string)
 
@@ -630,7 +631,7 @@ func TestConfigUpdate(t *testing.T) {
 		t.Fatalf("PUT: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var updated map[string]interface{}
+	var updated map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
 		t.Fatalf("failed to decode update: %v", err)
 	}
@@ -659,7 +660,7 @@ func TestConfigDelete(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	id := created["id"].(string)
 
@@ -775,7 +776,7 @@ func TestSendMessage(t *testing.T) {
 	store.mu.Unlock()
 
 	// Build input JSON.
-	input := map[string]interface{}{
+	input := map[string]any{
 		"config_id": cfgID.String(),
 		"text":      "Hello from test!",
 	}
@@ -790,7 +791,7 @@ func TestSendMessage(t *testing.T) {
 		t.Fatalf("sendMessage: %v", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("failed to decode output: %v", err)
 	}
@@ -802,7 +803,7 @@ func TestSendMessage(t *testing.T) {
 	if capturedPayload == nil {
 		t.Fatal("expected captured payload")
 	}
-	var slackPayload map[string]interface{}
+	var slackPayload map[string]any
 	json.Unmarshal(capturedPayload, &slackPayload)
 	if slackPayload["text"] != "Hello from test!" {
 		t.Errorf("expected text 'Hello from test!', got %s", slackPayload["text"])
@@ -850,8 +851,8 @@ func TestSN_RegisterHostFunctions_NilRegistry(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	err := p.RegisterHostFunctions(nil)
@@ -865,8 +866,8 @@ func TestSN_RegisterHostFunctions_Valid(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	reg := newFakeFuncRegistry()
@@ -1067,8 +1068,8 @@ func TestSN_ErrorPaths_DBError_Create(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1095,8 +1096,8 @@ func TestSN_ErrorPaths_DBError_List(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1123,8 +1124,8 @@ func TestSN_ErrorPaths_DBError_Get(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1151,8 +1152,8 @@ func TestSN_ErrorPaths_DBError_Update(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1179,8 +1180,8 @@ func TestSN_ErrorPaths_DBError_Delete(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1204,8 +1205,8 @@ func TestSN_SendMessage_MissingTenant(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -1222,8 +1223,8 @@ func TestSN_SendMessage_InvalidJSON(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -1240,8 +1241,8 @@ func TestSN_SendMessage_MissingConfigID(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -1258,8 +1259,8 @@ func TestSN_SendMessage_MissingText(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -1276,8 +1277,8 @@ func TestSN_SendMessage_ConfigNotFound(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -1313,8 +1314,8 @@ func TestSN_SendMessage_WebhookError(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -1349,8 +1350,8 @@ func TestSN_SendMessage_NonJSONResponse(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -1359,7 +1360,7 @@ func TestSN_SendMessage_NonJSONResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sendMessage: %v", err)
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal([]byte(out), &result)
 	if result["success"] != true {
 		t.Errorf("expected success=true, got %v", result["success"])

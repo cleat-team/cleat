@@ -43,7 +43,7 @@ type PluginInfo struct {
 
 // RowScanner abstracts a single row result for single-row queries.
 type RowScanner interface {
-	Scan(dest ...interface{}) error
+	Scan(dest ...any) error
 }
 
 // Rows is the result of a multi-row query.
@@ -59,17 +59,17 @@ type Rows interface {
 // interface appropriate to their declared DatabaseAccess level.
 type PluginDB interface {
 	Begin(ctx context.Context) (PluginTx, error)
-	Exec(ctx context.Context, query string, args ...interface{}) (int64, error)
-	Query(ctx context.Context, query string, args ...interface{}) (Rows, error)
-	QueryRow(ctx context.Context, query string, args ...interface{}) RowScanner
+	Exec(ctx context.Context, query string, args ...any) (int64, error)
+	Query(ctx context.Context, query string, args ...any) (Rows, error)
+	QueryRow(ctx context.Context, query string, args ...any) RowScanner
 	Ping(ctx context.Context) error
 }
 
 // PluginTx is a transaction scoped to a plugin operation.
 type PluginTx interface {
-	Exec(ctx context.Context, query string, args ...interface{}) (int64, error)
-	Query(ctx context.Context, query string, args ...interface{}) (Rows, error)
-	QueryRow(ctx context.Context, query string, args ...interface{}) RowScanner
+	Exec(ctx context.Context, query string, args ...any) (int64, error)
+	Query(ctx context.Context, query string, args ...any) (Rows, error)
+	QueryRow(ctx context.Context, query string, args ...any) RowScanner
 	Commit() error
 	Rollback() error
 }
@@ -123,7 +123,7 @@ type AuditLogger interface {
 	Invocation(ctx context.Context, pluginName, functionName string, dropRate float64) error
 
 	// EnforceRetention deletes audit log entries that exceed the policy.
-	EnforceRetention(ctx context.Context, policy interface{}) (int64, error)
+	EnforceRetention(ctx context.Context, policy any) (int64, error)
 }
 
 // --- Optional interfaces (discovered by loader via type assertion) ---
@@ -147,11 +147,11 @@ type HasMigrations interface {
 // If the active dialect is MySQL or MSSQL and the corresponding
 // field is empty, the migration is skipped with a warning.
 type Migration struct {
-	Version   int
-	Up        string // required — SQL for PostgreSQL (the default)
-	UpMySQL   string // optional — MySQL DDL. Empty means PG-only for this version.
-	UpMSSQL   string // optional — MSSQL DDL. Empty means PG-only for this version.
-	Down      string // optional — SQL to roll back
+	Version int
+	Up      string // required — SQL for PostgreSQL (the default)
+	UpMySQL string // optional — MySQL DDL. Empty means PG-only for this version.
+	UpMSSQL string // optional — MSSQL DDL. Empty means PG-only for this version.
+	Down    string // optional — SQL to roll back
 }
 
 // HasCommands: plugin adds CLI subcommands.
@@ -220,4 +220,3 @@ type HasHealth interface {
 	Plugin
 	Health() error // nil = healthy
 }
-

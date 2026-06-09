@@ -87,7 +87,7 @@ func runRestoreWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql
 		}
 
 		// Check if this row references our workflow ID.
-		var rowMap map[string]interface{}
+		var rowMap map[string]any
 		if err := json.Unmarshal(br.Row, &rowMap); err != nil {
 			fmt.Fprintf(os.Stderr, "error parsing row on line %d: %v\n", lineNo, err)
 			osExit(1)
@@ -306,7 +306,7 @@ func insertChildWorkflow(ctx context.Context, db *sql.DB, rowJSON []byte) error 
 // Helpers
 // ---------------------------------------------------------------------------
 
-func nullIfEmpty(s string) interface{} {
+func nullIfEmpty(s string) any {
 	if s == "" {
 		return nil
 	}

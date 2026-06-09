@@ -368,9 +368,9 @@ func TestClassifyReturn(t *testing.T) {
 	intType := types.Typ[types.Int]
 
 	tests := []struct {
-		name    string
-		sig     *types.Signature
-		wantKind  returnKind
+		name     string
+		sig      *types.Signature
+		wantKind returnKind
 		wantType string
 	}{
 		{
@@ -381,7 +381,7 @@ func TestClassifyReturn(t *testing.T) {
 					types.NewParam(0, nil, "", errorType),
 				), false,
 			),
-			wantKind:  returnStringError,
+			wantKind: returnStringError,
 			wantType: "string",
 		},
 		{
@@ -391,7 +391,7 @@ func TestClassifyReturn(t *testing.T) {
 					types.NewParam(0, nil, "", errorType),
 				), false,
 			),
-			wantKind:  returnError,
+			wantKind: returnError,
 			wantType: "",
 		},
 		{
@@ -399,7 +399,7 @@ func TestClassifyReturn(t *testing.T) {
 			sig: types.NewSignatureType(nil, nil, nil, nil,
 				types.NewTuple(), false,
 			),
-			wantKind:  returnNothing,
+			wantKind: returnNothing,
 			wantType: "",
 		},
 		{
@@ -409,7 +409,7 @@ func TestClassifyReturn(t *testing.T) {
 					types.NewParam(0, nil, "", stringType),
 				), false,
 			),
-			wantKind:  returnString,
+			wantKind: returnString,
 			wantType: "string",
 		},
 		{
@@ -420,7 +420,7 @@ func TestClassifyReturn(t *testing.T) {
 					types.NewParam(0, nil, "", errorType),
 				), false,
 			),
-			wantKind:  returnStringError,
+			wantKind: returnStringError,
 			wantType: "int",
 		},
 	}

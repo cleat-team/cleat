@@ -17,9 +17,9 @@ type TenantPools struct {
 	// Owner pool for administrative operations (claiming, migrations).
 	OwnerDB *sql.DB
 
-	mu       sync.Mutex
-	pools    map[string]*sql.DB
-	connStr  string // base connection string (without user/password — we add per-tenant)
+	mu      sync.Mutex
+	pools   map[string]*sql.DB
+	connStr string // base connection string (without user/password — we add per-tenant)
 }
 
 // NewTenantPools creates a TenantPools manager.

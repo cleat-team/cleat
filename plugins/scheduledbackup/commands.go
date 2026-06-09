@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterCommands returns CLI subcommands for the scheduled-backup plugin.
@@ -198,7 +198,7 @@ func (p *Plugin) cliBackupList(cmds []string) error {
 		FROM backup_history h
 		WHERE h.tenant_id = $1
 	`
-	qargs := []interface{}{tenantID}
+	qargs := []any{tenantID}
 	argIdx := 2
 
 	if *configStr != "" {

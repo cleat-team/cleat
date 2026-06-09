@@ -16,8 +16,8 @@ func handCraftedComponent() []byte {
 	var buf []byte
 
 	// Magic + layer
-	buf = append(buf, 0x00, 0x61, 0x73, 0x6d)       // "\0asm"
-	buf = append(buf, 0x0d, 0x00, 0x01, 0x00)       // component layer
+	buf = append(buf, 0x00, 0x61, 0x73, 0x6d) // "\0asm"
+	buf = append(buf, 0x0d, 0x00, 0x01, 0x00) // component layer
 
 	// A tiny valid core WASM module that we'll embed.
 	// It has no imports, no exports, just a single empty function body.
@@ -45,10 +45,10 @@ func handCraftedComponent() []byte {
 	// Section 2: core instance (Instantiate module 0, no args)
 	buf = append(buf, 0x02) // section ID
 	instPayload := []byte{
-		0x01,       // count: 1 instance
-		0x00,       // discriminator: Instantiate
-		0x00,       // module_index: 0
-		0x00,       // args: empty vec
+		0x01, // count: 1 instance
+		0x00, // discriminator: Instantiate
+		0x00, // module_index: 0
+		0x00, // args: empty vec
 	}
 	buf = append(buf, encodeULEB128(uint32(len(instPayload)))...)
 	buf = append(buf, instPayload...)
@@ -56,12 +56,12 @@ func handCraftedComponent() []byte {
 	// Section 11 (0x0b): component export
 	buf = append(buf, 0x0b) // section ID
 	exportPayload := []byte{
-		0x01,             // count: 1 export
-		0x00, 0x03,       // name length: 3 (big-endian)
+		0x01,       // count: 1 export
+		0x00, 0x03, // name length: 3 (big-endian)
 		0x72, 0x75, 0x6e, // "run"
-		0x01,             // sort: func
-		0x00,             // index: 0
-		0x00,             // no type reference
+		0x01, // sort: func
+		0x00, // index: 0
+		0x00, // no type reference
 	}
 	buf = append(buf, encodeULEB128(uint32(len(exportPayload)))...)
 	buf = append(buf, exportPayload...)
@@ -148,15 +148,15 @@ func TestComponentWithImports(t *testing.T) {
 	// Section 10 (0x0a): component import — "wasi:cli/environment@0.2.0"
 	buf = append(buf, 0x0a)
 	importPayload := []byte{
-		0x01,                                           // count: 1
-		0x00, 0x1a,                                     // name length: 26 (big-endian)
+		0x01,       // count: 1
+		0x00, 0x1a, // name length: 26 (big-endian)
 		0x77, 0x61, 0x73, 0x69, 0x3a, 0x63, 0x6c, 0x69, // "wasi:cli"
 		0x2f,                                           // "/"
 		0x65, 0x6e, 0x76, 0x69, 0x72, 0x6f, 0x6e, 0x6d, // "environm"
-		0x65, 0x6e, 0x74,                               // "ent"
-		0x40, 0x30, 0x2e, 0x32, 0x2e, 0x30,             // "@0.2.0"
-		0x05,                                           // sort (instance)
-		0x00,                                           // type index: 0
+		0x65, 0x6e, 0x74, // "ent"
+		0x40, 0x30, 0x2e, 0x32, 0x2e, 0x30, // "@0.2.0"
+		0x05, // sort (instance)
+		0x00, // type index: 0
 	}
 	buf = append(buf, encodeULEB128(uint32(len(importPayload)))...)
 	buf = append(buf, importPayload...)
@@ -164,12 +164,12 @@ func TestComponentWithImports(t *testing.T) {
 	// Section 11 (0x0b): component export — "run"
 	buf = append(buf, 0x0b)
 	exportPayload := []byte{
-		0x01,             // count: 1
-		0x00, 0x03,       // name length: 3
+		0x01,       // count: 1
+		0x00, 0x03, // name length: 3
 		0x72, 0x75, 0x6e, // "run"
-		0x01,             // sort: func
-		0x00,             // index: 0
-		0x00,             // no type
+		0x01, // sort: func
+		0x00, // index: 0
+		0x00, // no type
 	}
 	buf = append(buf, encodeULEB128(uint32(len(exportPayload)))...)
 	buf = append(buf, exportPayload...)

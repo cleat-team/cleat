@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -51,13 +51,13 @@ type fakeLeaseRow struct {
 }
 
 type fakeDBStore struct {
-	mu                 sync.RWMutex
-	nextID             int64
-	configs            []fakeConfigRow
-	workflowInstances  []fakeWorkflowRow
-	apiKeys            map[string]string // key_hash_hex -> tenant_id
-	leases             map[string]fakeLeaseRow // lease_name -> lease
-	simulateErr        bool
+	mu                sync.RWMutex
+	nextID            int64
+	configs           []fakeConfigRow
+	workflowInstances []fakeWorkflowRow
+	apiKeys           map[string]string       // key_hash_hex -> tenant_id
+	leases            map[string]fakeLeaseRow // lease_name -> lease
+	simulateErr       bool
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -95,10 +95,11 @@ type fakeConn struct {
 func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
-func (*fakeConn) Close() error      { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
+
 func (*fakeTx) Commit() error   { return nil }
 func (*fakeTx) Rollback() error { return nil }
 
@@ -649,8 +650,8 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
@@ -686,7 +687,7 @@ func TestConfigCreateAndGet(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("failed to decode create response: %v", err)
 	}
@@ -717,7 +718,7 @@ func TestConfigCreateAndGet(t *testing.T) {
 		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var fetched map[string]interface{}
+	var fetched map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &fetched); err != nil {
 		t.Fatalf("failed to decode get response: %v", err)
 	}
@@ -752,7 +753,7 @@ func TestConfigList(t *testing.T) {
 		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var configs []map[string]interface{}
+	var configs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &configs); err != nil {
 		t.Fatalf("failed to decode list response: %v", err)
 	}
@@ -774,7 +775,7 @@ func TestConfigUpdate(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	id := created["id"].(string)
 
@@ -787,7 +788,7 @@ func TestConfigUpdate(t *testing.T) {
 		t.Fatalf("PUT: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var updated map[string]interface{}
+	var updated map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
 		t.Fatalf("failed to decode update response: %v", err)
 	}
@@ -817,7 +818,7 @@ func TestConfigDelete(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	id := created["id"].(string)
 
@@ -1047,7 +1048,7 @@ func TestCreateDefaults(t *testing.T) {
 		t.Fatalf("POST: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 
 	if created["site"] != "datadoghq.com" {
@@ -1164,8 +1165,8 @@ func TestDD_Run_Cancellation(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1304,8 +1305,8 @@ func TestDD_ErrorPaths_DBError_Create(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1332,8 +1333,8 @@ func TestDD_ErrorPaths_DBError_List(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1360,8 +1361,8 @@ func TestDD_ErrorPaths_DBError_Get(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1388,8 +1389,8 @@ func TestDD_ErrorPaths_DBError_Update(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1416,8 +1417,8 @@ func TestDD_ErrorPaths_DBError_Delete(t *testing.T) {
 	store.simulateErr = true
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	mux := http.NewServeMux()
@@ -1442,8 +1443,8 @@ func TestDD_ExportMetrics_QueryError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	err := p.exportMetrics(context.Background())
@@ -1463,8 +1464,8 @@ func TestDD_ExportForConfig_QueryError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 	cfg := ddConfigRow{

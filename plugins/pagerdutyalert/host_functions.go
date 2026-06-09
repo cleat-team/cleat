@@ -8,8 +8,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -55,10 +55,10 @@ type resolveIncidentOutput struct {
 // ---- PagerDuty Events API v2 types ----
 
 type pdEventPayload struct {
-	Summary       string                 `json:"summary"`
-	Severity      string                 `json:"severity"`
-	Source        string                 `json:"source"`
-	CustomDetails map[string]interface{} `json:"custom_details,omitempty"`
+	Summary       string         `json:"summary"`
+	Severity      string         `json:"severity"`
+	Source        string         `json:"source"`
+	CustomDetails map[string]any `json:"custom_details,omitempty"`
 }
 
 type pdEventRequest struct {
@@ -69,10 +69,10 @@ type pdEventRequest struct {
 }
 
 type pdEventResponse struct {
-	Status      string   `json:"status"`
-	DedupKey    string   `json:"dedup_key"`
-	Message     string   `json:"message,omitempty"`
-	Errors      []string `json:"errors,omitempty"`
+	Status   string   `json:"status"`
+	DedupKey string   `json:"dedup_key"`
+	Message  string   `json:"message,omitempty"`
+	Errors   []string `json:"errors,omitempty"`
 }
 
 const pdEventsAPIURL = "https://events.pagerduty.com/v2/enqueue"
@@ -124,10 +124,10 @@ func (p *Plugin) triggerIncident(ctx context.Context, inputJSON string) (string,
 	}
 
 	// Build the custom_details from optional details field.
-	customDetails := make(map[string]interface{})
+	customDetails := make(map[string]any)
 	if input.Details != nil && *input.Details != "" {
 		// Try to parse details as JSON for structured details.
-		var structured interface{}
+		var structured any
 		if err := json.Unmarshal([]byte(*input.Details), &structured); err == nil {
 			customDetails["details"] = structured
 		} else {

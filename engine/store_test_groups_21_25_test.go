@@ -504,9 +504,9 @@ func TestStartChildWorkflowAtomic(t *testing.T) {
 
 			childID := uuid.New().String()
 			event := EventRecord{
-				Step:       0,
-				EventType:  EventTypeChildWorkflow,
-				ChildName:  "test-workflow",
+				Step:        0,
+				EventType:   EventTypeChildWorkflow,
+				ChildName:   "test-workflow",
 				TimestampMs: time.Now().UnixMilli(),
 			}
 

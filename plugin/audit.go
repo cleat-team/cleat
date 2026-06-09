@@ -17,10 +17,10 @@ import (
 type AuditEventType string
 
 const (
-	AuditPluginDeploy          AuditEventType = "plugin_deploy"
-	AuditPluginDeprecate       AuditEventType = "plugin_deprecate"
+	AuditPluginDeploy           AuditEventType = "plugin_deploy"
+	AuditPluginDeprecate        AuditEventType = "plugin_deprecate"
 	AuditPluginCapabilityChange AuditEventType = "plugin_capability_change"
-	AuditPluginInvocation      AuditEventType = "plugin_invocation"
+	AuditPluginInvocation       AuditEventType = "plugin_invocation"
 )
 
 // AuditEntry represents a single row in the plugin_audit_log table.
@@ -74,7 +74,7 @@ func DropPluginAuditLogTableSQL() string {
 // AuditLog provides methods for writing audit events to the plugin_audit_log
 // table. It implements the AuditLogger interface.
 type AuditLog struct {
-	db *sql.DB
+	db  *sql.DB
 	rng *rand.Rand
 	mu  sync.Mutex
 }
@@ -126,7 +126,7 @@ func (a *AuditLog) Invocation(ctx context.Context, pluginName, functionName stri
 // EnforceRetention deletes audit log entries that exceed the given policy.
 // The policy parameter must be a RetentionPolicy value. Returns the number
 // of rows deleted.
-func (a *AuditLog) EnforceRetention(ctx context.Context, policy interface{}) (int64, error) {
+func (a *AuditLog) EnforceRetention(ctx context.Context, policy any) (int64, error) {
 	p, ok := policy.(RetentionPolicy)
 	if !ok {
 		return 0, fmt.Errorf("plugin audit: expected RetentionPolicy, got %T", policy)
@@ -191,7 +191,7 @@ type RetentionPolicy struct {
 // DefaultRetentionPolicy returns a sensible default retention policy.
 func DefaultRetentionPolicy() RetentionPolicy {
 	return RetentionPolicy{
-		MaxAge:             90 * 24 * time.Hour, // 90 days
+		MaxAge:              90 * 24 * time.Hour, // 90 days
 		MaxEntriesPerPlugin: 10000,
 	}
 }

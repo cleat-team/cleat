@@ -153,7 +153,7 @@ func runEmbedded(args []string) {
 		})
 		mux.HandleFunc("/result", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			json.NewEncoder(w).Encode(map[string]any{
 				"result":     result,
 				"suspended":  suspended,
 				"deferrals":  deferrals,
@@ -184,7 +184,7 @@ type logCaller struct{}
 func (c *logCaller) Call(ctx context.Context, service, operation, requestJSON string) (string, error) {
 	log.Printf("[cleat run] %s.%s(%s)", service, operation, truncate(requestJSON, 100))
 	// Return a placeholder success response so workflows can run end-to-end.
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"ok":      true,
 		"service": service,
 		"op":      operation,

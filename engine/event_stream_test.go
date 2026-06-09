@@ -364,7 +364,6 @@ func TestDBEventStream_Slice_StartGELen(t *testing.T) {
 	}
 }
 
-
 func TestDBEventStream_Slice_Copy(t *testing.T) {
 	s := NewDBEventStream(nil, "wf-1", 100)
 	s.Append(EventRecord{Step: 0, Service: "original"})
@@ -387,4 +386,3 @@ func TestDBEventStream_Slice_StartEQEnd(t *testing.T) {
 		t.Errorf("len = %d, want 0", len(got))
 	}
 }
-

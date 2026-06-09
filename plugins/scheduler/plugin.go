@@ -32,10 +32,10 @@ func New() plugin.Plugin {
 
 // Plugin implements user-managed cron schedules with tenant isolation.
 type Plugin struct {
-db     plugin.PluginDB
-	env    *plugin.Environment
-	mux    *http.ServeMux
-	logger *slog.Logger
+	db      plugin.PluginDB
+	env     *plugin.Environment
+	mux     *http.ServeMux
+	logger  *slog.Logger
 	dialect plugin.Dialect
 }
 

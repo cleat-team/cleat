@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -28,7 +28,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -80,7 +80,7 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("ETag", strconv.Itoa(version))
-	p.writeJSON(w, 200, map[string]interface{}{
+	p.writeJSON(w, 200, map[string]any{
 		"key":        key,
 		"value":      value,
 		"version":    version,
@@ -168,7 +168,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.Header().Set("ETag", strconv.Itoa(newVersion))
-		p.writeJSON(w, 200, map[string]interface{}{
+		p.writeJSON(w, 200, map[string]any{
 			"key":     key,
 			"version": newVersion,
 		})
@@ -205,7 +205,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("ETag", strconv.Itoa(newVersion))
-	p.writeJSON(w, statusCode, map[string]interface{}{
+	p.writeJSON(w, statusCode, map[string]any{
 		"key":     key,
 		"version": newVersion,
 	})
@@ -267,7 +267,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		FROM kv_store
 		WHERE tenant_id = $1
 		`
-	args := []interface{}{tid}
+	args := []any{tid}
 	argIdx := 2
 
 	if prefix != "" {

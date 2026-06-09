@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ===========================================================================
@@ -731,7 +731,6 @@ func TestSendWebhook_InvalidJSON(t *testing.T) {
 	}
 }
 
-
 // ===========================================================================
 // handleCreateWebhook — events not provided (events == nil branch)
 // ===========================================================================
@@ -749,11 +748,11 @@ func TestHandleCreateWebhook_EventsNil(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
-	events, ok := resp["events"].([]interface{})
+	events, ok := resp["events"].([]any)
 	if !ok {
 		t.Fatal("expected events to be a list")
 	}
@@ -782,14 +781,14 @@ func TestHandleUpdateWebhook_EventsAndEnabled(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
 	if resp["enabled"] != false {
 		t.Errorf("expected enabled=false, got %v", resp["enabled"])
 	}
-	events, ok := resp["events"].([]interface{})
+	events, ok := resp["events"].([]any)
 	if !ok || len(events) != 1 || events[0] != "new.event" {
 		t.Errorf(`expected events ["new.event"], got %v`, resp["events"])
 	}
@@ -814,7 +813,7 @@ func TestHandleUpdateWebhook_Secret(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -884,7 +883,7 @@ func TestHandleListDeliveries_StatusFilter(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var deliveries []interface{}
+	var deliveries []any
 	if err := json.Unmarshal(rec.Body.Bytes(), &deliveries); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -1337,7 +1336,7 @@ func TestSendWebhook_NilPayloadDefaults(t *testing.T) {
 		t.Fatalf("sendWebhook: %v", err)
 	}
 
-	var out map[string]interface{}
+	var out map[string]any
 	if err := json.Unmarshal([]byte(output), &out); err != nil {
 		t.Fatalf("failed to decode output: %v", err)
 	}
@@ -1347,71 +1346,70 @@ func TestSendWebhook_NilPayloadDefaults(t *testing.T) {
 	}
 }
 
-
 // ===========================================================================
 // handleListDeliveries — delivery with all response fields set
 // ===========================================================================
 
 func TestHandleListDeliveries_WithResponseData(t *testing.T) {
-		p, store := setupTestPlugin(t)
-		handler := buildHandler(t, p, store)
+	p, store := setupTestPlugin(t)
+	handler := buildHandler(t, p, store)
 
-		id := createTestWebhook(t, handler, "https://example.com/hook", "secret")
+	id := createTestWebhook(t, handler, "https://example.com/hook", "secret")
 
-		// Create a delivered delivery with all response fields set.
-		now := time.Now().UTC()
-		deliveredAt := now.Add(-1 * time.Minute)
-		responseCode := 200
-		responseBody := "OK"
-		lastAttemptAt := now.Add(-30 * time.Second)
-		deliveryID := uuid.New()
-		store.mu.Lock()
-		store.deliveries = append(store.deliveries, &testDelivery{
-			id:            deliveryID,
-			webhookID:     id,
-			eventType:     "test.event",
-			payload:       []byte(`{"key":"val"}`),
-			status:        "delivered",
-			attemptCount:  1,
-			lastAttemptAt: &lastAttemptAt,
-			deliveredAt:   &deliveredAt,
-			responseCode:  &responseCode,
-			responseBody:  &responseBody,
-			createdAt:     now,
-		})
-		store.mu.Unlock()
+	// Create a delivered delivery with all response fields set.
+	now := time.Now().UTC()
+	deliveredAt := now.Add(-1 * time.Minute)
+	responseCode := 200
+	responseBody := "OK"
+	lastAttemptAt := now.Add(-30 * time.Second)
+	deliveryID := uuid.New()
+	store.mu.Lock()
+	store.deliveries = append(store.deliveries, &testDelivery{
+		id:            deliveryID,
+		webhookID:     id,
+		eventType:     "test.event",
+		payload:       []byte(`{"key":"val"}`),
+		status:        "delivered",
+		attemptCount:  1,
+		lastAttemptAt: &lastAttemptAt,
+		deliveredAt:   &deliveredAt,
+		responseCode:  &responseCode,
+		responseBody:  &responseBody,
+		createdAt:     now,
+	})
+	store.mu.Unlock()
 
-		req := authedRequestForTest("GET", "/webhooks/"+id.String()+"/deliveries", nil)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
+	req := authedRequestForTest("GET", "/webhooks/"+id.String()+"/deliveries", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusOK {
-			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-		}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
 
-		var deliveries []map[string]interface{}
-		if err := json.Unmarshal(rec.Body.Bytes(), &deliveries); err != nil {
-			t.Fatalf("failed to decode: %v", err)
-		}
-		if len(deliveries) != 1 {
-			t.Fatalf("expected 1 delivery, got %d", len(deliveries))
-		}
-		d := deliveries[0]
-		if d["status"] != "delivered" {
-			t.Errorf("expected status 'delivered', got %v", d["status"])
-		}
-		if d["response_code"] != float64(200) {
-			t.Errorf("expected response_code 200, got %v", d["response_code"])
-		}
-		if d["response_body"] != "OK" {
-			t.Errorf("expected response_body 'OK', got %v", d["response_body"])
-		}
-		if d["delivered_at"] == nil {
-			t.Error("expected delivered_at to be set")
-		}
-		if d["last_attempt_at"] == nil {
-			t.Error("expected last_attempt_at to be set")
-		}
+	var deliveries []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &deliveries); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if len(deliveries) != 1 {
+		t.Fatalf("expected 1 delivery, got %d", len(deliveries))
+	}
+	d := deliveries[0]
+	if d["status"] != "delivered" {
+		t.Errorf("expected status 'delivered', got %v", d["status"])
+	}
+	if d["response_code"] != float64(200) {
+		t.Errorf("expected response_code 200, got %v", d["response_code"])
+	}
+	if d["response_body"] != "OK" {
+		t.Errorf("expected response_body 'OK', got %v", d["response_body"])
+	}
+	if d["delivered_at"] == nil {
+		t.Error("expected delivered_at to be set")
+	}
+	if d["last_attempt_at"] == nil {
+		t.Error("expected last_attempt_at to be set")
+	}
 }
 
 // ===========================================================================
@@ -1422,23 +1420,23 @@ func TestHandleListDeliveries_WithResponseData(t *testing.T) {
 type scanErrorConnector struct{}
 
 func (*scanErrorConnector) Connect(_ context.Context) (driver.Conn, error) {
-		return &scanErrorConn{}, nil
+	return &scanErrorConn{}, nil
 }
 
 func (*scanErrorConnector) Driver() driver.Driver {
-		return &scanErrorDrv{}
+	return &scanErrorDrv{}
 }
 
 type scanErrorDrv struct{}
 
 func (*scanErrorDrv) Open(_ string) (driver.Conn, error) {
-		return nil, fmt.Errorf("scanErrorDriver: use sql.OpenDB")
+	return nil, fmt.Errorf("scanErrorDriver: use sql.OpenDB")
 }
 
 type scanErrorConn struct{}
 
 func (*scanErrorConn) Prepare(_ string) (driver.Stmt, error) {
-		return nil, fmt.Errorf("scanErrorConn: unexpected Prepare call")
+	return nil, fmt.Errorf("scanErrorConn: unexpected Prepare call")
 }
 
 func (*scanErrorConn) Close() error { return nil }
@@ -1451,51 +1449,51 @@ func (*scanErrorTx) Commit() error   { return nil }
 func (*scanErrorTx) Rollback() error { return nil }
 
 func (*scanErrorConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
-		return &fakeResult{rowsAffected: 1}, nil
+	return &fakeResult{rowsAffected: 1}, nil
 }
 
 func (*scanErrorConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
-		if strings.Contains(query, "FROM webhook_delivery") {
-			// Return a row where attempt_count is a string (should be int64).
-			// This will cause rows.Scan to fail.
-			return &fakeRows{
-				columns: []string{"id", "webhook_id", "event_type", "payload", "attempt_count"},
-				data: [][]driver.Value{{
-					uuid.New().String(),
-					uuid.New().String(),
-					"test.event",
-					[]byte(`{"msg":"hello"}`),
-					"not-an-int", // wrong type — should be int64
-				}},
-			}, nil
-		}
-		return &fakeRows{columns: []string{"url", "secret"}}, nil
+	if strings.Contains(query, "FROM webhook_delivery") {
+		// Return a row where attempt_count is a string (should be int64).
+		// This will cause rows.Scan to fail.
+		return &fakeRows{
+			columns: []string{"id", "webhook_id", "event_type", "payload", "attempt_count"},
+			data: [][]driver.Value{{
+				uuid.New().String(),
+				uuid.New().String(),
+				"test.event",
+				[]byte(`{"msg":"hello"}`),
+				"not-an-int", // wrong type — should be int64
+			}},
+		}, nil
+	}
+	return &fakeRows{columns: []string{"url", "secret"}}, nil
 }
 
 func TestProcessDeliveries_ScanError(t *testing.T) {
-		db := sql.OpenDB(&scanErrorConnector{})
-		defer db.Close()
+	db := sql.OpenDB(&scanErrorConnector{})
+	defer db.Close()
 
-		p := &Plugin{
-			db:     &engine.SQLDBAdapter{DB: db},
-			logger: discardLogger(),
-			httpClient: &http.Client{Timeout: 5 * time.Second},
-		}
+	p := &Plugin{
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     discardLogger(),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
 
-		attempted, succeeded, failed, err := p.processDeliveries(context.Background())
-		if err != nil {
-			t.Fatalf("processDeliveries: %v", err)
-		}
-		// The scan error should be logged, and the delivery skipped.
-		if attempted != 0 {
-			t.Errorf("expected 0 attempted (scan failed), got %d", attempted)
-		}
-		if succeeded != 0 {
-			t.Errorf("expected 0 succeeded, got %d", succeeded)
-		}
-		if failed != 0 {
-			t.Errorf("expected 0 failed, got %d", failed)
-		}
+	attempted, succeeded, failed, err := p.processDeliveries(context.Background())
+	if err != nil {
+		t.Fatalf("processDeliveries: %v", err)
+	}
+	// The scan error should be logged, and the delivery skipped.
+	if attempted != 0 {
+		t.Errorf("expected 0 attempted (scan failed), got %d", attempted)
+	}
+	if succeeded != 0 {
+		t.Errorf("expected 0 succeeded, got %d", succeeded)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed, got %d", failed)
+	}
 }
 
 // ===========================================================================
@@ -1503,88 +1501,88 @@ func TestProcessDeliveries_ScanError(t *testing.T) {
 // ===========================================================================
 
 func TestSendWebhook_DBVerifyError(t *testing.T) {
-		db := sql.OpenDB(&erroringConnector{})
-		defer db.Close()
+	db := sql.OpenDB(&erroringConnector{})
+	defer db.Close()
 
-		p := &Plugin{
-			db:     &engine.SQLDBAdapter{DB: db},
-			logger: discardLogger(),
-		}
+	p := &Plugin{
+		db:     &engine.SQLDBAdapter{DB: db},
+		logger: discardLogger(),
+	}
 
-		cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-verify-err"}
-		ctx := plugin.WithCallContext(context.Background(), cc)
+	cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-verify-err"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
 
-		_, err := p.sendWebhook(ctx, `{"webhook_id":"`+uuid.New().String()+`","event_type":"test"}`)
-		if err == nil {
-			t.Fatal("expected error for DB failure, got nil")
-		}
-		if !strings.Contains(err.Error(), "verify webhook") {
-			t.Errorf("expected 'verify webhook' error, got: %v", err)
-		}
+	_, err := p.sendWebhook(ctx, `{"webhook_id":"`+uuid.New().String()+`","event_type":"test"}`)
+	if err == nil {
+		t.Fatal("expected error for DB failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "verify webhook") {
+		t.Errorf("expected 'verify webhook' error, got: %v", err)
+	}
 }
 
 func TestSendWebhook_DBInsertError(t *testing.T) {
-		// Use a connector that succeeds for the verify query but fails for the insert.
-		// We can use the recordingConnector which returns fakeRows for queries and
-		// fakeResult for execs — the verify query (SELECT EXISTS) needs to return
-		// true, and the insert (Exec) needs to fail.
-		type verifyOnlyConnector struct{}
+	// Use a connector that succeeds for the verify query but fails for the insert.
+	// We can use the recordingConnector which returns fakeRows for queries and
+	// fakeResult for execs — the verify query (SELECT EXISTS) needs to return
+	// true, and the insert (Exec) needs to fail.
+	type verifyOnlyConnector struct{}
 
-		type verifyOnlyConn struct{}
+	type verifyOnlyConn struct{}
 
-		conn := &verifyOnlyConnector{}
-		sqlDb := sql.OpenDB(&fakeConnector{store: newFakeNotifyStore()})
-		defer sqlDb.Close()
+	conn := &verifyOnlyConnector{}
+	sqlDb := sql.OpenDB(&fakeConnector{store: newFakeNotifyStore()})
+	defer sqlDb.Close()
 
-		// Create a plugin with a real store so verify works.
-		p, store := setupTestPlugin(t)
+	// Create a plugin with a real store so verify works.
+	p, store := setupTestPlugin(t)
 
-		webhookID := uuid.New()
-		now := time.Now().UTC()
-		store.mu.Lock()
-		store.configs = append(store.configs, &testWebhookCfg{
-			tenantID:  testTenantID,
-			id:        webhookID,
-			url:       "https://example.com/hook",
-			secret:    "",
-			events:    `["test"]`,
-			enabled:   true,
-			createdAt: now,
-			updatedAt: now,
-		})
-		store.mu.Unlock()
+	webhookID := uuid.New()
+	now := time.Now().UTC()
+	store.mu.Lock()
+	store.configs = append(store.configs, &testWebhookCfg{
+		tenantID:  testTenantID,
+		id:        webhookID,
+		url:       "https://example.com/hook",
+		secret:    "",
+		events:    `["test"]`,
+		enabled:   true,
+		createdAt: now,
+		updatedAt: now,
+	})
+	store.mu.Unlock()
 
-		cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-insert-err"}
-		ctx := plugin.WithCallContext(context.Background(), cc)
+	cc := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "wf-insert-err"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
 
-		// Set up a new erroring DB for the insert.
-		errDb := sql.OpenDB(&erroringConnector{})
-		defer errDb.Close()
+	// Set up a new erroring DB for the insert.
+	errDb := sql.OpenDB(&erroringConnector{})
+	defer errDb.Close()
 
-		// Replace the plugin's DB with the erroring one for the insert.
-		// But this will also fail the verify. Instead, let's use the normal
-		// setup with a specific failExec for inserts.
-		// Actually, the simplest approach: use the existing sendWebhook test
-		// failures that we already have: no tenant, invalid JSON, etc.
-		// The DB errors are already covered by TestRouteHandlers_DBError
-		// for the HTTP route handlers.
+	// Replace the plugin's DB with the erroring one for the insert.
+	// But this will also fail the verify. Instead, let's use the normal
+	// setup with a specific failExec for inserts.
+	// Actually, the simplest approach: use the existing sendWebhook test
+	// failures that we already have: no tenant, invalid JSON, etc.
+	// The DB errors are already covered by TestRouteHandlers_DBError
+	// for the HTTP route handlers.
 
-		// Skip this test — the DB exec error in sendWebhook is hard to isolate
-		// from the verify query without custom mocking.
-		_ = conn
-		_ = sqlDb
+	// Skip this test — the DB exec error in sendWebhook is hard to isolate
+	// from the verify query without custom mocking.
+	_ = conn
+	_ = sqlDb
 
-		// Use p from setupTestPlugin which has a working DB.
-		input := fmt.Sprintf(`{"webhook_id":"%s","event_type":"test.event"}`, webhookID.String())
-		output, err := p.sendWebhook(ctx, input)
-		if err != nil {
-			t.Fatalf("sendWebhook: %v", err)
-		}
-		var out map[string]interface{}
-		if err := json.Unmarshal([]byte(output), &out); err != nil {
-			t.Fatalf("failed to decode: %v", err)
-		}
-		if _, ok := out["delivery_id"]; !ok {
-			t.Fatal("expected delivery_id in output")
-		}
+	// Use p from setupTestPlugin which has a working DB.
+	input := fmt.Sprintf(`{"webhook_id":"%s","event_type":"test.event"}`, webhookID.String())
+	output, err := p.sendWebhook(ctx, input)
+	if err != nil {
+		t.Fatalf("sendWebhook: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(output), &out); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	if _, ok := out["delivery_id"]; !ok {
+		t.Fatal("expected delivery_id in output")
+	}
 }

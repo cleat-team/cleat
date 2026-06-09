@@ -8,8 +8,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -28,10 +28,10 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 // ---- Input/output types ----
 
 type sendMessageInput struct {
-	ConfigID uuid.UUID        `json:"config_id"`
-	Channel  string           `json:"channel,omitempty"`
-	Text     string           `json:"text"`
-	Blocks   json.RawMessage  `json:"blocks,omitempty"`
+	ConfigID uuid.UUID       `json:"config_id"`
+	Channel  string          `json:"channel,omitempty"`
+	Text     string          `json:"text"`
+	Blocks   json.RawMessage `json:"blocks,omitempty"`
 }
 
 type sendMessageOutput struct {

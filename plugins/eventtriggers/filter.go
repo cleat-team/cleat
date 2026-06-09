@@ -14,14 +14,14 @@ import (
 //  2. Text expression (otherwise): event.data.amount > 100
 //
 // If the expression is empty or "true", returns true without evaluation.
-func EvaluateFilter(expr string, eventData map[string]interface{}) (bool, error) {
+func EvaluateFilter(expr string, eventData map[string]any) (bool, error) {
 	if expr == "" || expr == "true" {
 		return true, nil
 	}
 
 	// Auto-detect structured JSON filter.
 	if strings.HasPrefix(strings.TrimSpace(expr), "{") {
-		var filter map[string]interface{}
+		var filter map[string]any
 		if err := json.Unmarshal([]byte(expr), &filter); err != nil {
 			return false, fmt.Errorf("event-triggers: invalid JSON filter: %w", err)
 		}
@@ -59,7 +59,7 @@ func EvaluateFilter(expr string, eventData map[string]interface{}) (bool, error)
 //	{"$exists": bool}    — path exists (or not)
 //
 // Multiple keys are ANDed together.
-func matchStructured(filter map[string]interface{}, eventData map[string]interface{}) (bool, error) {
+func matchStructured(filter map[string]any, eventData map[string]any) (bool, error) {
 	for path, cond := range filter {
 		val, found := getPath(eventData, path)
 		matched, err := matchCondition(path, val, found, cond)
@@ -73,9 +73,9 @@ func matchStructured(filter map[string]interface{}, eventData map[string]interfa
 	return true, nil
 }
 
-func matchCondition(path string, val interface{}, found bool, cond interface{}) (bool, error) {
+func matchCondition(path string, val any, found bool, cond any) (bool, error) {
 	switch c := cond.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		// Operator form: {"$gt": 100}
 		return matchOperators(path, val, found, c)
 	default:
@@ -87,7 +87,7 @@ func matchCondition(path string, val interface{}, found bool, cond interface{}) 
 	}
 }
 
-func matchOperators(path string, val interface{}, found bool, ops map[string]interface{}) (bool, error) {
+func matchOperators(path string, val any, found bool, ops map[string]any) (bool, error) {
 	for op, operand := range ops {
 		switch op {
 		case "$exists":
@@ -123,7 +123,7 @@ func matchOperators(path string, val interface{}, found bool, ops map[string]int
 				return false, nil
 			}
 		case "$in":
-			list, ok := operand.([]interface{})
+			list, ok := operand.([]any)
 			if !ok {
 				return false, fmt.Errorf("event-triggers: $in requires array, got %T", operand)
 			}
@@ -141,7 +141,7 @@ func matchOperators(path string, val interface{}, found bool, ops map[string]int
 				return false, nil
 			}
 		case "$nin":
-			list, ok := operand.([]interface{})
+			list, ok := operand.([]any)
 			if !ok {
 				return false, fmt.Errorf("event-triggers: $nin requires array, got %T", operand)
 			}
@@ -161,9 +161,9 @@ func matchOperators(path string, val interface{}, found bool, ops map[string]int
 
 // getPath resolves a dotted path like "event.data.user.name" or "event.data.items[0]"
 // in a nested map.
-func getPath(data map[string]interface{}, path string) (interface{}, bool) {
+func getPath(data map[string]any, path string) (any, bool) {
 	parts := strings.Split(path, ".")
-	var current interface{} = data
+	var current any = data
 	for _, part := range parts {
 		// Check for array index: "field[N]"
 		if idx := strings.IndexByte(part, '['); idx >= 0 && strings.HasSuffix(part, "]") {
@@ -173,18 +173,18 @@ func getPath(data map[string]interface{}, path string) (interface{}, bool) {
 			if err != nil {
 				return nil, false
 			}
-			m, ok := current.(map[string]interface{})
+			m, ok := current.(map[string]any)
 			if !ok {
 				return nil, false
 			}
-			arr, ok := m[fieldName].([]interface{})
+			arr, ok := m[fieldName].([]any)
 			if !ok || index < 0 || index >= len(arr) {
 				return nil, false
 			}
 			current = arr[index]
 			continue
 		}
-		m, ok := current.(map[string]interface{})
+		m, ok := current.(map[string]any)
 		if !ok {
 			return nil, false
 		}
@@ -197,7 +197,7 @@ func getPath(data map[string]interface{}, path string) (interface{}, bool) {
 	return current, true
 }
 
-func valuesEqual(a, b interface{}) bool {
+func valuesEqual(a, b any) bool {
 	// Normalize numeric types for comparison.
 	aNum, aIsNum := toFloat64(a)
 	bNum, bIsNum := toFloat64(b)
@@ -207,7 +207,7 @@ func valuesEqual(a, b interface{}) bool {
 	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
 }
 
-func compareNumeric(val, operand interface{}) int {
+func compareNumeric(val, operand any) int {
 	a, aOK := toFloat64(val)
 	b, bOK := toFloat64(operand)
 	if !aOK || !bOK {
@@ -222,7 +222,7 @@ func compareNumeric(val, operand interface{}) int {
 	return 0
 }
 
-func toFloat64(v interface{}) (float64, bool) {
+func toFloat64(v any) (float64, bool) {
 	switch n := v.(type) {
 	case float64:
 		return n, true
@@ -256,12 +256,12 @@ const (
 	tokTrue
 	tokFalse
 	tokNull
-	tokEq   // ==
-	tokNeq  // !=
-	tokGt   // >
-	tokLt   // <
-	tokGte  // >=
-	tokLte  // <=
+	tokEq  // ==
+	tokNeq // !=
+	tokGt  // >
+	tokLt  // <
+	tokGte // >=
+	tokLte // <=
 	tokDot
 	tokLBrack // [
 	tokRBrack // ]
@@ -680,7 +680,7 @@ func parse(tokens []token) (expr, error) {
 // Evaluator
 // ---------------------------------------------------------------------------
 
-func evaluate(ex expr, data map[string]interface{}) (bool, error) {
+func evaluate(ex expr, data map[string]any) (bool, error) {
 	switch e := ex.(type) {
 	case trueExpr:
 		return true, nil
@@ -693,7 +693,7 @@ func evaluate(ex expr, data map[string]interface{}) (bool, error) {
 	}
 }
 
-func evalComparison(ce comparisonExpr, data map[string]interface{}) (bool, error) {
+func evalComparison(ce comparisonExpr, data map[string]any) (bool, error) {
 	val, err := evalPath(data, ce.path)
 	if err != nil {
 		return false, err
@@ -701,7 +701,7 @@ func evalComparison(ce comparisonExpr, data map[string]interface{}) (bool, error
 	return compareValues(val, ce.lit, ce.op)
 }
 
-func evalMembership(me membershipExpr, data map[string]interface{}) (bool, error) {
+func evalMembership(me membershipExpr, data map[string]any) (bool, error) {
 	val, err := evalPath(data, me.path)
 	if err != nil {
 		return false, err
@@ -722,12 +722,12 @@ func evalMembership(me membershipExpr, data map[string]interface{}) (bool, error
 // The path grammar always starts with "event.data." which is validated
 // during parsing; the steps slice contains only the field/index accessors
 // after that prefix.
-func evalPath(data map[string]interface{}, steps []pathStep) (interface{}, error) {
-	current := interface{}(data)
+func evalPath(data map[string]any, steps []pathStep) (any, error) {
+	current := any(data)
 
 	for _, step := range steps {
 		if step.isIndex {
-			arr, ok := current.([]interface{})
+			arr, ok := current.([]any)
 			if !ok {
 				return nil, fmt.Errorf("cannot index into non-array value")
 			}
@@ -736,7 +736,7 @@ func evalPath(data map[string]interface{}, steps []pathStep) (interface{}, error
 			}
 			current = arr[step.index]
 		} else {
-			m, ok := current.(map[string]interface{})
+			m, ok := current.(map[string]any)
 			if !ok {
 				return nil, fmt.Errorf("cannot access field %q of non-object value", step.field)
 			}
@@ -751,7 +751,7 @@ func evalPath(data map[string]interface{}, steps []pathStep) (interface{}, error
 	return current, nil
 }
 
-func compareValues(a interface{}, lit literal, op string) (bool, error) {
+func compareValues(a any, lit literal, op string) (bool, error) {
 	switch v := a.(type) {
 	case float64:
 		if !lit.isNumber {

@@ -27,10 +27,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/internal/analyzer"
 	"github.com/cleat-team/cleat/internal/callgraph"
 	"github.com/cleat-team/cleat/internal/closure"
-	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/internal/transform"
 	"github.com/cleat-team/cleat/wasm"
 )
@@ -752,20 +752,20 @@ func detectVetLang(dir string) (string, error) {
 		return "as", nil
 	}
 
-		// Fallback: check source file extensions.
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			switch {
-			case strings.HasSuffix(e.Name(), ".go"):
-				return "go", nil
-			case strings.HasSuffix(e.Name(), ".rs"):
-				return "rust", nil
-			case strings.HasSuffix(e.Name(), ".java"):
-				return "java", nil
-			}
+	// Fallback: check source file extensions.
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
 		}
+		switch {
+		case strings.HasSuffix(e.Name(), ".go"):
+			return "go", nil
+		case strings.HasSuffix(e.Name(), ".rs"):
+			return "rust", nil
+		case strings.HasSuffix(e.Name(), ".java"):
+			return "java", nil
+		}
+	}
 
 	return "", fmt.Errorf("could not auto-detect language in %s. Use --lang to specify", dir)
 }
@@ -1015,7 +1015,6 @@ func runDeploy(args []string) {
 		os.Exit(1)
 	}
 
-
 	// Build the SQL with metadata columns if available.
 	abiVersion := 1
 	minVersion := 1
@@ -1086,7 +1085,7 @@ func analyze(pattern, target string) (*analyzer.AnalysisResult, *callgraph.Graph
 // buildJSONDiagnostics builds a JSON representation of all diagnostics.
 // logBuildProgress prints a build progress message. In JSON output mode,
 // the message goes to stderr so stdout contains only the JSON diagnostics.
-func logBuildProgress(format string, jsonOut bool, args ...interface{}) {
+func logBuildProgress(format string, jsonOut bool, args ...any) {
 	if jsonOut {
 		fmt.Fprintf(os.Stderr, format, args...)
 	} else {
@@ -1094,62 +1093,61 @@ func logBuildProgress(format string, jsonOut bool, args ...interface{}) {
 	}
 }
 
+// vetJSONOutput builds a VetOutput from analysis results.
+func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadingErrs []closure.ThreadingError) VetOutput {
+	var out VetOutput
+	out.Errors = make([]VetResult, 0)
+	out.Warnings = make([]VetResult, 0)
 
-	// vetJSONOutput builds a VetOutput from analysis results.
-	func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadingErrs []closure.ThreadingError) VetOutput {
-		var out VetOutput
-		out.Errors = make([]VetResult, 0)
-		out.Warnings = make([]VetResult, 0)
+	// Threading errors.
+	for _, te := range threadingErrs {
+		out.Errors = append(out.Errors, VetResult{
+			File:    lookupFile(result, te.FuncName),
+			Line:    te.Line,
+			Column:  0,
+			Message: te.Message,
+			Chain:   te.Chain,
+		})
+	}
 
-		// Threading errors.
-		for _, te := range threadingErrs {
+	// Validation errors.
+	for funcName, errs := range cr.Errors {
+		for _, e := range errs {
 			out.Errors = append(out.Errors, VetResult{
-				File:    lookupFile(result, te.FuncName),
-				Line:    te.Line,
-				Column:  0,
-				Message: te.Message,
-				Chain:   te.Chain,
+				Code:       e.Code,
+				File:       lookupFile(result, funcName),
+				Line:       e.Line,
+				Column:     0,
+				Message:    e.Message,
+				Suggestion: e.Suggestion,
 			})
 		}
-
-		// Validation errors.
-		for funcName, errs := range cr.Errors {
-			for _, e := range errs {
-				out.Errors = append(out.Errors, VetResult{
-					Code:       e.Code,
-					File:       lookupFile(result, funcName),
-					Line:       e.Line,
-					Column:     0,
-					Message:    e.Message,
-					Suggestion: e.Suggestion,
-				})
-			}
-		}
-
-		// Warnings.
-		for funcName, warns := range cr.Warnings {
-			for _, w := range warns {
-				out.Warnings = append(out.Warnings, VetResult{
-					Code:       w.Code,
-					File:       lookupFile(result, funcName),
-					Line:       w.Line,
-					Column:     0,
-					Message:    w.Message,
-					Suggestion: w.Suggestion,
-				})
-			}
-		}
-
-		// Summary.
-		out.Summary = VetSummary{
-			Functions:      result.NumFuncs,
-			DurableLeaves:  result.NumDurableLeaves,
-			DurableClosure: result.NumDurableClosure,
-			Pure:           result.NumPure,
-		}
-
-		return out
 	}
+
+	// Warnings.
+	for funcName, warns := range cr.Warnings {
+		for _, w := range warns {
+			out.Warnings = append(out.Warnings, VetResult{
+				Code:       w.Code,
+				File:       lookupFile(result, funcName),
+				Line:       w.Line,
+				Column:     0,
+				Message:    w.Message,
+				Suggestion: w.Suggestion,
+			})
+		}
+	}
+
+	// Summary.
+	out.Summary = VetSummary{
+		Functions:      result.NumFuncs,
+		DurableLeaves:  result.NumDurableLeaves,
+		DurableClosure: result.NumDurableClosure,
+		Pure:           result.NumPure,
+	}
+
+	return out
+}
 
 // lookupFile returns the base filename for a function by its fully-qualified name.
 func lookupFile(result *analyzer.AnalysisResult, funcName string) string {
@@ -1163,7 +1161,6 @@ func lookupFile(result *analyzer.AnalysisResult, funcName string) string {
 	}
 	return ""
 }
-
 
 func formatDurableLeaves(result *analyzer.AnalysisResult, cr *closure.Result) string {
 	var names []string

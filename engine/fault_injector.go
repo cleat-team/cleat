@@ -61,7 +61,7 @@ type FaultInjector struct {
 	networkPartitionCancel context.CancelFunc
 	diskLatencyMin         time.Duration
 	diskLatencyMax         time.Duration
-	clockSkewOffset       time.Duration
+	clockSkewOffset        time.Duration
 }
 
 // NewFaultInjector creates a new FaultInjector for the given database.

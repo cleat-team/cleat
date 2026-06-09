@@ -173,4 +173,3 @@ func resolvePublicKey(keyID string) (ed25519.PublicKey, error) {
 func isOfficialName(name string) bool {
 	return strings.HasPrefix(name, "cleat/") || !strings.Contains(name, "/")
 }
-

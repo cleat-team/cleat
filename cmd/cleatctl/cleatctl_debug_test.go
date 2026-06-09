@@ -39,7 +39,9 @@ type mockWorkflowInstanceRows struct {
 	closed   bool
 }
 
-func (d *mockWorkflowInstanceDriver) Open(_ string) (driver.Conn, error) { return nil, errors.New("unused") }
+func (d *mockWorkflowInstanceDriver) Open(_ string) (driver.Conn, error) {
+	return nil, errors.New("unused")
+}
 
 func (c *mockWorkflowInstanceConnector) Connect(_ context.Context) (driver.Conn, error) {
 	return &mockWorkflowInstanceConn{instance: c.instance, err: c.err}, nil
@@ -49,11 +51,13 @@ func (c *mockWorkflowInstanceConnector) Driver() driver.Driver { return &mockWor
 func (c *mockWorkflowInstanceConn) Prepare(_ string) (driver.Stmt, error) {
 	return &mockWorkflowInstanceStmt{instance: c.instance, err: c.err}, nil
 }
-func (c *mockWorkflowInstanceConn) Close() error                       { return nil }
-func (c *mockWorkflowInstanceConn) Begin() (driver.Tx, error)          { return nil, errors.New("no tx") }
-func (s *mockWorkflowInstanceStmt) Close() error                       { return nil }
-func (s *mockWorkflowInstanceStmt) NumInput() int                      { return -1 }
-func (s *mockWorkflowInstanceStmt) Exec(_ []driver.Value) (driver.Result, error) { return nil, errors.New("no exec") }
+func (c *mockWorkflowInstanceConn) Close() error              { return nil }
+func (c *mockWorkflowInstanceConn) Begin() (driver.Tx, error) { return nil, errors.New("no tx") }
+func (s *mockWorkflowInstanceStmt) Close() error              { return nil }
+func (s *mockWorkflowInstanceStmt) NumInput() int             { return -1 }
+func (s *mockWorkflowInstanceStmt) Exec(_ []driver.Value) (driver.Result, error) {
+	return nil, errors.New("no exec")
+}
 
 func (s *mockWorkflowInstanceStmt) Query(_ []driver.Value) (driver.Rows, error) {
 	if s.err != nil {
@@ -67,7 +71,7 @@ func (r *mockWorkflowInstanceRows) Columns() []string {
 		"result", "error", "error_code", "error_op", "assigned_to", "next_wake_at",
 		"tenant_id", "created_at", "generation"}
 }
-func (r *mockWorkflowInstanceRows) Close() error      { r.closed = true; return nil }
+func (r *mockWorkflowInstanceRows) Close() error { r.closed = true; return nil }
 
 func (r *mockWorkflowInstanceRows) Next(dest []driver.Value) error {
 	if r.err != nil {
@@ -326,9 +330,9 @@ func TestFormatEvent_Signal(t *testing.T) {
 func TestFormatEvent_Truncate(t *testing.T) {
 	longStr := strings.Repeat("x", 200)
 	ev := engine.EventRecord{
-		Step:     0,
+		Step:      0,
 		EventType: "Activity",
-		Request:  longStr,
+		Request:   longStr,
 	}
 	result := formatEvent(ev)
 	if strings.Contains(result, longStr) {
@@ -823,8 +827,8 @@ func TestDebugState_ReadCommand_StateNoData(t *testing.T) {
 
 func TestDebugState_ReadCommand_Events(t *testing.T) {
 	ds := &debugState{
-		cmdCh:  make(chan engine.ReplayStepAction, 1),
-		quit:   make(chan struct{}),
+		cmdCh: make(chan engine.ReplayStepAction, 1),
+		quit:  make(chan struct{}),
 		events: []engine.EventRecord{
 			{Step: 0, EventType: "Activity", Service: "svc", Op: "op"},
 			{Step: 1, EventType: "Sleep"},
@@ -1053,10 +1057,10 @@ func TestFormatEvent_Fetch(t *testing.T) {
 
 func TestFormatEvent_StateOp(t *testing.T) {
 	ev := engine.EventRecord{
-		Step:     0,
+		Step:      0,
 		EventType: "State",
-		StateOp:  "put",
-		StateKey: "myvar",
+		StateOp:   "put",
+		StateKey:  "myvar",
 	}
 	result := formatEvent(ev)
 	if !strings.Contains(result, "type=State") {

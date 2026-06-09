@@ -695,7 +695,7 @@ func TestDispatchLoop_ClaimsWorkflows(t *testing.T) {
 
 	// Verify the workflow was added to inflight BEFORE executeWorkflow finishes.
 	var found bool
-	w.inflight.Range(func(key, value interface{}) bool {
+	w.inflight.Range(func(key, value any) bool {
 		if key.(string) == "wf-sticky-1" {
 			found = true
 		}
@@ -2316,7 +2316,7 @@ func TestAPIHealthz_Degraded(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.Code)
 	}
-	var body map[string]interface{}
+	var body map[string]any
 	json.NewDecoder(resp.Body).Decode(&body)
 	if body["degraded"] != true {
 		t.Error("expected degraded=true in healthz response under memory pressure")
@@ -2613,7 +2613,7 @@ func TestAPIGetDAG(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var resp map[string]interface{}
+	var resp map[string]any
 	json.NewDecoder(w.Body).Decode(&resp)
 	// Body is bytes.Buffer; no Close needed.
 	if resp["workflow_id"] != "wf-dag-1" {
@@ -2894,7 +2894,7 @@ func TestAPIDefinitions(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var defs []map[string]interface{}
+	var defs []map[string]any
 	json.NewDecoder(w.Body).Decode(&defs)
 	// Body is bytes.Buffer; no Close needed.
 	if len(defs) != 2 {
@@ -2937,7 +2937,7 @@ func TestAPIDefinitions_Empty(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var defs []map[string]interface{}
+	var defs []map[string]any
 	json.NewDecoder(w.Body).Decode(&defs)
 	// Body is bytes.Buffer; no Close needed.
 	if defs == nil {
@@ -2970,7 +2970,7 @@ func TestAPIDefinitions_WithMemoryStats(t *testing.T) {
 	if w.Code != 200 {
 		t.Errorf("expected 200, got %d", w.Code)
 	}
-	var defs []map[string]interface{}
+	var defs []map[string]any
 	json.NewDecoder(w.Body).Decode(&defs)
 	// Body is bytes.Buffer; no Close needed.
 	if len(defs) != 1 {

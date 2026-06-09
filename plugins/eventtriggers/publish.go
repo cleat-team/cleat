@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // PublishEvent stores an event, dispatches it to matching subscriptions,
@@ -19,13 +19,13 @@ import (
 // through the HTTP API.
 func PublishEvent(
 	ctx context.Context,
-db plugin.PluginDB,
+	db plugin.PluginDB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	eventID uuid.UUID,
 	tenantID uuid.UUID,
 	eventType string,
-	eventData map[string]interface{},
+	eventData map[string]any,
 ) (int, error) {
 	eventDataJSON, err := json.Marshal(eventData)
 	if err != nil {
@@ -76,13 +76,13 @@ db plugin.PluginDB,
 // errors are logged but do not halt processing).
 func triggerMatchingWorkflows(
 	ctx context.Context,
-db plugin.PluginDB,
+	db plugin.PluginDB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	eventID uuid.UUID,
 	tenantID uuid.UUID,
 	eventType string,
-	eventData map[string]interface{},
+	eventData map[string]any,
 ) (int, error) {
 	rows, err := db.Query(ctx, plugin.Rebind(`
 		SELECT id, tenant_id, event_type, def_name, entry_point, input_template, filter_expr, enabled, created_at, max_retries
@@ -164,7 +164,7 @@ db plugin.PluginDB,
 // an event has been successfully stored.
 func signalAwaiters(
 	ctx context.Context,
-db plugin.PluginDB,
+	db plugin.PluginDB,
 	logger *slog.Logger,
 	env *plugin.Environment,
 	tenantID uuid.UUID,

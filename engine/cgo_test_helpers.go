@@ -72,7 +72,9 @@ func cgotestMakeStrArgs(strs ...string) (ptr unsafe.Pointer, count int, free fun
 		return nil, 0, func() {}
 	}
 	return unsafe.Pointer(&vals[0]), len(strs), func() {
-		for _, p := range frees { C.free(p) }
+		for _, p := range frees {
+			C.free(p)
+		}
 	}
 }
 
@@ -93,7 +95,7 @@ func cgotestMakeU32Arg(v uint32) unsafe.Pointer {
 	return unsafe.Pointer(p)
 }
 
-func cgotestMakeMixedArgs(args ...interface{}) (ptr unsafe.Pointer, count int, free func()) {
+func cgotestMakeMixedArgs(args ...any) (ptr unsafe.Pointer, count int, free func()) {
 	vals := make([]C.wasmtime_component_val_t, len(args))
 	frees := make([]unsafe.Pointer, 0)
 	for i, arg := range args {
@@ -112,7 +114,9 @@ func cgotestMakeMixedArgs(args ...interface{}) (ptr unsafe.Pointer, count int, f
 		return nil, 0, func() {}
 	}
 	return unsafe.Pointer(&vals[0]), len(args), func() {
-		for _, p := range frees { C.free(p) }
+		for _, p := range frees {
+			C.free(p)
+		}
 	}
 }
 
@@ -124,7 +128,6 @@ func cgotestReadResultU64(r unsafe.Pointer) uint64 {
 	return uint64(C.cgotest_val_get_u64((*C.wasmtime_component_val_t)(r)))
 }
 
-
 func cgotestHasResultString(r unsafe.Pointer) bool {
 	var slen C.size_t
 	return C.cgotest_val_get_string((*C.wasmtime_component_val_t)(r), &slen) != nil
@@ -132,16 +135,16 @@ func cgotestHasResultString(r unsafe.Pointer) bool {
 
 func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer, nargs int, resultPtr unsafe.Pointer) error {
 	dispatch := map[int]func(*C.wasmtime_component_val_t, C.size_t, *C.wasmtime_component_val_t, C.size_t) *C.wasmtime_error_t{
-		0: b.dispatchDurableCallString,
-		1: b.dispatchDurableCallRetry,
-		2: b.dispatchDurableCallHeartbeat,
-		3: b.dispatchDurableDefer,
-		4: b.dispatchChildWorkflow,
-		5: b.dispatchCreatePromise,
-		6: b.dispatchPluginCall,
-		7: b.dispatchSetScope,
-		8: b.dispatchGetState,
-		9: b.dispatchListState,
+		0:  b.dispatchDurableCallString,
+		1:  b.dispatchDurableCallRetry,
+		2:  b.dispatchDurableCallHeartbeat,
+		3:  b.dispatchDurableDefer,
+		4:  b.dispatchChildWorkflow,
+		5:  b.dispatchCreatePromise,
+		6:  b.dispatchPluginCall,
+		7:  b.dispatchSetScope,
+		8:  b.dispatchGetState,
+		9:  b.dispatchListState,
 		10: b.dispatchPollCancellation,
 		11: b.dispatchWorkflowID,
 		12: b.dispatchRunID,
@@ -171,16 +174,16 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 
 func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer, nargs int, resultPtr unsafe.Pointer) error {
 	dispatch := map[int]func(*C.wasmtime_component_val_t, C.size_t, *C.wasmtime_component_val_t, C.size_t) *C.wasmtime_error_t{
-		0: b.dispatchDurableSleep,
-		1: b.dispatchNow,
-		2: b.dispatchRandom,
-		3: b.dispatchVersion,
-		4: b.dispatchMinVersion,
-		5: b.dispatchDurableLog,
-		6: b.dispatchContinueAsNew,
-		7: b.dispatchResolvePromise,
-		8: b.dispatchRejectPromise,
-		9: b.dispatchSetQueryState,
+		0:  b.dispatchDurableSleep,
+		1:  b.dispatchNow,
+		2:  b.dispatchRandom,
+		3:  b.dispatchVersion,
+		4:  b.dispatchMinVersion,
+		5:  b.dispatchDurableLog,
+		6:  b.dispatchContinueAsNew,
+		7:  b.dispatchResolvePromise,
+		8:  b.dispatchRejectPromise,
+		9:  b.dispatchSetQueryState,
 		10: b.dispatchDurableSend,
 		11: b.dispatchSetState,
 		12: b.dispatchIncrState,

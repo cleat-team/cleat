@@ -55,20 +55,20 @@ func TestMSSQLStore_ClaimWorkflow_Success(t *testing.T) {
 			match: "SET status = 'running'",
 			data: [][]driver.Value{
 				{
-					"wf-1",              // id
-					"test-wf",           // def_name
-					int64(1),            // def_version
-					"running",           // status
-					inputJSON,           // input (string for MSSQL)
-					"worker-1",          // assigned_to
-					now,                 // next_wake_at
-					nil,                 // tenant_id
-					now,                 // created_at
-					nil,                 // error_code
-					nil,                 // error_op
-					int64(1),            // generation
-					int64(0),            // priority
-					"",                  // trace_id
+					"wf-1",     // id
+					"test-wf",  // def_name
+					int64(1),   // def_version
+					"running",  // status
+					inputJSON,  // input (string for MSSQL)
+					"worker-1", // assigned_to
+					now,        // next_wake_at
+					nil,        // tenant_id
+					now,        // created_at
+					nil,        // error_code
+					nil,        // error_op
+					int64(1),   // generation
+					int64(0),   // priority
+					"",         // trace_id
 				},
 			},
 		},

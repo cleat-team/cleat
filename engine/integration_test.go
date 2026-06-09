@@ -771,7 +771,6 @@ func TestRLSTenantIsolation(t *testing.T) {
 	t.Log("RLS tenant isolation test passed")
 }
 
-
 // TestIntegrationWorkflowMaxDuration verifies that the WithDefaultWorkflowTimeout
 // option cancels execution when a workflow exceeds its wall-clock duration limit.
 func TestIntegrationWorkflowMaxDuration(t *testing.T) {
@@ -837,7 +836,7 @@ func TestIntegrationWorkflowMaxDuration(t *testing.T) {
 // normalizeJSON unmarshals and re-marshals a JSON string to produce a
 // canonical form for comparison, ignoring key ordering and whitespace.
 func normalizeJSON(s string) string {
-	var v interface{}
+	var v any
 	if err := json.Unmarshal([]byte(s), &v); err != nil {
 		return s
 	}

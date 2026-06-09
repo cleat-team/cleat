@@ -18,9 +18,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ type fakeConn struct {
 func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
-func (*fakeConn) Close() error      { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
@@ -581,7 +581,7 @@ func TestCreateAndQueryEvents(t *testing.T) {
 		t.Fatal("timed out waiting for 3 audit events")
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
@@ -648,7 +648,7 @@ func TestFilterByTenant(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var eventsA []map[string]interface{}
+	var eventsA []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &eventsA); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -668,7 +668,7 @@ func TestFilterByTenant(t *testing.T) {
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	var eventsB []map[string]interface{}
+	var eventsB []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &eventsB); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -723,7 +723,7 @@ func TestFilterByTimeRange(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -771,7 +771,7 @@ func TestFilterByMethod(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -819,7 +819,7 @@ func TestFilterByStatus(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -920,7 +920,7 @@ func TestQueryEventsLimit(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var events []map[string]interface{}
+	var events []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}

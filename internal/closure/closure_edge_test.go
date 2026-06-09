@@ -255,8 +255,8 @@ func TestDfsChainVisited(t *testing.T) {
 func TestVerifyThreadingEmptyDurableSet(t *testing.T) {
 	// Result with no functions in the durable set.
 	result := &analyzer.AnalysisResult{
-		Funcs:      make(map[string]*analyzer.FuncDecl),
-		TargetPkg:  &analyzer.Package{Info: nil, Files: nil},
+		Funcs:     make(map[string]*analyzer.FuncDecl),
+		TargetPkg: &analyzer.Package{Info: nil, Files: nil},
 	}
 	cg := &callgraph.Graph{
 		Calls:    make(map[string]map[string]bool),

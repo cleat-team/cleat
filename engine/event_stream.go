@@ -140,8 +140,8 @@ type DBEventStream struct {
 	loaded []EventRecord
 
 	// totalCount caches the total event count (from COUNT query).
-	totalCount   int
-	totalLoaded  bool
+	totalCount  int
+	totalLoaded bool
 }
 
 // NewDBEventStream creates a new DBEventStream for the given workflow.

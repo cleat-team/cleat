@@ -164,7 +164,7 @@ func (d Dialect) workflowInstanceColumnsExtra() string {
 type QueryBuilder struct {
 	d       Dialect
 	buf     strings.Builder
-	args    []interface{}
+	args    []any
 	nextPos int
 }
 
@@ -179,7 +179,7 @@ func NewQueryBuilder(d Dialect, baseSQL string) *QueryBuilder {
 
 // AddCondition appends " AND <cond>" with one auto-numbered placeholder.
 // condFmt must contain exactly one "%s" verb for the placeholder.
-func (qb *QueryBuilder) AddCondition(condFmt string, arg interface{}) {
+func (qb *QueryBuilder) AddCondition(condFmt string, arg any) {
 	ph := qb.d.placeholder(qb.nextPos)
 	qb.nextPos++
 	qb.buf.WriteString(" AND ")
@@ -208,7 +208,7 @@ func (qb *QueryBuilder) AddRaw(sql string) {
 
 // AddArgs appends arguments directly (for use with AddRaw when you manually
 // wrote placeholders). Increments nextPos by len(args).
-func (qb *QueryBuilder) AddArgs(args ...interface{}) {
+func (qb *QueryBuilder) AddArgs(args ...any) {
 	qb.args = append(qb.args, args...)
 	qb.nextPos += len(args)
 }
@@ -220,7 +220,7 @@ func (qb *QueryBuilder) NextPos() int {
 }
 
 // SQL returns the built query string and argument slice.
-func (qb *QueryBuilder) SQL() (string, []interface{}) {
+func (qb *QueryBuilder) SQL() (string, []any) {
 	return qb.buf.String(), qb.args
 }
 
@@ -230,7 +230,7 @@ func (qb *QueryBuilder) SQL() (string, []interface{}) {
 
 // scanner abstracts *sql.Rows and *sql.Row for scanWorkflowInstance.
 type scanner interface {
-	Scan(dest ...interface{}) error
+	Scan(dest ...any) error
 }
 
 // scanWorkflowInstance scans a row into a WorkflowInstance, handling

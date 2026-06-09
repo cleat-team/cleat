@@ -337,10 +337,10 @@ func TestFromManifest_MapWithSimpleTypes(t *testing.T) {
 				Type: "object",
 				Fields: map[string]plugin.FieldDef{
 					"settings": {
-						Type:       "map",
+						Type:        "map",
 						Description: "key-value settings",
-						KeyType:    &plugin.FieldDef{Type: "string"},
-						ValueType:  &plugin.FieldDef{Type: "string"},
+						KeyType:     &plugin.FieldDef{Type: "string"},
+						ValueType:   &plugin.FieldDef{Type: "string"},
 					},
 				},
 			},

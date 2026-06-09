@@ -21,9 +21,9 @@ import (
 
 func TestParsePluginSpec(t *testing.T) {
 	tests := []struct {
-		spec             string
-		wantName         string
-		wantConstraint   string
+		spec           string
+		wantName       string
+		wantConstraint string
 	}{
 		{"my-plugin@^1.0.0", "my-plugin", "^1.0.0"},
 		{"my-plugin", "my-plugin", ""},
@@ -593,4 +593,3 @@ func TestExtractCrateName_SectionAfterPackage(t *testing.T) {
 		t.Errorf("extractCrateName = %q, want %q", got, want)
 	}
 }
-

@@ -16,8 +16,8 @@ import (
 func TestPluginCallCompactionRoundTrip(t *testing.T) {
 	events := []EventRecord{
 		{
-			Step:      0,
-			EventType: EventTypePluginCall,
+			Step:         0,
+			EventType:    EventTypePluginCall,
 			PluginName:   "test-plugin",
 			PluginFunc:   "DoSomething",
 			PluginInput:  `{"key":"value"}`,
@@ -25,8 +25,8 @@ func TestPluginCallCompactionRoundTrip(t *testing.T) {
 			PluginError:  "",
 		},
 		{
-			Step:      1,
-			EventType: EventTypePluginCallStreamChunk,
+			Step:         1,
+			EventType:    EventTypePluginCallStreamChunk,
 			PluginName:   "test-plugin",
 			PluginFunc:   "DoSomething",
 			PluginInput:  `{"key":"value"}`,
@@ -34,8 +34,8 @@ func TestPluginCallCompactionRoundTrip(t *testing.T) {
 			PluginError:  "",
 		},
 		{
-			Step:      2,
-			EventType: EventTypePluginCallStreamChunk,
+			Step:         2,
+			EventType:    EventTypePluginCallStreamChunk,
 			PluginName:   "test-plugin",
 			PluginFunc:   "DoSomething",
 			PluginInput:  `{"key":"value"}`,
@@ -43,8 +43,8 @@ func TestPluginCallCompactionRoundTrip(t *testing.T) {
 			PluginError:  "",
 		},
 		{
-			Step:      3,
-			EventType: EventTypePluginCall,
+			Step:         3,
+			EventType:    EventTypePluginCall,
 			PluginName:   "test-plugin",
 			PluginFunc:   "GetObject",
 			PluginInput:  `{"bucket":"x","key":"y"}`,
@@ -329,9 +329,9 @@ func TestCompactionRoundTripThenReplay(t *testing.T) {
 
 // mockCompactStore implements WorkflowStore for testing CompactWorkflowHistory.
 type mockCompactStore struct {
-	events         []EventRecord
-	loadErr        error
-	compactErr     error
+	events            []EventRecord
+	loadErr           error
+	compactErr        error
 	compactWorkflowID string
 	compactState      []byte
 	compactStep       int
@@ -361,40 +361,100 @@ func (m *mockCompactStore) CompactHistory(ctx context.Context, workflowID string
 }
 
 // satisfy the rest of the WorkflowStore interface with no-ops.
-func (m *mockCompactStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) { return nil, nil }
-func (m *mockCompactStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
-func (m *mockCompactStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) { return nil, nil }
-func (m *mockCompactStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error { return nil }
-func (m *mockCompactStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error { return nil }
-func (m *mockCompactStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) { return nil, nil }
-func (m *mockCompactStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) { return 0, nil }
-func (m *mockCompactStore) ListVersions(ctx context.Context, defName string) ([]int, error) { return nil, nil }
-func (m *mockCompactStore) Heartbeat(ctx context.Context, workflowID, workerID string, _ int64) (bool, error) { return false, nil }
-func (m *mockCompactStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error { return nil }
-func (m *mockCompactStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error { return nil }
-func (m *mockCompactStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error { return nil }
-func (m *mockCompactStore) RequestCancellation(ctx context.Context, workflowID, reason string) error { return nil }
-func (m *mockCompactStore) CheckCancellation(ctx context.Context, workflowID string) (bool, string, error) { return false, "", nil }
-func (m *mockCompactStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error { return nil }
-func (m *mockCompactStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) { return "", false, nil }
-func (m *mockCompactStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) { return "", false, nil }
-func (m *mockCompactStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) { return "", nil }
-func (m *mockCompactStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) { return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority) }
-func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) { return "", false, nil }
-func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) { return 0, nil }
-func (m *mockCompactStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) { return "", nil }
-func (m *mockCompactStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) { return nil, nil }
-func (m *mockCompactStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) { return nil, nil }
-func (m *mockCompactStore) CreateSchedule(ctx context.Context, s Schedule) error { return nil }
+func (m *mockCompactStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error {
+	return nil
+}
+func (m *mockCompactStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error {
+	return nil
+}
+func (m *mockCompactStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) GetWASMLength(ctx context.Context, defName string, defVersion int) (int64, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) Heartbeat(ctx context.Context, workflowID, workerID string, _ int64) (bool, error) {
+	return false, nil
+}
+func (m *mockCompactStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
+	return nil
+}
+func (m *mockCompactStore) FailWorkflow(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
+	return nil
+}
+func (m *mockCompactStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
+	return nil
+}
+func (m *mockCompactStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
+	return nil
+}
+func (m *mockCompactStore) CheckCancellation(ctx context.Context, workflowID string) (bool, string, error) {
+	return false, "", nil
+}
+func (m *mockCompactStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
+	return nil
+}
+func (m *mockCompactStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+	return "", false, nil
+}
+func (m *mockCompactStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
+	return "", false, nil
+}
+func (m *mockCompactStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
+	return "", nil
+}
+func (m *mockCompactStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
+	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
+}
+func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+	return "", false, nil
+}
+func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
+	return "", nil
+}
+func (m *mockCompactStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) CreateSchedule(ctx context.Context, s Schedule) error  { return nil }
 func (m *mockCompactStore) ListSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
 func (m *mockCompactStore) DeleteSchedule(ctx context.Context, name string) error { return nil }
-func (m *mockCompactStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error { return nil }
+func (m *mockCompactStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error {
+	return nil
+}
 func (m *mockCompactStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
-func (m *mockCompactStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error { return nil }
-func (m *mockCompactStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) { return 0, nil }
-func (m *mockCompactStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) { return nil, nil }
-func (m *mockCompactStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error { return nil }
-func (m *mockCompactStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) { return nil, nil }
+func (m *mockCompactStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
+	return nil
+}
+func (m *mockCompactStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) TraceWorkflow(ctx context.Context, workflowID, traceID string) error {
+	return nil
+}
+func (m *mockCompactStore) GetCompactionCandidates(ctx context.Context, threshold int, limit int) ([]string, error) {
+	return nil, nil
+}
 func (m *mockCompactStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) {
 	if m.loadCompactionStateErr != nil {
 		return nil, m.loadCompactionStateErr
@@ -404,38 +464,96 @@ func (m *mockCompactStore) LoadCompactionState(ctx context.Context, workflowID s
 	}
 	return nil, nil
 }
-func (m *mockCompactStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error { return nil }
-func (m *mockCompactStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error { return nil }
-func (m *mockCompactStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error { return nil }
-func (m *mockCompactStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) { return "", "", "", nil }
-func (m *mockCompactStore) ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error) { return nil, nil }
-func (m *mockCompactStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error { return nil }
-func (m *mockCompactStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) { return nil, nil }
-func (m *mockCompactStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error { return nil }
-func (m *mockCompactStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) { return false, nil }
+func (m *mockCompactStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
+	return nil
+}
+func (m *mockCompactStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+	return nil
+}
+func (m *mockCompactStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+	return nil
+}
+func (m *mockCompactStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
+	return "", "", "", nil
+}
+func (m *mockCompactStore) ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
+	return nil
+}
+func (m *mockCompactStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+	return nil
+}
+func (m *mockCompactStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
+	return false, nil
+}
 func (m *mockCompactStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
-func (m *mockCompactStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error { return nil }
-func (m *mockCompactStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) { return 0, nil }
-func (m *mockCompactStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error { return nil }
-func (m *mockCompactStore) ClearStickyWorker(ctx context.Context, workflowID string) error { return nil }
+func (m *mockCompactStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
+	return nil
+}
+func (m *mockCompactStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
+	return nil
+}
+func (m *mockCompactStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
+	return nil
+}
 func (m *mockCompactStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error { return nil }
-func (m *mockCompactStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) { return nil, nil }
-func (m *mockCompactStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) { return nil, nil }
-func (m *mockCompactStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) { return uuid.Nil, nil }
-func (m *mockCompactStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error { return nil }
-func (m *mockCompactStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error { return nil }
-func (m *mockCompactStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) { return 0, nil }
-func (m *mockCompactStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) { return nil, nil }
-func (m *mockCompactStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error { return nil }
-func (m *mockCompactStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) { return nil, nil }
-func (m *mockCompactStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error) { return nil, nil }
+func (m *mockCompactStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
+	return uuid.Nil, nil
+}
+func (m *mockCompactStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
+	return nil
+}
+func (m *mockCompactStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
+	return nil
+}
+func (m *mockCompactStore) CountActiveInstances(ctx context.Context, name string, version int) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) GetActiveInstanceCountsByVersion(ctx context.Context) (map[string]int, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) RecordWorkflowMemorySample(ctx context.Context, defName string, sampleBytes int64) error {
+	return nil
+}
+func (m *mockCompactStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats, error) {
+	return nil, nil
+}
 func (m *mockCompactStore) QueueDepth(ctx context.Context) (int64, error) { return 0, nil }
-func (m *mockCompactStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) { return 0, nil }
-func (m *mockCompactStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
-func (m *mockCompactStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) { return "", nil }
-func (m *mockCompactStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error { return nil }
-func (m *mockCompactStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error { return nil }
-func (m *mockCompactStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) { return 0, nil }
+func (m *mockCompactStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
+	return "", nil
+}
+func (m *mockCompactStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	return nil
+}
+func (m *mockCompactStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	return nil
+}
+func (m *mockCompactStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
 func (m *mockCompactStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error) {
 	eventCh := make(chan EventRecord)
 	errCh := make(chan error, 1)
@@ -1489,22 +1607,50 @@ func TestLoadCompactionStateWithOpenChildren(t *testing.T) {
 		t.Errorf("expected 3 compacted events, got %d", len(cs.Events))
 	}
 }
-func (m *mockCompactStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) { return 0, nil }
+func (m *mockCompactStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
+	return 0, nil
+}
 
-func (m *mockCompactStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) { return nil, nil }
-func (m *mockCompactStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
-func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error { return nil }
+func (m *mockCompactStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error {
+	return nil
+}
+func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+	return nil
+}
 func (m *mockCompactStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
-func (m *mockCompactStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) { return "", false, nil }
-func (m *mockCompactStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) { return false, "", nil }
-func (m *mockCompactStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) { return 0, nil }
-func (m *mockCompactStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) { return 0, nil }
-func (m *mockCompactStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) { return true, nil }
-func (m *mockCompactStore) IncrementEventCount(ctx context.Context, tx *sql.Tx, workflowID string, delta int, maxQuota int) (bool, error) { return true, nil }
-func (m *mockCompactStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) { return 0, nil }
-func (m *mockCompactStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
-func (m *mockCompactStore) GetEventCount(ctx context.Context, workflowID string) (int, error) { return 0, nil }
-func (m *mockCompactStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) { return nil, nil }
+func (m *mockCompactStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+	return "", false, nil
+}
+func (m *mockCompactStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
+	return false, "", nil
+}
+func (m *mockCompactStore) ResolveLatestVersion(ctx context.Context, defName string) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
+	return true, nil
+}
+func (m *mockCompactStore) IncrementEventCount(ctx context.Context, tx *sql.Tx, workflowID string, delta int, maxQuota int) (bool, error) {
+	return true, nil
+}
+func (m *mockCompactStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
+	return nil, nil
+}
 
 // retryMockStore wraps mockCompactStore and fails CompactHistory a specified
 // number of times before succeeding. The error returned is a deadlock error

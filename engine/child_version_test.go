@@ -584,4 +584,3 @@ func TestResolveChildVersion_ExplicitPinZeroEdge_WithDBExists(t *testing.T) {
 		t.Errorf("expected version 3 (parent version), got %d", v)
 	}
 }
-

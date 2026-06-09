@@ -23,11 +23,11 @@ type VersionMetrics struct {
 // VersionMetricsSummary is a complete summary of version metrics across all
 // workflow definitions.
 type VersionMetricsSummary struct {
-	TotalVersions   int              `json:"total_versions"`
-	ActiveVersions  int              `json:"active_versions"`
-	Deprecated      int              `json:"deprecated"`
-	TotalActiveInstances int         `json:"total_active_instances"`
-	Workflows       []VersionMetrics `json:"workflows"`
+	TotalVersions        int              `json:"total_versions"`
+	ActiveVersions       int              `json:"active_versions"`
+	Deprecated           int              `json:"deprecated"`
+	TotalActiveInstances int              `json:"total_active_instances"`
+	Workflows            []VersionMetrics `json:"workflows"`
 }
 
 // StaleVersionAlert describes a workflow version that may need attention.

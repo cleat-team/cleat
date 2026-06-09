@@ -10,8 +10,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterCommands returns the CLI subcommands for the scheduler plugin.
@@ -80,14 +80,14 @@ func (p *Plugin) cliList(args []string) error {
 
 	for rows.Next() {
 		var (
-			id         uuid.UUID
-			name       string
-			cron       string
-			workflow   string
-			enabled    bool
-			lastRunAt  sql.NullTime
-			nextRunAt  sql.NullTime
-			createdAt  time.Time
+			id        uuid.UUID
+			name      string
+			cron      string
+			workflow  string
+			enabled   bool
+			lastRunAt sql.NullTime
+			nextRunAt sql.NullTime
+			createdAt time.Time
 		)
 		if err := rows.Scan(&id, &name, &cron, &workflow, &enabled, &lastRunAt, &nextRunAt, &createdAt); err != nil {
 			return fmt.Errorf("scan: %w", err)
@@ -149,7 +149,7 @@ func (p *Plugin) cliAdd(args []string) error {
 	}
 
 	// Validate JSON input.
-	var inputJSON interface{}
+	var inputJSON any
 	if err := json.Unmarshal([]byte(*input), &inputJSON); err != nil {
 		return fmt.Errorf("invalid JSON input: %w", err)
 	}
@@ -217,7 +217,7 @@ func (p *Plugin) cliDelete(args []string) error {
 	if err != nil {
 		return fmt.Errorf("delete: %w", err)
 	}
-		rows, _ := result.RowsAffected()
+	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		return fmt.Errorf("schedule not found")
 	}

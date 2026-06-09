@@ -17,7 +17,6 @@ import (
 	"github.com/tetratelabs/wazero/sys"
 )
 
-
 // cleatComplete stores the workflow result delivered via cleat_complete host import.
 // This decouples workflow completion from Go WASI runtime shutdown behavior.
 type cleatComplete struct {
@@ -31,17 +30,18 @@ var cleatCompleteKey struct{}
 const DefaultMemoryLimitPages = 512
 
 var wazeroInitOnce sync.Once
+
 // Runtime wraps a wazero runtime with pre-registered host function imports.
 type Runtime struct {
 	wazeroRuntime wazero.Runtime
 	// stdout/stderr are NOT goroutine-safe — they are shared across callers
 	// of InstantiateModuleNamed. Concurrent execution must use the
 	// wazeroBackend.Execute() path, which uses per-backend buffers.
-	stdout        bytes.Buffer
-	stderr        bytes.Buffer
-	callTimeout   time.Duration // per-call WASM execution timeout (0 = none)
+	stdout           bytes.Buffer
+	stderr           bytes.Buffer
+	callTimeout      time.Duration // per-call WASM execution timeout (0 = none)
 	MemoryLimitPages uint32        // max WASM linear memory in pages (64KB each)
-	fuelLimit         uint64        // max WASM fuel (function calls) per invocation; 0 = no limit
+	fuelLimit        uint64        // max WASM fuel (function calls) per invocation; 0 = no limit
 }
 
 // Stdout returns captured stdout output from the most recent module.

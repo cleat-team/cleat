@@ -2,16 +2,16 @@ package notifications
 
 import (
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -29,7 +29,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -49,14 +49,14 @@ func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
 // ---- types ----
 
 type webhookConfigJSON struct {
-	ID        uuid.UUID              `json:"id"`
-	TenantID  uuid.UUID              `json:"tenant_id"`
-	URL       string                 `json:"url"`
-	Secret    string                 `json:"secret"`
-	Events    []string               `json:"events"`
-	Enabled   bool                   `json:"enabled"`
-	CreatedAt time.Time              `json:"created_at"`
-	UpdatedAt time.Time              `json:"updated_at"`
+	ID        uuid.UUID `json:"id"`
+	TenantID  uuid.UUID `json:"tenant_id"`
+	URL       string    `json:"url"`
+	Secret    string    `json:"secret"`
+	Events    []string  `json:"events"`
+	Enabled   bool      `json:"enabled"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type createWebhookRequest struct {
@@ -268,7 +268,7 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 
 	// Build dynamic UPDATE query for the fields that are present.
 	setClauses := []string{}
-	args := []interface{}{}
+	args := []any{}
 	argIdx := 1
 
 	if req.URL != nil {
@@ -417,7 +417,7 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 			FROM webhook_delivery
 			WHERE webhook_id = $1
 		`
-	args := []interface{}{webhookID}
+	args := []any{webhookID}
 	argIdx := 2
 
 	if statusFilter := r.URL.Query().Get("status"); statusFilter != "" {

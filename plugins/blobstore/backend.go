@@ -4,15 +4,15 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"errors"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/cleat-team/cleat/plugin"
 )
 
 // Backend stores and retrieves blob bytes. Implementations must be safe for

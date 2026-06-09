@@ -13,9 +13,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -34,7 +34,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -150,7 +150,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 
 	p.logger.Info("scheduledbackup: config created", "id", id, "tenant", tid, "name", req.Name)
 
-	p.writeJSON(w, 201, map[string]interface{}{
+	p.writeJSON(w, 201, map[string]any{
 		"id":          id,
 		"name":        req.Name,
 		"cron":        req.Cron,
@@ -301,7 +301,7 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Build dynamic UPDATE query.
 	query := `UPDATE backup_config SET updated_at = now()`
-	args := []interface{}{}
+	args := []any{}
 	argIdx := 1
 
 	if req.Name != nil {
@@ -406,7 +406,7 @@ func (p *Plugin) handleListHistory(w http.ResponseWriter, r *http.Request) {
 		FROM backup_history
 		WHERE tenant_id = $1
 	`
-	args := []interface{}{tid}
+	args := []any{tid}
 	argIdx := 2
 
 	if configIDStr != "" {
@@ -509,7 +509,7 @@ func (p *Plugin) handleRunBackup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return 202 immediately and run backup in background.
-	p.writeJSON(w, 202, map[string]interface{}{
+	p.writeJSON(w, 202, map[string]any{
 		"history_id": historyID,
 		"config_id":  id,
 		"status":     "running",

@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // Run starts the delivery retry loop. It runs every 30 seconds, finding

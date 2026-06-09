@@ -223,7 +223,8 @@ func main() {
 	if *shardsFile != "" {
 		configs, err := loadShardConfigs(*shardsFile)
 		if err != nil {
-			logger.ErrorContext(context.Background(), "failed to load shards config — check that the file exists and contains valid JSON", "worker_id", workerID, "file", *shardsFile, "error", err); os.Exit(1)
+			logger.ErrorContext(context.Background(), "failed to load shards config — check that the file exists and contains valid JSON", "worker_id", workerID, "file", *shardsFile, "error", err)
+			os.Exit(1)
 		}
 		// Apply --schema flag to shards without an explicit schema.
 		for i := range configs {
@@ -236,18 +237,21 @@ func main() {
 		var payloadEncryption *engine.PayloadEncryption
 		if *encryptSensitivePayloads {
 			if *encryptionKeyFile == "" {
-				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --encryption-key-file", "worker_id", workerID); os.Exit(1)
+				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --encryption-key-file", "worker_id", workerID)
+				os.Exit(1)
 			}
 		}
 		if *encryptionKeyFile != "" {
 			keyData, kerr := os.ReadFile(*encryptionKeyFile)
 			if kerr != nil {
-				logger.ErrorContext(context.Background(), "failed to read encryption key file — check that the file exists and is readable", "worker_id", workerID, "file", *encryptionKeyFile, "error", kerr); os.Exit(1)
+				logger.ErrorContext(context.Background(), "failed to read encryption key file — check that the file exists and is readable", "worker_id", workerID, "file", *encryptionKeyFile, "error", kerr)
+				os.Exit(1)
 			}
 			keyStr := strings.TrimSpace(string(keyData))
 			pe, perr := engine.NewPayloadEncryption(keyStr)
 			if perr != nil {
-				logger.ErrorContext(context.Background(), "invalid encryption key — expected a base64-encoded 256-bit AES key", "worker_id", workerID, "error", perr); os.Exit(1)
+				logger.ErrorContext(context.Background(), "invalid encryption key — expected a base64-encoded 256-bit AES key", "worker_id", workerID, "error", perr)
+				os.Exit(1)
 			}
 			payloadEncryption = pe
 			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
@@ -267,11 +271,13 @@ func main() {
 			}
 			sdb, err := sql.Open("postgres", dsn)
 			if err != nil {
-				logger.ErrorContext(context.Background(), "shard open failed", "worker_id", workerID, "shard", cfg.Name, "error", err); os.Exit(1)
+				logger.ErrorContext(context.Background(), "shard open failed", "worker_id", workerID, "shard", cfg.Name, "error", err)
+				os.Exit(1)
 			}
 			if err := sdb.PingContext(ctx); err != nil {
 				sdb.Close()
-				logger.ErrorContext(ctx, "shard ping failed", "worker_id", workerID, "shard", cfg.Name, "error", err); os.Exit(1)
+				logger.ErrorContext(ctx, "shard ping failed", "worker_id", workerID, "shard", cfg.Name, "error", err)
+				os.Exit(1)
 			}
 			sdb.SetMaxOpenConns(15)
 			sdb.SetMaxIdleConns(5)
@@ -288,7 +294,8 @@ func main() {
 			s, closer, err := f.OpenStore(ctx, defaultTenantID, taskQueues...)
 			if err != nil {
 				sdb.Close()
-				logger.ErrorContext(context.Background(), "shard open store failed", "worker_id", workerID, "shard", cfg.Name, "error", err); os.Exit(1)
+				logger.ErrorContext(context.Background(), "shard open store failed", "worker_id", workerID, "shard", cfg.Name, "error", err)
+				os.Exit(1)
 			}
 			stores[i] = s
 			closers[i] = closer.Close
@@ -296,7 +303,8 @@ func main() {
 
 		shardedStore, err := engine.NewShardedStore(configs, stores, closers)
 		if err != nil {
-			logger.ErrorContext(context.Background(), "failed to create sharded store", "worker_id", workerID, "error", err); os.Exit(1)
+			logger.ErrorContext(context.Background(), "failed to create sharded store", "worker_id", workerID, "error", err)
+			os.Exit(1)
 		}
 		store = shardedStore
 		defer shardedStore.Close()
@@ -330,11 +338,13 @@ func main() {
 		// Resolve DB connection string via the configured credential provider.
 		credProvider, credErr := engine.NewDBCredentialProvider(*dbCredentialProvider, *dbURL, *dbCredentialPath)
 		if credErr != nil {
-			logger.ErrorContext(context.Background(), "credential provider error — check that the provider is configured correctly", "worker_id", workerID, "provider", *dbCredentialProvider, "error", credErr); os.Exit(1)
+			logger.ErrorContext(context.Background(), "credential provider error — check that the provider is configured correctly", "worker_id", workerID, "provider", *dbCredentialProvider, "error", credErr)
+			os.Exit(1)
 		}
 		resolvedURL, credErr := credProvider.GetConnectionString(ctx)
 		if credErr != nil {
-			logger.ErrorContext(context.Background(), "failed to resolve database credentials — check the credential path or provider configuration", "worker_id", workerID, "provider", *dbCredentialProvider, "path", *dbCredentialPath, "error", credErr); os.Exit(1)
+			logger.ErrorContext(context.Background(), "failed to resolve database credentials — check the credential path or provider configuration", "worker_id", workerID, "provider", *dbCredentialProvider, "path", *dbCredentialPath, "error", credErr)
+			os.Exit(1)
 		}
 		*dbURL = resolvedURL
 		if *dbURL == "" {
@@ -353,7 +363,8 @@ func main() {
 			dbDSN := dsnWithSchema(*dbURL, *schemaName)
 			db, err = sql.Open(sqlDriver, dbDSN)
 			if err != nil {
-				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err); os.Exit(1)
+				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err)
+				os.Exit(1)
 			}
 			defer db.Close()
 			db.SetMaxOpenConns(*concurrency + 5)
@@ -371,7 +382,8 @@ func main() {
 			if *maxPluginConnections > 0 {
 				pluginDB, err = sql.Open(sqlDriver, dbDSN)
 				if err != nil {
-					logger.ErrorContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", err); os.Exit(1)
+					logger.ErrorContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
 				}
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
@@ -383,7 +395,8 @@ func main() {
 		case "mysql":
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
-				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err); os.Exit(1)
+				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err)
+				os.Exit(1)
 			}
 			defer db.Close()
 			db.SetMaxOpenConns(*concurrency + 5)
@@ -395,7 +408,8 @@ func main() {
 			if *maxPluginConnections > 0 {
 				pluginDB, err = sql.Open(sqlDriver, *dbURL)
 				if err != nil {
-					logger.ErrorContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", err); os.Exit(1)
+					logger.ErrorContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
 				}
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
@@ -409,7 +423,8 @@ func main() {
 			// Open a connection to verify and for plugin/migration use.
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
-				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err); os.Exit(1)
+				logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err)
+				os.Exit(1)
 			}
 			defer db.Close()
 			db.SetMaxOpenConns(*concurrency + 5)
@@ -420,7 +435,8 @@ func main() {
 			if *maxPluginConnections > 0 {
 				pluginDB, err = sql.Open(sqlDriver, *dbURL)
 				if err != nil {
-					logger.ErrorContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", err); os.Exit(1)
+					logger.ErrorContext(context.Background(), "failed to open plugin connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
 				}
 				pluginDB.SetMaxOpenConns(*maxPluginConnections)
 				pluginDB.SetMaxIdleConns(max(1, *maxPluginConnections/2))
@@ -430,27 +446,32 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		default:
-			logger.ErrorContext(context.Background(), "invalid driver", "worker_id", workerID, "driver", *driver); os.Exit(1)
+			logger.ErrorContext(context.Background(), "invalid driver", "worker_id", workerID, "driver", *driver)
+			os.Exit(1)
 		}
 
 		// Load encryption key if configured.
 		if *encryptSensitivePayloads {
 			if *driver != "postgres" {
-				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --driver=postgres", "worker_id", workerID); os.Exit(1)
+				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --driver=postgres", "worker_id", workerID)
+				os.Exit(1)
 			}
 			if *encryptionKeyFile == "" {
-				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --encryption-key-file", "worker_id", workerID); os.Exit(1)
+				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --encryption-key-file", "worker_id", workerID)
+				os.Exit(1)
 			}
 		}
 		if *encryptionKeyFile != "" {
 			keyData, kerr := os.ReadFile(*encryptionKeyFile)
 			if kerr != nil {
-				logger.ErrorContext(context.Background(), "failed to read encryption key file", "worker_id", workerID, "error", kerr); os.Exit(1)
+				logger.ErrorContext(context.Background(), "failed to read encryption key file", "worker_id", workerID, "error", kerr)
+				os.Exit(1)
 			}
 			keyStr := strings.TrimSpace(string(keyData))
 			pe, perr := engine.NewPayloadEncryption(keyStr)
 			if perr != nil {
-				logger.ErrorContext(context.Background(), "invalid encryption key", "worker_id", workerID, "error", perr); os.Exit(1)
+				logger.ErrorContext(context.Background(), "invalid encryption key", "worker_id", workerID, "error", perr)
+				os.Exit(1)
 			}
 			payloadEncryption = pe
 			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
@@ -491,7 +512,8 @@ func main() {
 
 		s, _, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
 		if err != nil {
-			logger.ErrorContext(context.Background(), "failed to open database store — check that the database is accessible and the schema exists", "worker_id", workerID, "error", err); os.Exit(1)
+			logger.ErrorContext(context.Background(), "failed to open database store — check that the database is accessible and the schema exists", "worker_id", workerID, "error", err)
+			os.Exit(1)
 		}
 		store = s
 
@@ -511,13 +533,15 @@ func main() {
 	if *pluginConfigFile != "" {
 		data, ferr := os.ReadFile(*pluginConfigFile)
 		if ferr != nil {
-			logger.ErrorContext(context.Background(), "failed to read plugin config file", "worker_id", workerID, "file", *pluginConfigFile, "error", ferr); os.Exit(1)
+			logger.ErrorContext(context.Background(), "failed to read plugin config file", "worker_id", workerID, "file", *pluginConfigFile, "error", ferr)
+			os.Exit(1)
 		}
 		data = []byte(os.ExpandEnv(string(data)))
 		if json.Valid(data) {
 			rawPluginConfig = data
 		} else {
-			logger.ErrorContext(context.Background(), "plugin config must be valid JSON", "worker_id", workerID, "file", *pluginConfigFile); os.Exit(1)
+			logger.ErrorContext(context.Background(), "plugin config must be valid JSON", "worker_id", workerID, "file", *pluginConfigFile)
+			os.Exit(1)
 		}
 	}
 
@@ -548,17 +572,20 @@ func main() {
 	var err error
 	plugList, err = plugin.Discover()
 	if err != nil {
-		logger.ErrorContext(context.Background(), "plugin initialization failed — check that all plugin binaries are present and compatible", "worker_id", workerID, "error", err); os.Exit(1)
+		logger.ErrorContext(context.Background(), "plugin initialization failed — check that all plugin binaries are present and compatible", "worker_id", workerID, "error", err)
+		os.Exit(1)
 	}
 
 	// Run core schema migrations before plugin migrations.
 	migrator := migration.NewRunner(db, factory.Dialect(), "migrations")
 	if err := migrator.Run(ctx); err != nil {
-		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges", "worker_id", workerID, "error", err); os.Exit(1)
+		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges", "worker_id", workerID, "error", err)
+		os.Exit(1)
 	}
 
 	if err := plugin.RunMigrations(ctx, db, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
-		logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err); os.Exit(1)
+		logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
+		os.Exit(1)
 	}
 
 	// For MySQL, the factory creates a per-tenant database that needs its
@@ -567,14 +594,17 @@ func main() {
 		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
 			tenantDB, terr := mf.TenantDB(ctx, defaultTenantID)
 			if terr != nil {
-				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr); os.Exit(1)
+				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
+				os.Exit(1)
 			}
 			tm := migration.NewRunner(tenantDB, factory.Dialect(), "migrations")
 			if terr = tm.Run(ctx); terr != nil {
-				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr); os.Exit(1)
+				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
+				os.Exit(1)
 			}
 			if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList); terr != nil {
-				logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr); os.Exit(1)
+				logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
+				os.Exit(1)
 			}
 		}
 	}
@@ -683,7 +713,8 @@ func main() {
 	// Load custom redaction patterns from file (if configured).
 	if *redactPatternsFile != "" {
 		if err := engine.LoadRedactPatterns(*redactPatternsFile); err != nil {
-			logger.ErrorContext(context.Background(), "failed to load redact patterns — check that the file exists and contains valid patterns", "worker_id", workerID, "file", *redactPatternsFile, "error", err); os.Exit(1)
+			logger.ErrorContext(context.Background(), "failed to load redact patterns — check that the file exists and contains valid patterns", "worker_id", workerID, "file", *redactPatternsFile, "error", err)
+			os.Exit(1)
 		}
 	}
 
@@ -753,7 +784,7 @@ func main() {
 		wasmMemoryMaxMB:             wasmMemoryMaxMB,
 		wasmInstructionLimit:        wasmInstructionLimit,
 		wasmDiskCache:               wasmDiskCache,
-		wasmtimeBackend:              wasmtimeBackend,
+		wasmtimeBackend:             wasmtimeBackend,
 		maxQuotaEvents:              *maxQuotaEvents,
 		maxQuotaChildren:            *maxQuotaChildren,
 		maxQuotaConcurrencyKeys:     *maxQuotaConcurrencyKeys,
@@ -1077,7 +1108,7 @@ type Worker struct {
 	wasmMemoryMaxMB             *int
 	wasmInstructionLimit        *int
 	wasmDiskCache               *engine.WasmDiskCache
-	wasmtimeBackend              engine.WasmBackend
+	wasmtimeBackend             engine.WasmBackend
 
 	drainCh   chan struct{}
 	drainOnce sync.Once
@@ -1265,7 +1296,7 @@ func (w *Worker) dispatchLoop() {
 		// If draining and no in-flight work, exit cleanly.
 		if w.draining.Load() {
 			inflight := 0
-			w.inflight.Range(func(_, _ interface{}) bool { inflight++; return true })
+			w.inflight.Range(func(_, _ any) bool { inflight++; return true })
 			if inflight == 0 {
 				w.logger.InfoContext(w.ctx, "drain complete", "worker_id", w.id)
 				return
@@ -1287,7 +1318,7 @@ func (w *Worker) dispatchLoop() {
 
 		// Count in-flight workflows.
 		count := 0
-		w.inflight.Range(func(_, _ interface{}) bool {
+		w.inflight.Range(func(_, _ any) bool {
 			count++
 			return true
 		})
@@ -1323,7 +1354,7 @@ func (w *Worker) dispatchLoop() {
 				select {
 				case <-w.ctx.Done():
 					return
-			case <-w.parentWakeCh:
+				case <-w.parentWakeCh:
 				case <-time.After(backoff):
 				}
 				continue
@@ -1351,7 +1382,7 @@ func (w *Worker) dispatchLoop() {
 					select {
 					case <-w.ctx.Done():
 						return
-			case <-w.parentWakeCh:
+					case <-w.parentWakeCh:
 					case <-time.After(backoff):
 					}
 					continue
@@ -1375,8 +1406,8 @@ func (w *Worker) dispatchLoop() {
 			select {
 			case <-w.ctx.Done():
 				return
-		case <-w.parentWakeCh:
-			idleTicks = 0 // reset backoff, poll immediately
+			case <-w.parentWakeCh:
+				idleTicks = 0 // reset backoff, poll immediately
 			case <-time.After(sleep):
 			}
 			continue
@@ -1978,10 +2009,10 @@ func (w *Worker) scheduleLoop() {
 					input = json.RawMessage("{}")
 				}
 				if sch.EntryPoint != "" {
-					var m map[string]interface{}
+					var m map[string]any
 					json.Unmarshal(input, &m)
 					if m == nil {
-						m = make(map[string]interface{})
+						m = make(map[string]any)
 					}
 					m["__entry_point"] = sch.EntryPoint
 					input, _ = json.Marshal(m)
@@ -2153,7 +2184,7 @@ func (w *Worker) dispatchPendingUpdates() {
 	ctx := context.Background()
 
 	// Iterate over all claimed workflows.
-	w.inflight.Range(func(key, value interface{}) bool {
+	w.inflight.Range(func(key, value any) bool {
 		wfID := key.(string)
 
 		// Get pending update requests for this workflow.
@@ -2351,7 +2382,7 @@ func (c *dbServiceCaller) handleHTTPFetch(ctx context.Context, requestJSON strin
 	for k := range resp.Header {
 		respHeaders[k] = resp.Header.Get(k)
 	}
-	result, _ := json.Marshal(map[string]interface{}{
+	result, _ := json.Marshal(map[string]any{
 		"status":  resp.StatusCode,
 		"headers": respHeaders,
 		"body":    string(respBody),
@@ -2369,7 +2400,7 @@ type dbWorkflowState struct {
 
 func (s *dbWorkflowState) Version() int    { return s.version }
 func (s *dbWorkflowState) MinVersion() int { return s.minVersion }
-func (s *dbWorkflowState) Priority() int  { return s.priority }
+func (s *dbWorkflowState) Priority() int   { return s.priority }
 func (s *dbWorkflowState) ChildVersion(name string) (int, bool) {
 	if s.childVersions == nil {
 		return 0, false
@@ -3102,7 +3133,7 @@ func write429(w http.ResponseWriter, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Retry-After", "1")
 	w.WriteHeader(http.StatusTooManyRequests)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]any{
 		"error":          msg,
 		"retry_after_ms": 1000,
 	})
@@ -3142,7 +3173,7 @@ type apiServer struct {
 	db          *sql.DB
 }
 
-func (s *apiServer) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (s *apiServer) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -3155,7 +3186,7 @@ func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
 func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	stale := s.worker.healthTracker.staleLoops()
 	if len(stale) > 0 {
-		s.writeJSON(w, 503, map[string]interface{}{
+		s.writeJSON(w, 503, map[string]any{
 			"ok":          false,
 			"stale_loops": stale,
 			"reason":      "background_loop_stuck",
@@ -3163,7 +3194,7 @@ func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.worker.memoryController != nil && s.worker.memoryController.Pressure() > 0 {
-		s.writeJSON(w, 200, map[string]interface{}{
+		s.writeJSON(w, 200, map[string]any{
 			"ok":       true,
 			"degraded": true,
 			"reason":   "memory_pressure",
@@ -3191,12 +3222,12 @@ func (s *apiServer) handleDrainStart(w http.ResponseWriter, r *http.Request) {
 	s.worker.draining.Store(true)
 
 	count := 0
-	s.worker.inflight.Range(func(_, _ interface{}) bool {
+	s.worker.inflight.Range(func(_, _ any) bool {
 		count++
 		return true
 	})
 
-	s.writeJSON(w, 202, map[string]interface{}{
+	s.writeJSON(w, 202, map[string]any{
 		"draining":  true,
 		"in_flight": count,
 	})
@@ -3207,12 +3238,12 @@ func (s *apiServer) handleDrainStatus(w http.ResponseWriter, r *http.Request) {
 	draining := s.worker.draining.Load()
 
 	count := 0
-	s.worker.inflight.Range(func(_, _ interface{}) bool {
+	s.worker.inflight.Range(func(_, _ any) bool {
 		count++
 		return true
 	})
 
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"draining":  draining,
 		"in_flight": count,
 	}
@@ -3404,11 +3435,11 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	// Inject entry point into input if provided.
 	in := input.Input
 	if input.EntryPoint != "" {
-		in, _ = json.Marshal(map[string]interface{}{
+		in, _ = json.Marshal(map[string]any{
 			"__entry_point": input.EntryPoint,
 		})
 		// Merge with provided input.
-		var merged map[string]interface{}
+		var merged map[string]any
 		json.Unmarshal(input.Input, &merged)
 		merged["__entry_point"] = input.EntryPoint
 		in, _ = json.Marshal(merged)
@@ -3592,13 +3623,13 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	// Parse the spec so we can add workflow_id metadata.
-	var dagData map[string]interface{}
+	var dagData map[string]any
 	if err := json.Unmarshal(spec, &dagData); err != nil {
 		s.writeError(w, 500, "invalid dag_spec JSON: "+err.Error())
 		return
 	}
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"workflow_id": wf.ID,
 		"dag":         dagData,
 	}
@@ -3870,13 +3901,13 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type defResponse struct {
-		Name            string                    `json:"name"`
-		Version         int                       `json:"version"`
-		ABIVersion      int                       `json:"abi_version"`
-		MinVersion      int                       `json:"min_version"`
-		CreatedAt       time.Time                 `json:"created_at"`
-		Deprecated      bool                      `json:"deprecated"`
-		ActiveInstances int                       `json:"active_instances"`
+		Name            string                      `json:"name"`
+		Version         int                         `json:"version"`
+		ABIVersion      int                         `json:"abi_version"`
+		MinVersion      int                         `json:"min_version"`
+		CreatedAt       time.Time                   `json:"created_at"`
+		Deprecated      bool                        `json:"deprecated"`
+		ActiveInstances int                         `json:"active_instances"`
 		Memory          *engine.WorkflowMemoryStats `json:"memory,omitempty"`
 	}
 
@@ -3979,7 +4010,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	// Invalidate WASM cache
 	s.worker.wasmCache.remove(fmt.Sprintf("%s:%d", def.Name, def.Version))
 
-	s.writeJSON(w, http.StatusCreated, map[string]interface{}{
+	s.writeJSON(w, http.StatusCreated, map[string]any{
 		"name":        def.Name,
 		"version":     def.Version,
 		"plugin_deps": def.PluginDeps,
@@ -3989,7 +4020,7 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 
 func (s *apiServer) inflightCount() int {
 	count := 0
-	s.worker.inflight.Range(func(_, _ interface{}) bool { count++; return true })
+	s.worker.inflight.Range(func(_, _ any) bool { count++; return true })
 	return count
 }
 

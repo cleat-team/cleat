@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -33,11 +33,11 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 // ---- Input/output types ----
 
 type searchInput struct {
-	Collection  string            `json:"collection"`
-	QueryVector []float64         `json:"query_vector,omitempty"`
-	TopK        int               `json:"top_k,omitempty"`
-	Filter      map[string]any    `json:"filter,omitempty"`
-	IncludeMeta bool              `json:"include_meta,omitempty"`
+	Collection  string         `json:"collection"`
+	QueryVector []float64      `json:"query_vector,omitempty"`
+	TopK        int            `json:"top_k,omitempty"`
+	Filter      map[string]any `json:"filter,omitempty"`
+	IncludeMeta bool           `json:"include_meta,omitempty"`
 }
 
 type searchOutput struct {
@@ -45,11 +45,11 @@ type searchOutput struct {
 }
 
 type searchResult struct {
-	ID        string         `json:"id"`
-	ExternalID string        `json:"external_id,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
-	Score     float64        `json:"score"`
+	ID         string         `json:"id"`
+	ExternalID string         `json:"external_id,omitempty"`
+	Content    string         `json:"content,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+	Score      float64        `json:"score"`
 }
 
 type upsertInput struct {

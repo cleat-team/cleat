@@ -313,7 +313,7 @@ func TestPluginLoader_DeploySuccess(t *testing.T) {
 	db := newPluginLoaderMockDB(plMockConfig{execRowsAffected: 1})
 	l := NewPluginLoader(db, nil)
 
-	err := l.DeployPlugin(context.Background(), "p", "1.0.0", []byte{0x00, 0x61, 0x73, 0x6d}, map[string]interface{}{"key": "val"})
+	err := l.DeployPlugin(context.Background(), "p", "1.0.0", []byte{0x00, 0x61, 0x73, 0x6d}, map[string]any{"key": "val"})
 	if err != nil {
 		t.Fatalf("DeployPlugin: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestPluginLoader_DeployMarshalError(t *testing.T) {
 	l := NewPluginLoader(db, nil)
 
 	// Go channels cannot be JSON-marshaled.
-	err := l.DeployPlugin(context.Background(), "p", "1.0.0", nil, map[string]interface{}{"ch": make(chan int)})
+	err := l.DeployPlugin(context.Background(), "p", "1.0.0", nil, map[string]any{"ch": make(chan int)})
 	if err == nil {
 		t.Fatal("expected marshal error for non-JSON-serializable config")
 	}
@@ -802,7 +802,7 @@ func TestPluginLoader_RoundTrip(t *testing.T) {
 	l := NewPluginLoader(db, rt)
 
 	// Deploy the plugin.
-	err := l.DeployPlugin(context.Background(), "p", "1.0.0", wasmBytes, map[string]interface{}{"type": "test"})
+	err := l.DeployPlugin(context.Background(), "p", "1.0.0", wasmBytes, map[string]any{"type": "test"})
 	if err != nil {
 		t.Fatalf("DeployPlugin: %v", err)
 	}
@@ -817,4 +817,3 @@ func TestPluginLoader_RoundTrip(t *testing.T) {
 	}
 	mod.Close(context.Background())
 }
-

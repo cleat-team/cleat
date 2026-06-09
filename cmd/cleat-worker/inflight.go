@@ -5,18 +5,18 @@ import "sync"
 // InflightRegistry provides type-safe tracking of in-flight workflow instances.
 type InflightRegistry struct {
 	mu    sync.RWMutex
-	items map[string]interface{}
+	items map[string]any
 }
 
 // NewInflightRegistry creates a new empty InflightRegistry.
 func NewInflightRegistry() *InflightRegistry {
 	return &InflightRegistry{
-		items: make(map[string]interface{}),
+		items: make(map[string]any),
 	}
 }
 
 // Add stores a value under the given key.
-func (r *InflightRegistry) Add(key string, value interface{}) {
+func (r *InflightRegistry) Add(key string, value any) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.items[key] = value
@@ -30,7 +30,7 @@ func (r *InflightRegistry) Remove(key string) {
 }
 
 // Get returns the value associated with the given key.
-func (r *InflightRegistry) Get(key string) (interface{}, bool) {
+func (r *InflightRegistry) Get(key string) (any, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	v, ok := r.items[key]
@@ -45,7 +45,7 @@ func (r *InflightRegistry) Len() int {
 }
 
 // Range calls f sequentially for each key and value. If f returns false, range stops.
-func (r *InflightRegistry) Range(f func(key string, value interface{}) bool) {
+func (r *InflightRegistry) Range(f func(key string, value any) bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for k, v := range r.items {

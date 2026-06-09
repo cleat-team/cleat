@@ -1,5 +1,5 @@
 run:
-  go: "1.26"
+  go: "1.25"
 linters:
   enable:
     - errcheck
@@ -12,6 +12,7 @@ linters:
     - unconvert
     - gocyclo
     - gofmt
+    - gosec
 issues:
   exclude-files:
     - ".*_test\\.go$"

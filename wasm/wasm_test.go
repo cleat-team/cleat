@@ -1,8 +1,8 @@
 package wasm
 
 import (
-	"go/parser"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"strings"
 	"testing"
@@ -541,10 +541,10 @@ func TestBitPackingAwaitSignals(t *testing.T) {
 	}{
 		{0, 0, false, 0},
 		{1, 0, false, 0},
-		{0xFFFF, 0, false, 0},   // max 16-bit signalNameLen
-		{0, 0xFFFF, false, 0},    // max 16-bit payloadLen
-		{0, 0, true, 0},          // timedOut set
-		{0, 0, false, 0xFFFF},    // max 16-bit errCode
+		{0xFFFF, 0, false, 0},          // max 16-bit signalNameLen
+		{0, 0xFFFF, false, 0},          // max 16-bit payloadLen
+		{0, 0, true, 0},                // timedOut set
+		{0, 0, false, 0xFFFF},          // max 16-bit errCode
 		{0xABCD, 0x1234, true, 0x5678}, // all fields non-zero
 	}
 	for _, tt := range tests {
@@ -560,7 +560,7 @@ func TestBitPackingAwaitSignals(t *testing.T) {
 		// Extract using adapter.go DurableAwaitSignals ResultStmts.
 		signalNameLen := uint32(uint64(packed) >> 48)
 		payloadLen := uint32((uint64(packed) >> 32) & 0xFFFF)
-		timedOut := uint32((uint64(packed) >> 16) & 0xFFFF) != 0
+		timedOut := uint32((uint64(packed)>>16)&0xFFFF) != 0
 		errCode := uint32(uint64(packed) & 0xFFFF)
 
 		if signalNameLen != tt.signalNameLen {
@@ -588,8 +588,8 @@ func TestBitPackingSleep(t *testing.T) {
 	tests := []struct {
 		sleepStatus byte
 	}{
-		{0},   // normal return
-		{1},   // suspend sentinel
+		{0},    // normal return
+		{1},    // suspend sentinel
 		{0xFF}, // any non-zero value
 	}
 	for _, tt := range tests {
@@ -618,8 +618,8 @@ func TestDecodeExportResult(t *testing.T) {
 		{0, 0},
 		{0, 1},
 		{1, 0},
-		{0xFFFFFFFF, 0},          // max errCode
-		{0, 0xFFFFFFFF},          // max actualLen -- sets bit 63
+		{0xFFFFFFFF, 0}, // max errCode
+		{0, 0xFFFFFFFF}, // max actualLen -- sets bit 63
 		{0xDEAD, 0xBEEF},
 	}
 	for _, tt := range tests {

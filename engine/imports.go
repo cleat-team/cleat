@@ -258,34 +258,34 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_with_options")
 
-		// cleat_child_workflow_in_schema: (ptr,len x4, i64, i64, ptr,len, ptr,maxLen) -> i64
-		// Creates a child workflow in a different PostgreSQL schema for cross-instance cooperation.
-		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-			schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
-			policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
-			mem := m.Memory()
-			targetSchema, ok := readServiceName(mem, schemaPtr, schemaLen)
+	// cleat_child_workflow_in_schema: (ptr,len x4, i64, i64, ptr,len, ptr,maxLen) -> i64
+	// Creates a child workflow in a different PostgreSQL schema for cross-instance cooperation.
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
+		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
+		mem := m.Memory()
+		targetSchema, ok := readServiceName(mem, schemaPtr, schemaLen)
+		if !ok {
+			return errBadParam
+		}
+		wfName, ok := readServiceName(mem, namePtr, nameLen)
+		if !ok {
+			return errBadParam
+		}
+		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		parentClosePolicy := ""
+		if policyLen > 0 {
+			var ok bool
+			parentClosePolicy, ok = readServiceName(mem, policyPtr, policyLen)
 			if !ok {
 				return errBadParam
 			}
-			wfName, ok := readServiceName(mem, namePtr, nameLen)
-			if !ok {
-				return errBadParam
-			}
-			wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
-			if !ok {
-				return errBadParam
-			}
-			parentClosePolicy := ""
-			if policyLen > 0 {
-				var ok bool
-				parentClosePolicy, ok = readServiceName(mem, policyPtr, policyLen)
-				if !ok {
-					return errBadParam
-				}
-			}
-			return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
-		}).Export("cleat_child_workflow_in_schema")
+		}
+		return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
+	}).Export("cleat_child_workflow_in_schema")
 
 	// cleat_await_child: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -835,19 +835,19 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(h.Fetch(ctx, m, method, url, headersJSON, body, responsePtr, responseMaxLen))
 	}).Export("cleat_fetch")
 
-		// cleat_json_parse: (ptr,len, ptr,maxLen) -> i64
-		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-			jsonPtr, jsonLen, outPtr, outMaxLen uint32) uint64 {
-			return uint64(handlerFromContext(ctx).JsonParse(ctx, m, jsonPtr, jsonLen, outPtr, outMaxLen))
-		}).Export("cleat_json_parse")
+	// cleat_json_parse: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		jsonPtr, jsonLen, outPtr, outMaxLen uint32) uint64 {
+		return uint64(handlerFromContext(ctx).JsonParse(ctx, m, jsonPtr, jsonLen, outPtr, outMaxLen))
+	}).Export("cleat_json_parse")
 
-		// cleat_json_stringify: (ptr,len, ptr,maxLen) -> i64
-		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-			ptr, len, outPtr, outMaxLen uint32) uint64 {
-			return uint64(handlerFromContext(ctx).JsonStringify(ctx, m, ptr, len, outPtr, outMaxLen))
-		}).Export("cleat_json_stringify")
+	// cleat_json_stringify: (ptr,len, ptr,maxLen) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		ptr, len, outPtr, outMaxLen uint32) uint64 {
+		return uint64(handlerFromContext(ctx).JsonStringify(ctx, m, ptr, len, outPtr, outMaxLen))
+	}).Export("cleat_json_stringify")
 
-		// cleat_poll_work supplies entry point + input to Go wasip1
+	// cleat_poll_work supplies entry point + input to Go wasip1
 	// modules via their _start/main path. Normal Go WASM builds call this
 	// from main() to receive work before dispatching to the entry point.
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -855,27 +855,27 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return 0
 	}).Export("cleat_poll_work")
 
-		// cleat_complete signals workflow completion with a result or error.
-		// This is called by the WASM export wrapper BEFORE returning, so the
-		// worker can capture the result even if the Go WASI runtime subsequently
-		// calls proc_exit (which would overwrite the normal return value).
-		// status=0 means success (result is JSON), status=1 means error (result is error message).
-		builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-			status uint32, resultPtr uint32, resultLen uint32) uint64 {
-			mem := m.Memory()
-			result := readWasmString(mem, resultPtr, resultLen)
-			// Store in context for CallExportWithSuspend to retrieve.
-			r := ctx.Value(&cleatCompleteKey)
-			if r != nil {
-				c := r.(*cleatComplete)
-				if status == 0 {
-					c.Result = &result
-				} else {
-					c.Error = &result
-				}
+	// cleat_complete signals workflow completion with a result or error.
+	// This is called by the WASM export wrapper BEFORE returning, so the
+	// worker can capture the result even if the Go WASI runtime subsequently
+	// calls proc_exit (which would overwrite the normal return value).
+	// status=0 means success (result is JSON), status=1 means error (result is error message).
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		status uint32, resultPtr uint32, resultLen uint32) uint64 {
+		mem := m.Memory()
+		result := readWasmString(mem, resultPtr, resultLen)
+		// Store in context for CallExportWithSuspend to retrieve.
+		r := ctx.Value(&cleatCompleteKey)
+		if r != nil {
+			c := r.(*cleatComplete)
+			if status == 0 {
+				c.Result = &result
+			} else {
+				c.Error = &result
 			}
-			return 0
-		}).Export("cleat_complete")
+		}
+		return 0
+	}).Export("cleat_complete")
 }
 
 // nowMs is the global time provider, atomically settable for tests.

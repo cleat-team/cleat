@@ -240,9 +240,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 		}
 	}
 
-
-		// tenant_api_keys (needed by ResolveTenantFromAPIKey)
-		if _, err := db.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'tenant_api_keys' AND schema_name(schema_id) = 'dbo')
+	// tenant_api_keys (needed by ResolveTenantFromAPIKey)
+	if _, err := db.Exec(`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'tenant_api_keys' AND schema_name(schema_id) = 'dbo')
 	         CREATE TABLE tenant_api_keys (
 	             key_hash VARBINARY(32) NOT NULL PRIMARY KEY,
 	             tenant_id UNIQUEIDENTIFIER NOT NULL,
@@ -250,8 +249,8 @@ func SetupMSSQLFullSchema(t *testing.T, db *sql.DB) {
 	             created_at DATETIME2 DEFAULT SYSUTCDATETIME(),
 	             revoked_at DATETIME2 NULL
 	         )`); err != nil {
-			t.Logf("setup MSSQL full schema: tenant_api_keys warning: %v", err)
-		}
+		t.Logf("setup MSSQL full schema: tenant_api_keys warning: %v", err)
+	}
 	// Migration: add columns that may be missing from older test databases.
 	migrations := []string{
 		`IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE name = 'event_count' AND object_id = OBJECT_ID('workflow_instances'))

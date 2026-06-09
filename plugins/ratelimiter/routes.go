@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // upsertQuery provides dialect-specific upsert for rate limits.
@@ -72,7 +72,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -177,7 +177,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		"window_seconds", req.WindowSeconds,
 	)
 
-	p.writeJSON(w, http.StatusOK, map[string]interface{}{
+	p.writeJSON(w, http.StatusOK, map[string]any{
 		"limit_key":      key,
 		"max_requests":   req.MaxRequests,
 		"window_seconds": req.WindowSeconds,

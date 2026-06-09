@@ -19,7 +19,7 @@ type checkDBResult struct {
 	cols   []string
 	rows   [][]driver.Value
 	err    error
-	isPing bool  // true if this entry is a Ping call
+	isPing bool // true if this entry is a Ping call
 }
 
 type checkDBMockConnector struct {
@@ -73,9 +73,11 @@ type checkDBMockStmt struct {
 	result checkDBResult
 }
 
-func (s *checkDBMockStmt) Close() error                       { return nil }
-func (s *checkDBMockStmt) NumInput() int                      { return -1 }
-func (s *checkDBMockStmt) Exec(_ []driver.Value) (driver.Result, error) { return nil, fmt.Errorf("no exec") }
+func (s *checkDBMockStmt) Close() error  { return nil }
+func (s *checkDBMockStmt) NumInput() int { return -1 }
+func (s *checkDBMockStmt) Exec(_ []driver.Value) (driver.Result, error) {
+	return nil, fmt.Errorf("no exec")
+}
 
 func (s *checkDBMockStmt) Query(_ []driver.Value) (driver.Rows, error) {
 	return &checkDBMockRows{cols: s.result.cols, rows: s.result.rows}, nil
@@ -164,24 +166,24 @@ func TestRunCheckDB_PingFailure(t *testing.T) {
 
 func TestRunCheckDB_PingSuccess(t *testing.T) {
 	script := []checkDBResult{
-		makePingResult(nil),                                                          // ping ok
+		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}), // schema
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                  // table 13
-		makeMultiRowResult([]string{"status", "cnt"}, nil),                            // instances (none)
-		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),                   // event history
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),                  // dead letters
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),                   // table 13
+		makeMultiRowResult([]string{"status", "cnt"}, nil),                             // instances (none)
+		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),                    // event history
+		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),                   // dead letters
 	}
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "connected") {
@@ -201,19 +203,19 @@ func TestRunCheckDB_SchemaVersion_NoRows(t *testing.T) {
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, nil), // no rows
 		// rest doesn't matter for this path but must be provided
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -226,22 +228,22 @@ func TestRunCheckDB_SchemaVersion_NoRows(t *testing.T) {
 
 func TestRunCheckDB_SchemaVersion_ReadError(t *testing.T) {
 	script := []checkDBResult{
-		makePingResult(nil),                                // ping ok
+		makePingResult(nil), // ping ok
 		makeQueryError(fmt.Errorf("schema query timeout")), // schema error
 		// rest
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -260,19 +262,19 @@ func TestRunCheckDB_SchemaVersion_Valid(t *testing.T) {
 			[]string{"version", "applied_at"},
 			[]driver.Value{"005_migration", &appliedAt},
 		),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(1024 * 1024)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -289,20 +291,20 @@ func TestRunCheckDB_SchemaVersion_Valid(t *testing.T) {
 func TestRunCheckDB_SchemaVersion_VerboseNoRows(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
-		makeQueryResult([]string{"version", "applied_at"}, nil), // no rows
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"version", "applied_at"}, nil),      // no rows
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -321,19 +323,19 @@ func TestRunCheckDB_Tables_AllAccessible(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -355,17 +357,17 @@ func TestRunCheckDB_Tables_FallbackPath(t *testing.T) {
 		makeQueryResult([]string{"count"}, []driver.Value{int64(42)}),
 		// Table 2: information_schema succeeds (count=1)
 		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -412,20 +414,20 @@ func TestRunCheckDB_Tables_VerboseMissing(t *testing.T) {
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
 		// 1 accessible, 1 missing
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),    // table 1 accessible
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),    // table 2 info_schema says 0
-		makeQueryError(fmt.Errorf("relation does not exist")),            // table 2 fallback fails
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),     // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1 accessible
+		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // table 2 info_schema says 0
+		makeQueryError(fmt.Errorf("relation does not exist")),        // table 2 fallback fails
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -445,19 +447,19 @@ func TestRunCheckDB_Instances_WithStatuses(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, [][]driver.Value{
 			{"running", int64(5)},
 			{"completed", int64(10)},
@@ -476,19 +478,19 @@ func TestRunCheckDB_Instances_VerboseStatuses(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, [][]driver.Value{
 			{"running", int64(2)},
 		}),
@@ -508,20 +510,20 @@ func TestRunCheckDB_Instances_QueryError(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
-		makeQueryError(fmt.Errorf("instance query error")), // instance query fails
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
+		makeQueryError(fmt.Errorf("instance query error")),           // instance query fails
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
 	}
@@ -536,19 +538,19 @@ func TestRunCheckDB_Instances_QueryErrorVerbose(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeQueryError(fmt.Errorf("instance query error")),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -567,19 +569,19 @@ func TestRunCheckDB_EventHistory_Size(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(5 * 1024 * 1024)}), // 5MB
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -594,21 +596,21 @@ func TestRunCheckDB_EventHistory_FallbackCount(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
-		makeQueryError(fmt.Errorf("pg_column_size not available")), // size query fails
+		makeQueryError(fmt.Errorf("pg_column_size not available")),    // size query fails
 		makeQueryResult([]string{"count"}, []driver.Value{int64(42)}), // fallback count
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
 	}
@@ -626,19 +628,19 @@ func TestRunCheckDB_DeadLetters_WithCount(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(3)}), // 3 dead letters
@@ -653,19 +655,19 @@ func TestRunCheckDB_DeadLetters_ZeroCount(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // zero dead letters
@@ -684,19 +686,19 @@ func TestRunCheckDB_Verbose_JSONSummary(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
@@ -714,19 +716,19 @@ func TestRunCheckDB_ShortVerboseFlag(t *testing.T) {
 	script := []checkDBResult{
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 1
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 2
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 3
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 4
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 5
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 6
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 7
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 8
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 9
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 10
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 11
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 12
-		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}),  // table 13
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 1
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 2
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 3
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 4
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 5
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 6
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 7
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 8
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 9
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 10
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 11
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 12
+		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
 		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),

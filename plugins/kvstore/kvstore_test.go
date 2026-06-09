@@ -20,10 +20,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare call")
 }
 
-func (*fakeConn) Close() error { return nil }
+func (*fakeConn) Close() error              { return nil }
 func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
@@ -587,7 +587,7 @@ func TestPutGetDelete(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var putResp map[string]interface{}
+	var putResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &putResp); err != nil {
 		t.Fatalf("PUT: failed to decode response: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestPutGetDelete(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var getResp map[string]interface{}
+	var getResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &getResp); err != nil {
 		t.Fatalf("GET: failed to decode response: %v", err)
 	}
@@ -648,7 +648,7 @@ func TestPutVersionIncrement(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT 1: expected 201, got %d", rec.Code)
 	}
-	resp1 := map[string]interface{}{}
+	resp1 := map[string]any{}
 	json.Unmarshal(rec.Body.Bytes(), &resp1)
 	v1 := int(resp1["version"].(float64))
 
@@ -659,7 +659,7 @@ func TestPutVersionIncrement(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("PUT 2: expected 200 (updated), got %d", rec.Code)
 	}
-	resp2 := map[string]interface{}{}
+	resp2 := map[string]any{}
 	json.Unmarshal(rec.Body.Bytes(), &resp2)
 	v2 := int(resp2["version"].(float64))
 
@@ -690,7 +690,7 @@ func TestListAll(t *testing.T) {
 		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST: failed to decode: %v", err)
 	}
@@ -737,7 +737,7 @@ func TestListWithPrefix(t *testing.T) {
 		t.Fatalf("LIST with prefix: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST: failed to decode: %v", err)
 	}
@@ -859,7 +859,7 @@ func TestPutWithIfMatch(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	var putResp map[string]interface{}
+	var putResp map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &putResp)
 	version := int(putResp["version"].(float64))
 

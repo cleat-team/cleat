@@ -33,11 +33,11 @@ func New() plugin.Plugin {
 
 // Plugin implements scheduled PostgreSQL backups with tenant isolation.
 type Plugin struct {
-db     plugin.PluginDB
-	mux    *http.ServeMux
-	logger *slog.Logger
+	db      plugin.PluginDB
+	mux     *http.ServeMux
+	logger  *slog.Logger
 	dialect plugin.Dialect
-	config Config
+	config  Config
 }
 
 // Config controls backup storage and pg_dump output location.

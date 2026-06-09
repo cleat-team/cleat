@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -33,11 +33,11 @@ type awaitWebhookInput struct {
 }
 
 type awaitWebhookOutput struct {
-	Found      bool              `json:"found"`
-	ID         string            `json:"id,omitempty"`
-	EventType  string            `json:"event_type,omitempty"`
-	Payload    json.RawMessage   `json:"payload,omitempty"`
-	ReceivedAt string            `json:"received_at,omitempty"`
+	Found      bool            `json:"found"`
+	ID         string          `json:"id,omitempty"`
+	EventType  string          `json:"event_type,omitempty"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
+	ReceivedAt string          `json:"received_at,omitempty"`
 }
 
 // ---- Host functions ----
@@ -73,7 +73,7 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 		FROM webhook_events
 		WHERE tenant_id = $1 AND processed = false
 	`
-	args := []interface{}{cc.TenantID}
+	args := []any{cc.TenantID}
 	argIdx := 2
 
 	if sourceID != uuid.Nil {

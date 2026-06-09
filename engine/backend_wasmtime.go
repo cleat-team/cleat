@@ -3,8 +3,8 @@
 package engine
 
 import (
-	"encoding/binary"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -173,10 +173,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 				startFn.Call(store)
 			}()
 
-				if completeResult == `"__cleat_suspended__"` {
-					return &ExecResult{Suspended: true}, nil
-				}
-
+			if completeResult == `"__cleat_suspended__"` {
+				return &ExecResult{Suspended: true}, nil
+			}
 
 			if completeResult != "" {
 				return &ExecResult{Result: completeResult, Suspended: false}, nil
@@ -198,7 +197,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	}
 
 	// Set up scratch buffers for the direct export call (non-Go path).
-	outBufSz := OutBufSize // 1 MB default, configurable
+	outBufSz := OutBufSize                        // 1 MB default, configurable
 	const legacyOffset = uint32(10 * 1024 * 1024) // 10 MiB
 
 	currentSize := uint64(mem.DataSize(store))
@@ -236,7 +235,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// the error code (low 32 bits) and output length (high 32 bits).
 	// Wrap in recover to handle wasmtime-go internal panics (e.g., from
 	// modules with unexpected import/export configurations).
-	var results interface{}
+	var results any
 	var callErr error
 	func() {
 		defer func() {
@@ -252,10 +251,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if completeErr != "" {
 		return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr)
 	}
-				if completeResult == `"__cleat_suspended__"` {
-					return &ExecResult{Suspended: true}, nil
-				}
-
+	if completeResult == `"__cleat_suspended__"` {
+		return &ExecResult{Suspended: true}, nil
+	}
 
 	if completeResult != "" {
 		return &ExecResult{Result: completeResult, Suspended: false}, nil
@@ -311,21 +309,20 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 //	269     65536  input JSON buffer
 //	65837   65536  output JSON buffer
 const (
-	_dispatcherBase       = 10 * 1024 * 1024 // 10 MiB
-	_dispatcherCmd        = _dispatcherBase + 0
-	_dispatcherNameLen    = _dispatcherBase + 1
-	_dispatcherInputLen   = _dispatcherBase + 5
-	_dispatcherOutputLen  = _dispatcherBase + 9
-	_dispatcherNameBuf    = _dispatcherBase + 13
-	_dispatcherInputBuf   = _dispatcherBase + 269
-	_dispatcherOutputBuf  = _dispatcherBase + 65837
-	_dispatcherNameMax    = 256
-	_dispatcherInputMax   = 65536
-	_dispatcherOutputMax  = 65536
-	_dispatcherInterval   = 10 * time.Millisecond
-	_dispatcherTimeout    = 30 * time.Second
+	_dispatcherBase      = 10 * 1024 * 1024 // 10 MiB
+	_dispatcherCmd       = _dispatcherBase + 0
+	_dispatcherNameLen   = _dispatcherBase + 1
+	_dispatcherInputLen  = _dispatcherBase + 5
+	_dispatcherOutputLen = _dispatcherBase + 9
+	_dispatcherNameBuf   = _dispatcherBase + 13
+	_dispatcherInputBuf  = _dispatcherBase + 269
+	_dispatcherOutputBuf = _dispatcherBase + 65837
+	_dispatcherNameMax   = 256
+	_dispatcherInputMax  = 65536
+	_dispatcherOutputMax = 65536
+	_dispatcherInterval  = 10 * time.Millisecond
+	_dispatcherTimeout   = 30 * time.Second
 )
-
 
 func putUint32LE(b []byte, v uint32) {
 	b[0] = byte(v)
@@ -546,7 +543,7 @@ func (b *wasmtimeBackend) registerCleatCall(linker *wasmtime.Linker, completeRes
 			return errBadParamInt64
 		}
 		callCtx := ctxWithMem(context.Background(), buf)
-	return h.DurableCall(callCtx, nil, service, op, req, uint32(respPtr), uint32(respMaxLen))
+		return h.DurableCall(callCtx, nil, service, op, req, uint32(respPtr), uint32(respMaxLen))
 	})
 }
 
@@ -1816,201 +1813,77 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 			}
 			cm := compiled[inst.ModuleIndex]
 
-		// Build a map from import module name to source instance index,
-		// resolving through FromExports chains to the actual instantiated instance.
-		importNameToInstance := make(map[string]int, len(inst.Args))
-		for _, arg := range inst.Args {
-			resolved := arg.InstanceIndex
-			if resolved >= 0 && resolved < len(actualProvider) {
-				resolved = actualProvider[resolved]
-			}
-			importNameToInstance[arg.Name] = resolved
-			if arg.Name == "" {
-				importNameToInstance[componentAdapterModule] = resolved
-			}
-		}
-		// For GOT.mem / GOT.func imports, override to the CPython
-		// runtime instance when available. The component model DAG
-		// may route through adapter instances that lack CPython symbols.
-		if cpythonRuntimeIdx >= 0 {
+			// Build a map from import module name to source instance index,
+			// resolving through FromExports chains to the actual instantiated instance.
+			importNameToInstance := make(map[string]int, len(inst.Args))
 			for _, arg := range inst.Args {
-				if strings.HasPrefix(arg.Name, "GOT.") {
-					importNameToInstance[arg.Name] = cpythonRuntimeIdx
+				resolved := arg.InstanceIndex
+				if resolved >= 0 && resolved < len(actualProvider) {
+					resolved = actualProvider[resolved]
+				}
+				importNameToInstance[arg.Name] = resolved
+				if arg.Name == "" {
+					importNameToInstance[componentAdapterModule] = resolved
 				}
 			}
-		}
-
-		linker := wasmtime.NewLinker(b.engine)
-		// Register host functions (WASI, env stubs, teavm stubs, all cleat_*).
-		// Use dummy completeResult/completeErr since component modules don't
-		// use the Go dispatcher cleat_complete protocol.
-		var completeResult, completeErr string
-		if err := b.registerAllImports(linker, &completeResult, &completeErr, true); err != nil {
-			return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
-		}
-
-		// Per-export routing: resolve GOT / libpython imports
-		// from already-instantiated instances before DefineInstance.
-		b.perExportRoute(store, cm, linker, instances, bundle, compiled)
-
-		// Wire cross-module imports: for each import the module declares,		}
-
-		// Wire cross-module imports: for each import the module declares,
-		// map it to the already-instantiated source instance.
-		// Skip WASI 0.2.0 interface names — adapter signatures may not
-		// match what the module expects. Traps handle them instead.
-		for importName, srcIdx := range importNameToInstance {
-			if strings.Contains(importName, ":") && !strings.HasPrefix(importName, "GOT.") {
-				continue
-			}
-			if srcIdx < 0 || srcIdx >= len(instances) || instances[srcIdx] == nil {
-				continue
-			}
-			if err := linker.DefineInstance(store, importName, instances[srcIdx]); err != nil {
-				// "defined twice" is OK — some exports (e.g. abort) are
-				// defined by both registerEnvStubs and the source instance.
-				if !strings.Contains(err.Error(), "defined twice") {
-					return nil, fmt.Errorf("host: define instance %d as %q for instance %d: %w", srcIdx, importName, i, err)
+			// For GOT.mem / GOT.func imports, override to the CPython
+			// runtime instance when available. The component model DAG
+			// may route through adapter instances that lack CPython symbols.
+			if cpythonRuntimeIdx >= 0 {
+				for _, arg := range inst.Args {
+					if strings.HasPrefix(arg.Name, "GOT.") {
+						importNameToInstance[arg.Name] = cpythonRuntimeIdx
+					}
 				}
 			}
-		}
 
-		// Some modules import "memory" from "env" (not as a host function).
-		// Route it from any already-instantiated instance that exports memory.
-		for _, prevInst := range instances {
-			if prevInst == nil {
-				continue
+			linker := wasmtime.NewLinker(b.engine)
+			// Register host functions (WASI, env stubs, teavm stubs, all cleat_*).
+			// Use dummy completeResult/completeErr since component modules don't
+			// use the Go dispatcher cleat_complete protocol.
+			var completeResult, completeErr string
+			if err := b.registerAllImports(linker, &completeResult, &completeErr, true); err != nil {
+				return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
 			}
-			if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
-				_ = linker.Define(store, "env", "memory", memExp)
-				break
-			}
-		}
-		// wit_dylib functions for component model adapter canonical ABI.
-		for _, impTy := range cm.Imports() {
-			if impTy.Module() != "env" || impTy.Name() == nil ||
-				!strings.HasPrefix(*impTy.Name(), "wit_dylib_") {
-				continue
-			}
-			if impTy.Type() == nil || impTy.Type().FuncType() == nil {
-				continue
-			}
-			b.defineWitDylib(store, linker, impTy)
-		}
-		// Final GOT routing: for GOT.mem/GOT.func imports, route
-		// from the CPython runtime with proper mutability handling.
-		for _, impTy := range cm.Imports() {
-			modName := impTy.Module()
-			if modName != "GOT.mem" && modName != "GOT.func" {
-				continue
-			}
-			namePtr := impTy.Name()
-			if namePtr == nil {
-				continue
-			}
-			fieldName := *namePtr
-			if fieldName == "__memory_base" || fieldName == "__table_base" {
-				continue
-			}
-			extType := impTy.Type()
-			if extType == nil || extType.GlobalType() == nil {
-				continue
-			}
-			importGlobalType := extType.GlobalType()
-			routed := false
-			if cpythonRuntimeIdx >= 0 && instances[cpythonRuntimeIdx] != nil {
-				cpythonInst := instances[cpythonRuntimeIdx]
-				cpythonModIdx := bundle.Instances[cpythonRuntimeIdx].ModuleIndex
-				for _, expTy := range compiled[cpythonModIdx].Exports() {
-					if !strings.HasSuffix(expTy.Name(), ":"+fieldName) {
-						continue
+
+			// Per-export routing: resolve GOT / libpython imports
+			// from already-instantiated instances before DefineInstance.
+			b.perExportRoute(store, cm, linker, instances, bundle, compiled)
+
+			// Wire cross-module imports: for each import the module declares,		}
+
+			// Wire cross-module imports: for each import the module declares,
+			// map it to the already-instantiated source instance.
+			// Skip WASI 0.2.0 interface names — adapter signatures may not
+			// match what the module expects. Traps handle them instead.
+			for importName, srcIdx := range importNameToInstance {
+				if strings.Contains(importName, ":") && !strings.HasPrefix(importName, "GOT.") {
+					continue
+				}
+				if srcIdx < 0 || srcIdx >= len(instances) || instances[srcIdx] == nil {
+					continue
+				}
+				if err := linker.DefineInstance(store, importName, instances[srcIdx]); err != nil {
+					// "defined twice" is OK — some exports (e.g. abort) are
+					// defined by both registerEnvStubs and the source instance.
+					if !strings.Contains(err.Error(), "defined twice") {
+						return nil, fmt.Errorf("host: define instance %d as %q for instance %d: %w", srcIdx, importName, i, err)
 					}
-					candidate := cpythonInst.GetExport(store, expTy.Name())
-					if candidate == nil || candidate.Global() == nil {
-						continue
-					}
-					val := candidate.Global().Get(store)
-					newGType := wasmtime.NewGlobalType(
-						importGlobalType.Content(),
-						importGlobalType.Mutable())
-					if newG, newErr := wasmtime.NewGlobal(store, newGType, val); newErr == nil {
-						_ = linker.Define(store, modName, fieldName, newG)
-						routed = true
-					}
+				}
+			}
+
+			// Some modules import "memory" from "env" (not as a host function).
+			// Route it from any already-instantiated instance that exports memory.
+			for _, prevInst := range instances {
+				if prevInst == nil {
+					continue
+				}
+				if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
+					_ = linker.Define(store, "env", "memory", memExp)
 					break
 				}
 			}
-			if !routed {
-				// Create a default mutable global with the import's type.
-				gType := wasmtime.NewGlobalType(
-					importGlobalType.Content(),
-					importGlobalType.Mutable())
-				if g, err := wasmtime.NewGlobal(store, gType, wasmtime.ValI32(0)); err == nil {
-					_ = linker.Define(store, modName, fieldName, g)
-				}
-			}
-		}
-
-		// Fill unresolved WASI 0.2.0 imports with traps.
-		_ = linker.DefineUnknownImportsAsTraps(cm)
-		// Define placeholder imports for modules that need them.
-		// __indirect_function_table: size from the module's table import
-		// (or a generous default if import info is unavailable).
-		tblMinSize := uint32(1048576)
-		tblHasMax := false
-		tblMaxSize := uint32(0)
-		for _, impTy := range cm.Imports() {
-			if impTy.Module() == "env" && impTy.Name() != nil && *impTy.Name() == "__indirect_function_table" {
-				if extType := impTy.Type(); extType != nil {
-					if tt := extType.TableType(); tt != nil {
-						tblMinSize = tt.Minimum()
-						tblHasMax, tblMaxSize = tt.Maximum()
-					}
-				}
-				break
-			}
-		}
-		tblType := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMinSize, tblHasMax, tblMaxSize)
-		if tbl, err := wasmtime.NewTable(store, tblType, wasmtime.ValFuncref(nil)); err == nil {
-			_ = linker.Define(store, "env", "__indirect_function_table", tbl)
-		}
-		i32Mut := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
-		i32Imm := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
-		if sp, err := wasmtime.NewGlobal(store, i32Mut, wasmtime.ValI32(0)); err == nil {
-			_ = linker.Define(store, "env", "__stack_pointer", sp)
-		}
-		if mb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
-			_ = linker.Define(store, "env", "__memory_base", mb)
-		}
-		if tb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
-			_ = linker.Define(store, "env", "__table_base", tb)
-		}
-		if gmb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(0)); err == nil {
-			_ = linker.Define(store, "GOT.mem", "__memory_base", gmb)
-		}
-		if gtb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1)); err == nil {
-			_ = linker.Define(store, "GOT.func", "__table_base", gtb)
-		}
-
-
-
-		modInst, instErr := linker.Instantiate(store, cm)
-		if instErr != nil {
-			// If the error is a missing import, retry in a later pass
-			// (the dependency may not be instantiated yet).
-			if strings.Contains(instErr.Error(), "unknown import") ||
-				strings.Contains(instErr.Error(), "has not been defined") {
-				continue // retry in next pass
-			}
-			// Element segment / table errors can result from
-			// adapter-provided tables conflicting with our
-			// placeholders. Retry without cross-module routing.
-			if strings.Contains(instErr.Error(), "undefined element") ||
-				strings.Contains(instErr.Error(), "out of bounds") {
-				linker2 := wasmtime.NewLinker(b.engine)
-				var cr2, ce2 string
-				b.registerAllImports(linker2, &cr2, &ce2, true)
-			// wit_dylib functions for component model adapter canonical ABI (fallback).
+			// wit_dylib functions for component model adapter canonical ABI.
 			for _, impTy := range cm.Imports() {
 				if impTy.Module() != "env" || impTy.Name() == nil ||
 					!strings.HasPrefix(*impTy.Name(), "wit_dylib_") {
@@ -2019,83 +1892,207 @@ func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte
 				if impTy.Type() == nil || impTy.Type().FuncType() == nil {
 					continue
 				}
-				b.defineWitDylib(store, linker2, impTy)
+				b.defineWitDylib(store, linker, impTy)
 			}
-			_ = linker2.DefineUnknownImportsAsTraps(cm)
-				for _, prevInst := range instances {
-					if prevInst == nil { continue }
-					if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
-						_ = linker2.Define(store, "env", "memory", memExp)
+			// Final GOT routing: for GOT.mem/GOT.func imports, route
+			// from the CPython runtime with proper mutability handling.
+			for _, impTy := range cm.Imports() {
+				modName := impTy.Module()
+				if modName != "GOT.mem" && modName != "GOT.func" {
+					continue
+				}
+				namePtr := impTy.Name()
+				if namePtr == nil {
+					continue
+				}
+				fieldName := *namePtr
+				if fieldName == "__memory_base" || fieldName == "__table_base" {
+					continue
+				}
+				extType := impTy.Type()
+				if extType == nil || extType.GlobalType() == nil {
+					continue
+				}
+				importGlobalType := extType.GlobalType()
+				routed := false
+				if cpythonRuntimeIdx >= 0 && instances[cpythonRuntimeIdx] != nil {
+					cpythonInst := instances[cpythonRuntimeIdx]
+					cpythonModIdx := bundle.Instances[cpythonRuntimeIdx].ModuleIndex
+					for _, expTy := range compiled[cpythonModIdx].Exports() {
+						if !strings.HasSuffix(expTy.Name(), ":"+fieldName) {
+							continue
+						}
+						candidate := cpythonInst.GetExport(store, expTy.Name())
+						if candidate == nil || candidate.Global() == nil {
+							continue
+						}
+						val := candidate.Global().Get(store)
+						newGType := wasmtime.NewGlobalType(
+							importGlobalType.Content(),
+							importGlobalType.Mutable())
+						if newG, newErr := wasmtime.NewGlobal(store, newGType, val); newErr == nil {
+							_ = linker.Define(store, modName, fieldName, newG)
+							routed = true
+						}
 						break
 					}
 				}
-				tblMin2 := uint32(1048576)
-				tblType2 := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMin2, false, 0)
-				if tbl2, _ := wasmtime.NewTable(store, tblType2, wasmtime.ValFuncref(nil)); tbl2 != nil {
-					_ = linker2.Define(store, "env", "__indirect_function_table", tbl2)
-				}
-				i32Imm2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
-				i32Mut2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
-				if sp2, _ := wasmtime.NewGlobal(store, i32Mut2, wasmtime.ValI32(0)); sp2 != nil {
-					_ = linker2.Define(store, "env", "__stack_pointer", sp2)
-				}
-				if mb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); mb2 != nil {
-					_ = linker2.Define(store, "env", "__memory_base", mb2)
-				}
-				if tb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); tb2 != nil {
-					_ = linker2.Define(store, "env", "__table_base", tb2)
-				}
-				if gmb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(0)); gmb2 != nil {
-					_ = linker2.Define(store, "GOT.mem", "__memory_base", gmb2)
-				}
-				if gtb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1)); gtb2 != nil {
-					_ = linker2.Define(store, "GOT.func", "__table_base", gtb2)
-				}
-				// Also run per-export routing for the fresh linker
-				// to resolve GOT / libpython global imports.
-				b.perExportRoute(store, cm, linker2, instances, bundle, compiled)
-				if modInst2, err2 := linker2.Instantiate(store, cm); err2 == nil {
-					instances[i] = modInst2
-					pending[i] = false
-					pendingCount--
-					progress = true
-					continue
+				if !routed {
+					// Create a default mutable global with the import's type.
+					gType := wasmtime.NewGlobalType(
+						importGlobalType.Content(),
+						importGlobalType.Mutable())
+					if g, err := wasmtime.NewGlobal(store, gType, wasmtime.ValI32(0)); err == nil {
+						_ = linker.Define(store, modName, fieldName, g)
+					}
 				}
 			}
-			// Build a list of expected import module names for diagnostics.
-			var importMods []string
-			for importName := range importNameToInstance {
-				importMods = append(importMods, importName)
+
+			// Fill unresolved WASI 0.2.0 imports with traps.
+			_ = linker.DefineUnknownImportsAsTraps(cm)
+			// Define placeholder imports for modules that need them.
+			// __indirect_function_table: size from the module's table import
+			// (or a generous default if import info is unavailable).
+			tblMinSize := uint32(1048576)
+			tblHasMax := false
+			tblMaxSize := uint32(0)
+			for _, impTy := range cm.Imports() {
+				if impTy.Module() == "env" && impTy.Name() != nil && *impTy.Name() == "__indirect_function_table" {
+					if extType := impTy.Type(); extType != nil {
+						if tt := extType.TableType(); tt != nil {
+							tblMinSize = tt.Minimum()
+							tblHasMax, tblMaxSize = tt.Maximum()
+						}
+					}
+					break
+				}
 			}
-			return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args, imports: %v): %w", i, inst.ModuleIndex, len(inst.Args), importMods, instErr)
+			tblType := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMinSize, tblHasMax, tblMaxSize)
+			if tbl, err := wasmtime.NewTable(store, tblType, wasmtime.ValFuncref(nil)); err == nil {
+				_ = linker.Define(store, "env", "__indirect_function_table", tbl)
+			}
+			i32Mut := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
+			i32Imm := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
+			if sp, err := wasmtime.NewGlobal(store, i32Mut, wasmtime.ValI32(0)); err == nil {
+				_ = linker.Define(store, "env", "__stack_pointer", sp)
+			}
+			if mb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
+				_ = linker.Define(store, "env", "__memory_base", mb)
+			}
+			if tb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
+				_ = linker.Define(store, "env", "__table_base", tb)
+			}
+			if gmb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(0)); err == nil {
+				_ = linker.Define(store, "GOT.mem", "__memory_base", gmb)
+			}
+			if gtb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1)); err == nil {
+				_ = linker.Define(store, "GOT.func", "__table_base", gtb)
+			}
+
+			modInst, instErr := linker.Instantiate(store, cm)
+			if instErr != nil {
+				// If the error is a missing import, retry in a later pass
+				// (the dependency may not be instantiated yet).
+				if strings.Contains(instErr.Error(), "unknown import") ||
+					strings.Contains(instErr.Error(), "has not been defined") {
+					continue // retry in next pass
+				}
+				// Element segment / table errors can result from
+				// adapter-provided tables conflicting with our
+				// placeholders. Retry without cross-module routing.
+				if strings.Contains(instErr.Error(), "undefined element") ||
+					strings.Contains(instErr.Error(), "out of bounds") {
+					linker2 := wasmtime.NewLinker(b.engine)
+					var cr2, ce2 string
+					b.registerAllImports(linker2, &cr2, &ce2, true)
+					// wit_dylib functions for component model adapter canonical ABI (fallback).
+					for _, impTy := range cm.Imports() {
+						if impTy.Module() != "env" || impTy.Name() == nil ||
+							!strings.HasPrefix(*impTy.Name(), "wit_dylib_") {
+							continue
+						}
+						if impTy.Type() == nil || impTy.Type().FuncType() == nil {
+							continue
+						}
+						b.defineWitDylib(store, linker2, impTy)
+					}
+					_ = linker2.DefineUnknownImportsAsTraps(cm)
+					for _, prevInst := range instances {
+						if prevInst == nil {
+							continue
+						}
+						if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
+							_ = linker2.Define(store, "env", "memory", memExp)
+							break
+						}
+					}
+					tblMin2 := uint32(1048576)
+					tblType2 := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMin2, false, 0)
+					if tbl2, _ := wasmtime.NewTable(store, tblType2, wasmtime.ValFuncref(nil)); tbl2 != nil {
+						_ = linker2.Define(store, "env", "__indirect_function_table", tbl2)
+					}
+					i32Imm2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
+					i32Mut2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
+					if sp2, _ := wasmtime.NewGlobal(store, i32Mut2, wasmtime.ValI32(0)); sp2 != nil {
+						_ = linker2.Define(store, "env", "__stack_pointer", sp2)
+					}
+					if mb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); mb2 != nil {
+						_ = linker2.Define(store, "env", "__memory_base", mb2)
+					}
+					if tb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); tb2 != nil {
+						_ = linker2.Define(store, "env", "__table_base", tb2)
+					}
+					if gmb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(0)); gmb2 != nil {
+						_ = linker2.Define(store, "GOT.mem", "__memory_base", gmb2)
+					}
+					if gtb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1)); gtb2 != nil {
+						_ = linker2.Define(store, "GOT.func", "__table_base", gtb2)
+					}
+					// Also run per-export routing for the fresh linker
+					// to resolve GOT / libpython global imports.
+					b.perExportRoute(store, cm, linker2, instances, bundle, compiled)
+					if modInst2, err2 := linker2.Instantiate(store, cm); err2 == nil {
+						instances[i] = modInst2
+						pending[i] = false
+						pendingCount--
+						progress = true
+						continue
+					}
+				}
+				// Build a list of expected import module names for diagnostics.
+				var importMods []string
+				for importName := range importNameToInstance {
+					importMods = append(importMods, importName)
+				}
+				return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args, imports: %v): %w", i, inst.ModuleIndex, len(inst.Args), importMods, instErr)
+			}
+			instances[i] = modInst
+			pending[i] = false
+			pendingCount--
+			progress = true
 		}
-		instances[i] = modInst
-		pending[i] = false
-		pendingCount--
-		progress = true
+		if !progress {
+			// No instances could be instantiated in this pass.
+			// Build a diagnostic list of whats still pending.
+			var pendingList []int
+			for idx, p := range pending {
+				if p {
+					pendingList = append(pendingList, idx)
+				}
+			}
+			return nil, fmt.Errorf("host: could not instantiate %d instances (stuck at pass %d): pending=%v", pendingCount, pass, pendingList)
+		}
 	}
-	if !progress {
-		// No instances could be instantiated in this pass.
-		// Build a diagnostic list of whats still pending.
+
+	if pendingCount > 0 {
 		var pendingList []int
 		for idx, p := range pending {
 			if p {
 				pendingList = append(pendingList, idx)
 			}
 		}
-		return nil, fmt.Errorf("host: could not instantiate %d instances (stuck at pass %d): pending=%v", pendingCount, pass, pendingList)
+		return nil, fmt.Errorf("host: %d instances still pending after %d passes: %v", pendingCount, maxPasses, pendingList)
 	}
-}
-
-if pendingCount > 0 {
-	var pendingList []int
-	for idx, p := range pending {
-		if p {
-			pendingList = append(pendingList, idx)
-		}
-	}
-	return nil, fmt.Errorf("host: %d instances still pending after %d passes: %v", pendingCount, maxPasses, pendingList)
-}
 
 	// ---- Step 3b: Call constructors on all core instances ----
 	// Modules compiled with Emscripten or componentize-py export
@@ -2290,7 +2287,7 @@ if pendingCount > 0 {
 	}
 
 	// ---- Step 7: Call the entry point ----
-	var results interface{}
+	var results any
 	var callErr error
 	func() {
 		defer func() {
@@ -2700,11 +2697,16 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 				results := make([]wasmtime.Val, len(resTypes))
 				for i, rt := range resTypes {
 					switch rt.Kind() {
-					case wasmtime.KindI32: results[i] = wasmtime.ValI32(0)
-					case wasmtime.KindI64: results[i] = wasmtime.ValI64(0)
-					case wasmtime.KindF32: results[i] = wasmtime.ValF32(0)
-					case wasmtime.KindF64: results[i] = wasmtime.ValF64(0)
-					default: results[i] = wasmtime.ValI32(0)
+					case wasmtime.KindI32:
+						results[i] = wasmtime.ValI32(0)
+					case wasmtime.KindI64:
+						results[i] = wasmtime.ValI64(0)
+					case wasmtime.KindF32:
+						results[i] = wasmtime.ValF32(0)
+					case wasmtime.KindF64:
+						results[i] = wasmtime.ValF64(0)
+					default:
+						results[i] = wasmtime.ValI32(0)
 					}
 				}
 				return results, nil
@@ -2720,28 +2722,36 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 			kind == "flags" || kind == "enum":
 			fn := wasmtime.NewFunc(store, functype,
 				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil { b.witDylib.pushI32(args[0].I32(), args[1].I32()) }
+					if b.witDylib != nil {
+						b.witDylib.pushI32(args[0].I32(), args[1].I32())
+					}
 					return nil, nil
 				})
 			_ = linker.Define(store, "env", name, fn)
 		case kind == "u64" || kind == "s64":
 			fn := wasmtime.NewFunc(store, functype,
 				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil { b.witDylib.pushI64(args[0].I32(), args[1].I64()) }
+					if b.witDylib != nil {
+						b.witDylib.pushI64(args[0].I32(), args[1].I64())
+					}
 					return nil, nil
 				})
 			_ = linker.Define(store, "env", name, fn)
 		case kind == "f32":
 			fn := wasmtime.NewFunc(store, functype,
 				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil { b.witDylib.pushF32(args[0].I32(), args[1].F32()) }
+					if b.witDylib != nil {
+						b.witDylib.pushF32(args[0].I32(), args[1].F32())
+					}
 					return nil, nil
 				})
 			_ = linker.Define(store, "env", name, fn)
 		case kind == "f64":
 			fn := wasmtime.NewFunc(store, functype,
 				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil { b.witDylib.pushF64(args[0].I32(), args[1].F64()) }
+					if b.witDylib != nil {
+						b.witDylib.pushF64(args[0].I32(), args[1].F64())
+					}
 					return nil, nil
 				})
 			_ = linker.Define(store, "env", name, fn)
@@ -2754,7 +2764,8 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 							mem := exp.Memory()
 							if mem != nil {
 								data := mem.UnsafeData(caller)
-								ptr := args[1].I32(); length := args[2].I32()
+								ptr := args[1].I32()
+								length := args[2].I32()
 								if ptr >= 0 && int(ptr)+int(length) <= len(data) {
 									strData := make([]byte, length)
 									copy(strData, data[ptr:ptr+length])
@@ -2789,7 +2800,9 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 			fn := wasmtime.NewFunc(store, functype,
 				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
 					var val int32
-					if b.witDylib != nil { val = b.witDylib.popI32(args[0].I32()) }
+					if b.witDylib != nil {
+						val = b.witDylib.popI32(args[0].I32())
+					}
 					return []wasmtime.Val{wasmtime.ValI32(val)}, nil
 				})
 			_ = linker.Define(store, "env", name, fn)
@@ -2797,7 +2810,9 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 			fn := wasmtime.NewFunc(store, functype,
 				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
 					var val int64
-					if b.witDylib != nil { val = b.witDylib.popI64(args[0].I32()) }
+					if b.witDylib != nil {
+						val = b.witDylib.popI64(args[0].I32())
+					}
 					return []wasmtime.Val{wasmtime.ValI64(val)}, nil
 				})
 			_ = linker.Define(store, "env", name, fn)
@@ -2805,7 +2820,9 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 			fn := wasmtime.NewFunc(store, functype,
 				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
 					var val float32
-					if b.witDylib != nil { val = b.witDylib.popF32(args[0].I32()) }
+					if b.witDylib != nil {
+						val = b.witDylib.popF32(args[0].I32())
+					}
 					return []wasmtime.Val{wasmtime.ValF32(val)}, nil
 				})
 			_ = linker.Define(store, "env", name, fn)
@@ -2813,7 +2830,9 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 			fn := wasmtime.NewFunc(store, functype,
 				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
 					var val float64
-					if b.witDylib != nil { val = b.witDylib.popF64(args[0].I32()) }
+					if b.witDylib != nil {
+						val = b.witDylib.popF64(args[0].I32())
+					}
 					return []wasmtime.Val{wasmtime.ValF64(val)}, nil
 				})
 			_ = linker.Define(store, "env", name, fn)
@@ -2836,7 +2855,9 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 		default:
 			fn := wasmtime.NewFunc(store, functype,
 				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil { _ = b.witDylib.popI32(args[0].I32()) }
+					if b.witDylib != nil {
+						_ = b.witDylib.popI32(args[0].I32())
+					}
 					return []wasmtime.Val{wasmtime.ValI32(0)}, nil
 				})
 			_ = linker.Define(store, "env", name, fn)
@@ -2873,7 +2894,9 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 				}
 				resTypes := functype.Results()
 				results := make([]wasmtime.Val, len(resTypes))
-				if len(results) > 0 { results[0] = wasmtime.ValI32(handle) }
+				if len(results) > 0 {
+					results[0] = wasmtime.ValI32(handle)
+				}
 				return results, nil
 			})
 		_ = linker.Define(store, "env", name, fn)
@@ -2931,7 +2954,9 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
 				resTypes := functype.Results()
 				results := make([]wasmtime.Val, len(resTypes))
-				if len(results) > 0 { results[0] = wasmtime.ValI32(0) }
+				if len(results) > 0 {
+					results[0] = wasmtime.ValI32(0)
+				}
 				return results, nil
 			})
 		_ = linker.Define(store, "env", name, fn)
@@ -2949,17 +2974,25 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 	case "cabi_realloc":
 		fn := wasmtime.NewFunc(store, functype,
 			func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				oldPtr := args[0].I32(); oldSize := args[1].I32()
-				_ = oldSize; _ = args[2].I32() // align
+				oldPtr := args[0].I32()
+				oldSize := args[1].I32()
+				_ = oldSize
+				_ = args[2].I32() // align
 				newSize := args[3].I32()
 				exp := caller.GetExport("memory")
-				if exp == nil { return []wasmtime.Val{wasmtime.ValI32(0)}, nil }
+				if exp == nil {
+					return []wasmtime.Val{wasmtime.ValI32(0)}, nil
+				}
 				mem := exp.Memory()
-				if mem == nil { return []wasmtime.Val{wasmtime.ValI32(0)}, nil }
+				if mem == nil {
+					return []wasmtime.Val{wasmtime.ValI32(0)}, nil
+				}
 				if oldPtr == 0 && newSize > 0 {
 					data := mem.UnsafeData(caller)
 					newPtr := int32(len(data) - int(newSize) - 64)
-					if newPtr < 0 { newPtr = 0 }
+					if newPtr < 0 {
+						newPtr = 0
+					}
 					return []wasmtime.Val{wasmtime.ValI32(newPtr)}, nil
 				}
 				return []wasmtime.Val{wasmtime.ValI32(oldPtr)}, nil
@@ -2980,5 +3013,3 @@ func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime
 		_ = linker.Define(store, "env", name, makeNoop())
 	}
 }
-
-

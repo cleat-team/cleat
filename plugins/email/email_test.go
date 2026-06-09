@@ -304,11 +304,11 @@ func TestSend(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]interface{}{
-		"to":       "recipient@example.com",
-		"subject":  "Hello from cleat",
+	input := map[string]any{
+		"to":        "recipient@example.com",
+		"subject":   "Hello from cleat",
 		"body_html": "<h1>Hello</h1>",
-		"from":     "sender@example.com",
+		"from":      "sender@example.com",
 	}
 	inputJSON, _ := json.Marshal(input)
 
@@ -320,7 +320,7 @@ func TestSend(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("failed to decode output: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestSendWithBodyText(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]interface{}{
+	input := map[string]any{
 		"to":        "user@example.com",
 		"subject":   "Test with text",
 		"body_html": "<p>HTML content</p>",
@@ -360,7 +360,7 @@ func TestSendWithBodyText(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal([]byte(output), &result)
 	if result["message_id"] != "msg-with-text" {
 		t.Errorf("expected message_id 'msg-with-text', got %v", result["message_id"])
@@ -377,7 +377,7 @@ func TestSendWithCCBCC(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]interface{}{
+	input := map[string]any{
 		"to":        "primary@example.com",
 		"subject":   "CC/BCC test",
 		"body_html": "<p>Hello</p>",
@@ -395,7 +395,7 @@ func TestSendWithCCBCC(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal([]byte(output), &result)
 	if result["message_id"] != "msg-cc-bcc" {
 		t.Errorf("expected message_id 'msg-cc-bcc', got %v", result["message_id"])
@@ -412,12 +412,12 @@ func TestSendWithReplyTo(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]interface{}{
-		"to":       "user@example.com",
-		"subject":  "Reply test",
+	input := map[string]any{
+		"to":        "user@example.com",
+		"subject":   "Reply test",
 		"body_html": "<p>Reply to me</p>",
-		"from":     "sender@example.com",
-		"reply_to": "support@example.com",
+		"from":      "sender@example.com",
+		"reply_to":  "support@example.com",
 	}
 	inputJSON, _ := json.Marshal(input)
 
@@ -442,9 +442,9 @@ func TestSendWithDefaultFrom(t *testing.T) {
 	p := newTestPlugin(t)
 	p.defaultFrom = "default@example.com"
 
-	input := map[string]interface{}{
-		"to":       "user@example.com",
-		"subject":  "Default from test",
+	input := map[string]any{
+		"to":        "user@example.com",
+		"subject":   "Default from test",
 		"body_html": "<p>Hello</p>",
 	}
 	inputJSON, _ := json.Marshal(input)
@@ -457,7 +457,7 @@ func TestSendWithDefaultFrom(t *testing.T) {
 		t.Fatalf("send: %v", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal([]byte(output), &result)
 	if result["message_id"] != "default-from-msg" {
 		t.Errorf("expected message_id 'default-from-msg', got %v", result["message_id"])
@@ -528,11 +528,11 @@ func TestSendErrorPaths_APIError(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]interface{}{
-		"to":       "user@example.com",
-		"subject":  "test",
+	input := map[string]any{
+		"to":        "user@example.com",
+		"subject":   "test",
 		"body_html": "<p>test</p>",
-		"from":     "from@example.com",
+		"from":      "from@example.com",
 	}
 	inputJSON, _ := json.Marshal(input)
 
@@ -558,10 +558,10 @@ func TestSendTemplate(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]interface{}{
+	input := map[string]any{
 		"to":          "user@example.com",
 		"template_id": "d-abc123def456",
-		"template_data": map[string]interface{}{
+		"template_data": map[string]any{
 			"name": "Alice",
 			"link": "https://example.com",
 		},
@@ -577,7 +577,7 @@ func TestSendTemplate(t *testing.T) {
 		t.Fatalf("sendTemplate: %v", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("failed to decode output: %v", err)
 	}
@@ -598,10 +598,10 @@ func TestSendTemplateWithReplyTo(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]interface{}{
+	input := map[string]any{
 		"to":          "user@example.com",
 		"template_id": "d-abc123def456",
-		"template_data": map[string]interface{}{
+		"template_data": map[string]any{
 			"name": "Bob",
 		},
 		"from":     "sender@example.com",
@@ -628,10 +628,10 @@ func TestSendTemplateWithDefaultFrom(t *testing.T) {
 	p := newTestPlugin(t)
 	p.defaultFrom = "default@example.com"
 
-	input := map[string]interface{}{
+	input := map[string]any{
 		"to":          "user@example.com",
 		"template_id": "d-xyz789",
-		"template_data": map[string]interface{}{
+		"template_data": map[string]any{
 			"name": "Carol",
 		},
 	}
@@ -701,11 +701,11 @@ func TestSendTemplateErrorPaths_APIError(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]interface{}{
-		"to":          "user@example.com",
-		"template_id": "d-invalid",
-		"template_data": map[string]interface{}{},
-		"from":        "from@example.com",
+	input := map[string]any{
+		"to":            "user@example.com",
+		"template_id":   "d-invalid",
+		"template_data": map[string]any{},
+		"from":          "from@example.com",
 	}
 	inputJSON, _ := json.Marshal(input)
 
@@ -739,7 +739,7 @@ func TestCheckStatus(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]interface{}{"message_id": "test-msg-123"}
+	input := map[string]any{"message_id": "test-msg-123"}
 	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
@@ -750,14 +750,14 @@ func TestCheckStatus(t *testing.T) {
 		t.Fatalf("checkStatus: %v", err)
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		t.Fatalf("failed to decode output: %v", err)
 	}
 	if result["status"] != "delivered" {
 		t.Errorf("expected status 'delivered', got %v", result["status"])
 	}
-	events, ok := result["events"].([]interface{})
+	events, ok := result["events"].([]any)
 	if !ok || len(events) == 0 {
 		t.Error("expected at least one event")
 	}
@@ -780,7 +780,7 @@ func TestCheckStatusMessageFoundWithOpens(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]interface{}{"message_id": "msg-opened"}
+	input := map[string]any{"message_id": "msg-opened"}
 	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
@@ -790,7 +790,7 @@ func TestCheckStatusMessageFoundWithOpens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkStatus: %v", err)
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal([]byte(output), &result)
 	if result["status"] != "opened" {
 		t.Errorf("expected status 'opened', got %v", result["status"])
@@ -806,7 +806,7 @@ func TestCheckStatusMessageNotFound(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]interface{}{"message_id": "nonexistent"}
+	input := map[string]any{"message_id": "nonexistent"}
 	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
@@ -816,7 +816,7 @@ func TestCheckStatusMessageNotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkStatus: %v", err)
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal([]byte(output), &result)
 	if result["status"] != "unknown" {
 		t.Errorf("expected status 'unknown', got %v", result["status"])
@@ -833,7 +833,7 @@ func TestCheckStatusAPINotAvailable(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]interface{}{"message_id": "test-msg"}
+	input := map[string]any{"message_id": "test-msg"}
 	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
@@ -843,7 +843,7 @@ func TestCheckStatusAPINotAvailable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkStatus: %v", err)
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal([]byte(output), &result)
 	if result["status"] != "sent" {
 		t.Errorf("expected best-effort status 'sent', got %v", result["status"])
@@ -860,7 +860,7 @@ func TestCheckStatusAPINotFound(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]interface{}{"message_id": "test-msg"}
+	input := map[string]any{"message_id": "test-msg"}
 	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
@@ -870,7 +870,7 @@ func TestCheckStatusAPINotFound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkStatus: %v", err)
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal([]byte(output), &result)
 	if result["status"] != "sent" {
 		t.Errorf("expected best-effort status 'sent', got %v", result["status"])

@@ -164,8 +164,8 @@ func TestNewApp_Validation(t *testing.T) {
 
 func TestNewApp_Defaults(t *testing.T) {
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
 	}
 
@@ -192,8 +192,8 @@ func TestNewApp_Defaults(t *testing.T) {
 
 func TestNewApp_HealthTrackerSharing(t *testing.T) {
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
 	}
 
@@ -220,10 +220,10 @@ func TestNewApp_HealthTrackerSharing(t *testing.T) {
 func TestNewApp_CustomLogger(t *testing.T) {
 	custom := slog.New(slog.DiscardHandler)
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Logger:       custom,
+		Logger:        custom,
 	}
 
 	app, err := NewApp(context.Background(), config)
@@ -238,10 +238,10 @@ func TestNewApp_CustomLogger(t *testing.T) {
 func TestNewApp_CustomMux(t *testing.T) {
 	custom := http.NewServeMux()
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Mux:          custom,
+		Mux:           custom,
 	}
 
 	app, err := NewApp(context.Background(), config)
@@ -284,10 +284,10 @@ func TestNewApp_CustomRegistry(t *testing.T) {
 func TestNewApp_PluginInitSuccess(t *testing.T) {
 	mp := &mockPlugin{info: plugin.PluginInfo{Name: "test-plugin"}}
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Plugins:      []plugin.Plugin{mp},
+		Plugins:       []plugin.Plugin{mp},
 	}
 
 	app, err := NewApp(context.Background(), config)
@@ -312,10 +312,10 @@ func TestNewApp_PluginInitError(t *testing.T) {
 	}
 
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Plugins:      []plugin.Plugin{mp},
+		Plugins:       []plugin.Plugin{mp},
 	}
 
 	app, err := NewApp(context.Background(), config)
@@ -346,10 +346,10 @@ func TestNewApp_PluginInitError_CleansUpPrevious(t *testing.T) {
 	}
 
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Plugins:      []plugin.Plugin{p1, p2},
+		Plugins:       []plugin.Plugin{p1, p2},
 	}
 
 	_, err := NewApp(context.Background(), config)
@@ -377,10 +377,10 @@ func TestNewApp_HasHostFunctions(t *testing.T) {
 	}
 
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Plugins:      []plugin.Plugin{mp},
+		Plugins:       []plugin.Plugin{mp},
 	}
 
 	app, err := NewApp(context.Background(), config)
@@ -418,10 +418,10 @@ func TestNewApp_HasHostFunctionsError(t *testing.T) {
 	}
 
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Plugins:      []plugin.Plugin{p1, p2},
+		Plugins:       []plugin.Plugin{p1, p2},
 	}
 
 	_, err := NewApp(context.Background(), config)
@@ -441,10 +441,10 @@ func TestNewApp_MultiplePlugins(t *testing.T) {
 	p2 := &mockPlugin{info: plugin.PluginInfo{Name: "plugin-2"}}
 
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Plugins:      []plugin.Plugin{p1, p2},
+		Plugins:       []plugin.Plugin{p1, p2},
 	}
 
 	app, err := NewApp(context.Background(), config)
@@ -469,10 +469,10 @@ func TestNewApp_PluginConfig(t *testing.T) {
 	}
 
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Plugins:      []plugin.Plugin{mp},
+		Plugins:       []plugin.Plugin{mp},
 		PluginConfigs: map[string]json.RawMessage{
 			"cfg-plugin": pluginConfig,
 		},
@@ -501,10 +501,10 @@ func TestApp_Close(t *testing.T) {
 	}
 
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Plugins:      []plugin.Plugin{mp},
+		Plugins:       []plugin.Plugin{mp},
 	}
 
 	app, err := NewApp(context.Background(), config)
@@ -711,11 +711,11 @@ func TestApp_Accessors(t *testing.T) {
 	customMux := http.NewServeMux()
 
 	config := AppConfig{
-		Runtime:      &Runtime{},
-		StoreFactory: &mockStoreFactory{},
+		Runtime:       &Runtime{},
+		StoreFactory:  &mockStoreFactory{},
 		ServiceCaller: &mockServiceCaller{},
-		Logger:       customLogger,
-		Mux:          customMux,
+		Logger:        customLogger,
+		Mux:           customMux,
 	}
 
 	app, err := NewApp(context.Background(), config)
@@ -736,4 +736,3 @@ func TestApp_Accessors(t *testing.T) {
 		t.Error("Mux() returned wrong mux")
 	}
 }
-

@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,13 +39,13 @@ type fakePDConfigRow struct {
 }
 
 type fakeDBStore struct {
-	mu       sync.RWMutex
-	apiKeys  map[string]string               // key_hash -> tenant_id
-	pdConfig map[string]*fakePDConfigRow     // "tenant:id" -> row
-	failNextExec     bool                    // next ExecContext returns error
-	failNextQuery    bool                    // next QueryContext returns error
-	failNextRefetch  int32                   // atomic: next queryPDConfigByID returns error
-	failNextScanOnList bool                  // next queryPDConfigList returns corrupt data
+	mu                 sync.RWMutex
+	apiKeys            map[string]string           // key_hash -> tenant_id
+	pdConfig           map[string]*fakePDConfigRow // "tenant:id" -> row
+	failNextExec       bool                        // next ExecContext returns error
+	failNextQuery      bool                        // next QueryContext returns error
+	failNextRefetch    int32                       // atomic: next queryPDConfigByID returns error
+	failNextScanOnList bool                        // next queryPDConfigList returns corrupt data
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -78,8 +78,8 @@ type fakeConn struct {
 func (*fakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("fakeConn: unexpected Prepare")
 }
-func (*fakeConn) Close() error                                     { return nil }
-func (*fakeConn) Begin() (driver.Tx, error)                        { return &fakeTx{}, nil }
+func (*fakeConn) Close() error              { return nil }
+func (*fakeConn) Begin() (driver.Tx, error) { return &fakeTx{}, nil }
 
 type fakeTx struct{}
 
@@ -432,8 +432,8 @@ func setupTestPlugin(t *testing.T, httpClient *http.Client) (*Plugin, http.Handl
 	}
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.Default(),
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.Default(),
 		httpClient: client,
 	}
 
@@ -474,7 +474,7 @@ func TestPDCreateConfig(t *testing.T) {
 		t.Fatalf("POST /pagerduty/configs: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestPDListConfigs(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var configs []map[string]interface{}
+	var configs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &configs); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -553,7 +553,7 @@ func TestPDGetConfig(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -564,7 +564,7 @@ func TestPDGetConfig(t *testing.T) {
 		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var got map[string]interface{}
+	var got map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &got)
 	if got["name"] != "get-test" {
 		t.Errorf("expected name 'get-test', got %q", got["name"])
@@ -593,7 +593,7 @@ func TestPDUpdateConfig(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -630,7 +630,7 @@ func TestPDDeleteConfig(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -703,7 +703,7 @@ func TestTriggerIncidentLifecycle(t *testing.T) {
 		t.Fatalf("create config: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -975,7 +975,7 @@ func TestPDUpdateConfig_NoFields(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -1309,7 +1309,7 @@ func TestTriggerIncident_WithStructuredDetails(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create config: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -1356,7 +1356,7 @@ func TestResolveIncident_ConfigNotFound(t *testing.T) {
 type errReadCloser struct{}
 
 func (*errReadCloser) Read(_ []byte) (int, error) { return 0, fmt.Errorf("simulated read error") }
-func (*errReadCloser) Close() error                { return nil }
+func (*errReadCloser) Close() error               { return nil }
 
 func TestPDCreateConfig_BodyReadError(t *testing.T) {
 	_, handler, _ := setupTestPlugin(t, nil)
@@ -1384,7 +1384,7 @@ func TestPDListConfigs_Empty(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var configs []map[string]interface{}
+	var configs []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &configs); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
@@ -1416,7 +1416,7 @@ func TestPDUpdateConfig_WithRoutingKey(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -1437,7 +1437,6 @@ func (s *fakeDBStore) triggerRefetchError() {
 	atomic.StoreInt32(&s.failNextRefetch, 1)
 }
 
-
 func TestPDUpdateConfig_RefetchError(t *testing.T) {
 	_, handler, store := setupTestPlugin(t, nil)
 
@@ -1448,7 +1447,7 @@ func TestPDUpdateConfig_RefetchError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 
@@ -1466,8 +1465,6 @@ func TestPDUpdateConfig_RefetchError(t *testing.T) {
 	}
 }
 
-
-
 func (s *fakeDBStore) triggerListScanError() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1484,7 +1481,7 @@ func TestPDListConfigs_ScanError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	configID := created["id"].(string)
 

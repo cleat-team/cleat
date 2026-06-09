@@ -28,7 +28,7 @@ func memTestWasm(sections ...[]byte) []byte {
 // having the given initial pages and flags (0 = no max, 1 = max present).
 func memSection(initialPages uint32, flags byte) []byte {
 	// Content: count=1, flags, initial pages, [max pages if flags&1 != 0]
-	content := encodeULEB128(1)                  // count
+	content := encodeULEB128(1) // count
 	content = append(content, encodeULEB128(uint32(flags))...)
 	content = append(content, encodeULEB128(initialPages)...)
 	if flags&1 != 0 {
@@ -93,7 +93,7 @@ func importSectionWithoutMemory() []byte {
 	content = append(content, []byte("env")...)
 	content = append(content, encodeULEB128(10)...)
 	content = append(content, []byte("cleat_call")...)
-	content = append(content, byte(0)) // kind=func
+	content = append(content, byte(0))             // kind=func
 	content = append(content, encodeULEB128(0)...) // type index
 	size := encodeULEB128(uint32(len(content)))
 	out := []byte{2}
