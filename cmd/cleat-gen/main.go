@@ -101,7 +101,7 @@ func runClient(args []string) {
 	outputFile := fs.String("o", "", "output file path")
 	serviceName := fs.String("service", "", "service name (defaults to spec package name with _spec suffix stripped)")
 	outPkg := fs.String("p", "", "output package name (defaults to service name)")
-	fs.Parse(args)
+	_ = fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
