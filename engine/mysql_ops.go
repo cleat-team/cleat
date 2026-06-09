@@ -398,10 +398,11 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 // if the workflow has not been compacted.
 func (s *MySQLStore) LoadCompactionState(ctx context.Context, workflowID string) (*CompactionState, error) {
 	var rawJSON []byte
+	var compactedStep sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT compaction_state FROM workflow_instances
+		SELECT compaction_state, compaction_step FROM workflow_instances
 		WHERE id = ? AND tenant_id = ?
-	`, workflowID, s.tenantID).Scan(&rawJSON)
+	`, workflowID, s.tenantID).Scan(&rawJSON, &compactedStep)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -414,6 +415,9 @@ func (s *MySQLStore) LoadCompactionState(ctx context.Context, workflowID string)
 	var cs CompactionState
 	if err := json.Unmarshal(rawJSON, &cs); err != nil {
 		return nil, fmt.Errorf("LoadCompactionState: unmarshal: %w", err)
+	}
+	if compactedStep.Valid {
+		cs.CompactedStep = int(compactedStep.Int64)
 	}
 	return &cs, nil
 }
@@ -532,6 +536,7 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
+	var tenantID sql.NullString
 
 	var errorCode, errorOp sql.NullString
 
@@ -540,11 +545,11 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 		       assigned_to, heartbeat_at, next_wake_at, completed_at,
 		       CAST(result AS CHAR), error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
-		       COALESCE(trace_id, '')
-		FROM workflow_instances WHERE id = ? AND tenant_id = ?
-	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
+		       COALESCE(trace_id, ''), tenant_id
+		FROM workflow_instances WHERE id = ?
+	`, id).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg,
-		&errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID)
+		&errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID, &tenantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -557,6 +562,7 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	wf.Error = errorMsg.String
 	wf.ErrorCode = errorCode.String
 	wf.ErrorOp = errorOp.String
+	wf.TenantID = tenantID.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
 	}
