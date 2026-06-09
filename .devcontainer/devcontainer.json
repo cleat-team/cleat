@@ -1,6 +1,6 @@
 {
   "name": "cleat Development",
-  "image": "mcr.microsoft.com/devcontainers/go:1.24",
+  "image": "mcr.microsoft.com/devcontainers/go:1.25",
   "features": {
     "ghcr.io/devcontainers/features/docker-in-docker:2": {},
     "ghcr.io/devcontainers/features/node:1": {

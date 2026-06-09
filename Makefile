@@ -322,6 +322,7 @@ tools-go:
 	else \
 		echo "[MISSING] Go $(GO_MIN_VERSION)+ — install from https://go.dev/dl/"; \
 		echo "  Linux:   wget https://go.dev/dl/go1.25.7.linux-amd64.tar.gz && sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.25.7.linux-amd64.tar.gz"; \
+		echo "  macOS:   brew install go@1.25"; \
 	fi
 
 
@@ -392,3 +393,26 @@ tools-check:
 	@$(MAKE) --no-print-directory tools-as
 	@echo ""
 	@echo "=== Done ==="
+
+.PHONY: setup
+setup:
+	@echo "=== Cleat Setup ==="
+	@echo ""
+	@$(MAKE) --no-print-directory tools-go
+	@echo ""
+	@echo "Next steps:"
+	@echo "  1. Start PostgreSQL:  docker compose -f docker-compose.partner.yml up -d postgres"
+	@echo "  2. Build CLI:         go build -o cleat ./cmd/cleat && go build -o cleat-worker ./cmd/cleat-worker"
+	@echo "  3. Verify:            make tools"
+	@echo "  4. Run dev mode:      ./cleat dev start"
+	@echo ""
+	@echo "See docs/tutorials/quick-start.md for a full walkthrough."
+
+.PHONY: setup-full
+setup-full:
+	@echo "=== Cleat Full Setup ==="
+	@echo ""
+	@$(MAKE) --no-print-directory tools
+	@go build ./...
+	@echo ""
+	@echo "Full toolchain ready. Run 'make test' to verify."

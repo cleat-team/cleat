@@ -7,7 +7,7 @@ end-to-end. Every command is a copy-paste snippet.
 
 ## 1. Prerequisites
 
-- **Go 1.24+** -- [Download](https://go.dev/dl/)
+- **Go 1.25+** -- [Download](https://go.dev/dl/)
 - **Docker** -- for running Postgres locally
 - **cleat CLI** -- install with one command:
 
@@ -25,23 +25,20 @@ cleat version
 
 ## 2. Start Postgres
 
-Cleat uses Postgres as its durable store. Start a local instance:
+Cleat uses Postgres as its durable store. Start a local instance with the
+partner compose file:
 
 ```bash
-docker run -d --name cleat-postgres \
-    -e POSTGRES_USER=cleat \
-    -e POSTGRES_PASSWORD=cleat \
-    -e POSTGRES_DB=cleat \
-    -p 5432:5432 \
-    postgres:16
+docker compose -f docker-compose.partner.yml up -d postgres
 ```
 
 Wait a moment for the container to be ready, then verify:
 
 ```bash
-docker logs cleat-postgres 2>&1 | tail -5
-# Expected output (last line):
-# PostgreSQL init process complete; ready for start up.
+docker compose -f docker-compose.partner.yml ps
+# Expected output:
+# NAME                   IMAGE               SERVICE
+# cleat-agent0-postgres-1  postgres:16        postgres   running (healthy)
 ```
 
 ## 3. Scaffold a project
@@ -232,8 +229,7 @@ that is the durability guarantee.
 Stop the worker (Ctrl+C in its terminal), then stop and remove the database:
 
 ```bash
-docker stop cleat-postgres
-docker rm cleat-postgres
+docker compose -f docker-compose.partner.yml down -v
 ```
 
 ## Next steps
