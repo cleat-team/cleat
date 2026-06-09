@@ -117,6 +117,7 @@ func TestPollSignalFound(t *testing.T) {
 	}
 
 	s := newTestExecSession()
+	s.engine.workflowID = "wf-poll" // must match DeliverSignal
 	s.engine.signalStore = store
 
 	result := s.PollSignal(ctx, nil, "test-signal", 0, 0)
@@ -131,6 +132,7 @@ func TestPollSignalFound(t *testing.T) {
 func TestPollSignalNotFound(t *testing.T) {
 	store := newMockSignalWorkflowStore()
 	s := newTestExecSession()
+	s.engine.workflowID = "wf-poll"
 	s.engine.signalStore = store
 
 	result := s.PollSignal(context.Background(), nil, "nonexistent-signal", 0, 0)
@@ -160,6 +162,7 @@ func TestPollSignalWithPayload(t *testing.T) {
 	}
 
 	s := newTestExecSession()
+	s.engine.workflowID = "wf-poll" // must match DeliverSignal
 	s.engine.signalStore = store
 
 	// With a raw memory buffer, the payload should be written.

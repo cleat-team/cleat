@@ -382,14 +382,14 @@ func TestHandlerContextKey_Type(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestErrBadParam_Constant(t *testing.T) {
-	if errBadParam != 0xFFFFFFFF_00000001 {
-		t.Errorf("errBadParam = %x, want %x", errBadParam, 0xFFFFFFFF_00000001)
+	if errBadParam != uint64(0xFFFFFFFF_00000001) {
+		t.Errorf("errBadParam = %x, want %x", errBadParam, uint64(0xFFFFFFFF_00000001))
 	}
 }
 
 func TestErrSignalAuthRequired_Constant(t *testing.T) {
-	if errSignalAuthRequired != 0xFFFFFFFF_00000002 {
-		t.Errorf("errSignalAuthRequired = %x, want %x", errSignalAuthRequired, 0xFFFFFFFF_00000002)
+	if errSignalAuthRequired != uint64(0xFFFFFFFF_00000002) {
+		t.Errorf("errSignalAuthRequired = %x, want %x", errSignalAuthRequired, uint64(0xFFFFFFFF_00000002))
 	}
 }
 
