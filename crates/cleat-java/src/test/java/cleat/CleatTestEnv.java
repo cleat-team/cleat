@@ -696,11 +696,6 @@ public class CleatTestEnv {
             delegate.setQueryState(key, value);
         }
 
-        @Override
-        public CleatResult<String> getQueryState(String key) {
-            return delegate.getQueryState(key);
-        }
-
         // ---- Update / Query handlers ----
 
         @Override
@@ -779,25 +774,6 @@ public class CleatTestEnv {
                 String service, String operation, String requestJSON,
                 long delayMs) {
             return delegate.scheduleInvoke(service, operation, requestJSON, delayMs);
-        }
-
-        // ---- Cron ----
-
-        @Override
-        public CleatResult<String> scheduleCron(
-                String workflowName, String cronExpr, String timezone,
-                String inputJSON) {
-            return CleatResult.ok("test-schedule-id");
-        }
-
-        @Override
-        public CleatResult<Void> deleteCron(String scheduleId) {
-            return CleatResult.ok(null);
-        }
-
-        @Override
-        public CleatResult<String> listCrons() {
-            return CleatResult.ok("[]");
         }
 
         // ---- Detached execution ----

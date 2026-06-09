@@ -819,27 +819,6 @@ class CleatTestEnvTest {
     }
 
     // ======================================================================
-    // 38. Cron operations
-    // ======================================================================
-
-    @Test
-    void testCronOperations() {
-        String result = env.execute(h -> {
-            CleatResult<String> cronResult = h.scheduleCron(
-                "daily", "0 0 * * *", "UTC", "{}");
-            if (cronResult.isErr()) {
-                return "error";
-            }
-            String id = cronResult.getValue();
-            h.deleteCron(id);
-            return id;
-        });
-
-        assertEquals("test-schedule-id", result,
-            "scheduleCron should return a mock schedule ID");
-    }
-
-    // ======================================================================
     // 39. cleatCallHeartbeat
     // ======================================================================
 
