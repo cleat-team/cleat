@@ -63,10 +63,10 @@ type PluginLoader struct {
 	rt *Runtime
 
 	// LRU cache for compiled plugin modules (keyed by name+version).
-	mu       sync.Mutex
-	cache    map[pluginCacheKey]*pluginCacheEntry
-	lruList  *list.List
-	maxSize  int
+	mu      sync.Mutex
+	cache   map[pluginCacheKey]*pluginCacheEntry
+	lruList *list.List
+	maxSize int
 
 	// limits defines the maximum capabilities for WASM plugins loaded
 	// through this loader. If zero-valued (default), no capability
@@ -335,7 +335,7 @@ func (l *PluginLoader) SetLimits(limits plugin.CapabilityLimits) {
 //	     VALUES ($1, $2, $3, $4)
 //	     ON CONFLICT (name, version) DO UPDATE SET
 //	       wasm_bytes = $3, config = $4, deprecated = false, created_at = now()
-func (l *PluginLoader) DeployPlugin(ctx context.Context, name string, version string, wasmBytes []byte, config map[string]interface{}) error {
+func (l *PluginLoader) DeployPlugin(ctx context.Context, name string, version string, wasmBytes []byte, config map[string]any) error {
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("deploy plugin %s v%s: marshal config: %w", name, version, err)
@@ -361,7 +361,7 @@ func (l *PluginLoader) DeployPlugin(ctx context.Context, name string, version st
 // DeployPluginWithCapabilities is like DeployPlugin but additionally validates
 // the declared capabilities against configured limits before deploying.
 // If the capabilities violate the limits, the deployment is refused.
-func (l *PluginLoader) DeployPluginWithCapabilities(ctx context.Context, name string, version string, wasmBytes []byte, config map[string]interface{}, declared plugin.Capabilities) error {
+func (l *PluginLoader) DeployPluginWithCapabilities(ctx context.Context, name string, version string, wasmBytes []byte, config map[string]any, declared plugin.Capabilities) error {
 	// If limits are set, validate declared capabilities.
 	if l.limits.IsSet() {
 		// Convert declared Capabilities to CapabilityLimits for validation.

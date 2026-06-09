@@ -354,7 +354,7 @@ func TestGap_LoadEventHistoryPaginated(t *testing.T) {
 				nil, nil, nil, nil, nil, // durationMs, signalNames, timeoutMs, signalName, signalPayload
 				nil, nil, nil, nil, nil, nil, // deferDesc, deferID, childName, childInput, runID, newInput
 				nil, nil, nil, nil, nil, // pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr
-				nil, // payload
+				nil,                // payload
 				nil, nil, nil, nil, // promiseName, promiseID, promiseResult, promiseError
 				nil, // createdAt
 			}},

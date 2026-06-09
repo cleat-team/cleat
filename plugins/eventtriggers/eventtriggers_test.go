@@ -85,17 +85,17 @@ func TestFilterLiteralTrue(t *testing.T) {
 	tests := []struct {
 		name string
 		expr string
-		data map[string]interface{}
+		data map[string]any
 	}{
 		{
 			name: "empty expression",
 			expr: "",
-			data: map[string]interface{}{"price": 100.0},
+			data: map[string]any{"price": 100.0},
 		},
 		{
 			name: "true literal",
 			expr: "true",
-			data: map[string]interface{}{"price": 100.0},
+			data: map[string]any{"price": 100.0},
 		},
 		{
 			name: "true with no data",
@@ -118,7 +118,7 @@ func TestFilterLiteralTrue(t *testing.T) {
 }
 
 func TestFilterComparison(t *testing.T) {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"price": 100.0,
 		"name":  "widget",
 	}
@@ -164,7 +164,7 @@ func TestFilterComparison(t *testing.T) {
 }
 
 func TestFilterStringComparison(t *testing.T) {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"status": "active",
 	}
 
@@ -196,31 +196,31 @@ func TestFilterMembership(t *testing.T) {
 	tests := []struct {
 		name string
 		expr string
-		data map[string]interface{}
+		data map[string]any
 		want bool
 	}{
 		{
 			name: "in string true",
 			expr: `event.data.status in("active", "pending")`,
-			data: map[string]interface{}{"status": "active"},
+			data: map[string]any{"status": "active"},
 			want: true,
 		},
 		{
 			name: "in string false",
 			expr: `event.data.status in("active", "pending")`,
-			data: map[string]interface{}{"status": "inactive"},
+			data: map[string]any{"status": "inactive"},
 			want: false,
 		},
 		{
 			name: "in number true",
 			expr: `event.data.count in(1, 2, 3)`,
-			data: map[string]interface{}{"count": 2.0},
+			data: map[string]any{"count": 2.0},
 			want: true,
 		},
 		{
 			name: "in number false",
 			expr: `event.data.count in(1, 2, 3)`,
-			data: map[string]interface{}{"count": 5.0},
+			data: map[string]any{"count": 5.0},
 			want: false,
 		},
 	}
@@ -239,8 +239,8 @@ func TestFilterMembership(t *testing.T) {
 }
 
 func TestFilterNestedPath(t *testing.T) {
-	data := map[string]interface{}{
-		"user": map[string]interface{}{
+	data := map[string]any{
+		"user": map[string]any{
 			"name": "alice",
 		},
 	}
@@ -255,8 +255,8 @@ func TestFilterNestedPath(t *testing.T) {
 }
 
 func TestFilterArrayIndex(t *testing.T) {
-	data := map[string]interface{}{
-		"items": []interface{}{"a", "b", "c"},
+	data := map[string]any{
+		"items": []any{"a", "b", "c"},
 	}
 
 	tests := []struct {
@@ -295,7 +295,7 @@ func TestFilterArrayIndex(t *testing.T) {
 }
 
 func TestFilterNull(t *testing.T) {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"deleted_at": nil,
 	}
 
@@ -337,7 +337,7 @@ func TestFilterNull(t *testing.T) {
 }
 
 func TestFilterInvalidExpr(t *testing.T) {
-	data := map[string]interface{}{"price": 100.0}
+	data := map[string]any{"price": 100.0}
 
 	tests := []struct {
 		name string
@@ -376,18 +376,18 @@ func TestFilterInvalidExpr(t *testing.T) {
 }
 
 func TestFilterStructured(t *testing.T) {
-	data := map[string]interface{}{
-		"event": map[string]interface{}{
-			"data": map[string]interface{}{
+	data := map[string]any{
+		"event": map[string]any{
+			"data": map[string]any{
 				"amount": 150.0,
 				"status": "active",
-				"user": map[string]interface{}{
+				"user": map[string]any{
 					"name": "alice",
 					"age":  30.0,
 				},
-				"items": []interface{}{
-					map[string]interface{}{"sku": "ABC"},
-					map[string]interface{}{"sku": "DEF"},
+				"items": []any{
+					map[string]any{"sku": "ABC"},
+					map[string]any{"sku": "DEF"},
 				},
 			},
 		},
@@ -511,8 +511,8 @@ func TestFilterStructuredEdgeCases(t *testing.T) {
 	}
 
 	// Unknown operator
-	_, err = EvaluateFilter(`{"event.data.x": {"$unknown": 1}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{"x": 1}},
+	_, err = EvaluateFilter(`{"event.data.x": {"$unknown": 1}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{"x": 1}},
 	})
 	if err == nil {
 		t.Error("expected error for unknown operator")
@@ -559,12 +559,12 @@ func TestUnregisterAwaiterEmptyID(t *testing.T) {
 
 // TestMergeInputAndTemplateNil verifies mergeInputAndTemplate handles nil template.
 func TestMergeInputAndTemplateNil(t *testing.T) {
-	data := map[string]interface{}{"key": "value"}
+	data := map[string]any{"key": "value"}
 	result, err := mergeInputAndTemplate(nil, data)
 	if err != nil {
 		t.Fatalf("mergeInputAndTemplate(nil, data) returned error: %v", err)
 	}
-	var merged map[string]interface{}
+	var merged map[string]any
 	if err := json.Unmarshal(result, &merged); err != nil {
 		t.Fatalf("failed to decode result: %v", err)
 	}
@@ -576,12 +576,12 @@ func TestMergeInputAndTemplateNil(t *testing.T) {
 // TestMergeInputAndTemplateNonObject verifies mergeInputAndTemplate handles non-object templates.
 func TestMergeInputAndTemplateNonObject(t *testing.T) {
 	tmpl := json.RawMessage(`"just a string"`)
-	data := map[string]interface{}{"key": "value"}
+	data := map[string]any{"key": "value"}
 	result, err := mergeInputAndTemplate(tmpl, data)
 	if err != nil {
 		t.Fatalf("mergeInputAndTemplate(string, data) returned error: %v", err)
 	}
-	var merged map[string]interface{}
+	var merged map[string]any
 	if err := json.Unmarshal(result, &merged); err != nil {
 		t.Fatalf("failed to decode result: %v", err)
 	}
@@ -592,8 +592,8 @@ func TestMergeInputAndTemplateNonObject(t *testing.T) {
 
 // TestFilterLiteralFalse verifies the filter returns error for boolean false value.
 func TestFilterStructuredInvalidPath(t *testing.T) {
-	_, err := EvaluateFilter(`{"event.data.missing": {"$exists": "not-bool"}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{}},
+	_, err := EvaluateFilter(`{"event.data.missing": {"$exists": "not-bool"}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{}},
 	})
 	if err == nil {
 		t.Error("expected error for $exists with non-bool value")
@@ -602,8 +602,8 @@ func TestFilterStructuredInvalidPath(t *testing.T) {
 
 // TestFilterStructuredNeqNonExistent verifies $ne on a non-existent field returns true.
 func TestFilterStructuredNeqNonExistent(t *testing.T) {
-	result, err := EvaluateFilter(`{"event.data.nonexistent": {"$ne": "value"}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{}},
+	result, err := EvaluateFilter(`{"event.data.nonexistent": {"$ne": "value"}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -615,8 +615,8 @@ func TestFilterStructuredNeqNonExistent(t *testing.T) {
 
 // TestFilterStructuredGtLtNonExistent verifies comparison operators on non-existent fields.
 func TestFilterStructuredGtLtNonExistent(t *testing.T) {
-	data := map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{}},
+	data := map[string]any{
+		"event": map[string]any{"data": map[string]any{}},
 	}
 
 	tests := []struct {
@@ -644,8 +644,8 @@ func TestFilterStructuredGtLtNonExistent(t *testing.T) {
 
 // TestFilterStructuredNinNonExistent verifies $nin on non-existent field.
 func TestFilterStructuredNinNonExistent(t *testing.T) {
-	result, err := EvaluateFilter(`{"event.data.nonexistent": {"$nin": ["a","b"]}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{}},
+	result, err := EvaluateFilter(`{"event.data.nonexistent": {"$nin": ["a","b"]}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -657,8 +657,8 @@ func TestFilterStructuredNinNonExistent(t *testing.T) {
 
 // TestFilterStructuredNinMatch verifies $nin returns false when value is in list.
 func TestFilterStructuredNinMatch(t *testing.T) {
-	result, err := EvaluateFilter(`{"event.data.status": {"$nin": ["active", "pending"]}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{"status": "active"}},
+	result, err := EvaluateFilter(`{"event.data.status": {"$nin": ["active", "pending"]}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{"status": "active"}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -670,8 +670,8 @@ func TestFilterStructuredNinMatch(t *testing.T) {
 
 // TestFilterStructuredInvalidIn verifies $in with non-array operand returns error.
 func TestFilterStructuredInvalidIn(t *testing.T) {
-	_, err := EvaluateFilter(`{"event.data.status": {"$in": "not-an-array"}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{"status": "active"}},
+	_, err := EvaluateFilter(`{"event.data.status": {"$in": "not-an-array"}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{"status": "active"}},
 	})
 	if err == nil {
 		t.Error("expected error for $in with non-array operand")
@@ -680,8 +680,8 @@ func TestFilterStructuredInvalidIn(t *testing.T) {
 
 // TestFilterStructuredInvalidNin verifies $nin with non-array operand returns error.
 func TestFilterStructuredInvalidNin(t *testing.T) {
-	_, err := EvaluateFilter(`{"event.data.status": {"$nin": "not-an-array"}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{"status": "active"}},
+	_, err := EvaluateFilter(`{"event.data.status": {"$nin": "not-an-array"}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{"status": "active"}},
 	})
 	if err == nil {
 		t.Error("expected error for $nin with non-array operand")
@@ -690,8 +690,8 @@ func TestFilterStructuredInvalidNin(t *testing.T) {
 
 // TestFilterStructuredLt verifies $lt operator.
 func TestFilterStructuredLt(t *testing.T) {
-	result, err := EvaluateFilter(`{"event.data.amount": {"$lt": 200}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{"amount": 150.0}},
+	result, err := EvaluateFilter(`{"event.data.amount": {"$lt": 200}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{"amount": 150.0}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -703,8 +703,8 @@ func TestFilterStructuredLt(t *testing.T) {
 
 // TestFilterStructuredGte verifies $gte operator.
 func TestFilterStructuredGte(t *testing.T) {
-	result, err := EvaluateFilter(`{"event.data.amount": {"$gte": 150}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{"amount": 150.0}},
+	result, err := EvaluateFilter(`{"event.data.amount": {"$gte": 150}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{"amount": 150.0}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -716,8 +716,8 @@ func TestFilterStructuredGte(t *testing.T) {
 
 // TestFilterStructuredLte verifies $lte operator.
 func TestFilterStructuredLte(t *testing.T) {
-	result, err := EvaluateFilter(`{"event.data.amount": {"$lte": 150}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{"amount": 150.0}},
+	result, err := EvaluateFilter(`{"event.data.amount": {"$lte": 150}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{"amount": 150.0}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -729,8 +729,8 @@ func TestFilterStructuredLte(t *testing.T) {
 
 // TestFilterStructuredGtNonNumeric verifies $gt with non-numeric returns false.
 func TestFilterStructuredGtNonNumeric(t *testing.T) {
-	result, err := EvaluateFilter(`{"event.data.amount": {"$gt": 100}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{"amount": "abc"}},
+	result, err := EvaluateFilter(`{"event.data.amount": {"$gt": 100}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{"amount": "abc"}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -742,8 +742,8 @@ func TestFilterStructuredGtNonNumeric(t *testing.T) {
 
 // TestFilterStructuredEqFalse verifies $eq returns false on mismatch.
 func TestFilterStructuredEqFalse(t *testing.T) {
-	result, err := EvaluateFilter(`{"event.data.status": {"$eq": "inactive"}}`, map[string]interface{}{
-		"event": map[string]interface{}{"data": map[string]interface{}{"status": "active"}},
+	result, err := EvaluateFilter(`{"event.data.status": {"$eq": "inactive"}}`, map[string]any{
+		"event": map[string]any{"data": map[string]any{"status": "active"}},
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -755,7 +755,7 @@ func TestFilterStructuredEqFalse(t *testing.T) {
 
 // TestFilterComparisonNeq verifies != comparison operator.
 func TestFilterComparisonNeq(t *testing.T) {
-	data := map[string]interface{}{"price": 100.0}
+	data := map[string]any{"price": 100.0}
 	result, err := EvaluateFilter(`event.data.price != 200`, data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -767,7 +767,7 @@ func TestFilterComparisonNeq(t *testing.T) {
 
 // TestFilterNonObjectPath verifies error when path step doesn't hit an object.
 func TestFilterNonObjectPath(t *testing.T) {
-	data := map[string]interface{}{"price": 100.0}
+	data := map[string]any{"price": 100.0}
 	_, err := EvaluateFilter(`event.data.price.nested`, data)
 	if err == nil {
 		t.Error("expected error for accessing field of non-object")
@@ -776,7 +776,7 @@ func TestFilterNonObjectPath(t *testing.T) {
 
 // TestFilterComparisonBool verifies comparison with boolean values.
 func TestFilterComparisonBool(t *testing.T) {
-	data := map[string]interface{}{"active": true}
+	data := map[string]any{"active": true}
 	result, err := EvaluateFilter(`event.data.active == true`, data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -797,7 +797,7 @@ func TestFilterComparisonBool(t *testing.T) {
 // TestFilterComparisonBoolInvalidOperator verifies error with comparison operator other
 // than == or != on booleans.
 func TestFilterComparisonBoolInvalidOperator(t *testing.T) {
-	data := map[string]interface{}{"active": true}
+	data := map[string]any{"active": true}
 	_, err := EvaluateFilter(`event.data.active > false`, data)
 	if err == nil {
 		t.Error("expected error for > on boolean")
@@ -806,7 +806,7 @@ func TestFilterComparisonBoolInvalidOperator(t *testing.T) {
 
 // TestFilterComparisonStringOrder verifies string ordering comparisons.
 func TestFilterComparisonStringOrder(t *testing.T) {
-	data := map[string]interface{}{"name": "bravo"}
+	data := map[string]any{"name": "bravo"}
 	result, err := EvaluateFilter(`event.data.name > "alpha"`, data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -826,7 +826,7 @@ func TestFilterComparisonStringOrder(t *testing.T) {
 
 // TestFilterComparisonTypeMismatch verifies error on type mismatch.
 func TestFilterComparisonTypeMismatch(t *testing.T) {
-	data := map[string]interface{}{"price": 100.0}
+	data := map[string]any{"price": 100.0}
 	_, err := EvaluateFilter(`event.data.price == "string"`, data)
 	if err == nil {
 		t.Error("expected error for comparing number with string")
@@ -835,7 +835,7 @@ func TestFilterComparisonTypeMismatch(t *testing.T) {
 
 // TestFilterComparisonNullInvalidOperator verifies error on null with unsupported op.
 func TestFilterComparisonNullInvalidOperator(t *testing.T) {
-	data := map[string]interface{}{"deleted": nil}
+	data := map[string]any{"deleted": nil}
 	_, err := EvaluateFilter(`event.data.deleted > null`, data)
 	if err == nil {
 		t.Error("expected error for > on null")
@@ -844,7 +844,7 @@ func TestFilterComparisonNullInvalidOperator(t *testing.T) {
 
 // TestFilterComparisonNullNeqFalse verifies null != null returns false.
 func TestFilterComparisonNullNeqFalse(t *testing.T) {
-	data := map[string]interface{}{"deleted": nil}
+	data := map[string]any{"deleted": nil}
 	result, err := EvaluateFilter(`event.data.deleted != null`, data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -856,7 +856,7 @@ func TestFilterComparisonNullNeqFalse(t *testing.T) {
 
 // TestFilterUnsupportedType verifies error for unsupported type.
 func TestFilterUnsupportedType(t *testing.T) {
-	data := map[string]interface{}{"items": []interface{}{1, 2, 3}}
+	data := map[string]any{"items": []any{1, 2, 3}}
 	_, err := EvaluateFilter(`event.data.items == 1`, data)
 	if err == nil {
 		t.Error("expected error for comparing array with number")
@@ -907,7 +907,7 @@ func TestExprMarkerMembershipExpr(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestGetPath_NonExistentField(t *testing.T) {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"existing": "value",
 	}
 	_, ok := getPath(data, "missing")
@@ -917,8 +917,8 @@ func TestGetPath_NonExistentField(t *testing.T) {
 }
 
 func TestGetPath_NonNumericArrayIndex(t *testing.T) {
-	data := map[string]interface{}{
-		"items": []interface{}{"a", "b", "c"},
+	data := map[string]any{
+		"items": []any{"a", "b", "c"},
 	}
 	// "items[abc]" should fail due to non-numeric index
 	_, ok := getPath(data, "items[abc]")
@@ -928,8 +928,8 @@ func TestGetPath_NonNumericArrayIndex(t *testing.T) {
 }
 
 func TestGetPath_NegativeArrayIndex(t *testing.T) {
-	data := map[string]interface{}{
-		"items": []interface{}{"a", "b", "c"},
+	data := map[string]any{
+		"items": []any{"a", "b", "c"},
 	}
 	_, ok := getPath(data, "items[-1]")
 	if ok {
@@ -938,7 +938,7 @@ func TestGetPath_NegativeArrayIndex(t *testing.T) {
 }
 
 func TestGetPath_TypeMismatch(t *testing.T) {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"scalar": "hello",
 	}
 	// Trying to index into a scalar value should fail.
@@ -949,7 +949,7 @@ func TestGetPath_TypeMismatch(t *testing.T) {
 }
 
 func TestGetPath_ArrayIndexOnNonArray(t *testing.T) {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"scalar": "hello",
 	}
 	_, ok := getPath(data, "scalar[0]")
@@ -961,7 +961,6 @@ func TestGetPath_ArrayIndexOnNonArray(t *testing.T) {
 // ---------------------------------------------------------------------------
 // parsePath edge case tests
 // ---------------------------------------------------------------------------
-
 
 func TestParsePath_TrailingDot(t *testing.T) {
 	_, err := EvaluateFilter("event.data. > 5", nil)
@@ -996,9 +995,9 @@ func TestParsePath_UnclosedBracket(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEvaluateFilter_NonExistentPath(t *testing.T) {
-	data := map[string]interface{}{
-		"event": map[string]interface{}{
-			"data": map[string]interface{}{
+	data := map[string]any{
+		"event": map[string]any{
+			"data": map[string]any{
 				"price": 100.0,
 			},
 		},
@@ -1010,7 +1009,7 @@ func TestEvaluateFilter_NonExistentPath(t *testing.T) {
 }
 
 func TestEvaluateFilter_MissingEventKey(t *testing.T) {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"wrong_key": "value",
 	}
 	_, err := EvaluateFilter("event.data.x == 5", data)

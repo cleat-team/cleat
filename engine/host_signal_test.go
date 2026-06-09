@@ -83,7 +83,6 @@ func (m *mockSignalWorkflowStore) GetAllowedSignalCallers(_ context.Context, _ s
 	return m.allowedCallers, nil
 }
 
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -481,6 +480,7 @@ func makeSignalAuthCheck(store *mockSignalWorkflowStore) func(ctx context.Contex
 		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", callerDefName, targetWorkflowID)
 	}
 }
+
 // ---------------------------------------------------------------------------
 // Wildcard signal auth tests
 // ---------------------------------------------------------------------------

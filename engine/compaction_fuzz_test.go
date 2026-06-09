@@ -62,7 +62,7 @@ func FuzzCompactionEquivalence(f *testing.F) {
 	f.Add(fuzzSeed(EventCodePluginCallStreamChunk, []string{"s3", "GetObject", `{"key":"x"}`, `{"body":"..."}`, ""}, []int64{}...))
 
 	// Pair: Call + Sleep (tests split at 1-halfway).
-		f.Add(fuzzSeed(EventCodeCall, []string{"svc", "op", `{}`, `{}`, ""}))
+	f.Add(fuzzSeed(EventCodeCall, []string{"svc", "op", `{}`, `{}`, ""}))
 	// Pair: ChildWorkflow + child completing AwaitChild (tests open-children
 	// tracking and completion).
 	f.Add(append(
@@ -346,7 +346,6 @@ func eventFieldsMatch(a, b EventRecord) bool {
 			a.Response == b.Response &&
 			a.Err == b.Err
 
-
 	case EventTypeAwaitSignals:
 		return a.SignalNames == b.SignalNames &&
 			a.TimeoutMs == b.TimeoutMs
@@ -438,10 +437,10 @@ func eventFieldsMatch(a, b EventRecord) bool {
 			a.PluginOutput == b.PluginOutput &&
 			a.PluginError == b.PluginError
 
-		case EventTypeAcquireLock:
-			return a.LockKey == b.LockKey &&
-				a.LockTTLMs == b.LockTTLMs &&
-				a.LockAcquired == b.LockAcquired
+	case EventTypeAcquireLock:
+		return a.LockKey == b.LockKey &&
+			a.LockTTLMs == b.LockTTLMs &&
+			a.LockAcquired == b.LockAcquired
 
 	case EventTypeReleaseLock:
 		return a.LockKey == b.LockKey
@@ -614,29 +613,29 @@ func dumpEventDiff(t *testing.T, a, b EventRecord) {
 		mismatchStr("PluginInput", a.PluginInput, b.PluginInput, t)
 		mismatchStr("PluginOutput", a.PluginOutput, b.PluginOutput, t)
 		mismatchStr("PluginError", a.PluginError, b.PluginError, t)
-		case EventTypeSideEffect:
-			mismatchStr("SideEffectResult", a.SideEffectResult, b.SideEffectResult, t)
-		case EventTypeScopeAcquired:
-			mismatchStr("ScopeKey", a.ScopeKey, b.ScopeKey, t)
-		case EventTypeAcquireLock:
-			mismatchStr("LockKey", a.LockKey, b.LockKey, t)
-			mismatchInt("LockTTLMs", a.LockTTLMs, b.LockTTLMs, t)
-			mismatchInt("LockAcquired", int64(a.LockAcquired), int64(b.LockAcquired), t)
-		case EventTypeReleaseLock:
-			mismatchStr("LockKey", a.LockKey, b.LockKey, t)
-		case EventTypeDurableLog:
-			mismatchStr("Message", a.Message, b.Message, t)
-			mismatchStr("LogLevel", a.LogLevel, b.LogLevel, t)
-			mismatchStr("LogKV", a.LogKV, b.LogKV, t)
-		case EventTypeDurableSend:
-			mismatchStr("Service", a.Service, b.Service, t)
-			mismatchStr("Op", a.Op, b.Op, t)
-			mismatchStr("Request", a.Request, b.Request, t)
-		case EventTypeDurableScheduleInvoke:
-			mismatchStr("Service", a.Service, b.Service, t)
-			mismatchStr("Op", a.Op, b.Op, t)
-			mismatchStr("Request", a.Request, b.Request, t)
-			mismatchInt("DurationMs", a.DurationMs, b.DurationMs, t)
+	case EventTypeSideEffect:
+		mismatchStr("SideEffectResult", a.SideEffectResult, b.SideEffectResult, t)
+	case EventTypeScopeAcquired:
+		mismatchStr("ScopeKey", a.ScopeKey, b.ScopeKey, t)
+	case EventTypeAcquireLock:
+		mismatchStr("LockKey", a.LockKey, b.LockKey, t)
+		mismatchInt("LockTTLMs", a.LockTTLMs, b.LockTTLMs, t)
+		mismatchInt("LockAcquired", int64(a.LockAcquired), int64(b.LockAcquired), t)
+	case EventTypeReleaseLock:
+		mismatchStr("LockKey", a.LockKey, b.LockKey, t)
+	case EventTypeDurableLog:
+		mismatchStr("Message", a.Message, b.Message, t)
+		mismatchStr("LogLevel", a.LogLevel, b.LogLevel, t)
+		mismatchStr("LogKV", a.LogKV, b.LogKV, t)
+	case EventTypeDurableSend:
+		mismatchStr("Service", a.Service, b.Service, t)
+		mismatchStr("Op", a.Op, b.Op, t)
+		mismatchStr("Request", a.Request, b.Request, t)
+	case EventTypeDurableScheduleInvoke:
+		mismatchStr("Service", a.Service, b.Service, t)
+		mismatchStr("Op", a.Op, b.Op, t)
+		mismatchStr("Request", a.Request, b.Request, t)
+		mismatchInt("DurationMs", a.DurationMs, b.DurationMs, t)
 	}
 }
 

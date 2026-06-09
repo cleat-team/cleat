@@ -467,7 +467,6 @@ func readLEB128(buf []byte, pos int) (uint32, int) {
 	return val, pos + n
 }
 
-
 // PatchEmptyImportModuleName patches core WASM bytecode that has imports with
 // empty ("") module names by replacing them with replacementName. This is needed
 // because wazero rejects imports with empty module names, but component-model

@@ -37,7 +37,7 @@ import (
 type witDylibValueKind int
 
 const (
-	witKindEmpty  witDylibValueKind = iota
+	witKindEmpty witDylibValueKind = iota
 	witKindI32
 	witKindI64
 	witKindF32

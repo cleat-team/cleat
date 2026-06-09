@@ -2479,7 +2479,6 @@ func (s *MSSQLStore) GetEventCount(ctx context.Context, workflowID string) (int,
 	return count, tx.Commit()
 }
 
-
 // ---- Sticky Session methods ----
 
 // UpdateStickyWorker sets the sticky worker for a workflow.

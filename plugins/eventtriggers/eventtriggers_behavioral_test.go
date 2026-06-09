@@ -3,8 +3,8 @@ package eventtriggers
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"crypto/sha256"
+	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
-		"github.com/cleat-team/cleat/engine"
-	)
+	"github.com/google/uuid"
+)
 
 // ---------------------------------------------------------------------------
 // Interface / compile-time checks
@@ -293,14 +293,14 @@ func TestAwaitEvent_InputValidation(t *testing.T) {
 func TestMergeInputAndTemplate(t *testing.T) {
 	t.Run("empty template uses event data only", func(t *testing.T) {
 		tmpl := json.RawMessage("")
-		data := map[string]interface{}{"order_id": "123", "amount": 99.5}
+		data := map[string]any{"order_id": "123", "amount": 99.5}
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		var parsed map[string]interface{}
+		var parsed map[string]any
 		if err := json.Unmarshal(result, &parsed); err != nil {
 			t.Fatalf("unmarshal result: %v", err)
 		}
@@ -314,14 +314,14 @@ func TestMergeInputAndTemplate(t *testing.T) {
 
 	t.Run("template with event data merge", func(t *testing.T) {
 		tmpl := json.RawMessage(`{"source": "webhook", "version": "1.0"}`)
-		data := map[string]interface{}{"order_id": "456", "amount": 50.0}
+		data := map[string]any{"order_id": "456", "amount": 50.0}
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		var parsed map[string]interface{}
+		var parsed map[string]any
 		if err := json.Unmarshal(result, &parsed); err != nil {
 			t.Fatalf("unmarshal result: %v", err)
 		}
@@ -341,14 +341,14 @@ func TestMergeInputAndTemplate(t *testing.T) {
 
 	t.Run("event data overrides template on key conflict", func(t *testing.T) {
 		tmpl := json.RawMessage(`{"priority": "low", "source": "template"}`)
-		data := map[string]interface{}{"priority": "high", "extra": "value"}
+		data := map[string]any{"priority": "high", "extra": "value"}
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		var parsed map[string]interface{}
+		var parsed map[string]any
 		if err := json.Unmarshal(result, &parsed); err != nil {
 			t.Fatalf("unmarshal result: %v", err)
 		}
@@ -365,14 +365,14 @@ func TestMergeInputAndTemplate(t *testing.T) {
 
 	t.Run("invalid template JSON is silently ignored", func(t *testing.T) {
 		tmpl := json.RawMessage(`{not valid}`)
-		data := map[string]interface{}{"key": "value"}
+		data := map[string]any{"key": "value"}
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		var parsed map[string]interface{}
+		var parsed map[string]any
 		if err := json.Unmarshal(result, &parsed); err != nil {
 			t.Fatalf("unmarshal result: %v", err)
 		}
@@ -452,7 +452,7 @@ func TestTypesJSONRoundtrip(t *testing.T) {
 			t.Fatalf("marshal: %v", err)
 		}
 
-		var raw map[string]interface{}
+		var raw map[string]any
 		if err := json.Unmarshal(data, &raw); err != nil {
 			t.Fatalf("unmarshal to map: %v", err)
 		}
@@ -483,7 +483,7 @@ func TestTypesJSONRoundtrip(t *testing.T) {
 		original := publishEventRequest{
 			ID:        "123e4567-e89b-12d3-a456-426614174000",
 			EventType: "order.created",
-			Data:      map[string]interface{}{"amount": 99.5, "currency": "USD"},
+			Data:      map[string]any{"amount": 99.5, "currency": "USD"},
 		}
 
 		data, err := json.Marshal(original)
@@ -589,7 +589,7 @@ func TestWriteJSON(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	rec := httptest.NewRecorder()
 
-	payload := map[string]interface{}{"status": "ok", "value": 42}
+	payload := map[string]any{"status": "ok", "value": 42}
 	p.writeJSON(rec, http.StatusCreated, payload)
 
 	resp := rec.Result()
@@ -603,7 +603,7 @@ func TestWriteJSON(t *testing.T) {
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	var decoded map[string]interface{}
+	var decoded map[string]any
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatalf("unmarshal response body: %v", err)
 	}
@@ -632,7 +632,7 @@ func TestWriteError(t *testing.T) {
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-	var decoded map[string]interface{}
+	var decoded map[string]any
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		t.Fatalf("unmarshal response body: %v", err)
 	}
@@ -645,7 +645,7 @@ func TestWriteJSON_EmptyBody(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	rec := httptest.NewRecorder()
 
-	p.writeJSON(rec, http.StatusOK, map[string]interface{}{})
+	p.writeJSON(rec, http.StatusOK, map[string]any{})
 
 	resp := rec.Result()
 	defer resp.Body.Close()
@@ -689,7 +689,7 @@ func TestTenantID(t *testing.T) {
 func TestToFloat64(t *testing.T) {
 	tests := []struct {
 		name  string
-		input interface{}
+		input any
 		want  float64
 		ok    bool
 	}{
@@ -720,7 +720,7 @@ func TestToFloat64(t *testing.T) {
 func TestValuesEqual(t *testing.T) {
 	tests := []struct {
 		name string
-		a, b interface{}
+		a, b any
 		want bool
 	}{
 		{"float64 equal", float64(100), float64(100), true},
@@ -748,7 +748,7 @@ func TestValuesEqual(t *testing.T) {
 
 func TestCompareValues(t *testing.T) {
 	t.Run("string comparisons", func(t *testing.T) {
-		data := map[string]interface{}{"status": "active"}
+		data := map[string]any{"status": "active"}
 		ce := comparisonExpr{
 			path: []pathStep{{field: "status"}},
 			op:   "==",
@@ -814,7 +814,7 @@ func TestCompareValues(t *testing.T) {
 	})
 
 	t.Run("bool comparisons", func(t *testing.T) {
-		data := map[string]interface{}{"flag": true}
+		data := map[string]any{"flag": true}
 		ce := comparisonExpr{
 			path: []pathStep{{field: "flag"}},
 			op:   "==",
@@ -846,7 +846,7 @@ func TestCompareValues(t *testing.T) {
 	})
 
 	t.Run("null comparisons", func(t *testing.T) {
-		data := map[string]interface{}{"value": nil}
+		data := map[string]any{"value": nil}
 		ce := comparisonExpr{
 			path: []pathStep{{field: "value"}},
 			op:   "==",
@@ -877,7 +877,7 @@ func TestCompareValues(t *testing.T) {
 	})
 
 	t.Run("type mismatch errors", func(t *testing.T) {
-		data := map[string]interface{}{"amount": float64(100)}
+		data := map[string]any{"amount": float64(100)}
 		ce := comparisonExpr{
 			path: []pathStep{{field: "amount"}},
 			op:   "==",
@@ -890,7 +890,7 @@ func TestCompareValues(t *testing.T) {
 	})
 
 	t.Run("evalPath error", func(t *testing.T) {
-		data := map[string]interface{}{}
+		data := map[string]any{}
 		ce := comparisonExpr{
 			path: []pathStep{{field: "nonexistent"}},
 			op:   "==",
@@ -923,7 +923,7 @@ func TestMatchConditionFieldNotFound(t *testing.T) {
 
 func TestGetPathEdgeCases(t *testing.T) {
 	t.Run("invalid array index", func(t *testing.T) {
-		data := map[string]interface{}{"items": []interface{}{"a", "b"}}
+		data := map[string]any{"items": []any{"a", "b"}}
 		_, found := getPath(data, "items[invalid]")
 		if found {
 			t.Error("expected found=false for invalid array index string")
@@ -931,7 +931,7 @@ func TestGetPathEdgeCases(t *testing.T) {
 	})
 
 	t.Run("index out of bounds", func(t *testing.T) {
-		data := map[string]interface{}{"items": []interface{}{"a", "b"}}
+		data := map[string]any{"items": []any{"a", "b"}}
 		_, found := getPath(data, "items[5]")
 		if found {
 			t.Error("expected found=false for out-of-bounds index")
@@ -939,7 +939,7 @@ func TestGetPathEdgeCases(t *testing.T) {
 	})
 
 	t.Run("negative index", func(t *testing.T) {
-		data := map[string]interface{}{"items": []interface{}{"a", "b"}}
+		data := map[string]any{"items": []any{"a", "b"}}
 		_, found := getPath(data, "items[-1]")
 		if found {
 			t.Error("expected found=false for negative index")
@@ -947,7 +947,7 @@ func TestGetPathEdgeCases(t *testing.T) {
 	})
 
 	t.Run("index into non-array", func(t *testing.T) {
-		data := map[string]interface{}{"items": "not-an-array"}
+		data := map[string]any{"items": "not-an-array"}
 		_, found := getPath(data, "items[0]")
 		if found {
 			t.Error("expected found=false for indexing non-array")
@@ -955,8 +955,8 @@ func TestGetPathEdgeCases(t *testing.T) {
 	})
 
 	t.Run("field not found after array", func(t *testing.T) {
-		data := map[string]interface{}{"items": []interface{}{
-			map[string]interface{}{"sku": "ABC"},
+		data := map[string]any{"items": []any{
+			map[string]any{"sku": "ABC"},
 		}}
 		_, found := getPath(data, "items[0].missing")
 		if found {
@@ -965,7 +965,7 @@ func TestGetPathEdgeCases(t *testing.T) {
 	})
 
 	t.Run("path into non-object", func(t *testing.T) {
-		data := map[string]interface{}{"items": []interface{}{"a", "b"}}
+		data := map[string]any{"items": []any{"a", "b"}}
 		_, found := getPath(data, "items[0].field")
 		if found {
 			t.Error("expected found=false for accessing field on string")
@@ -978,7 +978,7 @@ func TestGetPathEdgeCases(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestEvaluateFilterMembershipExpr(t *testing.T) {
-	data := map[string]interface{}{
+	data := map[string]any{
 		"status": "active",
 	}
 
@@ -1012,13 +1012,13 @@ func TestEvaluateFilterMembershipExpr(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMatchOperatorsExtraBranches(t *testing.T) {
-	data := map[string]interface{}{
-		"event": map[string]interface{}{
-			"data": map[string]interface{}{
+	data := map[string]any{
+		"event": map[string]any{
+			"data": map[string]any{
 				"amount": float64(100),
 				"status": "active",
 				"flag":   true,
-				"items":  []interface{}{"a", "b"},
+				"items":  []any{"a", "b"},
 			},
 		},
 	}
@@ -1114,9 +1114,9 @@ func TestMatchOperatorsExtraBranches(t *testing.T) {
 
 func TestEvaluateFilterEdgeCases(t *testing.T) {
 	t.Run("$gt with non-number operand silently fails", func(t *testing.T) {
-		data := map[string]interface{}{
-			"event": map[string]interface{}{
-				"data": map[string]interface{}{
+		data := map[string]any{
+			"event": map[string]any{
+				"data": map[string]any{
 					"amount": float64(100),
 				},
 			},
@@ -1131,9 +1131,9 @@ func TestEvaluateFilterEdgeCases(t *testing.T) {
 	})
 
 	t.Run("$in with non-array operand", func(t *testing.T) {
-		data := map[string]interface{}{
-			"event": map[string]interface{}{
-				"data": map[string]interface{}{
+		data := map[string]any{
+			"event": map[string]any{
+				"data": map[string]any{
 					"status": "active",
 				},
 			},
@@ -1145,9 +1145,9 @@ func TestEvaluateFilterEdgeCases(t *testing.T) {
 	})
 
 	t.Run("$nin with non-array operand", func(t *testing.T) {
-		data := map[string]interface{}{
-			"event": map[string]interface{}{
-				"data": map[string]interface{}{
+		data := map[string]any{
+			"event": map[string]any{
+				"data": map[string]any{
 					"status": "active",
 				},
 			},
@@ -1349,7 +1349,7 @@ func TestEvalMembershipPathError(t *testing.T) {
 		path: []pathStep{{field: "nonexistent"}},
 		lits: []literal{{isString: true, strVal: "x"}},
 	}
-	data := map[string]interface{}{}
+	data := map[string]any{}
 	_, err := evalMembership(me, data)
 	if err == nil {
 		t.Error("expected path-not-found error for membershipExpr")
@@ -1395,9 +1395,9 @@ func TestEvaluateFilterParseErrors(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMatchOperatorsExistsNonBool(t *testing.T) {
-	data := map[string]interface{}{
-		"event": map[string]interface{}{
-			"data": map[string]interface{}{
+	data := map[string]any{
+		"event": map[string]any{
+			"data": map[string]any{
 				"amount": float64(100),
 			},
 		},
@@ -1456,7 +1456,7 @@ func TestParserErrorBranches(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestTokenizerNegativeNumber(t *testing.T) {
-	data := map[string]interface{}{"amount": -5.0}
+	data := map[string]any{"amount": -5.0}
 	result, err := EvaluateFilter(`event.data.amount == -5`, data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1467,7 +1467,7 @@ func TestTokenizerNegativeNumber(t *testing.T) {
 }
 
 func TestTokenizerDecimalNumber(t *testing.T) {
-	data := map[string]interface{}{"price": 99.5}
+	data := map[string]any{"price": 99.5}
 	result, err := EvaluateFilter(`event.data.price == 99.5`, data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1478,7 +1478,7 @@ func TestTokenizerDecimalNumber(t *testing.T) {
 }
 
 func TestTokenizerTrueKeyword(t *testing.T) {
-	data := map[string]interface{}{"flag": true}
+	data := map[string]any{"flag": true}
 	result, err := EvaluateFilter(`event.data.flag == true`, data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1489,7 +1489,7 @@ func TestTokenizerTrueKeyword(t *testing.T) {
 }
 
 func TestTokenizerFalseKeyword(t *testing.T) {
-	data := map[string]interface{}{"flag": false}
+	data := map[string]any{"flag": false}
 	result, err := EvaluateFilter(`event.data.flag == false`, data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1540,9 +1540,9 @@ func TestParseExprTrueLiteral(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMatchOperatorsEq(t *testing.T) {
-	data := map[string]interface{}{
-		"event": map[string]interface{}{
-			"data": map[string]interface{}{
+	data := map[string]any{
+		"event": map[string]any{
+			"data": map[string]any{
 				"amount": float64(100),
 				"status": "active",
 			},
@@ -1581,9 +1581,9 @@ func TestMatchOperatorsEq(t *testing.T) {
 }
 
 func TestMatchOperatorsLtLte(t *testing.T) {
-	data := map[string]interface{}{
-		"event": map[string]interface{}{
-			"data": map[string]interface{}{
+	data := map[string]any{
+		"event": map[string]any{
+			"data": map[string]any{
 				"amount": float64(100),
 			},
 		},
@@ -1641,9 +1641,9 @@ func TestMatchOperatorsLtLte(t *testing.T) {
 }
 
 func TestMatchOperatorsExistsEdgeCases(t *testing.T) {
-	data := map[string]interface{}{
-		"event": map[string]interface{}{
-			"data": map[string]interface{}{
+	data := map[string]any{
+		"event": map[string]any{
+			"data": map[string]any{
 				"amount": float64(100),
 			},
 		},
@@ -1677,7 +1677,7 @@ func TestMatchOperatorsExistsEdgeCases(t *testing.T) {
 func TestEvalPathErrors(t *testing.T) {
 	t.Run("array index on non-array", func(t *testing.T) {
 		_, err := evalPath(
-			map[string]interface{}{"items": "not-an-array"},
+			map[string]any{"items": "not-an-array"},
 			[]pathStep{{isIndex: true, index: 0}},
 		)
 		if err == nil {
@@ -1687,7 +1687,7 @@ func TestEvalPathErrors(t *testing.T) {
 
 	t.Run("field on non-object", func(t *testing.T) {
 		_, err := evalPath(
-			map[string]interface{}{"items": []interface{}{"a", "b"}},
+			map[string]any{"items": []any{"a", "b"}},
 			[]pathStep{{isIndex: true, index: 0}, {field: "field"}},
 		)
 		if err == nil {
@@ -1713,9 +1713,9 @@ func TestPeekEOFBranch(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMatchOperatorsGte(t *testing.T) {
-	data := map[string]interface{}{
-		"event": map[string]interface{}{
-			"data": map[string]interface{}{
+	data := map[string]any{
+		"event": map[string]any{
+			"data": map[string]any{
 				"amount": float64(100),
 			},
 		},
@@ -1768,7 +1768,7 @@ func TestMatchOperatorsGte(t *testing.T) {
 
 func TestEvalPathArrayOutOfBounds(t *testing.T) {
 	_, err := evalPath(
-		map[string]interface{}{"items": []interface{}{"a", "b"}},
+		map[string]any{"items": []any{"a", "b"}},
 		[]pathStep{{field: "items"}, {isIndex: true, index: 5}},
 	)
 	if err == nil {
@@ -1793,7 +1793,7 @@ func TestEvalMembershipTypeMismatch(t *testing.T) {
 			{isBool: true, boolVal: false},
 		},
 	}
-	data := map[string]interface{}{"amount": float64(100)}
+	data := map[string]any{"amount": float64(100)}
 	result, err := evalMembership(me, data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1869,7 +1869,7 @@ func TestGetPathBracketNoSuffix(t *testing.T) {
 	// Path "items[0" has '[' but no ']'. HasSuffix returns false so the code
 	// falls through to regular field lookup for the literal key "items[0".
 	// Since the map has only "items" (not "items[0"), the lookup fails.
-	data := map[string]interface{}{"items": []interface{}{"a", "b"}}
+	data := map[string]any{"items": []any{"a", "b"}}
 	_, found := getPath(data, "items[0")
 	if found {
 		t.Error("expected found=false for path with '[' but no ']'")
@@ -1918,7 +1918,7 @@ func TestInitExplicitLogger(t *testing.T) {
 
 func TestCompareValuesExtraBranches(t *testing.T) {
 	t.Run("string value with non-string literal", func(t *testing.T) {
-		data := map[string]interface{}{"status": "active"}
+		data := map[string]any{"status": "active"}
 		ce := comparisonExpr{
 			path: []pathStep{{field: "status"}},
 			op:   "==",
@@ -1931,7 +1931,7 @@ func TestCompareValuesExtraBranches(t *testing.T) {
 	})
 
 	t.Run("bool value with non-bool literal", func(t *testing.T) {
-		data := map[string]interface{}{"flag": true}
+		data := map[string]any{"flag": true}
 		ce := comparisonExpr{
 			path: []pathStep{{field: "flag"}},
 			op:   "==",
@@ -1944,7 +1944,7 @@ func TestCompareValuesExtraBranches(t *testing.T) {
 	})
 
 	t.Run("nil value with non-null literal", func(t *testing.T) {
-		data := map[string]interface{}{"value": nil}
+		data := map[string]any{"value": nil}
 		ce := comparisonExpr{
 			path: []pathStep{{field: "value"}},
 			op:   "==",
@@ -1999,10 +1999,10 @@ func TestCompareNumeric(t *testing.T) {
 
 func TestGetPathNestedAccess(t *testing.T) {
 	t.Run("deeply nested paths", func(t *testing.T) {
-		data := map[string]interface{}{
-			"a": map[string]interface{}{
-				"b": map[string]interface{}{
-					"c": map[string]interface{}{
+		data := map[string]any{
+			"a": map[string]any{
+				"b": map[string]any{
+					"c": map[string]any{
 						"d": "found",
 					},
 				},
@@ -2018,10 +2018,10 @@ func TestGetPathNestedAccess(t *testing.T) {
 	})
 
 	t.Run("array element then nested field", func(t *testing.T) {
-		data := map[string]interface{}{
-			"items": []interface{}{
-				map[string]interface{}{"sku": "ABC", "price": 10.0},
-				map[string]interface{}{"sku": "DEF", "price": 20.0},
+		data := map[string]any{
+			"items": []any{
+				map[string]any{"sku": "ABC", "price": 10.0},
+				map[string]any{"sku": "DEF", "price": 20.0},
 			},
 		}
 		val, found := getPath(data, "items[1].sku")
@@ -2034,10 +2034,10 @@ func TestGetPathNestedAccess(t *testing.T) {
 	})
 
 	t.Run("index into map then field access into nested object", func(t *testing.T) {
-		data := map[string]interface{}{
-			"items": []interface{}{
-				map[string]interface{}{
-					"nested": map[string]interface{}{"value": float64(42)},
+		data := map[string]any{
+			"items": []any{
+				map[string]any{
+					"nested": map[string]any{"value": float64(42)},
 				},
 			},
 		}
@@ -2051,7 +2051,7 @@ func TestGetPathNestedAccess(t *testing.T) {
 	})
 
 	t.Run("simple path without dots", func(t *testing.T) {
-		data := map[string]interface{}{"key": "value"}
+		data := map[string]any{"key": "value"}
 		val, found := getPath(data, "key")
 		if !found {
 			t.Error("expected found=true for simple path key")
@@ -2068,7 +2068,7 @@ func TestGetPathNestedAccess(t *testing.T) {
 
 func TestMatchConditionOperatorMapEdges(t *testing.T) {
 	t.Run("$lte with missing field", func(t *testing.T) {
-		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$lte": float64(100)})
+		matched, err := matchCondition("path", nil, false, map[string]any{"$lte": float64(100)})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -2078,7 +2078,7 @@ func TestMatchConditionOperatorMapEdges(t *testing.T) {
 	})
 
 	t.Run("$ne with missing field matches", func(t *testing.T) {
-		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$ne": "value"})
+		matched, err := matchCondition("path", nil, false, map[string]any{"$ne": "value"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -2088,7 +2088,7 @@ func TestMatchConditionOperatorMapEdges(t *testing.T) {
 	})
 
 	t.Run("$eq with missing field does not match", func(t *testing.T) {
-		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$eq": "value"})
+		matched, err := matchCondition("path", nil, false, map[string]any{"$eq": "value"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -2098,7 +2098,7 @@ func TestMatchConditionOperatorMapEdges(t *testing.T) {
 	})
 
 	t.Run("$gt with missing field does not match", func(t *testing.T) {
-		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$gt": float64(100)})
+		matched, err := matchCondition("path", nil, false, map[string]any{"$gt": float64(100)})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -2116,14 +2116,14 @@ func TestTokenizerAllOperators(t *testing.T) {
 	tests := []struct {
 		input string
 		desc  string
-		data  map[string]interface{}
+		data  map[string]any
 	}{
-		{`event.data.x == 5`, "eq operator", map[string]interface{}{"x": float64(5)}},
-		{`event.data.x != 5`, "neq operator", map[string]interface{}{"x": float64(5)}},
-		{`event.data.x > 5`, "gt operator", map[string]interface{}{"x": float64(10)}},
-		{`event.data.x < 5`, "lt operator", map[string]interface{}{"x": float64(1)}},
-		{`event.data.x >= 5`, "gte operator", map[string]interface{}{"x": float64(5)}},
-		{`event.data.x <= 5`, "lte operator", map[string]interface{}{"x": float64(5)}},
+		{`event.data.x == 5`, "eq operator", map[string]any{"x": float64(5)}},
+		{`event.data.x != 5`, "neq operator", map[string]any{"x": float64(5)}},
+		{`event.data.x > 5`, "gt operator", map[string]any{"x": float64(10)}},
+		{`event.data.x < 5`, "lt operator", map[string]any{"x": float64(1)}},
+		{`event.data.x >= 5`, "gte operator", map[string]any{"x": float64(5)}},
+		{`event.data.x <= 5`, "lte operator", map[string]any{"x": float64(5)}},
 	}
 
 	for _, tt := range tests {
@@ -2170,7 +2170,7 @@ func TestParserAdditionalEdges(t *testing.T) {
 	})
 
 	t.Run("null literal comparison", func(t *testing.T) {
-		data := map[string]interface{}{"value": nil}
+		data := map[string]any{"value": nil}
 		result, err := EvaluateFilter(`event.data.value == null`, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -2181,7 +2181,7 @@ func TestParserAdditionalEdges(t *testing.T) {
 	})
 
 	t.Run("false literal comparison", func(t *testing.T) {
-		data := map[string]interface{}{"flag": false}
+		data := map[string]any{"flag": false}
 		result, err := EvaluateFilter(`event.data.flag == false`, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -2198,7 +2198,7 @@ func TestParserAdditionalEdges(t *testing.T) {
 
 func TestParseLiteralKeywords(t *testing.T) {
 	t.Run("null literal in membership", func(t *testing.T) {
-		data := map[string]interface{}{"value": nil}
+		data := map[string]any{"value": nil}
 		result, err := EvaluateFilter(`event.data.value in(null)`, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -2209,7 +2209,7 @@ func TestParseLiteralKeywords(t *testing.T) {
 	})
 
 	t.Run("bool literal in membership", func(t *testing.T) {
-		data := map[string]interface{}{"flag": true}
+		data := map[string]any{"flag": true}
 		result, err := EvaluateFilter(`event.data.flag in(true, false)`, data)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -2259,7 +2259,7 @@ func TestValuesEqualEdgeCases(t *testing.T) {
 func TestEvalPathAdditionalErrors(t *testing.T) {
 	t.Run("field on non-object intermediate", func(t *testing.T) {
 		_, err := evalPath(
-			map[string]interface{}{"key": "stringval"},
+			map[string]any{"key": "stringval"},
 			[]pathStep{{field: "key"}, {field: "nested"}},
 		)
 		if err == nil {
@@ -2269,7 +2269,7 @@ func TestEvalPathAdditionalErrors(t *testing.T) {
 
 	t.Run("missing field in nested path", func(t *testing.T) {
 		_, err := evalPath(
-			map[string]interface{}{"outer": map[string]interface{}{"inner": "val"}},
+			map[string]any{"outer": map[string]any{"inner": "val"}},
 			[]pathStep{{field: "outer"}, {field: "nonexistent"}},
 		)
 		if err == nil {
@@ -2284,7 +2284,7 @@ func TestEvalPathAdditionalErrors(t *testing.T) {
 
 func TestMatchOperatorsMissingFieldBranches(t *testing.T) {
 	t.Run("$ne existing field that equals value -> not match", func(t *testing.T) {
-		matched, err := matchCondition("path", "active", true, map[string]interface{}{"$ne": "active"})
+		matched, err := matchCondition("path", "active", true, map[string]any{"$ne": "active"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -2294,7 +2294,7 @@ func TestMatchOperatorsMissingFieldBranches(t *testing.T) {
 	})
 
 	t.Run("$lt missing field does not match", func(t *testing.T) {
-		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$lt": float64(100)})
+		matched, err := matchCondition("path", nil, false, map[string]any{"$lt": float64(100)})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -2304,7 +2304,7 @@ func TestMatchOperatorsMissingFieldBranches(t *testing.T) {
 	})
 
 	t.Run("$gte missing field does not match", func(t *testing.T) {
-		matched, err := matchCondition("path", nil, false, map[string]interface{}{"$gte": float64(100)})
+		matched, err := matchCondition("path", nil, false, map[string]any{"$gte": float64(100)})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -2359,16 +2359,16 @@ type etSubscriptionRow struct {
 }
 
 type etIngestedEventRow struct {
-	id        string
-	tenantID  string
-	eventType string
-	eventData string
-	receivedAt time.Time
-	processed bool
-	retryCount int
+	id          string
+	tenantID    string
+	eventType   string
+	eventData   string
+	receivedAt  time.Time
+	processed   bool
+	retryCount  int
 	lastRetryAt *time.Time
-	status    string
-	errorMsg  *string
+	status      string
+	errorMsg    *string
 }
 
 type etAwaiterRow struct {
@@ -2421,16 +2421,18 @@ type etConn struct {
 func (*etConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("etConn: unexpected Prepare call")
 }
-func (*etConn) Close() error      { return nil }
+func (*etConn) Close() error              { return nil }
 func (*etConn) Begin() (driver.Tx, error) { return &etTx{}, nil }
 
 type etTx struct{}
+
 func (*etTx) Commit() error   { return nil }
 func (*etTx) Rollback() error { return nil }
 
 type etResult struct {
 	rowsAffected int64
 }
+
 func (r *etResult) LastInsertId() (int64, error) { return 0, nil }
 func (r *etResult) RowsAffected() (int64, error) { return r.rowsAffected, nil }
 
@@ -2440,8 +2442,8 @@ type etRows struct {
 	pos     int
 }
 
-func (r *etRows) Columns() []string            { return r.columns }
-func (r *etRows) Close() error                 { return nil }
+func (r *etRows) Columns() []string { return r.columns }
+func (r *etRows) Close() error      { return nil }
 func (r *etRows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.data) {
 		return io.EOF
@@ -3437,7 +3439,7 @@ func TestAwaitEventFindsAndConsumesEvent(t *testing.T) {
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	// Call awaitEvent with matching event type.
-	input, _ := json.Marshal(map[string]interface{}{
+	input, _ := json.Marshal(map[string]any{
 		"event_type": "order.created",
 		"timeout_ms": 5000,
 	})
@@ -3485,7 +3487,7 @@ func TestAwaitEventNoEvent(t *testing.T) {
 	ctx := plugin.WithCallContext(context.Background(), cc)
 
 	// When no event, awaitEvent should return Found=false.
-	input, _ := json.Marshal(map[string]interface{}{
+	input, _ := json.Marshal(map[string]any{
 		"event_type": "nonexistent.event",
 		"timeout_ms": 1000,
 	})
@@ -3522,7 +3524,7 @@ func TestAwaitEventWithAwaiterRegistration(t *testing.T) {
 	}
 
 	// No event in store, so awaitEvent should register an awaiter.
-	input, _ := json.Marshal(map[string]interface{}{
+	input, _ := json.Marshal(map[string]any{
 		"event_type": "order.shipped",
 		"timeout_ms": 5000,
 	})
@@ -3835,12 +3837,12 @@ func TestMarkRetryFailed(t *testing.T) {
 			receivedAt: time.Now(),
 		})
 		store.subscriptions = append(store.subscriptions, etSubscriptionRow{
-			id:        uuid.New().String(),
-			tenantID:  etTestTenantStr,
-			eventType: "test.event",
-			defName:   "wf",
+			id:         uuid.New().String(),
+			tenantID:   etTestTenantStr,
+			eventType:  "test.event",
+			defName:    "wf",
 			maxRetries: 1,
-			enabled:   true,
+			enabled:    true,
 		})
 		store.mu.Unlock()
 

@@ -49,8 +49,8 @@ func OpenAIChat(ctx context.Context, client *http.Client, apiKey, baseURL string
 			Message      ChoiceMessage `json:"message"`
 			FinishReason string        `json:"finish_reason"`
 		} `json:"choices"`
-		Usage  Usage  `json:"usage"`
-		Model  string `json:"model"`
+		Usage Usage  `json:"usage"`
+		Model string `json:"model"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return ChatOutput{}, fmt.Errorf("openai: parse response: %w", err)
@@ -89,7 +89,7 @@ func OpenAIChatStream(ctx context.Context, client *http.Client, apiKey, baseURL 
 	}
 
 	// Clone input and enable streaming.
-	bodyMap := map[string]interface{}{}
+	bodyMap := map[string]any{}
 	data, _ := json.Marshal(input)
 	json.Unmarshal(data, &bodyMap)
 	bodyMap["stream"] = true

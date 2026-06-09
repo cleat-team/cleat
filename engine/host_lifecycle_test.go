@@ -14,10 +14,10 @@ type mockWorkflowState struct {
 	minVersion int
 }
 
-func (m *mockWorkflowState) Version() int            { return m.version }
-func (m *mockWorkflowState) MinVersion() int          { return m.minVersion }
+func (m *mockWorkflowState) Version() int                         { return m.version }
+func (m *mockWorkflowState) MinVersion() int                      { return m.minVersion }
 func (m *mockWorkflowState) ChildVersion(name string) (int, bool) { return 0, false }
-func (m *mockWorkflowState) Priority() int            { return 0 }
+func (m *mockWorkflowState) Priority() int                        { return 0 }
 
 // ---------------------------------------------------------------------------
 // Version tests.
@@ -360,9 +360,9 @@ func TestReplyToSignalReplayMatch(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
-		Step:      0,
-		EventType: EventTypeSignalReceived,
-		SignalName: "corr-001",
+		Step:          0,
+		EventType:     EventTypeSignalReceived,
+		SignalName:    "corr-001",
 		SignalPayload: `{"response":"ok"}`,
 	}}
 	result := s.ReplyToSignal(context.Background(), nil, "corr-001", `{"response":"ok"}`)

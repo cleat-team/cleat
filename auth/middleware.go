@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/google/uuid"
 )
 
 type tenantIDKey struct{}

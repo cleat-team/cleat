@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // tokenBucket implements a simple token bucket rate limiter. All operations

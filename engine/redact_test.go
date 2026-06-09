@@ -25,7 +25,7 @@ func TestRedactSensitiveFields(t *testing.T) {
 func TestRedactCaseInsensitive(t *testing.T) {
 	input := `{"TOKEN": "abc123", "Api-Key": "xyz789", "name": "hello"}`
 	got := Redact(input)
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal([]byte(got), &parsed); err != nil {
 		t.Fatalf("invalid JSON output: %v", err)
 	}
@@ -132,24 +132,24 @@ func TestLoadRedactPatternsMissingFile(t *testing.T) {
 }
 
 func TestRedactMap_RecursesIntoArrays(t *testing.T) {
-	input := map[string]interface{}{
-		"items": []interface{}{
-			map[string]interface{}{"token": "secret-in-array"},
+	input := map[string]any{
+		"items": []any{
+			map[string]any{"token": "secret-in-array"},
 		},
 	}
 	RedactMap(input)
-	items := input["items"].([]interface{})
-	first := items[0].(map[string]interface{})
+	items := input["items"].([]any)
+	first := items[0].(map[string]any)
 	if first["token"] != "[REDACTED]" {
 		t.Errorf("array element not redacted: got %v", first["token"])
 	}
 }
 
 func TestRedactMap(t *testing.T) {
-	m := map[string]interface{}{
+	m := map[string]any{
 		"token": "secret",
 		"name":  "Alice",
-		"nested": map[string]interface{}{
+		"nested": map[string]any{
 			"password": "p@ss",
 			"color":    "blue",
 		},
@@ -161,7 +161,7 @@ func TestRedactMap(t *testing.T) {
 	if m["name"] != "Alice" {
 		t.Errorf("name should be preserved, got %v", m["name"])
 	}
-	nested := m["nested"].(map[string]interface{})
+	nested := m["nested"].(map[string]any)
 	if nested["password"] != "[REDACTED]" {
 		t.Errorf("nested password should be redacted, got %v", nested["password"])
 	}
@@ -263,18 +263,18 @@ func TestRedact_NonJSON_JWT(t *testing.T) {
 }
 
 func TestRedactSlice(t *testing.T) {
-	input := []interface{}{
-		map[string]interface{}{"token": "secret", "name": "hello"},
+	input := []any{
+		map[string]any{"token": "secret", "name": "hello"},
 		"plain-string",
 		42,
-		[]interface{}{"nested-list"},
+		[]any{"nested-list"},
 	}
 	result := redactSlice(input)
 	if len(result) != 4 {
 		t.Fatalf("len = %d, want 4", len(result))
 	}
 	// First element: map with redacted field.
-	m, ok := result[0].(map[string]interface{})
+	m, ok := result[0].(map[string]any)
 	if !ok {
 		t.Fatal("first element should be a map")
 	}
@@ -294,7 +294,7 @@ func TestRedactSlice(t *testing.T) {
 }
 
 func TestRedactMap_NonRecursedTypes(t *testing.T) {
-	m := map[string]interface{}{
+	m := map[string]any{
 		"name":   "Alice",
 		"count":  42,
 		"active": true,
@@ -316,17 +316,17 @@ func TestRedactMap_NonRecursedTypes(t *testing.T) {
 }
 
 func TestRedactMap_DeeplyNested(t *testing.T) {
-	m := map[string]interface{}{
-		"nested": map[string]interface{}{
-			"deep": map[string]interface{}{
+	m := map[string]any{
+		"nested": map[string]any{
+			"deep": map[string]any{
 				"token": "deep-secret",
 				"color": "red",
 			},
 		},
 	}
 	RedactMap(m)
-	nested := m["nested"].(map[string]interface{})
-	deep := nested["deep"].(map[string]interface{})
+	nested := m["nested"].(map[string]any)
+	deep := nested["deep"].(map[string]any)
 	if deep["token"] != "[REDACTED]" {
 		t.Errorf("deeply nested token should be redacted, got %v", deep["token"])
 	}

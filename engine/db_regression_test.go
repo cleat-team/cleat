@@ -370,4 +370,3 @@ func TestPostgresStore_VerifyWorkflowEvents_Mismatch(t *testing.T) {
 		t.Errorf("expected 'checksum mismatch' error, got: %v", err)
 	}
 }
-

@@ -41,7 +41,7 @@ type Task struct {
 // TaskContext provides the task with HostCalls and access to parent outputs.
 type TaskContext struct {
 	H            cleat.HostCalls
-	Input        interface{}
+	Input        any
 	ParentOutput func(parentName string) (string, error)
 }
 
@@ -112,7 +112,7 @@ func (d *DAG) Output(name string) (string, bool) {
 // input can be:
 //   - map[string]RawMessage — per-task inputs keyed by task name
 //   - any other value — used as the input for all tasks
-func (d *DAG) Execute(h cleat.HostCalls, input interface{}) error {
+func (d *DAG) Execute(h cleat.HostCalls, input any) error {
 	return d.ExecuteWithOptions(h, input, ExecuteOptions{})
 }
 
@@ -133,7 +133,7 @@ func (d *DAG) Execute(h cleat.HostCalls, input interface{}) error {
 // input can be:
 //   - map[string]RawMessage — per-task inputs keyed by task name
 //   - any other value — used as the input for all tasks
-func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts ExecuteOptions) error {
+func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input any, opts ExecuteOptions) error {
 	if err := d.validate(); err != nil {
 		return err
 	}
@@ -146,7 +146,7 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts Exec
 	d.outputs = make(map[string]string)
 
 	// Build dependency graph.
-	unsatisfied := make(map[string]int)    // task name -> count of unsatisfied deps
+	unsatisfied := make(map[string]int)     // task name -> count of unsatisfied deps
 	dependents := make(map[string][]string) // task name -> dependent task names
 
 	for name, task := range d.tasks {
@@ -237,7 +237,7 @@ func (d *DAG) ExecuteWithOptions(h cleat.HostCalls, input interface{}, opts Exec
 }
 
 // startChild creates a single child workflow for the given task.
-func (d *DAG) startChild(h cleat.HostCalls, task *Task, defaultInput interface{}, perTaskInputs map[string]RawMessage) (string, error) {
+func (d *DAG) startChild(h cleat.HostCalls, task *Task, defaultInput any, perTaskInputs map[string]RawMessage) (string, error) {
 	inputJSON, err := d.taskInput(task, defaultInput, perTaskInputs)
 	if err != nil {
 		return "", err
@@ -310,7 +310,7 @@ func taskLess(a, b *Task) bool {
 // raw JSON without wrapping — the target workflow receives its native input
 // format. Otherwise the input is wrapped with task name, input, and parent
 // outputs via buildTaskInput.
-func (d *DAG) taskInput(task *Task, defaultInput interface{}, perTaskInputs map[string]RawMessage) ([]byte, error) {
+func (d *DAG) taskInput(task *Task, defaultInput any, perTaskInputs map[string]RawMessage) ([]byte, error) {
 	if task.WorkflowName != "" {
 		// Pass raw input through — the target workflow expects its own format.
 		if raw, ok := perTaskInputs[task.Name]; ok {
@@ -334,8 +334,8 @@ func (d *DAG) taskInput(task *Task, defaultInput interface{}, perTaskInputs map[
 }
 
 // buildTaskInput constructs the wrapped JSON input for a child workflow task.
-func (d *DAG) buildTaskInput(task *Task, input interface{}) ([]byte, error) {
-	wrapped := map[string]interface{}{
+func (d *DAG) buildTaskInput(task *Task, input any) ([]byte, error) {
+	wrapped := map[string]any{
 		"task":           task.Name,
 		"input":          input,
 		"parent_outputs": d.buildParentOutputs(task, d.outputs),
@@ -392,7 +392,7 @@ func appendQuotedJSON(dst []byte, s string) []byte {
 }
 
 // marshalToJSON encodes common types to JSON without encoding/json.
-func marshalToJSON(v interface{}) ([]byte, error) {
+func marshalToJSON(v any) ([]byte, error) {
 	switch val := v.(type) {
 	case RawMessage:
 		if len(val) == 0 {
@@ -403,7 +403,7 @@ func marshalToJSON(v interface{}) ([]byte, error) {
 		return appendQuotedJSON(nil, val), nil
 	case map[string]string:
 		return buildStringMapJSON(val), nil
-	case map[string]interface{}:
+	case map[string]any:
 		return buildInterfaceMapJSON(val)
 	case nil:
 		return []byte("{}"), nil
@@ -432,7 +432,7 @@ func buildStringMapJSON(m map[string]string) []byte {
 	return b
 }
 
-func buildInterfaceMapJSON(m map[string]interface{}) ([]byte, error) {
+func buildInterfaceMapJSON(m map[string]any) ([]byte, error) {
 	if len(m) == 0 {
 		return []byte("{}"), nil
 	}

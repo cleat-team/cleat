@@ -112,8 +112,8 @@ func TestStripCustomSection_NotFound(t *testing.T) {
 
 func TestValidate_Errors(t *testing.T) {
 	tests := []struct {
-		name  string
-		meta  Metadata
+		name   string
+		meta   Metadata
 		errMsg string
 	}{
 		{"empty name", Metadata{}, "workflow_name is empty"},

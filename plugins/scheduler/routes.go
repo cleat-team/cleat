@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -28,7 +28,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -136,11 +136,11 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	p.logger.Info("scheduler: created", "id", id, "tenant", tid, "name", req.Name)
 
-	p.writeJSON(w, 201, map[string]interface{}{
-		"id":         id,
-		"name":       req.Name,
-		"cron":       req.Cron,
-		"enabled":    enabled,
+	p.writeJSON(w, 201, map[string]any{
+		"id":          id,
+		"name":        req.Name,
+		"cron":        req.Cron,
+		"enabled":     enabled,
 		"next_run_at": next,
 	})
 }
@@ -287,7 +287,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	// Build dynamic UPDATE query.
 	query := `UPDATE schedules SET updated_at = now()`
-	args := []interface{}{}
+	args := []any{}
 	argIdx := 1
 
 	if req.Name != nil {
@@ -409,7 +409,7 @@ func (p *Plugin) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		"input", string(inputBytes),
 	)
 
-	p.writeJSON(w, 200, map[string]interface{}{
+	p.writeJSON(w, 200, map[string]any{
 		"status":        "triggered",
 		"schedule_id":   id,
 		"workflow_name": workflowName,

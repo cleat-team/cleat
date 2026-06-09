@@ -34,17 +34,17 @@ func New() plugin.Plugin {
 
 // Plugin implements append-only event streams with tenant isolation.
 type Plugin struct {
-db     plugin.PluginDB
-	mux    *http.ServeMux
-	logger *slog.Logger
-	config Config
+	db      plugin.PluginDB
+	mux     *http.ServeMux
+	logger  *slog.Logger
+	config  Config
 	dialect plugin.Dialect
 }
 
 // Config controls eventstore parameters.
 type Config struct {
-	MaxEventSize  int `json:"max_event_size"`  // max event body bytes; default 1 MB
-	RetentionDays int `json:"retention_days"`  // days to keep events; <=0 disables cleanup, default 30
+	MaxEventSize  int `json:"max_event_size"` // max event body bytes; default 1 MB
+	RetentionDays int `json:"retention_days"` // days to keep events; <=0 disables cleanup, default 30
 }
 
 // Info returns plugin metadata for discovery and documentation.

@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -511,7 +511,7 @@ func (c *fakeConn) queryDueSchedules(args []driver.NamedValue, corrupt bool) (dr
 			// Return a row with a wrong type for next_run_at (should be time.Time)
 			return &fakeRows{
 				columns: []string{"id", "tenant_id", "name", "cron", "workflow_name", "input", "next_run_at"},
-				data: [][]driver.Value{{s.id, s.tenantID, s.name, s.cron, s.workflowName, s.input, "not-a-time"}},
+				data:    [][]driver.Value{{s.id, s.tenantID, s.name, s.cron, s.workflowName, s.input, "not-a-time"}},
 			}, nil
 		}
 		first = false
@@ -631,7 +631,7 @@ func TestScheduleCreate(t *testing.T) {
 		t.Fatalf("POST /schedules: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -689,7 +689,7 @@ func TestScheduleList(t *testing.T) {
 		t.Fatalf("GET /schedules: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var schedules []map[string]interface{}
+	var schedules []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &schedules); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -709,7 +709,7 @@ func TestScheduleGet(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -720,7 +720,7 @@ func TestScheduleGet(t *testing.T) {
 		t.Fatalf("GET: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var got map[string]interface{}
+	var got map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &got)
 	if got["name"] != "get-test" {
 		t.Errorf("expected name 'get-test', got %q", got["name"])
@@ -749,7 +749,7 @@ func TestScheduleUpdate(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -785,7 +785,7 @@ func TestScheduleDelete(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -819,7 +819,7 @@ func TestScheduleTrigger(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -830,7 +830,7 @@ func TestScheduleTrigger(t *testing.T) {
 		t.Fatalf("trigger: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var result map[string]interface{}
+	var result map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &result)
 	if result["status"] != "triggered" {
 		t.Errorf("expected status 'triggered', got %q", result["status"])
@@ -864,7 +864,7 @@ func TestScheduleEnableDisable(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -885,7 +885,7 @@ func TestScheduleEnableDisable(t *testing.T) {
 		t.Fatalf("GET: expected 200, got %d", rec.Code)
 	}
 
-	var sched map[string]interface{}
+	var sched map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &sched)
 	if sched["enabled"] != true {
 		t.Error("expected enabled=true after update")
@@ -914,7 +914,7 @@ func TestScheduleNextRunCalculation(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
 
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -926,7 +926,7 @@ func TestScheduleNextRunCalculation(t *testing.T) {
 		t.Fatalf("GET: expected 200, got %d", rec.Code)
 	}
 
-	var sched map[string]interface{}
+	var sched map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &sched)
 	if sched["next_run_at"] == nil {
 		t.Error("expected next_run_at to be set")
@@ -1470,7 +1470,7 @@ func TestScheduleCreateWithInput(t *testing.T) {
 		t.Fatalf("POST /schedules: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -1784,7 +1784,7 @@ func TestScheduleUpdate_InvalidCron(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -1809,7 +1809,7 @@ func TestScheduleUpdate_ExecError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -1838,7 +1838,7 @@ func TestScheduleDelete_ExecError(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -1944,14 +1944,18 @@ func (*rowsErrFakeRows) Err() error { return fmt.Errorf("simulated rows iteratio
 
 type rowsErrConnector struct{ store *fakeDBStore }
 
-func (c *rowsErrConnector) Connect(_ context.Context) (driver.Conn, error) { return &rowsErrConn{store: c.store}, nil }
+func (c *rowsErrConnector) Connect(_ context.Context) (driver.Conn, error) {
+	return &rowsErrConn{store: c.store}, nil
+}
 func (c *rowsErrConnector) Driver() driver.Driver { return &rowsErrDrv{} }
 
 type rowsErrConn struct{ store *fakeDBStore }
 
-func (*rowsErrConn) Prepare(_ string) (driver.Stmt, error) { return nil, fmt.Errorf("rowsErrConn: unexpected Prepare") }
-func (*rowsErrConn) Close() error                           { return nil }
-func (*rowsErrConn) Begin() (driver.Tx, error)              { return nil, fmt.Errorf("rowsErrConn: no tx") }
+func (*rowsErrConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("rowsErrConn: unexpected Prepare")
+}
+func (*rowsErrConn) Close() error              { return nil }
+func (*rowsErrConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("rowsErrConn: no tx") }
 func (c *rowsErrConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	if strings.Contains(query, "FOR UPDATE SKIP LOCKED") || strings.Contains(query, "next_run_at <= now()") {
 		return &rowsErrFakeRows{}, nil
@@ -2134,7 +2138,7 @@ func TestRunDueSchedules_RowsErr(t *testing.T) {
 	p := &Plugin{
 		db:     &engine.SQLDBAdapter{DB: db},
 		logger: slog.Default(),
-		env: &plugin.Environment{DB: &engine.SQLDBAdapter{DB: db}},
+		env:    &plugin.Environment{DB: &engine.SQLDBAdapter{DB: db}},
 	}
 
 	// Should not panic — rows.Err() is logged but not returned.
@@ -2164,7 +2168,7 @@ func TestScheduleUpdate_Cron(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -2192,7 +2196,7 @@ func TestScheduleUpdate_WorkflowName(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 
@@ -2220,7 +2224,7 @@ func TestScheduleUpdate_Input(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d", rec.Code)
 	}
-	var created map[string]interface{}
+	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	schedID := created["id"].(string)
 

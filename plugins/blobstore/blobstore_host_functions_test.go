@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------

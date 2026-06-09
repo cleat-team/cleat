@@ -23,8 +23,8 @@ import (
 	"github.com/tetratelabs/wazero/api"
 	"github.com/tetratelabs/wazero/experimental"
 
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/internal/telemetry"
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/wasm"
 )
 
@@ -1046,15 +1046,15 @@ func (e *Engine) executeWithBackend(
 	}
 
 	session := &execSession{
-		engine:     e,
-		history:    replayHistory,
-		isReplay:   len(replayHistory) > 0,
-		nowMs:      now,
-		deferrals:  make(map[string]string),
-		workflowID: e.workflowID,
-		defName:    e.defName,
-		execRunID:  e.workflowID,
-		tenantID:   e.tenantID,
+		engine:       e,
+		history:      replayHistory,
+		isReplay:     len(replayHistory) > 0,
+		nowMs:        now,
+		deferrals:    make(map[string]string),
+		workflowID:   e.workflowID,
+		defName:      e.defName,
+		execRunID:    e.workflowID,
+		tenantID:     e.tenantID,
 		stepCallback: e.stepCallback,
 	}
 
@@ -1103,30 +1103,30 @@ func (e *Engine) executeWithBackend(
 		}
 	}
 
-		// Use a per-execution backend instance to prevent data races on
-		// the handler/work-data fields when Execute is called concurrently.
-		execBackend := backend.PerExecution()
-		res, callErr := execBackend.Execute(execCtx, wasmBytes, entryPoint, input, session)
-		// wasmtime does not propagate Go context cancellation during
-		// fn.Call, so check for deadline exceeded post-execution.
-		if callErr == nil && execCtx.Err() == context.DeadlineExceeded {
-			if len(session.deferrals) > 0 {
-				e.runDefers(context.Background(), wasmBytes, session.deferrals)
-			}
-			session.releaseHeldScopes(context.Background())
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution timed out", e.workflowID)
+	// Use a per-execution backend instance to prevent data races on
+	// the handler/work-data fields when Execute is called concurrently.
+	execBackend := backend.PerExecution()
+	res, callErr := execBackend.Execute(execCtx, wasmBytes, entryPoint, input, session)
+	// wasmtime does not propagate Go context cancellation during
+	// fn.Call, so check for deadline exceeded post-execution.
+	if callErr == nil && execCtx.Err() == context.DeadlineExceeded {
+		if len(session.deferrals) > 0 {
+			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
-		if callErr != nil && session.suspendErr == nil {
-			// Non-suspend error (trap, panic, timeout, or cancellation).
-			// Try running defers on a fresh module.
-			if len(session.deferrals) > 0 {
-				e.runDefers(context.Background(), wasmBytes, session.deferrals)
-			}
-			session.releaseHeldScopes(context.Background())
-			if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
-			}
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr)
+		session.releaseHeldScopes(context.Background())
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution timed out", e.workflowID)
+	}
+	if callErr != nil && session.suspendErr == nil {
+		// Non-suspend error (trap, panic, timeout, or cancellation).
+		// Try running defers on a fresh module.
+		if len(session.deferrals) > 0 {
+			e.runDefers(context.Background(), wasmBytes, session.deferrals)
+		}
+		session.releaseHeldScopes(context.Background())
+		if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %s", e.workflowID, enriched)
+		}
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr)
 	}
 
 	if res.Suspended || session.suspendErr != nil {
@@ -1134,9 +1134,9 @@ func (e *Engine) executeWithBackend(
 		if se == nil {
 			se = &SuspendError{Reason: "workflow suspended"}
 		}
-			if se.Until.IsZero() {
-				se.Until = time.Now().Add(30 * time.Second)
-			}
+		if se.Until.IsZero() {
+			se.Until = time.Now().Add(30 * time.Second)
+		}
 
 		susResult := &SuspendResult{
 			History:      session.history,
@@ -1466,8 +1466,8 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 		})
 
 		execStdout.Reset()
-			execStderr.Reset()
-			mod, err := e.rt.instantiateModuleNamedWithWriters(instantiateCtx, cm, fmt.Sprintf("__core_%d__", i), &execStdout, &execStderr)
+		execStderr.Reset()
+		mod, err := e.rt.instantiateModuleNamedWithWriters(instantiateCtx, cm, fmt.Sprintf("__core_%d__", i), &execStdout, &execStderr)
 		if err != nil {
 			return "", nil, nil, nil, nil, fmt.Errorf("host: workflow %s: instantiate instance %d (module %d): %w", e.workflowID, i, inst.ModuleIndex, err)
 		}
@@ -1557,9 +1557,9 @@ func (e *Engine) executeComponent(ctx context.Context, bundle *wasm.ComponentBun
 			se := session.suspendErr
 			if se == nil {
 				se = &SuspendError{Reason: "workflow suspended"}
-			if se.Until.IsZero() {
-				se.Until = time.Now().Add(30 * time.Second)
-			}
+				if se.Until.IsZero() {
+					se.Until = time.Now().Add(30 * time.Second)
+				}
 			}
 
 			susResult := &SuspendResult{
@@ -1685,7 +1685,7 @@ type execSession struct {
 	nowMs            int64
 	randomSeq        int64 // monotonic counter for deterministic Random()
 	suspendErr       *SuspendError
-deferrals        map[string]string // registered defer callbacks (deferID -> description)
+	deferrals        map[string]string // registered defer callbacks (deferID -> description)
 	workflowID       string            // parent workflow instance ID (for child workflows)
 	defName          string            // workflow definition name (for metrics labels)
 	execRunID        string            // current execution run ID
@@ -1867,7 +1867,9 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) { return 0 }
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
 
 		if rec.EventType != EventTypeCall {
 			replayFailuresTotal.Inc()
@@ -1930,7 +1932,9 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) { return 0 }
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
 
 		if rec.EventType != EventTypePluginCall {
 			replayFailuresTotal.Inc()
@@ -2226,7 +2230,9 @@ func (s *execSession) replayPluginCallStreaming(ctx context.Context, m api.Modul
 		if rec.EventType != EventTypePluginCallStreamChunk {
 			break
 		}
-		if !s.advanceReplayStep(ctx, &rec) { return 0 }
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
 
 		chunk := plugin.StreamEvent{
 			Index:   rec.StreamChunkIndex,
@@ -2346,7 +2352,9 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 	for s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
 		if rec.EventType == EventTypeHeartbeat {
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			continue
 		}
 		break
@@ -2355,7 +2363,9 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 	// Now find the matching call event.
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) { return 0 }
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
 
 		if rec.EventType != EventTypeCall {
 			replayFailuresTotal.Inc()
@@ -2443,18 +2453,24 @@ func (s *execSession) DurableAwaitSignals(ctx context.Context, m api.Module, sig
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeSignalReceived {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				written, _ := s.writeResult(ctx, m, sigNamePtr, rec.SignalName, sigNameMaxLen)
 				_, _ = s.writeResult(ctx, m, payloadPtr, rec.SignalPayload, payloadMaxLen)
 				return packAwaitSignalsResult(uint32(written), uint32(len(rec.SignalPayload)), false, 0)
 			}
 			if rec.EventType == EventTypeAwaitSignals {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				// Check if there is a following signal_received event.
 				if s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
 					if nextRec.EventType == EventTypeSignalReceived {
-						if !s.advanceReplayStep(ctx, &nextRec) { return 0 }
+						if !s.advanceReplayStep(ctx, &nextRec) {
+							return 0
+						}
 						written, _ := s.writeResult(ctx, m, sigNamePtr, nextRec.SignalName, sigNameMaxLen)
 						_, _ = s.writeResult(ctx, m, payloadPtr, nextRec.SignalPayload, payloadMaxLen)
 						return packAwaitSignalsResult(uint32(written), uint32(len(nextRec.SignalPayload)), false, 0)
@@ -2539,7 +2555,9 @@ func (s *execSession) DurableDefer(ctx context.Context, m api.Module, descriptio
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeDefer {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 
 				written, _ := s.writeResult(ctx, m, deferIDPtr, rec.DeferID, deferIDMaxLen)
 				return int64(uint64(written)<<32 | 0)
@@ -2605,7 +2623,9 @@ func (s *execSession) ContinueAsNew(ctx context.Context, m api.Module, newInputJ
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeContinueAsNew {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				s.suspendErr = &SuspendError{
 					Reason:   "continue_as_new",
 					NewInput: rec.NewInput,
@@ -2637,7 +2657,9 @@ func (s *execSession) ContinueAsNewWithVersion(ctx context.Context, m api.Module
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeContinueAsNew {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				s.suspendErr = &SuspendError{
 					Reason:     "continue_as_new",
 					NewInput:   rec.NewInput,
@@ -2713,7 +2735,9 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeChildWorkflow {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 
 				written, _ := s.writeResult(ctx, m, runIDPtr, rec.RunID, runIDMaxLen)
 				return int64(uint64(written)<<32 | 0)
@@ -2836,7 +2860,9 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 			if rec.EventType == EventTypeAwaitChild {
 				if rec.Response != "" || rec.Err != "" {
 					// Cached result available — return it.
-					if !s.advanceReplayStep(ctx, &rec) { return 0 }
+					if !s.advanceReplayStep(ctx, &rec) {
+						return 0
+					}
 					if rec.Err != "" {
 						written, _ := s.writeResult(ctx, m, resultPtr, rec.Err, resultMaxLen)
 						return packAwaitChildResult(uint32(written), 1)
@@ -2845,7 +2871,7 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 					return packAwaitChildResult(uint32(written), 0)
 				}
 				s.engine.log().InfoContext(ctx, "await_child: no cached result, exitReplay to fresh", "workflow_id", s.workflowID, "runID", runID, "step", rec.Step)
-			// No cached result yet — fall through to fresh to re-check.
+				// No cached result yet — fall through to fresh to re-check.
 				// Don't advance stepCount; the fresh execution will record
 				// the result at this same step, overwriting the empty event.
 				s.exitReplay()
@@ -2944,7 +2970,9 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeAwaitAnyChild {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				if rec.Response != "" {
 					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
 					return int64(uint64(written)<<32 | 0)
@@ -2958,7 +2986,9 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 				if s.stepCount < len(s.history) {
 					nextRec := s.history[s.stepCount]
 					if nextRec.EventType == EventTypeAwaitAnyChild && nextRec.Response != "" {
-						if !s.advanceReplayStep(ctx, &nextRec) { return 0 }
+						if !s.advanceReplayStep(ctx, &nextRec) {
+							return 0
+						}
 						written, _ := s.writeResult(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
 						return int64(uint64(written)<<32 | 0)
 					}
@@ -3099,7 +3129,9 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) { return 0 }
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
 
 		if rec.EventType != EventTypeAwaitAllChildren {
 			replayFailuresTotal.Inc()
@@ -3261,7 +3293,9 @@ func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, n
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeUpdateHandler {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				return 0
 			}
 		}
@@ -3333,7 +3367,9 @@ func (s *execSession) CreatePromise(ctx context.Context, m api.Module, name stri
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeCreatePromise {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 
 				written, _ := s.writeResult(ctx, m, promiseIDPtr, rec.PromiseID, promiseIDMaxLen)
 				return packSimpleResult(0, written)
@@ -3376,17 +3412,23 @@ func (s *execSession) AwaitPromise(ctx context.Context, m api.Module, promiseID 
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypePromiseResolved {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				written, _ := s.writeResult(ctx, m, resultPtr, rec.PromiseResult, resultMaxLen)
 				return packAwaitPromiseResult(uint32(written), false, 0)
 			}
 			if rec.EventType == EventTypePromiseRejected {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				written, _ := s.writeResult(ctx, m, resultPtr, rec.PromiseError, resultMaxLen)
 				return packAwaitPromiseResult(uint32(written), false, 1)
 			}
 			if rec.EventType == EventTypeAwaitPromise {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				// Promise was pending in original execution. Check if resolved now.
 				s.exitReplay()
 			}
@@ -3443,7 +3485,9 @@ func (s *execSession) SendSignalAndWait(ctx context.Context, m api.Module, targe
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeSignalReceived {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 
 				written, _ := s.writeResult(ctx, m, responsePtr, rec.SignalPayload, responseMaxLen)
 				return packSimpleResult(0, written)
@@ -3500,7 +3544,9 @@ func (s *execSession) ReplyToSignal(ctx context.Context, m api.Module, correlati
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeSignalReceived {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				return 0
 			}
 		}
@@ -3524,7 +3570,9 @@ func (s *execSession) SignalWorkflow(ctx context.Context, m api.Module, targetRu
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
 			if rec.EventType == EventTypeSignalReceived {
-				if !s.advanceReplayStep(ctx, &rec) { return 0 }
+				if !s.advanceReplayStep(ctx, &rec) {
+					return 0
+				}
 				return 0
 			}
 		}
@@ -3681,7 +3729,9 @@ func (s *execSession) replaySetScope(ctx context.Context, m api.Module, objectTy
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) { return 0 }
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
 
 		if rec.EventType != EventTypeScopeAcquired {
 			return packSimpleResult(1, 0)
@@ -3826,7 +3876,9 @@ func (s *execSession) freshAcquireLock(ctx context.Context, m api.Module, key st
 func (s *execSession) replayAcquireLock(ctx context.Context, m api.Module, key string, ttlMs int64) int64 {
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) { return 0 }
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
 
 		if rec.EventType != EventTypeAcquireLock {
 			return packAcquireLockResult(false, 1)
@@ -3875,7 +3927,9 @@ func (s *execSession) freshReleaseLock(ctx context.Context, m api.Module, key st
 func (s *execSession) replayReleaseLock(ctx context.Context, m api.Module, key string) int64 {
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) { return 0 }
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
 
 		if rec.EventType != EventTypeReleaseLock {
 			return int64(1)
@@ -3914,7 +3968,9 @@ func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, compute
 func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
-		if !s.advanceReplayStep(ctx, &rec) { return 0 }
+		if !s.advanceReplayStep(ctx, &rec) {
+			return 0
+		}
 
 		if rec.EventType != EventTypeSideEffect {
 			replayFailuresTotal.Inc()
@@ -3970,7 +4026,9 @@ func (s *execSession) ResolvePromise(ctx context.Context, m api.Module, promiseI
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType == EventTypePromiseResolved {
 				return 0
 			}
@@ -3999,7 +4057,9 @@ func (s *execSession) RejectPromise(ctx context.Context, m api.Module, promiseID
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType == EventTypePromiseRejected {
 				return 0
 			}
@@ -4029,7 +4089,9 @@ func (s *execSession) DurableSend(ctx context.Context, m api.Module, service, op
 		// On replay, skip (fire-and-forget is recorded but not re-executed).
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 		}
 		return 0
 	}
@@ -4063,7 +4125,9 @@ func (s *execSession) DurableScheduleInvoke(ctx context.Context, m api.Module, s
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 		}
 		return 0
 	}
@@ -4109,7 +4173,9 @@ func (s *execSession) SetState(ctx context.Context, m api.Module, key, value str
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "set" || rec.StateKey != key {
 				return 1
 			}
@@ -4147,7 +4213,9 @@ func (s *execSession) GetState(ctx context.Context, m api.Module, key string, va
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "get" || rec.StateKey != key {
 				return packSimpleResult(1, 0)
 			}
@@ -4181,7 +4249,9 @@ func (s *execSession) DeleteState(ctx context.Context, m api.Module, key string)
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "del" || rec.StateKey != key {
 				return 1
 			}
@@ -4220,7 +4290,9 @@ func (s *execSession) IncrState(ctx context.Context, m api.Module, key string, d
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "incr" || rec.StateKey != key {
 				return 0
 			}
@@ -4265,7 +4337,9 @@ func (s *execSession) HasState(ctx context.Context, m api.Module, key string) in
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "has" || rec.StateKey != key {
 				return 0
 			}
@@ -4302,7 +4376,9 @@ func (s *execSession) ListState(ctx context.Context, m api.Module, prefix string
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType != EventTypeStateMutation || rec.StateOp != "list" || rec.StateKey != prefix {
 				return packSimpleResult(1, 0)
 			}
@@ -4342,7 +4418,9 @@ func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, input
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType != EventTypeRunDetached || rec.DetachedName != name {
 				return 1
 			}
@@ -4378,7 +4456,9 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) { return 0 }
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0
+			}
 			if rec.EventType != EventTypeFetch || rec.FetchMethod != method || rec.FetchURL != url || rec.FetchBody != body {
 				replayFailuresTotal.Inc()
 				errMsg := fmt.Sprintf("replay divergence at step %d: Fetch mismatch.\n  workflow: %s %s\n  history: %s %s\n  actual body: %s\n  expected body: %s\n  expected response: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
@@ -4438,7 +4518,7 @@ func (s *execSession) JsonParse(ctx context.Context, m api.Module, jsonPtr, json
 	if !ok {
 		return packSimpleResult(1)
 	}
-	var v interface{}
+	var v any
 	if err := json.Unmarshal([]byte(input), &v); err != nil {
 		return packSimpleResult(1)
 	}
@@ -4459,7 +4539,7 @@ func (s *execSession) JsonStringify(ctx context.Context, m api.Module, ptr, leng
 	if !ok {
 		return packSimpleResult(1)
 	}
-	var v interface{}
+	var v any
 	if err := json.Unmarshal([]byte(input), &v); err != nil {
 		return packSimpleResult(1)
 	}

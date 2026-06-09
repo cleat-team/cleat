@@ -66,10 +66,10 @@ type mockShardStore struct {
 	called map[string]int
 
 	// metricsStore support
-	isMetricsStore bool
-	stalledCount   int
-	eventTotal     int
-	eventSize      int64
+	isMetricsStore      bool
+	stalledCount        int
+	eventTotal          int
+	eventSize           int64
 	concurrencyKeyCount int
 }
 

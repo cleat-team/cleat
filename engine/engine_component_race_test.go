@@ -82,11 +82,11 @@ func minimalComponentWasm() []byte {
 	// allowing executeComponent Step 5 to find the instantiated module.
 	buf = append(buf, 0x0b)
 	exportPayload := []byte{
-		0x01,             // count: 1 export
-		0x00, 0x03,       // name length: 3 (big-endian)
+		0x01,       // count: 1 export
+		0x00, 0x03, // name length: 3 (big-endian)
 		0x72, 0x75, 0x6e, // "run"
-		0x05,             // sort: instance
-		0x00,             // index: 0
+		0x05, // sort: instance
+		0x00, // index: 0
 	}
 	buf = append(buf, encodeULEB128(uint32(len(exportPayload)))...)
 	buf = append(buf, exportPayload...)

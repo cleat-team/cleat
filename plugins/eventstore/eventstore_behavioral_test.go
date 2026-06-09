@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ func newESDB() *esDB {
 type esConnector struct{ db *esDB }
 
 func (c *esConnector) Connect(_ context.Context) (driver.Conn, error) { return &esConn{db: c.db}, nil }
-func (c *esConnector) Driver() driver.Driver                           { return &esDrv{} }
+func (c *esConnector) Driver() driver.Driver                          { return &esDrv{} }
 
 type esDrv struct{}
 
@@ -59,9 +59,11 @@ type esConn struct {
 	db *esDB
 }
 
-func (*esConn) Prepare(_ string) (driver.Stmt, error) { return nil, fmt.Errorf("esConn: unexpected Prepare") }
-func (*esConn) Close() error                           { return nil }
-func (*esConn) Begin() (driver.Tx, error)              { return &esTx{}, nil }
+func (*esConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("esConn: unexpected Prepare")
+}
+func (*esConn) Close() error              { return nil }
+func (*esConn) Begin() (driver.Tx, error) { return &esTx{}, nil }
 
 type esTx struct{}
 
@@ -71,7 +73,7 @@ func (*esTx) Rollback() error { return nil }
 type esResult struct{ n int64 }
 
 func (r *esResult) LastInsertId() (int64, error) { return 0, nil }
-func (r *esResult) RowsAffected() (int64, error)  { return r.n, nil }
+func (r *esResult) RowsAffected() (int64, error) { return r.n, nil }
 
 type esRows struct {
 	columns []string
@@ -79,8 +81,8 @@ type esRows struct {
 	pos     int
 }
 
-func (r *esRows) Columns() []string              { return r.columns }
-func (r *esRows) Close() error                    { return nil }
+func (r *esRows) Columns() []string { return r.columns }
+func (r *esRows) Close() error      { return nil }
 func (r *esRows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.data) {
 		return io.EOF
@@ -359,7 +361,7 @@ func esTenant2Req(method, path string, body io.Reader) *http.Request {
 	)
 }
 
-func esReadJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
+func esReadJSON(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	t.Helper()
 	if err := json.NewDecoder(rec.Body).Decode(v); err != nil {
 		t.Fatalf("decode body: %v", err)
@@ -517,7 +519,7 @@ func TestES_Read_EmptyStream(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("read empty: want 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var events []interface{}
+	var events []any
 	esReadJSON(t, rec, &events)
 	if len(events) != 0 {
 		t.Errorf("expected empty array, got %d elements", len(events))
@@ -549,7 +551,7 @@ func TestES_Read_QueryParams(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("read with from_seq: want 200, got %d", rec.Code)
 	}
-	var events []map[string]interface{}
+	var events []map[string]any
 	esReadJSON(t, rec, &events)
 	if len(events) != 3 {
 		t.Errorf("from_sequence=2: want 3 events, got %d", len(events))
@@ -614,7 +616,7 @@ func TestES_TenantIsolation(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("tenant B read: want 200, got %d", rec.Code)
 	}
-	var events []interface{}
+	var events []any
 	esReadJSON(t, rec, &events)
 	if len(events) != 0 {
 		t.Errorf("tenant B should see 0 events in shared stream, got %d", len(events))
@@ -996,7 +998,7 @@ func TestES_Read_PaginationEdges(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("limit=0: want 200, got %d", rec.Code)
 	}
-	var events []map[string]interface{}
+	var events []map[string]any
 	esReadJSON(t, rec, &events)
 	if len(events) != 3 {
 		t.Errorf("limit=0: want 3 events (default limit), got %d", len(events))
@@ -1205,7 +1207,7 @@ func TestES_Read_TenantIsolation(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("tenant B read: want 200, got %d", rec.Code)
 	}
-	var events []interface{}
+	var events []any
 	esReadJSON(t, rec, &events)
 	if len(events) != 0 {
 		t.Errorf("tenant B should see 0 events from iso-stream, got %d", len(events))

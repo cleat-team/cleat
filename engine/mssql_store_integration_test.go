@@ -1212,11 +1212,11 @@ func TestMSSQLIntegration_StartChildWorkflowAtomic(t *testing.T) {
 
 	childID := uuid.New().String()
 	event := EventRecord{
-		Step:      0,
-		EventType: "child_workflow",
-		ChildName: "atomic-wf",
+		Step:       0,
+		EventType:  "child_workflow",
+		ChildName:  "atomic-wf",
 		ChildInput: `{"child":true}`,
-		RunID:     childID,
+		RunID:      childID,
 	}
 
 	returnedID, err := store.StartChildWorkflowAtomic(ctx, childID, parentID, "atomic-wf", `{"child":true}`, 1, "ABANDON", event, 0)

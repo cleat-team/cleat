@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // OAuth provider endpoints.
@@ -79,7 +79,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -426,7 +426,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		"email", email,
 	)
 
-	p.writeJSON(w, http.StatusOK, map[string]interface{}{
+	p.writeJSON(w, http.StatusOK, map[string]any{
 		"session_token": sessionToken,
 		"user_email":    email,
 		"expires_at":    expiresAt,

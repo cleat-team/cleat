@@ -2,16 +2,16 @@ package pagerdutyalert
 
 import (
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -28,7 +28,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -233,7 +233,7 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Build dynamic UPDATE query for the fields that are present.
 	setClauses := []string{}
-	args := []interface{}{}
+	args := []any{}
 	argIdx := 1
 
 	if req.Name != nil {

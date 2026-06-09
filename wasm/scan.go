@@ -21,6 +21,7 @@ type ScannedImport struct {
 //   - magic: \0asm (4 bytes)
 //   - version: 1 (4 bytes, little-endian u32)
 //   - sections: each with id (1 byte) + size (LEB128 u32) + content
+//
 // Section 2 = Import section.
 func ScanWasmImports(wasmBytes []byte) ([]ScannedImport, error) {
 	if len(wasmBytes) < 8 {
@@ -253,4 +254,3 @@ var IsCleatHostFunction = func(name string) bool {
 		strings.HasPrefix(name, "plugin_") ||
 		strings.HasPrefix(name, "schedule_")
 }
-

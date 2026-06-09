@@ -15,7 +15,7 @@ import (
 // StartAPIServer creates and starts the HTTP API server with the given
 // configuration, worker, and plugin chain. It runs in a background goroutine
 // and shuts down when ctx is cancelled.
-func StartAPIServer(cfg *Config, w *Worker, plugMux, plugHandler http.Handler, plugList interface{}, db *sql.DB) {
+func StartAPIServer(cfg *Config, w *Worker, plugMux, plugHandler http.Handler, plugList any, db *sql.DB) {
 	if cfg.APIAddr == "" {
 		return
 	}

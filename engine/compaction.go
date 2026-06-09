@@ -24,31 +24,31 @@ const DefaultMaxCompactedEvents = 10000
 // Event type codes for compact JSONB storage. Short int codes minimize
 // storage size when a workflow has thousands of compacted events.
 const (
-	EventCodeCall             = 0
-	EventCodeSleep            = 1
-	EventCodeAwaitSignals     = 2
-	EventCodeSignalReceived   = 3
-	EventCodeDefer            = 4
-	EventCodeChildWorkflow    = 5
-	EventCodeAwaitChild       = 6
-	EventCodeContinueAsNew    = 7
-	EventCodeHeartbeat        = 8
-	EventCodeAwaitAllChildren = 9
-	EventCodePluginCall      = 10
-	EventCodeCreatePromise   = 11
-	EventCodeAwaitPromise    = 12
-	EventCodePromiseResolved = 13
-	EventCodePromiseRejected = 14
-	EventCodeUpdateHandler  = 15
-	EventCodeStateMutation  = 16
-	EventCodeRunDetached    = 17
-	EventCodeAcquireLock    = 18
-	EventCodeReleaseLock    = 19
+	EventCodeCall                  = 0
+	EventCodeSleep                 = 1
+	EventCodeAwaitSignals          = 2
+	EventCodeSignalReceived        = 3
+	EventCodeDefer                 = 4
+	EventCodeChildWorkflow         = 5
+	EventCodeAwaitChild            = 6
+	EventCodeContinueAsNew         = 7
+	EventCodeHeartbeat             = 8
+	EventCodeAwaitAllChildren      = 9
+	EventCodePluginCall            = 10
+	EventCodeCreatePromise         = 11
+	EventCodeAwaitPromise          = 12
+	EventCodePromiseResolved       = 13
+	EventCodePromiseRejected       = 14
+	EventCodeUpdateHandler         = 15
+	EventCodeStateMutation         = 16
+	EventCodeRunDetached           = 17
+	EventCodeAcquireLock           = 18
+	EventCodeReleaseLock           = 19
 	EventCodePluginCallStreamChunk = 20
-	EventCodeSideEffect       = 21
-	EventCodeScopeAcquired      = 22
-	EventCodeFetch            = 23
-	EventCodeDurableLog      = 24
+	EventCodeSideEffect            = 21
+	EventCodeScopeAcquired         = 22
+	EventCodeFetch                 = 23
+	EventCodeDurableLog            = 24
 	EventCodeDurableSend           = 25
 	EventCodeDurableScheduleInvoke = 26
 )
@@ -58,72 +58,72 @@ const (
 // to event history, so the code is reserved/unused.
 
 var eventTypeToCode = map[EventType]int{
-	EventTypeCall:             EventCodeCall,
-	EventTypeAwaitSignals:     EventCodeAwaitSignals,
-	EventTypeSignalReceived:   EventCodeSignalReceived,
-	EventTypeDefer:            EventCodeDefer,
-	EventTypeChildWorkflow:    EventCodeChildWorkflow,
-	EventTypeAwaitChild:       EventCodeAwaitChild,
-	EventTypeContinueAsNew:    EventCodeContinueAsNew,
-	EventTypeHeartbeat:        EventCodeHeartbeat,
-	EventTypeAwaitAllChildren: EventCodeAwaitAllChildren,
-	EventTypePluginCall:       EventCodePluginCall,
-	EventTypeCreatePromise:    EventCodeCreatePromise,
-	EventTypeAwaitPromise:     EventCodeAwaitPromise,
-	EventTypePromiseResolved:  EventCodePromiseResolved,
-	EventTypePromiseRejected:  EventCodePromiseRejected,
-	EventTypeUpdateHandler:    EventCodeUpdateHandler,
-	EventTypeStateMutation:    EventCodeStateMutation,
-	EventTypeRunDetached:      EventCodeRunDetached,
-	EventTypeAcquireLock:      EventCodeAcquireLock,
-	EventTypeReleaseLock:      EventCodeReleaseLock,
+	EventTypeCall:                  EventCodeCall,
+	EventTypeAwaitSignals:          EventCodeAwaitSignals,
+	EventTypeSignalReceived:        EventCodeSignalReceived,
+	EventTypeDefer:                 EventCodeDefer,
+	EventTypeChildWorkflow:         EventCodeChildWorkflow,
+	EventTypeAwaitChild:            EventCodeAwaitChild,
+	EventTypeContinueAsNew:         EventCodeContinueAsNew,
+	EventTypeHeartbeat:             EventCodeHeartbeat,
+	EventTypeAwaitAllChildren:      EventCodeAwaitAllChildren,
+	EventTypePluginCall:            EventCodePluginCall,
+	EventTypeCreatePromise:         EventCodeCreatePromise,
+	EventTypeAwaitPromise:          EventCodeAwaitPromise,
+	EventTypePromiseResolved:       EventCodePromiseResolved,
+	EventTypePromiseRejected:       EventCodePromiseRejected,
+	EventTypeUpdateHandler:         EventCodeUpdateHandler,
+	EventTypeStateMutation:         EventCodeStateMutation,
+	EventTypeRunDetached:           EventCodeRunDetached,
+	EventTypeAcquireLock:           EventCodeAcquireLock,
+	EventTypeReleaseLock:           EventCodeReleaseLock,
 	EventTypePluginCallStreamChunk: EventCodePluginCallStreamChunk,
-	EventTypeSideEffect:       EventCodeSideEffect,
-	EventTypeScopeAcquired:    EventCodeScopeAcquired,
-	EventTypeFetch:            EventCodeFetch,
-	EventTypeDurableLog:       EventCodeDurableLog,
+	EventTypeSideEffect:            EventCodeSideEffect,
+	EventTypeScopeAcquired:         EventCodeScopeAcquired,
+	EventTypeFetch:                 EventCodeFetch,
+	EventTypeDurableLog:            EventCodeDurableLog,
 	EventTypeDurableSend:           EventCodeDurableSend,
 	EventTypeDurableScheduleInvoke: EventCodeDurableScheduleInvoke,
 }
 
 var codeToEventType = map[int]EventType{
-	EventCodeCall:             EventTypeCall,
-	EventCodeAwaitSignals:     EventTypeAwaitSignals,
-	EventCodeSignalReceived:   EventTypeSignalReceived,
-	EventCodeDefer:            EventTypeDefer,
-	EventCodeChildWorkflow:    EventTypeChildWorkflow,
-	EventCodeAwaitChild:       EventTypeAwaitChild,
-	EventCodeContinueAsNew:    EventTypeContinueAsNew,
-	EventCodeHeartbeat:        EventTypeHeartbeat,
-	EventCodeAwaitAllChildren: EventTypeAwaitAllChildren,
-	EventCodePluginCall:       EventTypePluginCall,
-	EventCodeCreatePromise:    EventTypeCreatePromise,
-	EventCodeAwaitPromise:     EventTypeAwaitPromise,
-	EventCodePromiseResolved:  EventTypePromiseResolved,
-	EventCodePromiseRejected:  EventTypePromiseRejected,
-	EventCodeUpdateHandler:    EventTypeUpdateHandler,
-	EventCodeStateMutation:    EventTypeStateMutation,
-	EventCodeRunDetached:      EventTypeRunDetached,
-	EventCodeAcquireLock:      EventTypeAcquireLock,
-	EventCodeReleaseLock:      EventTypeReleaseLock,
+	EventCodeCall:                  EventTypeCall,
+	EventCodeAwaitSignals:          EventTypeAwaitSignals,
+	EventCodeSignalReceived:        EventTypeSignalReceived,
+	EventCodeDefer:                 EventTypeDefer,
+	EventCodeChildWorkflow:         EventTypeChildWorkflow,
+	EventCodeAwaitChild:            EventTypeAwaitChild,
+	EventCodeContinueAsNew:         EventTypeContinueAsNew,
+	EventCodeHeartbeat:             EventTypeHeartbeat,
+	EventCodeAwaitAllChildren:      EventTypeAwaitAllChildren,
+	EventCodePluginCall:            EventTypePluginCall,
+	EventCodeCreatePromise:         EventTypeCreatePromise,
+	EventCodeAwaitPromise:          EventTypeAwaitPromise,
+	EventCodePromiseResolved:       EventTypePromiseResolved,
+	EventCodePromiseRejected:       EventTypePromiseRejected,
+	EventCodeUpdateHandler:         EventTypeUpdateHandler,
+	EventCodeStateMutation:         EventTypeStateMutation,
+	EventCodeRunDetached:           EventTypeRunDetached,
+	EventCodeAcquireLock:           EventTypeAcquireLock,
+	EventCodeReleaseLock:           EventTypeReleaseLock,
 	EventCodePluginCallStreamChunk: EventTypePluginCallStreamChunk,
-	EventCodeSideEffect:       EventTypeSideEffect,
-	EventCodeScopeAcquired:      EventTypeScopeAcquired,
-	EventCodeFetch:              EventTypeFetch,
-	EventCodeDurableLog:         EventTypeDurableLog,
+	EventCodeSideEffect:            EventTypeSideEffect,
+	EventCodeScopeAcquired:         EventTypeScopeAcquired,
+	EventCodeFetch:                 EventTypeFetch,
+	EventCodeDurableLog:            EventTypeDurableLog,
 	EventCodeDurableSend:           EventTypeDurableSend,
 	EventCodeDurableScheduleInvoke: EventTypeDurableScheduleInvoke,
-	}
+}
 
 // CompactionState holds the minimal state needed to reconstruct the compacted
 // portion of a workflow's event history for deterministic replay.
 type CompactionState struct {
-	Version       int              `json:"version"`
-	CompactedStep int              `json:"compacted_step"`
-	Events        []CompactedEvent `json:"events"`
-	PendingDefers []CompactedDefer `json:"pending_defers,omitempty"`
-	OpenChildren  []CompactedChild `json:"open_children,omitempty"`
-	QueryState    map[string]string  `json:"query_state,omitempty"`
+	Version       int               `json:"version"`
+	CompactedStep int               `json:"compacted_step"`
+	Events        []CompactedEvent  `json:"events"`
+	PendingDefers []CompactedDefer  `json:"pending_defers,omitempty"`
+	OpenChildren  []CompactedChild  `json:"open_children,omitempty"`
+	QueryState    map[string]string `json:"query_state,omitempty"`
 
 	// Summary is populated when Events exceeds DefaultMaxCompactedEvents and is
 	// truncated. It records the truncation count for observability.
@@ -269,8 +269,8 @@ func extractCompactionState(events []EventRecord) *CompactionState {
 		OpenChildren:  make([]CompactedChild, 0),
 	}
 
-	defersSeen := make(map[string]string)  // deferID -> description
-	openChildren := make(map[string]bool)   // runID -> still open
+	defersSeen := make(map[string]string) // deferID -> description
+	openChildren := make(map[string]bool) // runID -> still open
 
 	for _, ev := range events {
 		ce := CompactedEvent{Type: eventTypeToCode[ev.EventType]}
@@ -526,4 +526,3 @@ func buildFullHistoryFromCompaction(tail []EventRecord, cs *CompactionState) []E
 
 	return full
 }
-

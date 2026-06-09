@@ -242,11 +242,11 @@ func TestFilenameConstrainedOut(t *testing.T) {
 		{"foo_linux.go", true},
 		{"foo_amd64.go", true},
 		{"foo_linux_amd64.go", true},
-		{"foo_wasm.go", false},    // wasm matches GOARCH
-		{"foo_wasip1.go", false},  // wasip1 matches GOOS
+		{"foo_wasm.go", false},   // wasm matches GOARCH
+		{"foo_wasip1.go", false}, // wasip1 matches GOOS
 		{"foo_wasip1_wasm.go", false},
-		{"foo.c", false},          // non-.go file
-		{"foo_test.go", false},    // test alone is not constrained
+		{"foo.c", false},       // non-.go file
+		{"foo_test.go", false}, // test alone is not constrained
 	}
 
 	for _, tc := range tests {

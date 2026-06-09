@@ -780,9 +780,9 @@ func TestListWorkflowDefs(t *testing.T) {
 			// Deploy two versions of the same named workflow.
 			for _, v := range []int{1, 2} {
 				if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-					Name:       "vlist",
-					Version:    v,
-					WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+					Name:      "vlist",
+					Version:   v,
+					WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
 				}); err != nil {
 					t.Fatalf("DeployWorkflowDef v%d: %v", v, err)
 				}
@@ -814,9 +814,9 @@ func TestResolveLatestVersion(t *testing.T) {
 
 			for _, v := range []int{1, 2} {
 				if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-					Name:       "vresolve",
-					Version:    v,
-					WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+					Name:      "vresolve",
+					Version:   v,
+					WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
 				}); err != nil {
 					t.Fatalf("DeployWorkflowDef v%d: %v", v, err)
 				}
@@ -842,9 +842,9 @@ func TestValidateVersion(t *testing.T) {
 			ctx := context.Background()
 
 			if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-				Name:       "vvalid",
-				Version:    1,
-				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				Name:      "vvalid",
+				Version:   1,
+				WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
 			}); err != nil {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
@@ -877,9 +877,9 @@ func TestMarkVersionDeprecated(t *testing.T) {
 			ctx := context.Background()
 
 			if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-				Name:       "vdep",
-				Version:    1,
-				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				Name:      "vdep",
+				Version:   1,
+				WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
 			}); err != nil {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
@@ -911,9 +911,9 @@ func TestPurgeWorkflowDef(t *testing.T) {
 			ctx := context.Background()
 
 			if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-				Name:       "vpurge",
-				Version:    1,
-				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				Name:      "vpurge",
+				Version:   1,
+				WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
 			}); err != nil {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}
@@ -942,9 +942,9 @@ func TestCountActiveInstances(t *testing.T) {
 			ctx := context.Background()
 
 			if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
-				Name:       "vcount",
-				Version:    1,
-				WASMBytes:  []byte{0x00, 0x61, 0x73, 0x6d},
+				Name:      "vcount",
+				Version:   1,
+				WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
 			}); err != nil {
 				t.Fatalf("DeployWorkflowDef: %v", err)
 			}

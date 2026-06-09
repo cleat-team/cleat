@@ -27,7 +27,7 @@ func New() plugin.Plugin {
 // Plugin implements vector similarity search using the pgvector PostgreSQL
 // extension. Workflows can store and query embedding vectors with metadata.
 type Plugin struct {
-db     plugin.PluginDB
+	db     plugin.PluginDB
 	mux    *http.ServeMux
 	logger *slog.Logger
 	config Config

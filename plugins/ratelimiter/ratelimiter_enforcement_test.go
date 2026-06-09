@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,9 +39,9 @@ type fakeRateLimitRow struct {
 
 type fakeDBStore struct {
 	mu              sync.RWMutex
-	apiKeys         map[string]string          // sha256 hex -> tenant_id uuid string
+	apiKeys         map[string]string           // sha256 hex -> tenant_id uuid string
 	rateLimits      map[string]fakeRateLimitRow // key: "tenant_uuid/limit_key"
-	corruptNextScan bool                      // next queryAllRateLimits returns corrupt data
+	corruptNextScan bool                        // next queryAllRateLimits returns corrupt data
 }
 
 type fakeConnector struct {
@@ -1342,7 +1342,6 @@ func TestRunWithDBInitialReloadSuccess(t *testing.T) {
 	}
 }
 
-
 // ---------------------------------------------------------------------------
 // Reload scan-error path
 // ---------------------------------------------------------------------------
@@ -1426,7 +1425,7 @@ type rowsErrConn struct {
 func (*rowsErrConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("rowsErrConn: unexpected Prepare")
 }
-func (*rowsErrConn) Close() error  { return nil }
+func (*rowsErrConn) Close() error              { return nil }
 func (*rowsErrConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("rowsErrConn: no tx") }
 
 var _ driver.QueryerContext = (*rowsErrConn)(nil)

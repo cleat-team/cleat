@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // SessionInfo holds user identity extracted from an OAuth session.

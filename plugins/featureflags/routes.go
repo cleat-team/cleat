@@ -2,16 +2,16 @@ package featureflags
 
 import (
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
@@ -29,7 +29,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 
 // ---- helpers ----
 
-func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -80,8 +80,8 @@ type updateFlagRequest struct {
 }
 
 type evaluateRequest struct {
-	Key     string                 `json:"key"`
-	Context EvaluationContext      `json:"context"`
+	Key     string            `json:"key"`
+	Context EvaluationContext `json:"context"`
 }
 
 // ---- POST /features/flags ----
@@ -266,7 +266,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	// Build dynamic update query — only set non-nil fields.
 	now := time.Now()
 	query := "UPDATE feature_flags SET updated_at = $1"
-	args := []interface{}{now}
+	args := []any{now}
 	argIdx := 2
 
 	if req.Key != nil {

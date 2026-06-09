@@ -182,7 +182,7 @@ func (h *versionHandler) purgeVersion(w http.ResponseWriter, r *http.Request, na
 }
 
 // writeVersionJSON is a standalone JSON response writer for this package.
-func writeVersionJSON(w http.ResponseWriter, status int, v interface{}) {
+func writeVersionJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
@@ -195,6 +195,6 @@ func writeVersionError(w http.ResponseWriter, status int, msg string) {
 
 // Default thresholds for stale version checking.
 const (
-	defaultStaleThreshold  = 7 * 24 * time.Hour  // 7 days
-	defaultPurgeThreshold  = 30 * 24 * time.Hour // 30 days
+	defaultStaleThreshold = 7 * 24 * time.Hour  // 7 days
+	defaultPurgeThreshold = 30 * 24 * time.Hour // 30 days
 )

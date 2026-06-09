@@ -22,7 +22,7 @@ type LockEntry struct {
 
 // LockFile stores resolved child workflow versions for reproducible builds.
 type LockFile struct {
-	Version int                 `json:"version"`
+	Version int                  `json:"version"`
 	Entries map[string]LockEntry `json:"entries"`
 }
 

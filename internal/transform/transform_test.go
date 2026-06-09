@@ -1,8 +1,8 @@
 package transform
 
 import (
-	"go/parser"
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"strings"
 	"testing"

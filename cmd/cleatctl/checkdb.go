@@ -198,7 +198,7 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 
 	// Output structured JSON for programmatic consumption if verbose.
 	if verbose {
-		summary := map[string]interface{}{
+		summary := map[string]any{
 			"status":            "healthy",
 			"tables_accessible": accessibleCount,
 			"total_tables":      len(tables),

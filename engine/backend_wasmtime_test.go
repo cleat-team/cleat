@@ -85,12 +85,12 @@ func TestWasmtimeReadStringValidated(t *testing.T) {
 	maxLen := int32(100)
 
 	tests := []struct {
-		name    string
-		ptr     int32
-		length  int32
-		maxLen  int32
-		want    string
-		wantOK  bool
+		name   string
+		ptr    int32
+		length int32
+		maxLen int32
+		want   string
+		wantOK bool
 	}{
 		{"normal", 0, 5, maxLen, "hello", true},
 		{"full", 0, 13, maxLen, "hello world!!", true},
@@ -635,7 +635,7 @@ func buildImportWasm(imports []struct {
 			idx := typeIdx[key]
 			importContent = append(importContent, wasmName("env")...)
 			importContent = append(importContent, wasmName(imp.Name)...)
-			importContent = append(importContent, 0x00)                        // kind = function
+			importContent = append(importContent, 0x00)                          // kind = function
 			importContent = append(importContent, encodeULEB128(uint32(idx))...) // type index
 		}
 		out = append(out, makeSection(2, wasmVec(numImports, importContent))...)
@@ -802,7 +802,6 @@ func TestWriteWorkToFixedMemory(t *testing.T) {
 	})
 }
 
-
 // ---------------------------------------------------------------------------
 // Section 6: Closure body tests via WASM module execution
 // ---------------------------------------------------------------------------
@@ -816,13 +815,25 @@ const (
 // closureWasm builds a WASM module that imports the given functions from
 // "env" and exports "memory" plus a no-arg wrapper for each import.
 func closureWasm(importNames []string, importTypes [][]byte) []byte {
-	var imports []struct{ Name string; Type []byte }
-	for i, name := range importNames {
-		imports = append(imports, struct{ Name string; Type []byte }{name, importTypes[i]})
+	var imports []struct {
+		Name string
+		Type []byte
 	}
-	var exports []struct{ Name string; CallIdx uint32 }
 	for i, name := range importNames {
-		exports = append(exports, struct{ Name string; CallIdx uint32 }{"test_" + name, uint32(i)})
+		imports = append(imports, struct {
+			Name string
+			Type []byte
+		}{name, importTypes[i]})
+	}
+	var exports []struct {
+		Name    string
+		CallIdx uint32
+	}
+	for i, name := range importNames {
+		exports = append(exports, struct {
+			Name    string
+			CallIdx uint32
+		}{"test_" + name, uint32(i)})
 	}
 	return buildImportWasm(imports, exports, true)
 }

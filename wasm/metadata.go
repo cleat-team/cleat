@@ -372,7 +372,9 @@ func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 		for i := uint32(0); i < count; i++ {
 			// Module name.
 			nameLen, nn := decodeULEB128(wasmBytes[offset:])
-			if nn <= 0 { return nil, fmt.Errorf("failed to decode module name len") }
+			if nn <= 0 {
+				return nil, fmt.Errorf("failed to decode module name len")
+			}
 			offset += nn
 			if int(nameLen) > sectionEnd-offset {
 				return nil, fmt.Errorf("corrupt WASM import %d: name overflows section", i)
@@ -382,7 +384,9 @@ func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 
 			// Field name.
 			fieldLen, nn := decodeULEB128(wasmBytes[offset:])
-			if nn <= 0 { return nil, fmt.Errorf("failed to decode field name len") }
+			if nn <= 0 {
+				return nil, fmt.Errorf("failed to decode field name len")
+			}
 			offset += nn
 			if int(fieldLen) > sectionEnd-offset {
 				return nil, fmt.Errorf("corrupt WASM import %d: field name overflows section", i)
@@ -391,7 +395,9 @@ func readImportSection(wasmBytes []byte) ([]wasmImport, error) {
 			offset += int(fieldLen)
 
 			// Skip kind byte.
-			if offset < sectionEnd { offset++ }
+			if offset < sectionEnd {
+				offset++
+			}
 
 			imports = append(imports, wasmImport{module: moduleName, field: fieldName})
 		}

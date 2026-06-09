@@ -48,21 +48,21 @@ func FuzzFilterParser(f *testing.F) {
 			}
 		}()
 
-		eventData := map[string]interface{}{
-			"event": map[string]interface{}{
-				"data": map[string]interface{}{
+		eventData := map[string]any{
+			"event": map[string]any{
+				"data": map[string]any{
 					"amount": float64(100),
 					"status": "active",
 					"name":   "test-user",
 					"count":  float64(42),
 					"flag":   true,
-					"tags":   []interface{}{"a", "b", "c"},
-					"nested": map[string]interface{}{
+					"tags":   []any{"a", "b", "c"},
+					"nested": map[string]any{
 						"key": "value",
 					},
-					"items": []interface{}{
-						map[string]interface{}{"id": "1"},
-						map[string]interface{}{"id": "2"},
+					"items": []any{
+						map[string]any{"id": "1"},
+						map[string]any{"id": "2"},
 					},
 				},
 			},

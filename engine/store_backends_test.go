@@ -456,7 +456,6 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 	}
 }
 
-
 // insertWorkflowInstance inserts a single workflow_instances row for cascade testing.
 func insertWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID string) {
 	t.Helper()

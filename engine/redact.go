@@ -81,7 +81,7 @@ func isBase64URLChar(c rune) bool {
 //
 // If the input is not valid JSON, it is returned as-is.
 func Redact(raw string) string {
-	var data interface{}
+	var data any
 	if err := json.Unmarshal([]byte(raw), &data); err != nil {
 		// If it's not valid JSON, still check if the whole string looks like a JWT.
 		if looksLikeJWT(raw) {
@@ -99,20 +99,20 @@ func Redact(raw string) string {
 }
 
 // redactValue recursively redacts sensitive values in an arbitrary JSON value.
-func redactValue(v interface{}) interface{} {
+func redactValue(v any) any {
 	return redactValueDepth(v, 0)
 }
 
 // redactValueDepth recursively redacts sensitive values with a recursion depth
 // limit to prevent stack overflow from deeply-nested input.
-func redactValueDepth(v interface{}, depth int) interface{} {
+func redactValueDepth(v any, depth int) any {
 	if depth > maxRedactDepth {
 		return v
 	}
 	switch val := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		return redactMapDepth(val, depth)
-	case []interface{}:
+	case []any:
 		return redactSliceDepth(val, depth)
 	case string:
 		if looksLikeJWT(val) {
@@ -125,14 +125,14 @@ func redactValueDepth(v interface{}, depth int) interface{} {
 }
 
 // redactMap redacts sensitive fields in a JSON object.
-func redactMap(m map[string]interface{}) map[string]interface{} {
+func redactMap(m map[string]any) map[string]any {
 	return redactMapDepth(m, 0)
 }
 
 // redactMapDepth redacts sensitive fields in a JSON object with a recursion
 // depth limit.
-func redactMapDepth(m map[string]interface{}, depth int) map[string]interface{} {
-	result := make(map[string]interface{}, len(m))
+func redactMapDepth(m map[string]any, depth int) map[string]any {
+	result := make(map[string]any, len(m))
 	for k, v := range m {
 		if isSensitiveField(k) {
 			result[k] = "[REDACTED]"
@@ -144,14 +144,14 @@ func redactMapDepth(m map[string]interface{}, depth int) map[string]interface{} 
 }
 
 // redactSlice recursively redacts each element of a JSON array.
-func redactSlice(arr []interface{}) []interface{} {
+func redactSlice(arr []any) []any {
 	return redactSliceDepth(arr, 0)
 }
 
 // redactSliceDepth recursively redacts each element of a JSON array with a
 // recursion depth limit.
-func redactSliceDepth(arr []interface{}, depth int) []interface{} {
-	result := make([]interface{}, len(arr))
+func redactSliceDepth(arr []any, depth int) []any {
+	result := make([]any, len(arr))
 	for i, v := range arr {
 		result[i] = redactValueDepth(v, depth+1)
 	}
@@ -160,15 +160,15 @@ func redactSliceDepth(arr []interface{}, depth int) []interface{} {
 
 // RedactMap is like Redact but operates on a map[string]interface{} in-place,
 // returning the same map. This is useful when the input is already parsed.
-func RedactMap(m map[string]interface{}) {
+func RedactMap(m map[string]any) {
 	for k, v := range m {
 		if isSensitiveField(k) {
 			m[k] = "[REDACTED]"
 		} else {
 			switch nested := v.(type) {
-			case map[string]interface{}:
+			case map[string]any:
 				m[k] = redactMapDepth(nested, 1)
-			case []interface{}:
+			case []any:
 				m[k] = redactSliceDepth(nested, 1)
 			}
 		}

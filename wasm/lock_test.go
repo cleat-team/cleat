@@ -181,7 +181,7 @@ func (c *lockTestConn) Prepare(query string) (driver.Stmt, error) {
 	return nil, errors.New("Prepare not implemented")
 }
 
-func (c *lockTestConn) Close() error  { return nil }
+func (c *lockTestConn) Close() error { return nil }
 func (c *lockTestConn) Begin() (driver.Tx, error) {
 	return nil, errors.New("not supported")
 }

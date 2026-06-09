@@ -50,7 +50,7 @@ func TestWriteVersionJSON_NilBody(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected status 200, got %d", resp.StatusCode)
 	}
-	var decoded interface{}
+	var decoded any
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestWriteVersionJSON_CustomStatus(t *testing.T) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("expected status 201, got %d", resp.StatusCode)
 	}
-	var decoded map[string]interface{}
+	var decoded map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestRegisterVersionHandler_ListAllEmpty(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestRegisterVersionHandler_ListAllWithData(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -257,7 +257,7 @@ func TestRegisterVersionHandler_ListByName(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
-	var defs []interface{}
+	var defs []any
 	if err := json.NewDecoder(resp.Body).Decode(&defs); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -440,7 +440,7 @@ func TestRegisterVersionHandler_Stale(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
-	var alerts []interface{}
+	var alerts []any
 	if err := json.NewDecoder(resp.Body).Decode(&alerts); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -469,7 +469,7 @@ func TestRegisterVersionHandler_GC(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200, got %d", resp.StatusCode)
 	}
-	var result map[string]interface{}
+	var result map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}

@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func TestInfo(t *testing.T) {
@@ -224,8 +224,8 @@ type healthFakeConn struct{}
 func (*healthFakeConn) Prepare(_ string) (driver.Stmt, error) {
 	return nil, fmt.Errorf("healthFakeConn: unexpected Prepare")
 }
-func (*healthFakeConn) Close() error                                     { return nil }
-func (*healthFakeConn) Begin() (driver.Tx, error)                        { return nil, fmt.Errorf("healthFakeConn: no tx") }
+func (*healthFakeConn) Close() error              { return nil }
+func (*healthFakeConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("healthFakeConn: no tx") }
 
 func (c *healthFakeConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
 	return &healthFakeRows{}, nil
@@ -248,8 +248,10 @@ func (r *healthFakeRows) Next(dest []driver.Value) error {
 
 type healthFakeConnector struct{}
 
-func (*healthFakeConnector) Connect(_ context.Context) (driver.Conn, error) { return &healthFakeConn{}, nil }
-func (*healthFakeConnector) Driver() driver.Driver                          { return &healthFakeDrv{} }
+func (*healthFakeConnector) Connect(_ context.Context) (driver.Conn, error) {
+	return &healthFakeConn{}, nil
+}
+func (*healthFakeConnector) Driver() driver.Driver { return &healthFakeDrv{} }
 
 type healthFakeDrv struct{}
 
@@ -297,9 +299,11 @@ func TestHealthSuccess(t *testing.T) {
 
 type healthErrorFakeConn struct{}
 
-func (*healthErrorFakeConn) Prepare(_ string) (driver.Stmt, error) { return nil, fmt.Errorf("unexpected Prepare") }
-func (*healthErrorFakeConn) Close() error                          { return nil }
-func (*healthErrorFakeConn) Begin() (driver.Tx, error)             { return nil, fmt.Errorf("no tx") }
+func (*healthErrorFakeConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, fmt.Errorf("unexpected Prepare")
+}
+func (*healthErrorFakeConn) Close() error              { return nil }
+func (*healthErrorFakeConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("no tx") }
 
 func (c *healthErrorFakeConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
 	return nil, fmt.Errorf("db connection failed")
@@ -309,12 +313,16 @@ var _ driver.QueryerContext = (*healthErrorFakeConn)(nil)
 
 type healthErrorFakeConnector struct{}
 
-func (*healthErrorFakeConnector) Connect(_ context.Context) (driver.Conn, error) { return &healthErrorFakeConn{}, nil }
-func (*healthErrorFakeConnector) Driver() driver.Driver                          { return &healthErrorFakeDrv{} }
+func (*healthErrorFakeConnector) Connect(_ context.Context) (driver.Conn, error) {
+	return &healthErrorFakeConn{}, nil
+}
+func (*healthErrorFakeConnector) Driver() driver.Driver { return &healthErrorFakeDrv{} }
 
 type healthErrorFakeDrv struct{}
 
-func (*healthErrorFakeDrv) Open(_ string) (driver.Conn, error) { return nil, fmt.Errorf("use sql.OpenDB") }
+func (*healthErrorFakeDrv) Open(_ string) (driver.Conn, error) {
+	return nil, fmt.Errorf("use sql.OpenDB")
+}
 
 func TestHealthDBError(t *testing.T) {
 	fakeDB := sql.OpenDB(&healthErrorFakeConnector{})

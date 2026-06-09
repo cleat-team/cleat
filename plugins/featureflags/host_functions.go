@@ -3,12 +3,12 @@ package featureflags
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped

@@ -155,9 +155,9 @@ func inClausePlaceholders(n int) string {
 
 // taskQueueClause returns the IN-clause SQL fragment and argument slice
 // for filtering by the store's configured task queues.
-func (s *MySQLStore) taskQueueClause() (string, []interface{}) {
+func (s *MySQLStore) taskQueueClause() (string, []any) {
 	phs := make([]string, len(s.taskQueues))
-	args := make([]interface{}, len(s.taskQueues))
+	args := make([]any, len(s.taskQueues))
 	for i, tq := range s.taskQueues {
 		phs[i] = "?"
 		args[i] = tq
@@ -197,7 +197,7 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 
 	// Step 1: Select IDs with SKIP LOCKED.
 	// Arg order: task_queue values..., tenant_id, worker_id, limit
-	selArgs := make([]interface{}, 0)
+	selArgs := make([]any, 0)
 	selArgs = append(selArgs, tqArgs...)
 	selArgs = append(selArgs, s.tenantID, workerID, limit)
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
@@ -235,12 +235,12 @@ func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 
 	// Step 2: Update the claimed rows.
 	idClause := inClausePlaceholders(len(ids))
-	idArgs := make([]interface{}, len(ids))
+	idArgs := make([]any, len(ids))
 	for i, id := range ids {
 		idArgs[i] = id
 	}
 
-	updateArgs := append([]interface{}{workerID}, idArgs...)
+	updateArgs := append([]any{workerID}, idArgs...)
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE workflow_instances
 		SET status = 'running',
@@ -293,7 +293,7 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 
 	// Step 1: Select IDs with SKIP LOCKED (sticky filter).
 	// Arg order: sticky_worker_id, task_queue values..., tenant_id, limit
-	selArgs := make([]interface{}, 0)
+	selArgs := make([]any, 0)
 	selArgs = append(selArgs, workerID)
 	selArgs = append(selArgs, tqArgs...)
 	selArgs = append(selArgs, s.tenantID, limit)
@@ -333,12 +333,12 @@ func (s *MySQLStore) ClaimStickyWorkflows(ctx context.Context, workerID string, 
 
 	// Step 2: Update the claimed rows.
 	idClause := inClausePlaceholders(len(ids))
-	idArgs := make([]interface{}, len(ids))
+	idArgs := make([]any, len(ids))
 	for i, id := range ids {
 		idArgs[i] = id
 	}
 
-	updateArgs := append([]interface{}{workerID}, idArgs...)
+	updateArgs := append([]any{workerID}, idArgs...)
 	_, err = tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE workflow_instances
 		SET status = 'running',

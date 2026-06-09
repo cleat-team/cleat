@@ -208,7 +208,7 @@ func TestPrepareBuildDirWithXfrmSource(t *testing.T) {
 			Exports: "// exports\n",
 		},
 		XfrmSource: map[string][]byte{
-			"handler.go": []byte("package mypkg\n\nfunc Handle() {}\n"),
+			"handler.go":  []byte("package mypkg\n\nfunc Handle() {}\n"),
 			"gen_skip.go": []byte("should be skipped\n"),
 		},
 	}

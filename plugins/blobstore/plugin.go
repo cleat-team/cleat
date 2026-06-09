@@ -37,7 +37,7 @@ func New() plugin.Plugin {
 
 // Plugin implements content-addressed blob storage with tenant isolation.
 type Plugin struct {
-db      plugin.PluginDB
+	db      plugin.PluginDB
 	mux     *http.ServeMux
 	logger  *slog.Logger
 	config  Config

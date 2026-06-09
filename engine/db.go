@@ -1426,10 +1426,10 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 			log.Printf("[store] inline parent wake failed (non-fatal): %v", err)
 		}
 
-			// Also populate the parent's await_child event with the child's
-			// result so the parent can replay it directly without needing
-			// a fresh GetChildResult query (which requires exitReplay).
-			if _, err := tx.ExecContext(ctx, `
+		// Also populate the parent's await_child event with the child's
+		// result so the parent can replay it directly without needing
+		// a fresh GetChildResult query (which requires exitReplay).
+		if _, err := tx.ExecContext(ctx, `
 				UPDATE event_history
 				SET response = $2
 				WHERE workflow_id = (
@@ -1439,8 +1439,8 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 				AND run_id = $1
 				AND (response IS NULL OR response = '')
 			`, runID, result); err != nil {
-				log.Printf("[store] parent event update failed (non-fatal): %v", err)
-			}
+			log.Printf("[store] parent event update failed (non-fatal): %v", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -2007,7 +2007,6 @@ func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWork
 	`, parentWorkflowID)
 	tx2.Commit()
 }
-
 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
@@ -3188,7 +3187,6 @@ func (s *PostgresStore) GetEventCount(ctx context.Context, workflowID string) (i
 	return count, tx.Commit()
 }
 
-
 // ---- Sticky Session implementations (Feature 10) ----
 
 // UpdateStickyWorker sets the sticky worker for a workflow.
@@ -3496,7 +3494,7 @@ func nullInt64(v int64) sql.NullInt64 {
 
 // eventRecordToPayload serializes event-type-specific fields into a JSON map.
 func eventRecordToPayload(rec EventRecord) ([]byte, error) {
-	payload := make(map[string]interface{})
+	payload := make(map[string]any)
 	switch rec.EventType {
 	case "call":
 		payload["service"] = rec.Service
@@ -3723,7 +3721,7 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 
 // populateFromPayload fills event-type-specific fields from a JSONB payload.
 func populateFromPayload(rec *EventRecord, payload []byte) {
-	var m map[string]interface{}
+	var m map[string]any
 	if err := json.Unmarshal(payload, &m); err != nil {
 		return
 	}

@@ -3,10 +3,10 @@
 package closure
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
 	"go/types"
-	"fmt"
 	"os"
 	"strings"
 

@@ -564,9 +564,9 @@ func TestDurableDeferReplayMatch(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
-		Step:              0,
-		EventType:         EventTypeDefer,
-		DeferDescription:  "cleanup",
+		Step:             0,
+		EventType:        EventTypeDefer,
+		DeferDescription: "cleanup",
 	}}
 	result := s.DurableDefer(context.Background(), nil, "cleanup", 0, 0)
 
@@ -640,7 +640,7 @@ func TestScheduleInvokeReplayAdvancesAnyEvent(t *testing.T) {
 // trackingConcurrencyStore records every call to ReleaseConcurrencyKey.
 type trackingConcurrencyStore struct {
 	mockConcurrencyKeyStore
-	mu     sync.Mutex
+	mu       sync.Mutex
 	releases []string
 }
 

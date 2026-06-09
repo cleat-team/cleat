@@ -21,11 +21,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // testBackendTenantID is the tenant UUID used for multi-backend test requests.
@@ -159,7 +159,7 @@ func beRequest(method, path string, body []byte) *http.Request {
 }
 
 // decodeJSON is a test helper that decodes the response body into v.
-func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
+func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, v any) {
 	t.Helper()
 	if err := json.NewDecoder(rec.Body).Decode(v); err != nil {
 		t.Fatalf(
@@ -178,7 +178,7 @@ func decodeJSON(t *testing.T, rec *httptest.ResponseRecorder, v interface{}) {
 // ---------------------------------------------------------------------------
 
 // stringify is a convenience for formatting map assertions.
-func stringify(v interface{}) string {
+func stringify(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }

@@ -3,13 +3,13 @@ package eventtriggers
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -32,11 +32,11 @@ type awaitEventInput struct {
 }
 
 type awaitEventOutput struct {
-	Found       bool              `json:"found"`
-	EventID     string            `json:"event_id,omitempty"`
-	EventType   string            `json:"event_type,omitempty"`
-	EventData   json.RawMessage   `json:"event_data,omitempty"`
-	ReceivedAt  string            `json:"received_at,omitempty"`
+	Found      bool            `json:"found"`
+	EventID    string          `json:"event_id,omitempty"`
+	EventType  string          `json:"event_type,omitempty"`
+	EventData  json.RawMessage `json:"event_data,omitempty"`
+	ReceivedAt string          `json:"received_at,omitempty"`
 }
 
 // ---- Host functions ----
@@ -138,4 +138,3 @@ func (p *Plugin) registerAwaiter(ctx context.Context, tenantID, workflowID, even
 		p.logger.Warn("event-triggers: register awaiter", "error", err, "workflow_id", workflowID)
 	}
 }
-

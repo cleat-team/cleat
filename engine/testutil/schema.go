@@ -484,7 +484,7 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 					def_name NVARCHAR(MAX) NOT NULL,
 					sample_bytes BIGINT NOT NULL,
 					recorded_at DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME())`,
-		`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_stats')
+			`IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'workflow_memory_stats')
 				CREATE TABLE workflow_memory_stats (
 					def_name NVARCHAR(255) NOT NULL PRIMARY KEY,
 					mean_bytes FLOAT(53) NOT NULL DEFAULT 0,

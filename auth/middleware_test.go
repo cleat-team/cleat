@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/google/uuid"
 )
 
 // testTenantID is a well-known UUID used as the test tenant.

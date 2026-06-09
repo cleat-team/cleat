@@ -252,7 +252,7 @@ func TestWASMCache_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				c.Get(string(rune('A' + j%26)) + string(rune('0'+j/26)))
+				c.Get(string(rune('A'+j%26)) + string(rune('0'+j/26)))
 			}
 		}()
 	}

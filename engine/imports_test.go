@@ -15,60 +15,134 @@ import (
 
 type stubHostHandler struct{}
 
-func (h *stubHostHandler) DurableCall(_ context.Context, _ api.Module, _, _, _ string, _, _ uint32) int64 { return 0 }
+func (h *stubHostHandler) DurableCall(_ context.Context, _ api.Module, _, _, _ string, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) DurableSleep(_ context.Context, _ api.Module, _ int64) int64 { return 0 }
-func (h *stubHostHandler) DurableAwaitSignals(_ context.Context, _ api.Module, _ string, _ int64, _, _, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) DurableDefer(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
+func (h *stubHostHandler) DurableAwaitSignals(_ context.Context, _ api.Module, _ string, _ int64, _, _, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) DurableDefer(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) DurableLog(_ context.Context, _ api.Module, _ string) int64 { return 0 }
-func (h *stubHostHandler) PollCancellation(_ context.Context, _ api.Module, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) PollSignal(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
+func (h *stubHostHandler) PollCancellation(_ context.Context, _ api.Module, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) PollSignal(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) ContinueAsNew(_ context.Context, _ api.Module, _ string) int64 { return 0 }
-func (h *stubHostHandler) ContinueAsNewWithVersion(_ context.Context, _ api.Module, _ string, _ int) int64 { return 0 }
-func (h *stubHostHandler) ChildWorkflow(_ context.Context, _ api.Module, _, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) ChildWorkflowWithOptions(_ context.Context, _ api.Module, _, _ string, _, _ int64, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) ChildWorkflowInSchema(_ context.Context, _ api.Module, _, _, _ string, _, _ int64, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) AwaitChild(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) AwaitAllChildren(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) PollChild(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) AwaitAnyChild(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) DurableCallWithRetry(_ context.Context, _ api.Module, _, _, _ string, _, _, _, _ int64, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) DurableCallWithHeartbeat(_ context.Context, _ api.Module, _, _, _ string, _ int64, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) Version(_ context.Context) int64 { return 0 }
-func (h *stubHostHandler) MinVersion(_ context.Context) int64 { return 0 }
+func (h *stubHostHandler) ContinueAsNewWithVersion(_ context.Context, _ api.Module, _ string, _ int) int64 {
+	return 0
+}
+func (h *stubHostHandler) ChildWorkflow(_ context.Context, _ api.Module, _, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) ChildWorkflowWithOptions(_ context.Context, _ api.Module, _, _ string, _, _ int64, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) ChildWorkflowInSchema(_ context.Context, _ api.Module, _, _, _ string, _, _ int64, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) AwaitChild(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) AwaitAllChildren(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) PollChild(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) AwaitAnyChild(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) DurableCallWithRetry(_ context.Context, _ api.Module, _, _, _ string, _, _, _, _ int64, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) DurableCallWithHeartbeat(_ context.Context, _ api.Module, _, _, _ string, _ int64, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) Version(_ context.Context) int64                                  { return 0 }
+func (h *stubHostHandler) MinVersion(_ context.Context) int64                               { return 0 }
 func (h *stubHostHandler) SetQueryState(_ context.Context, _ api.Module, _, _ string) int64 { return 0 }
-func (h *stubHostHandler) Now(_ context.Context) int64 { return 0 }
-func (h *stubHostHandler) Random(_ context.Context) int64 { return 0 }
-func (h *stubHostHandler) CreatePromise(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) AwaitPromise(_ context.Context, _ api.Module, _ string, _ int64, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) PluginCall(_ context.Context, _ api.Module, _, _, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) PluginCallStreaming(_ context.Context, _ api.Module, _, _, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) RegisterUpdateHandler(_ context.Context, _ api.Module, _ string) int64 { return 0 }
-func (h *stubHostHandler) SendSignalAndWait(_ context.Context, _ api.Module, _, _, _ string, _ int64, _, _ uint32) int64 { return 0 }
+func (h *stubHostHandler) Now(_ context.Context) int64                                      { return 0 }
+func (h *stubHostHandler) Random(_ context.Context) int64                                   { return 0 }
+func (h *stubHostHandler) CreatePromise(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) AwaitPromise(_ context.Context, _ api.Module, _ string, _ int64, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) PluginCall(_ context.Context, _ api.Module, _, _, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) PluginCallStreaming(_ context.Context, _ api.Module, _, _, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) RegisterUpdateHandler(_ context.Context, _ api.Module, _ string) int64 {
+	return 0
+}
+func (h *stubHostHandler) SendSignalAndWait(_ context.Context, _ api.Module, _, _, _ string, _ int64, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) ReplyToSignal(_ context.Context, _ api.Module, _, _ string) int64 { return 0 }
-func (h *stubHostHandler) SignalWorkflow(_ context.Context, _ api.Module, _, _, _ string) int64 { return 0 }
-func (h *stubHostHandler) SetScope(_ context.Context, _ api.Module, _, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) GetScope(_ context.Context, _ api.Module, _, _, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) UUID(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) AcquireLock(_ context.Context, _ api.Module, _ string, _ int64) int64 { return 0 }
+func (h *stubHostHandler) SignalWorkflow(_ context.Context, _ api.Module, _, _, _ string) int64 {
+	return 0
+}
+func (h *stubHostHandler) SetScope(_ context.Context, _ api.Module, _, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) GetScope(_ context.Context, _ api.Module, _, _, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) UUID(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) AcquireLock(_ context.Context, _ api.Module, _ string, _ int64) int64 {
+	return 0
+}
 func (h *stubHostHandler) ReleaseLock(_ context.Context, _ api.Module, _ string) int64 { return 0 }
-func (h *stubHostHandler) SideEffect(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
+func (h *stubHostHandler) SideEffect(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) WorkflowID(_ context.Context, _ api.Module, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) RunID(_ context.Context, _ api.Module, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) ResolvePromise(_ context.Context, _ api.Module, _, _ string) int64 { return 0 }
+func (h *stubHostHandler) RunID(_ context.Context, _ api.Module, _, _ uint32) int64      { return 0 }
+func (h *stubHostHandler) ResolvePromise(_ context.Context, _ api.Module, _, _ string) int64 {
+	return 0
+}
 func (h *stubHostHandler) RejectPromise(_ context.Context, _ api.Module, _, _ string) int64 { return 0 }
-func (h *stubHostHandler) DurableSend(_ context.Context, _ api.Module, _, _, _ string) int64 { return 0 }
-func (h *stubHostHandler) DurableScheduleInvoke(_ context.Context, _ api.Module, _, _, _ string, _ int64) int64 { return 0 }
-func (h *stubHostHandler) RegisterQueryHandler(_ context.Context, _ api.Module, _ string) int64 { return 0 }
+func (h *stubHostHandler) DurableSend(_ context.Context, _ api.Module, _, _, _ string) int64 {
+	return 0
+}
+func (h *stubHostHandler) DurableScheduleInvoke(_ context.Context, _ api.Module, _, _, _ string, _ int64) int64 {
+	return 0
+}
+func (h *stubHostHandler) RegisterQueryHandler(_ context.Context, _ api.Module, _ string) int64 {
+	return 0
+}
 func (h *stubHostHandler) SetState(_ context.Context, _ api.Module, _, _ string) int64 { return 0 }
-func (h *stubHostHandler) GetState(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
+func (h *stubHostHandler) GetState(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) DeleteState(_ context.Context, _ api.Module, _ string) int64 { return 0 }
-func (h *stubHostHandler) IncrState(_ context.Context, _ api.Module, _ string, _ int64) int64 { return 0 }
+func (h *stubHostHandler) IncrState(_ context.Context, _ api.Module, _ string, _ int64) int64 {
+	return 0
+}
 func (h *stubHostHandler) HasState(_ context.Context, _ api.Module, _ string) int64 { return 0 }
-func (h *stubHostHandler) ListState(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 { return 0 }
+func (h *stubHostHandler) ListState(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) RunDetached(_ context.Context, _ api.Module, _, _ string) int64 { return 0 }
-func (h *stubHostHandler) Fetch(_ context.Context, _ api.Module, _, _, _, _ string, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) JsonParse(_ context.Context, _ api.Module, _, _, _, _ uint32) int64 { return 0 }
-func (h *stubHostHandler) JsonStringify(_ context.Context, _ api.Module, _, _, _, _ uint32) int64 { return 0 }
+func (h *stubHostHandler) Fetch(_ context.Context, _ api.Module, _, _, _, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) JsonParse(_ context.Context, _ api.Module, _, _, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) JsonStringify(_ context.Context, _ api.Module, _, _, _, _ uint32) int64 {
+	return 0
+}
 
 // ---------------------------------------------------------------------------
 // withHandler / handlerFromContext tests

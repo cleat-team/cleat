@@ -28,11 +28,11 @@ func (r *ReadOnlyDB) Begin(ctx context.Context) (plugin.PluginTx, error) {
 	return &readOnlyTx{tx: tx}, nil
 }
 
-func (r *ReadOnlyDB) Exec(ctx context.Context, query string, args ...interface{}) (int64, error) {
+func (r *ReadOnlyDB) Exec(ctx context.Context, query string, args ...any) (int64, error) {
 	return 0, fmt.Errorf("read-only: Exec denied")
 }
 
-func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...interface{}) (plugin.Rows, error) {
+func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
 	rows, err := r.Inner.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -40,7 +40,7 @@ func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...interface{
 	return &sqlRowsWrapper{rows: rows}, nil
 }
 
-func (r *ReadOnlyDB) QueryRow(ctx context.Context, query string, args ...interface{}) plugin.RowScanner {
+func (r *ReadOnlyDB) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
 	row := r.Inner.QueryRowContext(ctx, query, args...)
 	return &rowScanner{row: row}
 }
@@ -55,11 +55,11 @@ type readOnlyTx struct {
 
 var _ plugin.PluginTx = (*readOnlyTx)(nil)
 
-func (r *readOnlyTx) Exec(ctx context.Context, query string, args ...interface{}) (int64, error) {
+func (r *readOnlyTx) Exec(ctx context.Context, query string, args ...any) (int64, error) {
 	return 0, fmt.Errorf("read-only: Exec denied")
 }
 
-func (r *readOnlyTx) Query(ctx context.Context, query string, args ...interface{}) (plugin.Rows, error) {
+func (r *readOnlyTx) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
 	rows, err := r.tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -67,7 +67,7 @@ func (r *readOnlyTx) Query(ctx context.Context, query string, args ...interface{
 	return &sqlRowsWrapper{rows: rows}, nil
 }
 
-func (r *readOnlyTx) QueryRow(ctx context.Context, query string, args ...interface{}) plugin.RowScanner {
+func (r *readOnlyTx) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
 	row := r.tx.QueryRowContext(ctx, query, args...)
 	return &rowScanner{row: row}
 }
@@ -82,10 +82,10 @@ type sqlRowsWrapper struct {
 
 var _ plugin.Rows = (*sqlRowsWrapper)(nil)
 
-func (w *sqlRowsWrapper) Next() bool                    { return w.rows.Next() }
-func (w *sqlRowsWrapper) Scan(dest ...interface{}) error { return w.rows.Scan(dest...) }
-func (w *sqlRowsWrapper) Close() error                   { return w.rows.Close() }
-func (w *sqlRowsWrapper) Err() error                     { return w.rows.Err() }
+func (w *sqlRowsWrapper) Next() bool             { return w.rows.Next() }
+func (w *sqlRowsWrapper) Scan(dest ...any) error { return w.rows.Scan(dest...) }
+func (w *sqlRowsWrapper) Close() error           { return w.rows.Close() }
+func (w *sqlRowsWrapper) Err() error             { return w.rows.Err() }
 
 // rowScanner adapts *sql.Row to plugin.RowScanner.
 type rowScanner struct {
@@ -94,6 +94,6 @@ type rowScanner struct {
 
 var _ plugin.RowScanner = (*rowScanner)(nil)
 
-func (r *rowScanner) Scan(dest ...interface{}) error {
+func (r *rowScanner) Scan(dest ...any) error {
 	return r.row.Scan(dest...)
 }

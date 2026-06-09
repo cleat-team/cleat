@@ -36,16 +36,16 @@ var WitToEnvImport = map[string]map[string]string{
 		"durable-poll-cancellation": "cleat_poll_cancellation",
 	},
 	"cleat:host-calls/durable-signals": {
-		"durable-await-signals":       "cleat_await_signals",
-		"durable-poll-signal":         "cleat_poll_signal",
+		"durable-await-signals":        "cleat_await_signals",
+		"durable-poll-signal":          "cleat_poll_signal",
 		"durable-send-signal-and-wait": "cleat_send_signal_and_wait",
-		"durable-reply-to-signal":     "cleat_reply_to_signal",
-		"durable-signal-workflow":     "cleat_signal_workflow",
+		"durable-reply-to-signal":      "cleat_reply_to_signal",
+		"durable-signal-workflow":      "cleat_signal_workflow",
 	},
 	"cleat:host-calls/durable-children": {
-		"durable-child-workflow":           "cleat_child_workflow",
-		"durable-await-child":              "cleat_await_child",
-		"durable-await-all-children":       "cleat_await_all_children",
+		"durable-child-workflow":              "cleat_child_workflow",
+		"durable-await-child":                 "cleat_await_child",
+		"durable-await-all-children":          "cleat_await_all_children",
 		"durable-child-workflow-with-options": "cleat_child_workflow_with_options",
 	},
 	"cleat:host-calls/durable-promises": {
@@ -319,13 +319,13 @@ func RewriteWitImports(wasmBytes []byte) ([]byte, error) {
 				if nn <= 0 {
 					return nil, fmt.Errorf("corrupt WASM import %d: reparse failed", i)
 				}
-				scanPos += nn // past module name ULEB128
+				scanPos += nn      // past module name ULEB128
 				scanPos += int(ml) // past module name bytes
 				fl, nn := decodeULEB128(oldPayload[scanPos:])
 				if nn <= 0 {
 					return nil, fmt.Errorf("corrupt WASM import %d: reparse failed", i)
 				}
-				scanPos += nn // past field name ULEB128
+				scanPos += nn      // past field name ULEB128
 				scanPos += int(fl) // past field name bytes
 				kindPos := scanPos
 				// kind byte at kindPos, descriptor from kindPos+1 to entryEnd

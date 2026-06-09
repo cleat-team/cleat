@@ -379,9 +379,9 @@ var directMethods = map[string]bool{
 //	h.DurableCallWithOptions(opts, "plugin", "op", req)
 //	h.CallWithOptions(opts, "plugin", "op", req)
 var offsetMethods = map[string]bool{
-	"DurableCallWithOptions":     true,
-	"CallWithOptions":            true,
-	"DurableCallJSONWithOptions": true,
+	"DurableCallWithOptions":      true,
+	"CallWithOptions":             true,
+	"DurableCallJSONWithOptions":  true,
 	"DurableCallTypedWithOptions": true,
 }
 
@@ -392,8 +392,8 @@ var offsetMethods = map[string]bool{
 //	cleat.PluginCallTyped[T](h, "plugin", "func", req) -> arg 1
 //	cleat.CallTypedWithOptions[T](h, opts, "plugin", "op", req) -> arg 2
 var pkgFuncs = map[string]int{
-	"CallTyped":           1,
-	"PluginCallTyped":     1,
+	"CallTyped":            1,
+	"PluginCallTyped":      1,
 	"CallTypedWithOptions": 2,
 }
 

@@ -47,20 +47,20 @@ func TestMySQLStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 		//          next_wake_at, tenant_id, created_at, error_code, error_op,
 		//          generation, priority, trace_id
 		{match: "COALESCE(priority", data: [][]driver.Value{{
-			"wf-1",                   // id
-			"test-wf",                // def_name
-			int64(1),                 // def_version
-			"running",                // status
-			[]byte(`{"input":"x"}`),  // input
-			"worker-1",               // assigned_to
-			now,                      // next_wake_at
-			nil,                      // tenant_id (NULL)
-			now,                      // created_at
-			nil,                      // error_code (NULL)
-			nil,                      // error_op (NULL)
-			int64(1),                 // generation
-			int64(0),                 // priority
-			"",                       // trace_id
+			"wf-1",                  // id
+			"test-wf",               // def_name
+			int64(1),                // def_version
+			"running",               // status
+			[]byte(`{"input":"x"}`), // input
+			"worker-1",              // assigned_to
+			now,                     // next_wake_at
+			nil,                     // tenant_id (NULL)
+			now,                     // created_at
+			nil,                     // error_code (NULL)
+			nil,                     // error_op (NULL)
+			int64(1),                // generation
+			int64(0),                // priority
+			"",                      // trace_id
 		}}},
 	}, []mockExecResult{
 		// Step 2: UPDATE
@@ -422,4 +422,3 @@ func TestMySQLStore_WithEncryption(t *testing.T) {
 		t.Error("original store encryption should be nil")
 	}
 }
-

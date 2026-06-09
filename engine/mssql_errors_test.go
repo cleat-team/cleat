@@ -190,11 +190,11 @@ func TestIsMSSQLRetryable(t *testing.T) {
 
 func TestMapMSSQLError(t *testing.T) {
 	tests := []struct {
-		name       string
-		op         string
-		workflowID string
-		err        error
-		wantNil    bool
+		name          string
+		op            string
+		workflowID    string
+		err           error
+		wantNil       bool
 		wantTransient bool
 		wantCancelled bool
 		wantPermanent bool
@@ -206,46 +206,46 @@ func TestMapMSSQLError(t *testing.T) {
 			wantNil: true,
 		},
 		{
-			name:           "deadlock maps to transient",
-			op:             "ClaimWorkflow",
-			workflowID:     "wf-1",
-			err:            fmt.Errorf("deadlock victim in resource"),
-			wantTransient:  true,
+			name:          "deadlock maps to transient",
+			op:            "ClaimWorkflow",
+			workflowID:    "wf-1",
+			err:           fmt.Errorf("deadlock victim in resource"),
+			wantTransient: true,
 		},
 		{
-			name:           "snapshot conflict maps to transient",
-			op:             "CompleteWorkflow",
-			workflowID:     "wf-2",
-			err:            fmt.Errorf("snapshot isolation update conflict error 3960"),
-			wantTransient:  true,
+			name:          "snapshot conflict maps to transient",
+			op:            "CompleteWorkflow",
+			workflowID:    "wf-2",
+			err:           fmt.Errorf("snapshot isolation update conflict error 3960"),
+			wantTransient: true,
 		},
 		{
-			name:           "timeout maps to transient",
-			op:             "FailWorkflow",
-			workflowID:     "wf-3",
-			err:            fmt.Errorf("timeout expired error 258"),
-			wantTransient:  true,
+			name:          "timeout maps to transient",
+			op:            "FailWorkflow",
+			workflowID:    "wf-3",
+			err:           fmt.Errorf("timeout expired error 258"),
+			wantTransient: true,
 		},
 		{
-			name:           "connection error maps to transient",
-			op:             "StartNewRun",
-			workflowID:     "wf-4",
-			err:            fmt.Errorf("connection reset by peer"),
-			wantTransient:  true,
+			name:          "connection error maps to transient",
+			op:            "StartNewRun",
+			workflowID:    "wf-4",
+			err:           fmt.Errorf("connection reset by peer"),
+			wantTransient: true,
 		},
 		{
-			name:           "duplicate key maps to cancelled",
-			op:             "DeployWorkflowDef",
-			workflowID:     "wf-5",
-			err:            fmt.Errorf("violation of PRIMARY KEY constraint error 2627"),
-			wantCancelled:  true,
+			name:          "duplicate key maps to cancelled",
+			op:            "DeployWorkflowDef",
+			workflowID:    "wf-5",
+			err:           fmt.Errorf("violation of PRIMARY KEY constraint error 2627"),
+			wantCancelled: true,
 		},
 		{
-			name:           "other error maps to permanent",
-			op:             "LoadWASM",
-			workflowID:     "wf-6",
-			err:            fmt.Errorf("syntax error"),
-			wantPermanent:  true,
+			name:          "other error maps to permanent",
+			op:            "LoadWASM",
+			workflowID:    "wf-6",
+			err:           fmt.Errorf("syntax error"),
+			wantPermanent: true,
 		},
 	}
 

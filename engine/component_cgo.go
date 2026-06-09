@@ -107,12 +107,16 @@ func getEnginePtr(engine *wasmtime.Engine) *C.wasm_engine_t {
 func componentCompile(engine *wasmtime.Engine, wasmBytes []byte) (*C.wasmtime_component_t, error) {
 	var ptr *C.wasmtime_component_t
 	var bufPtr *C.uint8_t
-	if len(wasmBytes) > 0 { bufPtr = (*C.uint8_t)(unsafe.Pointer(&wasmBytes[0])) }
+	if len(wasmBytes) > 0 {
+		bufPtr = (*C.uint8_t)(unsafe.Pointer(&wasmBytes[0]))
+	}
 	err := C.component_compile(getEnginePtr(engine), bufPtr, C.size_t(len(wasmBytes)), &ptr)
 	if err != nil {
-		var msg C.wasm_byte_vec_t; C.get_error_message(err, &msg)
+		var msg C.wasm_byte_vec_t
+		C.get_error_message(err, &msg)
 		s := C.GoStringN(msg.data, C.int(msg.size))
-		C.wasm_byte_vec_delete(&msg); C.wasmtime_error_delete(err)
+		C.wasm_byte_vec_delete(&msg)
+		C.wasmtime_error_delete(err)
 		return nil, fmt.Errorf("component compile: %s", s)
 	}
 	return ptr, nil
@@ -131,12 +135,15 @@ func componentInstantiate(
 	var inst C.wasmtime_component_instance_t
 	err := C.wasmtime_component_linker_instantiate(linker, C.store_context(unsafe.Pointer(store.Context())), component, &inst)
 	if err != nil {
-		var msg C.wasm_byte_vec_t; C.get_error_message(err, &msg)
+		var msg C.wasm_byte_vec_t
+		C.get_error_message(err, &msg)
 		s := C.GoStringN(msg.data, C.int(msg.size))
-		C.wasm_byte_vec_delete(&msg); C.wasmtime_error_delete(err)
+		C.wasm_byte_vec_delete(&msg)
+		C.wasmtime_error_delete(err)
 		return nil, fmt.Errorf("component instantiate: %s", s)
 	}
-	out := new(C.wasmtime_component_instance_t); *out = inst
+	out := new(C.wasmtime_component_instance_t)
+	*out = inst
 	return out, nil
 }
 
@@ -144,17 +151,23 @@ func componentInstantiate(
 func componentGetFunc(
 	instance *C.wasmtime_component_instance_t, store wasmtime.Storelike, name string,
 ) (*C.wasmtime_component_func_t, error) {
-	ctxPtr := store.Context(); nameBytes := []byte(name)
+	ctxPtr := store.Context()
+	nameBytes := []byte(name)
 	var namePtr *C.char
-	if len(nameBytes) > 0 { namePtr = (*C.char)(unsafe.Pointer(&nameBytes[0])) }
+	if len(nameBytes) > 0 {
+		namePtr = (*C.char)(unsafe.Pointer(&nameBytes[0]))
+	}
 	exportIdx := C.wasmtime_component_instance_get_export_index(instance, C.store_context(unsafe.Pointer(ctxPtr)), nil, namePtr, C.size_t(len(name)))
-	if exportIdx == nil { return nil, fmt.Errorf("component export %q not found", name) }
+	if exportIdx == nil {
+		return nil, fmt.Errorf("component export %q not found", name)
+	}
 	defer C.wasmtime_component_export_index_delete(exportIdx)
 	var fn C.wasmtime_component_func_t
 	if !C.wasmtime_component_instance_get_func(instance, C.store_context(unsafe.Pointer(ctxPtr)), exportIdx, &fn) {
 		return nil, fmt.Errorf("component export %q not a function", name)
 	}
-	out := new(C.wasmtime_component_func_t); *out = fn
+	out := new(C.wasmtime_component_func_t)
+	*out = fn
 	return out, nil
 }
 
@@ -173,14 +186,18 @@ func componentCall(
 	result.kind = C.WASMTIME_COMPONENT_STRING
 	err := C.wasmtime_component_func_call(fn, ctx, &args[0], 1, &result, 1)
 	if err != nil {
-		var msg C.wasm_byte_vec_t; C.get_error_message(err, &msg)
+		var msg C.wasm_byte_vec_t
+		C.get_error_message(err, &msg)
 		s := C.GoStringN(msg.data, C.int(msg.size))
-		C.wasm_byte_vec_delete(&msg); C.wasmtime_error_delete(err)
+		C.wasm_byte_vec_delete(&msg)
+		C.wasmtime_error_delete(err)
 		return "", fmt.Errorf("component call: %s", s)
 	}
 	var resultLen C.size_t
 	resultData := C.component_val_get_string(&result, &resultLen)
-	if resultData == nil { return "", nil }
+	if resultData == nil {
+		return "", nil
+	}
 	return C.GoStringN(resultData, C.int(resultLen)), nil
 }
 
@@ -190,92 +207,92 @@ func componentCall(
 type cbType int
 
 const (
-	cbTypeDefault            cbType = iota // deprecated fallback - returns 0
+	cbTypeDefault cbType = iota // deprecated fallback - returns 0
 
 	// durable-call interface
-	cbTypeDurableCallString                // (string,string,string) -> string
-	cbTypeDurableCallRetry                 // (string,string,string,u64,u64,u64,u64,string) -> string
-	cbTypeDurableCallHeartbeat             // (string,string,string,u64) -> string
+	cbTypeDurableCallString    // (string,string,string) -> string
+	cbTypeDurableCallRetry     // (string,string,string,u64,u64,u64,u64,string) -> string
+	cbTypeDurableCallHeartbeat // (string,string,string,u64) -> string
 
 	// durable-sleep interface
-	cbTypeDurableSleep                     // (u64) -> u64
-	cbTypeNow                              // () -> u64
-	cbTypeRandom                           // () -> u64
-	cbTypeDurableLog                       // (string) -> u64
+	cbTypeDurableSleep // (u64) -> u64
+	cbTypeNow          // () -> u64
+	cbTypeRandom       // () -> u64
+	cbTypeDurableLog   // (string) -> u64
 
 	// durable-version interface
-	cbTypeVersion                          // () -> u64
-	cbTypeMinVersion                       // () -> u64
+	cbTypeVersion    // () -> u64
+	cbTypeMinVersion // () -> u64
 
 	// durable-lifecycle interface
-	cbTypeDurableDefer                     // (string) -> string
-	cbTypeContinueAsNew                    // (string) -> u64
-	cbTypePollCancellation                 // () -> string
+	cbTypeDurableDefer     // (string) -> string
+	cbTypeContinueAsNew    // (string) -> u64
+	cbTypePollCancellation // () -> string
 
 	// durable-signals interface
-	cbTypeAwaitSignals                     // (string,u64,u32,u32,u32,u32) -> u64
-	cbTypePollSignal                       // (string) -> string
-	cbTypeSendSignalAndWait                // (string,string,string,u64) -> string
-	cbTypeReplyToSignal                    // (string,string) -> u64
-	cbTypeSignalWorkflow                   // (string,string,string) -> u64
+	cbTypeAwaitSignals      // (string,u64,u32,u32,u32,u32) -> u64
+	cbTypePollSignal        // (string) -> string
+	cbTypeSendSignalAndWait // (string,string,string,u64) -> string
+	cbTypeReplyToSignal     // (string,string) -> u64
+	cbTypeSignalWorkflow    // (string,string,string) -> u64
 
 	// durable-children interface
-	cbTypeChildWorkflow                    // (string,string) -> string
-	cbTypeAwaitChild                       // (string) -> string
-	cbTypeAwaitAllChildren                 // (string) -> string
-	cbTypeChildWorkflowWithOptions         // (string,string,u64,u64,string) -> string
+	cbTypeChildWorkflow            // (string,string) -> string
+	cbTypeAwaitChild               // (string) -> string
+	cbTypeAwaitAllChildren         // (string) -> string
+	cbTypeChildWorkflowWithOptions // (string,string,u64,u64,string) -> string
 
 	// durable-promises interface
-	cbTypeCreatePromise                    // (string[,u64]) -> string (WIT has ttl-ms, handler doesn't)
-	cbTypeAwaitPromise                     // (string,u64) -> string
-	cbTypeResolvePromise                   // (string,string) -> u64
-	cbTypeRejectPromise                    // (string,string) -> u64
+	cbTypeCreatePromise  // (string[,u64]) -> string (WIT has ttl-ms, handler doesn't)
+	cbTypeAwaitPromise   // (string,u64) -> string
+	cbTypeResolvePromise // (string,string) -> u64
+	cbTypeRejectPromise  // (string,string) -> u64
 
 	// durable-state interface
-	cbTypeSetQueryState                    // (string,string) -> u64
+	cbTypeSetQueryState // (string,string) -> u64
 
 	// durable-handlers interface
-	cbTypeRegisterUpdateHandler            // (string) -> u64
-	cbTypeRegisterQueryHandler             // (string) -> u64
+	cbTypeRegisterUpdateHandler // (string) -> u64
+	cbTypeRegisterQueryHandler  // (string) -> u64
 
 	// durable-messaging interface
-	cbTypeDurableSend                      // (string,string,string) -> u64
-	cbTypeScheduleInvoke                   // (string,string,string,u64) -> u64
+	cbTypeDurableSend    // (string,string,string) -> u64
+	cbTypeScheduleInvoke // (string,string,string,u64) -> u64
 
 	// durable-identity interface
-	cbTypeWorkflowID                       // () -> string
-	cbTypeRunID                            // () -> string
+	cbTypeWorkflowID // () -> string
+	cbTypeRunID      // () -> string
 
 	// plugin interface
-	cbTypePluginCall                       // (string,string,string) -> string
-	cbTypePluginCallStreaming              // (string,string,string) -> string
+	cbTypePluginCall          // (string,string,string) -> string
+	cbTypePluginCallStreaming // (string,string,string) -> string
 
 	// durable-lock interface
-	cbTypeAcquireLock                      // (string,s64) -> s64
-	cbTypeReleaseLock                      // (string) -> s64
+	cbTypeAcquireLock // (string,s64) -> s64
+	cbTypeReleaseLock // (string) -> s64
 
 	// durable-scope interface
-	cbTypeSetScope                         // (string,string) -> string
-	cbTypeGetScope                         // (u32,u32,u32,u32) -> u64
-	cbTypeUUID                             // (string) -> string
+	cbTypeSetScope // (string,string) -> string
+	cbTypeGetScope // (u32,u32,u32,u32) -> u64
+	cbTypeUUID     // (string) -> string
 
 	// durable-stream-state interface
-	cbTypeSetState                         // (string,string) -> u64
-	cbTypeGetState                         // (string) -> string
-	cbTypeDeleteState                      // (string) -> u64
-	cbTypeIncrState                        // (string,u64) -> u64
-	cbTypeHasState                         // (string) -> u64
-	cbTypeListState                        // (string) -> string
+	cbTypeSetState    // (string,string) -> u64
+	cbTypeGetState    // (string) -> string
+	cbTypeDeleteState // (string) -> u64
+	cbTypeIncrState   // (string,u64) -> u64
+	cbTypeHasState    // (string) -> u64
+	cbTypeListState   // (string) -> string
 
 	// durable-extended-lifecycle interface
-	cbTypeContinueAsNewVersioned           // (string,u32) -> u64
-	cbTypeSideEffect                       // (string) -> string
+	cbTypeContinueAsNewVersioned // (string,u32) -> u64
+	cbTypeSideEffect             // (string) -> string
 
 	// durable-extended-children interface
-	cbTypeChildWorkflowInSchema            // (string,string,string,u64,u64,string) -> string
+	cbTypeChildWorkflowInSchema // (string,string,string,u64,u64,string) -> string
 
 	// durable-fetch interface
-	cbTypeFetch                            // (string,string,string,string) -> string
+	cbTypeFetch // (string,string,string,string) -> string
 )
 
 type cbEntry struct {
@@ -291,14 +308,16 @@ var cbRegistry = struct {
 }{entries: make(map[uintptr]cbEntry)}
 
 func registerCB(b *wasmtimeBackend, typ cbType) uintptr {
-	cbRegistry.Lock(); defer cbRegistry.Unlock()
+	cbRegistry.Lock()
+	defer cbRegistry.Unlock()
 	id := uintptr(len(cbRegistry.entries) + 1)
 	cbRegistry.entries[id] = cbEntry{backend: b, typ: typ}
 	return id
 }
 
 func lookupCB(id uintptr) cbEntry {
-	cbRegistry.Lock(); defer cbRegistry.Unlock()
+	cbRegistry.Lock()
+	defer cbRegistry.Unlock()
 	return cbRegistry.entries[id]
 }
 
@@ -311,18 +330,24 @@ func argPtr(args *C.wasmtime_component_val_t, i int) *C.wasmtime_component_val_t
 
 // readStrArg returns the i-th argument as a Go string, or "" if out of range.
 func readStrArg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) string {
-	if int(nargs) <= i { return "" }
+	if int(nargs) <= i {
+		return ""
+	}
 	a := argPtr(args, i)
 	var slen C.size_t
 	sdata := C.component_val_get_string(a, &slen)
-	if sdata == nil { return "" }
+	if sdata == nil {
+		return ""
+	}
 	return C.GoStringN(sdata, C.int(slen))
 }
 
 // readU64Arg returns the i-th argument as a uint64, or 0 if out of range.
 // Handles both WASMTIME_COMPONENT_U64 and WASMTIME_COMPONENT_S64 kinds.
 func readU64Arg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) uint64 {
-	if int(nargs) <= i { return 0 }
+	if int(nargs) <= i {
+		return 0
+	}
 	a := argPtr(args, i)
 	return uint64(C.component_val_get_u64(a))
 }
@@ -330,14 +355,18 @@ func readU64Arg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) uint64 
 // readU32Arg returns the i-th argument as a uint32, or 0 if out of range.
 // Handles both WASMTIME_COMPONENT_U32 and WASMTIME_COMPONENT_S32 kinds.
 func readU32Arg(args *C.wasmtime_component_val_t, i int, nargs C.size_t) uint32 {
-	if int(nargs) <= i { return 0 }
+	if int(nargs) <= i {
+		return 0
+	}
 	a := argPtr(args, i)
 	return uint32(C.component_val_get_u32(a))
 }
 
 // setResultU64 sets the first result value to a u64.
 func setResultU64(results *C.wasmtime_component_val_t, nresults C.size_t, val uint64) {
-	if int(nresults) < 1 { return }
+	if int(nresults) < 1 {
+		return
+	}
 	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
 	C.component_val_set_u64(r, C.uint64_t(val))
 }
@@ -346,7 +375,9 @@ func setResultU64(results *C.wasmtime_component_val_t, nresults C.size_t, val ui
 // The C string memory is intentionally leaked -- wasmtime reads it after the
 // callback returns and the host cannot free it.
 func setResultString(results *C.wasmtime_component_val_t, nresults C.size_t, s string) {
-	if int(nresults) < 1 { return }
+	if int(nresults) < 1 {
+		return
+	}
 	cStr := C.CString(s)
 	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
 	*r = C.make_component_val_string(cStr, C.size_t(len(s)))
@@ -366,6 +397,7 @@ func extractStringFromPacked(packed int64, buf []byte) string {
 }
 
 // -- Go callback trampoline --------------------------------------------------
+//
 //export goComponentCallback
 func goComponentCallback(
 	env unsafe.Pointer, ctx *C.wasmtime_context_t,
@@ -374,7 +406,9 @@ func goComponentCallback(
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
 	entry := lookupCB(uintptr(env))
-	if entry.backend == nil || entry.backend.handler == nil { return nil }
+	if entry.backend == nil || entry.backend.handler == nil {
+		return nil
+	}
 	switch entry.typ {
 	case cbTypeDurableCallString:
 		return entry.backend.dispatchDurableCallString(args, nargs, results, nresults)
@@ -493,7 +527,9 @@ func (b *wasmtimeBackend) dispatchDurableCallString(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 3 || b.handler == nil { return nil }
+	if int(nargs) < 3 || b.handler == nil {
+		return nil
+	}
 	svc := readStrArg(args, 0, nargs)
 	op := readStrArg(args, 1, nargs)
 	req := readStrArg(args, 2, nargs)
@@ -511,7 +547,9 @@ func (b *wasmtimeBackend) dispatchDurableCallRetry(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 8 || b.handler == nil { return nil }
+	if int(nargs) < 8 || b.handler == nil {
+		return nil
+	}
 	svc := readStrArg(args, 0, nargs)
 	op := readStrArg(args, 1, nargs)
 	req := readStrArg(args, 2, nargs)
@@ -535,7 +573,9 @@ func (b *wasmtimeBackend) dispatchDurableCallHeartbeat(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 4 || b.handler == nil { return nil }
+	if int(nargs) < 4 || b.handler == nil {
+		return nil
+	}
 	svc := readStrArg(args, 0, nargs)
 	op := readStrArg(args, 1, nargs)
 	req := readStrArg(args, 2, nargs)
@@ -559,7 +599,9 @@ func (b *wasmtimeBackend) dispatchDurableSleep(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	durationMs := int64(readU64Arg(args, 0, nargs))
 	r := b.handler.DurableSleep(context.Background(), nil, durationMs)
 	setResultU64(results, nresults, uint64(r))
@@ -571,7 +613,9 @@ func (b *wasmtimeBackend) dispatchNow(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if b.handler == nil { return nil }
+	if b.handler == nil {
+		return nil
+	}
 	r := b.handler.Now(context.Background())
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -582,7 +626,9 @@ func (b *wasmtimeBackend) dispatchRandom(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if b.handler == nil { return nil }
+	if b.handler == nil {
+		return nil
+	}
 	r := b.handler.Random(context.Background())
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -593,7 +639,9 @@ func (b *wasmtimeBackend) dispatchDurableLog(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	msg := readStrArg(args, 0, nargs)
 	r := b.handler.DurableLog(context.Background(), nil, msg)
 	setResultU64(results, nresults, uint64(r))
@@ -609,7 +657,9 @@ func (b *wasmtimeBackend) dispatchVersion(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if b.handler == nil { return nil }
+	if b.handler == nil {
+		return nil
+	}
 	r := b.handler.Version(context.Background())
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -620,7 +670,9 @@ func (b *wasmtimeBackend) dispatchMinVersion(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if b.handler == nil { return nil }
+	if b.handler == nil {
+		return nil
+	}
 	r := b.handler.MinVersion(context.Background())
 	setResultU64(results, nresults, uint64(r))
 	return nil
@@ -635,7 +687,9 @@ func (b *wasmtimeBackend) dispatchDurableDefer(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	desc := readStrArg(args, 0, nargs)
 
 	buf := make([]byte, 65536)
@@ -651,7 +705,9 @@ func (b *wasmtimeBackend) dispatchContinueAsNew(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	input := readStrArg(args, 0, nargs)
 	r := b.handler.ContinueAsNew(context.Background(), nil, input)
 	setResultU64(results, nresults, uint64(r))
@@ -663,7 +719,9 @@ func (b *wasmtimeBackend) dispatchPollCancellation(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if b.handler == nil { return nil }
+	if b.handler == nil {
+		return nil
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.PollCancellation(ctxWithMem(context.Background(), buf), nil, 0, 65536)
@@ -683,7 +741,9 @@ func (b *wasmtimeBackend) dispatchAwaitSignals(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 6 || b.handler == nil { return nil }
+	if int(nargs) < 6 || b.handler == nil {
+		return nil
+	}
 	names := readStrArg(args, 0, nargs)
 	timeoutMs := int64(readU64Arg(args, 1, nargs))
 
@@ -700,7 +760,9 @@ func (b *wasmtimeBackend) dispatchPollSignal(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	name := readStrArg(args, 0, nargs)
 
 	buf := make([]byte, 65536)
@@ -716,7 +778,9 @@ func (b *wasmtimeBackend) dispatchSendSignalAndWait(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 4 || b.handler == nil { return nil }
+	if int(nargs) < 4 || b.handler == nil {
+		return nil
+	}
 	target := readStrArg(args, 0, nargs)
 	sigName := readStrArg(args, 1, nargs)
 	payload := readStrArg(args, 2, nargs)
@@ -736,7 +800,9 @@ func (b *wasmtimeBackend) dispatchReplyToSignal(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	correlationID := readStrArg(args, 0, nargs)
 	response := readStrArg(args, 1, nargs)
 	r := b.handler.ReplyToSignal(context.Background(), nil, correlationID, response)
@@ -749,7 +815,9 @@ func (b *wasmtimeBackend) dispatchSignalWorkflow(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 3 || b.handler == nil { return nil }
+	if int(nargs) < 3 || b.handler == nil {
+		return nil
+	}
 	target := readStrArg(args, 0, nargs)
 	sigName := readStrArg(args, 1, nargs)
 	payload := readStrArg(args, 2, nargs)
@@ -767,7 +835,9 @@ func (b *wasmtimeBackend) dispatchChildWorkflow(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	name := readStrArg(args, 0, nargs)
 	input := readStrArg(args, 1, nargs)
 
@@ -784,7 +854,9 @@ func (b *wasmtimeBackend) dispatchAwaitChild(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	runID := readStrArg(args, 0, nargs)
 
 	buf := make([]byte, 65536)
@@ -800,7 +872,9 @@ func (b *wasmtimeBackend) dispatchAwaitAllChildren(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	runIDsJSON := readStrArg(args, 0, nargs)
 
 	buf := make([]byte, 65536)
@@ -816,7 +890,9 @@ func (b *wasmtimeBackend) dispatchChildWorkflowWithOptions(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 5 || b.handler == nil { return nil }
+	if int(nargs) < 5 || b.handler == nil {
+		return nil
+	}
 	name := readStrArg(args, 0, nargs)
 	input := readStrArg(args, 1, nargs)
 	version := int64(readU64Arg(args, 2, nargs))
@@ -842,7 +918,9 @@ func (b *wasmtimeBackend) dispatchCreatePromise(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	name := readStrArg(args, 0, nargs)
 
 	buf := make([]byte, 65536)
@@ -858,7 +936,9 @@ func (b *wasmtimeBackend) dispatchAwaitPromise(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	id := readStrArg(args, 0, nargs)
 	timeoutMs := int64(readU64Arg(args, 1, nargs))
 
@@ -875,7 +955,9 @@ func (b *wasmtimeBackend) dispatchResolvePromise(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	id := readStrArg(args, 0, nargs)
 	val := readStrArg(args, 1, nargs)
 	r := b.handler.ResolvePromise(context.Background(), nil, id, val)
@@ -888,7 +970,9 @@ func (b *wasmtimeBackend) dispatchRejectPromise(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	id := readStrArg(args, 0, nargs)
 	errMsg := readStrArg(args, 1, nargs)
 	r := b.handler.RejectPromise(context.Background(), nil, id, errMsg)
@@ -905,7 +989,9 @@ func (b *wasmtimeBackend) dispatchSetQueryState(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	key := readStrArg(args, 0, nargs)
 	val := readStrArg(args, 1, nargs)
 	r := b.handler.SetQueryState(context.Background(), nil, key, val)
@@ -922,7 +1008,9 @@ func (b *wasmtimeBackend) dispatchRegisterUpdateHandler(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	name := readStrArg(args, 0, nargs)
 	r := b.handler.RegisterUpdateHandler(context.Background(), nil, name)
 	setResultU64(results, nresults, uint64(r))
@@ -934,7 +1022,9 @@ func (b *wasmtimeBackend) dispatchRegisterQueryHandler(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	name := readStrArg(args, 0, nargs)
 	r := b.handler.RegisterQueryHandler(context.Background(), nil, name)
 	setResultU64(results, nresults, uint64(r))
@@ -950,7 +1040,9 @@ func (b *wasmtimeBackend) dispatchDurableSend(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 3 || b.handler == nil { return nil }
+	if int(nargs) < 3 || b.handler == nil {
+		return nil
+	}
 	svc := readStrArg(args, 0, nargs)
 	op := readStrArg(args, 1, nargs)
 	req := readStrArg(args, 2, nargs)
@@ -964,7 +1056,9 @@ func (b *wasmtimeBackend) dispatchScheduleInvoke(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 4 || b.handler == nil { return nil }
+	if int(nargs) < 4 || b.handler == nil {
+		return nil
+	}
 	svc := readStrArg(args, 0, nargs)
 	op := readStrArg(args, 1, nargs)
 	req := readStrArg(args, 2, nargs)
@@ -983,7 +1077,9 @@ func (b *wasmtimeBackend) dispatchWorkflowID(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if b.handler == nil { return nil }
+	if b.handler == nil {
+		return nil
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.WorkflowID(ctxWithMem(context.Background(), buf), nil, 0, 65536)
@@ -998,7 +1094,9 @@ func (b *wasmtimeBackend) dispatchRunID(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if b.handler == nil { return nil }
+	if b.handler == nil {
+		return nil
+	}
 
 	buf := make([]byte, 65536)
 	packed := b.handler.RunID(ctxWithMem(context.Background(), buf), nil, 0, 65536)
@@ -1017,7 +1115,9 @@ func (b *wasmtimeBackend) dispatchPluginCall(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 3 || b.handler == nil { return nil }
+	if int(nargs) < 3 || b.handler == nil {
+		return nil
+	}
 	pluginName := readStrArg(args, 0, nargs)
 	funcName := readStrArg(args, 1, nargs)
 	input := readStrArg(args, 2, nargs)
@@ -1035,7 +1135,9 @@ func (b *wasmtimeBackend) dispatchPluginCallStreaming(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 3 || b.handler == nil { return nil }
+	if int(nargs) < 3 || b.handler == nil {
+		return nil
+	}
 	pluginName := readStrArg(args, 0, nargs)
 	funcName := readStrArg(args, 1, nargs)
 	input := readStrArg(args, 2, nargs)
@@ -1057,7 +1159,9 @@ func (b *wasmtimeBackend) dispatchAcquireLock(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	key := readStrArg(args, 0, nargs)
 	ttlMs := int64(readU64Arg(args, 1, nargs))
 	r := b.handler.AcquireLock(context.Background(), nil, key, ttlMs)
@@ -1070,7 +1174,9 @@ func (b *wasmtimeBackend) dispatchReleaseLock(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	key := readStrArg(args, 0, nargs)
 	r := b.handler.ReleaseLock(context.Background(), nil, key)
 	setResultU64(results, nresults, uint64(r))
@@ -1086,7 +1192,9 @@ func (b *wasmtimeBackend) dispatchSetScope(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	objType := readStrArg(args, 0, nargs)
 	instKey := readStrArg(args, 1, nargs)
 
@@ -1104,7 +1212,9 @@ func (b *wasmtimeBackend) dispatchGetScope(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 4 || b.handler == nil { return nil }
+	if int(nargs) < 4 || b.handler == nil {
+		return nil
+	}
 
 	// Create a double-sized buffer for two output params.
 	buf := make([]byte, 131072)
@@ -1118,7 +1228,9 @@ func (b *wasmtimeBackend) dispatchUUID(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	seed := readStrArg(args, 0, nargs)
 
 	buf := make([]byte, 65536)
@@ -1138,7 +1250,9 @@ func (b *wasmtimeBackend) dispatchSetState(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	key := readStrArg(args, 0, nargs)
 	val := readStrArg(args, 1, nargs)
 	r := b.handler.SetState(context.Background(), nil, key, val)
@@ -1151,7 +1265,9 @@ func (b *wasmtimeBackend) dispatchGetState(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	key := readStrArg(args, 0, nargs)
 
 	buf := make([]byte, 65536)
@@ -1167,7 +1283,9 @@ func (b *wasmtimeBackend) dispatchDeleteState(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	key := readStrArg(args, 0, nargs)
 	r := b.handler.DeleteState(context.Background(), nil, key)
 	setResultU64(results, nresults, uint64(r))
@@ -1179,7 +1297,9 @@ func (b *wasmtimeBackend) dispatchIncrState(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	key := readStrArg(args, 0, nargs)
 	delta := int64(readU64Arg(args, 1, nargs))
 	r := b.handler.IncrState(context.Background(), nil, key, delta)
@@ -1192,7 +1312,9 @@ func (b *wasmtimeBackend) dispatchHasState(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	key := readStrArg(args, 0, nargs)
 	r := b.handler.HasState(context.Background(), nil, key)
 	setResultU64(results, nresults, uint64(r))
@@ -1204,7 +1326,9 @@ func (b *wasmtimeBackend) dispatchListState(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	prefix := readStrArg(args, 0, nargs)
 
 	buf := make([]byte, 65536)
@@ -1224,7 +1348,9 @@ func (b *wasmtimeBackend) dispatchContinueAsNewVersioned(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil { return nil }
+	if int(nargs) < 2 || b.handler == nil {
+		return nil
+	}
 	input := readStrArg(args, 0, nargs)
 	newVersion := int(readU32Arg(args, 1, nargs))
 	r := b.handler.ContinueAsNewWithVersion(context.Background(), nil, input, newVersion)
@@ -1237,7 +1363,9 @@ func (b *wasmtimeBackend) dispatchSideEffect(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil { return nil }
+	if int(nargs) < 1 || b.handler == nil {
+		return nil
+	}
 	result := readStrArg(args, 0, nargs)
 
 	buf := make([]byte, 65536)
@@ -1257,7 +1385,9 @@ func (b *wasmtimeBackend) dispatchChildWorkflowInSchema(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 6 || b.handler == nil { return nil }
+	if int(nargs) < 6 || b.handler == nil {
+		return nil
+	}
 	schema := readStrArg(args, 0, nargs)
 	name := readStrArg(args, 1, nargs)
 	input := readStrArg(args, 2, nargs)
@@ -1283,7 +1413,9 @@ func (b *wasmtimeBackend) dispatchFetch(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
 ) *C.wasmtime_error_t {
-	if int(nargs) < 4 || b.handler == nil { return nil }
+	if int(nargs) < 4 || b.handler == nil {
+		return nil
+	}
 	method := readStrArg(args, 0, nargs)
 	url := readStrArg(args, 1, nargs)
 	headers := readStrArg(args, 2, nargs)
@@ -1317,9 +1449,9 @@ func (b *wasmtimeBackend) dispatchComponentDefault(
 // used by registerCleatComponentImports to register each import correctly.
 var witTypeMap = map[string]map[string]cbType{
 	"cleat:host-calls/durable-call": {
-		"durable-call":             cbTypeDurableCallString,
-		"durable-call-retry":       cbTypeDurableCallRetry,
-		"durable-call-heartbeat":   cbTypeDurableCallHeartbeat,
+		"durable-call":           cbTypeDurableCallString,
+		"durable-call-retry":     cbTypeDurableCallRetry,
+		"durable-call-heartbeat": cbTypeDurableCallHeartbeat,
 	},
 	"cleat:host-calls/durable-sleep": {
 		"durable-sleep":  cbTypeDurableSleep,
@@ -1344,9 +1476,9 @@ var witTypeMap = map[string]map[string]cbType{
 		"durable-signal-workflow":      cbTypeSignalWorkflow,
 	},
 	"cleat:host-calls/durable-children": {
-		"durable-child-workflow":             cbTypeChildWorkflow,
-		"durable-await-child":                cbTypeAwaitChild,
-		"durable-await-all-children":         cbTypeAwaitAllChildren,
+		"durable-child-workflow":              cbTypeChildWorkflow,
+		"durable-await-child":                 cbTypeAwaitChild,
+		"durable-await-all-children":          cbTypeAwaitAllChildren,
 		"durable-child-workflow-with-options": cbTypeChildWorkflowWithOptions,
 	},
 	"cleat:host-calls/durable-promises": {
@@ -1407,17 +1539,23 @@ var witTypeMap = map[string]map[string]cbType{
 
 func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_component_linker_t) error {
 	root := C.wasmtime_component_linker_root(linker)
-	if root == nil { return fmt.Errorf("component linker root is nil") }
+	if root == nil {
+		return fmt.Errorf("component linker root is nil")
+	}
 	for witModule, funcs := range wasm.WitToEnvImport {
 		nameBytes := []byte(witModule)
 		var namePtr *C.char
-		if len(nameBytes) > 0 { namePtr = (*C.char)(unsafe.Pointer(&nameBytes[0])) }
+		if len(nameBytes) > 0 {
+			namePtr = (*C.char)(unsafe.Pointer(&nameBytes[0]))
+		}
 		var sub *C.wasmtime_component_linker_instance_t
 		err := C.wasmtime_component_linker_instance_add_instance(root, namePtr, C.size_t(len(witModule)), &sub)
 		if err != nil {
-			var msg C.wasm_byte_vec_t; C.get_error_message(err, &msg)
+			var msg C.wasm_byte_vec_t
+			C.get_error_message(err, &msg)
 			s := C.GoStringN(msg.data, C.int(msg.size))
-			C.wasm_byte_vec_delete(&msg); C.wasmtime_error_delete(err)
+			C.wasm_byte_vec_delete(&msg)
+			C.wasmtime_error_delete(err)
 			return fmt.Errorf("register %s: %s", witModule, s)
 		}
 		for witFuncName := range funcs {
@@ -1430,13 +1568,17 @@ func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_compo
 			}
 			fnBytes := []byte(witFuncName)
 			var fnPtr *C.char
-			if len(fnBytes) > 0 { fnPtr = (*C.char)(unsafe.Pointer(&fnBytes[0])) }
+			if len(fnBytes) > 0 {
+				fnPtr = (*C.char)(unsafe.Pointer(&fnBytes[0]))
+			}
 			cbID := registerCB(b, fnType)
 			err := C.wasmtime_component_linker_instance_add_func(sub, fnPtr, C.size_t(len(witFuncName)), C.wasmtime_component_func_callback_t(C.goComponentCallback), unsafe.Pointer(uintptr(cbID)), nil)
 			if err != nil {
-				var msg C.wasm_byte_vec_t; C.get_error_message(err, &msg)
+				var msg C.wasm_byte_vec_t
+				C.get_error_message(err, &msg)
 				s := C.GoStringN(msg.data, C.int(msg.size))
-				C.wasm_byte_vec_delete(&msg); C.wasmtime_error_delete(err)
+				C.wasm_byte_vec_delete(&msg)
+				C.wasmtime_error_delete(err)
 				return fmt.Errorf("register %s.%s: %s", witModule, witFuncName, s)
 			}
 		}
@@ -1449,11 +1591,15 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	wasmBytes []byte, entryPoint string, input []byte, outBufSz uint32,
 ) (*ExecResult, error) {
 	component, err := componentCompile(b.engine, wasmBytes)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer C.wasmtime_component_delete(component)
 
 	linker := componentLinkerNew(b.engine)
-	if linker == nil { return nil, fmt.Errorf("component linker creation failed") }
+	if linker == nil {
+		return nil, fmt.Errorf("component linker creation failed")
+	}
 	defer C.wasmtime_component_linker_delete(linker)
 
 	store := wasmtime.NewStore(b.engine)
@@ -1466,9 +1612,11 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	C.wasmtime_component_linker_allow_shadowing(linker, true)
 
 	if wasiErr := C.wasmtime_component_linker_add_wasip2(linker); wasiErr != nil {
-		var msg C.wasm_byte_vec_t; C.get_error_message(wasiErr, &msg)
+		var msg C.wasm_byte_vec_t
+		C.get_error_message(wasiErr, &msg)
 		s := C.GoStringN(msg.data, C.int(msg.size))
-		C.wasm_byte_vec_delete(&msg); C.wasmtime_error_delete(wasiErr)
+		C.wasm_byte_vec_delete(&msg)
+		C.wasmtime_error_delete(wasiErr)
 		return nil, fmt.Errorf("wasi add: %s", s)
 	}
 
@@ -1477,7 +1625,9 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	}
 
 	instance, err := componentInstantiate(linker, store, component)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
 	// Save store info and scan for memory once.
 	cbRegistry.Lock()
@@ -1487,10 +1637,14 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 	C.save_first_memory_data(C.store_context(unsafe.Pointer(store.Context())), C.uint64_t(instance.store_id))
 
 	fn, err := componentGetFunc(instance, store, entryPoint)
-	if err != nil { return nil, fmt.Errorf("component get func: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("component get func: %w", err)
+	}
 
 	resultStr, callErr := componentCall(fn, store, string(input))
-	if callErr != nil { return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr) }
+	if callErr != nil {
+		return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr)
+	}
 
 	// Check for suspension sentinel from the Python wrapper.
 	if resultStr == "__CLEAT_SUSPEND__" {

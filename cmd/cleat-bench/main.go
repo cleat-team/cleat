@@ -301,9 +301,9 @@ type benchState struct {
 	minVersion int
 }
 
-func (s *benchState) Version() int                  { return s.version }
-func (s *benchState) MinVersion() int               { return s.minVersion }
-func (s *benchState) Priority() int                     { return 0 }
+func (s *benchState) Version() int                         { return s.version }
+func (s *benchState) MinVersion() int                      { return s.minVersion }
+func (s *benchState) Priority() int                        { return 0 }
 func (s *benchState) ChildVersion(name string) (int, bool) { return 0, false }
 
 func init() {

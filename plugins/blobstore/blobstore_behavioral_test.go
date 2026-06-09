@@ -478,7 +478,7 @@ func TestHandleListNoResults(t *testing.T) {
 	}
 
 	// Response should be a valid JSON array (possibly empty).
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST decode: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestHandleListDefaultLimit(t *testing.T) {
 		t.Fatalf("LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST decode: %v", err)
 	}
@@ -538,7 +538,7 @@ func TestHandlePutResponseBody(t *testing.T) {
 		t.Fatalf("PUT: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal response: %v", err)
 	}
@@ -620,8 +620,8 @@ func (b *failBackend) Delete(_ context.Context, _ string) error {
 // matching the configured patterns; all other queries pass through.
 type selectiveErrorConn struct {
 	*fakeConn
-	failExecPatterns   []string
-	failQueryPatterns  []string
+	failExecPatterns  []string
+	failQueryPatterns []string
 }
 
 func (c *selectiveErrorConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
@@ -1054,7 +1054,7 @@ func TestHandleListWithTagFilter(t *testing.T) {
 		t.Fatalf("LIST with tag: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	// Verify the response is a valid JSON array.
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST decode: %v", err)
 	}
@@ -1071,7 +1071,7 @@ func TestHandleListInvalidLimit(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("LIST with invalid limit: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST decode: %v", err)
 	}

@@ -540,7 +540,7 @@ func TestMySQLStore_GetCompactionCandidates_WithRows(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		{
 			match: "SELECT w.id",
-			data: [][]driver.Value{{"wf-1"}, {"wf-2"}},
+			data:  [][]driver.Value{{"wf-1"}, {"wf-2"}},
 		},
 	}, nil)
 	candidates, err := store.GetCompactionCandidates(testCtx, 100, 10)

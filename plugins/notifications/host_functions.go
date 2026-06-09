@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
@@ -26,9 +26,9 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 // ---- Input/output types ----
 
 type sendWebhookInput struct {
-	WebhookID uuid.UUID          `json:"webhook_id"`
-	EventType string             `json:"event_type"`
-	Payload   json.RawMessage    `json:"payload"`
+	WebhookID uuid.UUID       `json:"webhook_id"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 type sendWebhookOutput struct {

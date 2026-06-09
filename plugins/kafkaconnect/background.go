@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/plugins/eventtriggers"
+	"github.com/google/uuid"
 )
 
 // Run starts the consumer polling loop. It runs every 5 seconds, reading
@@ -121,11 +121,11 @@ func (p *Plugin) pollConfig(ctx context.Context, c configRow) {
 
 // kafkaRecord represents a single Kafka message consumed via the REST Proxy.
 type kafkaRecord struct {
-	Topic     string                 `json:"topic"`
-	Key       interface{}            `json:"key"`
-	Value     interface{}            `json:"value"`
-	Partition int                    `json:"partition"`
-	Offset    int64                  `json:"offset"`
+	Topic     string `json:"topic"`
+	Key       any    `json:"key"`
+	Value     any    `json:"value"`
+	Partition int    `json:"partition"`
+	Offset    int64  `json:"offset"`
 }
 
 // consumeViaRestProxy uses the Confluent REST Proxy v2 consumer API to poll
@@ -175,12 +175,12 @@ func (p *Plugin) consumeViaRestProxy(ctx context.Context, c configRow) ([]kafkaR
 func (p *Plugin) createConsumer(ctx context.Context, proxyURL string, c configRow) (string, string, error) {
 	consumerURL := proxyURL + "/consumers/" + c.ConsumerGroup
 
-	body := map[string]interface{}{
-		"name":                      "cleat-ingest-" + c.ID.String() + "-" + fmt.Sprintf("%d", time.Now().UnixMilli()),
-		"format":                    "json",
-		"auto.offset.reset":         "latest",
-		"auto.commit.enable":        "false",
-		"fetch.min.bytes":           "1",
+	body := map[string]any{
+		"name":                        "cleat-ingest-" + c.ID.String() + "-" + fmt.Sprintf("%d", time.Now().UnixMilli()),
+		"format":                      "json",
+		"auto.offset.reset":           "latest",
+		"auto.commit.enable":          "false",
+		"fetch.min.bytes":             "1",
 		"consumer.request.timeout.ms": "5000",
 	}
 
@@ -226,7 +226,7 @@ func (p *Plugin) createConsumer(ctx context.Context, proxyURL string, c configRo
 func (p *Plugin) subscribeConsumer(ctx context.Context, baseURI, topic string) error {
 	subURL := baseURI + "/subscription"
 
-	body := map[string]interface{}{
+	body := map[string]any{
 		"topics": []string{topic},
 	}
 	payloadBytes, err := json.Marshal(body)
@@ -299,7 +299,7 @@ func (p *Plugin) publishRecord(ctx context.Context, c configRow, record kafkaRec
 	eventID := uuid.New()
 
 	// Build the event data from the Kafka message.
-	eventData := map[string]interface{}{
+	eventData := map[string]any{
 		"topic":     c.Topic,
 		"partition": record.Partition,
 		"offset":    record.Offset,

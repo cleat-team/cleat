@@ -543,8 +543,8 @@ func buildMetadataBlob(exportFuncs []witDylibExportFunc) []byte {
 	nameStart := 64 + len(exportFuncs)*20
 	for i, ef := range exportFuncs {
 		off := 64 + i*20
-		binary.LittleEndian.PutUint32(buf[off:], 0)                         // type_id
-		binary.LittleEndian.PutUint32(buf[off+4:], uint32(nameStart))       // name_offset
+		binary.LittleEndian.PutUint32(buf[off:], 0)                          // type_id
+		binary.LittleEndian.PutUint32(buf[off+4:], uint32(nameStart))        // name_offset
 		binary.LittleEndian.PutUint32(buf[off+8:], uint32(len(ef.funcName))) // name_len
 		binary.LittleEndian.PutUint32(buf[off+12:], uint32(ef.syncElemIndex))
 		nameStart += len(ef.funcName)

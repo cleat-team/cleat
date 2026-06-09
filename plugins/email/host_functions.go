@@ -52,11 +52,11 @@ type sendOutput struct {
 }
 
 type sendTemplateInput struct {
-	To           string                 `json:"to"`
-	TemplateID   string                 `json:"template_id"`
-	TemplateData map[string]interface{} `json:"template_data"`
-	From         string                 `json:"from,omitempty"`
-	ReplyTo      string                 `json:"reply_to,omitempty"`
+	To           string         `json:"to"`
+	TemplateID   string         `json:"template_id"`
+	TemplateData map[string]any `json:"template_data"`
+	From         string         `json:"from,omitempty"`
+	ReplyTo      string         `json:"reply_to,omitempty"`
 }
 
 type sendTemplateOutput struct {
@@ -316,11 +316,11 @@ func (p *Plugin) checkStatus(ctx context.Context, inputJSON string) (string, err
 
 	var activityResp struct {
 		Messages []struct {
-			MsgID      string `json:"msg_id"`
-			Status     string `json:"status"`
-			LastEvent  string `json:"last_event_time"`
-			OpensCount int    `json:"opens_count"`
-			ClicksCount int   `json:"clicks_count"`
+			MsgID       string `json:"msg_id"`
+			Status      string `json:"status"`
+			LastEvent   string `json:"last_event_time"`
+			OpensCount  int    `json:"opens_count"`
+			ClicksCount int    `json:"clicks_count"`
 		} `json:"messages"`
 	}
 

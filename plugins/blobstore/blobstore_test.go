@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
@@ -503,8 +503,8 @@ type fakeRows struct {
 	pos     int
 }
 
-func (r *fakeRows) Columns() []string                      { return r.columns }
-func (r *fakeRows) Close() error                           { return nil }
+func (r *fakeRows) Columns() []string { return r.columns }
+func (r *fakeRows) Close() error      { return nil }
 func (r *fakeRows) Next(dest []driver.Value) error {
 	if r.pos >= len(r.data) {
 		return io.EOF
@@ -677,7 +677,7 @@ func TestPutGetDelete(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("PUT: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var putResp map[string]interface{}
+	var putResp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &putResp); err != nil {
 		t.Fatalf("PUT: failed to decode response: %v", err)
 	}
@@ -874,7 +874,7 @@ func TestListWithPrefix(t *testing.T) {
 		t.Fatalf("LIST with prefix 'a': expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	var results []map[string]interface{}
+	var results []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &results); err != nil {
 		t.Fatalf("LIST: failed to decode: %v", err)
 	}

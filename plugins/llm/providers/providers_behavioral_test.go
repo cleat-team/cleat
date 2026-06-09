@@ -363,7 +363,7 @@ func TestOpenAIChatEmptyAPIKey(t *testing.T) {
 	// The request should still be sent with "Bearer" prefix and empty key value.
 	// Note: Go's HTTP server trims trailing whitespace from header values.
 	if capturedKey != "Bearer" {
-			t.Errorf("expected 'Bearer', got %q", capturedKey)
+		t.Errorf("expected 'Bearer', got %q", capturedKey)
 	}
 }
 
@@ -459,10 +459,10 @@ func TestOpenAICostByModel(t *testing.T) {
 	defer srv.Close()
 
 	tests := []struct {
-		name     string
-		model    string
-		minCost  float64
-		maxCost  float64
+		name    string
+		model   string
+		minCost float64
+		maxCost float64
 	}{
 		{"gpt-4-turbo", "gpt-4-turbo", 0.01, 0.05},
 		{"gpt-4o", "gpt-4o", 0.001, 0.02},
@@ -494,10 +494,10 @@ func TestAnthropicCostByModel(t *testing.T) {
 	defer srv.Close()
 
 	tests := []struct {
-		name     string
-		model    string
-		minCost  float64
-		maxCost  float64
+		name    string
+		model   string
+		minCost float64
+		maxCost float64
 	}{
 		{"opus-4-7", "claude-opus-4-7", 0.08, 0.10},
 		{"haiku-4-5", "claude-haiku-4-5", 0.001, 0.01},
@@ -523,7 +523,7 @@ func TestGeminiCostByModel(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"candidates": []map[string]any{{
-				"content":     map[string]any{"role": "model", "parts": []map[string]any{{"text": "ok"}}},
+				"content":      map[string]any{"role": "model", "parts": []map[string]any{{"text": "ok"}}},
 				"finishReason": "STOP",
 			}},
 			"usageMetadata": map[string]int{
@@ -534,10 +534,10 @@ func TestGeminiCostByModel(t *testing.T) {
 	defer srv.Close()
 
 	tests := []struct {
-		name     string
-		model    string
-		minCost  float64
-		maxCost  float64
+		name    string
+		model   string
+		minCost float64
+		maxCost float64
 	}{
 		{"gemini-2.5-flash", "gemini-2.5-flash", 0.0001, 0.001},
 		{"gemini-2.5-pro", "gemini-2.5-pro", 0.001, 0.01},
@@ -574,10 +574,10 @@ func TestMistralCostByModel(t *testing.T) {
 	defer srv.Close()
 
 	tests := []struct {
-		name     string
-		model    string
-		minCost  float64
-		maxCost  float64
+		name    string
+		model   string
+		minCost float64
+		maxCost float64
 	}{
 		{"mistral-large", "mistral-large-latest", 0.001, 0.01},
 		{"mistral-medium", "mistral-medium-latest", 0.001, 0.01},
@@ -915,7 +915,7 @@ func TestOpenAIChatStreamContextCancel(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestOpenAIChatRequestBody(t *testing.T) {
-	var bodyMap map[string]interface{}
+	var bodyMap map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&bodyMap)
 		w.Header().Set("Content-Type", "application/json")
@@ -949,7 +949,7 @@ func TestOpenAIChatRequestBody(t *testing.T) {
 }
 
 func TestAnthropicChatRequestBody(t *testing.T) {
-	var bodyMap map[string]interface{}
+	var bodyMap map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&bodyMap)
 		w.Header().Set("Content-Type", "application/json")
@@ -979,13 +979,13 @@ func TestAnthropicChatRequestBody(t *testing.T) {
 }
 
 func TestGeminiChatRequestBody(t *testing.T) {
-	var bodyMap map[string]interface{}
+	var bodyMap map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&bodyMap)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"candidates": []map[string]any{{
-				"content":     map[string]any{"role": "model", "parts": []map[string]any{{"text": "ok"}}},
+				"content":      map[string]any{"role": "model", "parts": []map[string]any{{"text": "ok"}}},
 				"finishReason": "STOP",
 			}},
 			"usageMetadata": map[string]int{
@@ -1007,7 +1007,7 @@ func TestGeminiChatRequestBody(t *testing.T) {
 	}
 
 	// Check generationConfig is present and correct.
-	genCfg, ok := bodyMap["generationConfig"].(map[string]interface{})
+	genCfg, ok := bodyMap["generationConfig"].(map[string]any)
 	if !ok {
 		t.Fatal("expected generationConfig in request body")
 	}

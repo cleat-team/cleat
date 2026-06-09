@@ -135,15 +135,15 @@ func runBuildPython(pattern, outDir, runtime string) {
 }
 
 // detectEntryFunction uses the proper Python AST-based detector from
-// cleat_sdk.vet (``--detect-entry`` flag) to find the ``@cleat_entry``
+// cleat_sdk.vet (“--detect-entry“ flag) to find the “@cleat_entry“
 // decorated function in a .py file.
 //
-// It shells out to ``python3 -m cleat_sdk.vet --detect-entry <file>``,
+// It shells out to “python3 -m cleat_sdk.vet --detect-entry <file>“,
 // which handles:
 //   - AST-based parsing (not fragile string scanning)
 //   - Commented-out decorator filtering
 //   - Multi-line decorator arguments
-//   - ``async def`` detection and rejection
+//   - “async def“ detection and rejection
 //   - Multiple entry function error reporting
 func detectEntryFunction(pyFile string) (string, error) {
 	// Find the python-sdk directory so we can set PYTHONPATH.

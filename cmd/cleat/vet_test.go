@@ -212,7 +212,7 @@ func TestVetJSONOutputSchema(t *testing.T) {
 	// Non-zero exit expected when errors are found.
 	_ = err
 
-	var result map[string]interface{}
+	var result map[string]any
 	if jsonErr := json.Unmarshal([]byte(out), &result); jsonErr != nil {
 		t.Fatalf("failed to parse JSON: %v\n%s", jsonErr, out)
 	}
@@ -225,7 +225,7 @@ func TestVetJSONOutputSchema(t *testing.T) {
 	}
 
 	// Verify summary keys.
-	summary, ok := result["summary"].(map[string]interface{})
+	summary, ok := result["summary"].(map[string]any)
 	if !ok {
 		t.Fatal("summary is not a JSON object")
 	}
@@ -236,12 +236,12 @@ func TestVetJSONOutputSchema(t *testing.T) {
 	}
 
 	// Verify error structure.
-	errors, ok := result["errors"].([]interface{})
+	errors, ok := result["errors"].([]any)
 	if !ok {
 		t.Fatal("errors is not a JSON array")
 	}
 	if len(errors) > 0 {
-		errMap, ok := errors[0].(map[string]interface{})
+		errMap, ok := errors[0].(map[string]any)
 		if !ok {
 			t.Fatal("first error is not a JSON object")
 		}
@@ -283,8 +283,8 @@ func TestDetectVetLang(t *testing.T) {
 			wantLang: "python",
 		},
 		{
-			name: "nonexistent_directory",
-			setup: func(t *testing.T) string { return "nonexistent-directory-12345" },
+			name:    "nonexistent_directory",
+			setup:   func(t *testing.T) string { return "nonexistent-directory-12345" },
 			wantErr: true,
 		},
 		{

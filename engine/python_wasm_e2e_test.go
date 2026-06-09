@@ -31,7 +31,7 @@ import (
 //   - cleat-sdk installed          (pip install -e python-sdk/)
 func TestPythonWasmEndToEnd(t *testing.T) {
 
-ctx := context.Background()
+	ctx := context.Background()
 
 	// ---- Check prerequisites ----
 	pythonWasm := newPythonWasmTestHelper(t)
@@ -135,7 +135,7 @@ ctx := context.Background()
 	}
 
 	// Verify the result is valid JSON.
-	var resultData interface{}
+	var resultData any
 	if err := json.Unmarshal([]byte(result), &resultData); err != nil {
 		t.Errorf("result is not valid JSON: %v (raw: %s)", err, result)
 	}

@@ -187,12 +187,12 @@ func TestDialect_castExpr_panics_unknown(t *testing.T) {
 
 func TestDialect_limitOffset(t *testing.T) {
 	tests := []struct {
-		name       string
-		d          Dialect
-		limitPos   int
-		offsetPos  int
-		hasOffset  bool
-		want       string
+		name      string
+		d         Dialect
+		limitPos  int
+		offsetPos int
+		hasOffset bool
+		want      string
 	}{
 		{"postgres limit only", DialectPostgres, 1, 0, false, "LIMIT $1"},
 		{"postgres limit+offset", DialectPostgres, 2, 3, true, "LIMIT $2 OFFSET $3"},
