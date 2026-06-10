@@ -168,7 +168,7 @@ func TestGenerateImportsAllHostFunctions(t *testing.T) {
 func TestGenerateMemory(t *testing.T) {
 	code := string(GenerateMemory("mypkg"))
 	for _, c := range []string{"//go:build wasip1", "package mypkg",
-		`import "unsafe"`, "func readString(", "func stringPtr("} {
+		`"unsafe"`, "func readString(", "func stringPtr("} {
 		if !strings.Contains(code, c) {
 			t.Errorf("expected: %s", c)
 		}
@@ -183,7 +183,7 @@ func TestGenerateHostAdapterBasic(t *testing.T) {
 	usage := AnalyzeUsage(result, cr)
 	code := string(GenerateHostAdapter("basic", usage, "go"))
 	for _, c := range []string{"//go:build wasip1", "package basic",
-		`"fmt"`, `"unsafe"`, `"github.com/cleat-team/cleat/cleat"`,
+		`"unsafe"`, `"github.com/cleat-team/cleat/cleat"`,
 		"func makeHostCalls() cleat.HostCalls {",
 		"DurableCall: func(service string, operation string, requestJSON string) (string, error)",
 	} {
@@ -343,8 +343,8 @@ func TestCapitalize(t *testing.T) {
 func TestNeedsFmt(t *testing.T) {
 	usage := &UsageInfo{Used: map[string]bool{"cleat_call": true},
 		Funcs: []HostFunction{{ImportName: "cleat_call", FieldName: "DurableCall"}}}
-	if !needsFmt(usage) {
-		t.Error("cleat_call adapter uses fmt.Sprintf")
+	if needsFmt(usage) {
+		t.Error("cleat_call adapter no longer uses fmt.Sprintf directly")
 	}
 	usage2 := &UsageInfo{Used: map[string]bool{"cleat_sleep": true},
 		Funcs: []HostFunction{{ImportName: "cleat_sleep", FieldName: "DurableSleep"}}}
