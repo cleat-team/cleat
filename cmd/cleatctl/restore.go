@@ -97,6 +97,12 @@ func runRestoreWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql
 		if br.Table == "workflow_instances" {
 			if id, ok := rowMap["id"].(string); ok && id == workflowID {
 				instanceRows = append(instanceRows, br)
+				continue
+			}
+			// Also check for child workflow rows that have this workflow as parent.
+			// Insert them too so FK constraints are satisfied.
+			if parentID, ok := rowMap["parent_workflow_id"].(string); ok && parentID == workflowID {
+				instanceRows = append(instanceRows, br)
 			}
 			continue
 		}
@@ -116,15 +122,6 @@ func runRestoreWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql
 				fmt.Fprintf(os.Stderr, "warning: unknown table %q on line %d (skipped)\n", br.Table, lineNo)
 			}
 			continue
-		}
-
-		// Also check for child workflow rows that have this workflow as parent.
-		if br.Table == "workflow_instances" {
-			if parentID, ok := rowMap["parent_workflow_id"].(string); ok && parentID == workflowID {
-				// This is a child workflow of the restored workflow.
-				// Insert it too so FK constraints are satisfied.
-				instanceRows = append(instanceRows, br)
-			}
 		}
 	}
 

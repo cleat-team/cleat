@@ -979,3 +979,1066 @@ func TestMSSQLStore_AppendEventsInTx_Empty(t *testing.T) {
 		t.Fatalf("expected nil for empty records, got: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Heartbeat operations
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_Heartbeat_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "SET heartbeat_at", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	ok, err := store.Heartbeat(context.Background(), "wf-1", "worker-1", 1)
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if !ok {
+		t.Error("expected true (heartbeat updated)")
+	}
+}
+
+func TestMSSQLStore_Heartbeat_NoRows(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "SET heartbeat_at", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	ok, err := store.Heartbeat(context.Background(), "wf-1", "worker-1", 1)
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if ok {
+		t.Error("expected false when no rows updated")
+	}
+}
+
+func TestMSSQLStore_Heartbeat_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("connection refused"), nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	_, err := store.Heartbeat(context.Background(), "wf-1", "worker-1", 1)
+	if err == nil {
+		t.Fatal("expected error from begin failure, got nil")
+	}
+}
+
+func TestMSSQLStore_BatchHeartbeat_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "status = 'running'", affected: 5},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	n, err := store.BatchHeartbeat(context.Background(), "worker-1")
+	if err != nil {
+		t.Fatalf("BatchHeartbeat: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("expected 5 rows, got %d", n)
+	}
+}
+
+func TestMSSQLStore_BatchHeartbeat_Zero(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "status = 'running'", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	n, err := store.BatchHeartbeat(context.Background(), "worker-1")
+	if err != nil {
+		t.Fatalf("BatchHeartbeat: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0 rows, got %d", n)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Workflow lifecycle: CompleteWorkflow, FailWorkflow, ReleaseWorkflow
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_CompleteWorkflow_SuccessMock(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "SET status = 'done'"},
+		{match: "idempotency_keys SET result"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.CompleteWorkflow(context.Background(), "wf-1", "worker-1", 1, `{"result":"ok"}`, nil)
+	if err != nil {
+		t.Fatalf("CompleteWorkflow: %v", err)
+	}
+}
+
+func TestMSSQLStore_CompleteWorkflow_BeginErrorMock(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.CompleteWorkflow(context.Background(), "wf-1", "worker-1", 1, `{}`, nil)
+	if err == nil {
+		t.Fatal("expected error from begin failure, got nil")
+	}
+}
+
+func TestMSSQLStore_FailWorkflow_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "SET status = 'failed'"},
+		{match: "idempotency_keys SET error_msg"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.FailWorkflow(context.Background(), "wf-1", "worker-1", 1,
+		"something went wrong", "ERR_001", "my-op", nil)
+	if err != nil {
+		t.Fatalf("FailWorkflow: %v", err)
+	}
+}
+
+func TestMSSQLStore_ReleaseWorkflow_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "SET status = 'ready'", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.ReleaseWorkflow(context.Background(), "wf-1", "worker-1", 1, time.Now())
+	if err != nil {
+		t.Fatalf("ReleaseWorkflow: %v", err)
+	}
+}
+
+func TestMSSQLStore_ReleaseWorkflow_NoRows(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "SET status = 'ready'", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.ReleaseWorkflow(context.Background(), "wf-1", "worker-1", 1, time.Now())
+	if err == nil {
+		t.Fatal("expected error when no rows affected, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Signal operations: DeliverSignal, PollSignal, CheckCancellation
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_DeliverSignal_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "MERGE workflow_signals"},
+		{match: "SET next_wake_at"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.DeliverSignal(context.Background(), "wf-1", "order-approved", `{"approved":true}`)
+	if err != nil {
+		t.Fatalf("DeliverSignal: %v", err)
+	}
+}
+
+func TestMSSQLStore_DeliverSignal_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.DeliverSignal(context.Background(), "wf-1", "order-approved", `{}`)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestMSSQLStore_PollSignal_Found(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_signals", data: [][]driver.Value{{`{"approved":true}`}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	payload, found, err := store.PollSignal(context.Background(), "wf-1", "order-approved")
+	if err != nil {
+		t.Fatalf("PollSignal: %v", err)
+	}
+	if !found {
+		t.Error("expected found=true")
+	}
+	if payload != `{"approved":true}` {
+		t.Errorf("payload = %q, want %q", payload, `{"approved":true}`)
+	}
+}
+
+func TestMSSQLStore_PollSignal_NotFound(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_signals", data: [][]driver.Value{}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	_, found, err := store.PollSignal(context.Background(), "wf-1", "nonexistent")
+	if err != nil {
+		t.Fatalf("PollSignal: %v", err)
+	}
+	if found {
+		t.Error("expected found=false")
+	}
+}
+
+func TestMSSQLStore_PollSignal_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_signals", err: errors.New("connection lost")},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	_, _, err := store.PollSignal(context.Background(), "wf-1", "order-approved")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestMSSQLStore_CheckCancellation_True(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{{true, "user requested"}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	cancelled, reason, err := store.CheckCancellation(context.Background(), "wf-1")
+	if err != nil {
+		t.Fatalf("CheckCancellation: %v", err)
+	}
+	if !cancelled {
+		t.Error("expected cancelled=true")
+	}
+	if reason != "user requested" {
+		t.Errorf("reason = %q, want %q", reason, "user requested")
+	}
+}
+
+func TestMSSQLStore_CheckCancellation_False(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{{false, nil}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	cancelled, reason, err := store.CheckCancellation(context.Background(), "wf-1")
+	if err != nil {
+		t.Fatalf("CheckCancellation: %v", err)
+	}
+	if cancelled {
+		t.Error("expected cancelled=false")
+	}
+	if reason != "" {
+		t.Errorf("reason = %q, want empty", reason)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RequestCancellation
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_RequestCancellation_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "cancellation_requested"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.RequestCancellation(context.Background(), "wf-1", "too slow")
+	if err != nil {
+		t.Fatalf("RequestCancellation: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Child workflow operations
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_StartChildWorkflow_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_instances", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	runID, err := store.StartChildWorkflow(context.Background(), "parent-1", "child-wf", `{"key":"val"}`, 0, "ABANDON", 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflow: %v", err)
+	}
+	if runID == "" {
+		t.Error("expected non-empty runID")
+	}
+}
+
+func TestMSSQLStore_StartChildWorkflow_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_instances", err: errors.New("insert failed")},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	_, err := store.StartChildWorkflow(context.Background(), "parent-1", "child-wf", `{}`, 0, "", 0)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestMSSQLStore_StartChildWorkflowAtomic_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "INSERT INTO workflow_instances", affected: 1},
+		{match: "INSERT INTO event_history", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	event := EventRecord{
+		Step:       0,
+		EventType:  EventTypeChildWorkflow,
+		ChildName:  "child-wf",
+		ChildInput: `{"key":"val"}`,
+	}
+	runID, err := store.StartChildWorkflowAtomic(context.Background(), "", "parent-1",
+		"child-wf", `{"key":"val"}`, 1, "ABANDON", event, 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflowAtomic: %v", err)
+	}
+	if runID == "" {
+		t.Error("expected non-empty runID")
+	}
+}
+
+func TestMSSQLStore_StartChildWorkflowAtomic_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	event := EventRecord{Step: 0, EventType: EventTypeChildWorkflow}
+	_, err := store.StartChildWorkflowAtomic(context.Background(), "", "parent-1",
+		"child-wf", `{}`, 1, "", event, 0)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Workflow listing: ListWorkflows, GetWorkflowByID
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_ListWorkflows_Simple(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances", data: [][]driver.Value{
+			{
+				"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
+				"worker-1", now, nil, nil, nil, now,
+				int64(3), int64(0), "",
+			},
+		}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	wfs, err := store.ListWorkflows(context.Background(), WorkflowFilter{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	if len(wfs) != 1 {
+		t.Fatalf("expected 1 workflow, got %d", len(wfs))
+	}
+	if wfs[0].ID != "wf-1" || wfs[0].DefName != "test-wf" || wfs[0].Status != "running" {
+		t.Errorf("unexpected workflow fields: %+v", wfs[0])
+	}
+}
+
+func TestMSSQLStore_ListWorkflows_Empty(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances", data: [][]driver.Value{}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	wfs, err := store.ListWorkflows(context.Background(), WorkflowFilter{})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	if len(wfs) != 0 {
+		t.Errorf("expected 0 workflows, got %d", len(wfs))
+	}
+}
+
+func TestMSSQLStore_ListWorkflows_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances", err: errors.New("query failed")},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	_, err := store.ListWorkflows(context.Background(), WorkflowFilter{})
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{{
+			"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
+			"worker-1", now, now, nil, nil, nil, nil, nil,
+			int64(3), int64(0), "",
+		}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	wf, err := store.GetWorkflowByID(context.Background(), "wf-1")
+	if err != nil {
+		t.Fatalf("GetWorkflowByID: %v", err)
+	}
+	if wf == nil {
+		t.Fatal("expected non-nil workflow")
+	}
+	if wf.ID != "wf-1" || wf.DefName != "test-wf" || wf.Status != "running" {
+		t.Errorf("unexpected workflow fields: %+v", wf)
+	}
+	if wf.Generation != 3 {
+		t.Errorf("generation = %d, want 3", wf.Generation)
+	}
+}
+
+func TestMSSQLStore_GetWorkflowByID_NotFound(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	wf, err := store.GetWorkflowByID(context.Background(), "nonexistent")
+	if err != nil {
+		t.Fatalf("GetWorkflowByID: %v", err)
+	}
+	if wf != nil {
+		t.Error("expected nil workflow for not found")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Promise operations
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_CreatePromise_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_promises"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.CreatePromise(context.Background(), "wf-1", "my-promise", "promise-uuid-1")
+	if err != nil {
+		t.Fatalf("CreatePromise: %v", err)
+	}
+}
+
+func TestMSSQLStore_CreatePromise_Duplicate(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_promises", err: errors.New("duplicate key")},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.CreatePromise(context.Background(), "wf-1", "dup-promise", "dup-uuid")
+	if err == nil {
+		t.Fatal("expected error for duplicate, got nil")
+	}
+}
+
+func TestMSSQLStore_ResolvePromise_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "SET status = 'resolved'"},
+		{match: "SET next_wake_at"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.ResolvePromise(context.Background(), "wf-1", "promise-uuid-1", `{"result":"ok"}`)
+	if err != nil {
+		t.Fatalf("ResolvePromise: %v", err)
+	}
+}
+
+func TestMSSQLStore_RejectPromise_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "SET status = 'rejected'"},
+		{match: "SET next_wake_at"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.RejectPromise(context.Background(), "wf-1", "promise-uuid-1", "something went wrong")
+	if err != nil {
+		t.Fatalf("RejectPromise: %v", err)
+	}
+}
+
+func TestMSSQLStore_GetPromise_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_promises", data: [][]driver.Value{{"resolved", `{"result":"ok"}`, ""}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	status, result, errMsg, err := store.GetPromise(context.Background(), "wf-1", "promise-uuid-1")
+	if err != nil {
+		t.Fatalf("GetPromise: %v", err)
+	}
+	if status != "resolved" {
+		t.Errorf("status = %q, want %q", status, "resolved")
+	}
+	if result != `{"result":"ok"}` {
+		t.Errorf("result = %q, want %q", result, `{"result":"ok"}`)
+	}
+	if errMsg != "" {
+		t.Errorf("errMsg = %q, want empty", errMsg)
+	}
+}
+
+func TestMSSQLStore_GetPromise_NotFound(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_promises", data: [][]driver.Value{}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	status, result, errMsg, err := store.GetPromise(context.Background(), "wf-1", "nonexistent")
+	if err != nil {
+		t.Fatalf("GetPromise: %v", err)
+	}
+	if status != "pending" {
+		t.Errorf("status = %q, want %q", status, "pending")
+	}
+	if result != "" {
+		t.Errorf("result = %q, want empty", result)
+	}
+	if errMsg != "" {
+		t.Errorf("errMsg = %q, want empty", errMsg)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency key operations
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_AcquireConcurrencyKey_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 0},
+		{match: "INSERT INTO concurrency_keys", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	acquired, err := store.AcquireConcurrencyKey(context.Background(), "my-key", "wf-1", 60*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireConcurrencyKey: %v", err)
+	}
+	if !acquired {
+		t.Error("expected acquired=true")
+	}
+}
+
+func TestMSSQLStore_AcquireConcurrencyKey_NotAcquired(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 0},
+		{match: "INSERT INTO concurrency_keys", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	acquired, err := store.AcquireConcurrencyKey(context.Background(), "my-key", "wf-2", 60*time.Second)
+	if err != nil {
+		t.Fatalf("AcquireConcurrencyKey: %v", err)
+	}
+	if acquired {
+		t.Error("expected acquired=false")
+	}
+}
+
+func TestMSSQLStore_AcquireConcurrencyKey_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	_, err := store.AcquireConcurrencyKey(context.Background(), "my-key", "wf-1", 60*time.Second)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestMSSQLStore_ReleaseConcurrencyKey_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "DELETE FROM concurrency_keys"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.ReleaseConcurrencyKey(context.Background(), "my-key")
+	if err != nil {
+		t.Fatalf("ReleaseConcurrencyKey: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Segment finalization
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_FinalizeWorkflowSegment_Done(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "SET status = 'done'"},
+		{match: "idempotency_keys SET result"},
+		{match: "parent_workflow_id"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.FinalizeWorkflowSegment(context.Background(), "wf-1", "worker-1", 1,
+		[]EventRecord{}, "done", `{"result":"ok"}`, "", "", nil, time.Time{})
+	if err != nil {
+		t.Fatalf("FinalizeWorkflowSegment(done): %v", err)
+	}
+}
+
+func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "SET status = 'failed'"},
+		{match: "idempotency_keys SET error_msg"},
+		{match: "parent_workflow_id"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.FinalizeWorkflowSegment(context.Background(), "wf-1", "worker-1", 1,
+		[]EventRecord{}, "failed", "error occurred", "ERR_01", "my-op", nil, time.Time{})
+	if err != nil {
+		t.Fatalf("FinalizeWorkflowSegment(failed): %v", err)
+	}
+}
+
+func TestMSSQLStore_FinalizeWorkflowSegment_Ready(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "SET status = 'ready'"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.FinalizeWorkflowSegment(context.Background(), "wf-1", "worker-1", 1,
+		[]EventRecord{}, "ready", "", "", "", nil, time.Now())
+	if err != nil {
+		t.Fatalf("FinalizeWorkflowSegment(ready): %v", err)
+	}
+}
+
+func TestMSSQLStore_FinalizeWorkflowSegment_UnknownStatus(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.FinalizeWorkflowSegment(context.Background(), "wf-1", "worker-1", 1,
+		[]EventRecord{}, "invalid_status", "", "", "", nil, time.Time{})
+	if err == nil {
+		t.Fatal("expected error for unknown status, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Schedule operations: Create, Delete, SetEnabled, GetDue, UpdateNextRun
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_CreateSchedule_Success(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_schedules"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	sch := Schedule{
+		Name:           "hourly-job",
+		DefName:        "my-wf",
+		EntryPoint:     "main",
+		CronExpression: "0 * * * *",
+		Input:          json.RawMessage(`{}`),
+		Enabled:        true,
+		NextRunAt:      now,
+	}
+	err := store.CreateSchedule(context.Background(), sch)
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+}
+
+func TestMSSQLStore_DeleteSchedule_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "DELETE FROM workflow_schedules"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.DeleteSchedule(context.Background(), "hourly-job")
+	if err != nil {
+		t.Fatalf("DeleteSchedule: %v", err)
+	}
+}
+
+func TestMSSQLStore_SetScheduleEnabled_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_schedules SET enabled"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.SetScheduleEnabled(context.Background(), "hourly-job", false)
+	if err != nil {
+		t.Fatalf("SetScheduleEnabled: %v", err)
+	}
+}
+
+func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "READPAST", data: [][]driver.Value{
+			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now},
+		}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	schedules, err := store.GetDueSchedules(context.Background())
+	if err != nil {
+		t.Fatalf("GetDueSchedules: %v", err)
+	}
+	if len(schedules) != 1 {
+		t.Fatalf("expected 1 schedule, got %d", len(schedules))
+	}
+	if schedules[0].Name != "due-sch" || !schedules[0].Enabled {
+		t.Errorf("unexpected schedule: %+v", schedules[0])
+	}
+}
+
+func TestMSSQLStore_GetDueSchedules_Empty(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "READPAST", data: [][]driver.Value{}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	schedules, err := store.GetDueSchedules(context.Background())
+	if err != nil {
+		t.Fatalf("GetDueSchedules: %v", err)
+	}
+	if len(schedules) != 0 {
+		t.Errorf("expected 0 schedules, got %d", len(schedules))
+	}
+}
+
+func TestMSSQLStore_UpdateScheduleNextRun_Success(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "next_run_at = @p2"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.UpdateScheduleNextRun(context.Background(), "hourly-job", now.Add(1*time.Hour))
+	if err != nil {
+		t.Fatalf("UpdateScheduleNextRun: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Compaction operations
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_GetCompactionCandidates_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FETCH NEXT", data: [][]driver.Value{
+			{"wf-1"},
+			{"wf-2"},
+		}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	ids, err := store.GetCompactionCandidates(context.Background(), 100, 10)
+	if err != nil {
+		t.Fatalf("GetCompactionCandidates: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 candidates, got %d", len(ids))
+	}
+	if ids[0] != "wf-1" || ids[1] != "wf-2" {
+		t.Errorf("ids = %v, want [wf-1 wf-2]", ids)
+	}
+}
+
+func TestMSSQLStore_GetCompactionCandidates_Empty(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FETCH NEXT", data: [][]driver.Value{}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	ids, err := store.GetCompactionCandidates(context.Background(), 100, 10)
+	if err != nil {
+		t.Fatalf("GetCompactionCandidates: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected 0 candidates, got %d", len(ids))
+	}
+}
+
+func TestMSSQLStore_LoadCompactionState_Success(t *testing.T) {
+	stateJSON := `{"version":1,"compacted_step":10,"events":[]}`
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{{stateJSON}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	cs, err := store.LoadCompactionState(context.Background(), "wf-1")
+	if err != nil {
+		t.Fatalf("LoadCompactionState: %v", err)
+	}
+	if cs == nil {
+		t.Fatal("expected non-nil CompactionState")
+	}
+	if cs.Version != 1 {
+		t.Errorf("version = %d, want 1", cs.Version)
+	}
+	if cs.CompactedStep != 10 {
+		t.Errorf("compacted_step = %d, want 10", cs.CompactedStep)
+	}
+}
+
+func TestMSSQLStore_LoadCompactionState_Null(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{{nil}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	cs, err := store.LoadCompactionState(context.Background(), "wf-1")
+	if err != nil {
+		t.Fatalf("LoadCompactionState: %v", err)
+	}
+	if cs != nil {
+		t.Error("expected nil CompactionState for NULL state")
+	}
+}
+
+func TestMSSQLStore_LoadCompactionState_NotFound(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	cs, err := store.LoadCompactionState(context.Background(), "nonexistent")
+	if err != nil {
+		t.Fatalf("LoadCompactionState: %v", err)
+	}
+	if cs != nil {
+		t.Error("expected nil CompactionState for not found")
+	}
+}
+
+func TestMSSQLStore_CompactHistory_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", data: [][]driver.Value{{int64(5)}}},
+	}, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "DELETE FROM event_history"},
+		{match: "SET compaction_step"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.CompactHistory(context.Background(), "wf-1", []byte(`{"version":1,"compacted_step":10,"events":[]}`), 10, 5)
+	if err != nil {
+		t.Fatalf("CompactHistory: %v", err)
+	}
+}
+
+func TestMSSQLStore_CompactHistory_WorkflowGone(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT generation", err: sql.ErrNoRows},
+	}, []mockExecResult{
+		{match: "sp_set_session_context"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.CompactHistory(context.Background(), "nonexistent", []byte(`{}`), 1, 1)
+	if err != nil {
+		t.Fatalf("CompactHistory (workflow gone): %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AppendEventHistoryBatch
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_AppendEventHistoryBatch_SuccessMock(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "sp_set_session_context"},
+		{match: "INSERT INTO event_history", affected: 1},
+		{match: "event_count = event_count"},
+	})
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	recs := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "my-svc", Op: "my-op", Request: `{"key":"val"}`, Response: `{"result":"ok"}`},
+	}
+	err := store.AppendEventHistoryBatch(context.Background(), "wf-1", recs)
+	if err != nil {
+		t.Fatalf("AppendEventHistoryBatch: %v", err)
+	}
+}
+
+func TestMSSQLStore_AppendEventHistoryBatch_BeginErrorMock(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	recs := []EventRecord{
+		{Step: 0, EventType: EventTypeCall},
+	}
+	err := store.AppendEventHistoryBatch(context.Background(), "wf-1", recs)
+	if err == nil {
+		t.Fatal("expected error from begin failure, got nil")
+	}
+}
+
+func TestMSSQLStore_AppendEventHistoryBatch_EmptyMock(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	err := store.AppendEventHistoryBatch(context.Background(), "wf-1", []EventRecord{})
+	if err != nil {
+		t.Fatalf("AppendEventHistoryBatch empty: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LoadEventHistory
+// ---------------------------------------------------------------------------
+
+func TestMSSQLStore_LoadEventHistory_Success(t *testing.T) {
+	now := time.Now()
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM event_history", data: [][]driver.Value{{
+			int64(0),                    // step
+			string(EventTypeCall),       // event_type
+			"my-svc",                    // service
+			"my-op",                     // operation
+			`{"key":"val"}`,             // request
+			`{"result":"ok"}`,           // response
+			"",                          // error
+			int64(100),                  // duration_ms
+			"",                          // signal_names
+			int64(0),                    // timeout_ms
+			"",                          // signal_name
+			"",                          // signal_payload
+			"",                          // defer_description
+			"",                          // defer_id
+			"",                          // child_name
+			"",                          // child_input
+			"",                          // run_id
+			"",                          // new_input
+			"",                          // plugin_name
+			"",                          // plugin_func
+			"",                          // plugin_input
+			"",                          // plugin_output
+			"",                          // plugin_error
+			"",                          // payload
+			"",                          // promise_name
+			"",                          // promise_id
+			"",                          // promise_result
+			"",                          // promise_error
+			now,                         // created_at
+		}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	history, err := store.LoadEventHistory(context.Background(), "wf-1")
+	if err != nil {
+		t.Fatalf("LoadEventHistory: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(history))
+	}
+	if history[0].Step != 0 || string(history[0].EventType) != string(EventTypeCall) {
+		t.Errorf("unexpected event: step=%d, type=%s", history[0].Step, history[0].EventType)
+	}
+	if history[0].Service != "my-svc" || history[0].Op != "my-op" {
+		t.Errorf("service/op = %s/%s", history[0].Service, history[0].Op)
+	}
+}
+
+func TestMSSQLStore_LoadEventHistory_EmptyMock(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM event_history", data: [][]driver.Value{}},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	history, err := store.LoadEventHistory(context.Background(), "wf-empty")
+	if err != nil {
+		t.Fatalf("LoadEventHistory: %v", err)
+	}
+	if len(history) != 0 {
+		t.Errorf("expected 0 events, got %d", len(history))
+	}
+}
+
+func TestMSSQLStore_LoadEventHistory_QueryErrorMock(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM event_history", err: errors.New("connection lost")},
+	}, nil)
+	defer db.Close()
+
+	store := NewMSSQLStore(db)
+	_, err := store.LoadEventHistory(context.Background(), "wf-1")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}

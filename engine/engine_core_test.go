@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -39,6 +40,15 @@ type stubFetcher struct{}
 
 func (f *stubFetcher) Fetch(ctx context.Context, method, url, headersJSON, body string) (string, error) {
 	return "", nil
+}
+
+// errorFetcher returns a configurable error on every Fetch call.
+type errorFetcher struct {
+	errMsg string
+}
+
+func (f *errorFetcher) Fetch(_ context.Context, _, _, _, _ string) (string, error) {
+	return "", fmt.Errorf("%s", f.errMsg)
 }
 
 type stubWasmBackend struct{}

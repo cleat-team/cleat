@@ -324,50 +324,6 @@ func TestNowMs_AtomicAccess(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// wasiBuilder / teavmBuilder create host functions (tested via NewRuntime)
-// These tests verify that the stubs registered in NewRuntime don't panic.
-// ---------------------------------------------------------------------------
-
-func TestWasiResetAdapterState_Registered(t *testing.T) {
-	// The "reset_adapter_state" function is registered on the WASI module.
-	// This test verifies that NewRuntime registers it without error.
-	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0, 0)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	defer rt.Close(ctx)
-	// If we got here, WASI registration (including reset_adapter_state) succeeded.
-}
-
-func TestTeavmStubs_Registered(t *testing.T) {
-	// TeaVM stubs (putwcharsOut, currentTimeMillis, logString, logInt,
-	// logOutOfMemory) are registered during NewRuntime. Verify no error.
-	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0, 0)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	defer rt.Close(ctx)
-}
-
-// ---------------------------------------------------------------------------
-// AssemblyScript abort stub test
-// ---------------------------------------------------------------------------
-
-func TestAssemblyScriptAbortStub_Registered(t *testing.T) {
-	// The "abort" function is registered on the "env" host module for
-	// AssemblyScript compatibility. Verify NewRuntime succeeds.
-	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0, 0)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	defer rt.Close(ctx)
-}
-
-// ---------------------------------------------------------------------------
 // Error messages from runtime.go exercised via import resolution
 // ---------------------------------------------------------------------------
 
@@ -386,69 +342,6 @@ func TestWasmInitOnce_Twice(t *testing.T) {
 		t.Fatalf("second NewRuntime: %v", err)
 	}
 	defer rt2.Close(ctx)
-}
-
-// ---------------------------------------------------------------------------
-// cleat_complete host function closure test
-// ---------------------------------------------------------------------------
-
-func TestCleatCompleteClosure_StoresResult(t *testing.T) {
-	// Simulate what the cleat_complete host function does: store a result
-	// in the context's cleatComplete struct.
-	cc := &cleatComplete{}
-	ctx := context.WithValue(context.Background(), &cleatCompleteKey, cc)
-	_ = ctx
-
-	// Simulate cleat_complete(0 /* success */, ptr, len).
-	// The actual closure reads from WASM memory; here we set fields directly.
-	expected := `{"status":"ok"}`
-	cc.Result = &expected
-
-	if cc.Result == nil || *cc.Result != expected {
-		t.Errorf("cleat_complete result: got %v, want %q", cc.Result, expected)
-	}
-}
-
-func TestCleatCompleteClosure_StoresError(t *testing.T) {
-	cc := &cleatComplete{}
-	ctx := context.WithValue(context.Background(), &cleatCompleteKey, cc)
-	_ = ctx
-
-	expected := "something went wrong"
-	cc.Error = &expected
-
-	if cc.Error == nil || *cc.Error != expected {
-		t.Errorf("cleat_complete error: got %v, want %q", cc.Error, expected)
-	}
-}
-
-func TestCleatCompleteClosure_MissingContextKey(t *testing.T) {
-	// When cleatCompleteKey is not in the context, the cleat_complete host
-	// function should silently handle it (the value will be nil).
-	// We verify by creating a context without the key.
-	cc := &cleatComplete{}
-	result := "test"
-	cc.Result = &result
-
-	// Without the context key, setting Result on a local struct is fine.
-	// The real cleat_complete function accesses ctx.Value(&cleatCompleteKey)
-	// and skips if nil. Our local test just checks the struct mechanics.
-	if *cc.Result != "test" {
-		t.Error("cleatComplete struct should still work without context key")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Test that the handlerContextKey is typed correctly (structural identity)
-// ---------------------------------------------------------------------------
-
-func TestHandlerContextKey_Type(t *testing.T) {
-	// Both are struct{} types, so every instance is equal.
-	k1 := handlerContextKey{}
-	k2 := handlerContextKey{}
-	if k1 != k2 {
-		t.Error("handlerContextKey instances should be equal")
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -503,22 +396,6 @@ func TestHostFunctionNames_AllRegistered(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Test that the env module stub (cleat_poll_work, cleat_complete) exist
-// ---------------------------------------------------------------------------
-
-func TestEnvModuleStubs_NoPanic(t *testing.T) {
-	// cleat_poll_work and cleat_complete are registered on the "env" module
-	// by registerHostFunctions. Verify they were registered by creating a
-	// Runtime.
-	ctx := context.Background()
-	rt, err := NewRuntime(ctx, 0, 0)
-	if err != nil {
-		t.Fatalf("NewRuntime: %v", err)
-	}
-	defer rt.Close(ctx)
-	// Registration succeeded — stubs exist.
-}
 
 // ---------------------------------------------------------------------------
 // Cleanup: verify that withHandler stores the handler under the right key
@@ -540,40 +417,353 @@ func TestWithHandler_UsesCorrectKey(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test the nowMs atomic has the correct type-is-a-struct check
+// cleat_call wrapper tests (handler dispatch)
 // ---------------------------------------------------------------------------
 
-func TestNowMs_Type(t *testing.T) {
-	// nowMs is an atomic.Int64. Verify it's the correct type by calling
-	// its methods.
-	nowMs.Store(42)
-	if nowMs.Load() != 42 {
-		t.Errorf("nowMs.Load() = %d, want 42", nowMs.Load())
+// TestCleatCall_ReadsServiceOpReq verifies that DurableCall dispatches the
+// correct service, operation, and request to the ServiceCaller.
+func TestCleatCall_ReadsServiceOpReq(t *testing.T) {
+	caller := &mockCaller{}
+	engine := NewEngine(nil, caller)
+	s := &execSession{
+		engine: engine,
 	}
-	nowMs.Store(0) // reset for other tests
+
+	result := s.DurableCall(context.Background(), nil,
+		"my-service", "my-operation", `{"key":"value"}`, 0, 0)
+
+	if len(caller.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(caller.calls))
+	}
+	if caller.calls[0].Service != "my-service" {
+		t.Errorf("Service = %q, want %q", caller.calls[0].Service, "my-service")
+	}
+	if caller.calls[0].Op != "my-operation" {
+		t.Errorf("Op = %q, want %q", caller.calls[0].Op, "my-operation")
+	}
+	if caller.calls[0].Request != `{"key":"value"}` {
+		t.Errorf("Request = %q, want %q", caller.calls[0].Request, `{"key":"value"}`)
+	}
+
+	// Should be a success result
+	errCode := byte(result & 0xFF)
+	if errCode != 0 {
+		t.Errorf("errCode = %d, want 0", errCode)
+	}
+}
+
+// TestCleatCall_InvalidStrings verifies that DurableCall handles various edge
+// case string inputs without crashing.
+func TestCleatCall_InvalidStrings(t *testing.T) {
+	tests := []struct {
+		name    string
+		service string
+		op      string
+		request string
+	}{
+		{name: "empty service", service: "", op: "op", request: `{}`},
+		{name: "empty op", service: "svc", op: "", request: `{}`},
+		{name: "empty request", service: "svc", op: "op", request: ""},
+		{name: "all empty", service: "", op: "", request: ""},
+		{name: "unicode in request", service: "svc", op: "op", request: `{"msg":"héllo wörld"}`},
+		{name: "long request", service: "svc", op: "op", request: `{"data":"` + string(make([]byte, 1000)) + `"}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			caller := &mockCaller{}
+			engine := NewEngine(nil, caller)
+			s := &execSession{
+				engine: engine,
+			}
+
+			result := s.DurableCall(context.Background(), nil,
+				tt.service, tt.op, tt.request, 0, 0)
+
+			if len(caller.calls) != 1 {
+				t.Fatalf("expected 1 call, got %d", len(caller.calls))
+			}
+			if caller.calls[0].Service != tt.service {
+				t.Errorf("Service = %q, want %q", caller.calls[0].Service, tt.service)
+			}
+			if caller.calls[0].Op != tt.op {
+				t.Errorf("Op = %q, want %q", caller.calls[0].Op, tt.op)
+			}
+
+			// The result should indicate success or error — but must not panic
+			_ = result
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
-// Validate that cleat_complete key comparison works
+// cleat_child_workflow wrapper tests
 // ---------------------------------------------------------------------------
 
-func TestCleatCompleteKey_Identity(t *testing.T) {
-	// &cleatCompleteKey is a pointer to a package-level struct{} used as a
-	// context key. The pointer identity matters: every use must reference
-	// the same variable. We verify the pointer is consistent.
-	key1 := &cleatCompleteKey
-	key2 := &cleatCompleteKey
-	if key1 != key2 {
-		t.Error("&cleatCompleteKey should be the same pointer every time")
+// TestCleatChildWorkflow_ReadsNameAndInput verifies that ChildWorkflow
+// dispatches with the correct name and input to the child workflow store.
+func TestCleatChildWorkflow_ReadsNameAndInput(t *testing.T) {
+	mock := &mockChildWorkflowStore{}
+	engine := NewEngine(nil, nil, WithChildWorkflowStore(mock))
+	s := &execSession{
+		engine: engine,
+	}
+
+	result := s.ChildWorkflow(context.Background(), nil,
+		"my-child-workflow", `{"order_id":"ord-123"}`, 0, 0)
+
+	if mock.gotRunID != "child-run-001" {
+		// The runID was written to memory — since we passed nil module,
+		// writeResult returns 0. The actual result communicates success
+		// by the errCode.
+		_ = result
+	}
+	// History should have a child workflow event
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeChildWorkflow {
+		t.Errorf("event type = %q, want %q", s.history[0].EventType, EventTypeChildWorkflow)
+	}
+	if s.history[0].ChildName != "my-child-workflow" {
+		t.Errorf("ChildName = %q, want %q", s.history[0].ChildName, "my-child-workflow")
+	}
+	if s.history[0].ChildInput != `{"order_id":"ord-123"}` {
+		t.Errorf("ChildInput = %q, want %q", s.history[0].ChildInput, `{"order_id":"ord-123"}`)
+	}
+}
+
+// TestCleatChildWorkflow_EmptyName handles the edge case of an empty child
+// workflow name.
+func TestCleatChildWorkflow_EmptyName(t *testing.T) {
+	mock := &mockChildWorkflowStore{}
+	engine := NewEngine(nil, nil, WithChildWorkflowStore(mock))
+	s := &execSession{
+		engine: engine,
+	}
+
+	s.ChildWorkflow(context.Background(), nil, "", `{}`, 0, 0)
+
+	// Should not panic; history should contain the event with empty name
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(s.history))
+	}
+	if s.history[0].ChildName != "" {
+		t.Errorf("ChildName = %q, want empty", s.history[0].ChildName)
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Edge case: empty string in UpdateNowMs (ensures no crash)
+// cleat_call_retry wrapper tests
 // ---------------------------------------------------------------------------
 
-func TestUpdateNowMs_ConcurrentSafe(t *testing.T) {
-	// atomic.Int64 is concurrent-safe by design. Verify it doesn't panic
-	// when called (the function uses atomic.Store).
-	UpdateNowMs()
+// TestCleatCallRetry_ReadsAllParams verifies that DurableCallWithRetry
+// dispatches retry parameters correctly.
+func TestCleatCallRetry_ReadsAllParams(t *testing.T) {
+	caller := &mockCaller{}
+	engine := NewEngine(nil, caller)
+	s := &execSession{
+		engine: engine,
+	}
+
+	result := s.DurableCallWithRetry(context.Background(), nil,
+		"my-svc", "my-op", `{"key":"val"}`,
+		3, 100, 20000, 1000,
+		`["timeout","internal"]`, 0, 0)
+
+	// Should succeed on first attempt with correct args
+	if len(caller.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(caller.calls))
+	}
+	if caller.calls[0].Service != "my-svc" {
+		t.Errorf("Service = %q, want %q", caller.calls[0].Service, "my-svc")
+	}
+	if caller.calls[0].Op != "my-op" {
+		t.Errorf("Op = %q, want %q", caller.calls[0].Op, "my-op")
+	}
+
+	errCode := byte(result & 0xFF)
+	if errCode != 0 {
+		t.Errorf("errCode = %d, want 0", errCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cleat_call_heartbeat wrapper tests
+// ---------------------------------------------------------------------------
+
+// TestCleatCallHeartbeat_ReadsParams verifies that DurableCallWithHeartbeat
+// dispatches parameters correctly.
+func TestCleatCallHeartbeat_ReadsParams(t *testing.T) {
+	caller := &mockCaller{}
+	engine := NewEngine(nil, caller)
+	s := &execSession{
+		engine: engine,
+	}
+
+	result := s.DurableCallWithHeartbeat(context.Background(), nil,
+		"hb-svc", "hb-op", `{"task":"long"}`, 5000, 0, 0)
+
+	if len(caller.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(caller.calls))
+	}
+	if caller.calls[0].Service != "hb-svc" {
+		t.Errorf("Service = %q, want %q", caller.calls[0].Service, "hb-svc")
+	}
+	if caller.calls[0].Op != "hb-op" {
+		t.Errorf("Op = %q, want %q", caller.calls[0].Op, "hb-op")
+	}
+	if caller.calls[0].Request != `{"task":"long"}` {
+		t.Errorf("Request = %q, want %q", caller.calls[0].Request, `{"task":"long"}`)
+	}
+
+	// Success
+	errCode := byte(result & 0xFF)
+	if errCode != 0 {
+		t.Errorf("errCode = %d, want 0", errCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cleat_send_signal_and_wait wrapper tests
+// ---------------------------------------------------------------------------
+
+// TestCleatSendSignalAndWait_ReadsTargetSignalPayload verifies that
+// SendSignalAndWait dispatches with the correct target, signal, and payload.
+func TestCleatSendSignalAndWait_ReadsTargetSignalPayload(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	e := &Engine{
+		signalStore: store,
+	}
+	s := &execSession{
+		engine: e,
+	}
+
+	result := s.SendSignalAndWait(context.Background(), nil,
+		"target-wf-001", "order-approved", `{"order_id":"ord-123"}`, 30000, 0, 0)
+
+	// Without a signal waiting, this should record an await_signals event
+	// and return a suspend indicator.
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeAwaitSignals {
+		t.Errorf("event type = %q, want %q", s.history[0].EventType, EventTypeAwaitSignals)
+	}
+	if s.history[0].SignalNames != "order-approved" {
+		t.Errorf("SignalNames = %q, want %q", s.history[0].SignalNames, "order-approved")
+	}
+	if s.history[0].TimeoutMs != 30000 {
+		t.Errorf("TimeoutMs = %d, want %d", s.history[0].TimeoutMs, 30000)
+	}
+
+	// Return value should indicate suspend (packSimpleResult with errCode=1)
+	errCode := byte(result & 0xFF)
+	if errCode != 1 {
+		t.Errorf("errCode = %d, want 1 (suspend)", errCode)
+	}
+}
+
+// TestCleatSendSignalAndWait_WithExistingSignal verifies that SendSignalAndWait
+// correctly reads a pre-existing signal.
+func TestCleatSendSignalAndWait_WithExistingSignal(t *testing.T) {
+	store := newMockSignalWorkflowStore()
+	// Pre-deliver a signal so the poll succeeds.
+	err := store.DeliverSignal(context.Background(), "target-wf-001", "order-approved", `{"approved":true}`)
+	if err != nil {
+		t.Fatalf("DeliverSignal: %v", err)
+	}
+	e := &Engine{
+		signalStore: store,
+	}
+	s := &execSession{
+		engine: e,
+	}
+
+	result := s.SendSignalAndWait(context.Background(), nil,
+		"target-wf-001", "order-approved", `{"order_id":"ord-123"}`, 30000, 0, 0)
+
+	// Should find the pre-existing signal and record a signal_received event
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeSignalReceived {
+		t.Errorf("event type = %q, want %q", s.history[0].EventType, EventTypeSignalReceived)
+	}
+
+	// Return value should indicate success (errCode=0)
+	errCode := byte(result & 0xFF)
+	if errCode != 0 {
+		t.Errorf("errCode = %d, want 0", errCode)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cleat_fetch wrapper tests
+// ---------------------------------------------------------------------------
+
+// TestCleatFetch_ReadsMethodUrlHeadersBody verifies that Fetch dispatches
+// with the correct method, URL, headers, and body.
+func TestCleatFetch_ReadsMethodUrlHeadersBody(t *testing.T) {
+	fetcher := &stubFetcher{}
+	engine := NewEngine(nil, nil, WithFetcher(fetcher))
+	s := &execSession{
+		engine: engine,
+	}
+
+	result := s.Fetch(context.Background(), nil,
+		"GET", "https://api.example.com/data",
+		`{"Authorization":"Bearer tok"}`,
+		`{"query":"test"}`, 0, 0)
+
+	// Should record a fetch event
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeFetch {
+		t.Errorf("event type = %q, want %q", s.history[0].EventType, EventTypeFetch)
+	}
+	if s.history[0].FetchMethod != "GET" {
+		t.Errorf("FetchMethod = %q, want %q", s.history[0].FetchMethod, "GET")
+	}
+	if s.history[0].FetchURL != "https://api.example.com/data" {
+		t.Errorf("FetchURL = %q, want %q", s.history[0].FetchURL, "https://api.example.com/data")
+	}
+	if s.history[0].FetchHeaders != `{"Authorization":"Bearer tok"}` {
+		t.Errorf("FetchHeaders = %q, want %q", s.history[0].FetchHeaders, `{"Authorization":"Bearer tok"}`)
+	}
+	if s.history[0].FetchBody != `{"query":"test"}` {
+		t.Errorf("FetchBody = %q, want %q", s.history[0].FetchBody, `{"query":"test"}`)
+	}
+
+	// Success (stubFetcher returns empty response, no error)
+	errCode := byte(result & 0xFF)
+	if errCode != 0 {
+		t.Errorf("errCode = %d, want 0", errCode)
+	}
+}
+
+// TestCleatFetch_WithError verifies that Fetch handles errors from the fetcher.
+func TestCleatFetch_WithError(t *testing.T) {
+	fetcher := &errorFetcher{errMsg: "network error"}
+	engine := NewEngine(nil, nil, WithFetcher(fetcher))
+	s := &execSession{
+		engine: engine,
+	}
+
+	result := s.Fetch(context.Background(), nil,
+		"POST", "https://api.example.com/fail", "{}", "{}", 0, 0)
+
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 event in history, got %d", len(s.history))
+	}
+	if s.history[0].Err != "network error" {
+		t.Errorf("event error = %q, want %q", s.history[0].Err, "network error")
+	}
+
+	// Error return
+	errCode := byte(result & 0xFF)
+	if errCode != 1 {
+		t.Errorf("errCode = %d, want 1", errCode)
+	}
 }

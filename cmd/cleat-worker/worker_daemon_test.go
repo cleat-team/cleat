@@ -98,6 +98,7 @@ type mockStore struct {
 	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string, priority int) (string, error)
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
+	terminateWorkflowFn                func(ctx context.Context, workflowID, reason string) error
 }
 
 func (m *mockStore) ClaimWorkflow(ctx context.Context, workerID string) (*engine.WorkflowInstance, error) {
@@ -3072,6 +3073,9 @@ func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, p
 	return nil, nil
 }
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	if m.terminateWorkflowFn != nil {
+		return m.terminateWorkflowFn(ctx, workflowID, reason)
+	}
 	return nil
 }
 func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
