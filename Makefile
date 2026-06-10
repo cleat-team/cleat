@@ -135,7 +135,7 @@ coverage-report:
 #   plugin/           55%     (actual  65.5% stmt, 54.6% func)
 #   cleat/wasmtest    55%     (actual  62.6% stmt)
 #   cleat/            60%     (lowest: wasmtest  62.6% stmt)
-#   plugins/          65%     (lowest: kvstore  69.7% stmt, 61.4% func)
+#   plugins/          80%     (actual 84.9% stmt overall; lowest: slacknotify 70.3%)
 #   cmd/cleat-plugin-verify   0%  (utility, no tests)
 #   cmd/deploy-workflow       0%  (utility, no tests)
 #   cmd/wit-rewrite           0%  (utility, no tests)
@@ -156,7 +156,7 @@ coverage-check: coverage-go
 	    thresh["plugin"] = 60; \
 	    thresh["cleat/wasmtest"] = 60; \
 	    thresh["cleat"] = 60; \
-	    thresh["plugins"] = 65; \
+	    thresh["plugins"] = 80; \
 	    thresh["cmd/cleat-plugin-verify"] = 0; \
 	    thresh["cmd/deploy-workflow"] = 0; \
 	    thresh["cmd/wit-rewrite"] = 0; \
