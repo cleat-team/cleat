@@ -161,7 +161,7 @@ func (c *behConn) QueryContext(_ context.Context, query string, args []driver.Na
 	defer c.store.mu.RUnlock()
 
 	switch {
-	case strings.Contains(query, "FROM tenant_api_keys"):
+	case strings.Contains(query, "tenant_api_keys") && strings.Contains(query, "tenant_id"):
 		return c.queryTenant(args)
 	case strings.Contains(query, "FROM rate_limits") && !strings.Contains(query, "WHERE"):
 		return c.queryAllLimits()

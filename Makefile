@@ -128,20 +128,20 @@ coverage: coverage-go coverage-python
 coverage-report:
 	go tool cover -func=coverage.out
 
-# Thresholds (enforced via prefix matching; measured 2026-06-09):
+# Thresholds (enforced via prefix matching; measured 2026-06-10):
 #   engine/testutil    0%     (test helper)
-#   engine/           50%     (actual  57.5% stmt, 77.2% func)
-#   internal/         70%     (lowest: telemetry  65.7% stmt, 77.5% func)
-#   plugin/           55%     (actual  65.5% stmt, 54.6% func)
-#   cleat/wasmtest    55%     (actual  62.6% stmt)
-#   cleat/            60%     (lowest: wasmtest  62.6% stmt)
-#   plugins/          65%     (lowest: kvstore  69.7% stmt, 61.4% func)
+#   engine/           70%     (actual 70.0% PG-only; 77.6% with all backends)
+#   internal/         65%     (lowest: telemetry 65.7%)
+#   plugin/           70%     (actual 71.7%)
+#   cleat/wasmtest    60%     (actual 62.6%)
+#   cleat/            60%     (lowest: wasmtest 62.6%)
+#   plugins/          80%     (actual 84.9% overall; lowest: slacknotify 70.3%)
 #   cmd/cleat-plugin-verify   0%  (utility, no tests)
 #   cmd/deploy-workflow       0%  (utility, no tests)
 #   cmd/wit-rewrite           0%  (utility, no tests)
-#   cmd/              40%     (lowest non-zero: cleatctl  47.3% func)
-#   wasm/             55%     (actual  59.6% stmt, 71.8% func)
-#   auth/             85%     (actual  90.9% stmt, 98.2% func)
+#   cmd/              40%     (lowest non-zero: cleat-worker 42.8%)
+#   wasm/             75%     (actual 79.4%)
+#   auth/             90%     (actual 90.9%)
 .PHONY: coverage-check
 coverage-check: coverage-go
 	@cat coverage_cleat.out 2>/dev/null | grep -v "^mode:" >> coverage.out 2>/dev/null; \
@@ -151,16 +151,16 @@ coverage-check: coverage-go
 	    printf "%-40s %8s\n\n", "Package", "Coverage"; \
 	    n = split("engine/testutil engine internal plugin cleat/wasmtest cleat plugins cmd/cleat-plugin-verify cmd/deploy-workflow cmd/wit-rewrite cmd/cleatctl cmd wasm auth", prefixes, " "); \
 	    thresh["engine/testutil"] = 0; \
-	    thresh["engine"] = 60; \
-	    thresh["internal"] = 70; \
-	    thresh["plugin"] = 60; \
+	    thresh["engine"] = 70; \
+	    thresh["internal"] = 65; \
+	    thresh["plugin"] = 70; \
 	    thresh["cleat/wasmtest"] = 60; \
 	    thresh["cleat"] = 60; \
-	    thresh["plugins"] = 65; \
+	    thresh["plugins"] = 80; \
 	    thresh["cmd/cleat-plugin-verify"] = 0; \
 	    thresh["cmd/deploy-workflow"] = 0; \
 	    thresh["cmd/wit-rewrite"] = 0; \
-		    thresh["cmd/cleatctl"] = 70; \
+		    thresh["cmd/cleatctl"] = 75; \
 	    thresh["cmd"] = 40; \
 	    thresh["wasm"] = 75; \
 	    thresh["auth"] = 90; \

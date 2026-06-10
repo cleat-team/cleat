@@ -103,3 +103,10 @@ func TestRegisterRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestNew(t *testing.T) {
+	p := New()
+	if p == nil {
+		t.Fatal("New() returned nil")
+	}
+}

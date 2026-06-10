@@ -4809,3 +4809,582 @@ func TestNewPayloadEncryption_WrongKeyLength(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// computeEventChecksum -- additional event types
+// ---------------------------------------------------------------------------
+
+func TestComputeEventChecksum_SideEffect(t *testing.T) {
+	rec := EventRecord{Step: 0, EventType: EventTypeSideEffect, SideEffectResult: "result-data"}
+	c1 := computeEventChecksum(rec, "")
+	c2 := computeEventChecksum(rec, "")
+	if c1 == "" || len(c1) != 64 {
+		t.Error("expected non-empty 64-char hex checksum")
+	}
+	if c1 != c2 {
+		t.Error("checksum should be deterministic for same input")
+	}
+}
+
+func TestComputeEventChecksum_StateMutation(t *testing.T) {
+	rec := EventRecord{Step: 0, EventType: EventTypeStateMutation, StateKey: "k", StateValue: "v", StateDelta: 42}
+	c1 := computeEventChecksum(rec, "")
+	c2 := computeEventChecksum(rec, "")
+	if c1 != c2 {
+		t.Error("checksum should be deterministic")
+	}
+	if len(c1) != 64 {
+		t.Error("expected 64 hex chars")
+	}
+}
+
+func TestComputeEventChecksum_RunDetached(t *testing.T) {
+	rec := EventRecord{Step: 0, EventType: EventTypeRunDetached, DetachedName: "child", DetachedInput: `{"x":1}`}
+	c := computeEventChecksum(rec, "")
+	if c == "" || len(c) != 64 {
+		t.Error("expected non-empty 64-char hex checksum")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// populateFromPayload -- additional event types
+// ---------------------------------------------------------------------------
+
+func TestPopulateFromPayload_SignalReceived(t *testing.T) {
+	payload := `{"signal_name":"my-signal","signal_payload":"{\"data\":1}"}`
+	rec := &EventRecord{Step: 0, EventType: "signal_received"}
+	populateFromPayload(rec, []byte(payload))
+	if rec.SignalName != "my-signal" {
+		t.Errorf("expected SignalName 'my-signal', got %q", rec.SignalName)
+	}
+	if rec.SignalPayload != `{"data":1}` {
+		t.Errorf("expected SignalPayload %q, got %q", `{"data":1}`, rec.SignalPayload)
+	}
+}
+
+func TestPopulateFromPayload_ChildWorkflow(t *testing.T) {
+	payload := `{"child_name":"child-wf","child_input":"{}","run_id":"run-123"}`
+	rec := &EventRecord{Step: 0, EventType: "child_workflow"}
+	populateFromPayload(rec, []byte(payload))
+	if rec.ChildName != "child-wf" || rec.RunID != "run-123" {
+		t.Errorf("unexpected: ChildName=%q RunID=%q", rec.ChildName, rec.RunID)
+	}
+	if rec.ChildInput != "{}" {
+		t.Errorf("unexpected ChildInput=%q", rec.ChildInput)
+	}
+}
+
+func TestPopulateFromPayload_Promise(t *testing.T) {
+	// create_promise populates promise_name and promise_id
+	payload := `{"promise_name":"p-name","promise_id":"p-id"}`
+	rec := &EventRecord{Step: 0, EventType: "create_promise"}
+	populateFromPayload(rec, []byte(payload))
+	if rec.PromiseName != "p-name" || rec.PromiseID != "p-id" {
+		t.Errorf("unexpected: PromiseName=%q PromiseID=%q", rec.PromiseName, rec.PromiseID)
+	}
+	// promise_resolved populates promise_result
+	payload2 := `{"promise_id":"p-id","promise_result":"ok"}`
+	rec2 := &EventRecord{Step: 1, EventType: "promise_resolved"}
+	populateFromPayload(rec2, []byte(payload2))
+	if rec2.PromiseID != "p-id" || rec2.PromiseResult != "ok" {
+		t.Errorf("unexpected resolved: PromiseID=%q PromiseResult=%q", rec2.PromiseID, rec2.PromiseResult)
+	}
+	// promise_rejected with error
+	payload3 := `{"promise_id":"p-id-2","promise_error":"err msg"}`
+	rec3 := &EventRecord{Step: 2, EventType: "promise_rejected"}
+	populateFromPayload(rec3, []byte(payload3))
+	if rec3.PromiseID != "p-id-2" || rec3.PromiseError != "err msg" {
+		t.Errorf("unexpected rejected: PromiseID=%q PromiseError=%q", rec3.PromiseID, rec3.PromiseError)
+	}
+}
+
+func TestPopulateFromPayload_AcquireReleaseLock(t *testing.T) {
+	// acquire_lock
+	payload := `{"lock_key":"my-lock","lock_ttl_ms":30000,"lock_acquired":1}`
+	rec := &EventRecord{Step: 0, EventType: "acquire_lock"}
+	populateFromPayload(rec, []byte(payload))
+	if rec.LockKey != "my-lock" || rec.LockTTLMs != 30000 || rec.LockAcquired != 1 {
+		t.Errorf("unexpected: LockKey=%q LockTTLMs=%d LockAcquired=%d", rec.LockKey, rec.LockTTLMs, rec.LockAcquired)
+	}
+	// release_lock
+	payload2 := `{"lock_key":"released-lock"}`
+	rec2 := &EventRecord{Step: 1, EventType: "release_lock"}
+	populateFromPayload(rec2, []byte(payload2))
+	if rec2.LockKey != "released-lock" {
+		t.Errorf("expected LockKey 'released-lock', got %q", rec2.LockKey)
+	}
+}
+
+func TestPopulateFromPayload_Fetch(t *testing.T) {
+	payload := `{"fetch_method":"POST","fetch_url":"http://example.com","fetch_headers":"{}","fetch_body":"body","fetch_response_b64":"` +
+		base64.StdEncoding.EncodeToString([]byte(`{"ok":true}`)) +
+		`","error":""}`
+	rec := &EventRecord{Step: 0, EventType: "fetch"}
+	populateFromPayload(rec, []byte(payload))
+	if rec.FetchMethod != "POST" || rec.FetchURL != "http://example.com" {
+		t.Errorf("unexpected: Method=%q URL=%q", rec.FetchMethod, rec.FetchURL)
+	}
+	if rec.FetchResponse != `{"ok":true}` {
+		t.Errorf("unexpected FetchResponse=%q", rec.FetchResponse)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// eventRecordToPayload -- additional event types
+// ---------------------------------------------------------------------------
+
+func TestEventRecordToPayload_SignalReceived(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "signal_received",
+		SignalName: "my-signal", SignalPayload: `{"key":"val"}`,
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["signal_name"] != "my-signal" {
+		t.Errorf("expected signal_name 'my-signal', got %v", m["signal_name"])
+	}
+	if m["signal_payload"] != `{"key":"val"}` {
+		t.Errorf("expected signal_payload %q, got %v", `{"key":"val"}`, m["signal_payload"])
+	}
+}
+
+func TestEventRecordToPayload_AwaitSignals(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "await_signals",
+		SignalNames: `["sig1","sig2"]`, TimeoutMs: 10000,
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["signal_names"] != `["sig1","sig2"]` {
+		t.Errorf("expected signal_names %q, got %v", `["sig1","sig2"]`, m["signal_names"])
+	}
+	if m["timeout_ms"] != float64(10000) {
+		t.Errorf("expected timeout_ms 10000, got %v", m["timeout_ms"])
+	}
+}
+
+func TestEventRecordToPayload_ChildWorkflow(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "child_workflow",
+		ChildName: "child-wf", ChildInput: `{"x":1}`, RunID: "run-123",
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["child_name"] != "child-wf" || m["run_id"] != "run-123" {
+		t.Errorf("unexpected payload: %v", m)
+	}
+}
+
+func TestEventRecordToPayload_ReleaseLock(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "release_lock",
+		LockKey: "my-lock",
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["lock_key"] != "my-lock" {
+		t.Errorf("expected lock_key 'my-lock', got %v", m["lock_key"])
+	}
+}
+
+func TestEventRecordToPayload_SideEffect(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "side_effect",
+		SideEffectResult: "result-data",
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["side_effect_result"] != "result-data" {
+		t.Errorf("expected side_effect_result 'result-data', got %v", m["side_effect_result"])
+	}
+}
+
+func TestEventRecordToPayload_ErrorEvent(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "call",
+		Service: "svc", Op: "op", Request: `{}`,
+		Err: "something went wrong",
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["error"] != "something went wrong" {
+		t.Errorf("expected error field, got %v", m["error"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LoadWASM / LoadWorkflowConfig / LoadDAGSpec error paths
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_LoadWASM_NotFound(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT wasm_bytes", data: nil},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.LoadWASM(testCtx, "nonexistent", 1)
+	if err == nil {
+		t.Fatal("expected error for not found")
+	}
+	if !strings.Contains(err.Error(), "wasm not found") {
+		t.Errorf("expected 'wasm not found' error, got: %v", err)
+	}
+}
+
+func TestPostgresStore_LoadWorkflowConfig_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT max_history_length", err: errors.New("query failed")},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.LoadWorkflowConfig(testCtx, "test-wf", 1)
+	if err == nil {
+		t.Fatal("expected error from query failure")
+	}
+	if !strings.Contains(err.Error(), "load workflow config") {
+		t.Errorf("expected 'load workflow config' error, got: %v", err)
+	}
+}
+
+func TestPostgresStore_LoadDAGSpec_NotFound(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT dag_spec", data: nil},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.LoadDAGSpec(testCtx, "nonexistent", 1)
+	if err == nil {
+		t.Fatal("expected error for not found")
+	}
+	if !strings.Contains(err.Error(), "workflow def not found") {
+		t.Errorf("expected 'workflow def not found' error, got: %v", err)
+	}
+}
+
+func TestPostgresStore_LoadDAGSpec_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT dag_spec", err: errors.New("db error")},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.LoadDAGSpec(testCtx, "test-wf", 1)
+	if err == nil {
+		t.Fatal("expected error from query failure")
+	}
+	if !strings.Contains(err.Error(), "load dag_spec") {
+		t.Errorf("expected 'load dag_spec' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// beginTxWithRLS -- set_config failure
+// ---------------------------------------------------------------------------
+
+func TestBeginTxWithRLS_SetConfigError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "set_config", err: errors.New("set_config failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.LoadWASM(testCtx, "test-wf", 1)
+	if err == nil {
+		t.Fatal("expected error from set_config failure")
+	}
+	if !strings.Contains(err.Error(), "set row-level security") {
+		t.Errorf("expected 'set row-level security' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ListWorkflows -- additional filter combinations
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ListWorkflows_ErrorContainsFilter(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "error_msg", data: [][]driver.Value{
+			{"wf-1", "my-wf", int64(1), "failed", []byte(`{}`), "worker-1", nil, "ERR001", "some-op", "something failed", nil, int64(0), int64(0), ""},
+		}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	wfs, err := store.ListWorkflows(testCtx, WorkflowFilter{ErrorContains: "failed"})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	if len(wfs) != 1 {
+		t.Fatalf("expected 1 workflow, got %d", len(wfs))
+	}
+	if wfs[0].Error != "something failed" {
+		t.Errorf("expected Error 'something failed', got %q", wfs[0].Error)
+	}
+}
+
+func TestPostgresStore_ListWorkflows_WithOffset(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "OFFSET", data: [][]driver.Value{
+			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), ""},
+		}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	wfs, err := store.ListWorkflows(testCtx, WorkflowFilter{Limit: 10, Offset: 5})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	if len(wfs) != 1 {
+		t.Errorf("expected 1 workflow, got %d", len(wfs))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ClaimWorkflows -- scan error
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ClaimWorkflows_ScanError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "UPDATE workflow_instances",
+			data: [][]driver.Value{
+				// Wrong type for def_version (string instead of int64) causes scan error
+				{"wf-1", "test-wf", "not-an-int", "running", []byte(`{}`), "worker-1", nil, nil, nil, nil, nil, int64(0), int64(0), ""},
+			},
+		},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ClaimWorkflows(testCtx, "worker-1", 1)
+	if err == nil {
+		t.Fatal("expected scan error")
+	}
+	if !strings.Contains(err.Error(), "claim workflows scan") {
+		t.Errorf("expected 'claim workflows scan' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decryptAndRedactEventRecord — successful decryption of all fields
+// ---------------------------------------------------------------------------
+
+func TestDecryptAndRedactEventRecord_SuccessfulDecryption(t *testing.T) {
+	enc := newTestPayloadEncryption(t)
+	store := NewPostgresStore(nil).WithEncryption(enc, true).WithReadRedactionDisabled(true)
+
+	// Request and Response are stored as raw ciphertext bytes (already
+	// base64-decoded by tryDecodeBase64), so decryptField uses
+	// encryption.Decrypt (useBytesDecrypt=true).
+	plainReq := `{"hello":"world"}`
+	rawReq, err := enc.Encrypt([]byte(plainReq))
+	if err != nil {
+		t.Fatalf("Encrypt request: %v", err)
+	}
+	plainResp := `{"ok":true}`
+	rawResp, err := enc.Encrypt([]byte(plainResp))
+	if err != nil {
+		t.Fatalf("Encrypt response: %v", err)
+	}
+
+	// Err is stored as a base64-encoded ciphertext, so decryptField uses
+	// encryption.DecryptString (useBytesDecrypt=false).
+	plainErr := "operation failed"
+	encodedErr, err := enc.EncryptString(plainErr)
+	if err != nil {
+		t.Fatalf("EncryptString: %v", err)
+	}
+
+	rec := &EventRecord{
+		Step:     0,
+		Request:  string(rawReq),
+		Response: string(rawResp),
+		Err:      encodedErr,
+	}
+	store.decryptAndRedactEventRecord(rec, "wf-1")
+
+	if rec.Request != plainReq {
+		t.Errorf("expected Request=%q, got %q", plainReq, rec.Request)
+	}
+	if rec.Response != plainResp {
+		t.Errorf("expected Response=%q, got %q", plainResp, rec.Response)
+	}
+	if rec.Err != plainErr {
+		t.Errorf("expected Err=%q, got %q", plainErr, rec.Err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DeliverSignal — valid JSON payload
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_DeliverSignal_ValidJSON(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_signals", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	// Valid JSON payload — the code should insert it as-is (no quoting).
+	err := store.DeliverSignal(testCtx, "wf-1", "sig", `{"key":"value"}`)
+	if err != nil {
+		t.Fatalf("DeliverSignal with valid JSON: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetWorkflowByID — query error path
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_GetWorkflowByID_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT id, def_name, def_version", err: errors.New("query failed")},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.GetWorkflowByID(testCtx, "wf-1")
+	if err == nil {
+		t.Fatal("expected error from query failure")
+	}
+	if !strings.Contains(err.Error(), "get workflow") {
+		t.Errorf("expected 'get workflow' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat — RowsAffected greater than 1
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "SET heartbeat_at", affected: 3},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	owned, err := store.Heartbeat(testCtx, "wf-1", "worker-1", 0)
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if !owned {
+		t.Error("expected owned=true when RowsAffected=3")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CompleteWorkflow — UPDATE affects 0 rows (code ignores RowsAffected)
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_CompleteWorkflow_ZeroRowsAffected(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances SET status = 'done'", affected: 0},
+		{match: "UPDATE idempotency_keys SET result =", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", 0, `{}`, nil)
+	if err != nil {
+		t.Fatalf("CompleteWorkflow should succeed even with 0 rows affected: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FailWorkflow — exec error path
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_FailWorkflow_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.FailWorkflow(testCtx, "wf-1", "worker-1", 0, "err", "", "", nil)
+	if err == nil {
+		t.Fatal("expected error from exec failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LoadEventHistory — query error path
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_LoadEventHistory_QueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT step, event_type, service", err: errors.New("select failed")},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.LoadEventHistory(testCtx, "wf-1")
+	if err == nil {
+		t.Fatal("expected error from query failure")
+	}
+	if !strings.Contains(err.Error(), "load history") {
+		t.Errorf("expected 'load history' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetChildResult — scan error path
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_GetChildResult_ScanError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		// struct{} is not a supported driver.Value type for *string Scan target.
+		{match: "SELECT COALESCE", data: [][]driver.Value{{`{}`, struct{}{}}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, _, err := store.GetChildResult(testCtx, "child-1")
+	if err == nil {
+		t.Fatal("expected scan error")
+	}
+	if !strings.Contains(err.Error(), "get child result") {
+		t.Errorf("expected 'get child result' error, got: %v", err)
+	}
+}
+

@@ -241,6 +241,7 @@ func CleanupMySQLTestData(t *testing.T, db *sql.DB) {
 	t.Helper()
 
 	tables := []string{
+		"tenant_api_keys",
 		"workflow_update_requests",
 		"workflow_promises",
 		"workflow_signals",

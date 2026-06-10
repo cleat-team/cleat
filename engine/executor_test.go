@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -259,5 +260,151 @@ func TestDispatchUpdate_WithHandler(t *testing.T) {
 	}
 	if result != `{"result":"ok"}` {
 		t.Errorf("expected %q, got %q", `{"result":"ok"}`, result)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// executeCompiled and Execute/ExecuteCompiled/ReplayCompiled tests
+// ---------------------------------------------------------------------------
+
+// TestExecute_CompilationFailure verifies that Execute returns a compilation
+// error when given invalid WASM bytes.
+func TestExecute_CompilationFailure(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	engine := NewEngine(rt, nil)
+	engine.workflowID = "wf-compile-fail"
+
+	// Invalid WASM bytes should fail at compilation.
+	_, _, _, _, _, err = engine.Execute(ctx, []byte{0, 0, 0, 0}, "test", nil)
+	if err == nil {
+		t.Fatal("expected compilation error")
+	}
+	if !strings.Contains(err.Error(), "compile module") {
+		t.Errorf("expected 'compile module' in error, got: %v", err)
+	}
+}
+
+// TestExecuteCompiled_InstantiationFailure verifies that ExecuteCompiled
+// returns an instantiation error when the compiled module imports from an
+// unknown module (compiles but cannot be instantiated).
+func TestExecuteCompiled_InstantiationFailure(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	// Craft a minimal WASM module with an import from an unknown module "x".
+	// wazero's CompileModule validates binary structure (succeeds), but
+	// InstantiateModule fails because "x" is not in the Runtime's store.
+	wasmBytes := []byte{
+		0x00, 0x61, 0x73, 0x6d, // magic
+		0x01, 0x00, 0x00, 0x00, // version 1
+		// Type section: 1 type, (func)
+		0x01, 0x04, 0x01, 0x60, 0x00, 0x00,
+		// Import section: 1 import, module="x" name="test", func type 0
+		0x02, 0x0a, 0x01,
+		0x01, 0x78,
+		0x04, 0x74, 0x65, 0x73, 0x74,
+		0x00, 0x00,
+	}
+
+	compiled, err := rt.CompileModule(ctx, wasmBytes)
+	if err != nil {
+		t.Fatalf("CompileModule should succeed for structurally valid module: %v", err)
+	}
+	defer compiled.Close(ctx)
+
+	engine := NewEngine(rt, nil)
+	engine.workflowID = "wf-inst-fail"
+
+	_, _, _, _, _, err = engine.ExecuteCompiled(ctx, compiled, "test", nil)
+	if err == nil {
+		t.Fatal("expected instantiation error for module with unresolved imports")
+	}
+	if !strings.Contains(err.Error(), "instantiate module") {
+		t.Errorf("expected 'instantiate module' in error, got: %v", err)
+	}
+}
+
+// TestReplayCompiled_ChecksumVerificationFailure verifies that ReplayCompiled
+// returns an error when the workflow event verifier reports a checksum mismatch
+// and failOnMismatch is true.
+func TestReplayCompiled_ChecksumVerificationFailure(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	compiled, err := rt.CompileModule(ctx, minimalWasm())
+	if err != nil {
+		t.Fatalf("CompileModule: %v", err)
+	}
+	defer compiled.Close(ctx)
+
+	engine := NewEngine(rt, nil,
+		WithWorkflowEventVerifier(func(ctx context.Context, workflowID string) error {
+			return errors.New("checksum mismatch")
+		}, true), // failOnMismatch = true
+	)
+	engine.workflowID = "wf-checksum-fail"
+
+	// Non-empty history triggers replay verification in executeCompiled.
+	history := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "s", Op: "o", Request: "{}", Response: "{}", TimestampMs: 1000},
+	}
+
+	_, _, _, _, _, err = engine.ReplayCompiled(ctx, compiled, "test", nil, history)
+	if err == nil {
+		t.Fatal("expected checksum verification error")
+	}
+	if !strings.Contains(err.Error(), "checksum verification failed") {
+		t.Errorf("expected 'checksum verification failed' in error, got: %v", err)
+	}
+}
+
+// TestReplayCompiled_VersionValidationFailure verifies that ReplayCompiled
+// returns an error when version validation fails and allowVersionMismatch is false.
+func TestReplayCompiled_VersionValidationFailure(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	compiled, err := rt.CompileModule(ctx, minimalWasm())
+	if err != nil {
+		t.Fatalf("CompileModule: %v", err)
+	}
+	defer compiled.Close(ctx)
+
+	engine := NewEngine(rt, nil,
+		WithVersionValidation(func() error {
+			return errors.New("version mismatch")
+		}),
+		WithAllowVersionMismatch(false),
+	)
+	engine.workflowID = "wf-version-fail"
+
+	history := []EventRecord{
+		{Step: 0, EventType: EventTypeCall, Service: "s", Op: "o", Request: "{}", Response: "{}", TimestampMs: 1000},
+	}
+
+	_, _, _, _, _, err = engine.ReplayCompiled(ctx, compiled, "test", nil, history)
+	if err == nil {
+		t.Fatal("expected version validation error")
+	}
+	if !strings.Contains(err.Error(), "version validation failed") {
+		t.Errorf("expected 'version validation failed' in error, got: %v", err)
 	}
 }
