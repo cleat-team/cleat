@@ -344,7 +344,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	q := strings.ReplaceAll(query, "\n", " ")
 
 	switch {
-	case strings.Contains(q, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(q, "tenant_api_keys") && strings.Contains(q, "tenant_id"):
 		return c.queryTenantByKeyHash(args)
 	case strings.Contains(q, "next_run_at <= now()") || strings.Contains(q, "FOR UPDATE SKIP LOCKED"):
 		return c.queryDueSchedules(args, scanErr)

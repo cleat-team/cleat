@@ -1,6 +1,9 @@
 package ratelimiter
 
 import (
+	"database/sql"
+	"fmt"
+	"github.com/cleat-team/cleat/engine"
 	"context"
 	"log/slog"
 	"net/http"
@@ -239,5 +242,95 @@ func TestRegisterRoutes(t *testing.T) {
 		if pattern == "" {
 			t.Errorf("no handler matched %s %s", tt.method, tt.path)
 		}
+	}
+}
+
+func TestNew(t *testing.T) {
+	p := New()
+	if p == nil {
+		t.Fatal("New() returned nil")
+	}
+}
+
+func TestInit_InvalidConfig(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte("not-valid-json"),
+	}
+	err := p.Init(context.Background(), env)
+	if err == nil {
+		t.Fatal("expected error for invalid config")
+	}
+}
+
+func TestInit_DBMode_NoDB(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"mode":"db"}`),
+	}
+	err := p.Init(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Init() should succeed (fallback to memory), got: %v", err)
+	}
+	if p.mode != "memory" {
+		t.Errorf("expected mode=memory (fallback), got %q", p.mode)
+	}
+}
+
+func TestInit_ExplicitMemoryMode(t *testing.T) {
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"mode":"memory"}`),
+	}
+	err := p.Init(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Init() with memory mode: %v", err)
+	}
+	if p.mode != "memory" {
+		t.Errorf("expected mode=memory, got %q", p.mode)
+	}
+}
+
+func TestPruneRateCounters(t *testing.T) {
+	// Use the fake DB connector to avoid a nil-dereference on p.db.
+	store := &fakeDBStore{
+		apiKeys:    make(map[string]string),
+		rateLimits: make(map[string]fakeRateLimitRow),
+	}
+	fakeDB := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { fakeDB.Close() })
+
+	p := &Plugin{}
+	p.Init(context.Background(), &plugin.Environment{DB: &engine.SQLDBAdapter{DB: fakeDB}})
+	p.buckets = make(map[string]*tokenBucket)
+	p.buckets["tenant/key"] = newTokenBucket(10, 1)
+	p.pruneRateCounters(context.Background())
+}
+
+func TestIsDuplicateKeyError(t *testing.T) {
+	if isDuplicateKeyError(nil, plugin.DialectPostgres) {
+		t.Error("nil error should not be duplicate")
+	}
+	if !isDuplicateKeyError(fmt.Errorf("duplicate key value violates"), plugin.DialectPostgres) {
+		t.Error("Postgres duplicate key not detected")
+	}
+	if !isDuplicateKeyError(fmt.Errorf("23505"), plugin.DialectPostgres) {
+		t.Error("Postgres 23505 not detected")
+	}
+	if !isDuplicateKeyError(fmt.Errorf("Duplicate entry"), plugin.DialectMySQL) {
+		t.Error("MySQL duplicate entry not detected")
+	}
+	if !isDuplicateKeyError(fmt.Errorf("1062"), plugin.DialectMySQL) {
+		t.Error("MySQL 1062 not detected")
+	}
+	if !isDuplicateKeyError(fmt.Errorf("PRIMARY KEY violation"), plugin.DialectMSSQL) {
+		t.Error("MSSQL primary key not detected")
+	}
+	if !isDuplicateKeyError(fmt.Errorf("2627"), plugin.DialectMSSQL) {
+		t.Error("MSSQL 2627 not detected")
+	}
+	// Unknown dialect falls back to "duplicate" substring.
+	if !isDuplicateKeyError(fmt.Errorf("something duplicate here"), "unknown-dialect") {
+		t.Error("unknown-dialect duplicate fallback not detected")
 	}
 }

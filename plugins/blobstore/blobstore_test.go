@@ -184,7 +184,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		return c.queryBlobByKey(args)
 	case strings.Contains(query, "SELECT i.key, i.sha256, i.size, i.content_type"):
 		return c.queryListBlobs(query, args)
-	case strings.Contains(query, "SELECT tenant_id FROM tenant_api_keys"):
+	case strings.Contains(query, "tenant_api_keys") && strings.Contains(query, "tenant_id"):
 		return c.queryTenantLookup(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Query query: %s", query)
@@ -1063,5 +1063,12 @@ func TestNotFound(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for deleting missing blob, got %d", rec.Code)
+	}
+}
+
+func TestNew(t *testing.T) {
+	p := New()
+	if p == nil {
+		t.Fatal("New() returned nil")
 	}
 }
