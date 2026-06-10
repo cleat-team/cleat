@@ -308,6 +308,12 @@ func (s *InMemoryChildWorkflowStore) GetChildResult(_ context.Context, runID str
 	return "", false, nil
 }
 
+// ResolveVersionByTag implements engine.ChildWorkflowStore.
+// In-memory stores have no tags, so this always returns an error.
+func (s *InMemoryChildWorkflowStore) ResolveVersionByTag(_ context.Context, workflowName, tag string) (int, error) {
+	return 0, fmt.Errorf("ResolveVersionByTag: tag %q not found for workflow %s", tag, workflowName)
+}
+
 // InMemoryConcurrencyKeyStore implements engine.ConcurrencyKeyStore with an
 // in-memory map.
 type InMemoryConcurrencyKeyStore struct {
