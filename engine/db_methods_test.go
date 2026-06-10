@@ -3659,3 +3659,1153 @@ func TestPostgresStore_FailWorkflow_CommitError(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// AppendEventHistoryBatch (Postgres variant)
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_AppendEventHistoryBatch_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO event_history", affected: 1},
+		{match: "event_count", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	recs := []EventRecord{{
+		Step: 0, EventType: "call", Service: "svc", Op: "op",
+		Request: `{}`, Response: `{}`,
+	}}
+	err := store.AppendEventHistoryBatch(testCtx, "wf-1", recs)
+	if err != nil {
+		t.Fatalf("AppendEventHistoryBatch: %v", err)
+	}
+}
+
+func TestPostgresStore_AppendEventHistoryBatch_Empty(t *testing.T) {
+	db := newNoopDB(t)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.AppendEventHistoryBatch(testCtx, "wf-1", nil)
+	if err != nil {
+		t.Fatalf("AppendEventHistoryBatch (nil): %v", err)
+	}
+	err = store.AppendEventHistoryBatch(testCtx, "wf-1", []EventRecord{})
+	if err != nil {
+		t.Fatalf("AppendEventHistoryBatch (empty): %v", err)
+	}
+}
+
+func TestPostgresStore_AppendEventHistoryBatch_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("connection refused"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	recs := []EventRecord{{Step: 0, EventType: "call", Service: "svc"}}
+	err := store.AppendEventHistoryBatch(testCtx, "wf-1", recs)
+	if err == nil {
+		t.Fatal("expected error from begin tx failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "append history batch: begin tx") {
+		t.Errorf("expected error to contain 'append history batch: begin tx', got: %v", err)
+	}
+}
+
+func TestPostgresStore_AppendEventHistoryBatch_InsertError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO event_history", err: errors.New("insert failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	recs := []EventRecord{{Step: 0, EventType: "call", Service: "svc"}}
+	err := store.AppendEventHistoryBatch(testCtx, "wf-1", recs)
+	if err == nil {
+		t.Fatal("expected error from INSERT failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "append events in tx") {
+		t.Errorf("expected error to contain 'append events in tx', got: %v", err)
+	}
+}
+
+func TestPostgresStore_AppendEventHistoryBatch_RLSError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "set_config", err: errors.New("rls error")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	recs := []EventRecord{{Step: 0, EventType: "call", Service: "svc"}}
+	err := store.AppendEventHistoryBatch(testCtx, "wf-1", recs)
+	if err == nil {
+		t.Fatal("expected error from set_config failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "append history batch: set rls") {
+		t.Errorf("expected error to contain 'append history batch: set rls', got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AppendEventHistory (single event wrapper)
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_AppendEventHistory_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO event_history", affected: 1},
+		{match: "event_count", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	rec := EventRecord{Step: 0, EventType: "call", Service: "svc", Op: "op"}
+	err := store.AppendEventHistory(testCtx, "wf-1", rec)
+	if err != nil {
+		t.Fatalf("AppendEventHistory: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TraceWorkflow
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_TraceWorkflow_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances SET trace_id", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.TraceWorkflow(testCtx, "wf-1", "trace-1")
+	if err != nil {
+		t.Fatalf("TraceWorkflow: %v", err)
+	}
+}
+
+func TestPostgresStore_TraceWorkflow_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances SET trace_id", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.TraceWorkflow(testCtx, "wf-1", "trace-1")
+	if err == nil {
+		t.Fatal("expected error from UPDATE failure")
+	}
+}
+
+func TestPostgresStore_TraceWorkflow_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.TraceWorkflow(testCtx, "wf-1", "trace-1")
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+	if !strings.Contains(err.Error(), "trace workflow: begin") {
+		t.Errorf("expected 'trace workflow: begin' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RequestCancellation
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_RequestCancellation_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "SET cancellation_requested", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.RequestCancellation(testCtx, "wf-1", "reason")
+	if err != nil {
+		t.Fatalf("RequestCancellation: %v", err)
+	}
+}
+
+func TestPostgresStore_RequestCancellation_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "SET cancellation_requested", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.RequestCancellation(testCtx, "wf-1", "reason")
+	if err == nil {
+		t.Fatal("expected error from UPDATE failure")
+	}
+}
+
+func TestPostgresStore_RequestCancellation_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.RequestCancellation(testCtx, "wf-1", "reason")
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+	if !strings.Contains(err.Error(), "request cancellation: begin") {
+		t.Errorf("expected 'request cancellation: begin' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CreatePromise
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_CreatePromise_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_promises", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CreatePromise(testCtx, "wf-1", "my-promise", "promise-1")
+	if err != nil {
+		t.Fatalf("CreatePromise: %v", err)
+	}
+}
+
+func TestPostgresStore_CreatePromise_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_promises", err: errors.New("insert failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CreatePromise(testCtx, "wf-1", "my-promise", "promise-1")
+	if err == nil {
+		t.Fatal("expected error from INSERT failure")
+	}
+}
+
+func TestPostgresStore_CreatePromise_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CreatePromise(testCtx, "wf-1", "my-promise", "promise-1")
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+	if !strings.Contains(err.Error(), "create promise: begin") {
+		t.Errorf("expected 'create promise: begin' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ResolvePromise
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ResolvePromise_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_promises SET status", affected: 1},
+		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{"result":"ok"}`)
+	if err != nil {
+		t.Fatalf("ResolvePromise: %v", err)
+	}
+}
+
+func TestPostgresStore_ResolvePromise_PromiseUpdateError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_promises SET status", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{}`)
+	if err == nil {
+		t.Fatal("expected error from promise update failure")
+	}
+}
+
+func TestPostgresStore_ResolvePromise_WakeUpdateError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_promises SET status", affected: 1},
+		{match: "UPDATE workflow_instances SET next_wake_at", err: errors.New("wake update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{}`)
+	if err == nil {
+		t.Fatal("expected error from wake update failure")
+	}
+}
+
+func TestPostgresStore_ResolvePromise_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{}`)
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+	if !strings.Contains(err.Error(), "resolve promise: begin") {
+		t.Errorf("expected 'resolve promise: begin' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RejectPromise
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_RejectPromise_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_promises SET status", affected: 1},
+		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error msg")
+	if err != nil {
+		t.Fatalf("RejectPromise: %v", err)
+	}
+}
+
+func TestPostgresStore_RejectPromise_PromiseUpdateError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_promises SET status", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error")
+	if err == nil {
+		t.Fatal("expected error from promise update failure")
+	}
+}
+
+func TestPostgresStore_RejectPromise_WakeUpdateError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_promises SET status", affected: 1},
+		{match: "UPDATE workflow_instances SET next_wake_at", err: errors.New("wake update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error")
+	if err == nil {
+		t.Fatal("expected error from wake update failure")
+	}
+}
+
+func TestPostgresStore_RejectPromise_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error")
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+	if !strings.Contains(err.Error(), "reject promise: begin") {
+		t.Errorf("expected 'reject promise: begin' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UpdateStickyWorker
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_UpdateStickyWorker_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances SET sticky_worker_id", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.UpdateStickyWorker(testCtx, "wf-1", "worker-1")
+	if err != nil {
+		t.Fatalf("UpdateStickyWorker: %v", err)
+	}
+}
+
+func TestPostgresStore_UpdateStickyWorker_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances SET sticky_worker_id", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.UpdateStickyWorker(testCtx, "wf-1", "worker-1")
+	if err == nil {
+		t.Fatal("expected error from UPDATE failure")
+	}
+	if !strings.Contains(err.Error(), "update sticky worker") {
+		t.Errorf("expected error to contain 'update sticky worker', got: %v", err)
+	}
+}
+
+func TestPostgresStore_UpdateStickyWorker_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.UpdateStickyWorker(testCtx, "wf-1", "worker-1")
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+	if !strings.Contains(err.Error(), "update sticky worker: begin") {
+		t.Errorf("expected 'update sticky worker: begin' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CreateUpdateRequest
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_CreateUpdateRequest_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_update_requests", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CreateUpdateRequest(testCtx, "wf-1", "update-1", `{"key":"val"}`, "promise-1")
+	if err != nil {
+		t.Fatalf("CreateUpdateRequest: %v", err)
+	}
+}
+
+func TestPostgresStore_CreateUpdateRequest_NonJSONPayload(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_update_requests", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CreateUpdateRequest(testCtx, "wf-1", "update-1", "raw-string", "promise-1")
+	if err != nil {
+		t.Fatalf("CreateUpdateRequest: %v", err)
+	}
+}
+
+func TestPostgresStore_CreateUpdateRequest_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_update_requests", err: errors.New("insert failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CreateUpdateRequest(testCtx, "wf-1", "update-1", `{}`, "promise-1")
+	if err == nil {
+		t.Fatal("expected error from INSERT failure")
+	}
+}
+
+func TestPostgresStore_CreateUpdateRequest_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CreateUpdateRequest(testCtx, "wf-1", "update-1", `{}`, "promise-1")
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+	if !strings.Contains(err.Error(), "create update request: begin") {
+		t.Errorf("expected 'create update request: begin' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CompleteUpdateRequest
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_CompleteUpdateRequest_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_update_requests", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompleteUpdateRequest(testCtx, "wf-1", "update-1", `{"result":"ok"}`, "")
+	if err != nil {
+		t.Fatalf("CompleteUpdateRequest: %v", err)
+	}
+}
+
+func TestPostgresStore_CompleteUpdateRequest_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_update_requests", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompleteUpdateRequest(testCtx, "wf-1", "update-1", `{}`, "")
+	if err == nil {
+		t.Fatal("expected error from UPDATE failure")
+	}
+}
+
+func TestPostgresStore_CompleteUpdateRequest_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.CompleteUpdateRequest(testCtx, "wf-1", "update-1", `{}`, "")
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+	if !strings.Contains(err.Error(), "complete update request: begin") {
+		t.Errorf("expected 'complete update request: begin' error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// OpenStore / Close
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_OpenStore_PublicSchema(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, nil)
+	defer db.Close()
+
+	factory := NewPostgresStoreFactory(db, "public")
+	store, closer, err := factory.OpenStore(testCtx, "tenant-1")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if store == nil {
+		t.Fatal("expected non-nil store")
+	}
+	pgStore := store.(*PostgresStore)
+	if pgStore.tenantID != "tenant-1" {
+		t.Errorf("expected tenant-1, got %q", pgStore.tenantID)
+	}
+	if err := closer.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestPostgresStore_OpenStore_CustomSchema(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "CREATE SCHEMA", affected: 0},
+	})
+	defer db.Close()
+
+	factory := NewPostgresStoreFactory(db, "my_schema")
+	store, closer, err := factory.OpenStore(testCtx, "tenant-1")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if store == nil {
+		t.Fatal("expected non-nil store")
+	}
+	if err := closer.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestPostgresStore_OpenStore_SchemaError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "CREATE SCHEMA", err: errors.New("permission denied")},
+	})
+	defer db.Close()
+
+	factory := NewPostgresStoreFactory(db, "my_schema")
+	_, _, err := factory.OpenStore(testCtx, "tenant-1")
+	if err == nil {
+		t.Fatal("expected error from schema creation failure")
+	}
+	if !strings.Contains(err.Error(), "create schema") {
+		t.Errorf("expected 'create schema' error, got: %v", err)
+	}
+}
+
+func TestPostgresStore_OpenStore_DefaultSchema(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, nil)
+	defer db.Close()
+
+	factory := NewPostgresStoreFactory(db, "")
+	store, closer, err := factory.OpenStore(testCtx, "tenant-1")
+	if err != nil {
+		t.Fatalf("OpenStore: %v", err)
+	}
+	if store == nil {
+		t.Fatal("expected non-nil store")
+	}
+	if err := closer.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+func TestPostgresStore_Close(t *testing.T) {
+	var c nopCloser
+	if err := c.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// computeEventChecksum tests
+// ---------------------------------------------------------------------------
+
+func TestComputeEventChecksum_NoPrevious(t *testing.T) {
+	rec := EventRecord{Step: 0, EventType: EventTypeCall, Service: "s", Op: "o"}
+	checksum := computeEventChecksum(rec, "")
+	if checksum == "" {
+		t.Error("expected non-empty checksum")
+	}
+	if len(checksum) != 64 {
+		t.Errorf("expected 64 hex chars, got %d", len(checksum))
+	}
+}
+
+func TestComputeEventChecksum_WithPrevious(t *testing.T) {
+	rec := EventRecord{Step: 1, EventType: EventTypeSleep, DurationMs: 5000}
+	checksum := computeEventChecksum(rec, "abc123")
+	if checksum == "" {
+		t.Error("expected non-empty checksum")
+	}
+}
+
+func TestComputeEventChecksum_Deterministic(t *testing.T) {
+	rec := EventRecord{Step: 0, EventType: EventTypePluginCall, PluginName: "p", PluginFunc: "f"}
+	c1 := computeEventChecksum(rec, "")
+	c2 := computeEventChecksum(rec, "")
+	if c1 != c2 {
+		t.Error("checksum should be deterministic for same input")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// eventRecordToPayload tests
+// ---------------------------------------------------------------------------
+
+func TestEventRecordToPayload_Call(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "call",
+		Service: "s", Op: "o", Request: `{"key":"val"}`,
+		Response: `{"result":"ok"}`, DurationMs: 100,
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["service"] != "s" || m["operation"] != "o" {
+		t.Errorf("unexpected payload: %v", m)
+	}
+	if m["duration_ms"] != float64(100) {
+		t.Errorf("expected duration_ms 100, got %v", m["duration_ms"])
+	}
+}
+
+func TestEventRecordToPayload_PluginCall(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "plugin_call",
+		PluginName: "p", PluginFunc: "f",
+		PluginInput: `{"in":"put"}`, PluginOutput: `{"out":"put"}`,
+		PluginError: "some error",
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["plugin_name"] != "p" || m["plugin_error"] != "some error" {
+		t.Errorf("unexpected payload: %v", m)
+	}
+}
+
+func TestEventRecordToPayload_EmptyEvent(t *testing.T) {
+	rec := EventRecord{Step: 0, EventType: "unknown_type"}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	if string(data) != "{}" {
+		t.Errorf("expected empty object, got %s", data)
+	}
+}
+
+func TestEventRecordToPayload_Sleep(t *testing.T) {
+	rec := EventRecord{Step: 0, EventType: "sleep", DurationMs: 3000}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["duration_ms"] != float64(3000) {
+		t.Errorf("expected duration_ms 3000, got %v", m["duration_ms"])
+	}
+}
+
+func TestEventRecordToPayload_Fetch(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "fetch",
+		FetchMethod: "GET", FetchURL: "http://example.com",
+		FetchHeaders: `{"Accept":"text/plain"}`,
+		FetchBody: `{"q":"search"}`, FetchResponse: `{"status":"ok"}`,
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["fetch_method"] != "GET" || m["fetch_url"] != "http://example.com" {
+		t.Errorf("unexpected payload: %v", m)
+	}
+}
+
+func TestEventRecordToPayload_AcquireLock(t *testing.T) {
+	rec := EventRecord{
+		Step: 0, EventType: "acquire_lock",
+		LockKey: "my-lock", LockTTLMs: 60000, LockAcquired: 1,
+	}
+	data, err := eventRecordToPayload(rec)
+	if err != nil {
+		t.Fatalf("eventRecordToPayload: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["lock_key"] != "my-lock" || m["lock_acquired"] != float64(1) {
+		t.Errorf("unexpected payload: %v", m)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// populateFromPayload tests
+// ---------------------------------------------------------------------------
+
+func TestPopulateFromPayload_InvalidJSON(t *testing.T) {
+	rec := &EventRecord{Step: 0, EventType: "call"}
+	populateFromPayload(rec, []byte("{invalid json"))
+	if rec.Service != "" {
+		t.Errorf("expected no change, got Service=%q", rec.Service)
+	}
+}
+
+func TestPopulateFromPayload_CallFields(t *testing.T) {
+	payload := `{"service":"my-svc","operation":"my-op","request_b64":"` +
+		base64.StdEncoding.EncodeToString([]byte(`{"key":"val"}`)) +
+		`","response_b64":"` +
+		base64.StdEncoding.EncodeToString([]byte(`{"result":"ok"}`)) +
+		`","error":"","duration_ms":200}`
+	rec := &EventRecord{Step: 0, EventType: "call"}
+	populateFromPayload(rec, []byte(payload))
+	if rec.Service != "my-svc" || rec.Op != "my-op" {
+		t.Errorf("unexpected: Service=%q Op=%q", rec.Service, rec.Op)
+	}
+	if rec.Request != `{"key":"val"}` {
+		t.Errorf("unexpected Request=%q", rec.Request)
+	}
+	if rec.Response != `{"result":"ok"}` {
+		t.Errorf("unexpected Response=%q", rec.Response)
+	}
+	if rec.DurationMs != 200 {
+		t.Errorf("unexpected DurationMs=%d", rec.DurationMs)
+	}
+}
+
+func TestPopulateFromPayload_FallbackToRawFields(t *testing.T) {
+	payload := `{"service":"s","operation":"o","request":"raw-req","response":"raw-resp"}`
+	rec := &EventRecord{Step: 0, EventType: "call"}
+	populateFromPayload(rec, []byte(payload))
+	if rec.Request != "raw-req" || rec.Response != "raw-resp" {
+		t.Errorf("unexpected: Request=%q Response=%q", rec.Request, rec.Response)
+	}
+}
+
+func TestPopulateFromPayload_Sleep(t *testing.T) {
+	payload := `{"duration_ms":3000}`
+	rec := &EventRecord{Step: 0, EventType: "sleep"}
+	populateFromPayload(rec, []byte(payload))
+	if rec.DurationMs != 3000 {
+		t.Errorf("expected DurationMs 3000, got %d", rec.DurationMs)
+	}
+}
+
+func TestPopulateFromPayload_AwaitSignals(t *testing.T) {
+	payload := `{"signal_names":"[\"sig1\"]","timeout_ms":5000}`
+	rec := &EventRecord{Step: 0, EventType: "await_signals"}
+	populateFromPayload(rec, []byte(payload))
+	if rec.SignalNames != `["sig1"]` {
+		t.Errorf("expected SignalNames %q, got %q", `["sig1"]`, rec.SignalNames)
+	}
+	if rec.TimeoutMs != 5000 {
+		t.Errorf("expected TimeoutMs 5000, got %d", rec.TimeoutMs)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DeliverSignal tests — error paths
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_DeliverSignal_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.DeliverSignal(testCtx, "wf-1", "sig", `{}`)
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+	if !strings.Contains(err.Error(), "deliver signal: begin") {
+		t.Errorf("expected 'deliver signal: begin' error, got: %v", err)
+	}
+}
+
+func TestPostgresStore_DeliverSignal_InsertError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_signals", err: errors.New("insert failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.DeliverSignal(testCtx, "wf-1", "sig", `{}`)
+	if err == nil {
+		t.Fatal("expected error from insert failure")
+	}
+}
+
+func TestPostgresStore_DeliverSignal_UpdateError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_signals", affected: 1},
+		{match: "UPDATE workflow_instances", err: errors.New("update failed")},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.DeliverSignal(testCtx, "wf-1", "sig", `{}`)
+	if err == nil {
+		t.Fatal("expected error from update failure")
+	}
+}
+
+func TestPostgresStore_DeliverSignal_InvalidPayload(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_signals", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.DeliverSignal(testCtx, "wf-1", "sig", "plain text")
+	if err != nil {
+		t.Fatalf("DeliverSignal: %v", err)
+	}
+}
+
+func TestPostgresStore_DeliverSignal_CommitError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, []mockExecResult{
+		{match: "INSERT INTO workflow_signals", affected: 1},
+		{match: "UPDATE workflow_instances", affected: 1},
+	}, nil, errors.New("commit failed"))
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	err := store.DeliverSignal(testCtx, "wf-1", "sig", `{}`)
+	if err == nil {
+		t.Fatal("expected error from commit failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// decryptPayloadJSON tests
+// ---------------------------------------------------------------------------
+
+func TestDecryptPayloadJSON_NoEncryption(t *testing.T) {
+	store := NewPostgresStore(nil)
+	result := store.decryptPayloadJSON(`{"plain":"text"}`)
+	if result != `{"plain":"text"}` {
+		t.Errorf("expected original payload, got %q", result)
+	}
+}
+
+func TestDecryptPayloadJSON_EmptyPayload(t *testing.T) {
+	enc := newTestPayloadEncryption(t)
+	store := NewPostgresStore(nil).WithEncryption(enc, true)
+	result := store.decryptPayloadJSON("")
+	if result != "" {
+		t.Errorf("expected empty string, got %q", result)
+	}
+}
+
+func TestDecryptPayloadJSON_DecryptionFailure(t *testing.T) {
+	enc := newTestPayloadEncryption(t)
+	store := NewPostgresStore(nil).WithEncryption(enc, true)
+	result := store.decryptPayloadJSON(`"corrupted-base64-data"`)
+	if result != `"corrupted-base64-data"` {
+		t.Errorf("expected original payload on decryption failure, got %q", result)
+	}
+}
+
+func TestDecryptPayloadJSON_Success(t *testing.T) {
+	enc := newTestPayloadEncryption(t)
+	store := NewPostgresStore(nil).WithEncryption(enc, true)
+	encrypted, err := enc.EncryptJSON([]byte(`{"secret":"data"}`))
+	if err != nil {
+		t.Fatalf("EncryptJSON: %v", err)
+	}
+	result := store.decryptPayloadJSON(string(encrypted))
+	if result != `{"secret":"data"}` {
+		t.Errorf("expected decrypted payload, got %q", result)
+	}
+}
+
+func newTestPayloadEncryption(t *testing.T) *PayloadEncryption {
+	t.Helper()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	enc, err := NewPayloadEncryption(base64.StdEncoding.EncodeToString(key))
+	if err != nil {
+		t.Fatalf("NewPayloadEncryption: %v", err)
+	}
+	return enc
+}
+
+// ---------------------------------------------------------------------------
+// decryptAndRedactEventRecord tests
+// ---------------------------------------------------------------------------
+
+func TestDecryptAndRedactEventRecord_NoEncryption(t *testing.T) {
+	store := NewPostgresStore(nil)
+	rec := &EventRecord{Step: 0, Request: "hello", Response: "world"}
+	store.decryptAndRedactEventRecord(rec, "wf-1")
+	if rec.Request == "" {
+		t.Error("expected Request to be preserved (redacted or not)")
+	}
+}
+
+func TestDecryptAndRedactEventRecord_InvalidEncryptedData(t *testing.T) {
+	enc := newTestPayloadEncryption(t)
+	store := NewPostgresStore(nil).WithEncryption(enc, true)
+	rec := &EventRecord{
+		Step: 0, Request: "tampered-data", Response: "bad-data",
+		Err: "invalid-ciphertext",
+	}
+	store.decryptAndRedactEventRecord(rec, "wf-1")
+	if rec.Request != "[DECRYPTION_FAILED]" {
+		t.Errorf("expected [DECRYPTION_FAILED] for Request, got %q", rec.Request)
+	}
+	if rec.Response != "[DECRYPTION_FAILED]" {
+		t.Errorf("expected [DECRYPTION_FAILED] for Response, got %q", rec.Response)
+	}
+	if rec.Err != "[DECRYPTION_FAILED]" {
+		t.Errorf("expected [DECRYPTION_FAILED] for Err, got %q", rec.Err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ListWorkflows tests
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ListWorkflows_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ListWorkflows(testCtx, WorkflowFilter{})
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+}
+
+func TestPostgresStore_ListWorkflows_EmptyResult(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM workflow_instances", data: nil},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	wfs, err := store.ListWorkflows(testCtx, WorkflowFilter{})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	if len(wfs) != 0 {
+		t.Errorf("expected 0 workflows, got %d", len(wfs))
+	}
+}
+
+func TestPostgresStore_ListWorkflows_StatusFilter(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "status =", data: [][]driver.Value{
+			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "worker-1", nil, "", "", nil, nil, int64(0), int64(0), ""},
+		}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	wfs, err := store.ListWorkflows(testCtx, WorkflowFilter{Status: "running"})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	if len(wfs) != 1 {
+		t.Errorf("expected 1 workflow, got %d", len(wfs))
+	}
+	if wfs[0].ID != "wf-1" {
+		t.Errorf("expected ID 'wf-1', got %q", wfs[0].ID)
+	}
+}
+
+func TestPostgresStore_ListWorkflows_SearchFilter(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "OR", data: [][]driver.Value{
+			{"wf-2", "my-wf", int64(1), "done", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), ""},
+		}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	wfs, err := store.ListWorkflows(testCtx, WorkflowFilter{Search: "search-term"})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	if len(wfs) != 1 {
+		t.Errorf("expected 1 workflow, got %d", len(wfs))
+	}
+}
+
+func TestPostgresStore_ListWorkflows_InputContainsFilter(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "ILIKE", data: [][]driver.Value{
+			{"wf-3", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), ""},
+		}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	wfs, err := store.ListWorkflows(testCtx, WorkflowFilter{InputContains: "search-term"})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+	if len(wfs) != 1 {
+		t.Errorf("expected 1 workflow, got %d", len(wfs))
+	}
+}
+
+func TestPostgresStore_ListWorkflows_LimitClamping(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "ORDER BY", data: nil},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ListWorkflows(testCtx, WorkflowFilter{Limit: 5000})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+}
+
+func TestPostgresStore_ListWorkflows_DefaultLimit(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "ORDER BY", data: nil},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ListWorkflows(testCtx, WorkflowFilter{Limit: 0})
+	if err != nil {
+		t.Fatalf("ListWorkflows: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ClaimWorkflows error paths
+// ---------------------------------------------------------------------------
+
+func TestPostgresStore_ClaimWorkflows_BeginError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	_, err := store.ClaimWorkflows(testCtx, "worker-1", 1)
+	if err == nil {
+		t.Fatal("expected error from begin failure")
+	}
+}
+
+func TestPostgresStore_ClaimWorkflows_NoRows(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "UPDATE workflow_instances", data: nil},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	wfs, err := store.ClaimWorkflows(testCtx, "worker-1", 1)
+	if err != nil {
+		t.Fatalf("ClaimWorkflows: %v", err)
+	}
+	if len(wfs) != 0 {
+		t.Errorf("expected 0 workflows, got %d", len(wfs))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// claimWorkflowImpl tests
+// ---------------------------------------------------------------------------
+
+func TestClaimWorkflowImpl_ReturnsNil(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "UPDATE workflow_instances", data: nil},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	wf, err := store.claimWorkflowImpl(testCtx, "worker-1")
+	if err != nil {
+		t.Fatalf("claimWorkflowImpl: %v", err)
+	}
+	if wf != nil {
+		t.Errorf("expected nil workflow, got %+v", wf)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Encryption edge cases
+// ---------------------------------------------------------------------------
+
+func TestDecryptAndRedactEventRecord_WithRedactionDisabled(t *testing.T) {
+	store := NewPostgresStore(nil).WithReadRedactionDisabled(true)
+	rec := &EventRecord{Step: 0, Request: "sensitive-data"}
+	store.decryptAndRedactEventRecord(rec, "wf-1")
+	if rec.Request != "sensitive-data" {
+		t.Errorf("expected original data when redaction disabled, got %q", rec.Request)
+	}
+}
+
+func TestNewPayloadEncryption_BadKey(t *testing.T) {
+	_, err := NewPayloadEncryption("not-valid-base64!!!")
+	if err == nil {
+		t.Error("expected error for invalid base64 key")
+	}
+}
+
+func TestNewPayloadEncryption_WrongKeyLength(t *testing.T) {
+	shortKey := base64.StdEncoding.EncodeToString([]byte("short"))
+	_, err := NewPayloadEncryption(shortKey)
+	if err == nil {
+		t.Error("expected error for wrong key length")
+	}
+	if err != nil && !strings.Contains(err.Error(), "key must be exactly 32 bytes") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+

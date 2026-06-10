@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -381,5 +382,176 @@ func TestCompleteCallEvent_BeginError(t *testing.T) {
 	err := engine.completeCallEvent(context.Background(), "wf-123", rec, "")
 	if err == nil {
 		t.Fatal("expected error from completeCallEvent when begin fails, got nil")
+	}
+}
+
+func TestFlushEvent_BeginTxError(t *testing.T) {
+	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
+	defer db.Close()
+
+	engine := NewEngine(nil, nil, WithDB(db))
+	rec := EventRecord{
+		Step:      0,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+	}
+
+	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	if err == nil {
+		t.Fatal("expected error from flushEvent when begin fails, got nil")
+	}
+}
+
+func TestFlushEvent_EncryptionError(t *testing.T) {
+	// Use a short key that will fail to initialize encryption.
+	// This means flushEvent will not encrypt (encryption == nil), so
+	// we test the encryptSensitivePayloads=true path with a nil encryption.
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO event_history", affected: 1},
+	})
+	defer db.Close()
+
+	engine := NewEngine(nil, nil,
+		WithDB(db),
+	)
+	// Set encryption flag without an actual encryption instance.
+	// With encryptSensitivePayloads=true and encryption=nil, the encryption
+	// block in flushEvent is skipped (nil check first), so it succeeds.
+	engine.encryptSensitivePayloads = true
+	engine.encryption = nil
+
+	rec := EventRecord{
+		Step:      0,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+		Request:   `{"key":"val"}`,
+		Response:  `{"result":"ok"}`,
+	}
+
+	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	if err != nil {
+		t.Fatalf("flushEvent with encryptSensitivePayloads=true and nil encryption: %v", err)
+	}
+}
+
+func TestFlushEvent_QuotaExceeded(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "event_count", data: [][]driverValue{{int64(100)}}},
+	}, nil)
+	defer db.Close()
+
+	engine := NewEngine(nil, nil,
+		WithDB(db),
+		WithMaxQuotaEvents(50),
+		WithWorkflowStore(&stubWorkflowStore{}),
+	)
+
+	rec := EventRecord{
+		Step:      0,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+	}
+
+	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	if err == nil {
+		t.Fatal("expected error from flushEvent when quota exceeded, got nil")
+	}
+	if !strings.Contains(err.Error(), "event quota exceeded") {
+		t.Errorf("expected 'event quota exceeded' error, got: %v", err)
+	}
+}
+
+func TestFlushEvent_QuotaCheckError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "event_count", err: errors.New("quota query failed")},
+	}, nil)
+	defer db.Close()
+
+	engine := NewEngine(nil, nil,
+		WithDB(db),
+		WithMaxQuotaEvents(100),
+		WithWorkflowStore(&stubWorkflowStore{}),
+	)
+
+	rec := EventRecord{
+		Step:      0,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+	}
+
+	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	if err == nil {
+		t.Fatal("expected error from flushEvent when quota check fails, got nil")
+	}
+}
+
+func TestCompleteCallEvent_SuccessWithChecksum(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "COALESCE", data: [][]driverValue{{"prev-checksum"}}},
+	}, []mockExecResult{
+		{match: "UPDATE event_history", affected: 1},
+	})
+	defer db.Close()
+
+	engine := NewEngine(nil, nil, WithDB(db))
+	rec := EventRecord{
+		Step:      5,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+		Request:   `{"key":"val"}`,
+		Response:  `{"result":"ok"}`,
+	}
+
+	err := engine.completeCallEvent(context.Background(), "wf-123", rec, "")
+	if err != nil {
+		t.Fatalf("completeCallEvent: %v", err)
+	}
+}
+
+func TestCompleteCallEvent_ExecError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE event_history", err: errors.New("exec failed")},
+	})
+	defer db.Close()
+
+	engine := NewEngine(nil, nil, WithDB(db))
+	rec := EventRecord{
+		Step:      0,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+	}
+
+	err := engine.completeCallEvent(context.Background(), "wf-123", rec, "")
+	if err == nil {
+		t.Fatal("expected error when exec fails, got nil")
+	}
+}
+
+func TestCompleteCallEvent_RowsAffectedError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE event_history", affected: 0},
+	})
+	defer db.Close()
+
+	engine := NewEngine(nil, nil, WithDB(db))
+	rec := EventRecord{
+		Step:      0,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+	}
+
+	err := engine.completeCallEvent(context.Background(), "wf-123", rec, "")
+	if err == nil {
+		t.Fatal("expected error when no rows updated, got nil")
+	}
+	if !strings.Contains(err.Error(), "no rows updated") {
+		t.Errorf("expected 'no rows updated' error, got: %v", err)
 	}
 }

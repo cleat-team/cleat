@@ -1030,3 +1030,31 @@ func TestWithDB_NonNil(t *testing.T) {
 		t.Error("WithDB should set db")
 	}
 }
+
+func TestWithChildBindingPolicy(t *testing.T) {
+	e := NewEngine(nil, nil, WithChildBindingPolicy("frozen"))
+	if e.childBindingPolicy != "frozen" {
+		t.Errorf("got %q, want %q", e.childBindingPolicy, "frozen")
+	}
+}
+
+func TestWithChildBindingPolicy_Empty(t *testing.T) {
+	e := NewEngine(nil, nil, WithChildBindingPolicy(""))
+	if e.childBindingPolicy != "" {
+		t.Errorf("got %q, want empty", e.childBindingPolicy)
+	}
+}
+
+func TestWithChildBindingOverride(t *testing.T) {
+	e := NewEngine(nil, nil, WithChildBindingOverride("latest"))
+	if e.childBindingOverride != "latest" {
+		t.Errorf("got %q, want %q", e.childBindingOverride, "latest")
+	}
+}
+
+func TestWithChildBindingOverride_Empty(t *testing.T) {
+	e := NewEngine(nil, nil, WithChildBindingOverride(""))
+	if e.childBindingOverride != "" {
+		t.Errorf("got %q, want empty", e.childBindingOverride)
+	}
+}
