@@ -152,7 +152,7 @@ Options:
 
     let resolved_child_binding_policy = child_binding_policy
         .or_else(|| env::var("CLEAT_CHILD_BINDING_POLICY").ok())
-        .unwrap_or_else(|| "".to_string());
+        .unwrap_or_default();
 
     let meta = serde_json::json!({
         "workflow_name": resolved_name,
