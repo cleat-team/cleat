@@ -182,10 +182,11 @@ Options:
   --version <n>         Workflow version (or CLEAT_WORKFLOW_VERSION env var)
   --min-version <n>     Min compatible version (or CLEAT_MIN_COMPATIBLE_VERSION env var)
   --abi-version <n>     ABI version (or CLEAT_ABI_VERSION env var)
-  --plugin-deps <json>  Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)
-  --output, -o <file>   Output WASM path (default: overwrite input)
-  --read                Read and display metadata instead of writing
-  --verbose, -v         Verbose output
+  --plugin-deps <json>          Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)
+  --child-binding-policy <str>  Child binding policy (or CLEAT_CHILD_BINDING_POLICY env var)
+  --output, -o <file>           Output WASM path (default: overwrite input)
+  --read                        Read and display metadata instead of writing
+  --verbose, -v                 Verbose output
 `);
     process.exit(0);
   }
@@ -209,6 +210,8 @@ Options:
       options.abiVersion = parseInt(args[++i], 10);
     } else if (arg === "--plugin-deps") {
       options.pluginDeps = args[++i];
+    } else if (arg === "--child-binding-policy") {
+      options.childBindingPolicy = args[++i];
     } else if (!arg.startsWith("--")) {
       wasmFile = arg;
     }
@@ -267,12 +270,18 @@ Options:
     pluginDeps = {};
   }
 
+  const childBindingPolicy =
+    options.childBindingPolicy ||
+    process.env.CLEAT_CHILD_BINDING_POLICY ||
+    "";
+
   const meta = {
     workflow_name: name,
     workflow_version: version,
     min_compatible_version: minVersion,
     abi_version: abiVersion,
     plugin_deps: pluginDeps,
+    child_binding_policy: childBindingPolicy,
     sdk_language: "assemblyscript",
     language: "assemblyscript",
     sdk_version: "0.1.0",
@@ -290,6 +299,9 @@ Options:
     console.log(`  workflow_version:        ${meta.workflow_version}`);
     console.log(`  min_compatible_version:  ${meta.min_compatible_version}`);
     console.log(`  abi_version:             ${meta.abi_version}`);
+    if (meta.child_binding_policy) {
+      console.log(`  child_binding_policy:    ${meta.child_binding_policy}`);
+    }
     if (Object.keys(meta.plugin_deps).length > 0) {
       console.log(`  plugin_deps:             ${JSON.stringify(meta.plugin_deps)}`);
     }

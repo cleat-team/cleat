@@ -772,6 +772,78 @@ func (m *mockShardStore) GetAllowedSignalCallers(ctx context.Context, workflowID
 	return nil, nil
 }
 
+func (m *mockShardStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	m.recordCall("SetWorkflowTag")
+	if m.err != nil {
+		return m.err
+	}
+	return nil
+}
+
+func (m *mockShardStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	m.recordCall("RemoveWorkflowTag")
+	if m.err != nil {
+		return m.err
+	}
+	return nil
+}
+
+func (m *mockShardStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	m.recordCall("GetWorkflowTag")
+	if m.err != nil {
+		return 0, m.err
+	}
+	return 0, nil
+}
+
+func (m *mockShardStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	m.recordCall("GetWorkflowTags")
+	if m.err != nil {
+		return nil, m.err
+	}
+	return nil, nil
+}
+
+func (m *mockShardStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	m.recordCall("SetRoutingRule")
+	if m.err != nil {
+		return m.err
+	}
+	return nil
+}
+
+func (m *mockShardStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	m.recordCall("RemoveRoutingRule")
+	if m.err != nil {
+		return m.err
+	}
+	return nil
+}
+
+func (m *mockShardStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
+	m.recordCall("GetRoutingRules")
+	if m.err != nil {
+		return nil, m.err
+	}
+	return nil, nil
+}
+
+func (m *mockShardStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	m.recordCall("PickVersionByRouting")
+	if m.err != nil {
+		return 0, m.err
+	}
+	return 0, nil
+}
+
+func (m *mockShardStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	m.recordCall("ResolveVersionByTag")
+	if m.err != nil {
+		return 0, m.err
+	}
+	return 0, nil
+}
+
 // metricsStore implementation
 func (m *mockShardStore) CountStalledWorkflows(ctx context.Context, threshold time.Duration) (int, error) {
 	m.recordCall("CountStalledWorkflows")

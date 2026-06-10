@@ -22,10 +22,15 @@ fn main() {
         .unwrap_or_else(|_| "{}".to_string());
     println!("cargo:rustc-env=CLEAT_PLUGIN_DEPS={}", plugin_deps);
 
+    let child_binding_policy = std::env::var("CLEAT_CHILD_BINDING_POLICY")
+        .unwrap_or_else(|_| "".to_string());
+    println!("cargo:rustc-env=CLEAT_CHILD_BINDING_POLICY={}", child_binding_policy);
+
     // Re-run build.rs if any of these env vars change
     println!("cargo:rerun-if-env-changed=CLEAT_WORKFLOW_NAME");
     println!("cargo:rerun-if-env-changed=CLEAT_WORKFLOW_VERSION");
     println!("cargo:rerun-if-env-changed=CLEAT_MIN_COMPATIBLE_VERSION");
     println!("cargo:rerun-if-env-changed=CLEAT_ABI_VERSION");
     println!("cargo:rerun-if-env-changed=CLEAT_PLUGIN_DEPS");
+    println!("cargo:rerun-if-env-changed=CLEAT_CHILD_BINDING_POLICY");
 }

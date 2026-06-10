@@ -67,6 +67,9 @@ type Engine struct {
 	traceID              string // W3C Trace Context trace-id
 	stepCallback         ReplayStepCallback
 	logger               *slog.Logger
+
+	childBindingPolicy   string // from WASM metadata; defines how child versions are resolved
+	childBindingOverride string // from env/flag; overrides policy for debugging (e.g. "latest")
 }
 
 // WithSignalStore sets the signal store.
@@ -236,6 +239,24 @@ func WithReplayStepCallback(cb ReplayStepCallback) EngineOption {
 
 // WithLogger sets the structured logger (default: slog.Default()).
 func WithLogger(l *slog.Logger) EngineOption { return func(e *Engine) { e.logger = l } }
+
+// WithChildBindingPolicy sets the child binding policy from WASM metadata.
+// The policy determines how child workflow versions are resolved at runtime:
+//   - "frozen"       — use pinned ChildVersions from the metadata
+//   - "stable"       — resolve to the version tagged "stable" at child creation time
+//   - "latest"       — always resolve to MAX(version)
+//   - "" (empty)     — will be inferred by EffectivePolicy: "frozen" if ChildVersions present, else "latest"
+func WithChildBindingPolicy(policy string) EngineOption {
+	return func(e *Engine) { e.childBindingPolicy = policy }
+}
+
+// WithChildBindingOverride overrides the child binding policy for debugging.
+// For example, "latest" forces resolution to the latest version regardless
+// of the compiled-in policy. This is a worker-level, cross-tenant setting
+// intended for development environments only.
+func WithChildBindingOverride(override string) EngineOption {
+	return func(e *Engine) { e.childBindingOverride = override }
+}
 
 // log returns the engine's logger, falling back to slog.Default().
 func (e *Engine) log() *slog.Logger {

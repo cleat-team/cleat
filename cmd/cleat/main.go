@@ -38,9 +38,11 @@ import (
 var dbConnStr string
 var dbCredProviderName = "env"
 var dbCredPath string
+var buildTenantID string
 
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
+	flag.StringVar(&buildTenantID, "tenant", "", "tenant UUID for build-time resolution (default: zero UUID for single-tenant)")
 	flag.StringVar(&dbCredProviderName, "db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
 	flag.StringVar(&dbCredPath, "db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 	flag.Usage = func() {
@@ -90,11 +92,13 @@ func main() {
 		var diffOut bool
 		var sizeReport bool
 		var runtime string
+		var buildChannel string
 		fs.StringVar(&outDir, "o", "", "output directory for generated files")
 
 		fs.StringVar(&target, "target", "go", "compilation target: go (standard Go, default), tinygo (deprecated), rust, java, assemblyscript, python")
 		fs.StringVar(&entry, "entry", "", "entry point in 'file.py:func_name' format (for Python target)")
 		fs.StringVar(&runtime, "runtime", "", "WASM runtime: wasmtime, wazero (default: produce both)")
+		fs.StringVar(&buildChannel, "channel", "", "child version resolution channel: stable, latest, canary, or custom tag name")
 		fs.BoolVar(&jsonOut, "json", false, "output diagnostics as JSON")
 		fs.BoolVar(&diffOut, "diff", false, "output unified diff of each file before and after transformation")
 		fs.BoolVar(&sizeReport, "size-report", false, "output WASM binary size breakdown by package")
@@ -103,15 +107,24 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error: unknown target %q. Valid targets: go, tinygo, rust, java, assemblyscript, python\n", target)
 			os.Exit(1)
 		}
+		// Default channel: when --db is provided, default to "stable".
+		// When no --db, default to "latest" (current behavior, backwards compatible).
+		if buildChannel == "" {
+			if dbConnStr != "" || os.Getenv("CLEAT_DATABASE_URL") != "" {
+				buildChannel = "stable"
+			} else {
+				buildChannel = "latest"
+			}
+		}
 		remainder := fs.Args()
 		if len(remainder) > 0 {
 			pattern = remainder[0]
 		}
 		if entry != "" {
 			// Use --entry as the pattern for Python builds.
-			runBuild(entry, outDir, target, runtime, jsonOut, diffOut, sizeReport)
+			runBuild(entry, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport)
 		} else {
-			runBuild(pattern, outDir, target, runtime, jsonOut, diffOut, sizeReport)
+			runBuild(pattern, outDir, target, runtime, buildChannel, jsonOut, diffOut, sizeReport)
 		}
 	case "vet":
 		fs := flag.NewFlagSet("vet", flag.ExitOnError)
@@ -186,33 +199,33 @@ func main() {
 	}
 }
 
-func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut bool, sizeReport bool) {
+func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, diffOut bool, sizeReport bool) {
 	if target == "java" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildJava(pattern, outDir)
+		runBuildJava(pattern, outDir, channel)
 		return
 	}
 	if target == "assemblyscript" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildAssemblyScript(pattern, outDir)
+		runBuildAssemblyScript(pattern, outDir, channel)
 		return
 	}
 	if target == "rust" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildRust(pattern, outDir)
+		runBuildRust(pattern, outDir, channel)
 		return
 	}
 	if target == wasm.PythonTarget {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildPython(pattern, outDir, runtime)
+		runBuildPython(pattern, outDir, runtime, channel)
 		return
 	}
 	result, cg, cr, threadingErrs, usage, tr := analyze(pattern, target)
@@ -442,7 +455,7 @@ func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut boo
 	// Resolve child workflow versions from lock file or database.
 	var childVersions map[string]int
 	if len(usage.Children) > 0 {
-		childVersions = resolveBuildChildVersions(usage.Children, jsonOut)
+		childVersions = resolveBuildChildVersions(usage.Children, channel, jsonOut)
 	}
 
 	workflowName := wasmOutputName(result)
@@ -454,6 +467,7 @@ func runBuild(pattern, outDir, target, runtime string, jsonOut bool, diffOut boo
 		Language:             "go",
 		PluginDeps:           derivePluginDeps(usage),
 		ChildVersions:        childVersions,
+		ChildBindingPolicy:   channel,
 	}
 	wasmWithMeta, err := wasm.WriteMetadata(wasmBytes, meta)
 	if err != nil {
@@ -1464,12 +1478,25 @@ func formatSize(n int64) string {
 }
 
 // resolveBuildChildVersions resolves child workflow versions for a build.
-// Priority: 1) --db flag / CLEAT_DATABASE_URL (queries DB, writes lock file),
-// 2) existing cleat.lock file, 3) warn and return nil (dynamic runtime resolution).
-func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[string]int {
+// Priority: 1) --db flag / CLEAT_DATABASE_URL (creates a tenant-scoped store,
+// resolves via store methods, writes lock file), 2) existing cleat.lock file,
+// 3) warn and return nil (dynamic runtime resolution).
+//
+// When a DB connection is available, resolution goes through the store's
+// tenant-aware methods (ResolveLatestVersion, ResolveVersionByTag) rather than
+// raw SQL. This ensures proper tenant isolation — the --tenant flag (or
+// CLEAT_TENANT_ID env var) scopes all queries to the correct tenant.
+func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut bool) map[string]int {
 	connStr := dbConnStr
 	if connStr == "" {
 		connStr = os.Getenv("CLEAT_DATABASE_URL")
+	}
+	tenantID := buildTenantID
+	if tenantID == "" {
+		tenantID = os.Getenv("CLEAT_TENANT_ID")
+	}
+	if tenantID == "" {
+		tenantID = engine.DefaultTenantUUID
 	}
 
 	if connStr != "" {
@@ -1483,7 +1510,10 @@ func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[strin
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		resolved, err := wasm.ResolveChildVersionsFromDB(ctx, db, children)
+		// Use the tenant-scoped store so all queries are isolated.
+		store := engine.NewPostgresStore(db).WithTenant(tenantID)
+
+		resolved, err := resolveChildVersionsFromStore(ctx, store, children, channel)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: resolving child workflow versions: %v\n", err)
 			os.Exit(1)
@@ -1496,6 +1526,7 @@ func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[strin
 		}
 		lf := &wasm.LockFile{
 			Version: wasm.LockFileVersion,
+			Policy:  channel,
 			Entries: entries,
 		}
 		if err := wasm.WriteLockFile(".", lf); err != nil {
@@ -1506,8 +1537,8 @@ func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[strin
 		return resolved
 	}
 
-	// No DB connection: try existing lock file.
-	if lf, err := wasm.ReadLockFile("."); err == nil && lf.Version == wasm.LockFileVersion {
+	// No DB connection: try existing lock file (v1 or v2).
+	if lf, err := wasm.ReadLockFile("."); err == nil && (lf.Version == wasm.LockFileVersion || lf.Version == 1) {
 		result := make(map[string]int, len(lf.Entries))
 		for name, entry := range lf.Entries {
 			result[name] = entry.Version
@@ -1522,11 +1553,42 @@ func resolveBuildChildVersions(children map[string]bool, jsonOut bool) map[strin
 	return nil
 }
 
+// resolveChildVersionsFromStore resolves child workflow versions using the
+// tenant-scoped store. If channel is "latest" or empty, uses ResolveLatestVersion.
+// Otherwise resolves via ResolveVersionByTag, falling back to ResolveLatestVersion
+// if the tag is not found.
+func resolveChildVersionsFromStore(ctx context.Context, store engine.WorkflowStore, children map[string]bool, channel string) (map[string]int, error) {
+	result := make(map[string]int, len(children))
+	for name := range children {
+		var v int
+		var err error
+		if channel == "" || channel == "latest" {
+			v, err = store.ResolveLatestVersion(ctx, name)
+		} else {
+			v, err = store.ResolveVersionByTag(ctx, name, channel)
+			if err != nil {
+				// Tag not found — fall back to latest.
+				v, err = store.ResolveLatestVersion(ctx, name)
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve child %q: %w", name, err)
+		}
+		if v == 0 {
+			return nil, fmt.Errorf("child workflow %q has no non-deprecated versions deployed", name)
+		}
+		result[name] = v
+	}
+	return result, nil
+}
+
 // runLock implements the "cleat lock" subcommand.
 func runLock(args []string) {
 	fs := flag.NewFlagSet("lock", flag.ExitOnError)
 	lockDB := fs.String("db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
 	lockUpdate := fs.Bool("update", false, "re-resolve all child versions from database")
+	lockChannel := fs.String("channel", "stable", "channel for version resolution: stable, latest, canary, or custom tag")
+	lockTenant := fs.String("tenant", "", "tenant UUID for scoped resolution (default: zero UUID)")
 	fs.Parse(args)
 
 	connStr := *lockDB
@@ -1537,6 +1599,13 @@ func runLock(args []string) {
 		fmt.Fprintf(os.Stderr, "Error: --db flag or CLEAT_DATABASE_URL required\n")
 		fmt.Fprintf(os.Stderr, "Usage: cleat lock [--db <conn>] [--update] <package>\n")
 		os.Exit(1)
+	}
+	tenantID := *lockTenant
+	if tenantID == "" {
+		tenantID = os.Getenv("CLEAT_TENANT_ID")
+	}
+	if tenantID == "" {
+		tenantID = engine.DefaultTenantUUID
 	}
 
 	var children map[string]bool
@@ -1578,7 +1647,9 @@ func runLock(args []string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	resolved, err := wasm.ResolveChildVersionsFromDB(ctx, db, children)
+	// Use the tenant-scoped store so all queries are isolated.
+	store := engine.NewPostgresStore(db).WithTenant(tenantID)
+	resolved, err := resolveChildVersionsFromStore(ctx, store, children, *lockChannel)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: resolving child workflow versions: %v\n", err)
 		os.Exit(1)
@@ -1590,6 +1661,7 @@ func runLock(args []string) {
 	}
 	lf := &wasm.LockFile{
 		Version: wasm.LockFileVersion,
+		Policy:  *lockChannel,
 		Entries: entries,
 	}
 	if err := wasm.WriteLockFile(".", lf); err != nil {

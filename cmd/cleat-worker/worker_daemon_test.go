@@ -3090,6 +3090,32 @@ func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID stri
 	return nil, nil
 }
 
+func (m *mockStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	return nil
+}
+func (m *mockStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	return nil
+}
+func (m *mockStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
+func (m *mockStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	return nil, nil
+}
+func (m *mockStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	return nil
+}
+func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error { return nil }
+func (m *mockStore) GetRoutingRules(ctx context.Context, workflowName string) ([]engine.RoutingRule, error) {
+	return nil, nil
+}
+func (m *mockStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	return 0, nil
+}
+func (m *mockStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
+
 // ---- healthTracker unit tests ----
 
 func TestHealthTracker_RecordRunAndIsStale(t *testing.T) {

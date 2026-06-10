@@ -115,6 +115,7 @@ func main() {
 	wasmCacheDir := flag.String("wasm-cache-dir", "", "Directory for disk-backed compiled WASM module cache (empty disables)")
 	wasmDiskCacheMaxFiles := flag.Int("wasm-disk-cache-max-files", 100, "Max files in the disk-backed compiled WASM module cache (LRU eviction)")
 	redactPatternsFile := flag.String("redact-patterns-file", "", "Path to file with custom redaction patterns (one per line)")
+	childBindingOverride := flag.String("child-binding-override", "", "Override child binding policy: 'latest' to always use latest child versions (for debugging). Also read from CLEAT_CHILD_BINDING_OVERRIDE env var.")
 	dbCredentialProvider := flag.String("db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
 	dbCredentialPath := flag.String("db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 
@@ -138,6 +139,13 @@ func main() {
 	otelDisabled := flag.Bool("otel-disabled", false, "Disable OpenTelemetry trace export")
 
 	flag.Parse()
+
+	// Apply CLEAT_CHILD_BINDING_OVERRIDE env var as fallback when the flag is not set.
+	if *childBindingOverride == "" {
+		if env := os.Getenv("CLEAT_CHILD_BINDING_OVERRIDE"); env != "" {
+			childBindingOverride = &env
+		}
+	}
 
 	// Set WASM output buffer size before any Runtime is created.
 	engine.OutBufSize = uint32(*wasmOutputBufferSize)
@@ -789,6 +797,7 @@ func main() {
 		maxQuotaChildren:            *maxQuotaChildren,
 		maxQuotaConcurrencyKeys:     *maxQuotaConcurrencyKeys,
 		maxWorkflowDuration:         *maxWorkflowDuration,
+		childBindingOverride:        *childBindingOverride,
 		healthCheckInterval:         *healthCheckInterval,
 		encryption:                  payloadEncryption,
 		encryptSensitivePayloads:    *encryptSensitivePayloads,
@@ -1124,6 +1133,12 @@ type Worker struct {
 
 	// Maximum wall-clock duration per workflow execution (0 = no limit).
 	maxWorkflowDuration time.Duration
+
+	// childBindingOverride overrides the child binding policy for all tenants
+	// on this worker. This is a worker-level, cross-tenant setting intended for
+	// development/debugging only (e.g. "latest" forces all child workflows to
+	// resolve to the latest version regardless of the compiled-in policy).
+	childBindingOverride string
 
 	// parentWakeCh is signaled when a workflow reaches a terminal status
 	// (done/failed). The dispatch loop selects on this channel to skip its
@@ -1635,6 +1650,12 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		}
 	}
 
+	// Extract child binding policy from WASM metadata for the engine.
+	var childBindingPolicy string
+	if wfMeta != nil {
+		childBindingPolicy = wfMeta.ChildBindingPolicy
+	}
+
 	caller := &dbServiceCaller{store: w.store, workerID: w.id}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(w.store.(engine.SignalStore)),
@@ -1654,6 +1675,8 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		engine.WithMaxQuotaChildren(w.maxQuotaChildren),
 		engine.WithMaxQuotaConcurrencyKeys(w.maxQuotaConcurrencyKeys),
 		engine.WithDefaultWorkflowTimeout(w.maxWorkflowDuration),
+		engine.WithChildBindingPolicy(childBindingPolicy),
+		engine.WithChildBindingOverride(w.childBindingOverride),
 	}
 	// If the store supports concurrency keys (PostgresStore, ShardedStore),
 	// enable virtual object scope enforcement.
@@ -3432,6 +3455,18 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Check A/B routing rules: if a routing rule matches, use the specified
+	// version instead of the default latest.
+	targetVersion := versions[0] // default: latest
+	if routedVersion, routedErr := s.store.PickVersionByRouting(r.Context(), name); routedErr == nil && routedVersion > 0 {
+		targetVersion = routedVersion
+		slog.InfoContext(r.Context(), "A/B routing applied",
+			"workflow", name,
+			"routed_version", routedVersion,
+			"latest_version", versions[0],
+		)
+	}
+
 	// Inject entry point into input if provided.
 	in := input.Input
 	if input.EntryPoint != "" {
@@ -3455,7 +3490,7 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	// Redact sensitive fields in the input before storing.
 	in = json.RawMessage(engine.Redact(string(in)))
-	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, versions[0], in, idempotencyKey, tenantID, input.Priority)
+	runID, alreadyExisted, err := s.store.StartNewRun(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return

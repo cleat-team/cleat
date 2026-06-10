@@ -20,7 +20,7 @@ import (
 //   - "path/to/dir/"          — a directory (looks for .py files)
 //
 // runtime specifies the target WASM runtime: "wasmtime", "wazero", or "" for both.
-func runBuildPython(pattern, outDir, runtime string) {
+func runBuildPython(pattern, outDir, runtime, channel string) {
 	pyFile := ""
 	funcName := ""
 
@@ -100,6 +100,11 @@ func runBuildPython(pattern, outDir, runtime string) {
 
 	fmt.Printf("  Compiling Python to WASM via componentize-py...\n")
 	fmt.Printf("  Entry: %s\n", entry)
+
+	if channel != "" {
+		os.Setenv("CLEAT_CHILD_BINDING_POLICY", channel)
+		defer os.Unsetenv("CLEAT_CHILD_BINDING_POLICY")
+	}
 
 	if err := wasm.BuildPythonWasmWithRuntime(entry, wasmOutput, runtime, false); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: componentize-py failed: %v\n", err)

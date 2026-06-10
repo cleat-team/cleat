@@ -215,3 +215,55 @@ func TestReadCustomSection_NameOverflow(t *testing.T) {
 		t.Error("expected error for name overflow in readCustomSection")
 	}
 }
+
+func TestEffectivePolicy_Defaults(t *testing.T) {
+	tests := []struct {
+		name     string
+		meta     Metadata
+		expected string
+	}{
+		{
+			name:     "empty policy, no child versions -> latest",
+			meta:     Metadata{ChildBindingPolicy: ""},
+			expected: "latest",
+		},
+		{
+			name:     "empty policy, with child versions -> frozen",
+			meta:     Metadata{ChildVersions: map[string]int{"child1": 1}},
+			expected: "frozen",
+		},
+		{
+			name:     "explicit frozen",
+			meta:     Metadata{ChildBindingPolicy: "frozen"},
+			expected: "frozen",
+		},
+		{
+			name:     "explicit stable",
+			meta:     Metadata{ChildBindingPolicy: "stable"},
+			expected: "stable",
+		},
+		{
+			name:     "explicit latest",
+			meta:     Metadata{ChildBindingPolicy: "latest"},
+			expected: "latest",
+		},
+		{
+			name:     "explicit tag:canary",
+			meta:     Metadata{ChildBindingPolicy: "tag:canary"},
+			expected: "tag:canary",
+		},
+		{
+			name:     "empty policy with child versions still wins over explicit empty",
+			meta:     Metadata{ChildVersions: map[string]int{"c": 2}},
+			expected: "frozen",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.meta.EffectivePolicy()
+			if got != tc.expected {
+				t.Errorf("EffectivePolicy() = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}

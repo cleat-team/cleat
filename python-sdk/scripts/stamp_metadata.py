@@ -173,6 +173,7 @@ def build_metadata(args: argparse.Namespace) -> dict:
     min_version = env_or_arg("CLEAT_MIN_COMPATIBLE_VERSION", args.min_version)
     abi_version = env_or_arg("CLEAT_ABI_VERSION", args.abi_version)
     plugin_deps_str = env_or_arg("CLEAT_PLUGIN_DEPS", args.plugin_deps)
+    child_binding_policy = env_or_arg("CLEAT_CHILD_BINDING_POLICY", args.child_binding_policy) or ""
     language = env_or_arg("CLEAT_LANGUAGE", args.language)
 
     # Parse numeric values from env (they come as strings).
@@ -204,6 +205,7 @@ def build_metadata(args: argparse.Namespace) -> dict:
         "min_compatible_version": min_version,
         "abi_version": abi_version,
         "plugin_deps": plugin_deps,
+        "child_binding_policy": child_binding_policy,
         "sdk_language": "python",
         "sdk_version": "0.2.0",
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -230,6 +232,12 @@ def main():
     )
     parser.add_argument(
         "--plugin-deps", help="Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)"
+    )
+    parser.add_argument(
+        "--child-binding-policy",
+        default=None,
+        dest="child_binding_policy",
+        help="Child binding policy (or CLEAT_CHILD_BINDING_POLICY env var)",
     )
     parser.add_argument("--output", "-o", help="Output WASM path (default: overwrite input)")
     parser.add_argument(
@@ -278,6 +286,8 @@ def main():
         print(f"  workflow_version:     {meta['workflow_version']}")
         print(f"  min_compatible_version: {meta['min_compatible_version']}")
         print(f"  abi_version:          {meta['abi_version']}")
+        if meta["child_binding_policy"]:
+            print(f"  child_binding_policy: {meta['child_binding_policy']}")
         if meta["plugin_deps"]:
             print(f"  plugin_deps:          {meta['plugin_deps']}")
         original_size = len(wasm_bytes)

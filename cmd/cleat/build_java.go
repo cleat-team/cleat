@@ -11,7 +11,7 @@ import (
 )
 
 // runBuildJava compiles a Java workflow to WASM using Gradle and the TeaVM plugin.
-func runBuildJava(pattern, outDir string) {
+func runBuildJava(pattern, outDir, channel string) {
 	javaDir := pattern
 	if javaDir == "" {
 		javaDir = "."
@@ -44,6 +44,10 @@ func runBuildJava(pattern, outDir string) {
 	cmd.Dir = javaDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	if channel != "" {
+		cmd.Env = append(cmd.Env, "CLEAT_CHILD_BINDING_POLICY="+channel)
+	}
 
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: gradle build failed: %v\n", err)

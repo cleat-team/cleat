@@ -1651,6 +1651,33 @@ func (m *mockCompactStore) GetEventCount(ctx context.Context, workflowID string)
 func (m *mockCompactStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
 	return nil, nil
 }
+func (m *mockCompactStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	return nil
+}
+func (m *mockCompactStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	return nil
+}
+func (m *mockCompactStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	return nil
+}
+func (m *mockCompactStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	return nil
+}
+func (m *mockCompactStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
+	return nil, nil
+}
+func (m *mockCompactStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	return 0, nil
+}
+func (m *mockCompactStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
 
 // retryMockStore wraps mockCompactStore and fails CompactHistory a specified
 // number of times before succeeding. The error returned is a deadlock error
