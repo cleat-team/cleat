@@ -88,7 +88,7 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	})
 
 	rtCfg := wazero.NewRuntimeConfigCompiler().
-		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExtendedConst).
+		WithCoreFeatures(api.CoreFeaturesV2).
 		WithMemoryLimitPages(memoryLimitPages)
 	rt := wazero.NewRuntimeWithConfig(ctx, rtCfg)
 
