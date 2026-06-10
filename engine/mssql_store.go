@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"strings"
 	"sync"
 	"time"
@@ -3005,4 +3007,194 @@ func (s *MSSQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 		time.Sleep(10 * time.Millisecond)
 	}
 	return totalDeleted, nil
+}
+
+// ---------------------------------------------------------------------------
+// Tag methods (deployment channels)
+// ---------------------------------------------------------------------------
+
+// SetWorkflowTag assigns a tag to a specific version.
+// Uses MERGE so reassigning a tag updates in place.
+func (s *MSSQLStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	_, err := s.db.ExecContext(ctx, `
+		MERGE workflow_tags AS target
+		USING (SELECT @p1 AS workflow_name, @p2 AS tag) AS source
+		ON target.workflow_name = source.workflow_name AND target.tag = source.tag
+		WHEN MATCHED THEN UPDATE SET
+			version = @p3,
+			created_at = SYSUTCDATETIME()
+		WHEN NOT MATCHED THEN INSERT (workflow_name, version, tag, tenant_id)
+			VALUES (@p1, @p3, @p2, @p4);
+	`, workflowName, tag, version, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("set workflow tag: %w", err)
+	}
+	return nil
+}
+
+// RemoveWorkflowTag deletes a tag assignment.
+func (s *MSSQLStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2
+	`, workflowName, tag)
+	if err != nil {
+		return fmt.Errorf("remove workflow tag: %w", err)
+	}
+	return nil
+}
+
+// GetWorkflowTag returns the version for a given tag.
+func (s *MSSQLStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	var version int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2
+	`, workflowName, tag).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("get workflow tag: tag %q not found for workflow %s", tag, workflowName)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("get workflow tag: %w", err)
+	}
+	return version, nil
+}
+
+// GetWorkflowTags returns all tag -> version mappings for a workflow.
+func (s *MSSQLStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT tag, version FROM workflow_tags WHERE workflow_name = @p1
+	`, workflowName)
+	if err != nil {
+		return nil, fmt.Errorf("get workflow tags: %w", err)
+	}
+	defer rows.Close()
+
+	tags := make(map[string]int)
+	for rows.Next() {
+		var tag string
+		var version int
+		if err := rows.Scan(&tag, &version); err != nil {
+			return nil, fmt.Errorf("get workflow tags: scan: %w", err)
+		}
+		tags[tag] = version
+	}
+	return tags, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Routing methods (A/B traffic splitting)
+// ---------------------------------------------------------------------------
+
+// SetRoutingRule creates a routing rule for a workflow version.
+func (s *MSSQLStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	id := uuid.New()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO workflow_routing (id, workflow_name, target_version, weight, tenant_id)
+		VALUES (@p1, @p2, @p3, @p4, @p5)
+	`, id, workflowName, targetVersion, weight, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("set routing rule: %w", err)
+	}
+	return nil
+}
+
+// RemoveRoutingRule deletes a routing rule by ID.
+func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	id, err := uuid.Parse(ruleID)
+	if err != nil {
+		return fmt.Errorf("remove routing rule: invalid rule id %q: %w", ruleID, err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		DELETE FROM workflow_routing WHERE id = @p1
+	`, id)
+	if err != nil {
+		return fmt.Errorf("remove routing rule: %w", err)
+	}
+	return nil
+}
+
+// GetRoutingRules returns all routing rules for a workflow.
+func (s *MSSQLStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT CONVERT(NVARCHAR(36), id), workflow_name, target_version, weight
+		FROM workflow_routing WHERE workflow_name = @p1
+	`, workflowName)
+	if err != nil {
+		return nil, fmt.Errorf("get routing rules: %w", err)
+	}
+	defer rows.Close()
+
+	var rules []RoutingRule
+	for rows.Next() {
+		var r RoutingRule
+		if err := rows.Scan(&r.ID, &r.WorkflowName, &r.TargetVersion, &r.Weight); err != nil {
+			return nil, fmt.Errorf("get routing rules: scan: %w", err)
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+// PickVersionByRouting performs weighted random version selection.
+// Returns 0 if no routing rules exist.
+func (s *MSSQLStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	rules, err := s.GetRoutingRules(ctx, workflowName)
+	if err != nil {
+		return 0, err
+	}
+	if len(rules) == 0 {
+		return 0, nil
+	}
+
+	total := 0.0
+	for _, r := range rules {
+		total += r.Weight
+	}
+	if total <= 0 {
+		return 0, nil
+	}
+
+	// Use crypto/rand for weighted selection.
+	scale := int64(1_000_000_000)
+	scaledTotal := int64(total * float64(scale))
+	if scaledTotal <= 0 {
+		return 0, nil
+	}
+
+	n, err := rand.Int(rand.Reader, big.NewInt(scaledTotal))
+	if err != nil {
+		return 0, fmt.Errorf("pick version by routing: random: %w", err)
+	}
+	pick := n.Int64()
+
+	cumulative := int64(0)
+	for _, r := range rules {
+		cumulative += int64(r.Weight * float64(scale))
+		if pick < cumulative {
+			return r.TargetVersion, nil
+		}
+	}
+	return rules[len(rules)-1].TargetVersion, nil
+}
+
+// ---------------------------------------------------------------------------
+// Version Resolution
+// ---------------------------------------------------------------------------
+
+// ResolveVersionByTag resolves a tag to a version number.
+// If tag is "latest", returns the highest non-deprecated version.
+func (s *MSSQLStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	if tag == "latest" {
+		return s.ResolveLatestVersion(ctx, workflowName)
+	}
+	var version int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2
+	`, workflowName, tag).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("resolve version by tag: tag %q not found for workflow %s", tag, workflowName)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("resolve version by tag: %w", err)
+	}
+	return version, nil
 }

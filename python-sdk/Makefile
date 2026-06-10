@@ -26,6 +26,7 @@ WORKFLOW_VERSION         ?= 0
 MIN_COMPATIBLE_VERSION   ?= 1
 ABI_VERSION              ?= 1
 PLUGIN_DEPS              ?= {}
+CHILD_BINDING_POLICY     ?=
 
 # Example workflow files and their output names
 EXAMPLE_WORKFLOWS := \

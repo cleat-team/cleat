@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,95 @@ func (s *execSession) ChildWorkflowInSchema(ctx context.Context, m api.Module, t
 	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), int(priority), parentClosePolicy, runIDPtr, runIDMaxLen, targetSchema)
 }
 
+// resolveChildVersion resolves the child workflow version by priority:
+//  1. Explicit version from ChildWorkflowOptions (version > 0 from WASM ABI)
+//  2. Runtime override (engine.childBindingOverride)
+//  3. Binding policy from WASM metadata (engine.childBindingPolicy)
+//  4. Fallback: 0 means DB resolves to MAX(version)
+//
+// Cross-schema children (targetSchema != "") skip policy resolution
+// and return explicitVersion (if > 0) or 0 (DB fallback).
+func (s *execSession) resolveChildVersion(ctx context.Context, name string, explicitVersion int, targetSchema string) int {
+	if explicitVersion > 0 {
+		return explicitVersion
+	}
+
+	// Cross-schema children should still use explicit version or fallback to MAX.
+	if targetSchema != "" {
+		return 0
+	}
+
+	// Check runtime override first (env var or worker flag for debugging).
+	// An override completely bypasses the compiled-in policy.
+	override := s.engine.childBindingOverride
+	if override != "" {
+		if override == "latest" {
+			return 0 // DB resolves to MAX; skip metadata policy
+		}
+		if strings.HasPrefix(override, "tag:") {
+			tag := strings.TrimPrefix(override, "tag:")
+			if s.engine.childWfStore != nil {
+				if v, err := s.engine.childWfStore.ResolveVersionByTag(ctx, name, tag); err == nil && v > 0 {
+					s.engine.log().InfoContext(ctx, "child version resolved by runtime override",
+						"name", name, "tag", tag, "version", v)
+					return v
+				}
+			}
+		}
+	}
+
+	// If no override resolved, apply metadata policy
+	if s.engine.state != nil {
+		policy := s.engine.childBindingPolicy // from metadata, set by worker
+		if policy == "" {
+			// Backwards compat: if pinned versions exist, use frozen; else latest
+			if _, ok := s.engine.state.ChildVersion(name); ok {
+				policy = "frozen"
+			} else {
+				policy = "latest"
+			}
+		}
+
+		switch {
+		case policy == "frozen":
+			if pinnedVersion, ok := s.engine.state.ChildVersion(name); ok && pinnedVersion > 0 {
+				s.engine.log().InfoContext(ctx, "child version resolved by frozen policy",
+					"name", name, "version", pinnedVersion)
+				return pinnedVersion
+			}
+			s.engine.log().InfoContext(ctx, "child version: frozen policy, no pinned version",
+				"name", name)
+		case policy == "stable":
+			if s.engine.childWfStore != nil {
+				if v, err := s.engine.childWfStore.ResolveVersionByTag(ctx, name, "stable"); err == nil && v > 0 {
+					s.engine.log().InfoContext(ctx, "child version resolved by stable policy",
+						"name", name, "version", v)
+					return v
+				}
+			}
+			s.engine.log().InfoContext(ctx, "child version: stable policy resolution failed",
+				"name", name)
+		case policy == "latest":
+			s.engine.log().InfoContext(ctx, "child version: latest policy",
+				"name", name)
+			// Leave childVersion = 0, DB resolves to MAX
+		case strings.HasPrefix(policy, "tag:"):
+			tag := strings.TrimPrefix(policy, "tag:")
+			if s.engine.childWfStore != nil {
+				if v, err := s.engine.childWfStore.ResolveVersionByTag(ctx, name, tag); err == nil && v > 0 {
+					s.engine.log().InfoContext(ctx, "child version resolved by tag policy",
+						"name", name, "tag", tag, "version", v)
+					return v
+				}
+			}
+			s.engine.log().InfoContext(ctx, "child version: tag policy resolution failed",
+				"name", name, "tag", tag)
+		}
+	}
+
+	return 0
+}
+
 // childWorkflowWithVersion is the shared implementation for creating child workflows.
 // If version <= 0, the parent's version is used as the default.
 // If targetSchema is non-empty, the child is created in that PostgreSQL schema
@@ -72,19 +162,17 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		s.exitReplay()
 	}
 
-	// Resolve version priority:
+	// Resolve child version by priority:
 	//   1. Explicit version from ChildWorkflowOptions (version > 0 from WASM ABI)
-	//   2. Pinned child version from WASM metadata (compile-time pin)
-	//   3. DB resolves version <= 0 to MAX(version) via CASE in INSERT
-	// Cross-schema children skip pinned versions (target schema may differ).
-	childVersion := version
-	if childVersion <= 0 && ts == "" {
-		if s.engine.state != nil {
-			if pinnedVersion, ok := s.engine.state.ChildVersion(name); ok && pinnedVersion > 0 {
-				childVersion = pinnedVersion
-			}
-		}
-	}
+	//   2. Runtime override (engine.childBindingOverride)
+	//   3. Binding policy from WASM metadata:
+	//      - "frozen": use pinned ChildVersions from metadata
+	//      - "stable": resolve against "stable" tag via store
+	//      - "latest": resolve MAX(version) via store
+	//      - "tag:X": resolve against tag X via store
+	//      - "" (empty): use EffectivePolicy() logic
+	//   4. Fallback: DB resolves version <= 0 to MAX(version) via CASE in INSERT
+	childVersion := s.resolveChildVersion(ctx, name, version, ts)
 
 	// Fresh execution: create child workflow atomically with event.
 	var runID string
@@ -502,9 +590,12 @@ func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, input
 		s.exitReplay()
 	}
 
+	// Resolve child version using the same policy logic as childWorkflowWithVersion.
+	childVersion := s.resolveChildVersion(ctx, name, 0, "")
+
 	var runID string
 	if s.engine.childWfStore != nil {
-		rid, err := s.engine.childWfStore.StartChildWorkflow(ctx, s.workflowID, name, inputJSON, 0, "", 0)
+		rid, err := s.engine.childWfStore.StartChildWorkflow(ctx, s.workflowID, name, inputJSON, childVersion, "", 0)
 		if err == nil {
 			runID = rid
 		}

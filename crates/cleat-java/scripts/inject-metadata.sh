@@ -61,6 +61,7 @@ Options:
   --min-version <n>     Min compatible version (or CLEAT_MIN_COMPATIBLE_VERSION env var)
   --abi-version <n>     ABI version (or CLEAT_ABI_VERSION env var)
   --plugin-deps <json>  Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)
+  --child-binding-policy <policy>  Child binding policy (or CLEAT_CHILD_BINDING_POLICY env var)
   --output, -o <file>   Output WASM path (default: overwrite input)
   --read                Read and display metadata instead of writing
   --verbose, -v         Verbose output
@@ -76,6 +77,7 @@ VERSION="${CLEAT_WORKFLOW_VERSION:-0}"
 MIN_VERSION="${CLEAT_MIN_COMPATIBLE_VERSION:-1}"
 ABI_VERSION="${CLEAT_ABI_VERSION:-1}"
 PLUGIN_DEPS="${CLEAT_PLUGIN_DEPS:-{}}"
+CHILD_BINDING_POLICY="${CLEAT_CHILD_BINDING_POLICY:-}"
 READ_ONLY=0
 VERBOSE=0
 
@@ -90,6 +92,7 @@ while [ $# -gt 0 ]; do
         --min-version) MIN_VERSION="$2"; shift 2 ;;
         --abi-version) ABI_VERSION="$2"; shift 2 ;;
         --plugin-deps) PLUGIN_DEPS="$2"; shift 2 ;;
+        --child-binding-policy) CHILD_BINDING_POLICY="$2"; shift 2 ;;
         -*)
             echo "Unknown option: $1"
             usage
@@ -133,6 +136,9 @@ if [ -n "$PYTHON_STAMP" ] && command -v python3 &>/dev/null 2>&1; then
     STAMP_ARGS=("$PYTHON_STAMP" "$WASM_FILE")
     STAMP_ARGS+=(--name "$NAME" --version "$VERSION" --min-version "$MIN_VERSION")
     STAMP_ARGS+=(--abi-version "$ABI_VERSION" --plugin-deps "$PLUGIN_DEPS")
+    if [ -n "$CHILD_BINDING_POLICY" ]; then
+        STAMP_ARGS+=(--child-binding-policy "$CHILD_BINDING_POLICY")
+    fi
     STAMP_ARGS+=(--language java)
     if [ -n "$OUTPUT" ]; then
         STAMP_ARGS+=(--output "$OUTPUT")
@@ -159,6 +165,7 @@ elif [ -x "$CLEAT_CLI" ]; then
   "min_compatible_version": $MIN_VERSION,
   "abi_version": $ABI_VERSION,
   "plugin_deps": $PLUGIN_DEPS,
+  "child_binding_policy": "$CHILD_BINDING_POLICY",
   "sdk_language": "java",
   "language": "java",
   "sdk_version": "0.1.0",
@@ -190,6 +197,7 @@ else
   "min_compatible_version": $MIN_VERSION,
   "abi_version": $ABI_VERSION,
   "plugin_deps": $PLUGIN_DEPS,
+  "child_binding_policy": "$CHILD_BINDING_POLICY",
   "sdk_language": "java",
   "language": "java",
   "sdk_version": "0.1.0",

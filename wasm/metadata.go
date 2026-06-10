@@ -22,7 +22,25 @@ type Metadata struct {
 	MinCompatibleVersion int               `json:"min_compatible_version"`
 	PluginDeps           map[string]string `json:"plugin_deps,omitempty"`
 	ChildVersions        map[string]int    `json:"child_versions,omitempty"`
+	ChildBindingPolicy   string            `json:"child_binding_policy,omitempty"` // deployment channel / binding policy
 	Language             string            `json:"language,omitempty"`
+}
+
+// EffectivePolicy returns the effective child binding policy after applying
+// defaults:
+//   - "" (empty)    — backwards compatible: if ChildVersions populated -> "frozen", else -> "latest"
+//   - "frozen"      — strictly use pinned ChildVersions, never resolve at runtime
+//   - "stable"      — resolve to version with "stable" tag at child creation time
+//   - "latest"      — always resolve to MAX(version) at runtime
+//   - "tag:X"       — resolve to version with tag X (e.g. "tag:canary", "tag:experiment-b")
+func (m *Metadata) EffectivePolicy() string {
+	if m.ChildBindingPolicy != "" {
+		return m.ChildBindingPolicy
+	}
+	if len(m.ChildVersions) > 0 {
+		return "frozen"
+	}
+	return "latest"
 }
 
 // CurrentABIVersion is the ABI version produced by this version of cleat.

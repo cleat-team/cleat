@@ -1,8 +1,6 @@
 package wasm
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,7 +8,7 @@ import (
 )
 
 // LockFileVersion is the current cleat.lock schema version.
-const LockFileVersion = 1
+const LockFileVersion = 2
 
 // LockFileName is the standard lock file name.
 const LockFileName = "cleat.lock"
@@ -23,28 +21,8 @@ type LockEntry struct {
 // LockFile stores resolved child workflow versions for reproducible builds.
 type LockFile struct {
 	Version int                  `json:"version"`
+	Policy  string               `json:"policy,omitempty"` // the binding policy used ("frozen", "stable", "latest", "tag:X")
 	Entries map[string]LockEntry `json:"entries"`
-}
-
-// ResolveChildVersionsFromDB queries the database for the latest non-deprecated
-// version of each child workflow name. Returns a map of name -> version.
-func ResolveChildVersionsFromDB(ctx context.Context, db *sql.DB, children map[string]bool) (map[string]int, error) {
-	result := make(map[string]int, len(children))
-	for name := range children {
-		var v int
-		err := db.QueryRowContext(ctx, `
-			SELECT COALESCE(MAX(version), 0) FROM workflow_defs
-			WHERE name = $1 AND NOT deprecated
-		`, name).Scan(&v)
-		if err != nil {
-			return nil, fmt.Errorf("resolve child %q: %w", name, err)
-		}
-		if v == 0 {
-			return nil, fmt.Errorf("child workflow %q has no non-deprecated versions deployed", name)
-		}
-		result[name] = v
-	}
-	return result, nil
 }
 
 // ReadLockFile reads and parses a cleat.lock file from dir.

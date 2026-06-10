@@ -551,7 +551,7 @@ func TestRunBuild_GoTarget(t *testing.T) {
 
 	// runBuild prints to stdout/stderr which is fine.
 	// It calls analyze(), prepares the build dir, and compiles WASM.
-	runBuild(pattern, outDir, "go", "", false, false, false)
+	runBuild(pattern, outDir, "go", "", "", false, false, false)
 
 	// Check that output directory contains expected files.
 	entries, err := os.ReadDir(outDir)
@@ -701,7 +701,7 @@ func TestRunBuild_WithOutputDir(t *testing.T) {
 	outDir := filepath.Join(t.TempDir(), "custom", "output")
 
 	// Use a specific nested output path to verify -o behavior.
-	runBuild(pattern, outDir, "go", "", false, false, false)
+	runBuild(pattern, outDir, "go", "", "", false, false, false)
 
 	// Verify output files exist in the specified directory.
 	genFiles := []string{
@@ -1443,7 +1443,7 @@ func TestRunBuild_JavaTarget_NoBuildFile(t *testing.T) {
 	if os.Getenv("TEST_BUILD_JAVA") == "1" {
 		// Empty dir — no build.gradle.kts or build.gradle
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildJava(dir, ".")
+		runBuildJava(dir, ".", "latest")
 		return
 	}
 	emptyDir := t.TempDir()
@@ -1464,7 +1464,7 @@ func TestRunBuild_JavaTarget_NoBuildFile(t *testing.T) {
 func TestRunBuild_RustTarget_NoCargoToml(t *testing.T) {
 	if os.Getenv("TEST_BUILD_RUST") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildRust(dir, ".")
+		runBuildRust(dir, ".", "latest")
 		return
 	}
 	emptyDir := t.TempDir()
@@ -1485,7 +1485,7 @@ func TestRunBuild_RustTarget_NoCargoToml(t *testing.T) {
 func TestRunBuild_ASTarget_NoPackageJSON(t *testing.T) {
 	if os.Getenv("TEST_BUILD_AS") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildAssemblyScript(dir, ".")
+		runBuildAssemblyScript(dir, ".", "latest")
 		return
 	}
 	emptyDir := t.TempDir()
@@ -1506,7 +1506,7 @@ func TestRunBuild_ASTarget_NoPackageJSON(t *testing.T) {
 func TestRunBuild_PythonTarget_NoPyFile(t *testing.T) {
 	if os.Getenv("TEST_BUILD_PYTHON") == "1" {
 		dir := os.Getenv("TEST_BUILD_DIR")
-		runBuildPython(dir, ".", "")
+		runBuildPython(dir, ".", "", "latest")
 		return
 	}
 	emptyDir := t.TempDir()

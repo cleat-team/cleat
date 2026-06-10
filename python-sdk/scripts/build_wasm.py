@@ -240,6 +240,12 @@ def main():
         help="Plugin dependencies JSON (or CLEAT_PLUGIN_DEPS env var)",
     )
     parser.add_argument(
+        "--child-binding-policy",
+        default=None,
+        dest="child_binding_policy",
+        help="Child binding policy (or CLEAT_CHILD_BINDING_POLICY env var)",
+    )
+    parser.add_argument(
         "--skip-decompose",
         action="store_true",
         help="Skip the wasm-tools component decompose step. "
@@ -425,6 +431,7 @@ def main():
     if stamp_abi is None and os.environ.get("CLEAT_ABI_VERSION"):
         stamp_abi = int(os.environ["CLEAT_ABI_VERSION"])
     stamp_deps = args.plugin_deps or os.environ.get("CLEAT_PLUGIN_DEPS")
+    stamp_child_binding_policy = args.child_binding_policy or os.environ.get("CLEAT_CHILD_BINDING_POLICY")
 
     # Always stamp at least the language so consumers can identify the source.
     stamp_args = [
@@ -443,6 +450,8 @@ def main():
         stamp_args.extend(["--abi-version", str(stamp_abi)])
     if stamp_deps is not None:
         stamp_args.extend(["--plugin-deps", stamp_deps])
+    if stamp_child_binding_policy is not None:
+        stamp_args.extend(["--child-binding-policy", stamp_child_binding_policy])
     if args.verbose:
         stamp_args.append("--verbose")
 

@@ -822,6 +822,96 @@ func (s *ShardedStore) GetAllowedSignalCallers(ctx context.Context, workflowID s
 	return shard.Store.GetAllowedSignalCallers(ctx, workflowID)
 }
 
+// PickVersionByRouting checks A/B routing rules for the given workflow name.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return 0, nil
+	}
+	return shard.Store.PickVersionByRouting(ctx, workflowName)
+}
+
+// ResolveVersionByTag resolves a tag to a workflow definition version.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return 0, nil
+	}
+	return shard.Store.ResolveVersionByTag(ctx, workflowName, tag)
+}
+
+
+// SetWorkflowTag assigns a tag to a specific version.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return fmt.Errorf("set_workflow_tag: no shard available")
+	}
+	return shard.Store.SetWorkflowTag(ctx, workflowName, version, tag)
+}
+
+// RemoveWorkflowTag deletes a tag assignment.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return fmt.Errorf("remove_workflow_tag: no shard available")
+	}
+	return shard.Store.RemoveWorkflowTag(ctx, workflowName, tag)
+}
+
+// GetWorkflowTag returns the version for a given tag.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return 0, fmt.Errorf("get_workflow_tag: no shard available")
+	}
+	return shard.Store.GetWorkflowTag(ctx, workflowName, tag)
+}
+
+// GetWorkflowTags returns all tag -> version mappings for a workflow.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return nil, fmt.Errorf("get_workflow_tags: no shard available")
+	}
+	return shard.Store.GetWorkflowTags(ctx, workflowName)
+}
+
+// SetRoutingRule creates a routing rule for a workflow version.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return fmt.Errorf("set_routing_rule: no shard available")
+	}
+	return shard.Store.SetRoutingRule(ctx, workflowName, targetVersion, weight)
+}
+
+// RemoveRoutingRule deletes a routing rule by ID.
+// Delegates to the shard determined by the rule ID.
+func (s *ShardedStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	shard := s.getShard(ruleID)
+	if shard == nil {
+		return fmt.Errorf("remove_routing_rule: no shard available")
+	}
+	return shard.Store.RemoveRoutingRule(ctx, ruleID)
+}
+
+// GetRoutingRules returns all routing rules for a workflow.
+// Delegates to the shard determined by the workflow name.
+func (s *ShardedStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
+	shard := s.getShard(workflowName)
+	if shard == nil {
+		return nil, fmt.Errorf("get_routing_rules: no shard available")
+	}
+	return shard.Store.GetRoutingRules(ctx, workflowName)
+}
 // CreatePromise routes by workflow ID.
 func (s *ShardedStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	shard := s.getShard(workflowID)

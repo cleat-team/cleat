@@ -37,6 +37,11 @@ pub const ABI_VERSION: u32 = parse_u32(env!("CLEAT_ABI_VERSION"));
 /// Set via CLEAT_PLUGIN_DEPS (build.rs fallback: "{}").
 pub const PLUGIN_DEPS: &str = env!("CLEAT_PLUGIN_DEPS");
 
+/// Child workflow version binding policy.
+/// Values: "", "frozen", "stable", "latest", or "tag:<name>"
+/// Set via CLEAT_CHILD_BINDING_POLICY (build.rs fallback: "").
+pub const CHILD_BINDING_POLICY: &str = env!("CLEAT_CHILD_BINDING_POLICY");
+
 /// Const-compatible decimal string to u32 parser.
 /// Used at compile time to turn `env!("CLEAT_WORKFLOW_VERSION")` etc. into `u32`.
 const fn parse_u32(s: &str) -> u32 {

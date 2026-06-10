@@ -3,14 +3,18 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"sort"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // compactJSONString removes any extra whitespace (spaces after colons and commas)
@@ -1184,4 +1188,185 @@ func (s *MySQLStore) GetEventCount(ctx context.Context, workflowID string) (int,
 		return 0, fmt.Errorf("get event count for %s: %w", workflowID, err)
 	}
 	return count, nil
+}
+
+// ---------------------------------------------------------------------------
+// Tag methods (deployment channels)
+// ---------------------------------------------------------------------------
+
+// SetWorkflowTag assigns a tag to a specific version.
+// Uses INSERT ... ON DUPLICATE KEY UPDATE so reassigning a tag updates in place.
+func (s *MySQLStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO workflow_tags (workflow_name, version, tag, tenant_id)
+		VALUES (?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE version = VALUES(version), created_at = NOW(6)
+	`, workflowName, version, tag, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("SetWorkflowTag: %w", err)
+	}
+	return nil
+}
+
+// RemoveWorkflowTag deletes a tag assignment.
+func (s *MySQLStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM workflow_tags WHERE workflow_name = ? AND tag = ? AND tenant_id = ?
+	`, workflowName, tag, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("RemoveWorkflowTag: %w", err)
+	}
+	return nil
+}
+
+// GetWorkflowTag returns the version for a given tag.
+func (s *MySQLStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	var version int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT version FROM workflow_tags WHERE workflow_name = ? AND tag = ? AND tenant_id = ?
+	`, workflowName, tag, s.tenantID).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("GetWorkflowTag: tag %q not found for workflow %s", tag, workflowName)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("GetWorkflowTag: %w", err)
+	}
+	return version, nil
+}
+
+// GetWorkflowTags returns all tag -> version mappings for a workflow.
+func (s *MySQLStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT tag, version FROM workflow_tags WHERE workflow_name = ? AND tenant_id = ?
+	`, workflowName, s.tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("GetWorkflowTags: %w", err)
+	}
+	defer rows.Close()
+
+	tags := make(map[string]int)
+	for rows.Next() {
+		var tag string
+		var version int
+		if err := rows.Scan(&tag, &version); err != nil {
+			return nil, fmt.Errorf("GetWorkflowTags: scan: %w", err)
+		}
+		tags[tag] = version
+	}
+	return tags, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// Routing methods (A/B traffic splitting)
+// ---------------------------------------------------------------------------
+
+// SetRoutingRule creates a routing rule for a workflow version.
+func (s *MySQLStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	id := uuid.New().String()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO workflow_routing (id, workflow_name, target_version, weight, tenant_id)
+		VALUES (?, ?, ?, ?, ?)
+	`, id, workflowName, targetVersion, weight, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("SetRoutingRule: %w", err)
+	}
+	return nil
+}
+
+// RemoveRoutingRule deletes a routing rule by ID.
+func (s *MySQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM workflow_routing WHERE id = ? AND tenant_id = ?
+	`, ruleID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("RemoveRoutingRule: %w", err)
+	}
+	return nil
+}
+
+// GetRoutingRules returns all routing rules for a workflow.
+func (s *MySQLStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, workflow_name, target_version, weight
+		FROM workflow_routing WHERE workflow_name = ? AND tenant_id = ?
+	`, workflowName, s.tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("GetRoutingRules: %w", err)
+	}
+	defer rows.Close()
+
+	var rules []RoutingRule
+	for rows.Next() {
+		var r RoutingRule
+		if err := rows.Scan(&r.ID, &r.WorkflowName, &r.TargetVersion, &r.Weight); err != nil {
+			return nil, fmt.Errorf("GetRoutingRules: scan: %w", err)
+		}
+		rules = append(rules, r)
+	}
+	return rules, rows.Err()
+}
+
+// PickVersionByRouting performs weighted random version selection.
+// Returns 0 if no routing rules exist.
+func (s *MySQLStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	rules, err := s.GetRoutingRules(ctx, workflowName)
+	if err != nil {
+		return 0, err
+	}
+	if len(rules) == 0 {
+		return 0, nil
+	}
+
+	total := 0.0
+	for _, r := range rules {
+		total += r.Weight
+	}
+	if total <= 0 {
+		return 0, nil
+	}
+
+	// Use crypto/rand for weighted selection.
+	scale := int64(1_000_000_000)
+	scaledTotal := int64(total * float64(scale))
+	if scaledTotal <= 0 {
+		return 0, nil
+	}
+
+	n, err := rand.Int(rand.Reader, big.NewInt(scaledTotal))
+	if err != nil {
+		return 0, fmt.Errorf("PickVersionByRouting: random: %w", err)
+	}
+	pick := n.Int64()
+
+	cumulative := int64(0)
+	for _, r := range rules {
+		cumulative += int64(r.Weight * float64(scale))
+		if pick < cumulative {
+			return r.TargetVersion, nil
+		}
+	}
+	return rules[len(rules)-1].TargetVersion, nil
+}
+
+// ---------------------------------------------------------------------------
+// Version Resolution
+// ---------------------------------------------------------------------------
+
+// ResolveVersionByTag resolves a tag to a version number.
+// If tag is "latest", returns the highest non-deprecated version.
+func (s *MySQLStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	if tag == "latest" {
+		return s.ResolveLatestVersion(ctx, workflowName)
+	}
+	var version int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT version FROM workflow_tags WHERE workflow_name = ? AND tag = ? AND tenant_id = ?
+	`, workflowName, tag, s.tenantID).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("ResolveVersionByTag: tag %q not found for workflow %s", tag, workflowName)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("ResolveVersionByTag: %w", err)
+	}
+	return version, nil
 }

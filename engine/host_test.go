@@ -1288,6 +1288,10 @@ func (m *mockChildWorkflowStore) GetChildResult(ctx context.Context, runID strin
 	return m.result, m.completed, m.err
 }
 
+func (m *mockChildWorkflowStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
+
 // ---------------------------------------------------------------------------
 // Mock promise store for CreatePromise and AwaitPromise tests.
 // ---------------------------------------------------------------------------

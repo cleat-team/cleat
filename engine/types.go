@@ -275,6 +275,11 @@ type ChildWorkflowStore interface {
 	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error)
 
 	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
+
+	// ResolveVersionByTag resolves a workflow version by tag name (e.g. "stable", "canary").
+	// Returns the version number and nil error on success, or 0 and an error if the tag
+	// is not found.
+	ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error)
 }
 
 // CrossSchemaChildStore is an optional extension to ChildWorkflowStore for
@@ -388,4 +393,3 @@ type execSession struct {
 	// ReplayQuit.
 	stepCancel context.CancelFunc
 }
-

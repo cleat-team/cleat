@@ -2478,6 +2478,33 @@ func (s *stubWorkflowStore) GetEventCount(ctx context.Context, workflowID string
 func (s *stubWorkflowStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
 	return nil, nil
 }
+func (s *stubWorkflowStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	return nil
+}
+func (s *stubWorkflowStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	return nil
+}
+func (s *stubWorkflowStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	return nil
+}
+func (s *stubWorkflowStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	return nil
+}
+func (s *stubWorkflowStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
+	return 0, nil
+}
+func (s *stubWorkflowStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
+	return 0, nil
+}
 func (m *mockCollectMetricsStore) ClaimWorkflow(ctx context.Context, workerID string) (*WorkflowInstance, error) {
 	return nil, nil
 }
