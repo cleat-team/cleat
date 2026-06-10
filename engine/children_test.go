@@ -1202,3 +1202,61 @@ func TestChildWorkflowWithOptions_ExplicitVersion(t *testing.T) {
 		t.Errorf("expected Version 10, got %d", opts.Version)
 	}
 }
+
+func TestChildWorkflowWithOptions_Wrapper(t *testing.T) {
+	// ChildWorkflowWithOptions is a thin wrapper over childWorkflowWithVersion.
+	// Test that it delegates correctly with version/priority passthrough.
+	store := &mockChildStore{}
+	s := newTestExecSession()
+	s.engine.childWfStore = store
+	s.workflowID = "parent-wf"
+
+	result := s.ChildWorkflowWithOptions(context.Background(), nil, "test-wf", `{"x":1}`, 3, 5, "", 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected errCode 0, got %d", errCode)
+	}
+	if len(s.history) < 1 {
+		t.Error("expected at least 1 history entry")
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+}
+
+func TestChildWorkflowWithOptions_DefaultVersion(t *testing.T) {
+	// version=0 should be passed through as defVersion=0.
+	store := &mockChildStore{}
+	s := newTestExecSession()
+	s.engine.childWfStore = store
+	s.workflowID = "parent-wf"
+
+	result := s.ChildWorkflowWithOptions(context.Background(), nil, "test-wf", `{}`, 0, 0, "", 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected errCode 0, got %d", errCode)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+}
+
+func TestChildWorkflowWithOptions_NegativePriority(t *testing.T) {
+	// Negative priority should pass through (parity with childWorkflowWithVersion).
+	store := &mockChildStore{}
+	s := newTestExecSession()
+	s.engine.childWfStore = store
+	s.workflowID = "parent-wf"
+
+	result := s.ChildWorkflowWithOptions(context.Background(), nil, "test-wf", `{}`, 1, -1, "", 0, 0)
+
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Errorf("expected errCode 0, got %d", errCode)
+	}
+	if s.stepCount != 1 {
+		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -1056,5 +1057,108 @@ func TestWithChildBindingOverride_Empty(t *testing.T) {
 	e := NewEngine(nil, nil, WithChildBindingOverride(""))
 	if e.childBindingOverride != "" {
 		t.Errorf("got %q, want empty", e.childBindingOverride)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ExecuteCompiled tests
+// ---------------------------------------------------------------------------
+
+func TestExecuteCompiled_ExportNotFound(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	compiled, err := rt.CompileModule(ctx, minimalWasm())
+	if err != nil {
+		t.Fatalf("CompileModule: %v", err)
+	}
+	defer compiled.Close(ctx)
+
+	e := NewEngine(rt, nil)
+	_, _, _, _, _, err = e.ExecuteCompiled(ctx, compiled, "nonexistent_export", nil)
+	if err == nil {
+		t.Fatal("expected error for nonexistent export, got nil")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+func TestExecuteCompiled_WithInput(t *testing.T) {
+	// Same as ExportNotFound but with non-nil input.
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	compiled, err := rt.CompileModule(ctx, minimalWasm())
+	if err != nil {
+		t.Fatalf("CompileModule: %v", err)
+	}
+	defer compiled.Close(ctx)
+
+	e := NewEngine(rt, nil)
+	_, _, _, _, _, err = e.ExecuteCompiled(ctx, compiled, "handle", []byte(`{"key":"value"}`))
+	if err == nil {
+		t.Fatal("expected error for module with no exports")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected 'not found' in error, got: %v", err)
+	}
+}
+
+func TestExecuteCompiled_ClosedModule(t *testing.T) {
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	compiled, err := rt.CompileModule(ctx, minimalWasm())
+	if err != nil {
+		t.Fatalf("CompileModule: %v", err)
+	}
+	compiled.Close(ctx) // close before passing to ExecuteCompiled
+
+	e := NewEngine(rt, nil)
+	_, _, _, _, _, err = e.ExecuteCompiled(ctx, compiled, "handle", nil)
+	if err == nil {
+		t.Fatal("expected error for closed compiled module")
+	}
+}
+
+func TestExecuteCompiled_SharedCompiledModule(t *testing.T) {
+	// Two engines using the same compiled module.
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+
+	compiled, err := rt.CompileModule(ctx, minimalWasm())
+	if err != nil {
+		t.Fatalf("CompileModule: %v", err)
+	}
+	defer compiled.Close(ctx)
+
+	e1 := NewEngine(rt, nil)
+	e2 := NewEngine(rt, nil)
+
+	_, _, _, _, _, err1 := e1.ExecuteCompiled(ctx, compiled, "handle", nil)
+	_, _, _, _, _, err2 := e2.ExecuteCompiled(ctx, compiled, "handle", nil)
+
+	if err1 == nil {
+		t.Error("e1: expected error")
+	}
+	if err2 == nil {
+		t.Error("e2: expected error")
 	}
 }

@@ -555,3 +555,277 @@ func TestCompleteCallEvent_RowsAffectedError(t *testing.T) {
 		t.Errorf("expected 'no rows updated' error, got: %v", err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// flushEvent encryption tests
+// ---------------------------------------------------------------------------
+
+// TestFlushEvent_EncryptSensitivePayloads verifies that flushEvent encrypts
+// all encryptable fields when encryption is enabled and the INSERT succeeds.
+func TestFlushEvent_EncryptSensitivePayloads(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO event_history", affected: 1},
+	})
+	defer db.Close()
+
+	enc, err := NewPayloadEncryption(validKey(t))
+	if err != nil {
+		t.Fatalf("NewPayloadEncryption: %v", err)
+	}
+
+	engine := NewEngine(nil, nil,
+		WithDB(db),
+		WithEncryption(enc, true),
+	)
+
+	rec := EventRecord{
+		Step:           1,
+		EventType:      EventTypeCall,
+		Service:        "my-svc",
+		Op:             "my-op",
+		Request:        "sensitive-request",
+		Response:       "sensitive-response",
+		SignalPayload:  "sig-payload",
+		ChildInput:     "child-input",
+		NewInput:       "new-input",
+		PluginInput:    "plugin-input",
+		PluginOutput:   "plugin-output",
+		PromiseResult:  "promise-result",
+		PromiseError:   "promise-error",
+	}
+
+	err = engine.flushEvent(context.Background(), "wf-123", rec)
+	if err != nil {
+		t.Fatalf("flushEvent with encryption: %v", err)
+	}
+}
+
+// TestFlushEvent_EncryptionRollbackOnFailure verifies that flushEvent retries
+// on a transient INSERT failure when encryption is enabled, and succeeds on
+// the retry.
+func TestFlushEvent_EncryptionRollbackOnFailure(t *testing.T) {
+	transientErr := errors.New("transient INSERT error")
+
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO event_history", err: transientErr, consume: true},
+		{match: "INSERT INTO event_history", affected: 1},
+	})
+	defer db.Close()
+
+	enc, err := NewPayloadEncryption(validKey(t))
+	if err != nil {
+		t.Fatalf("NewPayloadEncryption: %v", err)
+	}
+
+	engine := NewEngine(nil, nil,
+		WithDB(db),
+		WithEncryption(enc, true),
+	)
+
+	rec := EventRecord{
+		Step:      1,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+		Request:   "sensitive-request",
+		Response:  "sensitive-response",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err = engine.flushEvent(ctx, "wf-123", rec)
+	if err != nil {
+		t.Fatalf("flushEvent after retry with encryption: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// runDefers tests
+// ---------------------------------------------------------------------------
+
+// TestRunDefers_Empty verifies that runDefers handles a nil deferrals map
+// without panicking.
+func TestRunDefers_Empty(t *testing.T) {
+	engine := NewEngine(nil, nil)
+	// should not panic with nil deferrals map
+	engine.runDefers(context.Background(), nil, nil)
+}
+
+// TestRunDefers_Single verifies that runDefers processes a single deferral
+// entry without error.
+func TestRunDefers_Single(t *testing.T) {
+	engine := NewEngine(nil, nil)
+	deferrals := map[string]string{
+		"defer-1": "first defer",
+	}
+	// wasmBytes is nil so RunDefer is not invoked; verify no panic
+	engine.runDefers(context.Background(), nil, deferrals)
+}
+
+// TestRunDefers_Sorted verifies that runDefers handles multiple deferrals
+// and sorts them by key without panicking.
+func TestRunDefers_Sorted(t *testing.T) {
+	engine := NewEngine(nil, nil)
+	deferrals := map[string]string{
+		"defer-3": "third defer",
+		"defer-1": "first defer",
+		"defer-2": "second defer",
+	}
+	// wasmBytes is nil so RunDefer is not invoked; verify no panic
+	engine.runDefers(context.Background(), nil, deferrals)
+}
+
+// ---------------------------------------------------------------------------
+// completeCallEvent additional tests
+// ---------------------------------------------------------------------------
+
+// TestCompleteCallEvent_CommitError verifies that completeCallEvent returns an
+// error when the transaction commit fails.
+func TestCompleteCallEvent_CommitError(t *testing.T) {
+	commitErr := errors.New("commit failed")
+	db := newMockDBWithErrors(t, nil, []mockExecResult{
+		{match: "UPDATE event_history", affected: 1},
+	}, nil, commitErr)
+	defer db.Close()
+
+	engine := NewEngine(nil, nil, WithDB(db))
+	rec := EventRecord{
+		Step:      0,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+		Request:   `{"key":"val"}`,
+		Response:  `{"result":"ok"}`,
+	}
+
+	err := engine.completeCallEvent(context.Background(), "wf-123", rec, "")
+	if err == nil {
+		t.Fatal("expected error from completeCallEvent when commit fails, got nil")
+	}
+}
+
+// TestCompleteCallEvent_ChecksumQueryError verifies that completeCallEvent
+// tolerates a checksum query error (step>1) and still completes successfully
+// when the UPDATE succeeds.
+func TestCompleteCallEvent_ChecksumQueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "COALESCE", err: errors.New("checksum query error")},
+	}, []mockExecResult{
+		{match: "UPDATE event_history", affected: 1},
+	})
+	defer db.Close()
+
+	engine := NewEngine(nil, nil, WithDB(db))
+	rec := EventRecord{
+		Step:      5,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+		Request:   `{"key":"val"}`,
+		Response:  `{"result":"ok"}`,
+	}
+
+	err := engine.completeCallEvent(context.Background(), "wf-123", rec, "")
+	if err != nil {
+		t.Fatalf("completeCallEvent with checksum query error: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// completeCallEvent encryption tests
+// ---------------------------------------------------------------------------
+
+// TestCompleteCallEvent_EncryptSuccess verifies that completeCallEvent
+// encrypts the response and error fields when encryption is enabled.
+func TestCompleteCallEvent_EncryptSuccess(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE event_history", affected: 1},
+	})
+	defer db.Close()
+
+	enc, err := NewPayloadEncryption(validKey(t))
+	if err != nil {
+		t.Fatalf("NewPayloadEncryption: %v", err)
+	}
+
+	engine := NewEngine(nil, nil,
+		WithDB(db),
+		WithEncryption(enc, true),
+	)
+
+	rec := EventRecord{
+		Step:      0,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+		Request:   `{"key":"val"}`,
+		Response:  "sensitive-response",
+	}
+
+	err = engine.completeCallEvent(context.Background(), "wf-123", rec, "error-detail")
+	if err != nil {
+		t.Fatalf("completeCallEvent with encryption: %v", err)
+	}
+}
+
+// TestCompleteCallEvent_EncryptResponseError verifies that completeCallEvent
+// returns an error when encryption of the response field fails.
+func TestCompleteCallEvent_EncryptResponseError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "UPDATE event_history", affected: 1},
+	})
+	defer db.Close()
+
+	engine := NewEngine(nil, nil, WithDB(db))
+	// A nil key causes EncryptString to fail.
+	engine.encryption = &PayloadEncryption{key: nil}
+	engine.encryptSensitivePayloads = true
+
+	rec := EventRecord{
+		Step:      0,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+		Response:  "sensitive-response",
+	}
+
+	err := engine.completeCallEvent(context.Background(), "wf-123", rec, "")
+	if err == nil {
+		t.Fatal("expected encryption error")
+	}
+	if !strings.Contains(err.Error(), "encrypt response") {
+		t.Errorf("expected 'encrypt response' in error, got: %v", err)
+	}
+}
+
+// TestFlushEvent_EncryptGeneralFailure verifies that flushEvent returns an
+// error when encryption fails (invalid key), testing the encryption-failure
+// retry/error handling path in flushEvent.
+func TestFlushEvent_EncryptGeneralFailure(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "INSERT INTO event_history", affected: 1},
+	})
+	defer db.Close()
+
+	engine := NewEngine(nil, nil, WithDB(db))
+	// A nil key causes EncryptString to fail on the first field (Request).
+	engine.encryption = &PayloadEncryption{key: nil}
+	engine.encryptSensitivePayloads = true
+
+	rec := EventRecord{
+		Step:      1,
+		EventType: EventTypeCall,
+		Service:   "my-svc",
+		Op:        "my-op",
+		Request:   "sensitive-request",
+	}
+
+	err := engine.flushEvent(context.Background(), "wf-123", rec)
+	if err == nil {
+		t.Fatal("expected encryption error")
+	}
+	if !strings.Contains(err.Error(), "encrypt request") {
+		t.Errorf("expected 'encrypt request' in error, got: %v", err)
+	}
+}

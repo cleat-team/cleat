@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/cleat-team/cleat/plugin"
 )
 
 func TestReadOnlyDB_ExecDenied(t *testing.T) {
@@ -236,5 +238,108 @@ func TestReadOnlyTx_Query_Error(t *testing.T) {
 	_, err = tx.Query(context.Background(), "SELECT * FROM t")
 	if err == nil {
 		t.Fatal("expected error from tx.Query")
+	}
+}
+
+func TestSQLRowsWrapper_Err_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT", data: [][]driver.Value{{"hello"}, {"world"}}},
+	}, nil)
+	r := &ReadOnlyDB{Inner: db}
+
+	rows, err := r.Query(context.Background(), "SELECT * FROM t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	// Iterate through all rows.
+	for rows.Next() {
+		var val string
+		if err := rows.Scan(&val); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Err() should return nil after successful iteration.
+	if err := rows.Err(); err != nil {
+		t.Errorf("expected nil error from Err(), got %v", err)
+	}
+}
+
+func TestSQLRowsWrapper_Err_EmptyResult(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT", data: [][]driver.Value{}},
+	}, nil)
+	r := &ReadOnlyDB{Inner: db}
+
+	rows, err := r.Query(context.Background(), "SELECT * FROM t WHERE 1=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	// No rows should be available.
+	if rows.Next() {
+		t.Error("expected no rows")
+	}
+	// Err() should return nil even with empty result.
+	if err := rows.Err(); err != nil {
+		t.Errorf("expected nil error from Err() on empty result, got %v", err)
+	}
+}
+
+func TestSQLRowsWrapper_Close(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT", data: [][]driver.Value{{"x"}}},
+	}, nil)
+	r := &ReadOnlyDB{Inner: db}
+
+	rows, err := r.Query(context.Background(), "SELECT * FROM t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := rows.Close(); err != nil {
+		t.Errorf("Close failed: %v", err)
+	}
+}
+
+func TestSQLRowsWrapper_RowsTypeCheck(t *testing.T) {
+	// Verify that the returned rows implement plugin.Rows.
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT", data: [][]driver.Value{{"v1"}}},
+	}, nil)
+	r := &ReadOnlyDB{Inner: db}
+
+	rows, err := r.Query(context.Background(), "SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	// Verify the plugin.Rows interface.
+	var want plugin.Rows = rows
+	if want == nil {
+		t.Error("expected non-nil plugin.Rows")
+	}
+}
+
+func TestSQLRowsWrapper_ScanError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT", data: [][]driver.Value{{"not-an-int"}}},
+	}, nil)
+	r := &ReadOnlyDB{Inner: db}
+
+	rows, err := r.Query(context.Background(), "SELECT * FROM t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		var val int
+		if err := rows.Scan(&val); err == nil {
+			t.Error("expected scan error for type mismatch")
+		}
 	}
 }

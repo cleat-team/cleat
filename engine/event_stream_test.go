@@ -1,7 +1,10 @@
 package engine
 
 import (
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -473,5 +476,183 @@ func TestSliceEventStream_AppendNilStream(t *testing.T) {
 	}
 	if got := s.At(0); got == nil || got.PluginName != "p" {
 		t.Errorf("At(0).PluginName = %q, want %q", s.At(0).PluginName, "p")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DBEventStream ensureLoaded tests
+// ---------------------------------------------------------------------------
+
+func TestDBEventStream_EnsureLoaded_DBQueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM event_history", err: errors.New("db conn error")},
+	}, nil)
+	defer db.Close()
+
+	s := NewDBEventStream(db, "wf-1", 100)
+	err := s.ensureLoaded(0)
+	if err == nil {
+		t.Fatal("ensureLoaded(0) expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "db conn error") {
+		t.Errorf("error = %v, want substring 'db conn error'", err)
+	}
+}
+
+func TestDBEventStream_EnsureLoaded_ScanError(t *testing.T) {
+	// Row with 1 column instead of 23 triggers a column-count mismatch in Scan.
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM event_history", data: [][]driver.Value{{int64(0)}}},
+	}, nil)
+	defer db.Close()
+
+	s := NewDBEventStream(db, "wf-1", 100)
+	err := s.ensureLoaded(0)
+	if err == nil {
+		t.Fatal("ensureLoaded(0) expected scan error, got nil")
+	}
+	if !strings.Contains(err.Error(), "scan") {
+		t.Errorf("error = %v, want substring 'scan'", err)
+	}
+}
+
+func TestDBEventStream_EnsureLoaded_Success(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM event_history", data: [][]driver.Value{
+			{
+				int64(0),               // Step
+				string(EventTypeCall),  // EventType
+				string("svc1"),         // service
+				nil,                    // op
+				nil,                    // request
+				nil,                    // response
+				nil,                    // error
+				nil,                    // duration_ms
+				nil,                    // signal_names
+				nil,                    // timeout_ms
+				nil,                    // signal_name
+				nil,                    // signal_payload
+				nil,                    // defer_description
+				nil,                    // defer_id
+				nil,                    // child_name
+				nil,                    // child_input
+				nil,                    // run_id
+				nil,                    // new_input
+				nil,                    // plugin_name
+				nil,                    // plugin_func
+				nil,                    // plugin_input
+				nil,                    // plugin_output
+				nil,                    // plugin_error
+			},
+			{
+				int64(1),
+				string(EventTypeCall),
+				string("svc2"),
+				nil, nil, nil, nil,
+				nil,
+				nil,
+				nil,
+				nil, nil,
+				nil, nil,
+				nil, nil, nil, nil,
+				nil, nil, nil, nil, nil,
+			},
+		}},
+	}, nil)
+	defer db.Close()
+
+	s := NewDBEventStream(db, "wf-1", 100)
+	err := s.ensureLoaded(0)
+	if err != nil {
+		t.Fatalf("ensureLoaded(0) error = %v, want nil", err)
+	}
+	if s.Len() != 2 {
+		t.Errorf("Len() = %d, want 2", s.Len())
+	}
+	if got := s.At(0); got == nil || got.Service != "svc1" {
+		t.Errorf("At(0).Service = %q, want %q", s.At(0).Service, "svc1")
+	}
+	if got := s.At(1); got == nil || got.Service != "svc2" {
+		t.Errorf("At(1).Service = %q, want %q", s.At(1).Service, "svc2")
+	}
+}
+
+func TestDBEventStream_EnsureLoaded_AlreadyLoaded(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM event_history", err: errors.New("should not be called")},
+	}, nil)
+	defer db.Close()
+
+	s := NewDBEventStream(db, "wf-1", 100)
+	s.Append(EventRecord{Step: 0, Service: "preloaded"})
+
+	// Index 0 is already loaded; ensureLoaded should return nil without a DB call.
+	err := s.ensureLoaded(0)
+	if err != nil {
+		t.Errorf("ensureLoaded(0) error = %v, want nil (DB should not be called)", err)
+	}
+	if got := s.At(0); got == nil || got.Service != "preloaded" {
+		t.Errorf("At(0).Service = %q, want %q", s.At(0).Service, "preloaded")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DBEventStream Total tests
+// ---------------------------------------------------------------------------
+
+func TestDBEventStream_Total_Preloaded(t *testing.T) {
+	s := NewDBEventStream(nil, "wf-1", 100)
+	s.totalLoaded = true
+	s.totalCount = 5
+
+	total, err := s.Total()
+	if err != nil {
+		t.Errorf("Total() error = %v, want nil", err)
+	}
+	if total != 5 {
+		t.Errorf("Total() = %d, want 5", total)
+	}
+}
+
+func TestDBEventStream_Total_DBQuery(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "COUNT", data: [][]driver.Value{{int64(5)}}},
+	}, nil)
+	defer db.Close()
+
+	s := NewDBEventStream(db, "wf-1", 100)
+	total, err := s.Total()
+	if err != nil {
+		t.Fatalf("Total() error = %v, want nil", err)
+	}
+	if total != 5 {
+		t.Errorf("Total() = %d, want 5", total)
+	}
+	if !s.totalLoaded {
+		t.Errorf("totalLoaded should be true after successful Total()")
+	}
+	if s.totalCount != 5 {
+		t.Errorf("totalCount = %d, want 5", s.totalCount)
+	}
+}
+
+func TestDBEventStream_Total_DBQueryError(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "COUNT", err: errors.New("count error")},
+	}, nil)
+	defer db.Close()
+
+	s := NewDBEventStream(db, "wf-1", 100)
+	s.Append(EventRecord{Step: 0})
+
+	total, err := s.Total()
+	if err == nil {
+		t.Fatal("Total() expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "count error") {
+		t.Errorf("error = %v, want substring 'count error'", err)
+	}
+	if total != 1 {
+		t.Errorf("Total() = %d, want 1 (fallback to len(loaded))", total)
 	}
 }

@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -582,5 +584,259 @@ func TestResolveChildVersion_ExplicitPinZeroEdge_WithDBExists(t *testing.T) {
 	}
 	if v != 3 {
 		t.Errorf("expected version 3 (parent version), got %d", v)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Error-injecting mock driver for testing query error paths.
+//
+// cvMockErrorDriver returns an error from any Query call, allowing us to test
+// how versionExists, latestCompatibleVersion, and latestVersion handle
+// SQL-level failures.
+// ---------------------------------------------------------------------------
+
+// newMockErrorDB creates a *sql.DB backed by a driver whose Stmt.Query always
+// returns the given error.
+func newMockErrorDB(err error) *sql.DB {
+	mockDB.mu.Lock()
+	mockDB.counter++
+	name := fmt.Sprintf("child_version_err_mock_%d", mockDB.counter)
+	mockDB.mu.Unlock()
+
+	d := &cvMockErrorDriver{err: err}
+	sql.Register(name, d)
+	db, err2 := sql.Open(name, "")
+	if err2 != nil {
+		panic(fmt.Sprintf("sql.Open(%q): %v", name, err2))
+	}
+	return db
+}
+
+type cvMockErrorDriver struct {
+	driver.Driver
+	err error
+}
+
+func (d *cvMockErrorDriver) Open(name string) (driver.Conn, error) {
+	return &cvMockErrorConn{err: d.err}, nil
+}
+
+type cvMockErrorConn struct {
+	driver.Conn
+	err error
+}
+
+func (c *cvMockErrorConn) Prepare(query string) (driver.Stmt, error) {
+	return &cvMockErrorStmt{err: c.err}, nil
+}
+
+func (c *cvMockErrorConn) Close() error { return nil }
+func (c *cvMockErrorConn) Begin() (driver.Tx, error) {
+	return &cvMockTx{}, nil
+}
+
+type cvMockErrorStmt struct {
+	driver.Stmt
+	err error
+}
+
+func (s *cvMockErrorStmt) Close() error    { return nil }
+func (s *cvMockErrorStmt) NumInput() int    { return -1 }
+func (s *cvMockErrorStmt) Exec(args []driver.Value) (driver.Result, error) {
+	return &cvMockResult{}, nil
+}
+
+func (s *cvMockErrorStmt) Query(args []driver.Value) (driver.Rows, error) {
+	return nil, s.err
+}
+
+// ---------------------------------------------------------------------------
+// Error path tests for versionExists, latestCompatibleVersion, latestVersion
+// ---------------------------------------------------------------------------
+
+func TestVersionExists_QueryError(t *testing.T) {
+	db := newMockErrorDB(errors.New("db connection lost"))
+	defer db.Close()
+
+	_, err := versionExists(context.Background(), db, "wf", 1)
+	if err == nil {
+		t.Fatal("expected error from versionExists when query fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "db connection lost") {
+		t.Errorf("expected 'db connection lost' in error, got: %v", err)
+	}
+}
+
+func TestLatestCompatibleVersion_QueryError(t *testing.T) {
+	db := newMockErrorDB(errors.New("query timeout"))
+	defer db.Close()
+
+	_, err := latestCompatibleVersion(context.Background(), db, "wf", 5)
+	if err == nil {
+		t.Fatal("expected error from latestCompatibleVersion when query fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "query timeout") {
+		t.Errorf("expected 'query timeout' in error, got: %v", err)
+	}
+}
+
+func TestLatestVersion_QueryError(t *testing.T) {
+	db := newMockErrorDB(errors.New("disk full"))
+	defer db.Close()
+
+	_, err := latestVersion(context.Background(), db, "wf")
+	if err == nil {
+		t.Fatal("expected error from latestVersion when query fails, got nil")
+	}
+	if !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("expected 'disk full' in error, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Error propagation tests for ResolveChildVersion
+// ---------------------------------------------------------------------------
+
+func TestResolveChildVersion_VersionExistsError_Rule1(t *testing.T) {
+	// Rule 1: opts.Version > 0, but versionExists query fails → error.
+	db := newMockErrorDB(errors.New("connection refused"))
+	defer db.Close()
+
+	ctx := context.Background()
+	opts := ChildWorkflowOptions{Version: 5}
+	_, err := ResolveChildVersion(ctx, db, "wf", 3, opts)
+	if err == nil {
+		t.Fatal("expected error when versionExists fails, got nil")
+	}
+}
+
+func TestResolveChildVersion_VersionExistsFallthrough_Rule2(t *testing.T) {
+	// Rule 2: opts.Version <= 0, versionExists returns not found →
+	// fall through to latestCompatibleVersion = 3.
+	callCount := 0
+	db := newMockDB(func(query string) []driver.Value {
+		callCount++
+		switch callCount {
+		case 1:
+			return []driver.Value{int64(0)} // versionExists: not found
+		case 2:
+			return []driver.Value{int64(3)} // latestCompatibleVersion = 3
+		default:
+			return []driver.Value{int64(0)}
+		}
+	})
+	defer db.Close()
+
+	ctx := context.Background()
+	opts := ChildWorkflowOptions{Version: 0}
+	v, err := ResolveChildVersion(ctx, db, "wf", 7, opts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if v != 3 {
+		t.Errorf("expected version 3 (latest compatible), got %d", v)
+	}
+}
+
+func TestResolveChildVersion_LatestCompatibleNil_FallsToLatest(t *testing.T) {
+		// versionExists returns false, latestCompatibleVersion 0 (no compatible) →
+		// fall through to latestVersion = 8.
+		callCount := 0
+		db := newMockDB(func(query string) []driver.Value {
+			callCount++
+			switch callCount {
+			case 1:
+				return []driver.Value{int64(0)} // versionExists: not found
+			case 2:
+				return []driver.Value{int64(0)} // latestCompatibleVersion: none (COALESCE = 0)
+			case 3:
+				return []driver.Value{int64(8)} // latestVersion = 8
+			default:
+				return []driver.Value{int64(0)}
+			}
+		})
+		defer db.Close()
+
+		ctx := context.Background()
+		opts := ChildWorkflowOptions{Version: 0}
+		v, err := ResolveChildVersion(ctx, db, "wf", 7, opts)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if v != 8 {
+			t.Errorf("expected version 8 (latest), got %d", v)
+		}
+	}
+
+func TestResolveChildVersion_LatestVersionNil_Error(t *testing.T) {
+	// versionExists false, latestCompatibleVersion 0, latestVersion nil → error.
+	callCount := 0
+	db := newMockDB(func(query string) []driver.Value {
+		callCount++
+		switch callCount {
+		case 1:
+			return []driver.Value{int64(0)} // versionExists: not found
+		case 2:
+			return []driver.Value{int64(0)} // latestCompatibleVersion: none
+		case 3:
+			return nil // latestVersion: nil row
+		default:
+			return []driver.Value{int64(0)}
+		}
+	})
+	defer db.Close()
+
+	ctx := context.Background()
+	opts := ChildWorkflowOptions{Version: 0}
+	_, err := ResolveChildVersion(ctx, db, "nonexistent-wf", 7, opts)
+	if err == nil {
+		t.Fatal("expected error when latestVersion fails, got nil")
+	}
+}
+
+func TestResolveChildVersion_AllQueriesZero_NoVersionFound(t *testing.T) {
+	// All queries return 0 → error.
+	callCount := 0
+	db := newMockDB(func(query string) []driver.Value {
+		callCount++
+		switch callCount {
+		case 1:
+			return []driver.Value{int64(0)} // versionExists: not found
+		case 2:
+			return []driver.Value{int64(0)} // latestCompatibleVersion: none
+		case 3:
+			return []driver.Value{int64(0)} // latestVersion: none
+		default:
+			return []driver.Value{int64(0)}
+		}
+	})
+	defer db.Close()
+
+	ctx := context.Background()
+	opts := ChildWorkflowOptions{Version: 0}
+	_, err := ResolveChildVersion(ctx, db, "wf", 7, opts)
+	if err == nil {
+		t.Fatal("expected error when no version is found, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Error propagation through ResolveChildVersion for Rule 2 (parent version)
+// ---------------------------------------------------------------------------
+
+// TestResolveChildVersion_ParentVersionQueryError verifies that when rule 2's
+// versionExists query fails, the error is properly wrapped and returned.
+func TestResolveChildVersion_ParentVersionQueryError(t *testing.T) {
+	db := newMockErrorDB(errors.New("connection lost"))
+	defer db.Close()
+
+	ctx := context.Background()
+	opts := ChildWorkflowOptions{Version: 0}
+	_, err := ResolveChildVersion(ctx, db, "wf", 3, opts)
+	if err == nil {
+		t.Fatal("expected error when versionExists query fails for rule 2")
+	}
+	if !strings.Contains(err.Error(), "check parent version") {
+		t.Errorf("expected 'check parent version' in error, got: %v", err)
 	}
 }
