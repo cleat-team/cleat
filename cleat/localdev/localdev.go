@@ -33,8 +33,48 @@ type ServiceCaller interface {
 	Call(ctx context.Context, service, operation, requestJSON string) (responseJSON string, err error)
 }
 
+// PluginCaller invokes plugin functions during local development.
+// This mirrors the engine's plugin call mechanism so that workflows that
+// use plugins (e.g., llm, blobstore, pagerduty-alert) can run locally
+// without WASM compilation.
+//
+// Implementations should call the appropriate plugin's function and
+// return the JSON result. The context carries deadlines and cancellation
+// from the workflow execution.
+type PluginCaller interface {
+	CallPlugin(ctx context.Context, pluginName, functionName, inputJSON string) (responseJSON string, err error)
+}
+
 // ChildWorkflowRunner executes a child workflow by name.
-// Implementations should run the child synchronously and return its result.
+//
+// In local dev mode, child workflows can be executed via this interface.
+// When no ChildWorkflowRunner is configured, child workflow calls return
+// immediately with a stub run ID and await methods return a default
+// completed result. This allows testing workflows that invoke children
+// without needing the child implementation.
+//
+// Implementations should run the named child workflow synchronously and
+// return its JSON result. The context carries cancellation and deadlines
+// from the parent workflow execution.
+//
+// Usage:
+//
+//	type MyChildRunner struct{}
+//
+//	func (r *MyChildRunner) RunChild(ctx context.Context, name, inputJSON string) (string, error) {
+//	    switch name {
+//	    case "notify":
+//	        return runNotify(ctx, inputJSON)
+//	    case "charge":
+//	        return runCharge(ctx, inputJSON)
+//	    default:
+//	        return "", fmt.Errorf("unknown child workflow: %s", name)
+//	    }
+//	}
+//
+//	runner := localdev.NewLocalRunner(
+//	    localdev.WithChildWorkflowRunner(&MyChildRunner{}),
+//	)
 type ChildWorkflowRunner interface {
 	RunChild(ctx context.Context, name string, inputJSON string) (resultJSON string, err error)
 }
@@ -70,6 +110,12 @@ type Option func(*LocalRunner)
 // If not set, DurableCall returns an error.
 func WithServiceCaller(caller ServiceCaller) Option {
 	return func(r *LocalRunner) { r.caller = caller }
+}
+
+// WithPluginCaller sets the PluginCaller for making plugin calls.
+// If not set, PluginCall returns an error.
+func WithPluginCaller(caller PluginCaller) Option {
+	return func(r *LocalRunner) { r.pluginCaller = caller }
 }
 
 // WithLogWriter sets the writer for DurableLog and event logging.
@@ -138,9 +184,10 @@ type localPromise struct {
 type LocalRunner struct {
 	mu sync.RWMutex
 
-	h         cleat.HostCalls
-	caller    ServiceCaller
-	logWriter io.Writer
+	h            cleat.HostCalls
+	caller       ServiceCaller
+	pluginCaller PluginCaller
+	logWriter    io.Writer
 	signalCh  chan Signal
 	events    []Event
 
@@ -693,7 +740,44 @@ func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) 
 }
 
 func (r *LocalRunner) pluginCallImpl(pluginName, functionName, inputJSON string) (string, error) {
-	return "", fmt.Errorf("localdev: PluginCall is not available in local dev mode (plugin %q, function %q)", pluginName, functionName)
+	r.mu.Lock()
+	caller := r.pluginCaller
+	r.mu.Unlock()
+
+	if caller == nil {
+		return "", fmt.Errorf("localdev: no PluginCaller configured, cannot call plugin %q function %q", pluginName, functionName)
+	}
+
+	ctx := context.Background()
+	callStart := time.Now()
+	resp, err := caller.CallPlugin(ctx, pluginName, functionName, inputJSON)
+	callElapsed := time.Since(callStart)
+
+	evt := Event{
+		Type:      "plugin_call",
+		Service:   pluginName,
+		Operation: functionName,
+		Request:   inputJSON,
+		Elapsed:   callElapsed.String(),
+	}
+	if err != nil {
+		evt.Err = err.Error()
+	} else {
+		evt.Response = resp
+	}
+
+	r.mu.Lock()
+	r.events = append(r.events, evt)
+	r.mu.Unlock()
+
+	r.logEvent("[%.3fs] plugin %s.%s", r.elapsed().Seconds(), pluginName, functionName)
+	if err != nil {
+		r.logEvent("  -> error: %s", err)
+	} else {
+		r.logEvent("  -> %s", truncate(resp, 200))
+	}
+
+	return resp, err
 }
 
 // ---------------------------------------------------------------------------
