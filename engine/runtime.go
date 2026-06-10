@@ -101,21 +101,6 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	// and h.Random() (imported as cleat_now / cleat_random).
 	wasiBuilder := rt.NewHostModuleBuilder(wasi_snapshot_preview1.ModuleName)
 	wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
-	_ = wasiBuilder
-	// Override clock_time_get and random_get with stubs so Go WASM modules
-	// don't crash on nil sys context. Workflows must use h.Now()/h.Random().
-	wasiBuilder.NewFunctionBuilder().
-		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-			_ = mod
-			stack[0] = 0 // errno::success
-		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI64, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
-		Export("clock_time_get")
-	wasiBuilder.NewFunctionBuilder().
-		WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
-			_ = mod
-			stack[0] = 0 // errno::success
-		}), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, []api.ValueType{api.ValueTypeI32}).
-		Export("random_get")
 	// Register reset_adapter_state, which is required by core modules
 	// extracted from component model binaries produced by componentize-py.
 	// In the full component model assembly this function is provided by the
@@ -124,7 +109,19 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	wasiBuilder.NewFunctionBuilder().WithFunc(
 		func(ctx context.Context, m api.Module) {},
 	).Export("reset_adapter_state")
-	if _, err := wasiBuilder.Instantiate(ctx); err != nil {
+	// Instantiate WASI with a fake Sys context that returns fixed (zero) time.
+	// This prevents the wazero nil pointer panic in clock_time_get (which
+	// accesses mod.Sys for walltime/nanotime) while keeping the Go WASM
+	// runtime's GC/goroutine scheduler from accessing real wall clock time.
+	// Workflow logic uses h.Now() (cleat_now) for deterministic time.
+	wasiCompiled, err := wasiBuilder.Compile(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("host: compiling WASI module: %w", err)
+	}
+	wasiConfig := wazero.NewModuleConfig().
+		WithWalltime(func() (int64, int32) { return 0, 0 }, sys.ClockResolution(1)).
+		WithNanotime(func() int64 { return 0 }, sys.ClockResolution(1))
+	if _, err := rt.InstantiateModule(ctx, wasiCompiled, wasiConfig); err != nil {
 		return nil, fmt.Errorf("host: instantiating WASI module: %w", err)
 	}
 
