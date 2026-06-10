@@ -128,9 +128,9 @@ coverage: coverage-go coverage-python
 coverage-report:
 	go tool cover -func=coverage.out
 
-# Thresholds (enforced via prefix matching; measured 2026-06-09):
+# Thresholds (enforced via prefix matching; measured 2026-06-10):
 #   engine/testutil    0%     (test helper)
-#   engine/           50%     (actual  57.5% stmt, 77.2% func)
+#   engine/           70%     (actual  70.0% stmt with PG; 77.6% with all backends)
 #   internal/         70%     (lowest: telemetry  65.7% stmt, 77.5% func)
 #   plugin/           55%     (actual  65.5% stmt, 54.6% func)
 #   cleat/wasmtest    55%     (actual  62.6% stmt)
@@ -151,7 +151,7 @@ coverage-check: coverage-go
 	    printf "%-40s %8s\n\n", "Package", "Coverage"; \
 	    n = split("engine/testutil engine internal plugin cleat/wasmtest cleat plugins cmd/cleat-plugin-verify cmd/deploy-workflow cmd/wit-rewrite cmd/cleatctl cmd wasm auth", prefixes, " "); \
 	    thresh["engine/testutil"] = 0; \
-	    thresh["engine"] = 60; \
+	    thresh["engine"] = 70; \
 	    thresh["internal"] = 70; \
 	    thresh["plugin"] = 60; \
 	    thresh["cleat/wasmtest"] = 60; \
