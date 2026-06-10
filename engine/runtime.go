@@ -101,6 +101,7 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	// and h.Random() (imported as cleat_now / cleat_random).
 	wasiBuilder := rt.NewHostModuleBuilder(wasi_snapshot_preview1.ModuleName)
 	wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
+	_ = wasiBuilder
 	// Override clock_time_get and random_get with stubs so Go WASM modules
 	// don't crash on nil sys context. Workflows must use h.Now()/h.Random().
 	wasiBuilder.NewFunctionBuilder().
