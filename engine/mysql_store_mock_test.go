@@ -422,3 +422,233 @@ func TestMySQLStore_WithEncryption(t *testing.T) {
 		t.Error("original store encryption should be nil")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Heartbeat
+// ---------------------------------------------------------------------------
+
+func TestMySQLHeartbeat_Owned(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances", affected: 1},
+	})
+	owned, err := store.Heartbeat(testCtxMySQL, "wf-1", "worker-1", 0)
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if !owned {
+		t.Error("expected owned=true when RowsAffected=1")
+	}
+}
+
+func TestMySQLHeartbeat_NotOwned(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances", affected: 0},
+	})
+	owned, err := store.Heartbeat(testCtxMySQL, "wf-1", "worker-1", 0)
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if owned {
+		t.Error("expected owned=false when RowsAffected=0")
+	}
+}
+
+func TestMySQLHeartbeat_Error(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances", err: errors.New("exec failed")},
+	})
+	_, err := store.Heartbeat(testCtxMySQL, "wf-1", "worker-1", 0)
+	if err == nil {
+		t.Fatal("expected error from exec failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "heartbeat") {
+		t.Errorf("expected 'heartbeat', got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BatchHeartbeat
+// ---------------------------------------------------------------------------
+
+func TestMySQLBatchHeartbeat(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances", affected: 5},
+	})
+	n, err := store.BatchHeartbeat(testCtxMySQL, "worker-1")
+	if err != nil {
+		t.Fatalf("BatchHeartbeat: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("expected 5, got %d", n)
+	}
+}
+
+func TestMySQLBatchHeartbeat_Zero(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances", affected: 0},
+	})
+	n, err := store.BatchHeartbeat(testCtxMySQL, "worker-1")
+	if err != nil {
+		t.Fatalf("BatchHeartbeat: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("expected 0, got %d", n)
+	}
+}
+
+func TestMySQLBatchHeartbeat_Error(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "UPDATE workflow_instances", err: errors.New("update failed")},
+	})
+	_, err := store.BatchHeartbeat(testCtxMySQL, "worker-1")
+	if err == nil {
+		t.Fatal("expected error from exec failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "batch heartbeat") {
+		t.Errorf("expected 'batch heartbeat', got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetChildResult
+// ---------------------------------------------------------------------------
+
+func TestMySQLGetChildResult_Done(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		queryRowOk("COALESCE(result, '{}')", `{"output":"ok"}`, "done"),
+	}, nil)
+	result, done, err := store.GetChildResult(testCtxMySQL, "child-1")
+	if err != nil {
+		t.Fatalf("GetChildResult: %v", err)
+	}
+	if !done {
+		t.Error("expected done=true")
+	}
+	if result != `{"output":"ok"}` {
+		t.Errorf("expected '{\"output\":\"ok\"}', got %q", result)
+	}
+}
+
+func TestMySQLGetChildResult_NotDone(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		queryRowOk("COALESCE(result, '{}')", "{}", "running"),
+	}, nil)
+	result, done, err := store.GetChildResult(testCtxMySQL, "child-1")
+	if err != nil {
+		t.Fatalf("GetChildResult: %v", err)
+	}
+	if done {
+		t.Error("expected done=false for running workflow")
+	}
+	if result != "" {
+		t.Errorf("expected empty result, got %q", result)
+	}
+}
+
+func TestMySQLGetChildResult_NotFound(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		{match: "COALESCE(result, '{}')"},
+	}, nil)
+	_, done, err := store.GetChildResult(testCtxMySQL, "nonexistent")
+	if err != nil {
+		t.Fatalf("GetChildResult: %v", err)
+	}
+	if done {
+		t.Error("expected done=false when workflow not found")
+	}
+}
+
+func TestMySQLGetChildResult_Error(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		{match: "COALESCE(result, '{}')", err: errors.New("query error")},
+	}, nil)
+	_, _, err := store.GetChildResult(testCtxMySQL, "child-1")
+	if err == nil {
+		t.Fatal("expected error from query failure, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// UpdateStickyWorker
+// ---------------------------------------------------------------------------
+
+func TestMySQLUpdateStickyWorker(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "SET sticky_worker_id", affected: 1},
+	})
+	err := store.UpdateStickyWorker(testCtxMySQL, "wf-1", "worker-1")
+	if err != nil {
+		t.Fatalf("UpdateStickyWorker: %v", err)
+	}
+}
+
+func TestMySQLUpdateStickyWorker_Error(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
+		{match: "SET sticky_worker_id", err: errors.New("update failed")},
+	})
+	err := store.UpdateStickyWorker(testCtxMySQL, "wf-1", "worker-1")
+	if err == nil {
+		t.Fatal("expected error from exec failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "update sticky worker") {
+		t.Errorf("expected 'update sticky worker', got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetAllowedSignalCallers
+// ---------------------------------------------------------------------------
+
+func TestMySQLGetAllowedSignalCallers(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		queryRowOk("allowed_signals FROM workflow_instances", `["caller1","caller2"]`),
+	}, nil)
+	callers, err := store.GetAllowedSignalCallers(testCtxMySQL, "wf-1")
+	if err != nil {
+		t.Fatalf("GetAllowedSignalCallers: %v", err)
+	}
+	if len(callers) != 2 || callers[0] != "caller1" || callers[1] != "caller2" {
+		t.Errorf("expected [caller1 caller2], got %v", callers)
+	}
+}
+
+func TestMySQLGetAllowedSignalCallers_Null(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		queryRowOk("allowed_signals FROM workflow_instances", ""),
+	}, nil)
+	callers, err := store.GetAllowedSignalCallers(testCtxMySQL, "wf-1")
+	if err != nil {
+		t.Fatalf("GetAllowedSignalCallers: %v", err)
+	}
+	if len(callers) != 0 {
+		t.Errorf("expected empty callers, got %v", callers)
+	}
+}
+
+func TestMySQLGetAllowedSignalCallers_Error(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		{match: "allowed_signals FROM workflow_instances", err: errors.New("query error")},
+	}, nil)
+	_, err := store.GetAllowedSignalCallers(testCtxMySQL, "wf-1")
+	if err == nil {
+		t.Fatal("expected error from query failure, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DriverName / Dialect (factory)
+// ---------------------------------------------------------------------------
+
+func TestMySQLDriverName(t *testing.T) {
+	f := NewMySQLStoreFactory(nil, "")
+	if got := f.DriverName(); got != "mysql" {
+		t.Errorf("DriverName = %q, want 'mysql'", got)
+	}
+}
+
+func TestMySQLDialect(t *testing.T) {
+	f := NewMySQLStoreFactory(nil, "")
+	if got := f.Dialect(); got != DialectMySQL {
+		t.Errorf("Dialect = %v, want DialectMySQL", got)
+	}
+}

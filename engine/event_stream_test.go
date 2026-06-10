@@ -386,3 +386,92 @@ func TestDBEventStream_Slice_StartEQEnd(t *testing.T) {
 		t.Errorf("len = %d, want 0", len(got))
 	}
 }
+
+func TestDBEventStream_Slice_EndBeyondLoaded(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM event_history", data: nil},
+	}, nil)
+	defer db.Close()
+
+	s := NewDBEventStream(db, "wf-1", 100)
+	s.Append(EventRecord{Step: 0, Service: "a"})
+
+	// end > loaded: ensureLoaded hits the DB, which returns no additional rows.
+	got := s.Slice(0, 10)
+	if len(got) != 1 {
+		t.Errorf("len = %d, want 1", len(got))
+	}
+	if got[0].Service != "a" {
+		t.Errorf("expected Service %q, got %q", "a", got[0].Service)
+	}
+}
+
+func TestDBEventStream_At_OutOfBounds(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "FROM event_history", data: nil},
+	}, nil)
+	defer db.Close()
+
+	s := NewDBEventStream(db, "wf-1", 100)
+	s.Append(EventRecord{Step: 0})
+
+	// At(5) is beyond loaded events; ensureLoaded hits the DB, which returns
+	// no additional rows, so At should return nil.
+	got := s.At(5)
+	if got != nil {
+		t.Errorf("At(5) = %v, want nil (beyond loaded, no more in DB)", got)
+	}
+}
+
+func TestSliceEventStream_SliceEndZeroWithEmptyStream(t *testing.T) {
+	s := NewSliceEventStream(nil)
+	got := s.Slice(0, 0)
+	if got != nil {
+		t.Errorf("Slice(0,0) on empty stream = %v, want nil", got)
+	}
+}
+
+func TestSliceEventStream_SliceEndNegative(t *testing.T) {
+	s := NewSliceEventStream([]EventRecord{
+		{Step: 0, Service: "a"},
+		{Step: 1, Service: "b"},
+		{Step: 2, Service: "c"},
+	})
+	got := s.Slice(1, -1) // end < 0 → clamped to len
+	if len(got) != 2 {
+		t.Errorf("len = %d, want 2", len(got))
+	}
+	if got[0].Service != "b" {
+		t.Errorf("first element Service = %q, want %q", got[0].Service, "b")
+	}
+}
+
+func TestSliceEventStream_At_NegativeIndex(t *testing.T) {
+	s := NewSliceEventStream([]EventRecord{{Step: 0}})
+	if got := s.At(-1); got != nil {
+		t.Errorf("At(-1) = %v, want nil", got)
+	}
+}
+
+func TestSliceEventStream_Slice_BoundsCheck(t *testing.T) {
+	events := []EventRecord{
+		{Step: 0, Service: "a"},
+		{Step: 1, Service: "b"},
+	}
+	s := NewSliceEventStream(events)
+	got := s.Slice(-5, 3) // negative start clamped to 0, end > len clamped to len
+	if len(got) != 2 {
+		t.Errorf("len = %d, want 2", len(got))
+	}
+}
+
+func TestSliceEventStream_AppendNilStream(t *testing.T) {
+	s := NewSliceEventStream(nil)
+	s.Append(EventRecord{Step: 0, EventType: EventTypePluginCall, PluginName: "p", PluginFunc: "f"})
+	if s.Len() != 1 {
+		t.Errorf("Len() = %d, want 1", s.Len())
+	}
+	if got := s.At(0); got == nil || got.PluginName != "p" {
+		t.Errorf("At(0).PluginName = %q, want %q", s.At(0).PluginName, "p")
+	}
+}

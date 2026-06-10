@@ -3530,3 +3530,172 @@ func TestStartChildWorkflowAtomic_NilShard_EmptyChildID(t *testing.T) {
 		t.Fatal("expected error for nil shard")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Delegation tests for tag/routing methods on ShardedStore
+// ---------------------------------------------------------------------------
+
+func TestPickVersionByRouting_Delegation(t *testing.T) {
+	ss, _ := makeShardedStore(t, 1)
+	got, err := ss.PickVersionByRouting(context.Background(), "my-wf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("expected 0, got %d", got)
+	}
+}
+
+func TestPickVersionByRouting_NoShard(t *testing.T) {
+	ss := makeShardedStoreManual(nil)
+	got, err := ss.PickVersionByRouting(context.Background(), "my-wf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("expected 0, got %d", got)
+	}
+}
+
+func TestResolveVersionByTag_Delegation(t *testing.T) {
+	ss, _ := makeShardedStore(t, 1)
+	got, err := ss.ResolveVersionByTag(context.Background(), "my-wf", "stable")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("expected 0, got %d", got)
+	}
+}
+
+func TestResolveVersionByTag_NoShard(t *testing.T) {
+	ss := makeShardedStoreManual(nil)
+	got, err := ss.ResolveVersionByTag(context.Background(), "my-wf", "stable")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("expected 0, got %d", got)
+	}
+}
+
+func TestSetWorkflowTag_Delegation(t *testing.T) {
+	ss, _ := makeShardedStore(t, 1)
+	err := ss.SetWorkflowTag(context.Background(), "my-wf", 1, "stable")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSetWorkflowTag_NoShard(t *testing.T) {
+	ss := makeShardedStoreManual(nil)
+	err := ss.SetWorkflowTag(context.Background(), "my-wf", 1, "stable")
+	if err == nil {
+		t.Fatal("expected error for nil shard")
+	}
+}
+
+func TestRemoveWorkflowTag_Delegation(t *testing.T) {
+	ss, _ := makeShardedStore(t, 1)
+	err := ss.RemoveWorkflowTag(context.Background(), "my-wf", "stable")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRemoveWorkflowTag_NoShard(t *testing.T) {
+	ss := makeShardedStoreManual(nil)
+	err := ss.RemoveWorkflowTag(context.Background(), "my-wf", "stable")
+	if err == nil {
+		t.Fatal("expected error for nil shard")
+	}
+}
+
+func TestGetWorkflowTag_Delegation(t *testing.T) {
+	ss, _ := makeShardedStore(t, 1)
+	got, err := ss.GetWorkflowTag(context.Background(), "my-wf", "stable")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("expected 0, got %d", got)
+	}
+}
+
+func TestGetWorkflowTag_NoShard(t *testing.T) {
+	ss := makeShardedStoreManual(nil)
+	_, err := ss.GetWorkflowTag(context.Background(), "my-wf", "stable")
+	if err == nil {
+		t.Fatal("expected error for nil shard")
+	}
+}
+
+func TestGetWorkflowTags_Delegation(t *testing.T) {
+	ss, _ := makeShardedStore(t, 1)
+	got, err := ss.GetWorkflowTags(context.Background(), "my-wf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil, got %v", got)
+	}
+}
+
+func TestGetWorkflowTags_NoShard(t *testing.T) {
+	ss := makeShardedStoreManual(nil)
+	_, err := ss.GetWorkflowTags(context.Background(), "my-wf")
+	if err == nil {
+		t.Fatal("expected error for nil shard")
+	}
+}
+
+func TestSetRoutingRule_Delegation(t *testing.T) {
+	ss, _ := makeShardedStore(t, 1)
+	err := ss.SetRoutingRule(context.Background(), "my-wf", 1, 0.5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSetRoutingRule_NoShard(t *testing.T) {
+	ss := makeShardedStoreManual(nil)
+	err := ss.SetRoutingRule(context.Background(), "my-wf", 1, 0.5)
+	if err == nil {
+		t.Fatal("expected error for nil shard")
+	}
+}
+
+func TestRemoveRoutingRule_Delegation(t *testing.T) {
+	ss, _ := makeShardedStore(t, 1)
+	err := ss.RemoveRoutingRule(context.Background(), "rule-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRemoveRoutingRule_NoShard(t *testing.T) {
+	ss := makeShardedStoreManual(nil)
+	err := ss.RemoveRoutingRule(context.Background(), "rule-1")
+	if err == nil {
+		t.Fatal("expected error for nil shard")
+	}
+}
+
+func TestGetRoutingRules_Delegation(t *testing.T) {
+	ss, _ := makeShardedStore(t, 1)
+	got, err := ss.GetRoutingRules(context.Background(), "my-wf")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("expected nil, got %v", got)
+	}
+}
+
+func TestGetRoutingRules_NoShard(t *testing.T) {
+	ss := makeShardedStoreManual(nil)
+	_, err := ss.GetRoutingRules(context.Background(), "my-wf")
+	if err == nil {
+		t.Fatal("expected error for nil shard")
+	}
+}

@@ -149,20 +149,21 @@ coverage-check: coverage-go
 	    fail = 0; \
 	    printf "=== Coverage by Package ===\n"; \
 	    printf "%-40s %8s\n\n", "Package", "Coverage"; \
-	    n = split("engine/testutil engine internal plugin cleat/wasmtest cleat plugins cmd/cleat-plugin-verify cmd/deploy-workflow cmd/wit-rewrite cmd wasm auth", prefixes, " "); \
+	    n = split("engine/testutil engine internal plugin cleat/wasmtest cleat plugins cmd/cleat-plugin-verify cmd/deploy-workflow cmd/wit-rewrite cmd/cleatctl cmd wasm auth", prefixes, " "); \
 	    thresh["engine/testutil"] = 0; \
-	    thresh["engine"] = 50; \
+	    thresh["engine"] = 60; \
 	    thresh["internal"] = 70; \
-	    thresh["plugin"] = 55; \
-	    thresh["cleat/wasmtest"] = 55; \
+	    thresh["plugin"] = 60; \
+	    thresh["cleat/wasmtest"] = 60; \
 	    thresh["cleat"] = 60; \
 	    thresh["plugins"] = 65; \
 	    thresh["cmd/cleat-plugin-verify"] = 0; \
 	    thresh["cmd/deploy-workflow"] = 0; \
 	    thresh["cmd/wit-rewrite"] = 0; \
+		    thresh["cmd/cleatctl"] = 70; \
 	    thresh["cmd"] = 40; \
-	    thresh["wasm"] = 55; \
-	    thresh["auth"] = 85; \
+	    thresh["wasm"] = 75; \
+	    thresh["auth"] = 90; \
 	} \
 	/^total:/ { next } \
 	{ \

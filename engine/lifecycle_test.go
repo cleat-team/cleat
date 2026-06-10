@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/tetratelabs/wazero"
 )
 
 // ---------------------------------------------------------------------------
@@ -1443,4 +1445,75 @@ func TestSendSignalAndWait_ReplayPastEnd(t *testing.T) {
 		t.Error("expected isReplay=false after exitReplay")
 	}
 	_ = result
+}
+
+
+func TestJsonParse(t *testing.T) {
+	ctx := context.Background()
+	rt := wazero.NewRuntime(ctx)
+	t.Cleanup(func() { rt.Close(ctx) })
+
+	compMod, err := rt.CompileModule(ctx, minimalMemoryWasm())
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	cfg := wazero.NewModuleConfig().WithName("json-parse-test")
+	mod, err := rt.InstantiateModule(ctx, compMod, cfg)
+	if err != nil {
+		t.Fatalf("instantiate: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		input        string
+		wantOK       bool
+		wantContains string
+	}{
+		{"valid object", `{"a":1}`, true, `"a"`},
+		{"valid array", `[1,2,3]`, true, `1`},
+		{"invalid json", `{bad`, false, ""},
+		{"empty string", ``, false, ""},
+		{"nested", `{"b":{"c":"d"}}`, true, `"c"`},
+	}
+
+	s := newTestExecSession()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte(tt.input)
+			mem := mod.Memory()
+			if !mem.Write(0, data) {
+				t.Fatal("write to memory failed")
+			}
+
+			outPtr := uint32(4096) // offset in memory for output
+			outMaxLen := uint32(4096)
+			result := s.JsonParse(ctx, mod, 0, uint32(len(data)), outPtr, outMaxLen)
+
+			errCode := byte(result & 0xFF)
+			if tt.wantOK && errCode != 0 {
+				t.Errorf("expected success (code 0), got code %d", errCode)
+			}
+			if !tt.wantOK && errCode == 0 {
+				t.Errorf("expected failure, got success")
+			}
+
+			if tt.wantOK {
+				// Read back the result from output buffer
+				out, ok := mem.Read(outPtr, outMaxLen)
+				if !ok {
+					t.Fatal("read output failed")
+				}
+				outStr := string(out)
+				// Find the null terminator
+				nullIdx := strings.IndexByte(outStr, 0)
+				if nullIdx >= 0 {
+					outStr = outStr[:nullIdx]
+				}
+				if !strings.Contains(outStr, tt.wantContains) {
+					t.Errorf("output %q does not contain %q", outStr, tt.wantContains)
+				}
+			}
+		})
+	}
 }
